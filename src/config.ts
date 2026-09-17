@@ -11,6 +11,7 @@ import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
 import type { AddressSeverity, ShipConfig } from "./core/shipPipeline.js";
+import type { ReadingDiffConfig } from "./core/readingDiff.js";
 import type { SpawnConfig } from "./core/dispatch/spawn.js";
 import type { DashboardConfig } from "./core/dashboardAuthConfig.js";
 import { effectiveGrants, hasAction } from "./core/authz/authorize.js";
@@ -31,7 +32,7 @@ import { AGENTS } from "./agents/registry.js";
 import type { McpServerEntry } from "./mcp/registry.js";
 import {
   validateBoundaries,
-  validateShipScopes,
+  validateScopeBlocks,
   validateConfig,
   validateGrants,
   validateHarnessWords,
@@ -97,16 +98,22 @@ export interface Scope {
    */
   boundary?: Boundary;
   /**
-   * The severity agent:ship must address before an approve stands in this
-   * scope: overrides the org's `ship.addressSeverity` — user over
-   * channel over org; a `severity:<level>` directive on the request wins.
-   * Set with `config set channel|me --ship.addressSeverity <level>`.
+   * The severity to address in this scope (docs/reference/specs/agent-review.md
+   * item 5a): a review's approve carrying a finding at or above it is parsed
+   * as `request_changes`, and ship holds its rounds to the same level.
+   * Overrides the org's `review.addressSeverity` — user over channel over
+   * org; a `severity:<level>` directive on the request wins. Set with
+   * `config set channel|me --review.addressSeverity <level>`. Validated at
+   * load (`validateScopeBlocks`).
+   */
+  review?: { addressSeverity?: AddressSeverity };
+  /**
    * `grant`: the renewals and cost cap a ship request in this scope carries
    * (decision 0046, the renewable lease): user over channel over the org's
    * `ship.grant`; a `renewals:<count>` directive sets the count for one
-   * request. Validated at load (`validateShipScopes`).
+   * request. Validated at load (`validateScopeBlocks`).
    */
-  ship?: { addressSeverity?: AddressSeverity; grant?: Grant };
+  ship?: { grant?: Grant };
   /**
    * Free-text custom instructions folded into the system prompt as ADVISORY
    * content only. Channel text applies to every run in the
@@ -192,6 +199,14 @@ export interface ReferencesConfig {
  *  The one place the default lives: the stage asks this, never the field. */
 export function referencesOn(config: AppConfig): boolean {
   return config.references?.enabled ?? false;
+}
+
+/** The deployment's `review` block: review-run behavior. */
+export interface ReviewConfig {
+  /** The reading-diff artifact's provider switch (docs/reference/specs/reading-diff.md). */
+  readingDiff?: ReadingDiffConfig;
+  /** The org's severity to address (docs/reference/specs/agent-review.md item 5a). Default `minor`. */
+  addressSeverity?: AddressSeverity;
 }
 
 export interface AppConfig {
@@ -295,9 +310,15 @@ export interface AppConfig {
    */
   dashboard?: DashboardConfig;
   /** Review-run behavior: the reading-diff artifact's provider switch
-   *  (`git` | `meat` | `off`; env `SWITCHBOARD_READING_DIFF` overrides).
-   *  See docs/reference/specs/reading-diff.md. */
-  review?: { readingDiff?: import("./core/readingDiff.js").ReadingDiffConfig };
+   *  (`git` | `meat` | `off`; env `SWITCHBOARD_READING_DIFF` overrides; see
+   *  docs/reference/specs/reading-diff.md) and `addressSeverity`, the org's
+   *  severity to address (docs/reference/specs/agent-review.md item 5a): a
+   *  review's approve carrying a finding at or above it is parsed as
+   *  `request_changes`, so `LGTM:` is never posted over one; ship holds its
+   *  rounds to the same level (agent-ship.md item 9). Default `minor`;
+   *  a channel's or user's `review.addressSeverity` overrides it, a
+   *  `severity:<level>` directive on the request wins. Validated at load. */
+  review?: ReviewConfig;
   /**
    * agent:ship pipeline caps (docs/reference/specs/agent-ship.md item 8): `maxRounds`
    * review rounds (default 3) and `maxMinutes`, the ship preset's declared
@@ -776,7 +797,7 @@ export class ConfigStore {
     validateScopeEfforts(doc, `overrides (${this.backing.describe()})`);
     validateBoundaries(doc, `overrides (${this.backing.describe()})`);
     // A stored grant is held to the same rule as a static one (decision 0046).
-    validateShipScopes(doc, `overrides (${this.backing.describe()})`);
+    validateScopeBlocks(doc, `overrides (${this.backing.describe()})`);
     validateHarnessWords(doc, `overrides (${this.backing.describe()})`);
     validateMcpServers(
       { channels: doc.channels, users: doc.users, defaults: doc.org },

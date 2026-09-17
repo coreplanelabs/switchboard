@@ -285,9 +285,18 @@ describe("composeChild — the child a brief names", () => {
     );
     expect(first.preset).toBe("review");
     expect(first.ref).toBeUndefined();
-    expect(first.prompt.startsWith("https://github.com/acme/api/pull/7\n\n")).toBe(true);
+    // The instance's severity to address rides as the child's directive
+    // (agent-review item 5a): the default when the instance carries none.
+    expect(first.prompt.startsWith("https://github.com/acme/api/pull/7 severity:minor\n\n")).toBe(true);
     expect(first.prompt).toContain(`Review pull request acme/api#7 at head \`${"a".repeat(40)}\``);
     expect(first.contract?.unit.id).toBe("U10");
+    const held = await composeChild(
+      { kind: "review", unit: "U10", pr: 7, headSha: "a".repeat(40), round: 1 },
+      { ...instance, addressSeverity: "major", addressSeveritySource: "user" },
+      unit,
+      r,
+    );
+    expect(held.prompt.startsWith("https://github.com/acme/api/pull/7 severity:major\n\n")).toBe(true);
     const second = await composeChild(
       {
         kind: "review",

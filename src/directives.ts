@@ -122,7 +122,7 @@ export function parseDirectives(input: string): RequestDirectives {
     } else if (f.key === "severity") {
       if (!isAddressSeverity(f.value)) {
         throw new Error(
-          `Unknown severity "${f.value}". severity:<level> takes one of ${ADDRESS_SEVERITIES.join(", ")} — the level agent:ship addresses before an approve stands.`,
+          `Unknown severity "${f.value}". severity:<level> takes one of ${ADDRESS_SEVERITIES.join(", ")} — the severity to address: a review's approve carrying a finding at or above it is a request_changes.`,
         );
       }
       out.severity = f.value;

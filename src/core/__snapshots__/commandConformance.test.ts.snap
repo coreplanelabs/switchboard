@@ -171,7 +171,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "object",
       },
       {
-        "name": "ship",
+        "name": "review",
         "required": false,
         "type": "object",
       },

@@ -188,7 +188,8 @@ const SUBMIT_PR_DESCRIPTION: PiToolDeclaration = {
 const SUBMIT_VERDICT: PiToolDeclaration = {
   description:
     "Record your review verdict. REQUIRED before your final message when reviewing a PR: " +
-    "`approve` when there are no blocking issues (nits alone are not blocking), `request_changes` otherwise. " +
+    "`approve` when no finding at or above the severity to address remains (the level in force for this run, `minor` by default: " +
+    "a major or minor finding means `request_changes`; nits alone never block), `request_changes` otherwise. " +
     "Switchboard writes the verdict as the first line of the GitHub comment itself (`LGTM:` only for approve); " +
     "a review with no submitted verdict is posted as NOT approving. Call it once, after your analysis; a later call replaces the earlier one. " +
     "`head` is the commit you reviewed — run `git rev-parse HEAD` in the checkout you read and tested and pass its output; " +
@@ -196,8 +197,8 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
     "Enumerate EVERY issue you report in `findings` with STABLE ids assigned in order (F1, F2, …) — a fix round " +
     "references findings by these ids, so never renumber them. Severity is exactly one of blocking|major|minor|nit; " +
     "the entry carries the file (plus line when it points at one) and a one-line title, while the full explanation " +
-    "stays in your review text keyed by the same ids. An `approve` carrying a `blocking` finding is downgraded to " +
-    "`request_changes` — approve only when nothing blocking remains.",
+    "stays in your review text keyed by the same ids. An `approve` carrying a finding at or above the severity to address " +
+    "is downgraded to `request_changes` and the ack names the finding and the level — approve only when every finding sits below it.",
   parameters: {
     type: "object",
     properties: {

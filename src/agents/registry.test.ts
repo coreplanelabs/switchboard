@@ -466,9 +466,13 @@ describe("review prompts: structured findings through submit_verdict (agent-ship
     }
   });
 
-  it("both review prompts warn that approve over a blocking finding is downgraded", () => {
+  it("both review prompts state the severity gate (agent-review item 5a): approve means no finding at or above the severity to address, minor by default, nits alone never block, and an approve over one is downgraded", () => {
     for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!]) {
       expect(sys).toMatch(/downgraded to `request_changes`/i);
+      expect(sys).toContain("no finding at or above the severity to address remains");
+      expect(sys).toContain("`minor` by default");
+      expect(sys).toContain("nits alone never block");
+      expect(sys).not.toMatch(/no blocking issues/); // the old rule: blocking alone gated
     }
   });
 });

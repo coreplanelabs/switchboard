@@ -19,7 +19,7 @@ import type { WaitCapability } from "../core/dispatch/awaitChildren.js";
 import type { SpawnCapability } from "../core/dispatch/spawn.js";
 import type { PrDescription } from "../core/prDescription.js";
 import type { ToolDef } from "../core/provider.js";
-import type { FindingDisposition, ReviewVerdict } from "../core/reviewVerdict.js";
+import type { AddressSeverity, FindingDisposition, ReviewVerdict } from "../core/reviewVerdict.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { Handoff } from "../core/ship/handoff.js";
 import type { Span } from "../core/trace/types.js";
@@ -128,6 +128,12 @@ export interface ToolContext {
    *  dispatcher turns it into the deterministic first line of the GitHub post
    *  (src/core/reviewVerdict.ts). Absent → the tool still accepts the call. */
   onVerdict?: (verdict: ReviewVerdict) => void;
+  /** The severity to address in force for this run (docs/reference/specs/agent-review.md
+   *  item 5a), resolved by the dispatcher — directive > user > channel > org —
+   *  and handed to `submit_verdict`'s parser, which downgrades an approve
+   *  carrying a finding at or above it. Absent (CLI, unit tests) → the
+   *  parser's default, `minor`. */
+  addressSeverity?: AddressSeverity;
   /** Receives the diff digest's totals (or the reason it has none) from
    *  `diff_digest`, once per call — the last call wins. Injected by the
    *  dispatcher for review runs; the post-step holds the totals against the

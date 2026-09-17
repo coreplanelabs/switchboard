@@ -2970,7 +2970,13 @@ describe("review post-step", () => {
   });
 
   /** A review-agent provider that calls submit_verdict, then answers. */
-  function verdictThenAnswer(verdict: string, summary: string, answer = "the findings", head?: string): Provider {
+  function verdictThenAnswer(
+    verdict: string,
+    summary: string,
+    answer = "the findings",
+    head?: string,
+    findings?: unknown[],
+  ): Provider {
     let n = 0;
     return {
       name: "fake",
@@ -2982,7 +2988,12 @@ describe("review post-step", () => {
                 type: "tool_use",
                 id: "v1",
                 name: "submit_verdict",
-                input: head ? { verdict, summary, head } : { verdict, summary },
+                input: {
+                  verdict,
+                  summary,
+                  ...(head ? { head } : {}),
+                  ...(findings ? { findings } : {}),
+                },
               },
             ],
             stopReason: "tool_use",
@@ -3024,6 +3035,71 @@ describe("review post-step", () => {
     expect(spy.calls[0].body.startsWith("Changes requested: null deref\n\n")).toBe(true);
     expect(spy.calls[0].body.startsWith("LGTM")).toBe(false);
     expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: PR_HEAD });
+  });
+
+  // Feature: docs/reference/specs/agent-review.md item 5a — the severity gate
+  // end to end: the level the dispatcher resolves (directive > user > channel
+  // > org, default minor) is the one the verdict parser holds the approve to,
+  // so the body posted to GitHub starts with `Changes requested:` over a
+  // finding at or above it, whatever the model submitted.
+  describe("the severity gate (agent-review item 5a)", () => {
+    const major = { id: "F3", severity: "major", file: "a.vue", line: 149, title: "drops the first key's ref" };
+    const minor = { id: "F1", severity: "minor", file: "a.ts", title: "a minor" };
+    const nit = { id: "F2", severity: "nit", file: "b.ts", title: "a nit" };
+    const review = (deps: TestDeps) => {
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      headExecutor(PR_HEAD);
+      const spy = postSpy();
+      deps.postReviewComment = spy.fn;
+      return spy;
+    };
+
+    it("by default (minor) an `approve` carrying a major finding posts as `Changes requested:` naming the downgrade — never `LGTM:`", async () => {
+      const deps = makeDeps(
+        YAML_FIXTURE,
+        verdictThenAnswer("approve", "ship it", "Solid, one regression.", undefined, [major]),
+      );
+      const spy = review(deps);
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.calls).toHaveLength(1);
+      expect(spy.calls[0].body.startsWith("LGTM")).toBe(false);
+      expect(
+        spy.calls[0].body.startsWith(
+          "Changes requested: ship it [downgraded from approve: finding F3 (major) at or above minor, the severity to address]\n",
+        ),
+      ).toBe(true);
+      expect(spy.calls[0].body).toContain("- [major] F3 a.vue:149 — drops the first key's ref");
+    });
+
+    it("by default an `approve` whose only finding is a nit still posts `LGTM:`", async () => {
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "one nit", "Fine.", undefined, [nit]));
+      const spy = review(deps);
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(spy.calls[0].body.startsWith("LGTM: one nit\n- [nit] F2 b.ts — a nit\n")).toBe(true);
+    });
+
+    it("a `severity:major` directive on the request widens the gate: an approve over a minor finding posts `LGTM:`", async () => {
+      const deps = makeDeps(YAML_FIXTURE, verdictThenAnswer("approve", "minor only", "Fine.", undefined, [minor]));
+      const spy = review(deps);
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review severity:major https://github.com/acme/api/pull/42"), io);
+      expect(spy.calls[0].body.startsWith("LGTM: minor only\n")).toBe(true);
+    });
+
+    it("a channel's `review.addressSeverity: nit` narrows the gate for every review there: an approve over a nit posts `Changes requested:`", async () => {
+      const yaml = YAML_FIXTURE + 'channels:\n  "slack:CX":\n    review:\n      addressSeverity: nit\n';
+      const deps = makeDeps(yaml, verdictThenAnswer("approve", "one nit", "Fine.", undefined, [nit]));
+      const spy = review(deps);
+      const { io } = fakeIO();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
+      expect(
+        spy.calls[0].body.startsWith(
+          "Changes requested: one nit [downgraded from approve: finding F2 (nit) at or above nit, the severity to address]\n",
+        ),
+      ).toBe(true);
+    });
   });
 
   it("a verdict from a non-review agent is impossible: the tool is not in the coding toolset", async () => {

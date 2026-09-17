@@ -126,7 +126,7 @@ npm publishing uses no token. Once, before turning the variable on: an admin of 
 
 ### Approve on the agent's LGTM
 
-`auto-approve-review-lgtm.yml` approves on this App's `LGTM: …` review comment ([Agent review](../reference/specs/agent-review.md)):
+`auto-approve-review-lgtm.yml` approves on this App's `LGTM: …` review comment ([Agent review](../reference/specs/agent-review.md)). Switchboard mints that line only when every finding sits below the severity to address (`review.addressSeverity`, default `minor`; [item 5a](../reference/specs/agent-review.md)): an approve over a major or minor finding is posted as `Changes requested:`, so the workflow never approves over one.
 
 ```sh
 gh api users/YOUR-APP[bot] --jq '{login, id}'       # the App's bot user: its slug plus "[bot]"

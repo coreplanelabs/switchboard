@@ -1058,10 +1058,38 @@ describe("ship caps block (agent:ship pipeline)", () => {
     expect(() => store(YAML_FIXTURE + "ship:\n  maxRunds: 2\n")).toThrow(/ship\.maxRunds is not a known key/);
   });
 
-  it("ship.addressSeverity: parsed at load, refused by name outside the ladder; resolveAddressSeverity layers directive > user > channel > org with the default minor as the org's", async () => {
-    expect(store(YAML_FIXTURE + "ship:\n  addressSeverity: major\n").config.ship).toEqual({ addressSeverity: "major" });
-    expect(() => store(YAML_FIXTURE + "ship:\n  addressSeverity: huge\n")).toThrow(
-      /ship\.addressSeverity must be one of blocking, major, minor, nit/,
+  it("review.addressSeverity: parsed at load on the org block and the scopes, refused by name outside the ladder — and no longer a ship key; resolveAddressSeverity layers directive > user > channel > org with the default minor as the org's", async () => {
+    expect(store(YAML_FIXTURE + "review:\n  addressSeverity: major\n").config.review).toEqual({
+      addressSeverity: "major",
+    });
+    expect(() => store(YAML_FIXTURE + "review:\n  addressSeverity: huge\n")).toThrow(
+      /review\.addressSeverity must be one of blocking, major, minor, nit/,
+    );
+    const channelScoped = YAML_FIXTURE.replace(
+      '  "slack:CREVIEW":',
+      '  "slack:CNIT":\n    review:\n      addressSeverity: nit\n  "slack:CREVIEW":',
+    );
+    expect(store(channelScoped).scopes("slack:CNIT", "slack:UHUGE").channel.review).toEqual({ addressSeverity: "nit" });
+    const userScoped = YAML_FIXTURE.replace(
+      '  "slack:UFORCED":',
+      '  "slack:UHUGE":\n    review:\n      addressSeverity: huge\n  "slack:UFORCED":',
+    );
+    expect(() => store(userScoped)).toThrow(
+      /users\.slack:UHUGE\.review\.addressSeverity must be one of blocking, major, minor, nit/,
+    );
+    // The knob moved off `ship` when the gate moved into the verdict parser:
+    // the old path is refused naming the move, on the org block and on a
+    // scope alike (a stored `config set … --ship.addressSeverity` from before
+    // the move is named, never ignored into "no gate").
+    expect(() => store(YAML_FIXTURE + "ship:\n  addressSeverity: major\n")).toThrow(
+      /ship\.addressSeverity moved to review\.addressSeverity — the severity to address now gates every review/,
+    );
+    const staleScope = YAML_FIXTURE.replace(
+      '  "slack:UFORCED":',
+      '  "slack:USTALE":\n    ship:\n      addressSeverity: major\n  "slack:UFORCED":',
+    );
+    expect(() => store(staleScope)).toThrow(
+      /users\.slack:USTALE\.ship\.addressSeverity moved to users\.slack:USTALE\.review\.addressSeverity/,
     );
     expect(resolveAddressSeverity({})).toEqual({ level: "minor", source: "org" });
     expect(resolveAddressSeverity({ org: "nit" })).toEqual({ level: "nit", source: "org" });

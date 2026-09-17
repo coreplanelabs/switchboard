@@ -1262,7 +1262,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     const { msg, opts } = h.dispatched[0];
     expect(msg.threadKey).toBe("slack:C1:3.0");
     expect(msg.sourceUrl).toBe("https://acme.slack.com/archives/C1/p3");
-    expect(msg.text.startsWith("agent:review in acme/api: https://github.com/acme/api/pull/7\n\n")).toBe(true);
+    expect(msg.text.startsWith("agent:review in acme/api: https://github.com/acme/api/pull/7 severity:minor\n\n")).toBe(
+      true,
+    );
     expect(msg.text).toContain(`Review pull request acme/api#7 at head \`${"a".repeat(40)}\``);
     expect(opts.coordinator).toEqual({
       parentInstanceId: PLAN_INSTANCE.id,

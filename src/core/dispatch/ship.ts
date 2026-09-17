@@ -346,9 +346,9 @@ export async function runShipBranch(
   // org's — and handed to the runner on the instance beside `merge`.
   const scopes = deps.config.scopes(msg.channelId, msg.userId);
   const addressSeverity = resolveAddressSeverity({
-    org: deps.config.config.ship?.addressSeverity,
-    channel: scopes.channel.ship?.addressSeverity,
-    user: scopes.user.ship?.addressSeverity,
+    org: deps.config.config.review?.addressSeverity,
+    channel: scopes.channel.review?.addressSeverity,
+    user: scopes.user.review?.addressSeverity,
     run: directives.severity,
   });
   // The grant (decision 0046, the renewable lease), resolved once here the
