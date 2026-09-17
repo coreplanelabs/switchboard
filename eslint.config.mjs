@@ -9,6 +9,8 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 import vueParser from "vue-eslint-parser";
 import { CLOCK_BAN_EXEMPT, CLOCK_BAN_FILES, CLOCK_READS } from "./src/core/trace/clockReads.mjs";
+import { DURATION_BAN_EXEMPT, DURATION_BAN_FILES, DURATION_READS } from "./src/core/trace/durationReads.mjs";
+import DURATION_ALLOWLIST from "./src/core/trace/durationAllowlist.json" with { type: "json" };
 import { HOST_TOOLING_FILES, SECRET_ENV_EXEMPT, SECRET_ENV_FILES, secretEnvPlugin } from "./src/secretEnv.mjs";
 
 // The clock ratchet (docs/reference/specs/tracing.md item 8): production code reads the wall
@@ -91,6 +93,18 @@ export default tseslint.config(
     ignores: [...CLOCK_BAN_EXEMPT],
     rules: {
       "no-restricted-syntax": ["error", ...CLOCK_READS.map((r) => ({ selector: r.selector, message: r.message }))],
+    },
+  },
+  {
+    // duration-ban: a minutes-scale duration literal outside src/core/budgets.ts is a
+    // lint error in every file the duration allowlist does not still list
+    // (decision 0046; the allowlist only shrinks). The listed files are exempt
+    // here until their literals become rows; `npm run duration:check` holds
+    // the list itself.
+    files: [...DURATION_BAN_FILES],
+    ignores: [...DURATION_BAN_EXEMPT, ...Object.keys(DURATION_ALLOWLIST)],
+    rules: {
+      "no-restricted-syntax": ["error", ...DURATION_READS.map((r) => ({ selector: r.selector, message: r.message }))],
     },
   },
   {

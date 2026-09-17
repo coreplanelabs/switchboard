@@ -4,10 +4,12 @@
 // predicate list, so the lint config, the CLI (scripts/clock-allowlist.mts) and
 // the allowlist test all load the same code; it is never part of the bot's
 // runtime (nothing under src/ imports it except its test).
-// `.vue` files are scanned by their <script> blocks; `.mjs` as JS.
+// `.vue` files are scanned by their <script> blocks, cut out by Vue's own
+// single-file-component parser (never a regular expression); `.mjs` as JS.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import ts from "typescript";
+import { parse as parseSfc } from "vue/compiler-sfc";
 import { CLOCK_BAN_EXEMPT, CLOCK_BAN_FILES, CLOCK_READS } from "./clockReads.mjs";
 
 export const ALLOWLIST_PATH = "src/core/trace/clockAllowlist.json";
@@ -38,24 +40,36 @@ function globToRe(glob) {
   return new RegExp(`^${re}$`);
 }
 
-const INCLUDE = CLOCK_BAN_FILES.map(globToRe);
-const EXEMPT = CLOCK_BAN_EXEMPT.map(globToRe);
-
-/** Every file the ratchet applies to, repo-relative and sorted. @param {string} root */
-export function productionFiles(root) {
+/** Every file under the ratchet roots that the include globs name and the
+ *  exempt globs do not, repo-relative and sorted — the walk both ratchets
+ *  (clock reads, duration literals) share. @param {string} root @param {readonly string[]} include @param {readonly string[]} exempt */
+export function filesUnder(root, include, exempt) {
+  const included = include.map(globToRe);
+  const exempted = exempt.map(globToRe);
   /** @type {string[]} */
   const files = [];
   for (const r of ROOTS) walk(join(root, r), files);
   return files
     .map((f) => relative(root, f))
-    .filter((f) => INCLUDE.some((re) => re.test(f)) && !EXEMPT.some((re) => re.test(f)))
+    .filter((f) => included.some((re) => re.test(f)) && !exempted.some((re) => re.test(f)))
     .sort();
 }
 
-/** The script blocks of a .vue file, or the file itself. @param {string} path @param {string} text */
-function sourceOf(path, text) {
+/** Every file the clock ratchet applies to, repo-relative and sorted. @param {string} root */
+export function productionFiles(root) {
+  return filesUnder(root, CLOCK_BAN_FILES, CLOCK_BAN_EXEMPT);
+}
+
+/** The script blocks of a .vue file (`<script>` and `<script setup>`, in that
+ *  order), or the file itself for any other path. The duration scanner reads
+ *  the same blocks through this one function. @param {string} path @param {string} text */
+export function scriptBlocksOf(path, text) {
   if (!path.endsWith(".vue")) return text;
-  return [...text.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
+  const { descriptor } = parseSfc(text, { filename: path });
+  return [descriptor.script, descriptor.scriptSetup]
+    .filter((block) => block !== null)
+    .map((block) => block.content)
+    .join("\n");
 }
 
 /** Count the clock reads in one source, keyed by predicate id.
@@ -63,7 +77,7 @@ function sourceOf(path, text) {
 export function countClockReads(path, text) {
   const source = ts.createSourceFile(
     path.endsWith(".mjs") ? "x.js" : "x.ts",
-    sourceOf(path, text),
+    scriptBlocksOf(path, text),
     ts.ScriptTarget.ES2022,
     true,
   );

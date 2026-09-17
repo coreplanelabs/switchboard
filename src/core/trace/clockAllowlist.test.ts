@@ -39,8 +39,8 @@ describe("clock ratchet", () => {
       "process.hrtime.bigint": 1,
       "process.uptime": 1,
     });
-    const vue = `<template><div>{{ x }}</div></template>\n<script setup lang="ts">const x = Date.now();</script>\n<style>.a { color: red }</style>`;
-    expect(countClockReads("x.vue", vue)).toEqual({ "Date.now": 1 });
+    const vue = `<template><div>{{ x }}</div></template>\n<script setup lang="ts">const x = Date.now();</script>\n<script lang="ts">export const y = performance.now();</script>\n<style>.a { color: red }</style>`;
+    expect(countClockReads("x.vue", vue)).toEqual({ "Date.now": 1, "performance.now": 1 });
     expect(countClockReads("x.mjs", "export const t = Date.now();")).toEqual({ "Date.now": 1 });
   });
 
