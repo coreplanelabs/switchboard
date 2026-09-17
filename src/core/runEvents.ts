@@ -203,6 +203,13 @@ export type RunNoteKind =
    *  the step. Information, not a failure of the harness: nothing ran that the
    *  gate did not decide. Published by the OpenCode bridge in its own mode. */
   | "settle_set_aside"
+  /** OpenCode's store refill carried a permission over something other than a
+   *  tool (a directory outside the project, a repeating session) for a call
+   *  the record never saw, and the store held no part yet to name the call's
+   *  tool by: the call was opened under the permission's own name. The summary
+   *  names the call and the step. Information, not a failure: the tool ran
+   *  under the gate's decision either way. Published by the OpenCode bridge. */
+  | "tool_unnamed"
   /** A ship coding child's budget ended with work still in the tree: the run
    *  loop committed and pushed it to the unit's branch (or says plainly that
    *  there was nothing to push), so a re-issue starts from the partial work
@@ -243,6 +250,7 @@ export const RUN_NOTE_KINDS = [
   "policy_refusal",
   "tool_refused",
   "settle_set_aside",
+  "tool_unnamed",
   "budget_salvage",
   "stuck_loop",
 ] as const satisfies readonly RunNoteKind[];

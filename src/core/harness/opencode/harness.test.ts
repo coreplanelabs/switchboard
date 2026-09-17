@@ -1206,7 +1206,22 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
       { content: [{ type: "text", text: "done" }], stopReason: "end_turn" },
     ],
   };
+  /** A tool call the fake hangs (`hangToolCall: 1`) until the finale interrupts it: the execution reaches no step boundary while the loop runs. */
+  const hungTurn: RunScript = {
+    turns: [
+      {
+        content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+    ],
+  };
 
+  /** Whether any model call of the run carried `text` in a user turn. */
+  const modelSaw = (r: DrivenRun, text: string) =>
+    r.modelCalls.some((c) =>
+      c.messages.some((m) => m.role === "user" && m.content.some((p) => p.type === "text" && p.text.includes(text))),
+    );
   /** The store's listings: the resolution reads newest first (`order=desc&limit=200`), down to the newest row it already knew — one page in practice, never one unqueried page and never the whole store. */
   const storeReads = (r: DrivenRun) => r.requests.filter((q) => q.method === "GET" && q.path.includes("/message?"));
   /** A seed longer than one page of the store (`STORE_PAGE_LIMIT`, 200 rows): 125 exchanges, 250 messages. */
@@ -1307,16 +1322,192 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(posts(r, "/interrupt")).toHaveLength(1);
   });
 
-  it("a follow-up's steer into a RUNNING execution whose answer the reset cut is unresolved, not lost — its row lands only at the next step boundary — and the run fails by name rather than hand a steer the server may have taken back for a second delivery", async () => {
+  it("a follow-up's steer into a RUNNING execution whose answer the reset cut — the ordinary steer timing — is resolved at the next step boundary the feed delivers, where its row has landed: folded in, the model reads it on its next call, and the run continues", async () => {
     const r = await openCodeDriver({ controlResetOnSteer: "landed", followUpAtFirstAsk: "also check the docs" }).run(
       toolTurn,
     );
+    expect(answered(r)).toBe("done");
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(followUps.some((s) => /folded in/.test(s))).toBe(true);
+    expect(followUps.some((s) => /not delivered/.test(s))).toBe(false);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(
+      r.modelCalls.some((c) =>
+        c.messages.some(
+          (m) =>
+            m.role === "user" && m.content.some((p) => p.type === "text" && p.text.includes("also check the docs")),
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("a follow-up's steer into a RUNNING execution whose answer the reset cut, when the execution never reaches a step boundary before the loop leaves (a hung tool the finale interrupts): unresolved — no row, the store still showing the execution under way — and the run fails by name rather than hand a steer the server may have taken back for a second delivery", async () => {
+    const r = await openCodeDriver({
+      controlResetOnSteer: "landed",
+      followUpAtFirstAsk: "also check the docs",
+      hangToolCall: 1,
+      interruptSettlesLate: "interrupted",
+    }).run(hungTurn);
     expect(r.outcome.kind).toBe("failed");
     const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
     expect(err?.name).toBe("OpenCodeWriteUnresolvedError");
-    expect(err?.message).toMatch(/an execution is under way and a steer into it lands only at its next step boundary/);
+    expect(err?.message).toMatch(/no row of the steer and the store still showing its execution under way/);
     expect(notes(r).some((n) => n.kind === "follow_up" && /not delivered/.test(n.summary))).toBe(false);
     expect(notes(r).some((n) => n.kind === "follow_up" && /folded in/.test(n.summary))).toBe(false);
+  });
+
+  it("a steer the server answered without a message id into a RUNNING execution that never reaches a step boundary before the loop leaves: unresolved by the same name — never noted as not delivered and handed back for a second delivery, never folded in", async () => {
+    const r = await openCodeDriver({
+      steerAnswersNoId: "landed",
+      followUpAtFirstAsk: "also check the docs",
+      hangToolCall: 1,
+      interruptSettlesLate: "interrupted",
+    }).run(hungTurn);
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err?.name).toBe("OpenCodeWriteUnresolvedError");
+    expect(err?.message).toMatch(/no row of the steer and the store still showing its execution under way/);
+    expect(
+      notes(r)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary)
+        .some((s) => /the follow-up's steer/.test(s)),
+    ).toBe(true);
+    expect(notes(r).some((n) => n.kind === "follow_up" && /not delivered/.test(n.summary))).toBe(false);
+    expect(notes(r).some((n) => n.kind === "follow_up" && /folded in/.test(n.summary))).toBe(false);
+    expect(r.inboxLeft).toEqual([]);
+  });
+
+  it("a follow-up's steer into a RUNNING execution the reset cut before the server took it: no row when its execution ends — the idle marker newest since the steer, the store's word — is the steer lost: handed back to the inbox, the run continuing, the model never shown it", async () => {
+    const r = await openCodeDriver({ controlResetOnSteer: "lost", followUpAtFirstAsk: "also check the docs" }).run(
+      toolTurn,
+    );
+    expect(answered(r)).toBe("done");
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(followUps.some((s) => /not delivered — the steer did not reach the session/.test(s))).toBe(true);
+    expect(followUps.some((s) => /folded in/.test(s))).toBe(false);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["also check the docs"]);
+    expect(
+      r.modelCalls.some((c) =>
+        c.messages.some(
+          (m) =>
+            m.role === "user" && m.content.some((p) => p.type === "text" && p.text.includes("also check the docs")),
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("a steer the server answered without a message id: its row in the store is the steer landed — folded in, the id learned so a later lost prompt of the same text is still re-issued", async () => {
+    const NOW = 1_700_000_000_000;
+    const sameWords = followUpPrompt([{ text: "same words", userId: "user:conformance", at: NOW }]);
+    const r = await openCodeDriver({ steerAnswersNoId: "landed", controlResetOnPrompt: "lost" }).run({
+      ...oneTurn,
+      request: sameWords,
+      followUp: "same words",
+    });
+    expect(answered(r)).toBe("done");
+    expect(posts(r, "/prompt").map((q) => (JSON.parse(q.body ?? "{}") as { delivery?: string }).delivery)).toEqual([
+      "steer",
+      "queue",
+      "queue",
+    ]);
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(followUps.some((s) => /folded in/.test(s))).toBe(true);
+    expect(followUps.some((s) => /not delivered/.test(s))).toBe(false);
+  });
+
+  it("a steer the server answered without a message id and recorded nothing: no row in the idle store is the steer lost — handed back for a fresh turn once the loop has left and never steered again by this loop: one steer POST, one store read, the follow-up in the inbox after the run and never shown to the model", async () => {
+    const r = await openCodeDriver({ steerAnswersNoId: "dropped" }).run({
+      ...toolTurn,
+      followUp: "also check the docs",
+    });
+    expect(answered(r)).toBe("done");
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(
+      followUps.some((s) =>
+        /not delivered — the steer did not reach the session \(the server answered with no message id.*handed back to the inbox for a fresh turn/.test(
+          s,
+        ),
+      ),
+    ).toBe(true);
+    expect(followUps.some((s) => /folded in/.test(s))).toBe(false);
+    expect(
+      posts(r, "/prompt").filter((q) => (JSON.parse(q.body ?? "{}") as { delivery?: string }).delivery === "steer"),
+    ).toHaveLength(1);
+    expect(storeReads(r)).toHaveLength(1);
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["also check the docs"]);
+    expect(modelSaw(r, "also check the docs")).toBe(false);
+  });
+
+  it("a batch of two follow-ups whose first steer the store told lost: the second is held with it — the batch handed back in order for the fresh turn once the loop has left, one steer POST, neither shown to the model", async () => {
+    const r = await openCodeDriver({ steerAnswersNoId: "dropped" }).run({
+      ...toolTurn,
+      followUp: "first words",
+      followUpToo: "second words",
+    });
+    expect(answered(r)).toBe("done");
+    expect(
+      posts(r, "/prompt").filter((q) => (JSON.parse(q.body ?? "{}") as { delivery?: string }).delivery === "steer"),
+    ).toHaveLength(1);
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["first words", "second words"]);
+    expect(modelSaw(r, "first words")).toBe(false);
+    expect(modelSaw(r, "second words")).toBe(false);
+  });
+
+  it("a follow-up arriving after a lost one — a later drain of the inbox — is still steered by this loop and folded in; the lost one alone waits for the fresh turn", async () => {
+    // The first ask is held until the later follow-up's steer has reached the serve: a play this short ends before the drainer's next tick otherwise.
+    const r = await openCodeDriver({
+      steerAnswersNoId: "dropped",
+      followUpAtFirstAsk: "second words",
+      firstAskWaitsForSteers: 2,
+    }).run({ ...toolTurn, followUp: "first words" });
+    expect(answered(r)).toBe("done");
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(followUps.filter((s) => /folded in/.test(s))).toEqual(["follow-up folded in: second words"]);
+    expect(followUps.filter((s) => /not delivered/.test(s))).toHaveLength(1);
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["first words"]);
+    expect(modelSaw(r, "second words")).toBe(true);
+    expect(modelSaw(r, "first words")).toBe(false);
+  });
+
+  it("two writes around one reset — the loop's queue prompt and a follow-up's steer into the execution it started, both answers cut — do not wait on each other: the prompt's resolution waits for the steer's POST and first store read, never for the step boundary only the loop's own feed reading delivers, so the loop reads on, the boundary comes, and the steer is folded in (a circular wait would hang the run)", async () => {
+    const r = await openCodeDriver({
+      controlResetOnPrompt: "landed",
+      controlResetOnSteer: "landed",
+      followUpAtPrompt: "also check the docs",
+    }).run(toolTurn);
+    expect(answered(r)).toBe("done");
+    expect(posts(r, "/prompt").map((q) => (JSON.parse(q.body ?? "{}") as { delivery?: string }).delivery)).toEqual([
+      "queue",
+      "steer",
+    ]);
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(followUps.some((s) => /folded in/.test(s))).toBe(true);
+    expect(followUps.some((s) => /not delivered/.test(s))).toBe(false);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a batch of two follow-ups whose first steer ends unresolved: the second, never posted, is handed back to the inbox with the run's failure — not dropped", async () => {
+    const r = await openCodeDriver({ controlResetOnSteer: "landed", storeListingResets: true }).run({
+      ...oneTurn,
+      followUp: "also check the docs",
+      followUpToo: "and the tests",
+    });
+    expect(r.outcome.kind).toBe("failed");
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["and the tests"]);
   });
 
   it("a follow-up's steer the reset cut before the server took it is handed back to the inbox, as any steer the server never took", async () => {

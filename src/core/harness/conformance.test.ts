@@ -55,6 +55,7 @@ describe("the table", () => {
     const empty: DrivenRun = {
       harness: "pi",
       outcome: { kind: "answered", answer: "ok" },
+      inboxLeft: [],
       events: [],
       steps: [],
       facts: [],
@@ -108,6 +109,7 @@ describe("the table", () => {
     const failing: DrivenRun = {
       harness: "pi",
       outcome: { kind: "answered", answer: "ok" },
+      inboxLeft: [],
       events: [],
       steps: [],
       facts: [],

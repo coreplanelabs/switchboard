@@ -1112,6 +1112,176 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
     expect(notes(events).filter((n) => n.kind === "harness_error")).toEqual([]);
   });
 
+  it("a refilled ask of a built-in outside the action table (todowrite) with a tool source opens its call under the record's word for the action, and its settle lands on that call — never an orphan result", () => {
+    const { bridge, events } = harness();
+    const refilled = bridge.observe({
+      feed: "permissions",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "reconnect",
+      data: [
+        {
+          id: "per_todo",
+          sessionID: "ses_c",
+          action: "todowrite",
+          resources: ["*"],
+          source: { type: "tool", messageID: "msg_todo", id: "c-todo" },
+        },
+      ],
+    });
+    expect(refilled.replies.map((r) => r.reply)).toEqual(["reject"]);
+    bridge.observe(ev("permission.replied", { sessionID: "ses_c", requestID: "per_todo", reply: "reject" }));
+    const settled = bridge.observe(
+      ev("session.tool.failed", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_todo",
+        id: "c-todo",
+        error: { name: "PermissionDeniedError", message: "todowrite is not in any bundle the write identity reaches" },
+      }),
+    );
+    expect(settled.bypass).toBeUndefined();
+    expect(
+      events
+        .filter((e) => e.type === "tool_call" || e.type === "tool_result")
+        .map((e) => `${e.type}:${e.callId}:${e.tool}${e.type === "tool_result" ? `:${e.ok}` : ""}`),
+    ).toEqual(["tool_call:c-todo:todowrite", "tool_result:c-todo:todowrite:false"]);
+    expect(bridge.doingNow()).toBeUndefined();
+  });
+
+  it("a refilled ask naming no call opens nothing; a permission over something other than a tool (external_directory, doom_loop) with a tool source opens the call under the tool the store names for it — the ask's source read against the mirror's assistant message and its tool part — and the settle lands there, never an orphan result", () => {
+    const { bridge, events } = harness();
+    const noSource = bridge.observe({
+      feed: "permissions",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "reconnect",
+      data: [{ id: "per_free", sessionID: "ses_c", action: "shell", resources: ["echo hi"] }],
+    });
+    expect(noSource.replies.map((r) => r.reply)).toEqual(["once"]);
+    expect(events.filter((e) => e.type === "tool_call")).toEqual([]);
+    // The store's refill names the calls: msg_x's tool parts c-dir (read) and c-loop (shell).
+    bridge.observe({
+      feed: "messages",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "reconnect",
+      data: [
+        {
+          id: "msg_x",
+          type: "assistant",
+          agent: "switchboard",
+          model: { providerID: "switchboard", id: "m" },
+          content: [
+            {
+              type: "tool",
+              id: "c-dir",
+              name: "read",
+              state: { status: "running", input: { filePath: "/w/src/a.ts" } },
+            },
+            { type: "tool", id: "c-loop", name: "shell", state: { status: "running", input: { command: "echo hi" } } },
+          ],
+          time: { created: NOW },
+        },
+      ],
+    });
+    const directory = bridge.observe({
+      feed: "permissions",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "reconnect",
+      data: [
+        {
+          id: "per_dir",
+          sessionID: "ses_c",
+          action: "external_directory",
+          resources: ["/workspace/threads/t/main/src"],
+          source: { type: "tool", messageID: "msg_x", id: "c-dir" },
+        },
+        {
+          id: "per_loop",
+          sessionID: "ses_c",
+          action: "doom_loop",
+          resources: ["*"],
+          source: { type: "tool", messageID: "msg_x", id: "c-loop" },
+        },
+      ],
+    });
+    expect(directory.replies.map((r) => `${r.requestID}:${r.reply}`)).toEqual(["per_dir:once", "per_loop:reject"]);
+    bridge.observe(ev("permission.replied", { sessionID: "ses_c", requestID: "per_dir", reply: "once" }));
+    bridge.observe(ev("permission.replied", { sessionID: "ses_c", requestID: "per_loop", reply: "reject" }));
+    const settledDir = bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_x",
+        id: "c-dir",
+        content: [{ type: "text", text: "the file" }],
+        executed: true,
+      }),
+    );
+    const settledLoop = bridge.observe(
+      ev("session.tool.failed", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_x",
+        id: "c-loop",
+        error: { name: "PermissionDeniedError", message: "refused" },
+      }),
+    );
+    expect(settledDir.bypass).toBeUndefined();
+    expect(settledLoop.bypass).toBeUndefined();
+    expect(
+      events
+        .filter((e) => e.type === "tool_call" || e.type === "tool_result")
+        .map((e) => `${e.type}:${e.callId}:${e.tool}${e.type === "tool_result" ? `:${e.ok}` : ""}`),
+    ).toEqual([
+      "tool_call:c-dir:read",
+      "tool_call:c-loop:bash",
+      "tool_result:c-dir:read:true",
+      "tool_result:c-loop:bash:false",
+    ]);
+    expect(notes(events).filter((n) => n.kind === "tool_unnamed")).toEqual([]);
+    expect(bridge.doingNow()).toBeUndefined();
+  });
+
+  it("a permission over something other than a tool whose call the store does not name yet — no part of the ask's source in the mirror — opens the call under the permission's own name, with a tool_unnamed note naming the call and the step, so its settle still lands on an announced call", () => {
+    const { bridge, events } = harness();
+    const directory = bridge.observe({
+      feed: "permissions",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "reconnect",
+      data: [
+        {
+          id: "per_dir2",
+          sessionID: "ses_c",
+          action: "external_directory",
+          resources: ["/workspace/threads/t/main/src"],
+          source: { type: "tool", messageID: "msg_y", id: "c-dir2" },
+        },
+      ],
+    });
+    expect(directory.replies.map((r) => r.reply)).toEqual(["once"]);
+    bridge.observe(ev("permission.replied", { sessionID: "ses_c", requestID: "per_dir2", reply: "once" }));
+    const settled = bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_y",
+        id: "c-dir2",
+        content: [{ type: "text", text: "the file" }],
+        executed: true,
+      }),
+    );
+    expect(settled.bypass).toBeUndefined();
+    expect(
+      events
+        .filter((e) => e.type === "tool_call" || e.type === "tool_result")
+        .map((e) => `${e.type}:${e.callId}:${e.tool}${e.type === "tool_result" ? `:${e.ok}` : ""}`),
+    ).toEqual(["tool_call:c-dir2:external_directory", "tool_result:c-dir2:external_directory:true"]);
+    expect(notes(events).filter((n) => n.kind === "tool_unnamed")).toHaveLength(1);
+    expect(notes(events)[0]?.summary).toMatch(/c-dir2/);
+    expect(notes(events)[0]?.summary).toMatch(/msg_y/);
+    expect(bridge.doingNow()).toBeUndefined();
+  });
+
   it("catching up on a dead generation's feed, its execution failing is history the bridge says — a model call failed while the bot was away, or the proxy's turn budget reached while the bot was away — never this generation's settle, and its step is closed", () => {
     const { bridge, events } = harness();
     bridge.observing = "catching-up";
@@ -1147,7 +1317,7 @@ describe("readStoreSince — the newest rows, page by page, down to what was the
     body: JSON.stringify({ data: rows, cursor: next ? { next } : {} }),
   });
 
-  it("asks for order=desc and the limit on the first page and on every cursor page, stops at the first row known before — not at a row learned since — and hands back the store's newest row", async () => {
+  it("asks for order=desc and the limit on the first page and on every cursor page, stops at the first row known before — not at a row learned since — and names the row it stopped at", async () => {
     const paths: string[] = [];
     const first = Array.from({ length: 200 }, (_, i) => row(400 - i));
     const second = [row(200), row(199), row(198)];
@@ -1163,21 +1333,16 @@ describe("readStoreSince — the newest rows, page by page, down to what was the
     expect(read.ok && read.messages.slice(0, 3).map((m) => m.id)).toEqual(["m400", "m399", "m398"]);
     expect(read.ok && read.messages.length).toBe(201);
     expect(read.ok && read.messages.at(-1)?.id).toBe("m200");
-    expect(read.ok && read.newest?.id).toBe("m400");
+    expect(read.ok && read.stopped?.id).toBe("m199");
   });
 
-  it("a store whose newest row is already known answers no rows and still names that newest row — what a steer's resolution reads the session's state from", async () => {
+  it("a store whose newest row is already known answers no rows and names that row as the one it stopped at — what a steer's resolution reads the session's state from", async () => {
     const read = await readStoreSince(
       async () => page([{ id: "idle1", type: "idle", time: { created: NOW } }, row(1)]),
       "ses_c",
       new Set(["idle1", "m1"]),
     );
-    expect(read).toEqual({
-      ok: true,
-      messages: [],
-      newest: { id: "idle1", type: "idle", time: { created: NOW } },
-      stopped: { id: "idle1", type: "idle", time: { created: NOW } },
-    });
+    expect(read).toEqual({ ok: true, messages: [], stopped: { id: "idle1", type: "idle", time: { created: NOW } } });
   });
 
   it("a page the server refuses or a page of another shape leaves the read refused by name, never partial", async () => {

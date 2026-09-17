@@ -340,14 +340,12 @@ export const STORE_PAGE_LIMIT = 200;
  *  does not end within them is refused, never continued on in part. */
 export const STORE_PAGES = 10_000;
 
-/** What a store read answers: the rows taken, newest or oldest first as asked;
- *  `newest`, the first row the listing answered whatever `take` said of it —
- *  the store's newest under `desc`; and `stopped`, the row `take` ended the
- *  read at, when one did. (An `idle` marker newest means no execution runs;
- *  anything else, one is under way — the re-attach's rule.) */
+/** What a store read answers: the rows taken, newest or oldest first as asked,
+ *  and `stopped`, the row `take` ended the read at, when one did — under
+ *  `desc`, the newest row known before. (An `idle` marker newest means no
+ *  execution runs; anything else, one is under way — the re-attach's rule.) */
 export type StoreRead =
-  | { ok: true; messages: OpenCodeMessage[]; newest?: OpenCodeMessage; stopped?: OpenCodeMessage }
-  | { ok: false; why: string };
+  { ok: true; messages: OpenCodeMessage[]; stopped?: OpenCodeMessage } | { ok: false; why: string };
 
 /** The store paged as the binary pages it: the order on every page (never the
  *  route's default), `limit=STORE_PAGE_LIMIT`, `cursor.next` followed, each
@@ -370,7 +368,6 @@ async function readStorePages(
 ): Promise<StoreRead> {
   const route = openCodeSessionRoutes(sessionID)["session.messages"].path;
   const messages: OpenCodeMessage[] = [];
-  let newest: OpenCodeMessage | undefined;
   let cursor: string | undefined;
   for (let page = 0; ; page++) {
     if (page === STORE_PAGES)
@@ -386,12 +383,11 @@ async function readStorePages(
     if (listed === undefined)
       return { ok: false, why: "the session's messages answered something that is not the page shape" };
     for (const m of listed.data) {
-      newest ??= m;
-      if (!take(m)) return { ok: true, messages, ...(newest ? { newest } : {}), stopped: m };
+      if (!take(m)) return { ok: true, messages, stopped: m };
       messages.push(m);
     }
     cursor = listed.next;
-    if (cursor === undefined) return { ok: true, messages, ...(newest ? { newest } : {}) };
+    if (cursor === undefined) return { ok: true, messages };
   }
 }
 

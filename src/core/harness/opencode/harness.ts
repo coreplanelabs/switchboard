@@ -30,7 +30,7 @@
 import { MINUTE_MS, turnLeaseMs } from "../../budgets.js";
 import type { Identity } from "../../../agents/registry.js";
 import type { Effort } from "../../../effort.js";
-import { followUpMessageId, followUpPrompt, followUpSnippet } from "../../threadAdmission.js";
+import { followUpMessageId, followUpPrompt, followUpSnippet, type FollowUpInput } from "../../threadAdmission.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind } from "../../runEvents.js";
 import {
   identityOrNothing,
@@ -58,6 +58,7 @@ import {
   OpenCodeRequestRefusedError,
   OpenCodeWriteUnresolvedError,
   openCodeToolNameWord,
+  StepBoundaries,
   type OpenCodeConnection,
   type OpenCodeReattach,
 } from "./bridge.js";
@@ -508,6 +509,7 @@ export async function openOpenCodeRun(
       posted,
       knownMessageIds: known,
       writes: { seq: 0, ownPrompts: new Map<string, number>(), imported },
+      boundaries: new StepBoundaries(),
       paths: server.paths,
       port: server.port,
       password: server.password,
@@ -759,6 +761,10 @@ function drainFollowUps(
   const auth = { Authorization: openCodeAuthHeader(conn.password) };
   const routes = openCodeSessionRoutes(conn.sessionID);
   return (async () => {
+    /** The follow-ups the store told lost, each with the batch behind it in
+     *  order: never steered again by this loop, requeued to the front of the
+     *  inbox once the loop has left, for the run stage's fresh-turn path. */
+    const deferred: FollowUpInput[] = [];
     while (running()) {
       const inputs = run.inbox?.drain() ?? [];
       for (const input of inputs) {
@@ -782,54 +788,128 @@ function drainFollowUps(
         // server that refuses a steer is one the loop itself is about to find
         // gone, and a retry every tick would only repeat the note.
         let failure: string | undefined;
-        // Posted through the connection's `posted` set while in flight, so a
-        // write the control plane's reset left unknown is resolved only once
+        /** The store's word that the server took nothing: held for the fresh turn with the batch behind it (`deferred`), never steered again by this loop; no refusal. */
+        let lost = false;
+        // The steer joins the connection's `posted` set — the loop's own reads
+        // (`promptLanded`) wait on it before reading the store — until it has
+        // answered and, when the answer named no id or the reset cut it, until
+        // the store has been read once for the verdict: so a steer's row of the
+        // prompt's own text is known before the loop reads, and no longer. Its
+        // wait on a step boundary runs outside the set: the boundary comes only
+        // from the loop's own feed reading, which a loop waiting on this steer
+        // would never do — a circular wait with no bound on either side. A
+        // write the control plane's reset left unknown is thus resolved once
         // this steer has answered — and its answer names the user message it
         // became (measured), known from here: a steer's row of the prompt's
         // own text is never read as the prompt landed. An answer that names
         // none, or a control reset that cut the answer, is told from the store
-        // instead: the rows newer than any known, newest first, a user row of
-        // the steer's text being the steer landed (measured: an idle
-        // session's steer has its row in the store at once) — its id learned,
-        // the follow-up delivered; none, and the session idle when the steer was
-        // posted — nothing newer than the loop's own prompts posted AFTER the
-        // steer (the session's writes are counted in order, `conn.writes`), and
-        // below them the idle marker, an imported row or nothing at all — the
-        // steer lost, handed back. None, with an execution under way at the
-        // steer (anything else newest below the later prompts), the store
-        // cannot yet say: a steer into a running execution lands only at its
-        // next step boundary (measured), so the steer is unresolved.
-        // Unresolved — that, or a store that cannot be read — fails the run by
-        // name as the loop's own writes do, one rule, the loop stopped hard
-        // here and the harness throwing once it has left: never a landed steer
-        // handed back for a second delivery.
-        const learnRow = async (steerSeq: number): Promise<boolean> => {
+        // instead — the one verdict for both, since a server that answered and
+        // recorded nothing is a steer lost as much as one the reset cut: the
+        // rows newer than what was known when the steer was posted (never what
+        // was learned since — the loop's own prompt after it, the rows of an
+        // execution it started), newest first, a user row of the steer's text
+        // being the steer landed (measured: an idle session's steer has its
+        // row in the store at once) — its id learned, the follow-up delivered;
+        // none, and the session idle when the steer was posted — nothing newer
+        // than the loop's own prompts posted AFTER the steer (the session's
+        // writes are counted in order, `conn.writes`), and below the oldest of
+        // them the idle marker, an imported row or nothing at all — the steer
+        // lost, handed back. None, with an execution under way at the steer
+        // (anything else newest below the later prompts) — the ordinary
+        // timing, a follow-up arriving mid-step — the store cannot yet say: a
+        // steer into a running execution lands only at its next step boundary
+        // (measured), so the verdict waits for the boundaries the loop reads
+        // off its feed (`conn.boundaries`: a step's end or failure, the
+        // execution's end, the idle) and the store is read again at each — the
+        // row there, landed; the idle marker newest since the steer with no
+        // row, lost. The store's word decides, never a count of boundaries —
+        // and a follow-up told lost is never steered again by this loop, since
+        // a steer told lost while the server still held it would reach the
+        // model twice once its row landed: it is held with the batch behind it
+        // for the run stage's fresh turn. Measured against the real binary: a
+        // steer into a running execution is announced `session.inbox.enqueued`
+        // at its POST and `session.inbox.delivered` at the step boundary it
+        // lands at, right after that step's `session.step.ended`, its row in
+        // the store there — before the execution's terminal event, the
+        // execution running a step for it — and a steer arriving after the end
+        // starts a new execution at once, its row in the store before the
+        // answer; so the idle marker newest since the steer with no row, read
+        // after the terminal event, is the server's word that it took nothing.
+        // The loop leaving the feed with no row and the store still showing the
+        // execution under way (a hung tool the finale interrupts) is the steer
+        // unresolved. Unresolved — that, or a store that cannot be read —
+        // fails the run by name as the loop's own writes do, one rule, the
+        // loop stopped hard here and the harness throwing once it has left,
+        // the batch's follow-ups not yet posted handed back with it: never a
+        // landed steer handed back for a second delivery, never a follow-up
+        // dropped.
+        const learnRow = async (
+          steerSeq: number,
+          knownAtSteer: ReadonlySet<string>,
+        ): Promise<"landed" | "lost" | "running"> => {
           const known = conn.knownMessageIds ?? new Set<string>();
           const read = await readStoreSince(
             (path) => conn.container.request(conn.paths, { method: "GET", port: conn.port, path, secretHeaders: auth }),
             conn.sessionID,
-            known,
+            knownAtSteer,
           ).catch((err: unknown): { ok: false; why: string } => ({
             ok: false,
             why: `the store could not be listed: ${redactAndCap(err instanceof Error ? err.message : String(err), 200)}`,
           }));
           if (!read.ok) throw new OpenCodeWriteUnresolvedError("the follow-up's steer", read.why);
-          // The rows newer than any known, newest first; a prompt of the loop's
-          // own posted after this steer, and everything above it, set aside.
-          const later = read.messages.findIndex((m) => (conn.writes?.ownPrompts.get(m.id) ?? -1) > steerSeq);
+          // The rows newer than what was known at the steer, newest first; the
+          // OLDEST prompt of the loop's own posted after this steer, and
+          // everything above it, set aside.
+          let later = -1;
+          for (let i = read.messages.length - 1; i >= 0 && later === -1; i--)
+            if ((conn.writes?.ownPrompts.get(read.messages[i].id) ?? -1) > steerSeq) later = i;
           const since = later === -1 ? read.messages : read.messages.slice(later + 1);
           const rows = since.filter((m) => m.type === "user" && (m as { text?: unknown }).text === text);
           for (const row of rows) known.add(row.id);
-          if (rows.length > 0) return true;
+          if (rows.length > 0) return "landed";
           const atSteer = since[0] ?? read.stopped;
           if (atSteer === undefined || atSteer.type === "idle" || conn.writes?.imported.has(atSteer.id) === true)
-            return false;
-          throw new OpenCodeWriteUnresolvedError(
-            "the follow-up's steer",
-            "an execution is under way and a steer into it lands only at its next step boundary, so the store cannot yet say whether the server took it",
-          );
+            return "lost";
+          return "running";
         };
+        /** Landed (`true`) or lost (`false`) — the store's word — waiting on the feed's step boundaries while the store shows an execution under way; `waiting` is told once before the first wait, when the store has been read and the verdict now depends on the loop. */
+        const resolve = async (
+          steerSeq: number,
+          knownAtSteer: ReadonlySet<string>,
+          seen: number,
+          waiting: () => void,
+        ): Promise<boolean> => {
+          let left = false;
+          for (;;) {
+            const verdict = await learnRow(steerSeq, knownAtSteer);
+            if (verdict !== "running") return verdict === "landed";
+            if (conn.boundaries === undefined)
+              throw new OpenCodeWriteUnresolvedError(
+                "the follow-up's steer",
+                "an execution is under way and this connection reads no step boundaries off the loop's feed, so the store cannot yet say whether the server took it",
+              );
+            if (left)
+              throw new OpenCodeWriteUnresolvedError(
+                "the follow-up's steer",
+                "the loop left the feed with no row of the steer and the store still showing its execution under way, so the store cannot say whether the server took it",
+              );
+            waiting();
+            if ((await conn.boundaries.wait(seen)) === "left") left = true;
+            seen = conn.boundaries.count;
+          }
+        };
+        // What the loop's reads wait on: settled once the steer has answered
+        // and any store read its verdict needs has run once (see above).
+        let readOnce: () => void = () => undefined;
+        const posted = new Promise<void>((settle) => (readOnce = settle));
+        conn.posted?.add(posted);
         const sent = (async () => {
+          // What the store held, and the boundaries the loop had read, when the
+          // steer was posted. The copy is bounded by the session's store — the
+          // rows the loop has learned, thousands at most — and made once per
+          // follow-up, cheaper than the store read it bounds.
+          const knownAtSteer: ReadonlySet<string> = new Set(conn.knownMessageIds ?? []);
+          const seenAtSteer = conn.boundaries?.count ?? 0;
           const steerSeq = conn.writes ? ++conn.writes.seq : 0;
           try {
             const res = await conn.container.request(conn.paths, {
@@ -844,32 +924,60 @@ function drainFollowUps(
             else {
               const id = parseAnswerId(res.body);
               if (id !== undefined) conn.knownMessageIds?.add(id);
-              else await learnRow(steerSeq);
+              else if (!(await resolve(steerSeq, knownAtSteer, seenAtSteer, readOnce))) {
+                lost = true;
+                failure = "the server answered with no message id and the store holds no row of the steer";
+              }
             }
           } catch (err) {
+            // A steer the store cannot resolve fails the run by name (below), never a hand-back.
+            if (err instanceof OpenCodeWriteUnresolvedError) throw err;
             failure = err instanceof Error ? err.message : String(err);
-            if (isControlReset(err) && (await learnRow(steerSeq))) failure = undefined;
+            if (isControlReset(err)) {
+              if (await resolve(steerSeq, knownAtSteer, seenAtSteer, readOnce)) failure = undefined;
+              else lost = true;
+            }
+          } finally {
+            readOnce();
+            conn.posted?.delete(posted);
           }
         })();
-        conn.posted?.add(sent);
         try {
           await sent;
         } catch (err) {
           if (err instanceof OpenCodeWriteUnresolvedError) {
             note("harness_error", `${err.message} — the run is stopped`);
             run.control?.requestStop("hard");
+            // The follow-ups held for the fresh turn, then the batch's after
+            // this one, never posted: back to the inbox for the run stage's
+            // fresh-turn path, never dropped. This one may have landed, so it
+            // is not.
+            run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input) + 1)]);
           }
           throw err;
-        } finally {
-          conn.posted?.delete(sent);
         }
         if (failure !== undefined) {
           note(
             "follow_up",
             `follow-up not delivered — the steer did not reach the session (${redactAndCap(failure, 200)}); handed back to the inbox for a fresh turn: ${redactSecrets(followUpSnippet(input))}`,
           );
-          run.inbox?.requeue(inputs.slice(inputs.indexOf(input)));
-          return;
+          const rest = inputs.slice(inputs.indexOf(input));
+          // A steer the server refused — the request threw, or answered outside
+          // 2xx — is one the loop itself is about to find gone: everything
+          // held and everything behind goes back to the inbox now, and the
+          // drainer stops here (a retry every tick would only repeat the note).
+          if (!lost) {
+            run.inbox?.requeue([...deferred.splice(0), ...rest]);
+            return;
+          }
+          // A steer the store told lost is no refusal — the server took
+          // nothing — but it is never steered again by this loop: were the
+          // server still holding it, a second steer would reach the model
+          // twice. It is held with the batch behind it, in order (the thread's
+          // order kept within what one drain brought), for the run stage's
+          // fresh turn; the drainer goes on with what later drains bring.
+          deferred.push(...rest);
+          break;
         }
         const source = {
           ...(input.sourceUrl ? { url: input.sourceUrl } : {}),
@@ -887,6 +995,9 @@ function drainFollowUps(
       if (!running()) break;
       await deps.sleep(deps.tickMs ?? 1000);
     }
+    // The loop has left: what the store told lost, with the batches behind it,
+    // to the front of the inbox in order for the run stage's fresh-turn path.
+    if (deferred.length > 0) run.inbox?.requeue(deferred.splice(0));
   })();
 }
 
