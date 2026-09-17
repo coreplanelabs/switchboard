@@ -212,6 +212,7 @@ function watchedChild(
   if (io.attachFile) watched.attachFile = (file) => io.attachFile!(file);
   if (io.uploadTicket) watched.uploadTicket = (file) => io.uploadTicket!(file);
   if (io.workItems) watched.workItems = (actor) => io.workItems!(actor);
+  if (io.isolateFollowUps) watched.isolateFollowUps = true;
   if (io.acknowledge) watched.acknowledge = (text) => io.acknowledge!(text);
   if (io.runFinished) watched.runFinished = (receipt) => io.runFinished!(receipt);
   if (io.openThread) watched.openThread = (lead) => io.openThread!(lead);

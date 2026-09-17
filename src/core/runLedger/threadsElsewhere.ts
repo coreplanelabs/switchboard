@@ -14,6 +14,7 @@
 export interface ThreadElsewhere {
   runId: string;
   agent?: string;
+  userId?: string;
   startedAt: number;
 }
 
@@ -21,12 +22,15 @@ export class ThreadsElsewhere {
   private byThread = new Map<string, ThreadElsewhere>();
 
   /** The sweep's current listing, replacing the previous one entirely. */
-  replace(rows: Iterable<{ threadKey: string; runId: string; startedAt: number; meta: { agent?: string } }>): void {
+  replace(
+    rows: Iterable<{ threadKey: string; runId: string; startedAt: number; meta: { agent?: string; userId?: string } }>,
+  ): void {
     const next = new Map<string, ThreadElsewhere>();
     for (const r of rows) {
       next.set(r.threadKey, {
         runId: r.runId,
         startedAt: r.startedAt,
+        ...(r.meta.userId !== undefined ? { userId: r.meta.userId } : {}),
         ...(r.meta.agent !== undefined ? { agent: r.meta.agent } : {}),
       });
     }

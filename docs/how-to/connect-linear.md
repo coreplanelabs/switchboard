@@ -73,6 +73,10 @@ Every operation refreshes the person's team membership and public-team access.
 Even an administrator's Switchboard grant does not bypass Linear's private-team
 boundary. Subissue creation does not automatically delegate another run.
 
+When a session already has an active run, its original requester can steer it.
+Another person’s prompt waits in the durable queue and starts a new turn under
+that person’s grants after the active run finishes. Stop bypasses waiting prompts.
+
 Native Stop lets a person cancel their own active work through the shared
 `runs:stop` policy. Stopping another person's work requires `runs:write` and
 visibility of that run. A Linear session does not establish team-wide membership;

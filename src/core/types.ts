@@ -245,6 +245,9 @@ export interface ConfirmationOffer {
 }
 
 export interface ChannelIO {
+  /** Queue another requester's follow-up until it can run with their own grants.
+   * The adapter must durably retry a dispatch that returns `deferred`. */
+  isolateFollowUps?: boolean;
   /** Bind work-tracking tools to the resolved actor, outside model arguments. */
   workItems?(actor: Actor): WorkItems;
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */

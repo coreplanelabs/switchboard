@@ -13,6 +13,7 @@ export interface LinearConsumerInbox {
   bind(key: string, lease: string, runId: string): Promise<boolean>;
   renew(key: string, lease: string): Promise<boolean>;
   retry(key: string, lease: string): Promise<boolean>;
+  defer(key: string, lease: string): Promise<boolean>;
   complete(key: string, lease: string): Promise<boolean>;
 }
 
@@ -21,7 +22,7 @@ export interface LinearConsumerDeps {
   api(organizationId: string): LinearApi;
   clock: Clock;
   warn(message: string): void;
-  dispatch(msg: IncomingMessage, io: ChannelIO): Promise<unknown>;
+  dispatch(msg: IncomingMessage, io: ChannelIO): Promise<{ deferred?: true } | void>;
   stop(input: Extract<LinearInput, { kind: "stop" }>, io: ChannelIO): Promise<void>;
   /** Proves admission from the ledger/history, not merely the runStarted hook. */
   recover(delivery: LinearDelivery, msg: IncomingMessage): Promise<"handled" | "unknown">;
@@ -41,7 +42,7 @@ export class LinearConsumer {
   private polling?: Promise<void>;
   private timer?: ReturnType<typeof setTimeout>;
   private readonly active = new Set<Promise<void>>();
-  private readonly sessionTurns = new Map<string, Promise<void>>();
+  private readonly sessionTurns = new Map<string, Promise<boolean>>();
 
   constructor(private readonly deps: LinearConsumerDeps) {}
 
@@ -101,12 +102,14 @@ export class LinearConsumer {
       event.payload.type === "AgentSessionEvent"
         ? `${event.payload.organizationId}:${String(object(event.payload.agentSession).id)}`
         : undefined;
-    const preceding = sessionKey ? this.sessionTurns.get(sessionKey) : undefined;
-    let release!: () => void;
-    const admitted = new Promise<void>((resolve) => {
+    const isStop = object(event.payload.agentActivity).signal === "stop";
+    const preceding = sessionKey && !isStop ? this.sessionTurns.get(sessionKey) : undefined;
+    let release!: (ready: boolean) => void;
+    let ready = false;
+    const admitted = new Promise<boolean>((resolve) => {
       release = resolve;
     });
-    if (sessionKey) this.sessionTurns.set(sessionKey, admitted);
+    if (sessionKey && !isStop) this.sessionTurns.set(sessionKey, admitted);
     let owned = true,
       runId = delivery.runId;
     let renewal: Promise<void> | undefined;
@@ -132,7 +135,10 @@ export class LinearConsumer {
       } else {
         // A runStarted hook follows the core's thread admission. Let the next
         // turn steer it then, rather than racing setup or waiting for its end.
-        await preceding;
+        if (preceding && !(await preceding)) {
+          if (owned) await inbox.retry(event.key, lease);
+          return;
+        }
         if (!owned) return;
         const api = this.deps.api(required(event.payload.organizationId));
         const session = await api.session(required(object(event.payload.agentSession).id));
@@ -145,7 +151,7 @@ export class LinearConsumer {
               type: "error",
               body: "Switchboard could not establish a supported request and its human sender. Please send a new mention or delegate this issue again.",
             });
-          if (owned) await inbox.complete(event.key, lease);
+          if (owned) ready = await inbox.complete(event.key, lease);
           return;
         }
         const io: ChannelIO = new LinearChannelIO({
@@ -160,7 +166,8 @@ export class LinearConsumer {
         io.runStarted = ({ id }) => {
           const first = runId === undefined;
           runId = id;
-          release();
+          ready = true;
+          release(true);
           // The dispatcher can replace an interrupted run on the same IO.
           // Keep the first durable hint; recovery also searches the request id.
           // Lease loss must stop the latest local run, not its predecessor.
@@ -191,16 +198,21 @@ export class LinearConsumer {
         } else {
           if (!(await inbox.begin(event.key, lease))) return;
           if (!owned) return;
-          await this.deps.dispatch(input.msg, io);
+          const outcome = await this.deps.dispatch(input.msg, io);
           await binding;
+          if (outcome?.deferred) {
+            if (runId) throw new Error("linear_deferred_after_run_started");
+            if (owned) await inbox.defer(event.key, lease);
+            return;
+          }
         }
       }
-      if (owned) await inbox.complete(event.key, lease);
+      if (owned) ready = await inbox.complete(event.key, lease);
     } catch {
       this.deps.warn("[linear] delivery unfinished; retained for recovery");
       if (owned) await inbox.retry(event.key, lease).catch(() => {});
     } finally {
-      release();
+      release(ready);
       if (sessionKey && this.sessionTurns.get(sessionKey) === admitted) this.sessionTurns.delete(sessionKey);
       clearInterval(heartbeat);
       await renewal;

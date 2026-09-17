@@ -28,6 +28,29 @@ function sqlStore() {
 for (const kind of ["memory", "sqlite"] as const) {
   describe(`Linear event inbox — ${kind}`, () => {
     const make = () => (kind === "memory" ? new InMemoryLinearInbox() : sqlStore().inbox);
+    it("defers only an unbound claim, preserves FIFO and lets stop bypass waiting prompts", async () => {
+      const inbox = make();
+      await inbox.accept(event);
+      await inbox.accept({ ...event, key: "follow" });
+      await inbox.claim(200, 100, "a");
+      await inbox.begin(event.key, "a");
+      expect(await inbox.defer(event.key, "wrong", 400)).toBe(false);
+      expect(await inbox.defer(event.key, "a", 400)).toBe(true);
+      expect(await inbox.claim(300, 100, "b")).toBeUndefined();
+      await inbox.accept({
+        ...event,
+        key: "stop",
+        payload: { ...event.payload, action: "prompted", agentActivity: { signal: "stop" } },
+      });
+      expect((await inbox.claim(300, 100, "stop"))?.event.key).toBe("stop");
+      await inbox.complete("stop", "stop", 300);
+      const resumed = await inbox.claim(400, 100, "c");
+      expect(resumed?.event.key).toBe(event.key);
+      expect(resumed?.begun).toBeUndefined();
+      await inbox.begin(event.key, "c");
+      await inbox.bind(event.key, "c", "run");
+      expect(await inbox.defer(event.key, "c", 500)).toBe(false);
+    });
     it("commits once, claims in arrival order and refuses concurrent consumers until lease expiry", async () => {
       const inbox = make();
       expect(await inbox.accept(event)).toBe(true);

@@ -18,6 +18,7 @@ import type { WorkItems } from "../../core/workItems.js";
 /** One native session is one Switchboard conversation. No Slack formatting,
  *  comment scraping or installation credential crosses this boundary. */
 export class LinearChannelIO implements ChannelIO {
+  readonly isolateFollowUps = true;
   private writes: Promise<void> = Promise.resolve();
   private receipt?: RunReceipt;
   private lastProgress = -Infinity;

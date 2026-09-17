@@ -10,4 +10,6 @@
 export interface DispatchOutcome {
   status: "completed" | "refused" | "failed" | "stopped";
   refusal?: string;
+  /** Admission made no run/inbox effects; a durable channel should retry later. */
+  deferred?: true;
 }

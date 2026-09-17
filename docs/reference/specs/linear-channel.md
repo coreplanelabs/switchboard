@@ -77,6 +77,11 @@ the human assignee.
     policy: people can cancel their own work, while another person's work
     needs the operator's write grant and visibility. It never stops a later
     run created after the control event arrived.
+    Only the original requester may steer an active run. Another person's
+    prompt stays in the durable queue until it can run under their own identity;
+    unknown ownership fails closed across host generations. A proven admission
+    deferral may clear the begun marker only while its lease owns an unbound
+    delivery. Later prompts retain arrival order; stop controls bypass waiting.
     A permanently invalid signed request closes with an honest native error.
 13. Signed revocation removes the matching installation before intake returns;
     a delayed revocation cannot remove a newer installation. It cancels pending
@@ -130,5 +135,6 @@ the human assignee.
 | 16: issue actions and delegated queue privacy | `[unit]` `src/channels/linear/workItems.test.ts::*` |
 | Work-item tool exposure and dispatcher binding | `[unit]` `src/tools/workItems.test.ts::*`, `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::binds work tracking to the resolved requester before a model can call an issue tool` |
 | Inbound files and deployed installation | `[gap]` Delivery plan acceptance ledger; not implemented by OAuth alone |
-
 | 12: independent channel startup | `[unit]` `src/channels/startup.test.ts::*` |
+| Requester isolation before follow-up effects | `[unit]` `src/core/dispatch/admission.test.ts::admit — the thread admission claim::defers another requester without writing either inbox, locally or across generations` |
+| Requester-bound execution after deferral | `[unit]` `src/core/dispatcher.test.ts::thread admission (docs/reference/specs/thread-admission.md)::an isolated channel defers another person and later binds a fresh run to that person` |

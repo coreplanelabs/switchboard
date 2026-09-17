@@ -228,11 +228,13 @@ describe("spawnChild — the one path a child run is born through", () => {
     ch.childIo.acknowledge = async (text) => {
       acknowledged.push(text);
     };
+    ch.childIo.isolateFollowUps = true;
     ch.childIo.workItems = (actor) => {
       actorIds.push(actor.id);
       return { request: async () => ({ items: [] }) };
     };
     const { dispatch } = fakeDispatch(async (_msg, io) => {
+      expect(io.isolateFollowUps).toBe(true);
       await io.acknowledge?.("Still working");
       const actor = {
         kind: "user" as const,

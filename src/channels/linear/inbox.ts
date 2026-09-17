@@ -21,6 +21,8 @@ export interface LinearInbox {
   bind(key: string, lease: string, runId: string): Promise<boolean>;
   renew(key: string, lease: string, until: number): Promise<boolean>;
   retry(key: string, lease: string, at: number): Promise<boolean>;
+  /** Clear dispatch entry only after an explicit no-effects admission deferral. */
+  defer(key: string, lease: string, at: number): Promise<boolean>;
   complete(key: string, lease: string, at: number): Promise<boolean>;
   cancelOrganization(organizationId: string, at: number): Promise<void>;
   prune(completedBefore: number): Promise<void>;
@@ -100,7 +102,8 @@ export class SqlLinearInbox implements LinearInbox {
       SET phase = ?, lease = ?, available_at = ?, attempts = attempts + 1
       WHERE sequence = (SELECT candidate.sequence FROM linear_deliveries candidate
         WHERE candidate.phase IN (?, ?) AND candidate.available_at <= ?
-        AND (? = 1 OR json_extract(candidate.payload, '$.type') != 'AgentSessionEvent' OR NOT EXISTS (
+        AND (? = 1 OR json_extract(candidate.payload, '$.type') != 'AgentSessionEvent'
+          OR json_extract(candidate.payload, '$.agentActivity.signal') = 'stop' OR NOT EXISTS (
           SELECT 1 FROM linear_deliveries prior WHERE prior.sequence < candidate.sequence
           AND prior.phase != 'done' AND prior.begun = 0
           AND json_extract(prior.payload, '$.type') = 'AgentSessionEvent'
@@ -188,6 +191,18 @@ export class SqlLinearInbox implements LinearInbox {
         .toArray().length === 1
     );
   }
+  async defer(key: string, lease: string, at: number): Promise<boolean> {
+    return (
+      this.sql
+        .exec(
+          "UPDATE linear_deliveries SET phase = 'pending', begun = 0, lease = NULL, available_at = ? WHERE event_key = ? AND lease = ? AND phase = 'processing' AND run_id IS NULL RETURNING event_key",
+          at,
+          key,
+          lease,
+        )
+        .toArray().length === 1
+    );
+  }
   async retry(key: string, lease: string, at: number): Promise<boolean> {
     return (
       this.sql
@@ -265,7 +280,8 @@ export class InMemoryLinearInbox implements LinearInbox {
         row.event.payload.type === "AgentSessionEvent"
           ? `${row.event.payload.organizationId}:${String(object(row.event.payload.agentSession).id)}`
           : undefined;
-      const follows = session !== undefined && blocked.has(session);
+      const follows =
+        session !== undefined && blocked.has(session) && object(row.event.payload.agentActivity).signal !== "stop";
       if (session && !row.begun) blocked.add(session);
       if (
         row.availableAt > now ||
@@ -321,6 +337,15 @@ export class InMemoryLinearInbox implements LinearInbox {
     const row = this.owned(key, lease);
     if (!row) return false;
     row.availableAt = Math.max(row.availableAt, until);
+    return true;
+  }
+  async defer(key: string, lease: string, at: number): Promise<boolean> {
+    const row = this.owned(key, lease);
+    if (!row || row.runId) return false;
+    row.begun = false;
+    row.phase = "pending";
+    row.lease = undefined;
+    row.availableAt = at;
     return true;
   }
   async retry(key: string, lease: string, at: number): Promise<boolean> {

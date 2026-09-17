@@ -25,6 +25,7 @@ function fixture() {
     begin: vi.fn((key: string, lease: string) => store.begin(key, lease)),
     bind: vi.fn((key: string, lease: string, id: string) => store.bind(key, lease, id)),
     renew: vi.fn((key: string, lease: string) => store.renew(key, lease, now + 120_000)),
+    defer: vi.fn((key: string, lease: string) => store.defer(key, lease, now + 5000)),
     retry: vi.fn((key: string, lease: string) => store.retry(key, lease, now + 5000)),
     complete: vi.fn((key: string, lease: string) => store.complete(key, lease, now)),
   };
@@ -61,6 +62,60 @@ function fixture() {
 afterEach(() => vi.useRealTimers());
 
 describe("Linear event consumer", () => {
+  it("retries an explicitly deferred turn as its own requester instead of treating it as interrupted", async () => {
+    const f = fixture();
+    await f.store.accept(event());
+    f.deps.dispatch.mockResolvedValueOnce({ deferred: true });
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.inbox.defer).toHaveBeenCalledOnce();
+    expect(f.inbox.complete).not.toHaveBeenCalled();
+    f.advance(5000);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.dispatch).toHaveBeenCalledTimes(2);
+    expect(f.deps.recover).not.toHaveBeenCalled();
+    expect(f.inbox.complete).toHaveBeenCalledOnce();
+  });
+  it("holds already claimed later prompts after deferral while stop bypasses the admission wait", async () => {
+    const f = fixture();
+    let decide!: () => void;
+    f.deps.dispatch.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        decide = resolve;
+      });
+      return { deferred: true };
+    });
+    const prompt = (id: string, signal?: string): LinearWebhookEvent => ({
+      ...event(),
+      key: id,
+      payload: {
+        ...event().payload,
+        action: "prompted",
+        agentActivity: { id, agentSessionId: "s", userId: "alice", signal, content: { type: "prompt", body: id } },
+      },
+    });
+    await f.store.accept(event());
+    await f.consumer.poll();
+    await vi.waitFor(() => expect(f.deps.dispatch).toHaveBeenCalledOnce());
+    await f.store.accept(prompt("later"));
+    await f.consumer.poll();
+    await f.store.accept(prompt("stop", "stop"));
+    await f.consumer.poll();
+    await vi.waitFor(() => expect(f.deps.stop).toHaveBeenCalledOnce());
+    expect(f.deps.dispatch).toHaveBeenCalledOnce();
+    decide();
+    await f.consumer.settled();
+    expect(f.inbox.retry).toHaveBeenCalledWith("later", expect.any(String));
+    expect(f.inbox.complete).toHaveBeenCalledTimes(1);
+    f.advance(5000);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.dispatch.mock.calls.map(([msg]) => msg.text)).toEqual(["Fix login", "Fix login", "later"]);
+    expect(f.deps.recover).not.toHaveBeenCalled();
+  });
   it("records dispatch entry before invoking the core and completes only after its reply", async () => {
     const f = fixture();
     await f.store.accept(event());

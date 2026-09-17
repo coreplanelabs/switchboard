@@ -240,6 +240,37 @@ async function resumeOf(
 }
 
 describe("admit — the thread admission claim", () => {
+  it("defers another requester without writing either inbox, locally or across generations", async () => {
+    for (const where of ["here", "elsewhere"]) {
+      for (const owner of ["slack:OTHER", undefined]) {
+        const f = setup("use my permissions");
+        f.io.isolateFollowUps = true;
+        if (where === "here") f.admission.claim(THREAD, { agent: "general", userId: owner });
+        else
+          f.elsewhere.replace([
+            { threadKey: THREAD, runId: "run-1", startedAt: 4000, meta: { agent: "general", userId: owner } },
+          ]);
+        expect(await admit(f.deps, f.ctx)).toEqual({ kind: "deferred" });
+        expect(f.ledger.pushes).toEqual([]);
+        expect(f.admission.get(THREAD)?.inbox.size ?? 0).toBe(0);
+        expect(f.replies).toEqual([]);
+        if (where === "elsewhere") expect(f.admission.get(THREAD)).toBeUndefined();
+      }
+    }
+  });
+  it("allows the original requester to steer isolated work here or across generations", async () => {
+    for (const where of ["here", "elsewhere"]) {
+      const f = setup("continue", { ledger: new RecordingLedger({ pushSeq: () => 1 }) });
+      f.io.isolateFollowUps = true;
+      if (where === "here")
+        f.admission.claim(THREAD, { agent: "general", userId: f.message.userId }).live.runId = "run-1";
+      else
+        f.elsewhere.replace([
+          { threadKey: THREAD, runId: "run-1", startedAt: 4000, meta: { agent: "general", userId: f.message.userId } },
+        ]);
+      expect(await admit(f.deps, f.ctx)).toEqual({ kind: "steered", where });
+    }
+  });
   it("uses a channel's nonterminal acknowledgement for a follow-up here or on another generation", async () => {
     for (const where of ["here", "elsewhere"]) {
       const admission = new ThreadAdmission<DispatchFollowUp>();

@@ -98,6 +98,9 @@ export class RemoteLinearInbox {
   renew(key: string, lease: string): Promise<boolean> {
     return call(this.transport, { op: "renew", key, lease });
   }
+  defer(key: string, lease: string): Promise<boolean> {
+    return call(this.transport, { op: "defer", key, lease });
+  }
   retry(key: string, lease: string): Promise<boolean> {
     return call(this.transport, { op: "retry", key, lease });
   }
@@ -173,6 +176,7 @@ export async function handleLinearBridge(
       "bind",
       "renew",
       "retry",
+      "defer",
       "complete",
       "session",
       "activities",
@@ -192,6 +196,8 @@ export async function handleLinearBridge(
       result = await deps.inbox.bind(required(body.key), required(body.lease), required(body.runId));
     else if (op === "renew")
       result = await deps.inbox.renew(required(body.key), required(body.lease), now + LINEAR_TIMING.deliveryLeaseMs);
+    else if (op === "defer")
+      result = await deps.inbox.defer(required(body.key), required(body.lease), now + LINEAR_TIMING.progressMs);
     else if (op === "retry")
       result = await deps.inbox.retry(required(body.key), required(body.lease), now + LINEAR_TIMING.progressMs);
     else if (op === "complete") result = await deps.inbox.complete(required(body.key), required(body.lease), now);

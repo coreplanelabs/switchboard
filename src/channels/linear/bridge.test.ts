@@ -19,6 +19,26 @@ function fixture() {
 }
 
 describe("Linear edge bridge", () => {
+  it("round-trips a fenced no-effects deferral and refuses one after a run binding", async () => {
+    const { inbox, transport, deps } = fixture();
+    await inbox.accept({
+      key: "defer",
+      receivedAt: 1,
+      payload: { organizationId: "org", type: "AgentSessionEvent", action: "created" },
+    });
+    const remote = new RemoteLinearInbox(transport);
+    const first = (await remote.claim())!;
+    await remote.begin("defer", first.lease);
+    expect(await remote.defer("defer", "wrong")).toBe(false);
+    expect(await remote.defer("defer", first.lease)).toBe(true);
+    expect(await remote.claim()).toBeUndefined();
+    deps.clock = () => 5100;
+    const next = (await remote.claim())!;
+    expect(next.begun).toBeUndefined();
+    await remote.begin("defer", next.lease);
+    await remote.bind("defer", next.lease, "run");
+    expect(await remote.defer("defer", next.lease)).toBe(false);
+  });
   it("binds work-item operations to an accessible session over the fixed bridge", async () => {
     const { api, transport } = fixture();
     const remote = new RemoteLinearApi(transport, "org");

@@ -533,6 +533,7 @@ export async function dispatch(
       });
     // A reply folded into the live child of a spawned thread: its parent hears it now.
     if (outcome.kind === "steered") await tellLineage({ kind: "steered" });
+    if (outcome.kind === "deferred") ended.deferred = true;
     if (outcome.kind !== "proceed") return ended;
     admitted = outcome.admitted;
     const taken = await adoptCarriedRun(deps, admissionCtx);

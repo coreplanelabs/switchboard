@@ -9066,6 +9066,35 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
       ),
     );
 
+  it("an isolated channel defers another person and later binds a fresh run to that person", async () => {
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO(),
+      second = fakeIO();
+    first.io.isolateFollowUps = second.io.isolateFollowUps = true;
+    const actors: string[] = [];
+    second.io.workItems = (actor) => {
+      actors.push(actor.id);
+      return { request: async () => ({ items: [] }) };
+    };
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const other = threadMsg("a separate request", "slack:UY");
+    expect(await dispatch(deps, other, second.io)).toMatchObject({ deferred: true });
+    expect(second.replies).toEqual([]);
+    expect(second.statuses).toEqual([]);
+    expect(actors).toEqual([]);
+    expect(deps.admission.get(other.threadKey)?.inbox.size).toBe(0);
+    settle().answer("first answer");
+    await run;
+    expect(requests).toHaveLength(1);
+    expect(await dispatch(deps, other, second.io)).not.toHaveProperty("deferred");
+    expect(actors).toEqual(["slack:UY"]);
+    expect(requests).toHaveLength(2);
+    expect(second.replies).toEqual(["answer 2"]);
+  });
+
   it("a thread reply while a run is in flight is steered: no second run, the follow-up reaches the live run at its next step, the reply says where it went", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
     let ids = 0;
