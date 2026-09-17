@@ -342,9 +342,10 @@ export type ViewerSettingsView = Pick<ConfigDescription, "effective" | "defaults
 export interface SettingsSeed {
   page: "settings";
   tab: SettingsTab;
-  /** The viewer's caller id (`access:<sub>`), for the "added by you" mark. */
+  /** The viewer's caller id (`access:<sub>`), for the "added by you" mark; the `me` tier
+   *  is this session's own scope — what the dashboard's chat runs read (record 0043). */
   viewer: string;
-  /** The person the session is linked to (record 0042), when its email named one: the `me` tier is theirs. */
+  /** The person the session is linked to (record 0042), when its email named one: the `me` tier is theirs instead. */
   asUser?: { id: string; name?: string };
   vocabulary: SettingsVocabulary;
   mcps?: {

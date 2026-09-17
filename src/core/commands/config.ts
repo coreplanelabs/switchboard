@@ -145,30 +145,32 @@ function assertMayEditChannel(caller: Caller, channel: string): void {
     throw new CommandError("unauthorized", "Channel config changes are restricted.");
 }
 
-/** Why a `me` write is refused on the Access surface when the session is not
- *  linked to a person (records 0041, 0042): a browser session never requests
- *  a run, so the scope it would write is read by nothing. */
-export const ME_ON_ACCESS_MESSAGE =
-  "Personal settings are set in chat (`config set me`, `config instructions me`): your runs are requested as your chat user, not as this browser session, so a setting written here would apply to nothing. Use `channel` here.";
+/** Why a `me` write is refused for a service token (records 0041, 0043): no run is
+ *  ever requested as one — the dashboard's chat is a browser session's, never a
+ *  token's — so the scope it would write is read by nothing. */
+export const ME_ON_SERVICE_TOKEN_MESSAGE =
+  "A service token has no personal scope: no run is requested as it, so a `me` setting would apply to nothing. Use `channel` here.";
 
 /**
- * The id whose scope `me` means for this caller (record 0042): a chat user,
- * the CLI and a token are themselves; an Access caller is the person its
- * session is linked to (`actor.self` carries the `slack:U…` id when the
- * session's email named one), and nobody when it is not — its own
- * `access:<sub>` scope is read by no run, so `me` there would be a setting
- * that lies. Exported for the surfaces that read a person's scope as the viewer.
+ * The id whose scope `me` means for this caller: a chat user, the CLI and a token
+ * are themselves; a browser session is the person it is linked to (record 0042:
+ * `actor.self` carries the `slack:U…` id when the session's email named one) and,
+ * unlinked, itself — `access:<sub>`, the identity the dashboard's chat requests its
+ * runs as (record 0043), so what the session sets is what its runs read. A service
+ * token (`access:svc:…`, a `service` actor) requests no run and has no `me`.
+ * Exported for the surfaces that read a person's scope as the viewer.
  */
 export function meIdOf(caller: Caller): string | undefined {
   if (caller.kind !== "access") return caller.id;
-  return caller.actor.self?.find((id) => id.startsWith("slack:"));
+  if (caller.actor.kind === "service") return undefined;
+  return caller.actor.self?.find((id) => id.startsWith("slack:")) ?? caller.id;
 }
 
 /** The `me` scope a write may reach, or the refusal by the data
- *  (docs/reference/specs/command-registry.md item 22) for an unlinked Access session. */
+ *  (docs/reference/specs/command-registry.md item 22) for a service token. */
 function meIdOrRefuse(caller: Caller): string {
   const id = meIdOf(caller);
-  if (id === undefined) throw new CommandError("unauthorized", ME_ON_ACCESS_MESSAGE);
+  if (id === undefined) throw new CommandError("unauthorized", ME_ON_SERVICE_TOKEN_MESSAGE);
   return id;
 }
 

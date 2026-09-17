@@ -160,13 +160,14 @@ describe("McpServersPanel", () => {
     expect(rows[1].text()).toContain("Connect");
   });
 
-  it("Add posts mcp.add with the org tier, the agents joined, and never a `me` scope", async () => {
+  it("Add posts mcp.add with the tier picked and the agents joined", async () => {
     const { fetchFn, calls } = fakeFetch({
       body: { server: { name: "vanta" }, connectUrl: "https://sb.example/mcp/connect/n1" },
     });
     const wrapper = mountApp(McpServersPanel, {
       props: { mcps: mcps({ channel: undefined }), vocabulary: VOCABULARY, viewer: "access:me", fetch: fetchFn },
     });
+    await wrapper.find("#mcp-scope").setValue("org");
     await wrapper.find("#mcp-name").setValue("vanta");
     await wrapper.find("#mcp-url").setValue("https://mcp.vanta.example/mcp");
     await wrapper.find('input[name="agent-coding"]').setValue(true);
@@ -181,7 +182,6 @@ describe("McpServersPanel", () => {
       scope: "org",
       agents: "general,research,coding",
     });
-    expect(JSON.stringify(calls[0].body)).not.toContain('"me"');
     const notice = wrapper.find("p.notice");
     expect(notice.text()).toContain("Added vanta");
     expect(notice.find("a.connect").attributes("href")).toBe("https://sb.example/mcp/connect/n1");
@@ -204,7 +204,7 @@ describe("McpServersPanel", () => {
     expect(wrapper.find("p.notice").text()).toBe("channel MCP servers are restricted here (channel config rights).");
   });
 
-  it("without the write right the form is disabled and says why; the rows still list", () => {
+  it("without the write right the form is disabled for the shared tiers and says why; the rows still list; the viewer's own tier stays open", async () => {
     const wrapper = mountApp(McpServersPanel, {
       props: {
         mcps: mcps({ canWrite: { org: false, channel: false }, channel: undefined }),
@@ -213,6 +213,10 @@ describe("McpServersPanel", () => {
       },
     });
     expect(wrapper.findAll("tr.server")).toHaveLength(2);
+    // `me` is every session's own to write: the form opens on it, enabled.
+    expect((wrapper.find("#mcp-scope").element as HTMLSelectElement).value).toBe("me");
+    expect((wrapper.find("#mcp-name").element as HTMLInputElement).disabled).toBe(false);
+    await wrapper.find("#mcp-scope").setValue("org");
     expect((wrapper.find("#mcp-name").element as HTMLInputElement).disabled).toBe(true);
     expect(wrapper.find("span.restricted").text()).toContain("admins");
     expect(wrapper.findAll("tr.server button").filter((b) => (b.element as HTMLButtonElement).disabled)).toHaveLength(
@@ -638,12 +642,35 @@ describe("McpServersPanel for a linked session (record 0042)", () => {
     });
   });
 
-  it("an unlinked session sees the person's row read-only and cannot pick me", () => {
-    const wrapper = mountApp(McpServersPanel, { props: { mcps: seed, vocabulary: VOCABULARY, viewer: "access:x" } });
-    expect((wrapper.find("#mcp-scope").element as HTMLSelectElement).value).toBe("org");
-    expect((wrapper.find('#mcp-scope option[value="me"]').element as HTMLOptionElement).disabled).toBe(true);
-    const row = wrapper.findAll("tr.server")[1];
-    expect(row.find("td.addedby").text()).not.toBe("you");
-    expect(row.findAll("button").filter((b) => (b.element as HTMLButtonElement).disabled).length).toBeGreaterThan(0);
+  it("an unlinked session's me is its own (record 0043): offered and defaulted, Add posts scope me, its own row is mine and writable, the person's row read-only", async () => {
+    const OWN: McpServerView = { ...MINE, name: "own", scopeKey: "user:access:x", addedBy: "access:x" };
+    const { fetchFn, calls } = fakeFetch({ body: { server: { name: "notes" } } });
+    const wrapper = mountApp(McpServersPanel, {
+      props: {
+        mcps: { ...seed, servers: [LAKE, MINE, OWN] },
+        vocabulary: VOCABULARY,
+        viewer: "access:x",
+        fetch: fetchFn,
+      },
+    });
+    expect((wrapper.find("#mcp-scope").element as HTMLSelectElement).value).toBe("me");
+    const option = wrapper.find('#mcp-scope option[value="me"]');
+    expect((option.element as HTMLOptionElement).disabled).toBe(false);
+    expect(option.text()).toContain("your own runs from this dashboard");
+    const [, theirs, own] = wrapper.findAll("tr.server");
+    expect(theirs.find("td.addedby").text()).not.toBe("you");
+    expect(theirs.findAll("button").filter((b) => (b.element as HTMLButtonElement).disabled).length).toBeGreaterThan(0);
+    expect(own.find("td.addedby").text()).toBe("you");
+    expect(own.findAll("button").filter((b) => (b.element as HTMLButtonElement).disabled)).toHaveLength(0);
+    await wrapper.find("#mcp-name").setValue("notes");
+    await wrapper.find("#mcp-url").setValue("https://mcp.notes.example/mcp");
+    await wrapper.find("form.add").trigger("submit");
+    await flush();
+    expect(calls[0].body).toEqual({
+      name: "notes",
+      url: "https://mcp.notes.example/mcp",
+      scope: "me",
+      agents: "general,research",
+    });
   });
 });

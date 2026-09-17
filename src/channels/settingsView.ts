@@ -20,11 +20,12 @@ import { WEB_HTML_HEADERS } from "./webShell.js";
 // handlers ask, and the page uses them to disable controls, never to decide.
 // Every button on the page is one `POST /api/<group>.<verb>` (commandHttp.ts).
 //
-// The dashboard configures the SHARED tiers — org and channel. There is no
-// `me` here: a browser session is `access:<sub>`, a run is requested as a chat
-// user, and the config and MCP handlers refuse a `me` write from the Access
-// surface (record 0041). The Installation tab is a projection of the running
-// config by allow-list (src/core/installationSettings.ts), gated on `config:read`.
+// The dashboard configures the SHARED tiers — org and channel — and the
+// viewer's own: a session linked to its Slack person writes the person's scope
+// (record 0042), an unlinked one its own `access:<sub>` scope, the identity the
+// dashboard's chat requests its runs as (record 0043). The Installation tab is
+// a projection of the running config by allow-list
+// (src/core/installationSettings.ts), gated on `config:read`.
 
 export type SettingsRoute =
   { tab: "home" } | { tab: "mcps"; channel?: string } | { tab: "channels"; channel?: string } | { tab: "installation" };
