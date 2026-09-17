@@ -901,13 +901,15 @@ describe("the pull request on the record (docs/reference/specs/run-history.md it
     expect(pushedBranchesOf(events.slice(1, 2))).toEqual([]);
     expect(pushedBranchesOf([])).toEqual([]);
   });
+});
 
-  // harness.md item 13: the workspace's release reads the record for the commands
-  // a run's ending may have left running in it — a call the ending cut (its result
-  // marked `cut`: pi's abort, OpenCode's interrupt, the session's end), or a call
-  // left open when the run failed or was interrupted; a run that completed with a
-  // call unpaired (a relayed tool that ran in the bot, a result lost to a gap)
-  // left nothing running.
+// harness.md item 13: the workspace's release reads the record for the commands
+// a run's ending may have left running in it — a call the ending cut (its result
+// marked `cut`: pi's abort, OpenCode's interrupt, the session's end), or a call
+// left open when the run failed or was interrupted; a run that completed with a
+// call unpaired (a relayed tool that ran in the bot, a result lost to a gap)
+// left nothing running.
+describe("callsInFlight — the commands a run's ending may have left running (docs/reference/specs/harness.md item 13)", () => {
   it("callsInFlight reads the record for the commands a run's ending may have left running: a call whose result is marked `cut` is one whatever the status, and stays one whatever lands for it later; a call with no result is one when the run failed, was interrupted or hard-stopped and none when it completed or stopped softly; settled calls, infra settles and results for calls never opened are none — in the record's order", () => {
     const call = (callId: string): RunEvent => ({
       type: "tool_call",
