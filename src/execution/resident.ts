@@ -416,7 +416,17 @@ export class ResidentExecutor implements Executor {
     return this.lastBinding;
   }
 
-  constructor(private opts: ResidentExecutorOptions) {}
+  /** Whether the next `/attach` carries `opts.sha` (item 51). The sha names the
+   *  commit the run asked for and belongs to the attach that BINDS the run and
+   *  to a `moveTo`; once an attach has succeeded, a recovery re-attach (a
+   *  worktree evicted, a runtime replaced) re-attaches the branch as the run
+   *  left it — its own pushes may have moved the tip past the sha it started
+   *  on, and the resident would refuse that as `stale-tip`. */
+  private shaPending: boolean;
+
+  constructor(private opts: ResidentExecutorOptions) {
+    this.shaPending = opts.sha !== undefined;
+  }
 
   /** Attach-on-open: bind (or reuse) the thread's worktree before the first
    *  tool call, so needs-ref / not-onboarded surface at selection time as
@@ -588,7 +598,7 @@ export class ResidentExecutor implements Executor {
     const body: Record<string, unknown> = {};
     if (this.opts.refHint) body.refHint = this.opts.refHint;
     if (this.opts.readonly) body.readonly = true;
-    if (this.opts.sha) body.sha = this.opts.sha;
+    if (this.opts.sha && this.shaPending) body.sha = this.opts.sha;
     if (this.opts.reuse) body.reuse = true;
     if (this.opts.ownPr) body.ownPr = this.opts.ownPr;
     if (this.opts.refByDefault) body.refByDefault = true;
@@ -622,6 +632,7 @@ export class ResidentExecutor implements Executor {
       ...(rebindRefused !== undefined ? { rebindRefused } : {}),
       ...(returned !== undefined ? { returned } : {}),
     };
+    this.shaPending = false; // bound at the commit asked for; recovery re-attaches name none
     return { ok: true, binding: this.lastBinding };
   }
 
@@ -648,11 +659,13 @@ export class ResidentExecutor implements Executor {
   /** Move the thread's worktree to `sha` (agent-review.md item 12): one more
    *  `/attach` carrying the new expected head, so the resident fetches its
    *  mirror (item 51) and recreates the tree at the ref's tip — the same
-   *  mechanism a re-review after a push uses, applied mid-run. Every later
-   *  attach (an eviction recovery) carries the new sha too. Answers the sha the
-   *  worktree is at; throws like attach() on a refusal. */
+   *  mechanism a re-review after a push uses, applied mid-run. The move's own
+   *  attach carries the new sha; a later recovery re-attach names none (item
+   *  51: the run's own pushes may move the tip). Answers the sha the worktree
+   *  is at; throws like attach() on a refusal. */
   async moveTo(sha: string, opts?: ExecTraceOptions): Promise<{ sha: string }> {
     this.opts = { ...this.opts, sha };
+    this.shaPending = true;
     const binding = await this.attach(opts?.span);
     return { sha: binding.sha };
   }

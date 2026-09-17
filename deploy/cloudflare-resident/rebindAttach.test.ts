@@ -255,7 +255,9 @@ describe("a binding whose own branch is gone from the mirror returns to the defa
     expect(throwAt).toBeGreaterThan(retarget);
     expect(worktree).toBeGreaterThan(throwAt);
     expect(create).toMatch(/binding = back\.binding;\s*returned = back\.returned;/);
-    expect(create).toMatch(/refExists: await this\.refExists\(binding\.ref\),/);
+    // The default's existence and tip are read for real after the return (item 51 judges the tip too).
+    expect(create).toMatch(/const defaultExists = await this\.refExists\(binding\.ref\);/);
+    expect(create).toMatch(/refExists: defaultExists,/);
     // The tree is provisioned at the default by the same worktree step, at the same path: nothing special-cased.
     expect(create).toMatch(/let binding = input\.binding;/);
     expect(create).toMatch(/let returned: Returned \| undefined;/);

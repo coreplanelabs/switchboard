@@ -5198,10 +5198,16 @@ export class ResidentDO extends Sandbox<Env> {
         // second movement is decided on. (Under the mirror mutex — the mirror
         // cannot change in between.)
         const refExists = why === null || (await this.refExists(binding.ref));
+        // The tip is read here, once, and is what the target is judged on and
+        // what the worktree is provisioned at: a caller that named a commit
+        // gets that commit or a `stale-tip` refusal, never whatever the tip
+        // happens to be (item 51).
+        let tipSha = refExists ? await this.readMirrorSha(binding.ref).catch(() => null) : null;
         let target = attachTarget({
           refExists,
           wantSha: want,
           commitInMirror: !refExists && want !== null && (await this.commitInMirror(want)),
+          tipSha,
         });
         if (target.kind === "unknown-ref" && returnable) {
           // The thread's branch — one a rebind moved it onto, or one its own
@@ -5214,10 +5220,13 @@ export class ResidentDO extends Sandbox<Env> {
           binding = back.binding;
           returned = back.returned;
           want = wantShaForBinding({ boundRef: binding.ref, refHint, wantSha });
+          const defaultExists = await this.refExists(binding.ref);
+          tipSha = defaultExists ? await this.readMirrorSha(binding.ref).catch(() => null) : null;
           target = attachTarget({
-            refExists: await this.refExists(binding.ref),
+            refExists: defaultExists,
             wantSha: want,
             commitInMirror: false,
+            tipSha,
           });
         }
         if (target.kind === "unknown-ref") {
@@ -5227,7 +5236,19 @@ export class ResidentDO extends Sandbox<Env> {
               (want !== null ? `, and the mirror does not hold the expected commit ${want.slice(0, 7)} either` : ""),
           );
         }
-        const sha = target.kind === "sha" ? target.sha : await this.readMirrorSha(binding.ref);
+        if (target.kind === "stale-tip") {
+          throw new StepError(
+            "stale-tip",
+            `ref ${JSON.stringify(binding.ref)} is at ${target.tip ? target.tip.slice(0, 7) : "an unreadable tip"} in the mirror${why === null ? " (no fetch was due)" : " even after the fetch"}; the caller expects ${target.want.slice(0, 7)} — the run executes at the commit it asked for, or not on this resident`,
+          );
+        }
+        // A tip the read could not answer is never provisioned at: with no
+        // commit named the target is `ref` without looking at the tip, so the
+        // failed read is named here instead of becoming a null sha.
+        const sha = target.kind === "sha" ? target.sha : tipSha;
+        if (sha === null) {
+          throw new StepError("rev-parse", `the mirror's tip of ${JSON.stringify(binding.ref)} could not be read`);
+        }
         const threadLockKey = await this.lockfileKey(sha);
         const recreated = await this.ensureThreadWorktree(binding, sha, mode.originUrl, mode.modeSwitch, {
           detached: target.kind === "sha",
@@ -5248,6 +5269,13 @@ export class ResidentDO extends Sandbox<Env> {
       }
       if (err instanceof StepError && err.step === "unknown-ref") {
         return { error: `unknown-ref: ${err.message}`, status: 400 };
+      }
+      if (err instanceof StepError && err.step === "stale-tip") {
+        // Item 51: not a resident fault and not a caller fault — a fact about
+        // the mirror at this instant. 409 with the state, so the bot's named
+        // fallback runs cold at the commit it asked for.
+        const s = await this.getStatus();
+        return { error: `stale-tip: ${err.message}`, status: 409, state: s.state, reason: "stale-tip" };
       }
       return this.attachFailed(err);
     }

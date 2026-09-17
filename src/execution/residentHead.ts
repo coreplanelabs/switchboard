@@ -67,10 +67,9 @@ export type FetchReason = "missing-ref" | "stale-tip" | "returnable-ref";
  *    lost and a ref a person named that the thread never pushed has no way
  *    back, so neither pays this fetch: the refresh cycle is their freshness.
  *  - otherwise null.
- *  A fetch that STILL leaves the tip elsewhere (a push racing this attach, or
- *  a force-push) is not this function's concern: the attach proceeds on the
- *  fetched tip and reports it, and the reviewed-head guard decides what a
- *  review of it may do. */
+ *  A fetch that STILL leaves the tip elsewhere (a push racing this attach, a
+ *  force-push, or a fetch that failed) is `attachTarget`'s concern: the attach
+ *  is refused `stale-tip` rather than run at a commit nobody asked for. */
 export function mirrorFetchReason(input: {
   refExists: boolean;
   mirrorSha?: string;
@@ -85,8 +84,16 @@ export function mirrorFetchReason(input: {
 
 /** What the attach checks out, once the mirror is as fresh as it will get. */
 export type AttachTarget =
-  /** The bound ref is in the mirror: clone its tip, as always. */
+  /** The bound ref is in the mirror, and its tip is the commit the caller
+   *  named (or the caller named none): clone its tip, as always. */
   | { kind: "ref" }
+  /** The bound ref is in the mirror but its tip is NOT the commit the caller
+   *  named, even after the fetch — the mirror is behind it (the fetch failed
+   *  or was skipped) or ahead of it (a push raced the attach). Refused: a run
+   *  executes at the sha it asked for, or not on this resident; the caller
+   *  falls back cold at the requested commit. `tip` is null when the tip
+   *  could not be read — never assumed fresh. */
+  | { kind: "stale-tip"; tip: string | null; want: string }
   /** The ref is gone but the commit the caller expects is in the mirror — a
    *  merged PR's branch was deleted while `refs/pull/N/head` (a `--mirror`
    *  clone carries every ref) still holds its head: check that commit out,
@@ -96,16 +103,22 @@ export type AttachTarget =
   /** Neither: the attach is refused as `unknown-ref`. */
   | { kind: "unknown-ref" };
 
-/** The attach target after the fetch (item 51). The ref wins whenever it
- *  exists — a detached tree is only for a ref that is gone; a caller that
- *  named no commit, or whose commit the mirror does not hold either, gets the
- *  refusal it always got. */
+/** The attach target after the fetch (item 51). A ref that exists is cloned
+ *  at its tip when the caller named no commit or the tip is that commit;
+ *  a tip that is any other commit is `stale-tip`, refused. A detached tree is
+ *  only for a ref that is gone; a caller that named no commit, or whose commit
+ *  the mirror does not hold either, gets the refusal it always got. */
 export function attachTarget(input: {
   refExists: boolean;
   wantSha: string | null;
   commitInMirror: boolean;
+  /** The ref's tip in the mirror after the fetch; null or absent when it could not be read. */
+  tipSha?: string | null;
 }): AttachTarget {
-  if (input.refExists) return { kind: "ref" };
+  if (input.refExists) {
+    if (input.wantSha === null || input.tipSha === input.wantSha) return { kind: "ref" };
+    return { kind: "stale-tip", tip: input.tipSha ?? null, want: input.wantSha };
+  }
   if (input.wantSha !== null && input.commitInMirror) return { kind: "sha", sha: input.wantSha };
   return { kind: "unknown-ref" };
 }

@@ -554,6 +554,31 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     expect(sentBody(calls[1])).not.toHaveProperty("sha");
   });
 
+  // Item 51: the sha names the commit the run asked for and belongs to the
+  // attach that binds the run. A recovery re-attach names none: the run's own
+  // pushes may have moved the tip past the sha it started on, and the resident
+  // now refuses a tip that is not the named commit (`stale-tip`).
+  it("a recovery re-attach after an eviction omits the sha the run started with — the run re-attaches the branch as it left it", async () => {
+    const { calls } = stubFetch(
+      { body: ATTACH_OK },
+      {
+        body: { error: "evicted: worktree was evicted", needs: "attach", stdout: "", stderr: "evicted", exitCode: 127 },
+      },
+      { body: { ...ATTACH_OK, sha: "d75b5a51aba97d43c64a42c96e580dd9abbfd78e" } },
+      { raw: "  " + JSON.stringify({ stdout: "recovered", stderr: "", exitCode: 0, truncated: false }) },
+    );
+    const ex = await ResidentExecutor.open({
+      ...OPTS,
+      refHint: "master",
+      sha: "47c4230692cbc5961682532afb822e9c2f1f40b7",
+    });
+    expect(sentBody(calls[0])).toMatchObject({ sha: "47c4230692cbc5961682532afb822e9c2f1f40b7" });
+    await expect(ex.exec("echo recovered")).resolves.toBe("recovered");
+    expect(calls.map(route)).toEqual(["/attach", "/exec", "/attach", "/exec"]);
+    expect(sentBody(calls[2])).not.toHaveProperty("sha");
+    expect(ex.binding?.sha).toBe("d75b5a51aba97d43c64a42c96e580dd9abbfd78e");
+  });
+
   // docs/reference/specs/resident-repos.md item 66: a resumed run re-attaches in
   // reuse-only mode: the resident keeps the tree as it stands. Sent only when
   // true so an older resident, and every fresh attach, sees the body it always did.
