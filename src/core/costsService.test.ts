@@ -114,7 +114,7 @@ describe("NullCostsService — the service of a process without cost reporting",
     const service = new NullCostsService();
     expect(service.groups()).toEqual([]);
     await expect(service.report("switchboard", null)).rejects.toThrow(COSTS_OFF_MESSAGE);
-    await expect(service.usersReport("switchboard", null, undefined)).rejects.toThrow(COSTS_OFF_MESSAGE);
+    await expect(service.byReport("switchboard", null, undefined)).rejects.toThrow(COSTS_OFF_MESSAGE);
     await expect(service.snapshot("casey")).rejects.toThrow(COSTS_OFF_MESSAGE);
     expect(service.status()).toEqual({
       snapshot: null,
@@ -131,7 +131,7 @@ describe("createCostsService", () => {
   it("before the first snapshot lands both reports refuse with NoCostsSnapshotError — nothing reads a source in the request — and the status says none", async () => {
     const service = createCostsService(cfg, snapshotterWith());
     await expect(service.report("switchboard", "7")).rejects.toBeInstanceOf(NoCostsSnapshotError);
-    await expect(service.usersReport("switchboard", "7", undefined)).rejects.toThrow(/no cost snapshot yet/);
+    await expect(service.byReport("switchboard", "7", undefined)).rejects.toThrow(/no cost snapshot yet/);
     expect(service.status().snapshot).toBeNull();
     await expect(service.report("nope", null)).rejects.toThrow(/unknown cost group/);
   });
@@ -168,7 +168,7 @@ describe("createCostsService", () => {
     const service = createCostsService(cfg, snapshots, {
       emailOfSlackUser: async (id) => (looked.push(id), emails[id]),
     });
-    const r = await service.usersReport("switchboard", "3", { sub: "s1", email: "alice@example.com" });
+    const r = await service.byReport("switchboard", "3", { sub: "s1", email: "alice@example.com" });
     expect(r.range).toEqual({ from: AUG_28, to: AUG_30, days: 3, partialLastDay: true });
     expect(r.coverage).toMatchObject({ from: AUG_28, historyOn: true, retentionDays: 30, clamped: false });
     expect(r.users.map((u) => u.userId)).toEqual(["slack:UALICE", "slack:UBOB", "http:ops", "slack:bot:B0CLAUDE"]);
@@ -180,7 +180,7 @@ describe("createCostsService", () => {
     // A second read looks up only the user whose email was unknown: a known
     // email is cached for the process, an unknown one is never pinned.
     emails["slack:UBOB"] = "bob@example.com";
-    const again = await service.usersReport("switchboard", "3", { sub: "s2", email: "bob@example.com" });
+    const again = await service.byReport("switchboard", "3", { sub: "s2", email: "bob@example.com" });
     expect(looked.sort()).toEqual(["slack:UALICE", "slack:UBOB", "slack:UBOB"]);
     expect(again.viewer).toEqual({ userIds: ["slack:UBOB"], matchedByEmail: true });
   });
@@ -189,20 +189,18 @@ describe("createCostsService", () => {
     const snapshots = snapshotterWith();
     await snapshots.refresh("schedule");
     const noLookup = createCostsService(cfg, snapshots);
-    expect((await noLookup.usersReport("switchboard", null, { sub: "s1", email: "alice@example.com" })).viewer).toEqual(
-      {
-        userIds: [],
-        matchedByEmail: false,
-      },
-    );
+    expect((await noLookup.byReport("switchboard", null, { sub: "s1", email: "alice@example.com" })).viewer).toEqual({
+      userIds: [],
+      matchedByEmail: false,
+    });
     const withLookup = createCostsService(cfg, snapshots, { emailOfSlackUser: async () => "x@y" });
-    expect((await withLookup.usersReport("switchboard", null, { sub: "svc" })).viewer).toEqual({
+    expect((await withLookup.byReport("switchboard", null, { sub: "svc" })).viewer).toEqual({
       userIds: [],
       matchedByEmail: false,
     });
     const offSnapshots = snapshotterWith(null);
     await offSnapshots.refresh("schedule");
-    const r = await createCostsService(cfg, offSnapshots).usersReport("switchboard", null, undefined);
+    const r = await createCostsService(cfg, offSnapshots).byReport("switchboard", null, undefined);
     expect(r.users).toEqual([]);
     expect(r.coverage.historyOn).toBe(false);
   });

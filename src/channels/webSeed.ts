@@ -2,7 +2,7 @@ import type { RunStatus } from "../core/runRecord.js";
 import type { FindingsLedgerView, RunView } from "../core/runsService.js";
 import type { UnitFacts, UnitRun, UnitRunsView } from "../core/unitRuns.js";
 import type { CostReport } from "../core/costs.js";
-import type { UserCostReport } from "../core/costsByUser.js";
+import type { CostsByReport } from "../core/costsBy.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import type { DeliveryReport } from "../core/delivery.js";
 import type { ScheduledRow } from "./scheduledPanel.js";
@@ -288,7 +288,7 @@ export interface CostsSeed {
   /** Which tab the page opens on: the daily table, or cost by user (`?view=users`). */
   view: "daily" | "users";
   /** Present when `view` is `users` and there is a snapshot: the by-user report for the same group and range. */
-  users?: UserCostReport;
+  users?: CostsByReport;
   /** The snapshot every figure on the page comes from: its stamp, the take in flight, when the next is due. */
   snapshot: CostsSnapshotStatus;
   /** Whether the viewer holds `costs:write` — the **Snapshot now** button is offered only then. */

@@ -8,7 +8,7 @@ import {
   type CostReportMeta,
   type LlmCostSource,
 } from "./costs.js";
-import { buildUserCostReport, type UserCostReport } from "./costsByUser.js";
+import { buildCostsByReport, type CostsByReport } from "./costsBy.js";
 import type { CostsSnapshot, CostsSnapshotStore } from "./costsSnapshotStore.js";
 import { NullRunStore, type RunStore } from "./runStore.js";
 import type { RunUsageReport } from "./runUsage.js";
@@ -180,13 +180,13 @@ export function reportFromSnapshot(
 
 /** The by-user report over the snapshot's run usage for the daily report's range (the daily
  *  report is the cloud to allocate and the LLM to reconcile against). Run usage absent = history off. */
-export function usersReportFromSnapshot(
+export function byReportFromSnapshot(
   snapshot: CostsSnapshot,
   daily: CostReport,
   viewer: { viewerUserIds: string[]; matchedByEmail: boolean },
-): UserCostReport {
+): CostsByReport {
   return {
-    ...buildUserCostReport({
+    ...buildCostsByReport({
       group: daily.group,
       range: daily.range,
       usage: snapshot.runUsage ?? { rows: [], pending: 0, retentionDays: 0 },

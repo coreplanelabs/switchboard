@@ -21,7 +21,7 @@ import { wrapUntrusted } from "../src/core/untrusted.js";
 import type { UnitFacts } from "../src/core/unitRuns.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES } from "../src/core/capabilities.js";
 import type { CostReport, DailyCost } from "../src/core/costs.js";
-import { buildUserCostReport } from "../src/core/costsByUser.js";
+import { buildCostsByReport } from "../src/core/costsBy.js";
 import type { CostsSnapshotStatus } from "../src/core/costsSnapshot.js";
 import type { RunUsage, UserDayUsage } from "../src/core/runUsage.js";
 import { buildDeliveryReport, resolveDeliveryRange, type PullRequestFacts } from "../src/core/delivery.js";
@@ -1174,7 +1174,7 @@ const COSTS_USER_ROWS: UserDayUsage[] = COSTS_DAYS.slice(COSTS_USERS_FROM).flatM
     });
   return rows;
 });
-const COSTS_USERS = buildUserCostReport({
+const COSTS_USERS = buildCostsByReport({
   group: COSTS.group,
   range: COSTS.range,
   usage: {

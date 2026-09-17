@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { UserCostReport, UserCostRow } from "@core/core/costsByUser.js";
+import type { CostsByReport, CostsByRow } from "@core/core/costsBy.js";
 import { monthDayOf, usd } from "../../lib/costs";
 
 // Cost by user (costs.md item 10): one row per person who started runs in the
@@ -12,13 +12,13 @@ import { monthDayOf, usd } from "../../lib/costs";
 // data begins, how many runs are still being priced, and how the attributed
 // total reconciles with the group's LLM figure.
 
-const props = defineProps<{ report: UserCostReport }>();
+const props = defineProps<{ report: CostsByReport }>();
 
 const filter = ref("");
 const meOnly = ref(false);
 const canMe = computed(() => props.report.viewer.userIds.length > 0);
 
-const rows = computed<UserCostRow[]>(() => {
+const rows = computed<CostsByRow[]>(() => {
   const q = filter.value.trim().toLowerCase();
   const mine = new Set(props.report.viewer.userIds);
   return props.report.users.filter((u) => {
@@ -29,11 +29,11 @@ const rows = computed<UserCostRow[]>(() => {
 });
 const attributedTotal = computed(() => props.report.users.reduce((s, u) => s + u.totalUsd, 0));
 const shown = computed(() => rows.value.reduce((s, u) => s + u.totalUsd, 0));
-const isMe = (u: UserCostRow): boolean => props.report.viewer.userIds.includes(u.userId);
+const isMe = (u: CostsByRow): boolean => props.report.viewer.userIds.includes(u.userId);
 
 /** `slack:U…` → the name when known, else the id without its platform prefix. */
-const labelOf = (u: UserCostRow): string => u.userName ?? u.userId.replace(/^[a-z]+:/, "");
-const platformOf = (u: UserCostRow): string => u.userId.split(":")[0] ?? "";
+const labelOf = (u: CostsByRow): string => u.userName ?? u.userId.replace(/^[a-z]+:/, "");
+const platformOf = (u: CostsByRow): string => u.userId.split(":")[0] ?? "";
 const dayCount = (n: number): string => `${n} day${n === 1 ? "" : "s"}`;
 </script>
 

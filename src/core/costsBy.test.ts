@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DailyCost, DateRange } from "./costs.js";
-import { buildUserCostReport, coverageFrom, llmUsdOfUsage, modelIdOf } from "./costsByUser.js";
+import { buildCostsByReport, coverageFrom, llmUsdOfUsage, modelIdOf } from "./costsBy.js";
 import type { RunUsage, RunUsageReport, UserDayUsage } from "./runUsage.js";
 
 // Feature: docs/reference/specs/costs.md item 10 — cost by user: run tokens priced at
@@ -105,7 +105,7 @@ describe("coverageFrom", () => {
   });
 });
 
-describe("buildUserCostReport", () => {
+describe("buildCostsByReport", () => {
   const H = 3_600_000;
   const report: RunUsageReport = {
     rows: [
@@ -121,7 +121,7 @@ describe("buildUserCostReport", () => {
   const days = [day(d0, 3, 12), day(d1, 6, 60), day(d2, 1.5, 0.5)];
 
   it("sums per user largest first, prices LLM at list, and allocates each day's cloud by wall-clock share", () => {
-    const r = buildUserCostReport({
+    const r = buildCostsByReport({
       group: "switchboard",
       range,
       usage: report,
@@ -162,7 +162,7 @@ describe("buildUserCostReport", () => {
   });
 
   it("reconciles: attributed LLM vs the group's figure for the covered days, and cloud allocated vs unallocated", () => {
-    const r = buildUserCostReport({
+    const r = buildCostsByReport({
       group: "switchboard",
       range,
       usage: report,
@@ -186,7 +186,7 @@ describe("buildUserCostReport", () => {
     // Day 0's spend went to another workspace (the key had not moved yet): $11 of
     // attributed tokens against a $0 figure. Day 1 compares; day 2 has tokens the
     // table cannot price ($0 attributed) against a $0.50 figure and compares too.
-    const r = buildUserCostReport({
+    const r = buildCostsByReport({
       group: "switchboard",
       range,
       usage: report,
@@ -212,7 +212,7 @@ describe("buildUserCostReport", () => {
       rows: report.rows.filter((x) => x.day !== d0),
       earliestFinishedAt: T0 + DAY,
     };
-    const r = buildUserCostReport({
+    const r = buildCostsByReport({
       group: "switchboard",
       range,
       usage: late,
@@ -228,7 +228,7 @@ describe("buildUserCostReport", () => {
     expect(r.reconciliation.cloudAllocatedUsd).toBeCloseTo(6 + 1.5, 9);
     expect(r.reconciliation.cloudUnallocatedUsd).toBe(0);
     // A covered day with no runs: unallocated.
-    const gap = buildUserCostReport({
+    const gap = buildCostsByReport({
       group: "switchboard",
       range,
       usage: { ...late, rows: late.rows.filter((x) => x.day !== d1) },
@@ -243,7 +243,7 @@ describe("buildUserCostReport", () => {
   });
 
   it("with the run history off the report is empty and says so", () => {
-    const r = buildUserCostReport({
+    const r = buildCostsByReport({
       group: "switchboard",
       range,
       usage: { rows: [], pending: 0, retentionDays: 0 },

@@ -2,7 +2,7 @@ import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { authorize } from "../core/authz/authorize.js";
 import type { Actor } from "../core/authz/types.js";
 import type { CostReport } from "../core/costs.js";
-import type { UserCostReport } from "../core/costsByUser.js";
+import type { CostsByReport } from "../core/costsBy.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import { COSTS_OFF_MESSAGE, NoCostsSnapshotError, type CostsService, type CostsViewer } from "../core/costsService.js";
 import { nodeSseSink, SSE_HEADERS, SSE_PRELUDE, startSseHeartbeat, type SseSink } from "./liveView/sse.js";
@@ -168,8 +168,8 @@ export function createCostsViewHandler(
     };
     if (route.kind === "users-json") {
       service
-        .usersReport(group, days, ctx.identity)
-        .then((users: UserCostReport) => json(res, users))
+        .byReport(group, days, ctx.identity)
+        .then((users: CostsByReport) => json(res, users))
         .catch(failed);
       return true;
     }
@@ -184,10 +184,9 @@ export function createCostsViewHandler(
     // report when that tab is open — both from the snapshot; before the first
     // one lands the page carries the status and no report. The status is read
     // after the reports so it is the one they were built from.
-    const users =
-      route.view === "users" ? orNone(service.usersReport(group, days, ctx.identity)) : Promise.resolve(null);
+    const users = route.view === "users" ? orNone(service.byReport(group, days, ctx.identity)) : Promise.resolve(null);
     Promise.all([orNone(service.report(group, days)), users])
-      .then(([report, usersReport]) => {
+      .then(([report, byReport]) => {
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
           shell(`${report?.label ?? group} spend`, {
@@ -196,7 +195,7 @@ export function createCostsViewHandler(
             report,
             groups,
             view: route.view,
-            ...(usersReport ? { users: usersReport } : {}),
+            ...(byReport ? { users: byReport } : {}),
             snapshot: service.status(),
             canSnapshot: canSnapshot(ctx.actor),
           }),

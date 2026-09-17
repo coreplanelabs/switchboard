@@ -1,0 +1,79 @@
+// The price of a model's tokens (docs/reference/specs/costs.md): one table
+// serves every dollar of token arithmetic — the open day's estimate from
+// Anthropic's hourly usage report and the by-user report's run tokens. The
+// list prices are Anthropic's, keyed by family and copied from the pricing
+// page; re-check them when the page moves.
+
+/** USD per million tokens of one kind, one model family. */
+export interface AnthropicModelPrice {
+  input: number;
+  output: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+  cacheRead: number;
+}
+
+/** Anthropic list prices per model family (platform.claude.com/docs/en/about-claude/pricing;
+ *  re-check when it moves). Keyed by the family id the usage report spells — a dated
+ *  release (`claude-haiku-4-5-20251001`) resolves to its family through
+ *  `anthropicPriceOf`. Only what the estimate needs: the open day priced at
+ *  the rate it will bill at; the cost report remains the invoice. */
+export const ANTHROPIC_PRICES: Record<string, AnthropicModelPrice> = {
+  "claude-fable-5-1": { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25 },
+  "claude-mythos-5-1": { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 0.25 },
+  "claude-fable-5": { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 1 },
+  "claude-mythos-5": { input: 10, output: 50, cacheWrite5m: 12.5, cacheWrite1h: 20, cacheRead: 1 },
+  "claude-opus-5": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
+  "claude-opus-4-8": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
+  "claude-opus-4-7": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
+  "claude-opus-4-6": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
+  "claude-opus-4-5": { input: 5, output: 25, cacheWrite5m: 6.25, cacheWrite1h: 10, cacheRead: 0.5 },
+  "claude-opus-4-1": { input: 15, output: 75, cacheWrite5m: 18.75, cacheWrite1h: 30, cacheRead: 1.5 },
+  "claude-opus-4": { input: 15, output: 75, cacheWrite5m: 18.75, cacheWrite1h: 30, cacheRead: 1.5 },
+  "claude-sonnet-5": { input: 2, output: 10, cacheWrite5m: 2.5, cacheWrite1h: 4, cacheRead: 0.2 },
+  "claude-sonnet-4-6": { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 },
+  "claude-sonnet-4-5": { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 },
+  "claude-sonnet-4": { input: 3, output: 15, cacheWrite5m: 3.75, cacheWrite1h: 6, cacheRead: 0.3 },
+  "claude-haiku-4-5": { input: 1, output: 5, cacheWrite5m: 1.25, cacheWrite1h: 2, cacheRead: 0.1 },
+  "claude-haiku-3-5": { input: 0.8, output: 4, cacheWrite5m: 1, cacheWrite1h: 1.6, cacheRead: 0.08 },
+};
+
+const DATED_RELEASE_SUFFIX = /^-\d{8}$/;
+
+/** The family prices of a model id: the id itself, or the id less a dated
+ *  release suffix (`-YYYYMMDD`). Nothing else counts as "the same family" —
+ *  `claude-fable-5-1` is not `claude-fable-5` with a suffix, and its cache
+ *  reads bill differently. Unknown → undefined, never a guess. */
+export function anthropicPriceOf(modelId: string): AnthropicModelPrice | undefined {
+  const exact = ANTHROPIC_PRICES[modelId];
+  if (exact) return exact;
+  for (const family of Object.keys(ANTHROPIC_PRICES)) {
+    if (modelId.startsWith(family) && DATED_RELEASE_SUFFIX.test(modelId.slice(family.length)))
+      return ANTHROPIC_PRICES[family];
+  }
+  return undefined;
+}
+
+/** Token counts of one usage-report row, in the report's own kinds. */
+export interface AnthropicTokens {
+  uncachedInput: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+}
+
+/** What those tokens cost at the family's list prices; undefined for a model
+ *  the table does not know (the caller reports the tokens, never $0). */
+export function anthropicTokensCostUsd(modelId: string, t: AnthropicTokens): number | undefined {
+  const p = anthropicPriceOf(modelId);
+  if (!p) return undefined;
+  return (
+    (t.uncachedInput * p.input +
+      t.output * p.output +
+      t.cacheRead * p.cacheRead +
+      t.cacheWrite5m * p.cacheWrite5m +
+      t.cacheWrite1h * p.cacheWrite1h) /
+    1_000_000
+  );
+}

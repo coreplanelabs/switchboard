@@ -7,7 +7,7 @@ import {
   type CostGroupConfig,
   type LlmCostRow,
 } from "./costs.js";
-import { buildUserCostReport } from "./costsByUser.js";
+import { buildCostsByReport } from "./costsBy.js";
 import {
   ALERT_AFTER_FAILURES,
   COSTS_SNAPSHOT_EVERY_HOURS,
@@ -19,7 +19,7 @@ import {
   SNAPSHOT_DAYS,
   SNAPSHOT_TICK_MS,
   takeCostsSnapshot,
-  usersReportFromSnapshot,
+  byReportFromSnapshot,
   type CostsSnapshotSources,
 } from "./costsSnapshot.js";
 import { InMemoryCostsSnapshotStore, type CostsSnapshot, type CostsSnapshotStore } from "./costsSnapshotStore.js";
@@ -227,7 +227,7 @@ describe("takeCostsSnapshot", () => {
 
 // ---- reports from a snapshot ---------------------------------------------------
 
-describe("reportFromSnapshot / usersReportFromSnapshot", () => {
+describe("reportFromSnapshot / byReportFromSnapshot", () => {
   const snapshot: CostsSnapshot = {
     takenAt: new Date(T0).toISOString(),
     takenBy: "schedule",
@@ -258,7 +258,7 @@ describe("reportFromSnapshot / usersReportFromSnapshot", () => {
 
   it("the by-user report is the builder over the snapshot's run usage for the range, history on; with run usage absent the history is off and nothing is attributed", () => {
     const daily = reportFromSnapshot(snapshot, "switchboard", GROUP, "7", meta);
-    const expected = buildUserCostReport({
+    const expected = buildCostsByReport({
       group: "switchboard",
       range: daily.range,
       usage: RUN_USAGE,
@@ -268,14 +268,14 @@ describe("reportFromSnapshot / usersReportFromSnapshot", () => {
       matchedByEmail: true,
       generatedAt: T0,
     });
-    const got = usersReportFromSnapshot(snapshot, daily, { viewerUserIds: ["slack:UALICE"], matchedByEmail: true });
+    const got = byReportFromSnapshot(snapshot, daily, { viewerUserIds: ["slack:UALICE"], matchedByEmail: true });
     expect(got).toEqual({
       ...expected,
       snapshot: { takenAt: snapshot.takenAt, takenBy: "schedule", durationMs: 31_000 },
     });
     expect(got.users.map((u) => u.userId)).toEqual(["slack:UALICE"]);
 
-    const off = usersReportFromSnapshot({ ...snapshot, runUsage: null }, daily, {
+    const off = byReportFromSnapshot({ ...snapshot, runUsage: null }, daily, {
       viewerUserIds: [],
       matchedByEmail: false,
     });

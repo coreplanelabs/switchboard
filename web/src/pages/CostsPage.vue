@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import type { CostReport } from "@core/core/costs.js";
-import type { UserCostReport } from "@core/core/costsByUser.js";
+import type { CostsByReport } from "@core/core/costsBy.js";
 import type { CostsSnapshotStatus } from "@core/core/costsSnapshot.js";
 import AppShell from "../components/AppShell.vue";
 import CostChart from "../components/costs/CostChart.vue";
-import CostsByUser from "../components/costs/CostsByUser.vue";
+import CostsByDimension from "../components/costs/CostsByDimension.vue";
 import { useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
 import { useSeed } from "../lib/seed";
 import { postCommand } from "../lib/settingsApi";
@@ -48,7 +48,7 @@ const snapshotLine = computed(() => (status.value ? snapshotLineOf(status.value,
 /** Which tab is open: the daily tables, or cost by user (`?view=users`, the
  *  by-user report riding along in the seed). */
 const view = computed<"daily" | "users">(() => seed?.view ?? "daily");
-const users = ref<UserCostReport | null>(seed?.view === "users" ? (seed?.users ?? null) : null);
+const users = ref<CostsByReport | null>(seed?.view === "users" ? (seed?.users ?? null) : null);
 
 // The status feed (costs.md item 8b): `/costs/<group>?stream=1` streams the
 // snapshot's status — a take starting, landing or failing — so every viewer
@@ -73,7 +73,7 @@ async function refetchReports(): Promise<boolean> {
     ]);
     if (!daily.ok) return false;
     report.value = (await daily.json()) as CostReport;
-    if (byUser?.ok) users.value = (await byUser.json()) as UserCostReport;
+    if (byUser?.ok) users.value = (await byUser.json()) as CostsByReport;
     return true;
   } catch {
     return false;
@@ -410,7 +410,7 @@ function monthDay(date: string): string {
           Who started the runs · LLM at list from their tokens · cloud allocated by wall-clock
         </p>
       </div>
-      <CostsByUser v-if="users" :report="users" />
+      <CostsByDimension v-if="users" :report="users" />
       <p v-else class="text-sm text-warn">The by-user report did not load with this page.</p>
       <p class="text-xs text-muted">
         Machine-readable twin:

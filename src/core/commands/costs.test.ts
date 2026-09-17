@@ -26,7 +26,7 @@ const service = (over: Partial<CostsService>): CostsService => {
   return {
     groups: () => base.groups(),
     report: (g, d) => base.report(g, d),
-    usersReport: (g, d, v) => base.usersReport(g, d, v),
+    byReport: (g, d, v) => base.byReport(g, d, v),
     status: () => base.status(),
     snapshot: (by) => base.snapshot(by),
     subscribe: () => base.subscribe(),

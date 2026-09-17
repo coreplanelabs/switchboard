@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CostReport } from "../core/costs.js";
-import type { UserCostReport } from "../core/costsByUser.js";
+import type { CostsByReport } from "../core/costsBy.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import { NoCostsSnapshotError, NullCostsService, type CostsService } from "../core/costsService.js";
 import { ACTORS } from "../core/authz/testing.js";
@@ -96,13 +96,13 @@ const NONE_YET: CostsSnapshotStatus = {
 function fakeService(
   impl: (group: string, days: string | null) => Promise<CostReport>,
   groups = ["switchboard"],
-  usersReport: CostsService["usersReport"] = () => Promise.reject(new Error("no by-user report in this test")),
+  byReport: CostsService["byReport"] = () => Promise.reject(new Error("no by-user report in this test")),
   status: CostsSnapshotStatus = STATUS,
 ): CostsService {
   return {
     groups: () => groups,
     report: impl,
-    usersReport,
+    byReport,
     status: () => status,
     snapshot: () => Promise.reject(new Error("no take in this test")),
     subscribe: () => () => undefined,
@@ -110,7 +110,7 @@ function fakeService(
 }
 
 /** A by-user report shaped like the builder's, small. */
-function usersReport(): UserCostReport {
+function byReport(): CostsByReport {
   const r = report();
   return {
     group: r.group,
@@ -328,7 +328,7 @@ describe("createCostsViewHandler", () => {
         ["switchboard"],
         (group, days, viewer) => {
           calls.push({ group, days, viewer });
-          return Promise.resolve(usersReport());
+          return Promise.resolve(byReport());
         },
       ),
       shell,
@@ -340,7 +340,7 @@ describe("createCostsViewHandler", () => {
     expect(page.status).toBe(200);
     const seed = seedOf(page.body());
     expect(seed.view).toBe("users");
-    expect(seed.users).toEqual(usersReport());
+    expect(seed.users).toEqual(byReport());
     expect(seed.report).toEqual(report());
     expect(calls).toEqual([{ group: "switchboard", days: "7", viewer: identity }]);
 
@@ -350,7 +350,7 @@ describe("createCostsViewHandler", () => {
     expect(twin.status).toBe(200);
     expect(twin.headers["content-type"]).toContain("application/json");
     expect(twin.headers["cache-control"]).toBe("no-store");
-    expect(JSON.parse(twin.body())).toEqual(usersReport());
+    expect(JSON.parse(twin.body())).toEqual(byReport());
     expect(calls).toHaveLength(2);
 
     const daily = fakeReqRes("GET", "/costs/switchboard");
@@ -386,7 +386,7 @@ describe("createCostsViewHandler", () => {
       {
         groups: () => ["switchboard"],
         report: () => Promise.reject(new NoCostsSnapshotError()),
-        usersReport: () => Promise.reject(new NoCostsSnapshotError()),
+        byReport: () => Promise.reject(new NoCostsSnapshotError()),
         status: () => taking,
         snapshot: () => Promise.reject(new Error("no take in this test")),
         subscribe: () => () => undefined,

@@ -1,4 +1,5 @@
-import { anthropicTokensCostUsd, type DailyCost, type DateRange } from "./costs.js";
+import type { DailyCost, DateRange } from "./costs.js";
+import { anthropicTokensCostUsd } from "./modelPricing.js";
 import { dayOf, type ModelUsage, type RunUsage, type RunUsageReport, type UserDayUsage } from "./runUsage.js";
 
 // Cost by user (docs/reference/specs/costs.md item 10): who spent what, built from the
@@ -15,11 +16,11 @@ import { dayOf, type ModelUsage, type RunUsage, type RunUsageReport, type UserDa
 // finish), so an empty day reads as "no data" rather than "$0".
 
 /** One model's tokens for one user over the range, priced; `usd` is null for a model the price table does not know. */
-export interface UserModelCost extends ModelUsage {
+export interface PricedModelUsage extends ModelUsage {
   usd: number | null;
 }
 
-export interface UserCostDay {
+export interface CostsByDay {
   day: string;
   userId: string;
   userName?: string;
@@ -31,7 +32,7 @@ export interface UserCostDay {
   unpricedTokens: number;
 }
 
-export interface UserCostRow {
+export interface CostsByRow {
   userId: string;
   userName?: string;
   runs: number;
@@ -40,10 +41,10 @@ export interface UserCostRow {
   cloudUsd: number;
   totalUsd: number;
   unpricedTokens: number;
-  byModel: Record<string, UserModelCost>;
+  byModel: Record<string, PricedModelUsage>;
 }
 
-export interface UserCostReport {
+export interface CostsByReport {
   group: string;
   /** The range as asked, clamped to `coverage.from`. */
   range: DateRange;
@@ -58,9 +59,9 @@ export interface UserCostReport {
     historyOn: boolean;
   };
   /** Per user over the range, largest total first. */
-  users: UserCostRow[];
+  users: CostsByRow[];
   /** Per user per day, oldest day first. */
-  days: UserCostDay[];
+  days: CostsByDay[];
   /** Runs in range whose usage the history has not priced yet (backfill outstanding). */
   pending: number;
   /** The tie-out, over the covered days that HAVE a workspace figure: a day
@@ -102,11 +103,11 @@ export const modelIdOf = (ref: string): string => (ref.includes("/") ? ref.slice
 export function llmUsdOfUsage(usage: RunUsage): {
   usd: number;
   unpricedTokens: number;
-  byModel: Record<string, UserModelCost>;
+  byModel: Record<string, PricedModelUsage>;
 } {
   let usd = 0;
   let unpricedTokens = 0;
-  const byModel: Record<string, UserModelCost> = {};
+  const byModel: Record<string, PricedModelUsage> = {};
   for (const [ref, m] of Object.entries(usage.byModel)) {
     const priced = anthropicTokensCostUsd(modelIdOf(ref), {
       uncachedInput: m.inputTokens,
@@ -132,7 +133,7 @@ export function coverageFrom(range: DateRange, usage: RunUsageReport, generatedA
   return from > range.to ? range.to : from;
 }
 
-export function buildUserCostReport(input: {
+export function buildCostsByReport(input: {
   group: string;
   range: DateRange;
   usage: RunUsageReport;
@@ -142,7 +143,7 @@ export function buildUserCostReport(input: {
   viewerUserIds: string[];
   matchedByEmail: boolean;
   generatedAt: number;
-}): UserCostReport {
+}): CostsByReport {
   const { range, usage } = input;
   const from = coverageFrom(range, usage, input.generatedAt);
   const covered = (day: string) => day >= from && day <= range.to;
@@ -154,7 +155,7 @@ export function buildUserCostReport(input: {
   let cloudUnallocatedUsd = 0;
   for (const [day, cloud] of cloudByDay) if ((wallByDay.get(day) ?? 0) <= 0) cloudUnallocatedUsd += cloud;
 
-  const days: UserCostDay[] = rowsIn.map((r: UserDayUsage) => {
+  const days: CostsByDay[] = rowsIn.map((r: UserDayUsage) => {
     const priced = llmUsdOfUsage(r.usage);
     const wall = wallByDay.get(r.day) ?? 0;
     const cloudUsd = wall > 0 ? (cloudByDay.get(r.day) ?? 0) * (r.wallMs / wall) : 0;
@@ -171,7 +172,7 @@ export function buildUserCostReport(input: {
     };
   });
 
-  const users = new Map<string, UserCostRow>();
+  const users = new Map<string, CostsByRow>();
   for (const r of rowsIn) {
     const row = users.get(r.userId) ?? {
       userId: r.userId,

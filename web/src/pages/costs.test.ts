@@ -3,7 +3,7 @@ import CostsPage from "./CostsPage.vue";
 import { fakeEventSourceFactory } from "../testing/fakeEventSource";
 import { mountApp } from "../testing/mount";
 import type { CostReport } from "@core/core/costs.js";
-import type { UserCostReport } from "@core/core/costsByUser.js";
+import type { CostsByReport } from "@core/core/costsBy.js";
 import type { CostsSnapshotStatus } from "@core/core/costsSnapshot.js";
 import type { CostsSeed } from "@core/channels/webSeed.js";
 
@@ -92,7 +92,7 @@ const seed = (
 
 /** The by-user report for the same three days: two Slack users, one of them the
  *  signed-in viewer; a day's cloud split by wall-clock, the LLM at list. */
-function usersReport(over: Partial<UserCostReport> = {}): UserCostReport {
+function byReport(over: Partial<CostsByReport> = {}): CostsByReport {
   const r = report();
   const alice = {
     userId: "slack:U0AL1CE",
@@ -140,7 +140,7 @@ function usersReport(over: Partial<UserCostReport> = {}): UserCostReport {
 }
 
 /** `null`: the page was served without its by-user report. */
-const usersSeed = (users: UserCostReport | null = usersReport()): CostsSeed => ({
+const usersSeed = (users: CostsByReport | null = byReport()): CostsSeed => ({
   ...seed(),
   view: "users",
   ...(users ? { users } : {}),
@@ -686,7 +686,7 @@ describe("CostsPage · By user", () => {
   it("disables the me toggle, and says why in visible text the input describes, when the viewer matched no run user", () => {
     const w = mountApp(CostsPage, {
       eventSource: fakeEventSourceFactory().factory,
-      seed: usersSeed(usersReport({ viewer: { userIds: [], matchedByEmail: false } })),
+      seed: usersSeed(byReport({ viewer: { userIds: [], matchedByEmail: false } })),
     });
     const input = w.find(".me-toggle input");
     expect(input.attributes("disabled")).toBeDefined();
@@ -708,7 +708,7 @@ describe("CostsPage · By user", () => {
     const clamped = mountApp(CostsPage, {
       eventSource: fakeEventSourceFactory().factory,
       seed: usersSeed(
-        usersReport({
+        byReport({
           coverage: { from: report().days[1].date, retentionDays: 30, clamped: true, historyOn: true },
           pending: 3,
         }),
@@ -721,7 +721,7 @@ describe("CostsPage · By user", () => {
     const off = mountApp(CostsPage, {
       eventSource: fakeEventSourceFactory().factory,
       seed: usersSeed(
-        usersReport({
+        byReport({
           coverage: { from: report().days[2].date, retentionDays: 0, clamped: true, historyOn: false },
           users: [],
           viewer: { userIds: [], matchedByEmail: false },
@@ -742,17 +742,17 @@ describe("CostsPage · By user", () => {
     expect(line).toContain("$1.40 on days with no runs");
     const tidy = mountApp(CostsPage, {
       eventSource: fakeEventSourceFactory().factory,
-      seed: usersSeed(usersReport({ reconciliation: { ...usersReport().reconciliation, cloudUnallocatedUsd: 0 } })),
+      seed: usersSeed(byReport({ reconciliation: { ...byReport().reconciliation, cloudUnallocatedUsd: 0 } })),
     });
     expect(tidy.find(".reconciliation").text()).not.toContain("days with no runs");
   });
 
   it("days whose runs spent tokens against a zero workspace figure are named apart from the tie-out, and a range with no figure at all says so instead of comparing", () => {
-    const rec = usersReport().reconciliation;
+    const rec = byReport().reconciliation;
     const partly = mountApp(CostsPage, {
       eventSource: fakeEventSourceFactory().factory,
       seed: usersSeed(
-        usersReport({
+        byReport({
           reconciliation: {
             ...rec,
             attributedLlmUsd: 3.5,
@@ -774,7 +774,7 @@ describe("CostsPage · By user", () => {
     const none = mountApp(CostsPage, {
       eventSource: fakeEventSourceFactory().factory,
       seed: usersSeed(
-        usersReport({
+        byReport({
           reconciliation: {
             ...rec,
             attributedLlmUsd: 0,
@@ -794,11 +794,11 @@ describe("CostsPage · By user", () => {
   });
 
   it("a compared range where more was attributed than the workspace shows says so in words, never as a negative dollar", () => {
-    const rec = usersReport().reconciliation;
+    const rec = byReport().reconciliation;
     const over = mountApp(CostsPage, {
       eventSource: fakeEventSourceFactory().factory,
       seed: usersSeed(
-        usersReport({
+        byReport({
           reconciliation: { ...rec, attributedLlmUsd: 21.5, workspaceLlmUsd: 19.5, unattributedLlmUsd: -2 },
         }),
       ),
