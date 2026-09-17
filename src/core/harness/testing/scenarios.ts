@@ -30,6 +30,7 @@ import {
   type HarnessResume,
 } from "../contract.js";
 import { HARD_STOP_MESSAGE, MODEL_CALL_IN_FLIGHT, timeBudgetAnswer, timeBudgetNote } from "../windDown.js";
+import { TRANSPORT_LOST_TEXT } from "./fakeContainer.js";
 
 /** The wall clock every conformance run is given: the drivers' preset budget. */
 export const CONFORMANCE_MAX_MINUTES = 10;
@@ -100,6 +101,21 @@ export interface RunScript {
    *  process started; `same` — the container as it was, so the crash judgement
    *  stands. `word` unless said. */
   deadWithoutWordThen?: "word" | "renamed" | "same";
+  /** The platform's replacement as the incident met it: the container is
+   *  killed under the process's command with the previous turn's tool call in
+   *  flight, before the model call of this 1-based number would carry that
+   *  call's result, and the harness's read fails on its TRANSPORT — the
+   *  executor's infra failure carrying the WebSocket's 1006 close, no word.
+   *  The driver leaves the call open and fails the next read so; what the one
+   *  more command then finds is `transportLostThen`, after
+   *  `containerDownForProbes` answers that the container is not running. */
+  transportLostBeforeModelCall?: number;
+  /** What the one more command after the transport loss finds, as `deadWithoutWordThen`: `word` unless said. */
+  transportLostThen?: "word" | "renamed" | "same";
+  /** How many times the one more command finds the container not running —
+   *  the window while the platform rebuilds it — before it answers what
+   *  `transportLostThen` says; the harness waits through them. 0 unless said. */
+  containerDownForProbes?: number;
   /** The row's process (named by the resume's facts) is still alive in this same
    *  container on the resume — the survival clause's alive-here: `open` finds it
    *  before anything is started and re-attaches to it when the row carries what
@@ -300,6 +316,53 @@ function checkDeadWithoutWordSame(run: DrivenRun): void {
   );
   assert.ok(run.killed.length > 0, "the dead process was not ended");
   assert.ok(run.removed.length > 0, "the dead process's root was not removed");
+}
+
+/** The transport loss's negative half: the one more command found the container
+ *  as recorded (after `waited` answers that it was down, when the row says so),
+ *  so the failure stands, NAMED — the run fails with the transport error it met,
+ *  not the seam's verdict and not a crash judgement of the harness's own; no
+ *  `sandbox_restarted` note; a `harness_error` note says the one more command
+ *  named no replacement and, for a wait, that the container was down and how long
+ *  it took to answer; the process ended and its root removed, as any failed run's. */
+function checkTransportLostStands(run: DrivenRun, waited: boolean): void {
+  const error = failed(run);
+  assert.ok(
+    !(error instanceof HarnessContainerReplacedError),
+    `a transport loss in the same container was judged replaced: ${error.message}`,
+  );
+  assert.equal(error.message, TRANSPORT_LOST_TEXT, "the failure is not named as the transport error it was");
+  assert.equal(
+    notes(run).filter((n) => n.kind === "sandbox_restarted").length,
+    0,
+    "a sandbox_restarted note was written for a container that answered as recorded",
+  );
+  const errors = notes(run)
+    .filter((n) => n.kind === "harness_error")
+    .map((n) => n.summary);
+  assert.ok(
+    errors.some(
+      (s) => /failed on its transport/.test(s) && /named no replacement/.test(s) && /the failure stands/.test(s),
+    ),
+    `no harness_error note says the one more command named no replacement: ${JSON.stringify(errors)}`,
+  );
+  if (waited) {
+    assert.ok(
+      errors.some((s) => /finds the container down/.test(s) && /waiting for it to answer/.test(s)),
+      `no harness_error note says the container was down under the one more command: ${JSON.stringify(errors)}`,
+    );
+    assert.ok(
+      errors.some((s) => /^the container answered after \d+s of waiting$/.test(s)),
+      `no harness_error note says how long the container took to answer: ${JSON.stringify(errors)}`,
+    );
+  } else {
+    assert.ok(
+      !errors.some((s) => /waiting for it to answer/.test(s)),
+      "a wait was noted where the container answered at once",
+    );
+  }
+  assert.ok(run.killed.length > 0, "the process was not ended after the failure");
+  assert.ok(run.removed.length > 0, "the process's root was not removed after the failure");
 }
 
 const resumeOf = (facts: HarnessFacts): HarnessResume => ({
@@ -825,6 +888,54 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       deadWithoutWordThen: "same",
     },
     check: checkDeadWithoutWordSame,
+  },
+  {
+    id: "survival-transport-lost-then-word",
+    clause: "survival",
+    title:
+      "the in-flight container command fails on its transport with no word (the platform kills the container under it and the WebSocket closes with 1006 before any word) and the one more command fails with the word: the executor's word after all — the seam's container-replaced verdict carrying the record with the in-flight call settled by the replaced note, one sandbox_restarted note, the call's failed tool_result on the stream, nothing killed or removed — never a plain failure",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("never")],
+      transportLostBeforeModelCall: 2,
+    },
+    check: (run, driver) => checkDeadWithoutWord(run, driver, "word"),
+  },
+  {
+    id: "survival-transport-lost-then-renamed",
+    clause: "survival",
+    title:
+      "the in-flight container command fails on its transport with no word and the one more command answers another identity than the one recorded when the process started: replaced by the changed identity — the verdict's condition says so and the sandbox_restarted note carries it in the executor's words' place, with the record and the settlement as with the word, nothing killed or removed",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("never")],
+      transportLostBeforeModelCall: 2,
+      transportLostThen: "renamed",
+    },
+    check: (run, driver) => checkDeadWithoutWord(run, driver, "renamed"),
+  },
+  {
+    id: "survival-transport-lost-then-same",
+    clause: "survival",
+    title:
+      "the in-flight container command fails on its transport with no word and the one more command answers the identity recorded when the process started: the failure stands, named as the transport error it was — no container-replaced verdict, no sandbox_restarted note, a harness_error note saying the one more command named no replacement, the process ended and its root removed",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("never")],
+      transportLostBeforeModelCall: 2,
+      transportLostThen: "same",
+    },
+    check: (run) => checkTransportLostStands(run, false),
+  },
+  {
+    id: "survival-transport-lost-down-then-same",
+    clause: "survival",
+    title:
+      "the in-flight container command fails on its transport with no word and the one more command finds the container not running, twice, before it answers the identity recorded: the container down is a wait, never the judgement — the probe is re-sent after the executor's backoff, the notes say the wait began and how long the container took to answer — and the same identity then leaves the failure standing, named",
+    script: {
+      turns: [call("c1", "bash", { command: "echo one" }), text("never")],
+      transportLostBeforeModelCall: 2,
+      transportLostThen: "same",
+      containerDownForProbes: 2,
+    },
+    check: (run) => checkTransportLostStands(run, true),
   },
   {
     id: "survival-foreign-row-refused",

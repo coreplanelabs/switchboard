@@ -62,6 +62,7 @@ import {
   replacedBecause,
   replacedVerdict,
   RUNTIME_WORD,
+  saysTransportLost,
   type HarnessContainer,
   type ReplacedCondition,
 } from "../container.js";
@@ -1064,6 +1065,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     let retryPromptSent = false;
     /** A container command under the read failed saying the runtime was replaced (item 16): the loop ends for the judgement below. */
     let containerSaid: Error | undefined;
+    /** A container command under the read failed on its transport with no word
+     *  (`saysTransportLost`; the third failure shape, harness.md item 6): the
+     *  loop ends for the one more command below, and the failure stands, named
+     *  as it was, when that command names no replacement. */
+    let transportLost: Error | undefined;
     /** Item 16's judgement, once pi is found gone before the run settled. The
      *  condition is the executor's word: a container command failed saying
      *  the runtime under it was replaced. The container this run was handed
@@ -1092,15 +1098,24 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         next = await Promise.race([pending, tick]);
       } catch (err) {
         // The read failed under the loop: the executor's word that the runtime
-        // under pi was replaced is the verdict below; a control file that
+        // under pi was replaced is the verdict below; a failure on the
+        // command's transport with no word (the platform's replacement closes
+        // the WebSocket under the read before any word can come) takes the one
+        // more command below before it is judged; a control file that
         // vanished under a live run fails the run by name, the note saying
         // which file under which root is gone (issue-shaped: a suite or a
         // cleanup emptied the run's root); any other failure is the run's, as
         // it always was.
         if (err instanceof HarnessControlFileLostError) note("harness_error", err.message);
-        if (!(err instanceof Error && saysContainerReplaced(err))) throw err;
-        containerSaid = err;
-        break;
+        if (err instanceof Error && saysContainerReplaced(err)) {
+          containerSaid = err;
+          break;
+        }
+        if (err instanceof Error && saysTransportLost(err)) {
+          transportLost = err;
+          break;
+        }
+        throw err;
       }
       if (next === "tick") {
         check();
@@ -1247,10 +1262,17 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // container answering another identity than the one recorded when
         // pi started is the condition in the word's place (a renamed
         // container with a dead pi is a replaced one). Only past both did pi
-        // die where it ran: the failure it always was.
+        // die where it ran: the failure it always was. A command that failed
+        // on its transport with no word takes the same one more command; the
+        // command waits through a container that is down (the restore window)
+        // rather than judging by its silence; and past both the failure
+        // stands, named as the transport error it was.
         replaced = await containerReplaced(containerSaid);
         if (replaced === undefined) {
-          const verdict = await replacedVerdict(container, facts?.container);
+          const verdict = await replacedVerdict(container, facts?.container, {
+            sleep: deps.sleep,
+            note: (text) => note("harness_error", text),
+          });
           if (verdict?.condition === "word") replaced = await containerReplaced(verdict.said);
           else if (verdict?.condition === "identity")
             replaced = new PiContainerReplacedError(undefined, verdict.was, verdict.now, recordNow(), "identity");
@@ -1259,6 +1281,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
           note("sandbox_restarted", replaced.message);
           throw replaced;
+        }
+        if (transportLost !== undefined) {
+          note(
+            "harness_error",
+            `a container command failed on its transport (${redactAndCap(transportLost.message, 240)}); the one more command named no replacement, so the failure stands`,
+          );
+          throw transportLost;
         }
         const tail = await container.tail(paths.errLog, 2000);
         throw new Error(`pi exited before the run settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`);

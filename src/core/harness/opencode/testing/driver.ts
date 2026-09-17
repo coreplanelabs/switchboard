@@ -286,6 +286,8 @@ class ScriptedServe {
    *  its tailer die with the call open and no read fails with the word; the play
    *  stops there. */
   private deadWithoutWord = false;
+  /** The replacement as the incident met it: the next feed read fails on its transport with no word (`transportLostBeforeModelCall`). */
+  private transportLost = false;
   private ordinal = 0;
   private replyFailuresLeft: number;
   private readonly replyPostThrows: boolean;
@@ -790,6 +792,18 @@ class ScriptedServe {
         this.container.dieWithoutWord(this.script.deadWithoutWordThen ?? "word", this.replacedWord);
         return;
       }
+      if (this.transportLost) {
+        // The platform kills the container under the call: the next feed read
+        // fails on its transport with no word, and the one more command finds
+        // the container down for as many probes as the script says before it
+        // finds what the script says. No further turns.
+        this.container.loseTransport(
+          this.script.transportLostThen ?? "word",
+          this.replacedWord,
+          this.script.containerDownForProbes ?? 0,
+        );
+        return;
+      }
     }
     this.emitEvent(this.interrupted ? "session.execution.interrupted" : "session.execution.succeeded", {
       sessionID: this.sessionID,
@@ -965,6 +979,16 @@ class ScriptedServe {
       turnIndex === this.script.deadWithoutWordBeforeModelCall - 2
     ) {
       this.deadWithoutWord = true;
+      return this.toolContent(callId, ask.name, input, "running", []);
+    }
+    // The replacement as the incident met it (`transportLostBeforeModelCall`):
+    // the same open call, the next feed read failing on its transport with no
+    // word once the turn is played.
+    if (
+      this.script.transportLostBeforeModelCall !== undefined &&
+      turnIndex === this.script.transportLostBeforeModelCall - 2
+    ) {
+      this.transportLost = true;
       return this.toolContent(callId, ask.name, input, "running", []);
     }
     // The gate clause switched off: a refused tool runs anyway (the bot's reject

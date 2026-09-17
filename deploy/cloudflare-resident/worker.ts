@@ -179,6 +179,7 @@ import {
   isRuntimeUnreachableSignal,
   killStaleBuildProcessesCommand,
   planRefresh,
+  RUNTIME_MOVED_WORDING,
   RUNTIME_REPLACEMENT_WORDING,
   RUNTIME_UNREACHABLE_DOWN_AT,
   runtimeUnreachableReason,
@@ -766,9 +767,34 @@ function isRuntimeReplacement(err: unknown): boolean {
   return false;
 }
 
+/** Whether the SDK's failure vouches that the runtime under the command MOVED
+ *  — a new incarnation serves the thread, so the container the command was
+ *  aimed at is gone whatever else the resident knows: the typed classes for
+ *  a stale process handle and an inactive runtime identity, an interruption
+ *  whose reason is a replaced runtime, the platform's superseded-isolate
+ *  reset, and the SDK's wordings for the same (`RUNTIME_MOVED_WORDING`, on the
+ *  error and its cause chain). NOT the words for a container that is merely
+ *  down (`STOPPED_CONTAINER_WORDING`: "The container is not running", "Process
+ *  supervisor is closed") and NOT a transport lost under the call
+ *  (`RPCTransportError`): an asleep or starting container and a network blip
+ *  answer those too, so on `/exec` they are the word only when the resident
+ *  itself knows the container it held is gone (`replacedExecAnswer`). The
+ *  resident's own steps keep the union (`isRuntimeReplacement`): a step
+ *  interrupted either way is retried onto the container that comes back. */
+function sdkVouchesRuntimeMoved(err: unknown): boolean {
+  if (err instanceof StaleProcessHandleError) return true;
+  if (err instanceof RuntimeIdentityInactiveError) return true;
+  if (err instanceof OperationInterruptedError && RUNTIME_REPLACED_REASONS.has(err.reason)) return true;
+  if (isDurableObjectCodeUpdateReset(err)) return true;
+  for (const link of selfAndCauses(err)) if (RUNTIME_MOVED_WORDING.test(errMsg(link))) return true;
+  return false;
+}
+
 /** The named ThreadErr every thread route (exec/read/write) answers for a
  *  runtime replacement, so the client can classify it (409 like the other
- *  recoverable thread states; `reason` is the discriminator). */
+ *  recoverable thread states; `reason` is the discriminator). On `/exec` the
+ *  answer goes through `replacedExecAnswer` first: the word only when the SDK
+ *  vouched the runtime moved or the resident knows the container is gone. */
 function runtimeReplacedErr(err: RuntimeReplacedError): ThreadErr {
   return { error: err.message, status: 409, reason: "runtime-replaced" };
 }
@@ -1592,6 +1618,52 @@ export class ResidentDO extends Sandbox<Env> {
    *  survives, so hydration state is always probed from disk. */
   private hydration: Promise<void> | null = null;
 
+  /** The container stop the platform delivered to `onStop` and no command has
+   *  answered since: the resident's own knowledge that the container it held
+   *  is gone (docs/reference/specs/resident-repos.md item 43). In memory on
+   *  purpose — a Durable Object that restarts learns the same fact from the
+   *  restore its next command's wake path starts (`restoring`), and a stop
+   *  recorded in storage would outlive the container that answers now. */
+  private containerStop: { at: number; exitCode: number; reason: string } | undefined;
+
+  /** The platform's signal that the container stopped — the rollout's
+   *  `runtime_signal`, or an exit of its own — recorded before the SDK's
+   *  reconciliation runs, so an `/exec` that meets the stopped container from
+   *  here on answers `runtime-replaced` (`replacedExecAnswer`) rather than the
+   *  binding's bare "The container is not running". The Sandbox base declares
+   *  the hook without parameters; the Container base beneath it passes them. */
+  async onStop(params?: { exitCode: number; reason: string }): Promise<void> {
+    this.containerStop = { at: systemClock(), exitCode: params?.exitCode ?? 0, reason: params?.reason ?? "unknown" };
+    console.log(
+      `container: stopped (exit ${this.containerStop.exitCode}, ${this.containerStop.reason}) — the container this resident held is gone; /exec answers runtime-replaced until a command answers again`,
+    );
+    await super.onStop();
+  }
+
+  /** Whether this resident knows the container it held is gone: it saw the
+   *  container stop and no command has answered since, or a restore is under
+   *  way (`restoring`, persisted before any restore work). Never the
+   *  platform's `running` flag — an asleep or starting container answers
+   *  false to it too, and an `/exec` that meets one must say what the SDK
+   *  said so the harness probes rather than relaunch into a container that
+   *  was never replaced. */
+  private async knowsContainerGone(): Promise<boolean> {
+    if (this.containerStop !== undefined) return true;
+    return (await this.getStatus()).state === "restoring";
+  }
+
+  /** The `/exec` answer for a command the SDK failed with a runtime
+   *  replacement (item 43; harness.md item 6): the word — `reason:
+   *  "runtime-replaced"`, the resident's sentence — when the SDK vouched the
+   *  runtime moved or the resident knows the container it held is gone;
+   *  otherwise what the SDK said, with no word and no `reason`, so the
+   *  harness's one more command decides. The command is never re-issued
+   *  either way: it may have started. */
+  private async replacedExecAnswer(err: RuntimeReplacedError): Promise<ThreadErr> {
+    if (sdkVouchesRuntimeMoved(err.cause) || (await this.knowsContainerGone())) return runtimeReplacedErr(err);
+    return { error: errMsg(err.cause), status: 409 };
+  }
+
   /** The step trace of the request in flight (docs/reference/specs/tracing.md item 19):
    *  `attachThread` and `runOp` each run inside their own collector, so the
    *  commands `runOk` runs and the mirror-lock waits land on the answer that
@@ -1978,7 +2050,9 @@ export class ResidentDO extends Sandbox<Env> {
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     }
     // The spawn is the proof the control port answers: a persisted count of
-    // unanswered connects ends here, whatever the command goes on to do.
+    // unanswered connects ends here, whatever the command goes on to do — and
+    // a container stop seen before it is history (`knowsContainerGone`).
+    this.containerStop = undefined;
     await this.clearRuntimeUnreachable();
     try {
       const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
@@ -6233,7 +6307,26 @@ export class ResidentDO extends Sandbox<Env> {
     return res;
   }
 
+  /** The exec route's one gate for a runtime replacement (item 43): every
+   *  `RuntimeReplacedError` the route meets — the preflight's own probe of the
+   *  worktree, the command itself — is judged by `replacedExecAnswer`, so the
+   *  word reaches the harness only when the SDK vouched the runtime moved or
+   *  the resident knows the container it held is gone. */
   private async execThreadImpl(
+    threadKey: string,
+    command: string,
+    timeoutMs: number,
+    env?: Record<string, string>,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
+    try {
+      return await this.execThreadBody(threadKey, command, timeoutMs, env);
+    } catch (err) {
+      if (err instanceof RuntimeReplacedError) return this.replacedExecAnswer(err);
+      throw err;
+    }
+  }
+
+  private async execThreadBody(
     threadKey: string,
     command: string,
     timeoutMs: number,
@@ -6253,13 +6346,8 @@ export class ResidentDO extends Sandbox<Env> {
         : {}),
     } satisfies ThreadBinding);
 
-    let r: Awaited<ReturnType<ResidentDO["threadRun"]>>;
-    try {
-      r = await this.threadRunCapped(binding.user, binding.worktreePath, command, timeoutMs, EXEC_OUTPUT_CAP, env);
-    } catch (err) {
-      if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
-      throw err;
-    }
+    // A runtime replacement under the command propagates to `execThreadImpl`'s gate.
+    const r = await this.threadRunCapped(binding.user, binding.worktreePath, command, timeoutMs, EXEC_OUTPUT_CAP, env);
     const truncated = r.stdout.length > EXEC_OUTPUT_CAP || r.stderr.length > EXEC_OUTPUT_CAP || r.truncated === true;
     const notes: string[] = [];
     if (r.timedOut)
