@@ -8,7 +8,7 @@ import {
   checkPrTitle,
   migrationNoteProblems,
   nextMajor,
-  TITLE_MAX_VISIBLE,
+  TITLE_MAX_LENGTH,
 } from "../scripts/check-pr-title.mjs";
 import { PR_DESCRIPTION_CAPS } from "./core/prDescription.js";
 
@@ -210,8 +210,17 @@ describe("the title is capped at 72 characters", () => {
   const fill = (prefix: string, n: number) => prefix + "x".repeat(n - prefix.length);
 
   it("is 72, and the submit tool's schema holds the title to the same number", () => {
-    expect(TITLE_MAX_VISIBLE).toBe(72);
-    expect(PR_DESCRIPTION_CAPS.title).toBe(TITLE_MAX_VISIBLE);
+    expect(TITLE_MAX_LENGTH).toBe(72);
+    expect(PR_DESCRIPTION_CAPS.title).toBe(TITLE_MAX_LENGTH);
+  });
+
+  it("counts raw characters, a markdown link's target included — GitHub renders no markdown in a title, and the schema counts the same way", () => {
+    const linked = `fix: [x](${"h".repeat(63)})`;
+    expect(linked).toHaveLength(73);
+    const v = checkPrTitle(linked, VOCAB);
+    expect(v.ok).toBe(false);
+    if (!v.ok) expect(v.problems[0]).toMatch(/73 characters/);
+    expect(checkPrTitle(`fix: [x](${"h".repeat(62)})`, VOCAB).ok).toBe(true);
   });
 
   it("a title at the cap passes; one character over is refused naming the count and the cap", () => {

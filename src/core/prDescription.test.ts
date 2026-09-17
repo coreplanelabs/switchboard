@@ -111,9 +111,16 @@ describe("parsePrDescription (the schema)", () => {
     // number the title gate (`npm run check:pr-title`) holds it to.
     expect(PR_DESCRIPTION_CAPS.title).toBe(72);
     expect(issueAt(() => parsePrDescription({ ...desc(), title: long(73) }), "title")).toBe(
-      "at most 72 visible characters (got 73)",
+      "at most 72 characters (got 73)",
     );
     expect(parsePrDescription({ ...desc(), title: long(72) }).title).toBe(long(72));
+    // The title is counted raw, as the gate counts it: GitHub renders no
+    // markdown in a title, so a link's target is characters the reader sees.
+    const linkedTitle = `fix: [x](${"h".repeat(63)})`;
+    expect(linkedTitle).toHaveLength(73);
+    expect(issueAt(() => parsePrDescription({ ...desc(), title: linkedTitle }), "title")).toBe(
+      "at most 72 characters (got 73)",
+    );
     expect(issueAt(() => parsePrDescription({ ...desc(), tldr: long(301) }), "tldr")).toBe(
       "at most 300 visible characters (got 301)",
     );

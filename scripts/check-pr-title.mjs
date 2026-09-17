@@ -49,7 +49,7 @@ export const MIGRATIONS_PATH = "docs/reference/migrations.md";
  *  subject convention and where GitHub's commit list cuts a subject. The
  *  submit tool's schema (`PR_DESCRIPTION_CAPS.title`) holds the same number;
  *  a test keeps the two equal. */
-export const TITLE_MAX_VISIBLE = 72;
+export const TITLE_MAX_LENGTH = 72;
 
 /** The scopes only bots write — Dependabot's `chore(deps)` / `ci(deps)` and
  *  release-please's `chore(main): release …` — as the code map's Areas table
@@ -130,9 +130,9 @@ export function checkPrTitle(rawTitle, { types, scopes }) {
   }
   if (/\.$/.test(description)) problems.push("the description ends with a period; drop it (it is a commit subject)");
   const exemptFromCap = type === "revert" || (scope !== undefined && BOT_SCOPES.includes(scope));
-  if (!exemptFromCap && title.length > TITLE_MAX_VISIBLE) {
+  if (!exemptFromCap && title.length > TITLE_MAX_LENGTH) {
     problems.push(
-      `the title is ${title.length} characters; at most ${TITLE_MAX_VISIBLE} — one change, one clause, present tense; the PR body carries the rest`,
+      `the title is ${title.length} characters; at most ${TITLE_MAX_LENGTH} — one change, one clause, present tense; the PR body carries the rest`,
     );
   }
   if (problems.length > 0) return { ok: false, problems };
