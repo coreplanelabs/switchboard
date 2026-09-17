@@ -59,7 +59,7 @@ function mountIndex(s: RunsIndexSeed) {
 }
 
 describe("RunsIndexPage — the toggles are remembered (item 29)", () => {
-  it("a toggle is written as a preference; a URL that names neither opens the remembered view once; a URL that names one wins; mine is remembered only where the session is linked", async () => {
+  it("a toggle is written as a preference; a URL that names neither opens the remembered view once; a URL that names one wins; mine is remembered for an unlinked session too", async () => {
     const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
     const ann = { id: "slack:UA", name: "ann" };
     // Nothing remembered: the bare view stays.
@@ -85,11 +85,11 @@ describe("RunsIndexPage — the toggles are remembered (item 29)", () => {
     vi.spyOn(browser, "search").mockReturnValue("?all=1");
     mountIndex(seed([], { all: true, asUser: ann }));
     expect(nav).not.toHaveBeenCalled();
-    // An unlinked session never navigates to `mine`, whatever the browser remembered.
+    // An unlinked session has runs of its own (record 0043): a remembered `mine` holds for it too.
     vi.spyOn(browser, "search").mockReturnValue("");
     localStorage.setItem("sb.runs.all", "0");
     mountIndex(seed([]));
-    expect(nav).not.toHaveBeenCalled();
+    expect(nav).toHaveBeenCalledWith("/runs?mine=1");
   });
 });
 
@@ -120,7 +120,7 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     expect((all.wrapper.find("#showdone").element as HTMLInputElement).checked).toBe(true);
   });
 
-  it("Show only mine (record 0042): offered to a session linked to its Slack person — checked on ?mine=1, a change navigates keeping the other toggle, the feed and the pager stay in the view; an unlinked session sees it disabled with the reason", async () => {
+  it("Show only mine (record 0042): checked on ?mine=1, a change navigates keeping the other toggle, the feed and the pager stay in the view; a linked session's hint names its person, an unlinked session's names the Threads chat", async () => {
     const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
     const ann = { id: "slack:UA", name: "ann" };
     const linked = mountIndex(seed([], { asUser: ann }));
@@ -152,11 +152,17 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
         .wrapper.find("#empty")
         .text(),
     ).toBe("No active runs of yours.");
-    // Unlinked: the box is there, disabled, and says why.
+    // Unlinked: the box is enabled — the session's own runs are the ones it asked for
+    // from Threads (record 0043) — and the hint says which runs those are.
     const unlinked = mountIndex(seed([]));
-    expect((unlinked.wrapper.find("#showmine").element as HTMLInputElement).disabled).toBe(true);
-    expect(unlinked.wrapper.find("#minehint").text()).toContain("not linked to a Slack user");
+    expect((unlinked.wrapper.find("#showmine").element as HTMLInputElement).disabled).toBe(false);
+    expect(unlinked.wrapper.find("#minehint").text()).toBe(
+      "Only the runs this session requested from Threads. Sign in with the email of your Slack account to see your Slack runs too.",
+    );
     expect(unlinked.es().url).toBe("/runs?stream=1");
+    const unlinkedMine = mountIndex(seed([], { mine: true }));
+    expect((unlinkedMine.wrapper.find("#showmine").element as HTMLInputElement).checked).toBe(true);
+    expect(unlinkedMine.es().url).toBe("/runs?stream=1&mine=1");
   });
 
   it("shows the empty sentinel per view, and the store-degraded banner when the seed carries one", () => {
