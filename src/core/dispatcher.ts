@@ -874,6 +874,25 @@ export async function dispatch(
     if (reservation) {
       reserved = reservation.reserved;
       requestRow = reservation.requestRow;
+      // A run the ledger would not track after waiting for a finish this
+      // process was landing (run-history item 54) says so on its own stream and
+      // on its card, not in the bot log alone: no handoff, resume or reclaim
+      // reaches this run, and a reader of its record should see why. Head
+      // material, like the cold-sandbox note below: a setup fact ahead of the loop.
+      if (reservation.untracked !== undefined) {
+        registry.publish(runId, {
+          type: "run_note",
+          kind: "ledger_untracked",
+          summary: redactAndCap(
+            oneLine(
+              `not tracked by the run ledger: ${reservation.untracked} — no handoff, resume or reclaim reaches this run; its record still reaches the store`,
+            ),
+            500,
+          ),
+          at: clock(),
+        });
+        shell.setLabel(`${shell.label} · untracked by the ledger`);
+      }
     }
 
     // The workspace attach (dispatch/provision.ts): the setup step that takes

@@ -18,6 +18,7 @@ import type { ChatMessage } from "../chatMessage.js";
 import type { ToolDef } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import type { RunRecord, RunSession } from "../runRecord.js";
+import type { TraceOptions } from "../trace/types.js";
 import type { AssembledTranscript } from "./transcript.js";
 import type { FenceResult, Notepad, SessionHit } from "./types.js";
 import { PermanentStoreError, RouteMissingError } from "../runStoreWorker.js";
@@ -53,9 +54,18 @@ export function mintGeneration(now: () => number = Date.now, random: () => strin
   return gen;
 }
 
+/** What a caller of `RecordSink.put` says beside the trace (item 54): with
+ *  `retryFollows`, a transient failure of this put will be tried again by the
+ *  caller (the history writer's ladder), so the run's finish stays named as in
+ *  flight through the backoff; without it, the failure is the attempt
+ *  sequence's end and the name goes. */
+export interface PutOptions extends TraceOptions {
+  retryFollows?: boolean;
+}
+
 /** Where a finished record goes: the ledger's `finish`, or the plain store. */
 export interface RecordSink {
-  put(record: RunRecord): Promise<unknown>;
+  put(record: RunRecord, opts?: PutOptions): Promise<unknown>;
 }
 
 export interface LedgerWriteThroughOptions {
@@ -130,6 +140,12 @@ export interface ReserveRunRequest {
   /** With `request` set: the message in the durable inbox row's shape. */
   meta: LiveRunMeta;
   card?: CardHandle | null;
+  /** The reservation waited for a finish in flight in this process — the
+   *  thread's live row was a run this process was closing — and the row still
+   *  stood afterwards, so the run goes on untracked (item 54). `why` names
+   *  that run and how its finish ended, for the run's own record: the warning
+   *  in the bot log is not the only witness. */
+  onUntracked?: (why: string) => void;
   onStop?: (mode: StopMode) => void;
   onFenced?: () => void;
 }
@@ -336,6 +352,35 @@ export class NullLedgerRun implements LedgerRun {
 /** Backoff before a retry: the claim gets both, a step or state write the first. */
 const RETRY_MS: readonly number[] = [200, 800];
 
+/** How a run's finish ended (item 54): the row went (`landed`), the ledger
+ *  refused it and the record went to the plain store (`refused`), or the
+ *  attempt sequence failed for good (`failed`, with the last error's words). */
+type LandingOutcome = { kind: "landed" } | { kind: "refused" } | { kind: "failed"; why: string };
+
+/** A finish this process is landing (item 54): one entry per run from its
+ *  first `put` to the outcome, settled once, awaited by a claim that met the
+ *  run's row on the thread. */
+interface Landing {
+  settled: Promise<LandingOutcome>;
+  resolve: (outcome: LandingOutcome) => void;
+}
+
+/** Why a claim that waited for a finish ended untracked all the same (item
+ *  54): the run's row still stood — or another run's row does now. */
+function untrackedWhy(awaited: string, live: { runId: string }, outcome: LandingOutcome): string {
+  if (live.runId !== awaited)
+    return `the thread's live row belongs to run ${live.runId} now, not to run ${awaited}, whose finish this reservation waited for`;
+  const held = `run ${awaited}, whose finish was in flight in this process, still holds the thread's row`;
+  switch (outcome.kind) {
+    case "failed":
+      return `${held}: its finish did not land (${outcome.why})`;
+    case "refused":
+      return `${held}: the ledger refused its finish`;
+    case "landed":
+      return `${held}: its finish landed, yet the row still stands`;
+  }
+}
+
 const describe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): LedgerWriteThrough {
@@ -354,6 +399,36 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
   const claimAttempts = opts.claimAttempts ?? RETRY_MS.length + 1;
   let routeMissingWarned = false;
   const live = new Set<TrackedRun>();
+  /** The finishes this process is landing right now, by run id (item 54): from
+   *  the sink's first `put` to the outcome — landed, refused, or failed for
+   *  good. A claim answered `thread-live` claims once more: after awaiting the
+   *  named run's `settled` when it is here — an event, no timer of the
+   *  write-through's own — and at once when it is not, since the finish may
+   *  have landed in the moment between the answer and this read (a row that
+   *  is another run's for real costs that one more claim, then is untracked
+   *  as it always was). What bounds the wait is the
+   *  finish's own attempt sequence: every ledger call in an attempt (the state
+   *  flush, the append flush, the finish, the store fallback) aborts at the
+   *  client's `AbortSignal.timeout` (`RUN_STORE_TIMEOUT_MS`), and between the
+   *  history writer's attempts its fixed backoff — the entry stays through
+   *  that backoff because the writer says a retry follows (`PutOptions`); a
+   *  single `put` that fails without that word, or a permanent failure,
+   *  settles the entry as failed at once, so no waiter outlives its caller. */
+  const landing = new Map<string, Landing>();
+  const landingFor = (runId: string): Landing => {
+    let entry = landing.get(runId);
+    if (entry === undefined) {
+      let resolve!: (outcome: LandingOutcome) => void;
+      const settled = new Promise<LandingOutcome>((r) => (resolve = r));
+      entry = { settled, resolve };
+      landing.set(runId, entry);
+    }
+    return entry;
+  };
+  const settleLanding = (runId: string, entry: Landing, outcome: LandingOutcome): void => {
+    entry.resolve(outcome);
+    if (landing.get(runId) === entry) landing.delete(runId);
+  };
 
   const routeMissing = (): void => {
     if (routeMissingWarned) return;
@@ -374,8 +449,19 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
    *  run's log. The three requests are one claim: any failure retries them all. */
   async function claim(
     req: Omit<OpenRunRequest, "seed" | "reservation">,
-    opts: { phase?: "attaching"; seed?: readonly ChatMessage[]; log?: { from: number; turns: number } } = {},
+    opts: {
+      phase?: "attaching";
+      seed?: readonly ChatMessage[];
+      log?: { from: number; turns: number };
+      /** Told why when the claim waited for a finish in flight here and ended untracked all the same (item 54). */
+      onUntracked?: (why: string) => void;
+    } = {},
   ): Promise<Claimed> {
+    // The one re-claim made after a `thread-live` answer, and — when the named
+    // run's finish was in flight here — which run and how its finish ended,
+    // what the untracked note says.
+    let claimedAgain = false;
+    let awaited: { runId: string; outcome: LandingOutcome } | undefined;
     for (let attempt = 1; ; attempt++) {
       try {
         let session: RunSession | undefined;
@@ -413,6 +499,28 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           return session ? { outcome: "ok", session } : { outcome: "ok" };
         }
         if (result.live.runId === req.runId) return { outcome: "fenced" };
+        // The thread's live row is a run this process is closing (item 54): a
+        // restart from its request, or the fresh turn for its unconsumed
+        // follow-ups, is dispatched from that run's finally right after its
+        // finish was handed to the history writer, so this claim can reach the
+        // ledger ahead of that write. Claim once more: after the finish when it
+        // is in flight here — its `settled` in `landing`, an awaited event,
+        // bounded by the finish's own calls and the writer's backoff, never a
+        // timer of ours — and at once when it is not, since it may have landed
+        // in the moment between the answer and this read. The second answer is
+        // the last: a finish that failed or was refused leaves the row
+        // standing, and the run goes on untracked, as any other thread-live
+        // answer leaves it — said on the run's own record through
+        // `onUntracked` when a finish was waited for; a row that was another
+        // run's all along is untracked silently, as before.
+        if (!claimedAgain) {
+          claimedAgain = true;
+          const inFlight = landing.get(result.live.runId);
+          if (inFlight !== undefined) awaited = { runId: result.live.runId, outcome: await inFlight.settled };
+          attempt--; // the re-claim is not a failed attempt
+          continue;
+        }
+        if (awaited !== undefined) opts.onUntracked?.(untrackedWhy(awaited.runId, result.live, awaited.outcome));
         warn(
           `[ledger] ${req.threadKey} not tracked: the thread's live row belongs to run ${result.live.runId} (started ${new Date(result.live.startedAt).toISOString()}) — reclaim is the resume phase's`,
         );
@@ -542,25 +650,45 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
 
     readonly sink: RecordSink = {
-      put: async (plain) => {
+      put: async (plain, opts) => {
         this.finished = true; // no event or state write after this point
         live.delete(this);
-        await this.close();
-        const session = this.sessionOnRecord();
-        const record = session ? { ...plain, session } : plain;
-        let result: Awaited<ReturnType<RunLedger["finish"]>>;
+        // Named in `landing` from the first attempt to the outcome, so a claim
+        // meeting this run's row can await it and say why the row stood (item
+        // 54). A transient failure the caller will retry keeps the name through
+        // the backoff; a permanent one, or a caller who will not try again,
+        // settles it as failed now — a waiter never outlives its caller.
+        const entry = landingFor(this.runId);
         try {
-          result = await ledger.finish(this.runId, gen, record);
+          const { value, outcome } = await this.land(plain);
+          settleLanding(this.runId, entry, outcome);
+          return value;
         } catch (err) {
-          if (!(err instanceof RouteMissingError)) throw err; // transient: the writer retries this sink
-          routeMissing();
-          return fallback.put(record);
+          if (opts?.retryFollows !== true || err instanceof PermanentStoreError)
+            settleLanding(this.runId, entry, { kind: "failed", why: describe(err) });
+          throw err;
         }
-        if (result.ok) return result;
-        warn(`[ledger] ${this.threadKey} finish refused (${result.reason}) — record written to the store directly`);
-        return fallback.put(record);
       },
     };
+
+    /** The finish itself: the flush, then the ledger's one-transaction `finish`,
+     *  else the plain store — and which of the two took the record. */
+    private async land(plain: RunRecord): Promise<{ value: unknown; outcome: LandingOutcome }> {
+      await this.close();
+      const session = this.sessionOnRecord();
+      const record = session ? { ...plain, session } : plain;
+      let result: Awaited<ReturnType<RunLedger["finish"]>>;
+      try {
+        result = await ledger.finish(this.runId, gen, record);
+      } catch (err) {
+        if (!(err instanceof RouteMissingError)) throw err; // transient: the writer retries this sink
+        routeMissing();
+        return { value: await fallback.put(record), outcome: { kind: "refused" } };
+      }
+      if (result.ok) return { value: result, outcome: { kind: "landed" } };
+      warn(`[ledger] ${this.threadKey} finish refused (${result.reason}) — record written to the store directly`);
+      return { value: await fallback.put(record), outcome: { kind: "refused" } };
+    }
 
     tracked(): boolean {
       return !this.detached;
@@ -786,7 +914,10 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
   return {
     gen,
     async reserve(req) {
-      const claimed = await claim({ ...req, system: "", tools: [], state: {} }, { phase: "attaching" });
+      const claimed = await claim(
+        { ...req, system: "", tools: [], state: {} },
+        { phase: "attaching", ...(req.onUntracked !== undefined ? { onUntracked: req.onUntracked } : {}) },
+      );
       if (claimed.outcome !== "ok") return undefined;
       const run = new TrackedRun(req);
       run.startHeartbeat();

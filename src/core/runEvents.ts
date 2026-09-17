@@ -142,6 +142,16 @@ export type RunNoteKind =
    *  after the attach, before the first turn, so the run page explains a
    *  sandbox run that shows resident steps. */
   | "cold_sandbox"
+  /** The run ledger would not track this run (docs/reference/specs/run-history.md
+   *  item 54): its reservation met the row of a run this process was closing
+   *  (a restart from its request, or the fresh turn for its follow-ups), waited
+   *  for that finish, and the row still stood — the finish failed or was
+   *  refused — so no handoff, resume or reclaim reaches this run, and its
+   *  record reaches the store when it finishes. The summary names that run and
+   *  how its finish ended; published by the dispatcher right after the
+   *  reservation, before the attach, and carried on the card's label — the bot
+   *  log's warning is not the only witness. */
+  | "ledger_untracked"
   /** The resident kept this thread's binding where it was instead of moving
    *  it onto the branch the thread's own run opened a pull request on
    *  (docs/reference/specs/resident-repos.md item 16): the summary names the
@@ -258,6 +268,7 @@ export const RUN_NOTE_KINDS = [
   "description_turn",
   "verdict_turn",
   "cold_sandbox",
+  "ledger_untracked",
   "rebind_refused",
   "work_left_behind",
   "workspace_torn_down",
@@ -373,6 +384,7 @@ export function isHeadMaterial(event: RunEvent): boolean {
         event.kind === "mcp_unavailable" ||
         event.kind === "spans_dropped" ||
         event.kind === "cold_sandbox" ||
+        event.kind === "ledger_untracked" ||
         event.kind === "rebind_refused"
       );
     case "span_start":

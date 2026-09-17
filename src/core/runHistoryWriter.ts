@@ -89,8 +89,16 @@ export class NullRunHistoryWriter implements RunHistoryWriter {
   }
 }
 
+/** What the writer tells a sink beside the trace: whether it will try this put
+ *  again on a transient failure (docs/reference/specs/run-history.md item 54 —
+ *  the ledger's write-through keeps a finish named as in flight through the
+ *  backoff on that word). */
+export interface SinkPutOptions extends TraceOptions {
+  retryFollows?: boolean;
+}
+
 /** Where a record can be written: the store, or a sink a caller routes one write through. */
-export type RecordSink = Pick<RunStore, "put"> | { put(record: RunRecord, trace?: TraceOptions): Promise<unknown> };
+export type RecordSink = Pick<RunStore, "put"> | { put(record: RunRecord, opts?: SinkPutOptions): Promise<unknown> };
 
 export interface RunHistoryWriterOptions {
   store: RecordSink;
@@ -146,7 +154,9 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
       // retry waking from backoff can never clobber the final record.
       if (flag?.superseded) return;
       try {
-        await sink.put(record, span ? { span } : undefined);
+        // The sink learns whether a transient failure here is the end of the
+        // sequence or a retry's beginning (item 54): the last attempt is final.
+        await sink.put(record, { ...(span ? { span } : {}), retryFollows: attempt < attempts });
         if (!flag) persisted(record.id);
         return;
       } catch (err) {

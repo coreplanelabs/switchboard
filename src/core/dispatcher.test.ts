@@ -11042,7 +11042,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       tickMs: 5,
       sleep: realSleep,
     };
-    return { deps, provider, registry, writer, containers, calls };
+    return { deps, provider, registry, writer, store, containers, calls };
   }
 
   // Feature: docs/reference/specs/harness.md item 6 (the survival clause's
@@ -11258,6 +11258,264 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(replies.at(-1)).toBe("started over and done");
     expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
     expect(registry.getById("run-2")).toMatchObject({ finished: true, status: "completed" });
+  });
+
+  // The same road in the order the process really has: the closed run's
+  // finish is fire-and-forget through the history writer, and the restart is
+  // dispatched from that run's finally — so the restart's reservation reaches
+  // the ledger while the thread's live row is still the closed run's. Seen
+  // live on a resident roll: the reservation was refused `thread-live`, the
+  // restart ran untracked, and the store held only its start tombstone.
+  it("a restart whose reservation meets the closed run's row still live — its finish in flight from this same process — waits for that finish to land and claims again, so the restarted run is tracked as its predecessor was, never untracked with only its start tombstone in the store", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const order: string[] = [];
+    let claimAnswered!: () => void;
+    const answered = new Promise<void>((r) => (claimAnswered = r));
+    // The closed row's finish lands only AFTER the restart's first claim was
+    // answered — refused, in the order production has when the write is slower
+    // than the dispatch of the restart; an `ok` there lands it just the same.
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "finish")
+          return async (runId: string, gen: string, record: RunRecord) => {
+            if (runId === "run-1") await answered;
+            order.push(`finish ${runId}`);
+            return target.finish(runId, gen, record);
+          };
+        if (prop === "claim")
+          return async (req: ClaimRequest) => {
+            const result = await target.claim(req);
+            if (req.runId !== "run-1") {
+              order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
+              claimAnswered(); // any answer: an `ok` here (a regression) fails the order assertion, never hangs the suite
+            }
+            return result;
+          };
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+    const { deps, provider, writer, containers } = replacedContainerWorld(ledger, {
+      // The re-attach (`reuse`) finds the thread rebound onto another tree: refused by name, the run restarts.
+      attach: (body) =>
+        new Response(
+          JSON.stringify(
+            body.reuse
+              ? { workspace: "/workspace/threads/t/other", ref: "main", sha: "abc", user: "worker3" }
+              : { workspace: "/workspace/threads/t/main", ref: "main", sha: "abc", user: "worker2" },
+          ),
+          { status: 200 },
+        ),
+    });
+    deps.admission = new ThreadAdmission();
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(outcome).toEqual({ status: "refused", refusal: "workspace_lost" });
+    expect(inner.finished.get("run-1")?.status).toBe("interrupted");
+    // The reservation met the closed run's live row, waited for its finish to
+    // land, and claimed again; then the prompt's promotion of that row (item
+    // 42: the same run and generation, `ok`), and the run's own finish.
+    expect(order).toEqual([
+      "claim run-2 thread-live",
+      "finish run-1",
+      "claim run-2 ok",
+      "claim run-2 ok",
+      "finish run-2",
+    ]);
+    expect(containers).toHaveLength(2);
+    expect(provider.requests).toHaveLength(1);
+    expect(replies.at(-1)).toBe("started over and done");
+    // Tracked as its predecessor was: the record went through the ledger's finish, and the row is closed.
+    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(inner.live.has("run-2")).toBe(false);
+    // …and nothing on its record says otherwise.
+    expect(
+      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+    ).toEqual([]);
+  });
+
+  // The OTHER dispatch a closed run's finally makes takes the same road: the
+  // fresh turn for the follow-ups the run never consumed (thread-admission item
+  // 4) carries no restart name and is dispatched a few lines after the finish
+  // was handed to the writer, so its reservation meets the same row — the gate
+  // is the finish in flight, not the request's shape.
+  it("the fresh turn for a closed run's unconsumed follow-ups meets that run's row still live — its finish in flight from this same process — waits for the finish and claims again, and is tracked as its own run", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const order: string[] = [];
+    let claimAnswered!: () => void;
+    const answered = new Promise<void>((r) => (claimAnswered = r));
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "finish")
+          return async (runId: string, gen: string, record: RunRecord) => {
+            if (runId === "run-1") await answered;
+            order.push(`finish ${runId}`);
+            return target.finish(runId, gen, record);
+          };
+        if (prop === "claim")
+          return async (req: ClaimRequest) => {
+            const result = await target.claim(req);
+            if (req.runId !== "run-1") {
+              order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
+              claimAnswered();
+            }
+            return result;
+          };
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+    // A provider whose first call waits for the test to fail it; the fresh turn's call answers at once.
+    let calls = 0;
+    let fail!: (err: Error) => void;
+    let onFirst!: () => void;
+    const firstStarted = new Promise<void>((r) => (onFirst = r));
+    const first = new Promise<CompletionResult>((_, reject) => (fail = reject));
+    const provider: Provider = {
+      name: "gated",
+      async complete() {
+        if (calls++ === 0) {
+          onFirst();
+          return first;
+        }
+        return { content: [{ type: "text", text: `answer ${calls}` }], stopReason: "end_turn" };
+      },
+    };
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}` });
+    const writer = createRunHistoryWriter({
+      store: new InMemoryRunStore(),
+      warn: () => {},
+      onPersisted: (id) => registry.markPersisted(id),
+      sleep: async () => {},
+    });
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.runHistoryWriter = writer;
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-T",
+      fallback: { put: async () => {} },
+      warn: () => {},
+    });
+    deps.admission = new ThreadAdmission();
+    const a = fakeIO();
+    const run = dispatch(
+      deps,
+      { ...msg("write the report"), sourceUrl: "https://slack.example/p2", userName: "ux" },
+      a.io,
+    );
+    await firstStarted;
+    const b = fakeIO();
+    await dispatch(
+      deps,
+      { ...msg("and also the numbers", "slack:UY"), sourceUrl: "https://slack.example/p2", userName: "uy" },
+      b.io,
+    );
+    expect(b.replies[0]).toMatch(/^↪/);
+    await vi.waitFor(() =>
+      expect(registry.snapshotById("run-1")?.events ?? []).toContainEqual(
+        expect.objectContaining({ type: "input", text: expect.stringContaining("and also the numbers") }),
+      ),
+    );
+    fail(new Error("provider exploded"));
+    await run;
+    await writer.settled();
+    expect(a.replies.some((r) => r.includes("provider exploded"))).toBe(true);
+    expect(b.replies.at(-1)).toBe("answer 2");
+    // The fresh turn's reservation met run-1's row, waited for its finish, claimed again, and its own finish went through the ledger.
+    expect(order).toEqual([
+      "claim run-2 thread-live",
+      "finish run-1",
+      "claim run-2 ok",
+      "claim run-2 ok",
+      "finish run-2",
+    ]);
+    expect(inner.finished.get("run-1")?.status).toBe("failed");
+    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(
+      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+    ).toEqual([]);
+    expect(inner.live.size).toBe(0);
+  });
+
+  // The same road when the predecessor's finish cannot land at all: the
+  // restart runs untracked — as the ledger's Phase 2 rule has always had it —
+  // but says so on its own record, not in the bot log alone.
+  it("a restart whose predecessor's finish keeps failing (the store client's timeout) claims once more the moment that finish settles, runs untracked, and carries exactly one ledger_untracked note naming the predecessor and the failure; its record reaches the plain store", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const order: string[] = [];
+    let claimAnswered!: () => void;
+    const answered = new Promise<void>((r) => (claimAnswered = r));
+    // The closed row's finish is in flight when the restart's first claim is
+    // answered, and then fails as the client fails when the state Worker
+    // answers nothing — every attempt the writer makes, so the row stands for
+    // good and the name is cleared only by the last attempt.
+    const ledger = new Proxy(inner, {
+      get(target, prop) {
+        if (prop === "finish")
+          return async (runId: string, gen: string, record: RunRecord) => {
+            if (runId !== "run-1") return target.finish(runId, gen, record);
+            await answered;
+            await new Promise((r) => realSetTimeout(r, 0)); // the claim's answer is read before this settles
+            order.push("finish run-1 threw");
+            throw new TransientStoreError("run ledger /runs/finish: The operation was aborted due to timeout");
+          };
+        if (prop === "claim")
+          return async (req: ClaimRequest) => {
+            const result = await target.claim(req);
+            if (req.runId !== "run-1") {
+              order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
+              claimAnswered(); // any answer: an `ok` here (a regression) fails the order assertion, never hangs the suite
+            }
+            return result;
+          };
+        const v = Reflect.get(target, prop) as unknown;
+        return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+      },
+    }) as InMemoryRunLedger;
+    const { deps, provider, registry, writer, store, containers } = replacedContainerWorld(ledger, {
+      attach: (body) =>
+        new Response(
+          JSON.stringify(
+            body.reuse
+              ? { workspace: "/workspace/threads/t/other", ref: "main", sha: "abc", user: "worker3" }
+              : { workspace: "/workspace/threads/t/main", ref: "main", sha: "abc", user: "worker2" },
+          ),
+          { status: 200 },
+        ),
+    });
+    deps.admission = new ThreadAdmission();
+    const { io, replies } = ioWithCard();
+    const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    await writer.settled();
+    expect(outcome).toEqual({ status: "refused", refusal: "workspace_lost" });
+    // The re-claim happened the moment the finish's LAST attempt threw — the name
+    // stayed through the writer's two retries — and was refused again: the row still stands.
+    expect(order.slice(0, 5)).toEqual([
+      "claim run-2 thread-live",
+      "finish run-1 threw",
+      "finish run-1 threw",
+      "finish run-1 threw",
+      "claim run-2 thread-live",
+    ]);
+    expect(inner.live.has("run-1")).toBe(true);
+    expect(inner.finished.has("run-1")).toBe(false);
+    // The restart ran and answered untracked: no ledger row of its own, its record in the plain store…
+    expect(containers).toHaveLength(2);
+    expect(provider.requests).toHaveLength(1);
+    expect(replies.at(-1)).toBe("started over and done");
+    expect(inner.finished.has("run-2")).toBe(false);
+    expect(registry.getById("run-2")).toMatchObject({ finished: true, status: "completed" });
+    const stored = await store.get("run-2");
+    expect(stored?.status).toBe("completed");
+    // …and exactly one note on it says why, naming the predecessor and how its finish ended.
+    const notes = (stored?.events ?? []).filter((e) => e.type === "run_note" && e.kind === "ledger_untracked");
+    expect(notes).toHaveLength(1);
+    expect((notes[0] as { summary: string }).summary).toBe(
+      "not tracked by the run ledger: run run-1, whose finish was in flight in this process, still holds the thread's row: its finish did not land (run ledger /runs/finish: The operation was aborted due to timeout) — no handoff, resume or reclaim reaches this run; its record still reaches the store",
+    );
   });
 
   // Feature: docs/reference/specs/harness.md item 6, harness-pi.md items 8 and
