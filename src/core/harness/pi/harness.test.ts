@@ -2300,6 +2300,48 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(same.container.killed).toEqual([4242]);
   });
 
+  it("a follow-up turn's wait observes the run as the loop's does: a hard stop requested while the container is down ends the turn as the hard stop — the abort line as the turn's answer, one stopped note in mode hard, no thrown transport error, no verdict", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) {
+        bashTurn(w, "call_0", "npm test", "ok");
+        finalTurn(c, "All green.");
+        return;
+      }
+      c.emit({ type: "turn_start" });
+      c.loseTransport("same", "vm-new", 50);
+      c.onDownProbe = () => w.control.requestStop("hard");
+    });
+    const session = await w.open();
+    expect(session.answer).toBe("All green.");
+    const answer = await session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    expect(noteKinds(w).filter((k) => k === "stopped")).toEqual(["stopped"]);
+    expect(w.events.find((e) => e.type === "run_note" && e.kind === "stopped")).toMatchObject({ mode: "hard" });
+    expect(noteSummaries(w)).toContainEqual("the wait ended after 0s: a hard stop was requested");
+    expect(noteSummaries(w)).not.toContainEqual(expect.stringMatching(/so the failure stands$/));
+    expect(noteKinds(w)).not.toContain("sandbox_restarted");
+  });
+
+  it("a control file that vanished under a follow-up turn is noted exactly once, then the turn fails by name", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) {
+        bashTurn(w, "call_0", "npm test", "ok");
+        finalTurn(c, "All green.");
+        return;
+      }
+      c.emit({ type: "turn_start" });
+      c.failNext = { operation: "read", error: new HarnessControlFileLostError("send", paths.fifo, paths.dir) };
+    });
+    const session = await w.open();
+    const err = await session
+      .followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessControlFileLostError);
+    expect(noteSummaries(w).filter((s) => s.includes("vanished while the run was live"))).toHaveLength(1);
+  });
+
   it("saysContainerReplaced reads the executors' typed word first — the resident's ExecSandboxRestartedError, the seam's HarnessContainerRuntimeReplacedError — then the word `runtime-replaced` or `runtime-unreachable` anywhere in a failure's text, behind any prefix; a failure without the word is not one, and a bare string never is", () => {
     expect(saysContainerReplaced(new ExecSandboxRestartedError("the sandbox restarted under the run", 1))).toBe(true);
     expect(saysContainerReplaced(new HarnessContainerRuntimeReplacedError("alive", "dead"))).toBe(true);

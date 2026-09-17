@@ -687,13 +687,13 @@ class RuntimeReplacedError extends Error {
     readonly phase: "spawn" | "collect",
     readonly cause: unknown,
     /** Whether the replacement was KNOWN where the failure was classified
-     *  (`replacementKnown`): the SDK vouched the runtime moved, or the resident
-     *  knew the container it held gone. One decision, made once at the exec
-     *  choke point: it gates the incarnation swap there and the word on
-     *  `/exec` (`replacedExecAnswer`). Unknown, the failure only says the
-     *  container is down or the transport was lost — a merely asleep or
-     *  starting container, or a network blip, say the same — so memos and
-     *  leases stay and the harness's one more command decides. */
+     *  (`replacementKnown`): the SDK vouched the runtime moved, or a restore is
+     *  under way for this resident. One decision, made once at the exec choke
+     *  point, and it gates the word on `/exec` alone (`replacedExecAnswer`) —
+     *  the incarnation swap is unconditional there. Unknown, the failure only
+     *  says the container is down or the transport was lost — a merely asleep
+     *  or starting container, or a network blip, say the same — so the answer
+     *  is the SDK's words and the harness's one more command decides. */
     readonly known: boolean,
   ) {
     super(
@@ -1636,35 +1636,32 @@ export class ResidentDO extends Sandbox<Env> {
   private hydration: Promise<void> | null = null;
 
   /** Whether this resident knows the container it held is gone
-   *  (docs/reference/specs/resident-repos.md item 43): the container's exit
-   *  as the platform's monitor recorded it, or a restore under way.
+   *  (docs/reference/specs/resident-repos.md item 43): a restore under way for
+   *  this resident (`restoring`, persisted before any restore work) — its own
+   *  knowledge, reliable — and nothing else.
    *
-   *  The exit: the Container base's state record answers `stopped_with_code`
-   *  once the container's monitor settled with an exit — the rollout's
-   *  "Runtime signalled the container to exit due to a new version rollout:
-   *  0" is parsed into that code within seconds of the kill — and answers
-   *  something else for everything that is NOT the container gone: `running`
-   *  while a start is under way (the binding's "not running" refusal is a
-   *  start race then), `stopped` after our own idle stop, `healthy` while it
-   *  serves. That is the rollout signal's one programmatic trace: the monitor
-   *  handler records the code and returns before `onError`, and `onStop` is
-   *  only ever REPLAYED by `syncPendingStoppedEvents` at the next start — for
-   *  an idle sleep as much as for a roll — so neither hook is overridden here
-   *  and no stop record is kept: a replayed stop during the very start whose
-   *  race must not get the word would count as the container gone.
+   *  Not the Container base's exit state (`getState()`), which was tried and
+   *  separates nothing, read from `@cloudflare/containers` 0.3.7
+   *  `container.js`: the rollout's "Runtime signalled the container to exit
+   *  due to a new version rollout: 0" does not match `RUNTIME_SIGNALLED_ERROR`
+   *  (`'runtime signalled the container to exit:'`, line 10, matched by a
+   *  lowercase `includes`, 53-56), so its monitor rejection writes `stopped`
+   *  (1445-1462) — or nothing at all, since the harness's next command wakes
+   *  the container and the wake replaces `this.monitor` before the old
+   *  callback runs (`startAndWaitForPorts`, 1377-1380; the callback's guard,
+   *  1442-1444) — while an idle stop's graceful exit resolves the monitor and
+   *  writes `stopped_with_code(0)` (1434-1440; `stop()` writes no state,
+   *  712-717). Not a replayed `onStop` either: the base calls it only from
+   *  `syncPendingStoppedEvents` at the next start (1594-1603), for an idle
+   *  sleep as much as for a roll. Not the platform's `running` flag — an
+   *  asleep or starting container answers false to it too. The harness's own
+   *  probe (`identity`, `alive`) stays the arbiter, so under-saying the word
+   *  here is safe and over-saying it is what orphans a process.
    *
-   *  Never the platform's `running` flag — an asleep or starting container
-   *  answers false to it too, and an `/exec` that meets one must say what the
-   *  SDK said so the harness probes rather than relaunch into a container that
-   *  was never replaced. A read that fails (the storage under a reset or a
-   *  restore) is no knowledge: the answer falls back to the SDK's words and the
-   *  harness probes, never an unhandled throw where a 409 was due. */
+   *  A read that fails (the storage under a reset or a restore) is no
+   *  knowledge: the answer falls back to the SDK's words and the harness
+   *  probes, never an unhandled throw where a 409 was due. */
   private async knowsContainerGone(): Promise<boolean> {
-    try {
-      if ((await this.getState()).status === "stopped_with_code") return true;
-    } catch {
-      // the container's state unreadable: judged by the restore below
-    }
     try {
       return (await this.getStatus()).state === "restoring";
     } catch {
@@ -1674,8 +1671,8 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** The one decision on a failure the SDK classified as a runtime
    *  replacement, made where it is classified (`run()`): the SDK vouched the
-   *  runtime moved, or the resident knows the container it held is gone. It
-   *  gates the incarnation swap there and the word on `/exec`. */
+   *  runtime moved, or a restore is under way for this resident. It gates the
+   *  word on `/exec` alone; the incarnation swap there is unconditional. */
   private async replacementKnown(err: unknown): Promise<boolean> {
     return sdkVouchesRuntimeMoved(err) || (await this.knowsContainerGone());
   }
@@ -2069,10 +2066,17 @@ export class ResidentDO extends Sandbox<Env> {
       // takes the throw below. It exists so that if a future SDK vouches "never
       // started" we retry then — and only then — without a change here.
       if (!(err instanceof OperationInterruptedError && err.retryable === true)) {
-        // The memos and leases go only with a container known to be gone; a
-        // failure that says merely "down" or "transport lost" keeps them.
+        // The memos and leases go on EVERY replacement the SDK classified,
+        // whatever the word below will say: they are cheap to re-derive, and
+        // the per-incarnation memo block's invariant is that this one choke
+        // point clears them. Gating the swap on `known` was tried and does not
+        // hold on a real roll — the harness's next command wakes the container
+        // and the wake rewrites the base's state and replaces its monitor
+        // before the exit is ever recorded, so `known` stays false and stale
+        // memos (`hydratedVerdictAt`, `gitSetupDone`, `stageDirsReady`, …) and
+        // dead leases survive into the replacement. Only the word is gated.
+        this.swapIncarnation();
         const known = await this.replacementKnown(err);
-        if (known) this.swapIncarnation();
         throw new RuntimeReplacedError("spawn", err, known);
       }
       console.log(
@@ -2096,8 +2100,10 @@ export class ResidentDO extends Sandbox<Env> {
       };
     } catch (err) {
       if (isRuntimeReplacement(err)) {
+        // Unconditional, as at the spawn site above: the memos and leases go
+        // with every classified replacement; only the word is gated.
+        this.swapIncarnation();
         const known = await this.replacementKnown(err);
-        if (known) this.swapIncarnation();
         throw new RuntimeReplacedError("collect", err, known);
       }
       if (err instanceof ProcessWaitTimeoutError) {
