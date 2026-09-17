@@ -21,7 +21,7 @@ Credentials are environment variables: `.env` locally, a Worker secret on Cloudf
 2. *Basic Information* → *App-Level Tokens* → generate one with `connections:write`: `xapp-…` is `SLACK_APP_TOKEN`.
 3. *Install App* → *Install to Workspace*: the *Bot User OAuth Token* `xoxb-…` is `SLACK_BOT_TOKEN`.
 
-Socket Mode is on in the manifest. Its scopes cover mentions, replies, thread history, channel lists, user names, files, the 👀 reaction and direct messages. The bot logs any scope its token lacks on first connection.
+Socket Mode is on in the manifest. Its scopes cover mentions, replies, thread history, channel lists, user names, files, the 👀 reaction and direct messages, and its Messages tab is enabled so people can DM the bot. The bot logs any scope its token lacks on first connection.
 
 ## Add a model provider key
 
