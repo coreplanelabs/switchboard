@@ -323,3 +323,27 @@ export function fit(pipeline: Pipeline): { ok: boolean; need: number; have: numb
   const need = ALLOWANCES.provision + ASKS.coding + reserveMinutes({ kind: "coding", index: 0 }, pipeline);
   return { ok: pipeline.maxMinutes >= need, need, have: pipeline.maxMinutes };
 }
+
+// ---- the grant (decision 0046, Renewal: the grant decides, the lease continues) ----
+
+/** What the request authorizes for the whole problem beyond one lease: a count
+ *  of renewals and a cost cap in dollars. A lease is sized by the infrastructure
+ *  that must outlive it; the grant is sized by the person — a scope's word or
+ *  the request's `renewals:` directive — and the runner spends it one segment at
+ *  a time. Zero renewals and no cap by default, so nothing renews until someone
+ *  says so; `costCapUsd` absent is no cap, never zero. */
+export interface Grant {
+  renewals: number;
+  costCapUsd?: number;
+}
+
+/** Which layer's word the grant is: the request's directive, the user's scope,
+ *  the channel's, or the org's `ship.grant` — the default counts as the org's. */
+export type GrantSource = "org" | "channel" | "user" | "run";
+
+export const DEFAULT_GRANT: Grant = { renewals: 0 };
+
+/** The most renewals one request may carry: thirteen segments of the ship
+ *  preset's ask are a day, the longest problem a person hands over in one
+ *  message before a plan should carry it. */
+export const GRANT_RENEWALS_MAX = 12;

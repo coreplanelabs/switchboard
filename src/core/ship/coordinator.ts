@@ -34,7 +34,17 @@ import type { RunStatus } from "../runRecord.js";
 import { normalizeHead, sameCommit } from "../reviewedHead.js";
 import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdictKind } from "../reviewVerdict.js";
 import { parsePlanUnit, planUnitIds } from "./contract.js";
-import { carve, loopPosition, MINUTE_MS, SHIP_WAIT, type Carve, type Loop } from "../budgets.js";
+import {
+  carve,
+  DEFAULT_GRANT,
+  loopPosition,
+  MINUTE_MS,
+  SHIP_WAIT,
+  type Carve,
+  type Grant,
+  type GrantSource,
+  type Loop,
+} from "../budgets.js";
 
 const MIN = MINUTE_MS;
 
@@ -578,6 +588,12 @@ export interface UnitPipelineInput {
   addressSeverity?: AddressSeverity;
   /** Which layer set the level in force; named in the round header and the ending. */
   addressSeveritySource?: AddressSeveritySource;
+  /** The grant the request carried (decision 0046, the renewable lease):
+   *  renewals and a cost cap, and which layer granted it — named in the report;
+   *  absent reads as zero renewals and no cap, the org's. Nothing here spends
+   *  it yet: the renewal decision is the segment's end, not this unit's. */
+  grant?: Grant;
+  grantSource?: GrantSource;
   /** The instance's mark (agent-ship item 16): a generated one-unit plan — a
    *  `plan` with an id and no `path` — whose unit runs in the requesting
    *  thread and is re-issued with the request's own text, never a plan path. */
@@ -1475,6 +1491,12 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
   // stated decision, never a silent one.
   const level = s.input.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY;
   const levelLine = `Severity addressed: ${level} and above (set by ${s.input.addressSeveritySource ?? "org"}).`;
+  // The grant as the instance carries it (decision 0046): spent of granted,
+  // the cap when one is set, and who granted it — zero of zero until a scope
+  // or a directive says otherwise, and nothing spends it before the renewal
+  // decision exists.
+  const grant = s.input.grant ?? DEFAULT_GRANT;
+  const grantLine = `Renewals: 0 of ${grant.renewals} spent${grant.costCapUsd !== undefined ? `, cost cap $${grant.costCapUsd}` : ""} (granted by ${s.input.grantSource ?? "org"}).`;
   const lastFindings = s.findingsByRound[e.reviewRounds] ?? [];
   const skipped = lastFindings.filter((f) => !findingsAtOrAbove([f], level).length);
   const skippedLine =
@@ -1490,6 +1512,7 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
         `✅ Merged after ${rounds}: ${e.pr.url} (squash \`${e.sha.slice(0, 7)}\`) — merged by the plan runner under \`plan:merge\`: the review approved at this head and the guards were green.`,
         verdictLine,
         levelLine,
+        grantLine,
         ...(skippedLine ? [skippedLine] : []),
         declinedLine,
       ].join("\n");
@@ -1498,6 +1521,7 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
         `✅ Merge-ready after ${rounds}: ${e.pr.url}`,
         verdictLine,
         levelLine,
+        grantLine,
         ...(skippedLine ? [skippedLine] : []),
         declinedLine,
         // What the driver read at the approved head when it composed this

@@ -43,6 +43,7 @@
 // The handler here is pure over a parsed request (`handleCoordinatorRequest`),
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
+import { DEFAULT_GRANT } from "../core/budgets.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { AGENTS } from "../agents/registry.js";
 import { authorize } from "../core/authz/authorize.js";
@@ -1013,6 +1014,9 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
     // The severity to address, beside `merge`: one value the machine reads.
     addressSeverity: instance.addressSeverity ?? "minor",
     addressSeveritySource: instance.addressSeveritySource ?? "org",
+    // The grant beside it (decision 0046): absent on the record, nothing renews.
+    grant: instance.grant ?? DEFAULT_GRANT,
+    grantSource: instance.grantSource ?? "org",
     // The mark (item 16): the machine's report keys its re-issue line on it.
     generated: isGenerated(instance),
     repo: instance.repo,
@@ -1494,7 +1498,15 @@ export function parentRunRecord(
   const events: RunEvent[] = [
     // The instance the record is the story of (agent-ship item 17): the run
     // page reads it to list the instance's units.
-    { type: "run_meta", agent: "ship", repo: instance.repo, instanceId: instance.id, at: instance.createdAt },
+    {
+      type: "run_meta",
+      agent: "ship",
+      repo: instance.repo,
+      instanceId: instance.id,
+      // The grant the request carried (decision 0046): what a renewal could spend.
+      grant: instance.grant ?? DEFAULT_GRANT,
+      at: instance.createdAt,
+    },
     ...units.flatMap((u) =>
       u.rounds.map((r): RunEvent => ({
         type: "ship_round",

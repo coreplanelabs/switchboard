@@ -10,6 +10,7 @@
 // for the bot-side callers — the reclaim at boot, the coordinator routes.
 
 import { AGENTS, type AgentDef } from "../agents/registry.js";
+import { DEFAULT_GRANT, type Grant, type GrantSource } from "./budgets.js";
 
 // ---- config (`ship` block, docs/reference/specs/agent-ship.md item 8) -------------------
 
@@ -32,6 +33,11 @@ export interface ShipConfig {
    *  overridable per channel and per user (`config set … --ship.addressSeverity`)
    *  and per run by a `severity:<level>` directive. */
   addressSeverity?: AddressSeverity;
+  /** The grant a ship request carries by default in this deployment (decision
+   *  0046, the renewable lease): renewals and a cost cap; overridable per
+   *  channel and per user (`ship.grant` on the scope) and, for the count alone,
+   *  per run by a `renewals:<count>` directive. Absent: zero renewals, no cap. */
+  grant?: Grant;
 }
 
 import { shipInterruptedNote, type ShipCaps } from "./ship/coordinator.js";
@@ -69,6 +75,27 @@ export function resolveAddressSeverity(layers: {
   if (layers.user !== undefined) return { level: layers.user, source: "user" };
   if (layers.channel !== undefined) return { level: layers.channel, source: "channel" };
   return { level: layers.org ?? DEFAULT_ADDRESS_SEVERITY, source: "org" };
+}
+
+/** The grant in force and the layer that set it (decision 0046): the user's
+ *  scope wins over the channel's over the org's `ship.grant`, the default (zero
+ *  renewals, no cap) counting as the org's; a `renewals:` directive on the
+ *  request sets the count and keeps the cap the winning scope set — a person
+ *  spends renewals by hand, never widens the dollars from prose. Resolved once
+ *  by the ship fork and written on the instance beside `merge`. */
+export function resolveGrant(layers: { org?: Grant; channel?: Grant; user?: Grant; run?: number }): {
+  grant: Grant;
+  source: GrantSource;
+} {
+  const scoped: { grant: Grant; source: GrantSource } =
+    layers.user !== undefined
+      ? { grant: layers.user, source: "user" }
+      : layers.channel !== undefined
+        ? { grant: layers.channel, source: "channel" }
+        : { grant: layers.org ?? DEFAULT_GRANT, source: "org" };
+  if (layers.run === undefined) return scoped;
+  const cap = scoped.grant.costCapUsd;
+  return { grant: { renewals: layers.run, ...(cap !== undefined ? { costCapUsd: cap } : {}) }, source: "run" };
 }
 
 export const SHIP_DEFAULT_MAX_ROUNDS = 3;

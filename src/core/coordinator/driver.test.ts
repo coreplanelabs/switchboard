@@ -49,7 +49,12 @@ const answer = (body: object, at = T0, status = 200): BotAnswer => ({
 });
 
 /** The bot's `plan` answer for the given rows: who merges is the instance's field, as the route answers it. */
-const planAnswer = (units: CoordinatorUnit[], at = T0, merge: "runner" | "person" = "runner"): BotReply =>
+const planAnswer = (
+  units: CoordinatorUnit[],
+  at = T0,
+  merge: "runner" | "person" = "runner",
+  extra: Record<string, unknown> = {},
+): BotReply =>
   ok(
     {
       ok: true,
@@ -59,6 +64,7 @@ const planAnswer = (units: CoordinatorUnit[], at = T0, merge: "runner" | "person
       base: "main",
       caps: { maxRounds: 2, maxMinutes: 120 },
       units,
+      ...extra,
     },
     at,
   );
@@ -274,6 +280,33 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
   });
 
+  it("the grant rides the plan answer into the unit's report — spent of granted, the cap and the granter — and a count the route answers above the module's ceiling reads as the default, so nothing renews on a guess (decision 0046)", async () => {
+    const run = async (extra: Record<string, unknown>) => {
+      const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+      const b = bot({
+        plan: [planAnswer([row("U10")], T0, "runner", extra)],
+        "unit-start": [started("U10")],
+        branch: [branched("U10")],
+        spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+        "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+        "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+        round: [acked(), acked(), acked(), acked()],
+        merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+        "unit-end": [ok({ ok: true, told: true }, T0 + 21 * MIN)],
+        finish: [ok({ ok: true, runId: "run-parent" }, T0 + 21 * MIN)],
+      });
+      await runPlan(s.runner, b.client, INSTANCE);
+      const [end] = b.of("unit-end") as Array<{ ending: { report: string } }>;
+      return end.ending.report;
+    };
+    expect(await run({ grant: { renewals: 3, costCapUsd: 20 }, grantSource: "channel" })).toContain(
+      "Renewals: 0 of 3 spent, cost cap $20 (granted by channel).",
+    );
+    expect(await run({})).toContain("Renewals: 0 of 0 spent (granted by org).");
+    expect(await run({ grant: { renewals: 99 }, grantSource: "user" })).toContain(
+      "Renewals: 0 of 0 spent (granted by user).",
+    );
+  });
   it("a merge door answering merged by other — the pull request was merged after the approval — completes the plan: the unit ends merged and the report reads the Already-merged sentence", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({

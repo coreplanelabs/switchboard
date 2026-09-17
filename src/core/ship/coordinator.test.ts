@@ -1643,6 +1643,33 @@ describe("the severity gate — an approve's findings held to the level in force
     const report = renderUnitReport(d.state);
     expect(report).toContain("Severity addressed: major and above (set by user).");
     expect(report).toContain("Findings below major, left as-is: F1 (minor) — naming; F2 (nit) — t");
+    // The grant, as the instance carries it: absent reads as the org's zero.
+    expect(report).toContain("Renewals: 0 of 0 spent (granted by org).");
+  });
+
+  it("the report names the grant the instance carries — renewals spent of granted, the cap and who granted it — while nothing renews yet", () => {
+    const d = fresh(
+      input({
+        merge: "person",
+        generated: true,
+        grant: { renewals: 6, costCapUsd: 50 },
+        grantSource: "channel",
+      }),
+    );
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+    expect(renderUnitReport(d.state)).toContain("Renewals: 0 of 6 spent, cost cap $50 (granted by channel).");
   });
 
   it("maxRounds still caps the loop: an approve at the round cap carrying a gated finding ends round_cap, never a silent merge_ready", () => {

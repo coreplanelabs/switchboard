@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 
 import { AGENTS } from "../agents/registry.js";
 import {
+  DEFAULT_GRANT,
+  GRANT_RENEWALS_MAX,
   ALLOWANCES,
   ASKS,
   BASH_COMMAND,
@@ -283,5 +285,17 @@ describe("the loop's clocks — the loop ends inside the lease, so the write-up 
     expect(bearerExpiresAt(T0 + 45 * MINUTE_MS)).toBe(T0 + 46 * MINUTE_MS);
     expect(provisionalBearerExpiresAt(T0, 45)).toBe(T0 + (3 + 45 + 1) * MINUTE_MS);
     expect(ALLOWANCES.bearerGrace).toBe(1);
+  });
+});
+
+describe("the grant — what the request authorizes beyond one lease, sized by the person", () => {
+  it("defaults to zero renewals and no cost cap, so nothing renews until a scope or a directive says so", () => {
+    expect(DEFAULT_GRANT).toEqual({ renewals: 0 });
+    expect(DEFAULT_GRANT.costCapUsd).toBeUndefined();
+  });
+
+  it("bounds the renewals one request may carry: with the ship lease at its ask, a day of segments", () => {
+    expect(GRANT_RENEWALS_MAX).toBe(12);
+    expect((GRANT_RENEWALS_MAX + 1) * ASKS.ship).toBeGreaterThanOrEqual(24 * 60);
   });
 });

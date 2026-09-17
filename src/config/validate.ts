@@ -13,7 +13,7 @@ import {
   SHIP_DEFAULT_MAX_MINUTES,
   type ShipConfig,
 } from "../core/shipPipeline.js";
-import { ALLOWANCES, ASKS, fit } from "../core/budgets.js";
+import { ALLOWANCES, ASKS, fit, GRANT_RENEWALS_MAX, type Grant } from "../core/budgets.js";
 import type { SpawnConfig } from "../core/dispatch/spawn.js";
 import { validateDashboardConfig } from "../core/dashboardAuthConfig.js";
 import { validateArtifacts } from "../artifacts/config.js";
@@ -304,6 +304,7 @@ export function validateConfig(cfg: AppConfig): void {
   for (const key of unknownKeys(cfg, CONFIG_KEYS)) throw new Error(`config.yaml: unknown key \`${key}\``);
   validateScopeEfforts(cfg, "config.yaml");
   validateBoundaries(cfg, "config.yaml");
+  validateShipScopes(cfg, "config.yaml");
   validateHarnessWords(cfg, "config.yaml");
   validateMcpServers(cfg, "config.yaml");
   if (typeof cfg.organization !== "string" || cfg.organization.trim() === "") {
@@ -520,7 +521,59 @@ export function validateRestrict(raw: unknown): Restriction {
 }
 
 /** The `ship` block's keys, held equal to `ShipConfig` the way the top-level keys are. */
-const SHIP_KEYS: Record<keyof ShipConfig, true> = { maxRounds: true, maxMinutes: true, addressSeverity: true };
+const SHIP_KEYS: Record<keyof ShipConfig, true> = {
+  maxRounds: true,
+  maxMinutes: true,
+  addressSeverity: true,
+  grant: true,
+};
+
+/** The keys a grant may carry — held equal to `Grant` by the type checker. */
+const GRANT_KEYS: Record<keyof Grant, true> = { renewals: true, costCapUsd: true };
+
+/**
+ * One grant, wherever config can carry it (the org's `ship.grant`, a channel's
+ * or a user's `ship.grant`): a mapping of `renewals` — an integer from 0 to
+ * `GRANT_RENEWALS_MAX` — and `costCapUsd`, a positive number of dollars, nothing
+ * else (decision 0046, the renewable lease). Every finding names the path; the
+ * caller decides what to do with it.
+ */
+export function grantProblem(path: string, raw: unknown): string | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `${path} must be a mapping`;
+  for (const key of unknownKeys(raw, GRANT_KEYS)) return `${path}: unknown field ${key}`;
+  const g = raw as Record<keyof Grant, unknown>;
+  if (
+    g.renewals !== undefined &&
+    (!Number.isInteger(g.renewals) || (g.renewals as number) < 0 || (g.renewals as number) > GRANT_RENEWALS_MAX)
+  )
+    return `${path}.renewals must be an integer from 0 to ${GRANT_RENEWALS_MAX} (decision 0046)`;
+  if (
+    g.costCapUsd !== undefined &&
+    (typeof g.costCapUsd !== "number" || !Number.isFinite(g.costCapUsd) || g.costCapUsd <= 0)
+  )
+    return `${path}.costCapUsd must be a positive number of dollars`;
+  return undefined;
+}
+
+/** Reject a malformed grant on a channel's or a user's `ship` block, naming the
+ *  path (docs/reference/specs/routing-and-config.md item 2); the org's rides
+ *  `validateShip`. A grant without `renewals` reads as zero at resolution. */
+export function validateShipScopes(
+  layer: { channels?: Record<string, Scope>; users?: Record<string, Scope> },
+  source: string,
+): void {
+  for (const [kind, scopes] of [
+    ["channels", layer.channels],
+    ["users", layer.users],
+  ] as const) {
+    for (const [id, scope] of Object.entries(scopes ?? {})) {
+      const grant = scope.ship?.grant;
+      if (grant === undefined) continue;
+      const problem = grantProblem(`${kind}.${id}.ship.grant`, grant);
+      if (problem) throw new Error(`${source}: ${problem}`);
+    }
+  }
+}
 
 /** `ship` caps (docs/reference/specs/agent-ship.md item 8): both bounds enforced at load
  *  so a typo cannot silently become "no cap" (mirrors validateRunHistory). Any
@@ -564,6 +617,11 @@ function validateShip(ship: ShipConfig): void {
     throw new Error(
       `config.yaml: ship.addressSeverity must be one of ${ADDRESS_SEVERITIES.join(", ")} (docs/reference/specs/agent-ship.md item 9)`,
     );
+  // The grant (decision 0046): renewals within the module's ceiling, a positive cap.
+  if (ship.grant !== undefined) {
+    const problem = grantProblem("ship.grant", ship.grant);
+    if (problem) throw new Error(`config.yaml: ${problem}`);
+  }
 }
 
 /** The `spawn` block's keys, held equal to `SpawnConfig` the way the top-level keys are. */

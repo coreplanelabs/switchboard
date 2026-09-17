@@ -154,3 +154,30 @@ describe("severity:<level>", () => {
     expect(() => parseDirectives("severity:huge fix it")).toThrow(/blocking, major, minor, nit/);
   });
 });
+
+// The grant's renewals ride the request like `budget:` (decision 0046, the
+// renewable lease): a whole number from zero to the module's ceiling, one
+// request's, never sticky. The cost cap is a scope's word only.
+describe("parseDirectives — renewals", () => {
+  it("extracts renewals:<count> as a number and strips it; zero is a valid word", () => {
+    const d = parseDirectives("renewals:3 fix the flaky suite");
+    expect(d.renewals).toBe(3);
+    expect(d.text).toBe("fix the flaky suite");
+    expect(parseDirectives("renewals=0 hi").renewals).toBe(0);
+    expect(parseDirectives("renewals:12 ok").renewals).toBe(12);
+    expect(parseDirectives("just a question").renewals).toBeUndefined();
+  });
+
+  it("refuses by name anything but a whole number within the ceiling", () => {
+    for (const bad of ["renewals:13", "renewals:abc", "renewals:2.5", "renewals:-1", "renewals:3x"]) {
+      expect(() => parseDirectives(`${bad} do it`), bad).toThrow(/Invalid renewals "/);
+      expect(() => parseDirectives(`${bad} do it`), bad).toThrow(/renewals:<count> takes a whole number from 0 to 12/);
+    }
+  });
+
+  it("is never carried by a thread", () => {
+    expect(lastThreadDirectives([{ role: "user", text: "renewals:3 model:openai/gpt-5 go" }])).toEqual({
+      model: "openai/gpt-5",
+    });
+  });
+});
