@@ -13,6 +13,7 @@ import {
 import { namedToInput } from "../core/commandSurface.js";
 import { CHANNEL_DIRECTORY_TIMEOUT_MS } from "../core/dispatch/record.js";
 import { isServiceToken, type AccessIdentity } from "./accessAuth.js";
+import { holdsAll, isViewablePerson } from "../core/authz/viewAs.js";
 import { MAX_BODY_BYTES, readBody } from "./http.js";
 
 // Generic HTTP adapter for the command registry: `/api/<group>.<verb>` for
@@ -62,6 +63,8 @@ export interface CommandHttpOptions {
    *  the same directory): past it the actor resolves without `memberOf`, and the lookup's late answer
    *  still fills the directory's cache for the next request. */
   channelsOfTimeoutMs?: number;
+  /** A person's display name for the view-as banner and audit line (record 0053); absent → the id. */
+  personName?: (personId: string) => Promise<string | undefined>;
   /** `PUBLIC_BASE_URL`, when set: the origin writes must come from. */
   publicBaseUrl?: string;
   maxBodyBytes?: number;
@@ -152,10 +155,15 @@ export function serviceTokenAllowed(pathname: string, identity: AccessIdentity):
  */
 export async function resolveAccessActor(
   identity: AccessIdentity,
-  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs">,
+  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs" | "personName">,
 ): Promise<Actor> {
   const actor = accessActor(identity, opts.grantsFor);
-  if (isServiceToken(identity) || !identity.email || !opts.personByEmail) return actor;
+  if (isServiceToken(identity)) return actor;
+  // A cookie's word narrows an admin and nobody else: any other session resolves as if it
+  // carried none, its own person link included (record 0053).
+  if (identity.viewAs !== undefined && holdsAll(actor) && isViewablePerson(identity.viewAs))
+    return viewingAs(actor, identity.viewAs, opts);
+  if (!identity.email || !opts.personByEmail) return actor;
   const person = await opts.personByEmail(identity.email).catch(() => undefined);
   if (!person || !person.id.startsWith("slack:")) return actor;
   // The person's channels: a directory fact about them, carried beside the
@@ -170,6 +178,46 @@ export async function resolveAccessActor(
     self: [actor.id, person.id],
     asUser: { id: person.id, ...(person.name ? { name: person.name } : {}) },
     ...(memberOf === "unknown" ? {} : { memberOf }),
+  };
+}
+
+/**
+ * The admin's actor with the person hung under it (record 0053): `onBehalfOf` the actor the
+ * person's OWN dashboard session would resolve to — the browser baseline every `access:<sub>`
+ * session holds (record 0042: a config entry keyed to the person's Slack id never reaches their
+ * browser), `self` the person's id, `memberOf` the directory's channels — so the effective
+ * grants are the intersection (the person's, under `all`) and every identity fact `is-self` and
+ * `member-of` read is the person's, while `id` stays the admin's and `viewingAs` names the
+ * person for the audit line and the banner. The caller has checked the admin holds `all` and
+ * the id names a Slack person: the cookie's word can narrow an admin and nobody else.
+ */
+async function viewingAs(
+  admin: Actor,
+  personId: string,
+  opts: Pick<CommandHttpOptions, "grantsFor" | "channelsOf" | "channelsOfTimeoutMs" | "personName">,
+): Promise<Actor> {
+  const [memberOf, name] = await Promise.all([
+    opts.channelsOf
+      ? boundedChannels(opts.channelsOf(personId), opts.channelsOfTimeoutMs ?? CHANNEL_DIRECTORY_TIMEOUT_MS)
+      : Promise.resolve<ReadonlySet<string> | "unknown">("unknown"),
+    opts.personName ? opts.personName(personId).catch((): undefined => undefined) : Promise.resolve(undefined),
+  ]);
+  const person: Actor = {
+    kind: "user",
+    id: personId,
+    // The browser baseline under a subject no config names — what the person's own session
+    // holds, whose `sub` this process does not know (an entry keyed to that sub is the one
+    // thing view-as cannot see; record 0053 names the boundary).
+    grants: opts.grantsFor(`access:${personId}`),
+    self: [personId],
+    asUser: { id: personId, ...(name ? { name } : {}) },
+    ...(memberOf === "unknown" ? {} : { memberOf }),
+  };
+  return {
+    ...admin,
+    onBehalfOf: person,
+    asUser: person.asUser,
+    viewingAs: { id: personId, ...(name ? { name } : {}) },
   };
 }
 
@@ -199,7 +247,7 @@ async function boundedChannels(
  *  the policy table decides on (`resolveAccessActor`: linked to its person when the email names one). */
 export async function callerFor(
   identity: AccessIdentity,
-  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs">,
+  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs" | "personName">,
 ): Promise<Caller> {
   return {
     kind: "access",

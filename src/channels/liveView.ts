@@ -27,6 +27,8 @@ import type { ScheduleStore } from "../core/scheduleStore.js";
 import { STORE_UNAVAILABLE_BANNER } from "../core/commandRegistry.js";
 import { buildScheduledRows, type FiringsState } from "./scheduledPanel.js";
 import type { ShellRenderer } from "./webShell.js";
+import { holdsAll } from "../core/authz/viewAs.js";
+import { refuseWhileViewing, requestersOf } from "./viewAs.js";
 import { WEB_HTML_HEADERS } from "./webShell.js";
 import type { RunIndexRowSeed, RunsIndexSeed, ScheduledSeed, UnitRunRowSeed, UnitSeed } from "./webSeed.js";
 export { FAVICON_ICO_SVG, FAVICON_IDLE, FAVICON_LIVE, faviconSvg } from "./favicon.js";
@@ -100,7 +102,7 @@ export type RunRoute =
 /** Path words that are never a run id (ids are UUIDs): the Scheduled tab, the
  *  artifacts prefix and the unit pages' prefix. `/runs/artifacts`,
  *  `/runs/artifacts/x` and a bare `/runs/unit` route nowhere. */
-const RESERVED_IDS = new Set(["scheduled", "artifacts", "unit"]);
+const RESERVED_IDS = new Set(["scheduled", "artifacts", "unit", "view-as"]);
 
 /** Match the bare index (`/runs`, `/runs/`), the Scheduled tab
  *  (`/runs/scheduled`, item 18 — a reserved path word, never a run id: ids are
@@ -469,10 +471,10 @@ export function createLiveViewHandler(
   /** The run 404 as a page (item 19): one non-revealing message for an unknown
    *  id, an expired one, a wrong token, a deny — and a unit the viewer may not
    *  see (item 28) — with the way back. */
-  const notFoundPage = (res: ServerResponse): void => {
+  const notFoundPage = (res: ServerResponse, viewer: Actor): void => {
     res.writeHead(404, WEB_HTML_HEADERS);
     res.end(
-      deps.shell("Run not found", {
+      deps.shell(viewer, "Run not found", {
         page: "runNotFound",
         retentionDays: deps.retention ? deps.retention.retentionDays : null,
       }),
@@ -562,6 +564,9 @@ export function createLiveViewHandler(
           all,
           mine,
           ...(ctx.actor.asUser ? { asUser: ctx.actor.asUser } : {}),
+          // A session holding `all` may view the dashboard as a person (record 0053): the
+          // picker offers the requesters this page names; the seed says nothing to anyone else.
+          ...(holdsAll(ctx.actor) ? { viewAs: { people: requestersOf(page.rows) } } : {}),
           retentionDays: deps.retention ? deps.retention.retentionDays : null,
           now: now(),
           rows: [...page.rows],
@@ -570,7 +575,7 @@ export function createLiveViewHandler(
           ...(page.olderThan !== undefined ? { olderThan: page.olderThan } : {}),
         };
         res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(deps.shell(title, seed));
+        res.end(deps.shell(ctx.actor, title, seed));
       };
       if (!all) {
         // The default view is the registry plus the ledger's rows live under
@@ -597,7 +602,7 @@ export function createLiveViewHandler(
       const scheduled = deps.scheduled;
       if (!scheduled) {
         res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(deps.shell("Scheduled runs", { page: "scheduled", now: now(), rows: null }));
+        res.end(deps.shell(ctx.actor, "Scheduled runs", { page: "scheduled", now: now(), rows: null }));
         return true;
       }
       const visibleTo = readableRuns(ctx.actor);
@@ -611,7 +616,7 @@ export function createLiveViewHandler(
           ...(firings.ok ? {} : { firingsUnavailable: firings.reason }),
         };
         res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(deps.shell("Scheduled runs", seed));
+        res.end(deps.shell(ctx.actor, "Scheduled runs", seed));
       };
       if (!scheduled.store) {
         render({ ok: false, reason: NO_STORE_REASON });
@@ -635,7 +640,7 @@ export function createLiveViewHandler(
       run(res, async () => {
         const found = await service.listUnitRuns(route.key, visibleTo);
         if (!found.ok) {
-          notFoundPage(res);
+          notFoundPage(res, ctx.actor);
           return;
         }
         // The pull request's findings ledger (agent-ship item 18), under the
@@ -656,7 +661,7 @@ export function createLiveViewHandler(
           retentionDays: deps.retention ? deps.retention.retentionDays : null,
         };
         res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(deps.shell(`Unit ${found.value.id}`, seed));
+        res.end(deps.shell(ctx.actor, `Unit ${found.value.id}`, seed));
       });
       return true;
     }
@@ -683,7 +688,7 @@ export function createLiveViewHandler(
           });
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
-          deps.shell("Live run", {
+          deps.shell(ctx.actor, "Live run", {
             page: "run",
             mode: "live",
             id: route.id,
@@ -741,6 +746,7 @@ export function createLiveViewHandler(
       // throws: the run loop observes the control on its own schedule — this
       // request only records the ask.
       if (route.kind === "stop") {
+        if (ctx.actor.viewingAs) return refuseWhileViewing(res, ctx.actor.viewingAs);
         const mode = parseStopMode(url.searchParams.get("mode"));
         if (!mode) {
           text(res, 400, "mode must be soft or hard");
@@ -780,6 +786,7 @@ export function createLiveViewHandler(
     const actor = ctx.actor;
     const servable = (view: RunView): boolean => view.finished || view.ownerGen !== undefined;
     if (route.kind === "stop") {
+      if (ctx.actor.viewingAs) return refuseWhileViewing(res, ctx.actor.viewingAs);
       const mode = parseStopMode(url.searchParams.get("mode"));
       if (!mode) {
         text(res, 400, "mode must be soft or hard");
@@ -843,7 +850,7 @@ export function createLiveViewHandler(
         } else if (route.kind === "page") {
           // A person landed here: the same 404 (existence never revealed), as a
           // page with the way back (item 19). Machine routes keep the text body.
-          notFoundPage(res);
+          notFoundPage(res, ctx.actor);
         } else text(res, 404, NOT_FOUND);
         return;
       }
@@ -889,7 +896,7 @@ export function createLiveViewHandler(
         const tokens = liveTokens();
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
-          deps.shell("Run", {
+          deps.shell(ctx.actor, "Run", {
             page: "run",
             mode: "history",
             id: route.id,

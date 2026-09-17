@@ -17,6 +17,7 @@ import { HttpIO, MAX_BODY_BYTES, readBody, type DispatchFn } from "./http.js";
 import { readableRuns } from "./liveView/viewer.js";
 import type { HomeCommandSeed, HomeConversationRowSeed, HomeSeed, HomeTurnSeed } from "./webSeed.js";
 import { WEB_HTML_HEADERS, type ShellRenderer } from "./webShell.js";
+import { viewingRefusal } from "../core/authz/viewAs.js";
 
 // The web channel — adapter #5 (docs/decisions/0043, docs/reference/specs/web-chat.md
 // item 11): the chat at `/threads`. Like the HTTP ingress it is pure transport:
@@ -452,6 +453,12 @@ export function createWebChatHandler(
       req.destroy();
       return;
     }
+    if (ctx.actor.viewingAs) {
+      // Viewing as a person is read-only (record 0053): the chat is the person's to speak in.
+      answer(403, { error: "unauthorized", message: viewingRefusal(ctx.actor.viewingAs) });
+      req.destroy();
+      return;
+    }
     const sub = subOf(ctx.actor);
     const threadKey = threadKeyFor(sub, id);
     if (!ownLane(sub, threadKey)) {
@@ -550,7 +557,7 @@ export function createWebChatHandler(
     }
     const render = (title: string, seed: HomeSeed) => {
       res.writeHead(200, WEB_HTML_HEADERS);
-      res.end(deps.shell(title, seed));
+      res.end(deps.shell(ctx.actor, title, seed));
     };
     const sub = subOf(ctx.actor);
     if (route.kind === "new") {
@@ -568,7 +575,7 @@ export function createWebChatHandler(
         // revealed. The viewer's own lane is theirs to open empty.
         if (open.runs.length === 0 && !ownLane(sub, threadKey)) {
           res.writeHead(404, WEB_HTML_HEADERS);
-          res.end(deps.shell("Run not found", { page: "runNotFound", retentionDays }));
+          res.end(deps.shell(ctx.actor, "Run not found", { page: "runNotFound", retentionDays }));
           return;
         }
         const seed = await seedFor(ctx, route.id, threadKey, open);

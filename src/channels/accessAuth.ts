@@ -52,6 +52,9 @@ export interface AccessIdentity {
   sub: string;
   email?: string;
   commonName?: string;
+  /** The person the session asked to view as (record 0053): the `sb-view-as` cookie's value, a
+   *  platform-namespaced person id. The resolver honours it only for an actor holding `all`. */
+  viewAs?: string;
 }
 
 /** True for a service-token identity: empty `sub`, non-empty `commonName`. */

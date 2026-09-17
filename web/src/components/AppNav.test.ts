@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { h } from "vue";
 import type { Capabilities } from "@core/core/capabilities.js";
 import type { WebSeed } from "@core/channels/webSeed.js";
@@ -6,6 +6,7 @@ import AppNav from "./AppNav.vue";
 import { navSections } from "../lib/navSections";
 import AppShell from "./AppShell.vue";
 import { ALL_ON, mountApp } from "../testing/mount";
+import { browser } from "../lib/browser";
 
 // Feature: docs/reference/specs/live-view.md — the site nav and the shell follow the
 // installation's capabilities (the seed): Residents needs `residents`, Costs
@@ -116,6 +117,75 @@ describe("AppShell", () => {
     expect(wrapper.find("h1 a.brand").attributes("href")).toBe("/threads");
     expect(wrapper.find("nav.site").exists()).toBe(true);
     expect(wrapper.find("#body").text()).toBe("hello");
+  });
+
+  // Feature: docs/decisions/0053 — the banner on every page while viewing as a person.
+  it("draws the view-as banner under the header when the seed carries viewingAs — the person by name with the id beside, read-only said plainly, an Exit that posts the exit route and reloads — and nothing of it otherwise", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    const reload = vi.spyOn(browser, "reload").mockImplementation(() => {});
+    try {
+      const plain = mountApp(AppShell, { props: { title: "Live runs", nav: "runs" }, seed: island() });
+      expect(plain.find("#view-as").exists()).toBe(false);
+      const viewing = mountApp(AppShell, {
+        props: { title: "Live runs", nav: "runs" },
+        seed: { ...island(), viewingAs: { id: "slack:UIVY", name: "ivy" } },
+      });
+      const banner = viewing.find("#view-as");
+      expect(banner.exists()).toBe(true);
+      expect(banner.attributes("role")).toBe("status");
+      expect(banner.find(".who strong").text()).toBe("ivy");
+      expect(banner.find(".who .font-mono").text()).toBe("slack:UIVY");
+      expect(banner.find(".readonly").text()).toContain("read-only");
+      await banner.find("#view-as-exit").trigger("click");
+      expect(fetch).toHaveBeenCalledWith("/runs/view-as/exit", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+      });
+      await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+      // Without a name the id stands alone.
+      const unnamed = mountApp(AppShell, {
+        props: { title: "Live runs", nav: "runs" },
+        seed: { ...island(), viewingAs: { id: "slack:UIVY" } },
+      });
+      expect(unnamed.find("#view-as .who strong").text()).toBe("slack:UIVY");
+      expect(unnamed.find("#view-as .who .font-mono").exists()).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("a refused exit keeps the banner and shows the server's sentence; nothing reloads", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        json: async () => ({
+          error: "unauthorized",
+          message: "Only a session holding every grant may view as a person.",
+        }),
+      }),
+    );
+    const reload = vi.spyOn(browser, "reload").mockImplementation(() => {});
+    try {
+      const viewing = mountApp(AppShell, {
+        props: { title: "Live runs", nav: "runs" },
+        seed: { ...island(), viewingAs: { id: "slack:UIVY", name: "ivy" } },
+      });
+      await viewing.find("#view-as-exit").trigger("click");
+      await vi.waitFor(() =>
+        expect(viewing.find("#view-as .text-bad").text()).toBe(
+          "Only a session holding every grant may view as a person.",
+        ),
+      );
+      expect(reload).not.toHaveBeenCalled();
+      expect(viewing.find("#view-as").exists()).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
   });
 
   it("offers the phone hamburger (nav + docs + theme in one touch menu) beside the sm+ inline nav", () => {

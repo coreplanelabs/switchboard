@@ -396,6 +396,30 @@ describe("POST /threads/<id>/send — the body into dispatch() as this session (
     expect(calls[0].msg).toMatchObject({ userId: "slack:UALICE", userName: "alice", authenticatedAs: "access:a1" });
   });
 
+  // Feature: docs/decisions/0053 — the chat is the person's to speak in.
+  it("a session viewing as a person is refused a send with 403 and the one sentence; nothing is dispatched", async () => {
+    const { handler, calls } = setup();
+    const viewing: Actor = {
+      ...alice,
+      grants: { actions: "all", channels: "all", repos: "all" },
+      onBehalfOf: linked,
+      asUser: linked.asUser,
+      viewingAs: { id: "slack:UALICE", name: "alice" },
+    };
+    const res = await request(handler, {
+      url: "/threads/conv-1/send",
+      method: "POST",
+      body: JSON.stringify({ text: "help" }),
+      actor: viewing,
+    });
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body)).toEqual({
+      error: "unauthorized",
+      message: "You are viewing as alice; writes are your own to make — exit view-as to write.",
+    });
+    expect(calls).toHaveLength(0);
+  });
+
   it("a request the pipeline answers without a run — a hand-back, a help answer, a steer acknowledgement — is 200 with the reply text and no view path", async () => {
     const { handler } = setup({
       dispatch: async (_deps, _msg, io) => {

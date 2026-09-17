@@ -4,6 +4,7 @@ import { systemClock } from "./trace/clock.js";
 import type { Span, TraceOptions } from "./trace/types.js";
 import { formatDuration } from "./time/formatDuration.js";
 import { authorize } from "./authz/authorize.js";
+import { viewingRefusal } from "./authz/viewAs.js";
 import type { Actor, Resource } from "./authz/types.js";
 import { ALL_CAPABILITIES, type Capabilities } from "./capabilities.js";
 
@@ -353,6 +354,8 @@ export interface AuditEntry {
   commandId: string;
   callerKind: Caller["kind"];
   callerId: string;
+  /** The person an admin's session was viewing as (record 0053), when it was. */
+  viewingAs?: string;
   /** The person a dashboard session is linked to (record 0042), when it differs from `callerId`:
    *  an operator reading the log sees who acted and through which session. */
   asUser?: string;
@@ -462,6 +465,7 @@ export class CommandRegistry<D> {
         callerKind: caller.kind,
         callerId: caller.id,
         ...(caller.actor.asUser ? { asUser: caller.actor.asUser.id } : {}),
+        ...(caller.actor.viewingAs ? { viewingAs: caller.actor.viewingAs.id } : {}),
         effect: cmd.effect,
         outcome: res.ok ? "ok" : res.error,
         ...(reason === undefined ? {} : { reason }),
@@ -470,6 +474,10 @@ export class CommandRegistry<D> {
       return res;
     };
 
+    // Viewing as a person (record 0053) is read-only: the person's own writes are theirs to make.
+    // Refused before the table is asked, in one sentence every surface shows as its notice.
+    if (caller.actor.viewingAs && cmd.effect !== "read")
+      return done(fail("unauthorized", viewingRefusal(caller.actor.viewingAs)), "viewing");
     const decision = authorize(caller.actor, cmd.action, resourceOf(cmd, input, caller));
     if (!decision.allow)
       return done(fail("unauthorized", `${caller.id} is not allowed to run ${cmd.id}`), decision.reason);

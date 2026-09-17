@@ -101,6 +101,13 @@ export function scopeFixture(): ScopeResource[] {
   return scopes;
 }
 
+const ivy = actor(
+  "user",
+  "slack:UIVY",
+  { actions: browserActions(COMMAND_GROUPS) },
+  { self: ["slack:UIVY"], asUser: { id: "slack:UIVY", name: "ivy" }, memberOf: new Set([CHANNELS.priv.id]) },
+);
+
 const nonMember = actor("user", "slack:UCAROL", {
   actions: new Set(["runs:read"]),
   channels: new Set([CHANNELS.pub2.id]),
@@ -153,6 +160,19 @@ export const ACTORS = {
       asUser: { id: "slack:UIVY", name: "ivy" },
       memberOf: new Set([CHANNELS.priv.id]),
     },
+  ),
+  /** The person an admin views as (record 0053), as the resolver builds her: the actor Ivy's OWN
+   *  dashboard session resolves to — the browser baseline, `self` her id, `memberOf` the private
+   *  channel per the directory. */
+  ivy,
+  /** An admin's session viewing as Ivy (record 0053): the admin's own `all` with Ivy hung under
+   *  it, so the effective grants are Ivy's and the identity facts Ivy's, while `id` stays the
+   *  admin's and `viewingAs` names her. */
+  viewingAsIvy: actor(
+    "user",
+    "access:admin",
+    { actions: "all", channels: "all", repos: "all" },
+    { onBehalfOf: ivy, asUser: { id: "slack:UIVY", name: "ivy" }, viewingAs: { id: "slack:UIVY", name: "ivy" } },
   ),
   /** An Access operator (granted every read + write with `channels: all`): fleet-wide, never exec. */
   operator: actor("user", "access:op", {

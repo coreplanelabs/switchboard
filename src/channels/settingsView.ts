@@ -2,6 +2,7 @@ import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { ChannelScopeIndexRow, ConfigDescription, Scope } from "../config.js";
 import type { PickableChannel } from "../core/commands/config.js";
 import { authorize } from "../core/authz/authorize.js";
+import type { Actor } from "../core/authz/types.js";
 import type { Capabilities } from "../core/capabilities.js";
 import type { Caller, CommandInvoker, InvokeResult } from "../core/commandRegistry.js";
 import type { InstallationView } from "../core/installationSettings.js";
@@ -254,9 +255,9 @@ export function createSettingsViewHandler(
       }
       plain(res, 502, `settings unavailable: ${reason}`);
     };
-    const render = (seed: SettingsSeed) => {
+    const render = (viewer: Actor, seed: SettingsSeed) => {
       res.writeHead(200, WEB_HTML_HEADERS);
-      res.end(shell("Settings", seed));
+      res.end(shell(viewer, "Settings", seed));
     };
     const channel = "channel" in route ? route.channel : undefined;
     // The caller is resolved once per request, linked to its person when the
@@ -278,11 +279,12 @@ export function createSettingsViewHandler(
             plain(res, 403, "forbidden");
             return;
           }
-          render({ ...base, installation: deps.installation() });
+          render(caller.actor, { ...base, installation: deps.installation() });
           return;
         }
         const part = tab === "mcps" ? await mcpsSeed(caller, channel) : await channelsSeed(caller, channel);
         render(
+          caller.actor,
           tab === "mcps"
             ? { ...base, mcps: part as SettingsSeed["mcps"] }
             : { ...base, channels: part as SettingsSeed["channels"] },

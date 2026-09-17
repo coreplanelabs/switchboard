@@ -242,8 +242,13 @@ function requestStop(mode: "soft" | "hard"): void {
   if (mode === "hard" && !browser.confirm("Hard stop: abort the run now with no summary and free its sandbox?")) return;
   stopDisabled.value = true;
   fetch(`${seed.stopUrl}&mode=${encodeURIComponent(mode)}`, { method: "POST", credentials: "same-origin" })
-    .then((r) => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    .then(async (r) => {
+      if (!r.ok) {
+        // A refusal carries its reason (a view-as session is told the writes are its own to make,
+        // record 0053); a bare failure keeps the status.
+        const parsed = (await r.json?.().catch(() => null)) as { message?: unknown } | null;
+        throw new Error(typeof parsed?.message === "string" ? parsed.message : `HTTP ${r.status}`);
+      }
       markStopping(mode);
     })
     .catch((err: unknown) => {
