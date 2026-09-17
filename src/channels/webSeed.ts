@@ -38,8 +38,9 @@ export interface RunsIndexSeed {
    *  predicate, server side — the feed is narrowed the same way). */
   mine: boolean;
   /** The Slack person this dashboard session acts as (record 0042), when its
-   *  email named one; absent, "Show mine" is offered disabled — no run is ever
-   *  requested as an unlinked session. */
+   *  email named one — "Show only mine" then names the person. Absent, the
+   *  session's own runs are the ones it requested from the Threads chat under
+   *  its `access:<sub>` (record 0043), and the toggle says so. */
   asUser?: { id: string; name?: string };
   /** Configured run-history retention; null when history is off. */
   retentionDays: number | null;

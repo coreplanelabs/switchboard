@@ -21,23 +21,23 @@ import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 const seed = useSeed("runs");
 const showAll = seed?.all ?? false;
 // `?mine=1` is a server view like `?all=1`: the viewer's predicate is narrowed
-// to their own runs before anything is loaded. It is offered only to a session
-// linked to its Slack person (record 0042) — no run is ever requested as an
-// unlinked session, so "mine" would be an honest but useless empty list.
+// to their own runs before anything is loaded. Every session has runs of its
+// own to show: a linked session's are its Slack person's on every channel
+// (record 0042); an unlinked session's are the ones it requested from the
+// Threads chat, recorded under its own `access:<sub>` (record 0043).
 const showMine = seed?.mine ?? false;
-const linked = seed?.asUser !== undefined;
 // The two toggles are remembered by this browser (item 29): a URL that names
 // neither opens the remembered view — one navigation, before the feed opens —
 // and a URL that names one wins, so a shared link shows what it says.
 const params = new URLSearchParams(browser.search());
 if (!params.has("mine") && !params.has("all") && seed) {
-  const wantMine = linked && browser.readPref(RUNS_PREF.mine) === "1";
+  const wantMine = browser.readPref(RUNS_PREF.mine) === "1";
   const wantAll = browser.readPref(RUNS_PREF.all) === "1";
   if (wantMine || wantAll) browser.navigate(viewHref(wantAll, wantMine));
 }
-const mineHint = linked
-  ? `Only the runs ${seed?.asUser?.name ?? "you"} requested`
-  : "Your session is not linked to a Slack user, so no run here is yours. Sign in with the email of your Slack account.";
+const mineHint = seed?.asUser
+  ? `Only the runs ${seed.asUser.name ?? "you"} requested`
+  : "Only the runs this session requested from Threads. Sign in with the email of your Slack account to see your Slack runs too.";
 /** The index href for a view: `/runs`, `?all=1`, `?mine=1`, or both. */
 function viewHref(all: boolean, mine: boolean): string {
   const q = [all ? "all=1" : "", mine ? "mine=1" : ""].filter(Boolean).join("&");
@@ -159,15 +159,13 @@ onUnmounted(() => {
       <span class="filter ml-auto inline-flex items-center gap-4">
         <UTooltip :text="mineHint">
           <label
-            class="toggle inline-flex select-none items-center gap-1.5"
-            :class="linked ? 'cursor-pointer text-toned hover:text-highlighted' : 'cursor-not-allowed text-dimmed'"
+            class="toggle inline-flex cursor-pointer select-none items-center gap-1.5 text-toned hover:text-highlighted"
           >
             <input
               id="showmine"
               type="checkbox"
               class="accent-(--ui-bg-inverted)"
               :checked="showMine"
-              :disabled="!linked"
               aria-describedby="minehint"
               @change="onToggleMine"
             />
