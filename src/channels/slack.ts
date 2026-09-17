@@ -580,6 +580,30 @@ export function clickSlackIO(
  *  `block_actions` body and the button pressed. */
 export type ConfirmClick = Pick<SlackActionMiddlewareArgs<BlockAction<ButtonAction>>, "ack" | "body" | "action">;
 
+/** The note the taken offer carries while the core works (item 14): which
+ *  button, who pressed it, and that it is in hand — as mrkdwn for the context
+ *  block and as plain text for the fallback. */
+export function takenOfferNote(kind: "confirm" | "cancel", userId: string): { mrkdwn: string; plain: string } {
+  const button = kind === "confirm" ? "Run" : "Cancel";
+  const doing = kind === "confirm" ? "running…" : "cancelling…";
+  return { mrkdwn: `*${button}* clicked by <@${userId}> · ${doing}`, plain: `${button} clicked · ${doing}` };
+}
+
+/** The offer message's blocks the moment a button is pressed: its own blocks
+ *  minus the `actions` block, with the taken note as one more context line —
+ *  so a second press has nothing to press while the command runs. Built from
+ *  the payload's blocks, which are the offer as posted. */
+export function takenOfferBlocks(
+  blocks: readonly SlackBlockKit[],
+  kind: "confirm" | "cancel",
+  userId: string,
+): SlackBlockKit[] {
+  return [
+    ...blocks.filter((b) => b.type !== "actions"),
+    { type: "context", elements: [{ type: "mrkdwn", text: takenOfferNote(kind, userId).mrkdwn }] },
+  ];
+}
+
 /**
  * A click on a confirmation's Run or Cancel (record 0044; slack-channel.md
  * item 14), in this order and no other: ack — Slack gives a listener three
@@ -616,6 +640,25 @@ export async function handleConfirmClick(
     return;
   }
   const threadTs = message.thread_ts ?? container?.thread_ts ?? message.ts;
+  // Take the offer before anything else runs: Slack has no disabled state for a
+  // button and its own grey flash ends after a moment, so a click that is only
+  // answered when the command finishes leaves live buttons on the message
+  // meanwhile. The buttons go now, and a line says who pressed which; the
+  // completion below rebuilds from the payload's original blocks, so the note
+  // is replaced by the answer. A take that fails is logged and the click
+  // proceeds — the core's consume is single-use whatever the message shows.
+  try {
+    await client.chat.update({
+      channel,
+      ts: message.ts,
+      text: `${message.text ?? ""}\n${takenOfferNote(kind, body.user.id).plain}`,
+      blocks: takenOfferBlocks(message.blocks ?? [], kind, body.user.id),
+    });
+  } catch (err) {
+    console.error(
+      `[confirm] ${kind} click on ${id} in ${channel}:${message.ts}: the buttons could not be taken down — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   let io: SlackIO | undefined;
   try {
     const requester = await resolveSlackRequester(client, {

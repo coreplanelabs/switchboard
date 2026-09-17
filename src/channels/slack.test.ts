@@ -843,10 +843,16 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
     });
     expect(s.grantsFor).toHaveBeenCalledWith("slack:UA");
     expect(click.io).toBeInstanceOf(SlackIO);
-    // The reply completed the offer message rather than posting a new one.
-    expect(s.update).toHaveBeenCalledTimes(1);
+    // Two edits of the offer message and no new post: the take right after the
+    // ack (buttons gone, the note), then the reply completing it.
+    expect(s.update).toHaveBeenCalledTimes(2);
     expect(s.postMessage).not.toHaveBeenCalled();
-    const call = s.update.mock.calls[0]![0];
+    expect(s.calls.slice(0, 2)).toEqual(["ack", "chat.update"]);
+    const taken = s.update.mock.calls[0]![0];
+    expect(taken).toMatchObject({ channel: "C1", ts: "4.0" });
+    expect(blocksOf(taken).some((b) => b.type === "actions")).toBe(false);
+    expect(JSON.stringify(taken.blocks)).toContain("*Run* clicked by <@UA> · running…");
+    const call = s.update.mock.calls[1]![0];
     expect(call).toMatchObject({ channel: "C1", ts: "4.0" });
     const blocks = blocksOf(call);
     expect(blocks.map((b) => b.type)).toEqual(["section", "context", "section"]);
@@ -863,7 +869,7 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
     await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.run") });
     const io = dispatchClickMock.mock.calls[0]![1].io;
     await io.reply("✅ acme/api onboarded");
-    expect(s.update).toHaveBeenCalledTimes(1);
+    expect(s.update).toHaveBeenCalledTimes(2);
     expect(s.postMessage).toHaveBeenCalledTimes(1);
     expect(s.postMessage.mock.calls[0]![0]).toMatchObject({
       channel: "C1",
@@ -877,7 +883,8 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
     coreReplies(OFFER_CANCELLED_LINE);
     await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.cancel") });
     expect(dispatchClickMock.mock.calls[0]![1]).toMatchObject({ kind: "cancel", id: "c-1" });
-    const call = s.update.mock.calls[0]![0];
+    expect(JSON.stringify(s.update.mock.calls[0]![0].blocks)).toContain("*Cancel* clicked by <@UA> · cancelling…");
+    const call = s.update.mock.calls[1]![0];
     const blocks = blocksOf(call);
     expect(blocks[0]).toEqual(offerBlocks[0]);
     expect(blocks.some((b) => b.type === "actions")).toBe(false);
@@ -890,13 +897,49 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
       const s = scripted();
       coreReplies(line);
       await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.run") });
-      expect(s.update).toHaveBeenCalledTimes(1);
-      const blocks = blocksOf(s.update.mock.calls[0]![0]);
+      expect(s.update).toHaveBeenCalledTimes(2);
+      const blocks = blocksOf(s.update.mock.calls[1]![0]);
       expect(blocks[0]).toEqual(offerBlocks[0]);
       expect(blocks.some((b) => b.type === "actions")).toBe(false);
       expect(blocks.at(-1)!.text!.text).toBe(line);
     },
   );
+
+  it("the buttons are gone before the core runs: the edit right after the ack drops the actions block and notes who pressed which, so a second press has nothing to press; the completion then replaces the note with the answer", async () => {
+    const s = scripted();
+    dispatchClickMock.mockImplementationOnce(async (_deps, click) => {
+      s.calls.push("dispatchClick");
+      await click.io.reply("routed: costs snapshot\nCosts snapshot taken");
+      return { status: "completed" };
+    });
+    await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.run") });
+    // The take is the first Web API call after the ack and lands before the core is asked.
+    expect(s.calls.indexOf("chat.update")).toBe(1);
+    expect(s.calls.indexOf("chat.update")).toBeLessThan(s.calls.indexOf("dispatchClick"));
+    const taken = blocksOf(s.update.mock.calls[0]![0]);
+    expect(taken.map((b) => b.type)).toEqual(["section", "context", "context"]);
+    expect(taken[0]).toEqual(offerBlocks[0]);
+    expect(taken[1]).toEqual(offerBlocks[1]);
+    expect(JSON.stringify(taken[2])).toContain("*Run* clicked by <@UA> · running…");
+    expect(String(s.update.mock.calls[0]![0].text)).toContain("Run clicked · running…");
+    // The completion is built from the offer as posted: the note is gone, the answer is under the line.
+    const done = blocksOf(s.update.mock.calls[1]![0]);
+    expect(done.map((b) => b.type)).toEqual(["section", "context", "section"]);
+    expect(done.at(-1)!.text!.text).toContain("Costs snapshot taken");
+    expect(JSON.stringify(done)).not.toContain("running…");
+  });
+
+  it("a take that fails is logged and the click still reaches the core and completes the message", async () => {
+    const s = scripted();
+    s.update.mockRejectedValueOnce(new Error("message_not_found"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    coreReplies(OFFER_CANCELLED_LINE);
+    await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.cancel") });
+    expect(error.mock.calls.map((c) => String(c[0])).join("\n")).toContain("could not be taken down");
+    expect(dispatchClickMock).toHaveBeenCalledTimes(1);
+    expect(s.update).toHaveBeenCalledTimes(2);
+    expect(blocksOf(s.update.mock.calls[1]![0]).at(-1)!.text!.text).toBe(OFFER_CANCELLED_LINE);
+  });
 
   it("a click by someone who is not the requester reaches dispatchClick as that actor — the core decides `foreign`, the adapter decides nothing", async () => {
     const s = scripted();
@@ -905,7 +948,8 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
     expect(dispatchClickMock).toHaveBeenCalledTimes(1);
     expect(dispatchClickMock.mock.calls[0]![1].actor).toMatchObject({ kind: "user", id: "slack:UOTHER" });
     expect(s.grantsFor).toHaveBeenCalledWith("slack:UOTHER");
-    expect(blocksOf(s.update.mock.calls[0]![0]).at(-1)!.text!.text).toBe(OFFER_FOREIGN_LINE);
+    expect(JSON.stringify(s.update.mock.calls[0]![0].blocks)).toContain("clicked by <@UOTHER>");
+    expect(blocksOf(s.update.mock.calls[1]![0]).at(-1)!.text!.text).toBe(OFFER_FOREIGN_LINE);
   });
 
   it("a throw out of the core is caught: logged, the offer message completed with the failure line, and the handler resolves", async () => {
@@ -917,8 +961,8 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
     ).resolves.toBeUndefined();
     expect(s.ack).toHaveBeenCalledTimes(1);
     expect(error.mock.calls.map((c) => String(c[0])).join("\n")).toContain("the store fell over");
-    expect(s.update).toHaveBeenCalledTimes(1);
-    const blocks = blocksOf(s.update.mock.calls[0]![0]);
+    expect(s.update).toHaveBeenCalledTimes(2);
+    const blocks = blocksOf(s.update.mock.calls[1]![0]);
     expect(blocks[0]).toEqual(offerBlocks[0]);
     expect(blocks.some((b) => b.type === "actions")).toBe(false);
     expect(blocks.at(-1)!.text!.text).toBe(CLICK_FAILED_LINE);
@@ -927,7 +971,7 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
   it("a failure to complete the message after a throw is logged too and never escapes the handler", async () => {
     const s = scripted();
     dispatchClickMock.mockRejectedValueOnce(new Error("the store fell over"));
-    s.update.mockRejectedValueOnce(new Error("message_not_found"));
+    s.update.mockRejectedValue(new Error("message_not_found"));
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     await expect(
       handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.run") }),
