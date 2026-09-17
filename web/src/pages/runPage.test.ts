@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import RunPage from "./RunPage.vue";
-import { ALL_ON, mountApp } from "../testing/mount";
+import { ALL_ON, mountApp, type MountAppOptions } from "../testing/mount";
+import { loadDiffs } from "../modules/pr-review/diffsLibrary";
 import { browser } from "../lib/browser";
 import type { Capabilities } from "@core/core/capabilities.js";
 import { formatClock, formatLocalIso } from "../lib/format";
@@ -1459,7 +1460,29 @@ describe("RunPage — live mode", () => {
 // page: a run that published reading-diff artifacts gets the Reading diff
 // button; the slideout renders the module from the adapter's state. The
 // module itself is tested in src/modules/pr-review/; this is the wiring.
-describe("PR-review panel wiring", () => {
+/** Opening the panel is the one place a page test crosses to vitest's main
+ *  process mid-test: the renderer arrives by a dynamic import that process
+ *  serves, and on a saturated CI shard (four forks on four vCPUs, the main
+ *  process transforming the neighbours' files) that import outran
+ *  vi.waitFor's one-second default. So the library is loaded once before the
+ *  group, and the group's budget, not that default, caps every wait. */
+const PANEL_BUDGET_MS = 30_000;
+
+describe("PR-review panel wiring", { timeout: PANEL_BUDGET_MS }, () => {
+  beforeAll(() => loadDiffs());
+  // Every mount here goes onto document.body, where the next test's
+  // querySelector finds it: a test that fails before its own unmount would
+  // hand its panel to the tests after it. The group unmounts, not the test.
+  const mounted: ReturnType<typeof mountApp>[] = [];
+  const mountPage = (seed: MountAppOptions["seed"]) => {
+    const wrapper = mountApp(RunPage, { seed });
+    mounted.push(wrapper);
+    return wrapper;
+  };
+  afterEach(() => {
+    for (const wrapper of mounted.splice(0)) if (!wrapper.vm.$.isUnmounted) wrapper.unmount();
+  });
+
   const inputFrame = { ...input, type: "input" } as const;
   const runMeta = {
     type: "run_meta",
@@ -1482,9 +1505,9 @@ describe("PR-review panel wiring", () => {
   } as const;
 
   it("a history run with artifacts shows the button; opening it renders the panel with the PR link, the file changed and its diff handed to the renderer", async () => {
-    const wrapper = mountApp(RunPage, {
-      seed: historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "looks correct", at: 9 }]),
-    });
+    const wrapper = mountPage(
+      historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "looks correct", at: 9 }]),
+    );
     const button = wrapper.find('[data-testid="reading-diff-button"]');
     expect(button.exists()).toBe(true);
     await button.trigger("click");
@@ -1493,8 +1516,9 @@ describe("PR-review panel wiring", () => {
     expect(panel).not.toBeNull();
     expect(panel!.textContent).toContain("acme/api#42");
     expect(panel!.textContent).toContain("full diff · git");
-    await vi.waitFor(() =>
-      expect(panel!.querySelector('[data-file="src/a.ts"]')?.textContent).toBe("rendered src/a.ts"),
+    await vi.waitFor(
+      () => expect(panel!.querySelector('[data-file="src/a.ts"]')?.textContent).toBe("rendered src/a.ts"),
+      { timeout: PANEL_BUDGET_MS },
     );
     expect(panel!.querySelector('[data-testid="file-entry"]')?.textContent).toContain("src/a.ts");
     // The panel replaces the slideover's header, so the dialog's accessible
@@ -1507,7 +1531,6 @@ describe("PR-review panel wiring", () => {
     const labelledBy = dialog!.getAttribute("aria-labelledby");
     expect(labelledBy).toBeTruthy();
     expect(document.getElementById(labelledBy!)?.textContent).toContain("acme/api#42");
-    wrapper.unmount();
   });
 
   it("artifacts arriving over the live stream light the button too", async () => {
@@ -1524,11 +1547,8 @@ describe("PR-review panel wiring", () => {
   });
 
   it("a run without artifacts (a coding run, or reading diffs off) has no button", () => {
-    const wrapper = mountApp(RunPage, {
-      seed: historySeed([inputFrame, runMeta, { type: "answer", text: "done", at: 9 }]),
-    });
+    const wrapper = mountPage(historySeed([inputFrame, runMeta, { type: "answer", text: "done", at: 9 }]));
     expect(wrapper.find('[data-testid="reading-diff-button"]').exists()).toBe(false);
-    wrapper.unmount();
   });
 
   it("a seeded pr_description renders in the panel: the dialog is named by the PR's title, and the Description tab carries the TL;DR", async () => {
@@ -1556,9 +1576,9 @@ describe("PR-review panel wiring", () => {
       truncated: false,
       at: 4,
     };
-    const wrapper = mountApp(RunPage, {
-      seed: historySeed([inputFrame, runMeta, artifact, description, { type: "answer", text: "ok", at: 9 }]),
-    });
+    const wrapper = mountPage(
+      historySeed([inputFrame, runMeta, artifact, description, { type: "answer", text: "ok", at: 9 }]),
+    );
     await wrapper.find('[data-testid="reading-diff-button"]').trigger("click");
     await wrapper.vm.$nextTick();
     const panel = document.querySelector('[data-testid="pr-review-panel"]')!;
@@ -1572,17 +1592,14 @@ describe("PR-review panel wiring", () => {
     expect(document.getElementById(dialog.getAttribute("aria-labelledby")!)?.textContent).toContain(
       "Retry webhook deliveries",
     );
-    wrapper.unmount();
   });
 
   const withAbridge = (on: boolean): Capabilities => ({ ...ALL_ON, readingDiffAbridge: on });
 
   it("the abridge control: with the capability on and only the git diff the panel offers Abridge with meat, and a click POSTs /api/review.abridge for this run; off → nothing", async () => {
-    const on = mountApp(RunPage, {
-      seed: {
-        ...historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "ok", at: 9 }]),
-        capabilities: withAbridge(true),
-      },
+    const on = mountPage({
+      ...historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "ok", at: 9 }]),
+      capabilities: withAbridge(true),
     });
     await on.find('[data-testid="reading-diff-button"]').trigger("click");
     await on.vm.$nextTick();
@@ -1601,17 +1618,14 @@ describe("PR-review panel wiring", () => {
     );
     expect(JSON.parse((fetch as ReturnType<typeof vi.fn>).mock.calls[0][1].body)).toEqual({ id: "run-1" });
     expect(document.querySelector('[data-testid="abridge-running"]')).not.toBeNull();
-    on.unmount();
+    on.unmount(); // the off half reads document.body for the absence of any abridge control
 
-    const off = mountApp(RunPage, {
-      seed: {
-        ...historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "ok", at: 9 }]),
-        capabilities: withAbridge(false),
-      },
+    const off = mountPage({
+      ...historySeed([inputFrame, runMeta, artifact, { type: "answer", text: "ok", at: 9 }]),
+      capabilities: withAbridge(false),
     });
     await off.find('[data-testid="reading-diff-button"]').trigger("click");
     await off.vm.$nextTick();
     expect(document.querySelector('[data-testid^="abridge"]')).toBeNull();
-    off.unmount();
   });
 });

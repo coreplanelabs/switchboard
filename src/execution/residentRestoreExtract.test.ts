@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -81,30 +81,42 @@ describe("residentRestoreExtract (item 61: the SDK's presigned restore MOUNTS th
     for (const line of s.split("\n").filter((l) => /\brm(dir)? /.test(l))) expect(line).toMatch(/\|\| true/);
   });
 
-  it("on a real filesystem without unsquashfs or mounts: the cp branch copies the tree out, the staging dir is gone, the target holds the files with their modes", () => {
-    const root = mkdtempSync(join(tmpdir(), "restore-extract-"));
-    try {
-      const mount = join(root, "checkout.restore-t1");
-      mkdirSync(join(mount, "src"), { recursive: true });
-      writeFileSync(join(mount, "src", "a.txt"), "hello", { mode: 0o644 });
-      writeFileSync(join(mount, "run.sh"), "#!/bin/sh\n", { mode: 0o755 });
-      const target = join(root, "checkout");
-      const script = extractRestoreScript({
-        mountDir: mount,
-        backupId: "a1a1a1a1-0000-4000-8000-000000000000",
-        archivePath: join(root, "missing.sqsh"),
-        targetDir: target,
-      });
-      // PATH without unsquashfs forces the cp branch; fusermount3/umount are absent or refuse → tolerated
-      const r = spawnSync("sh", ["-c", script], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
-      expect(r.status, r.stderr).toBe(0);
-      expect(r.stdout).toContain("extract: cp");
-      expect(readFileSync(join(target, "src", "a.txt"), "utf8")).toBe("hello");
-      expect(spawnSync("test", ["-x", join(target, "run.sh")]).status).toBe(0);
-      expect(spawnSync("test", ["-e", mount]).status).not.toBe(0);
-      expect(spawnSync("test", ["-e", join(root, "checkout.extract-t1")]).status).not.toBe(0);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
+  it(
+    "on a real filesystem without unsquashfs or mounts: the cp branch copies the tree out, the staging dir is gone, the target holds the files with their modes",
+    // The one real `sh` here is a dozen fork+execs; on a saturated CI shard
+    // (four vitest forks on four vCPUs, the neighbours spawning the CLI and
+    // the linter) each takes hundreds of ms, so the budget is a safety net
+    // against load. Every assertion reads the filesystem once sh has exited;
+    // none spawns anything.
+    { timeout: 30_000 },
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "restore-extract-"));
+      try {
+        const mount = join(root, "checkout.restore-t1");
+        mkdirSync(join(mount, "src"), { recursive: true });
+        writeFileSync(join(mount, "src", "a.txt"), "hello", { mode: 0o644 });
+        writeFileSync(join(mount, "run.sh"), "#!/bin/sh\n", { mode: 0o755 });
+        // the modes as the filesystem holds them (umask applied), for the copy to reproduce
+        const modes = { a: statSync(join(mount, "src", "a.txt")).mode, run: statSync(join(mount, "run.sh")).mode };
+        const target = join(root, "checkout");
+        const script = extractRestoreScript({
+          mountDir: mount,
+          backupId: "a1a1a1a1-0000-4000-8000-000000000000",
+          archivePath: join(root, "missing.sqsh"),
+          targetDir: target,
+        });
+        // PATH without unsquashfs forces the cp branch; fusermount3/umount are absent or refuse → tolerated
+        const r = spawnSync("sh", ["-c", script], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
+        expect(r.status, r.stderr).toBe(0);
+        expect(r.stdout).toContain("extract: cp");
+        expect(readFileSync(join(target, "src", "a.txt"), "utf8")).toBe("hello");
+        expect(statSync(join(target, "src", "a.txt")).mode).toBe(modes.a);
+        expect(statSync(join(target, "run.sh")).mode).toBe(modes.run);
+        expect(existsSync(mount)).toBe(false);
+        expect(existsSync(join(root, "checkout.extract-t1"))).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

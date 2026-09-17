@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -25,8 +25,15 @@ async function bash(script: string): Promise<{ stdout: string; stderr: string; c
 
 const cwd = mkdtempSync(join(tmpdir(), "execwrap-"));
 
+/** Every test here runs the wrapper under a real bash, a dozen fork+execs each.
+ *  On a saturated CI shard (four vitest forks on four vCPUs, the neighbours
+ *  spawning the CLI and the linter) one fork+exec takes hundreds of ms, so the
+ *  budget is a safety net against load — nothing here waits on a clock. */
+const REAL_BASH_BUDGET_MS = 30_000;
+
 /** Resolves once `text` has been written to `file` — the command under test is
- *  still running (it sleeps after its echos), so this is the moment to kill it. */
+ *  still running (it sleeps after its echos), so this is the moment to kill it.
+ *  The poll's cap is the test's own budget, not waitFor's one-second default. */
 const landed = (file: string, text: string) =>
   vi.waitFor(
     () => {
@@ -38,10 +45,10 @@ const landed = (file: string, text: string) =>
       }
       expect(content).toContain(text);
     },
-    { interval: 5 },
+    { interval: 5, timeout: REAL_BASH_BUDGET_MS },
   );
 
-describe("capWrappedCommand (run under real bash)", () => {
+describe("capWrappedCommand (run under real bash)", { timeout: REAL_BASH_BUDGET_MS }, () => {
   it("passes stdout and stderr through separately and preserves exit 0", async () => {
     const r = await bash(capWrappedCommand(cwd, `echo out-line && echo err-line >&2`, 1000));
     expect(r).toEqual({ stdout: "out-line\n", stderr: "err-line\n", code: 0 });
@@ -84,14 +91,20 @@ describe("capWrappedCommand (run under real bash)", () => {
   });
 
   it("cleans up BOTH temp files on normal exit (EXIT trap)", async () => {
-    const marker = `execwrap-probe-${Date.now()}`;
-    // Rename every mktemp (stdout AND stderr file) so the cleanup of each is proven.
-    const script = capWrappedCommand(cwd, `echo hi`, 100).replaceAll("$(mktemp)", `$(mktemp -t ${marker}.XXXXXX)`);
-    expect(script.split(marker).length - 1).toBe(2);
-    const r = await bash(script + `\n`);
-    expect(r.code).toBe(0);
-    const leftovers = await bash(`ls \${TMPDIR:-/tmp}/${marker}.* 2>/dev/null | wc -l`);
-    expect(leftovers.stdout.trim()).toBe("0");
+    // Point every mktemp (the stdout AND the stderr file) at a directory of
+    // this test's own, so each one's cleanup is proven by reading that
+    // directory. Never glob the shared temp dir for leftovers: a developer
+    // machine's accumulates the suite's leaked mkdtemp dirs by the hundreds
+    // of thousands, and one `ls $TMPDIR/<marker>.*` over it was the whole
+    // test budget. The trap runs before bash exits, so the wrapper exiting is
+    // the event awaited here.
+    const dir = mkdtempSync(join(cwd, "trap-"));
+    const script = capWrappedCommand(cwd, `echo hi`, 100).replaceAll("$(mktemp)", `$(mktemp ${dir}/stream.XXXXXX)`);
+    expect(script.split(`${dir}/stream.`).length - 1).toBe(2);
+    // exit 0 proves both mktemps succeeded (a failed one exits 125): the files
+    // existed, and now the directory is empty again.
+    expect(await bash(script + `\n`)).toEqual({ stdout: "hi\n", stderr: "", code: 0 });
+    expect(readdirSync(dir)).toEqual([]);
   });
 
   it("fixed-file mode + recovery: a SIGKILL mid-command leaves the files, and the recovery script salvages the capped heads then removes them", async () => {
