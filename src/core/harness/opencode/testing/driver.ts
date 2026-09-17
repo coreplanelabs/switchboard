@@ -620,6 +620,7 @@ class ScriptedServe {
       return { status: 204, headers: {}, body: "" };
     if (req.method === "POST" && req.path === "/api/session/import") {
       const body = parseBody(req.body);
+      this.sessionModel = (body.info as { model?: unknown } | undefined)?.model;
       // The conversation clause switched off: the seed is never imported, so the
       // model's first call does not see the thread's earlier turns.
       if (this.mutate !== "conversation")
@@ -627,7 +628,10 @@ class ScriptedServe {
           this.store.push(m as Record<string, unknown>);
       return j(200, { data: { id: (body.info as { id?: string })?.id ?? this.sessionID } });
     }
-    if (req.method === "POST" && req.path === "/api/session") return j(200, { data: { id: this.sessionID } });
+    if (req.method === "POST" && req.path === "/api/session") {
+      this.sessionModel = parseBody(req.body).model;
+      return j(200, { data: { id: this.sessionID } });
+    }
     if (req.method === "POST" && req.path.endsWith("/wait")) return { status: 204, headers: {}, body: "" };
     if (req.method === "POST" && req.path.endsWith("/prompt")) {
       const body = parseBody(req.body);
@@ -697,6 +701,47 @@ class ScriptedServe {
     return j(404, { error: "no such route" });
   }
 
+  /** The session's model reference, as the create or the import carried it:
+   *  resolved when an execution starts, never at the request — the real server
+   *  stores the reference as given and resolves it against its configuration
+   *  only when the prompt's execution asks for the model. */
+  private sessionModel: unknown;
+
+  /** Why the session's model reference does not resolve against the
+   *  configuration the launch wrote, in the real server's words, or nothing
+   *  when it does. Measured against `@opencode/cli` at the pin: a create with
+   *  `anthropic/real-model` is admitted, the prompt is admitted, the execution
+   *  starts and fails at once with `provider.no-route` — `Model unavailable:
+   *  anthropic/real-model` — and no `session.idle` follows. So a harness that
+   *  names the bot's provider where the configuration's key belongs meets the
+   *  same failure here it met live, and a loop that waits past the failure for
+   *  an idle hangs here as it hung there (record 0038's stage gate on the fake:
+   *  the fake answers as the real binary does, never more kindly). A session
+   *  created with no reference runs on the configuration's default model. */
+  private modelUnavailable(): string | undefined {
+    const ref = this.sessionModel;
+    if (typeof ref !== "object" || ref === null) return undefined;
+    const { providerID, id } = ref as { providerID?: unknown; id?: unknown };
+    const written = this.container.files.get(this.configPath());
+    const config = written
+      ? (JSON.parse(written) as { providers?: Record<string, { models?: Record<string, unknown> }> })
+      : {};
+    const provider = typeof providerID === "string" ? config.providers?.[providerID] : undefined;
+    if (provider !== undefined && typeof id === "string" && provider.models?.[id] !== undefined) return undefined;
+    return `Model unavailable: ${String(providerID)}/${String(id)}`;
+  }
+
+  /** The execution fails as the real server fails one: the failure event with
+   *  the provider's words, then the two refills its terminal transition causes
+   *  — the pending asks (none) and the store with the idle marker the failure
+   *  left — and NO `session.idle`. */
+  private failExecution(type: string, message: string): void {
+    this.emitEvent("session.execution.failed", { sessionID: this.sessionID, error: { type, message } });
+    this.store.push({ id: `msg_idle_${this.ordinal++}`, type: "idle", outcome: "failed", time: { created: NOW } });
+    this.emitPermissions([]);
+    this.emitMessages();
+  }
+
   private waitReply(requestID: string): Promise<Decision> {
     return new Promise((resolve) => this.replies.set(requestID, resolve));
   }
@@ -723,6 +768,15 @@ class ScriptedServe {
 
   private async play(): Promise<void> {
     this.playing = true;
+    this.emitEvent("session.execution.started", { sessionID: this.sessionID });
+    // The model reference is resolved when the execution asks for the model —
+    // the real server's moment — and a reference the configuration cannot
+    // resolve fails the execution there, in the server's words.
+    const unavailable = this.modelUnavailable();
+    if (unavailable !== undefined) {
+      this.failExecution("provider.no-route", unavailable);
+      return;
+    }
     if (this.script.unknownEventKind) this.emitEvent(this.script.unknownEventKind, { sessionID: this.sessionID });
     for (let t = 0; t < this.script.turns.length && !this.interrupted; t++) {
       // A hard stop before this model call (`hardStopBeforeModelCall`): request
@@ -757,16 +811,12 @@ class ScriptedServe {
         for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
       }
       if (this.script.failModelCall === t + 1) {
-        // The model call fails: the execution fails with the provider's words
-        // and the session goes idle, as the server reports a call the proxy
-        // answered with an error. A steer queued meanwhile was for the turn
-        // after this one, which never comes.
+        // The model call fails: the execution fails with the provider's words,
+        // as the server reports a call the proxy answered with an error, and
+        // the store's idle marker is the last of it. A steer queued meanwhile
+        // was for the turn after this one, which never comes.
         this.recordModelCall();
-        this.emitEvent("session.execution.failed", {
-          sessionID: this.sessionID,
-          error: { message: FAILED_MODEL_CALL_ERROR },
-        });
-        this.emitEvent("session.idle", { sessionID: this.sessionID });
+        this.failExecution("provider.error", FAILED_MODEL_CALL_ERROR);
         return;
       }
       this.flushSteers();

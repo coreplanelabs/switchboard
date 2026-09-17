@@ -187,7 +187,10 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
     const run: HarnessRun = {
       runId: RUN_ID,
       agent,
-      model: { id: "real-model", provider: "switchboard", providerType: "openai-compatible" },
+      // The bot's provider NAME, as a live deployment's run carries it — never
+      // the configuration's key: the harness must translate it, or the real
+      // resolver answers `Model unavailable: anthropic/real-model`.
+      model: { id: "real-model", provider: "anthropic", providerType: "openai-compatible" },
       system: agent.system,
       messages: [
         { role: "user", content: [{ type: "text", text: "earlier question" }] },

@@ -577,9 +577,22 @@ export class OpenCodeBridge {
         this.note("harness_error", `an OpenCode step failed: ${redactAndCap(errorMessage(data.error), 200)}`);
         break;
       case "session.execution.failed": {
+        // The execution ended on the failure: OpenCode's terminal transition,
+        // beside `succeeded` and `interrupted` (the store's idle marker carries
+        // `outcome: failed`), and no `session.idle` follows it — proven against
+        // the real binary, whose `provider.no-route` failure is the last event
+        // the session emits. So the run settles here, on the failure by name,
+        // or on the wind-down's answer when the run was already winding down;
+        // a loop that waited past it for an idle waited to its budget. The one
+        // exception is the proxy's turn-budget refusal, which is the wind-down's
+        // trigger: the write-up is steered and starts an execution of its own.
         const error = { status: statusOf(data.error), message: errorMessage(data.error) };
+        this.stepOpen = false;
         if (isBudgetRefusal(error)) out.budgetStop = true;
-        else out.providerError = redactAndCap(error.message, 400);
+        else {
+          out.providerError = redactAndCap(error.message, 400);
+          out.settled = true;
+        }
         break;
       }
       case "session.execution.succeeded":

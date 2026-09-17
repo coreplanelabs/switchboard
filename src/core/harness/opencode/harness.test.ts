@@ -6,6 +6,7 @@ import type { RunEvent } from "../../runEvents.js";
 import { HarnessContainerError } from "../container.js";
 import type { HarnessResume, OpenCodeHarnessFacts, PiHarnessFacts } from "../contract.js";
 import { HarnessRegistry, relayToolCall, type LiveHarness } from "../pi/relay.js";
+import { PROXY_PROVIDER } from "../pi/process.js";
 import { FakeHarnessContainer } from "../testing/fakeContainer.js";
 import type { DrivenRun } from "../testing/scenarios.js";
 import { bearerHashOf, RunBearerStore, type RunBearerGrant } from "../../modelProxy/runBearers.js";
@@ -705,6 +706,107 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
       );
     },
   );
+});
+
+// Feature: docs/reference/specs/harness.md item 13 — every model reference the
+// harness sends names the configuration's one provider. The run's model rides
+// the bot's provider NAME (`anthropic` on a live deployment), but the
+// configuration the launch writes defines exactly one provider, `switchboard`
+// (the proxy), with the model under it; a ref naming any other provider is one
+// OpenCode cannot resolve (`Model unavailable: anthropic/<id>`), which two live
+// runs met on their first turn. The fake serve resolves every ref against the
+// written configuration as the real server does, so the table catches it.
+describe("the model reference on every request that carries one names the configuration's provider", () => {
+  const request: ChatMessage = { role: "user", content: [{ type: "text", text: "do the thing" }] };
+  const modelRefsOf = (r: DrivenRun) =>
+    r.requests
+      .filter((q) => q.method === "POST" && (q.path === "/api/session" || q.path === "/api/session/import"))
+      .map((q) => {
+        const body = JSON.parse(q.body ?? "{}") as { model?: unknown; info?: { model?: unknown } };
+        return { path: q.path, model: q.path === "/api/session" ? body.model : body.info?.model };
+      });
+
+  it("a fresh run of one turn creates its session with switchboard/<id>; a run with a seed imports it under the same ref; a rebuild's import too — never the bot's provider name", async () => {
+    const driver = openCodeDriver();
+    const oneTurn = await driver.run({ turns: [{ content: [{ type: "text", text: "ok" }], stopReason: "end_turn" }] });
+    expect(oneTurn.outcome).toEqual({ kind: "answered", answer: "ok" });
+    expect(modelRefsOf(oneTurn)).toEqual([
+      { path: "/api/session", model: { providerID: PROXY_PROVIDER, id: "claude-fable-5" } },
+    ]);
+
+    const seeded = await driver.run({
+      seed: [
+        { role: "user", content: [{ type: "text", text: "earlier" }] },
+        { role: "assistant", content: [{ type: "text", text: "answered" }] },
+      ],
+      turns: [{ content: [{ type: "text", text: "continuing" }], stopReason: "end_turn" }],
+    });
+    expect(seeded.outcome).toEqual({ kind: "answered", answer: "continuing" });
+    expect(modelRefsOf(seeded)).toEqual([
+      { path: "/api/session/import", model: { providerID: PROXY_PROVIDER, id: "claude-fable-5" } },
+    ]);
+
+    const rebuilt = await driver.run({
+      turns: [{ content: [{ type: "text", text: "resumed" }], stopReason: "end_turn" }],
+      resume: {
+        messages: [request, { role: "assistant", content: [{ type: "text", text: "half way" }] }],
+        settlements: [],
+        remainingMs: 300_000,
+        turn: 1,
+        inboxConsumedSeq: 0,
+        facts: driver.facts({ pid: 999, container: "vm-old" }),
+      },
+    });
+    expect(rebuilt.outcome).toEqual({ kind: "answered", answer: "resumed" });
+    expect(modelRefsOf(rebuilt)).toEqual([
+      { path: "/api/session/import", model: { providerID: PROXY_PROVIDER, id: "claude-fable-5" } },
+    ]);
+    // The bot's provider name reaches no request at all.
+    for (const r of [oneTurn, seeded, rebuilt])
+      expect(r.requests.some((q) => (q.body ?? "").includes('"providerID":"anthropic"'))).toBe(false);
+  });
+
+  it("the fake serve resolves the session's reference as the real server does — the create admitted, the prompt admitted, the execution failing at once in the server's words with no idle after it — the guard that turns the table red (a hang on the old loop, a failure by name on this one) when the harness names the wrong provider", async () => {
+    let container: FakeHarnessContainer | undefined;
+    const driver = openCodeDriver({ inspectContainer: (c) => void (container = c) });
+    await driver.run({ turns: [{ content: [{ type: "text", text: "ok" }], stopReason: "end_turn" }] });
+    const post = (path: string, body: unknown) =>
+      container!.request(openCodeRunPaths("run-c"), {
+        method: "POST",
+        port: container!.freePort,
+        path,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const feedFrom = async (offset: number) =>
+      Buffer.from(await container!.readLog(openCodeRunPaths("run-c").feed, offset, 1024 * 1024))
+        .toString("utf8")
+        .split("\n")
+        .filter((l) => l.length > 0)
+        .map(
+          (l) => JSON.parse(l) as { feed: string; event?: { type: string; data?: { error?: { message?: string } } } },
+        );
+    const before = Buffer.byteLength(
+      Buffer.from(await container!.readLog(openCodeRunPaths("run-c").feed, 0, 1024 * 1024)).toString("utf8"),
+    );
+    // The bot's provider name where the configuration's key belongs: admitted at the create…
+    expect((await post("/api/session", { model: { providerID: "anthropic", id: "claude-fable-5" } })).status).toBe(200);
+    // …admitted at the prompt…
+    expect((await post("/api/session/ses_run-c/prompt", { text: "go", delivery: "queue" })).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 20));
+    // …and the execution fails at once, in the server's words, with the refills and no idle event after it.
+    const kinds = (await feedFrom(before)).map((r) => (r.feed === "event" ? r.event!.type : r.feed));
+    expect(kinds).toEqual(["session.execution.started", "session.execution.failed", "permissions", "messages"]);
+    const failed = (await feedFrom(before)).find((r) => r.event?.type === "session.execution.failed");
+    expect(failed?.event?.data?.error?.message).toBe("Model unavailable: anthropic/claude-fable-5");
+    // A model the configuration does not list under the right provider fails the same way.
+    const mid = before + Buffer.byteLength((await feedFrom(before)).map((r) => JSON.stringify(r) + "\n").join(""));
+    expect((await post("/api/session", { model: { providerID: PROXY_PROVIDER, id: "gpt-x" } })).status).toBe(200);
+    expect((await post("/api/session/ses_run-c/prompt", { text: "go", delivery: "queue" })).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 20));
+    const second = (await feedFrom(mid)).find((r) => r.event?.type === "session.execution.failed");
+    expect(second?.event?.data?.error?.message).toBe(`Model unavailable: ${PROXY_PROVIDER}/gpt-x`);
+  });
 });
 
 describe("resumeOpenCodeFacts", () => {

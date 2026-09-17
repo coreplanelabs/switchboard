@@ -72,6 +72,7 @@ import {
 } from "./process.js";
 import { openCodeImportBody, openCodeSeedAndRequest, openCodeSessionId, openCodeSettlementNote } from "./session.js";
 import { OPENCODE_TAILER_SOURCE } from "./tailerSource.js";
+import { PROXY_PROVIDER } from "../pi/process.js";
 import type { LiveHarness } from "../pi/relay.js";
 
 /** What a deployment sets for every run on OpenCode: the compaction thresholds
@@ -148,10 +149,16 @@ export class OpenCodeHarness implements Harness {
   }
 }
 
-/** The model ref a session carries: the run's provider and model, and the
- *  effort tier as its variant when the harness names one (none in stage A). */
+/** The model ref a session carries — on the create, the seed's import and a
+ *  rebuild's import alike. The provider is the configuration's one provider,
+ *  `PROXY_PROVIDER` (the key `openCodeConfig` writes the model under), never
+ *  the bot's provider name (`run.model.provider`, `anthropic` on a live
+ *  deployment): OpenCode resolves the ref against its configuration and a
+ *  provider it does not define is `Model unavailable: <provider>/<id>`. The id
+ *  is the run's, and the effort tier is its variant when the harness names
+ *  one (none in stage A). */
 function modelRef(run: HarnessRun, variant: string | undefined): { providerID: string; id: string; variant?: string } {
-  return { providerID: run.model.provider, id: run.model.id, ...(variant ? { variant } : {}) };
+  return { providerID: PROXY_PROVIDER, id: run.model.id, ...(variant ? { variant } : {}) };
 }
 
 /** The feed's current end byte, read forward from `from` to the last byte: a
