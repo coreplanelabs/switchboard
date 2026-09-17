@@ -9,7 +9,6 @@ import {
   AGENT_HUE,
   agentHue,
   dotTip,
-  SURFACE_GLYPH,
   SURFACE_NAME,
   elapsedText,
   expiresAt,
@@ -172,24 +171,26 @@ function onRowClick(ev: MouseEvent): void {
       </UTooltip>
       <!-- Who asked (record 0042, runs page): the resolved name, always visible — the
            source mark's hover kept saying it only to a pointer — led by the surface's
-           glyph, so a person's Slack, HTTP and CLI runs read apart without a hover
-           (authorization.md item 15: one person, several credentials). A fixed-width
-           column from sm (item 29): every row's agent chip starts at the same x
-           whatever the name's length, a long name truncates and reads in full
-           on hover, and a row that names nobody keeps the empty cell. -->
+           name as a small text label (slack · http · mcp · cli: the channel id's own
+           prefix word), so a person's Slack, HTTP and CLI runs read apart without a
+           hover and without a glyph legend (authorization.md item 15: one person,
+           several credentials). A fixed-width column from sm (item 29): every row's
+           agent chip starts at the same x whatever the name's length, a long name
+           truncates and reads in full on hover, and a row that names nobody keeps
+           the empty cell. -->
       <UTooltip v-if="who" :text="sourceTip(run)">
         <span
-          class="who pointer-events-auto min-w-0 shrink-0 truncate text-[0.8rem] max-sm:order-7 max-sm:text-xs sm:w-[12em]"
+          class="who pointer-events-auto min-w-0 shrink-0 truncate text-[0.8rem] max-sm:order-7 max-sm:text-xs sm:w-[14em]"
           :class="run.finished ? 'text-dimmed' : 'text-muted'"
           :data-user-id="run.userId"
           :data-surface="src.kind"
-          ><span class="glyph mr-1 text-dimmed" :class="src.kind === 'cli' ? 'text-[0.7rem]' : ''" aria-hidden="true">{{
-            SURFACE_GLYPH[src.kind] ?? "○"
+          ><span class="surface mr-1.5 rounded border border-accented px-1 font-mono text-[0.62rem] text-dimmed">{{
+            src.kind
           }}</span
           ><span class="name">{{ who }}</span></span
         >
       </UTooltip>
-      <span v-else class="who shrink-0 max-sm:hidden sm:w-[12em]" aria-hidden="true"></span>
+      <span v-else class="who shrink-0 max-sm:hidden sm:w-[14em]" aria-hidden="true"></span>
       <span
         v-if="parts.agent"
         class="agent shrink-0 rounded border px-1.5 font-mono text-[0.68rem] font-medium uppercase tracking-wider max-sm:order-2"

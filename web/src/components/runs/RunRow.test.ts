@@ -128,24 +128,27 @@ describe("RunRow", () => {
     expect(nobody.find(".who").text()).toBe("");
   });
 
-  it("the requester cell is a fixed-width column from sm (item 29): a long name truncates in the same 12em every row gets, and the full name is the hover; a nameless row keeps the same width", () => {
+  it("the requester cell is a fixed-width column from sm (item 29): a long name truncates in the same 14em every row gets, and the full name is the hover; a nameless row keeps the same width", () => {
     const long = mountRow(row({ userName: "Aleksandr Diamantopoulos" })).find(".who");
     expect(long.find(".name").text()).toBe("Aleksandr Diamantopoulos");
-    expect(long.classes()).toContain("sm:w-[12em]");
+    expect(long.classes()).toContain("sm:w-[14em]");
     expect(long.classes()).toContain("truncate");
     expect(long.classes()).not.toContain("sm:max-w-[9em]"); // no longer content-sized
     const nobody = mountRow(row({ userId: undefined, channelId: undefined })).find(".who");
-    expect(nobody.classes()).toContain("sm:w-[12em]");
+    expect(nobody.classes()).toContain("sm:w-[14em]");
   });
 
-  // authorization.md item 15: one person arrives over several credentials; the
-  // surface glyph leads the requester cell so their rows read apart without a hover.
-  it("leads the requester with the surface's glyph, always visible and decorative (the tooltip says the surface in words), so the same person's Slack, HTTP and CLI runs read apart", () => {
+  // authorization.md item 15: one person arrives over several credentials; a
+  // text label naming the surface leads the requester cell so their rows read
+  // apart without a hover — and without a glyph legend (the ⁙ ⌁ ◈ >_ marks
+  // were not understandable at a glance).
+  it("leads the requester with the surface's name as a text label — the channel id's prefix word, readable text, never a glyph — so the same person's Slack, HTTP and CLI runs read apart", () => {
     const slack = mountRow(row({ userName: "ada" }));
-    expect(slack.find(".who .glyph").text()).toBe("⁙");
-    expect(slack.find(".who .glyph").attributes("aria-hidden")).toBe("true");
+    expect(slack.find(".who .surface").text()).toBe("slack");
+    expect(slack.find(".who .surface").attributes("aria-hidden")).toBeUndefined(); // real text, read by everyone
     expect(slack.find(".who").attributes("data-surface")).toBe("slack");
-    expect(slack.find(".who .glyph").classes()).not.toContain("opacity-0");
+    expect(slack.find(".who .glyph").exists()).toBe(false);
+    expect(slack.find(".who").text()).not.toMatch(/[⁙⌁◈○]/);
     const http = mountRow(
       row({
         userName: "ada",
@@ -154,16 +157,18 @@ describe("RunRow", () => {
         authenticatedAs: "http:ada-ingress",
       }),
     );
-    expect(http.find(".who .glyph").text()).toBe("⌁");
+    expect(http.find(".who .surface").text()).toBe("http");
     expect(http.find(".who .name").text()).toBe("ada");
     expect(http.find(".who").attributes("data-surface")).toBe("http");
     const cli = mountRow(row({ userName: "ada", channelId: "cli:local" }));
-    expect(cli.find(".who .glyph").text()).toBe(">_");
+    expect(cli.find(".who .surface").text()).toBe("cli");
+    const mcp = mountRow(row({ userName: "ada", channelId: "mcp:default", userId: "mcp:ada" }));
+    expect(mcp.find(".who .surface").text()).toBe("mcp");
     const odd = mountRow(row({ channelId: "weird" }));
-    expect(odd.find(".who .glyph").text()).toBe("○");
+    expect(odd.find(".who .surface").text()).toBe("unknown"); // an unknown prefix reads as the word, never a placeholder glyph
   });
 
-  it("the source mark is the ↗ link for a run with a thread, the surface glyph otherwise; a javascript: url never links", () => {
+  it("the source mark is the ↗ link for a run with a thread and nothing visible otherwise — the requester cell already names the surface; a javascript: url never links", () => {
     const linked = mountRow(row({ sourceUrl: "https://acme.slack.com/archives/C1/p1", userName: "alice" }));
     const a = linked.find("a.source");
     expect(a.text()).toBe("↗");
@@ -171,10 +176,12 @@ describe("RunRow", () => {
     expect(a.attributes("target")).toBe("_blank");
     expect(a.attributes("aria-label")).toBe("open the Slack thread (new tab)");
     const plain = mountRow(row());
-    expect(plain.find("span.source").text()).toBe("⁙");
-    expect(plain.find("span.source").attributes("aria-label")).toBe("source: Slack");
+    expect(plain.find("a.source").exists()).toBe(false);
+    expect(plain.find("span.source").text()).toBe(""); // the cell keeps its width, shows nothing
+    expect(plain.find("span.source").attributes("aria-hidden")).toBe("true");
     const cli = mountRow(row({ channelId: "cli:local", userId: "cli:alice" }));
-    expect(cli.find("span.source").text()).toBe(">_");
+    expect(cli.find("span.source").text()).toBe("");
+    expect(cli.html()).not.toContain(">_");
     const hostile = mountRow(row({ sourceUrl: "javascript:alert(1)" }));
     expect(hostile.find("a.source").exists()).toBe(false);
     expect(hostile.html()).not.toContain("javascript:");
