@@ -228,12 +228,15 @@ export function buildCoreCommands(
   // its one service in with the ledger it drives runs on.
   const runs = once(async () => {
     if (wiring.runs) return wiring.runs;
-    const history = (await cfg()).config.runHistory;
+    const config = (await cfg()).config;
+    const history = config.runHistory;
     return createRunsService({
       registry: wiring.registry,
       store: await runStore(),
       sessions: buildRunLedger(history, wiring.secrets),
       units: buildCoordinatorInstanceStore(history, wiring.secrets),
+      // A finished run's tokens are priced through `costs.prices` (costs.md item 4c), the list alone without one.
+      prices: parseCostsConfig(config.costs)?.prices,
     });
   });
   const admin = async (): Promise<ResidentAdminClient | { unavailable: string }> =>

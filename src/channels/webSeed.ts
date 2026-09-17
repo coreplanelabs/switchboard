@@ -4,6 +4,7 @@ import type { UnitFacts, UnitRun, UnitRunsView } from "../core/unitRuns.js";
 import type { CostReport } from "../core/costs.js";
 import type { CostsByReport } from "../core/costsBy.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
+import type { RunCost } from "../core/modelPricing.js";
 import type { DeliveryReport } from "../core/delivery.js";
 import type { ScheduledRow } from "./scheduledPanel.js";
 import type { LiveFrame } from "./liveView/sse.js";
@@ -118,6 +119,9 @@ export interface RunHistorySeed {
   replyOk?: boolean;
   /** `runDurationMs(record)` — the one duration every surface prints. */
   durationMs?: number;
+  /** What the run cost (costs.md item 4c): its dollars through the price table, or
+   *  `usd: null` when a model it ran on has no price; absent on a record without usage. */
+  cost?: RunCost;
   /** The record was cut to its budget: the timeline's `not recorded` reads `(too large)`. */
   truncated?: boolean;
   /** The record predates span schema (docs/reference/specs/tracing.md): `events` carries

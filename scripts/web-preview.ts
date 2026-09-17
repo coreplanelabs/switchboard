@@ -2275,6 +2275,20 @@ function page(
         events: HIST_STREAM as never,
         status: "completed",
         eventCount: HIST_STREAM.length + 3,
+        // The run's dollars beside its duration (costs.md item 4c): one model, priced at list.
+        cost: {
+          usd: 0.4185,
+          byModel: {
+            "anthropic/claude-fable-5-1": {
+              turns: 9,
+              inputTokens: 18_400,
+              outputTokens: 3_150,
+              cacheReadTokens: 214_000,
+              cacheWriteTokens: 1_900,
+              usd: 0.4185,
+            },
+          },
+        },
         receivedAt: RECEIVED_AT,
         startedAt: NOW - 2_400_000,
         finishedAt: HIST_FINISHED_AT,

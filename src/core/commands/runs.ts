@@ -17,6 +17,7 @@ import {
 } from "../commandRegistry.js";
 import { UNIT_KEY_PATTERN } from "../coordinator/contract.js";
 import { parsePullRequestRef, PULL_REQUEST_REF_PATTERN, type FindingRow } from "../findingsLedger.js";
+import { formatUsd } from "../modelPricing.js";
 import type { RunEvent } from "../runEvents.js";
 import { SEARCH_MAX_HITS } from "../runLedger/sessionLog.js";
 import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, SESSION_KEY_PATTERN } from "../runRecord.js";
@@ -211,6 +212,19 @@ export const runsList = defineCommand({
   },
 });
 
+/** `runs get` on the text surfaces: the record's `key: value` lines, its cost
+ *  read as dollars (costs.md item 4c) — the total, then each model — or
+ *  `unpriced` where the price table knows no model, never `$0`. */
+function renderRunRecord(output: JsonValue): string {
+  if (!isObject(output) || !isObject(output.cost)) return renderCompact("runs.get", output);
+  const { cost, ...rest } = output;
+  const dollars = (usd: unknown): string => (typeof usd === "number" ? formatUsd(usd) : "unpriced");
+  const models = Object.entries(isObject(cost.byModel) ? cost.byModel : {}).map(
+    ([ref, m]) => `${ref} ${dollars(isObject(m) ? m.usd : undefined)}`,
+  );
+  return [renderCompact("runs.get", rest), `cost: ${[dollars(cost.usd), ...models].join(" · ")}`].join("\n");
+}
+
 export const runsGet = defineCommand({
   id: "runs.get",
   args: [idArg],
@@ -220,7 +234,8 @@ export const runsGet = defineCommand({
   action: "runs:read",
   effect: "read",
   surfaces: { chat: false },
-  describe: "One run's record; `--include messages` adds its events with free text wrapped as untrusted content.",
+  describe:
+    "One run's record, its cost in dollars per model (or unpriced) included; `--include messages` adds its events with free text wrapped as untrusted content.",
   handler: async ({ args, options, caller, deps }) => {
     const view = await getVisibleRun(
       await deps.runs(),
@@ -234,6 +249,7 @@ export const runsGet = defineCommand({
     if (view.events) view.events = view.events.map(wrapEvent);
     return asJson(view);
   },
+  render: renderRunRecord,
 });
 
 export const runsEvents = defineCommand({

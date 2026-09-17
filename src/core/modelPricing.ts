@@ -163,6 +163,31 @@ export interface PricedModelUsage extends ModelUsage {
 /** `anthropic/claude-fable-5` → `claude-fable-5`: the spans name the provider, the price table the model. */
 export const modelIdOf = (ref: string): string => (ref.includes("/") ? ref.slice(ref.indexOf("/") + 1) : ref);
 
+/** A run's dollars as every surface prints them (costs.md item 4c): cents from a
+ *  dollar up (`$1.24`), a tenth of a cent below that (`$0.038`), and `<$0.001`
+ *  under that — a run that spent anything never reads as `$0.000`; `$0.00` is a
+ *  run with no turns and nothing else. */
+export function formatUsd(usd: number): string {
+  if (usd === 0) return "$0.00";
+  if (usd < 0.001) return "<$0.001";
+  return `$${usd.toFixed(usd >= 1 ? 2 : 3)}`;
+}
+
+/** What one run cost (costs.md item 4c): the dollars when every model it ran
+ *  on has a price, null when one has none — a total that left a model's tokens
+ *  out would understate the run — and $0 for a run with no turns at all.
+ *  `byModel` says which model was unpriced. */
+export interface RunCost {
+  usd: number | null;
+  byModel: Record<string, PricedModelUsage>;
+}
+
+export function runCostOf(usage: RunUsage, prices: ModelPriceTable = NO_PRICES): RunCost {
+  const priced = llmUsdOfUsage(usage, prices);
+  const unpriced = Object.values(priced.byModel).some((m) => m.usd === null);
+  return { usd: unpriced ? null : priced.usd, byModel: priced.byModel };
+}
+
 /** A usage priced through the table (`modelPriceOf`): dollars for the models a
  *  price is known for, and the tokens of the ones it is not (never $0 in silence). */
 export function llmUsdOfUsage(

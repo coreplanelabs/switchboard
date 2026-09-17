@@ -1234,6 +1234,35 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(t.body()).not.toContain("tok-");
     });
 
+    // costs.md item 4c: the run's dollars ride the seed, beside its duration.
+    it("the history seed carries the record's cost when the record has usage, and none for a record written before it", async () => {
+      const h = harness();
+      const usage = {
+        turns: 1,
+        byModel: {
+          "anthropic/claude-haiku-4-5": {
+            turns: 1,
+            inputTokens: 1_000_000,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        },
+      };
+      await h.store!.put(record("priced", { usage }));
+      await h.store!.put(record("r1"));
+      const priced = fakeReqRes("GET", "/runs/priced");
+      h.handler(priced.req, priced.res);
+      await done(priced);
+      const seed = runSeedOf(priced.body()) as RunHistorySeed;
+      expect(seed.cost?.usd).toBeCloseTo(1, 9);
+      expect(seed.cost?.byModel["anthropic/claude-haiku-4-5"].usd).toBeCloseTo(1, 9);
+      const old = fakeReqRes("GET", "/runs/r1");
+      h.handler(old.req, old.res);
+      await done(old);
+      expect((runSeedOf(old.body()) as RunHistorySeed).cost).toBeUndefined();
+    });
+
     it("a span-schema record's seed is the stream normalized: a pair whose twin the budget dropped gains its `tool.bash` span, nothing else moves, and the seed is not `untimed`", async () => {
       const h = harness();
       const events: RunEvent[] = [

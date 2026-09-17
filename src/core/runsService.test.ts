@@ -9,6 +9,7 @@ import type { RunEvent } from "./runEvents.js";
 import { analyzeRunFriction } from "./runFriction.js";
 import type { RunRecord } from "./runRecord.js";
 import { RunRegistry, type RunRegistryOptions } from "./runRegistry.js";
+import { parseModelPrices } from "./modelPricing.js";
 import { InMemoryRunStore, type RunStore } from "./runStore.js";
 import { createRunsService, type RunActor, type RunsService } from "./runsService.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
@@ -98,6 +99,60 @@ describe("RunsService.getRun", () => {
     const withMessages = await svc.getRun(id, { include: "messages" });
     expect(withMessages.ok && withMessages.value.events?.map((e) => e.seq)).toEqual([1, 2]);
     expectNoToken(withMessages);
+  });
+
+  // docs/reference/specs/costs.md item 4c: a finished run's tokens are priced onto its view.
+  it("prices a finished run from its record — a persisted row and a finished registry row alike — through the configured table; a live run carries no cost", async () => {
+    const usage = {
+      turns: 1,
+      byModel: {
+        "openai/gpt-5": { turns: 1, inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+    };
+    const { reg, store } = setup();
+    await store!.put(record("priced", NOW - 1000, { usage }));
+    await store!.put(record("old", NOW - 2000)); // written before usage existed
+    // Without a table the list alone prices: the OpenAI model is unknown, so the run is unpriced — never $0.
+    const listOnly = createRunsService({ registry: reg, store });
+    const unpriced = await listOnly.getRun("priced");
+    expect(unpriced.ok && unpriced.value.usage).toEqual(usage);
+    expect(unpriced.ok && unpriced.value.cost).toEqual({
+      usd: null,
+      byModel: { "openai/gpt-5": { ...usage.byModel["openai/gpt-5"], usd: null } },
+    });
+    const old = await listOnly.getRun("old");
+    expect(old.ok && "cost" in old.value).toBe(false);
+    // The configured table prices it, on the summary read and the messages read alike.
+    const svc = createRunsService({
+      registry: reg,
+      store,
+      prices: parseModelPrices({ "openai/gpt-5": { input: 2, output: 0, cacheRead: 0, cacheWrite: 0 } }),
+    });
+    const priced = await svc.getRun("priced");
+    expect(priced.ok && priced.value.cost?.usd).toBeCloseTo(2, 9);
+    const full = await svc.getRun("priced", { include: "messages" });
+    expect(full.ok && full.value.cost?.usd).toBeCloseTo(2, 9);
+    // A finished row the registry still holds reads its usage and cost from the store's record.
+    const { id } = reg.create("coding · acme/x", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:7",
+    });
+    reg.publish(id, { type: "input", messageId: "m1", text: "hi" });
+    reg.finish(id, "completed");
+    await store!.put(record(id, NOW, { usage }));
+    const row = await svc.getRun(id);
+    expect(row.ok && row.value.cost?.usd).toBeCloseTo(2, 9);
+    expect(row.ok && row.value.usage).toEqual(usage);
+    // A live run has neither: its usage is summed at finish.
+    const live = reg.create("coding · acme/y", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:8",
+    });
+    const view = await svc.getRun(live.id);
+    expect(view.ok && "cost" in view.value).toBe(false);
+    expect(view.ok && "usage" in view.value).toBe(false);
   });
 
   // docs/reference/specs/run-history.md item 46: a spawned child's view names its

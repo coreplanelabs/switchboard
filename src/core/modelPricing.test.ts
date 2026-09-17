@@ -3,11 +3,13 @@ import {
   ANTHROPIC_PRICES,
   anthropicPriceOf,
   anthropicTokensCostUsd,
+  formatUsd,
   llmUsdOfUsage,
   modelIdOf,
   modelPriceOf,
   NO_PRICES,
   parseModelPrices,
+  runCostOf,
 } from "./modelPricing.js";
 import type { RunUsage } from "./runUsage.js";
 
@@ -97,6 +99,65 @@ describe("the price table — costs.prices over the list", () => {
     expect(listOnly.byModel["openai/gpt-5"].usd).toBeNull();
     expect(listOnly.unpricedTokens).toBe(4 * million);
     expect(listOnly.byModel["anthropic/claude-haiku-4-5"].usd).toBeCloseTo(1 + 5 + 0.1 + 1.25, 9);
+  });
+});
+
+// Feature: docs/reference/specs/costs.md item 4c — a run's own cost: the sum when
+// every model it ran on has a price, null (never $0) when one has none, $0 for
+// a run with no turns.
+describe("runCostOf", () => {
+  const million = 1_000_000;
+  const tokens = (input: number) => ({
+    turns: 1,
+    inputTokens: input,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  });
+
+  it("sums every model's dollars when each has a price, per model beside the total", () => {
+    const cost = runCostOf({
+      turns: 2,
+      byModel: { "anthropic/claude-haiku-4-5": tokens(million), "anthropic/claude-fable-5": tokens(million) },
+    });
+    expect(cost.usd).toBeCloseTo(1 + 10, 9);
+    expect(cost.byModel["anthropic/claude-haiku-4-5"].usd).toBeCloseTo(1, 9);
+    expect(cost.byModel["anthropic/claude-fable-5"].usd).toBeCloseTo(10, 9);
+  });
+
+  it("is null — never $0, never a partial sum — when a model it ran on has no price, and names that model as unpriced; the configured table prices it", () => {
+    const usage: RunUsage = {
+      turns: 2,
+      byModel: { "anthropic/claude-haiku-4-5": tokens(million), "openai/gpt-5": tokens(million) },
+    };
+    const list = runCostOf(usage);
+    expect(list.usd).toBeNull();
+    expect(list.byModel["openai/gpt-5"].usd).toBeNull();
+    expect(list.byModel["anthropic/claude-haiku-4-5"].usd).toBeCloseTo(1, 9);
+    const priced = runCostOf(
+      usage,
+      parseModelPrices({ "openai/gpt-5": { input: 2, output: 8, cacheRead: 0.5, cacheWrite: 0 } }),
+    );
+    expect(priced.usd).toBeCloseTo(1 + 2, 9);
+    // A turn under `unknown` (no model attr on the span) is unpriced too, even with no tokens counted.
+    expect(runCostOf({ turns: 1, byModel: { unknown: tokens(0) } }).usd).toBeNull();
+  });
+
+  it("a run with no turns cost $0", () => {
+    expect(runCostOf({ turns: 0, byModel: {} })).toEqual({ usd: 0, byModel: {} });
+  });
+});
+
+describe("formatUsd", () => {
+  it("prints cents from a dollar up, a tenth of a cent below, `<$0.001` under that — a run that spent never reads as $0.000 — and $0.00 for a run with no turns", () => {
+    expect(formatUsd(1.2449)).toBe("$1.24");
+    expect(formatUsd(12)).toBe("$12.00");
+    expect(formatUsd(0.0384)).toBe("$0.038");
+    expect(formatUsd(0.001)).toBe("$0.001");
+    expect(formatUsd(0.0009)).toBe("<$0.001");
+    expect(formatUsd(0.0004)).toBe("<$0.001");
+    expect(formatUsd(0.00000001)).toBe("<$0.001");
+    expect(formatUsd(0)).toBe("$0.00");
   });
 });
 
