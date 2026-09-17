@@ -34,6 +34,7 @@ export default defineConfig({
       "reuseAttach.test.ts",
       "rebindAttach.test.ts",
       "releaseAtRunEnd.test.ts",
+      "runRegistration.test.ts",
       "dirtNeverKeeps.test.ts",
       "autoRebuild.test.ts",
       "awaitRestore.test.ts",

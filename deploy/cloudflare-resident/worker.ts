@@ -1489,6 +1489,17 @@ const threadBindingKey = (threadKey: string) => `${THREAD_KEY_PREFIX}${threadKey
 
 const parentDir = (p: string): string => p.slice(0, p.lastIndexOf("/"));
 
+/** A run's registration, held from its attach to its release (item 44): a
+ *  harness run's process lives in the container BETWEEN the bot's operator
+ *  calls, so the in-memory op counters read 0 while it runs. Durable rows —
+ *  a fresh isolate still counts the process that survived in the container. */
+const RUN_REG_KEY_PREFIX = "runReg:";
+const runRegKey = (threadKey: string) => `${RUN_REG_KEY_PREFIX}${threadKey}`;
+interface RunRegistration {
+  threadKey: string;
+  registeredAt: string;
+}
+
 /** Deterministic per-thread+ref worktree path. Slugs replace anything outside
  *  [A-Za-z0-9._-]; a threadKey-derived hash suffix keeps two keys that slug
  *  identically (e.g. "a:b" vs "a-b") from colliding on disk. */
@@ -4750,7 +4761,7 @@ export class ResidentDO extends Sandbox<Env> {
       // container under it (and isIdle never parks the cycle mid-attach).
       this.attachesInFlight++;
       try {
-        return await this.attachThreadBody(
+        const res = await this.attachThreadBody(
           threadKey,
           refHint,
           readonly,
@@ -4761,6 +4772,10 @@ export class ResidentDO extends Sandbox<Env> {
           record,
           reason,
         );
+        // The run this attach opens is now in flight until its release —
+        // whatever its op counters read between the bot's calls (item 44).
+        if (!("error" in res)) await this.registerRun(threadKey);
+        return res;
       } finally {
         this.attachesInFlight--;
       }
@@ -6424,6 +6439,9 @@ export class ResidentDO extends Sandbox<Env> {
       evictedLeftBehind: tree && "leftBehind" in tree ? tree.leftBehind : undefined,
       evictedUnmeasured: tree && "unmeasured" in tree ? tree.unmeasured : undefined,
     } satisfies ThreadBinding);
+    // The run's registration goes with its binding (item 44): released here,
+    // never on a give-way above — a re-attach has re-registered it anyway.
+    await this.ctx.storage.delete(runRegKey(binding.threadKey));
     if (tree) console.log(`${logCtx}: ${binding.threadKey} evicted (${why}) — ${evictedTreeSentence(tree)}`);
     return true;
   }
@@ -6585,10 +6603,33 @@ export class ResidentDO extends Sandbox<Env> {
     return threadOps + this.opUsersInUse.size + this.attachesInFlight;
   }
   /** In-flight activity for the deploy preflight (GET /status, GET /residents).
-   *  In-memory by nature: a fresh isolate answers 0, which is correct — nothing
-   *  survived to be interrupted. */
+   *  The in-memory counters (a fresh isolate answers 0 for them — nothing of
+   *  THEIRS survived to be interrupted) plus the durable run registrations:
+   *  a harness run's process DOES survive an isolate swap in the container,
+   *  so its registration must too. */
   async getInFlightCount(): Promise<number> {
-    return this.inFlightCount();
+    return this.inFlightCount() + (await this.registeredRunsBeyondOps());
+  }
+  /** A run holds its worktree from `/attach` to its release (`/detach`, the
+   *  sweep, disk pressure — every path ends in `evictBinding`, which clears
+   *  the row). Written by the attach; idempotent, a re-attach refreshes it. */
+  private async registerRun(threadKey: string): Promise<void> {
+    await this.ctx.storage.put(runRegKey(threadKey), {
+      threadKey,
+      registeredAt: new Date(systemClock()).toISOString(),
+    } satisfies RunRegistration);
+  }
+  /** The registrations the op counters do not already see: a thread with an
+   *  op in flight is counted by `runsInFlightCount`, so its registration is
+   *  not counted again. Deliberately NOT part of `inFlightCount()`: the
+   *  container-lifecycle predicates (isIdle, reconcileImage) must not let a
+   *  stale registration pin a container awake — the clean-idle sweep is what
+   *  drains a registration whose release never came. */
+  private async registeredRunsBeyondOps(): Promise<number> {
+    const regs = await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX });
+    let n = 0;
+    for (const r of regs.values()) if ((this.threadOpsInFlight.get(r.threadKey) ?? 0) === 0) n++;
+    return n;
   }
   private attachesInFlight = 0;
   /** A refresh cycle past its idle/reconcile gates (fetching, rebuilding, snapshotting). */
@@ -7184,6 +7225,9 @@ export class ResidentDO extends Sandbox<Env> {
           recycledUnmeasured: recycledUnmeasured ?? null,
         }),
       );
+    // The runs whose process lives in the container between operator calls
+    // (item 44): what the deploy preflight must see, added to both counts.
+    const registeredRuns = await this.registeredRunsBeyondOps();
     return {
       resource: map.get(RESOURCE_KEY) ?? null,
       state: map.get(STATE_KEY) ?? "down",
@@ -7203,9 +7247,9 @@ export class ResidentDO extends Sandbox<Env> {
         provisionRun: provisionRun.length,
         provisionDeadline: provisionDeadline.length,
       },
-      inFlight: this.inFlightCount(),
+      inFlight: this.inFlightCount() + registeredRuns,
       // The runs alone (no refresh cycle): what the deploy preflight refuses on.
-      runsInFlight: this.runsInFlightCount(),
+      runsInFlight: this.runsInFlightCount() + registeredRuns,
       // Item 22: who holds what, as the rows say — the mirror mutex and the
       // cycle/hydration leases, each judged against this incarnation.
       incarnation: this.incarnation,
