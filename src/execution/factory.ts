@@ -24,6 +24,7 @@ import {
 import {
   ResidentExecutor,
   ResidentNeedsRefError,
+  waitOnStatus,
   type ResidentBinding,
   type ResidentExecutorOptions,
   type ResidentStatusProbe,
@@ -307,28 +308,12 @@ export async function makeExecutor(
     const token = processSecrets.named(tokenEnv);
     if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
     const resource = repoResourceId(ctx.repo);
-    let probe: ResidentStatusProbe = await probeResident(resident, token, resource, span);
+    const through = await probeThroughBlip(resident, token, resource, span, ctx.stopSignal);
+    let probe: ResidentStatusProbe = through.probe;
     /** How long the selection probe waited through a blip the Worker typed
      *  transient (execution.md item 9): drawn from the first attach's budget
      *  and named on the card with the attach's own wait. */
-    let probeWaitMs = 0;
-    if (probe.kind === "unreachable" && probe.transient) {
-      // The Durable Object reset or lost under the probe — the blip the
-      // attach's own wait exists for, met a moment earlier: re-probe under the
-      // first attach's budget, the run's stop riding in, instead of a cold
-      // fallback at once. Never the breaker's case: this answer is typed, the
-      // outage the breaker catches is not.
-      const through = await ResidentExecutor.probeStatusThroughBlip(
-        resident.baseUrl,
-        token.reveal(),
-        resource,
-        resident.probeTimeoutMs ?? 2000,
-        probe,
-        { budgetMs: FIRST_ATTACH_WAIT_MS, signal: ctx.stopSignal, span },
-      );
-      probe = through.probe;
-      probeWaitMs = through.waitedMs;
-    }
+    const probeWaitMs = through.waitedMs;
     /** Set when the run held the one /await-restore request (item 27) — the
      *  card names the wait whichever way the answer went. */
     let waitedForRestore = false;
@@ -559,24 +544,11 @@ async function reattachWorkspace(
   const token = processSecrets.named(tokenEnv);
   if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
   const resource = repoResourceId(ctx.repo);
-  let probe = await probeResident(resident, token, resource, span);
   // The selection probe waited through a blip the Worker typed transient, as a
   // fresh run's is (execution.md item 9): drawn from the first attach's budget,
   // the run's stop riding in, named on the note. A refusal at once here would
   // close the run and dispatch its request again for a blip a re-probe clears.
-  let probeWaitMs = 0;
-  if (probe.kind === "unreachable" && probe.transient) {
-    const through = await ResidentExecutor.probeStatusThroughBlip(
-      resident.baseUrl,
-      token.reveal(),
-      resource,
-      resident.probeTimeoutMs ?? 2000,
-      probe,
-      { budgetMs: FIRST_ATTACH_WAIT_MS, signal: ctx.stopSignal, span },
-    );
-    probe = through.probe;
-    probeWaitMs = through.waitedMs;
-  }
+  const { probe, waitedMs: probeWaitMs } = await probeThroughBlip(resident, token, resource, span, ctx.stopSignal);
   const waitedNote = probeWaitMs > 0 ? ` after waiting ${Math.round(probeWaitMs / 1000)}s` : "";
   if (probe.kind === "unreachable") throw refuse(`resident unreachable (${probe.error})${waitedNote}`);
   if (!isServiceable(probe.state, probe.reason))
@@ -830,6 +802,46 @@ async function probeResident(
     probeOutage = { until: systemClock() + PROBE_OUTAGE_WINDOW_MS, error: probe.error };
   }
   return probe;
+}
+
+/** The selection probe, waited through a blip the Worker typed transient
+ *  (execution.md item 9) — a fresh run's selection and a resumed run's
+ *  re-attach alike, one function: a 5xx carrying `transient: true` (the
+ *  Durable Object reset or lost under the probe, which the attach's own wait
+ *  would have waited through a moment later) is re-probed on the wake path's
+ *  one loop (`waitOnStatus`): at once first — a blip already recovered from
+ *  costs no pause, as the wake wait's first view costs none — then every poll,
+ *  under the first attach's budget and the selection's own probe deadline, the
+ *  run's stop ending it with its typed error. A transport failure or any other
+ *  answer ends the wait at once — untyped, it is the outage breaker's case,
+ *  never a wait. Answers the last view and how long was waited — nothing when
+ *  the first view was not the blip. */
+async function probeThroughBlip(
+  cfg: ResidentExecutionConfig,
+  token: Secret,
+  resource: string,
+  span?: Span,
+  stopSignal?: AbortSignal,
+): Promise<{ probe: ResidentStatusProbe; waitedMs: number }> {
+  const first = await probeResident(cfg, token, resource, span);
+  const typedBlip = (view: ResidentStatusProbe): boolean => view.kind === "unreachable" && view.transient === true;
+  if (!typedBlip(first)) return { probe: first, waitedMs: 0 };
+  let reprobed = false;
+  return waitOnStatus<{ probe: ResidentStatusProbe; waitedMs: number }>({
+    first,
+    probe: (signal) =>
+      ResidentExecutor.probeStatus(cfg.baseUrl, token.reveal(), resource, cfg.probeTimeoutMs ?? 2000, span, signal),
+    budgetMs: FIRST_ATTACH_WAIT_MS,
+    signal: stopSignal,
+    route: "/status",
+    judge: async (view, spent) => {
+      if (!typedBlip(view)) return { end: { probe: view, waitedMs: spent() } };
+      const verdict = reprobed ? "wait" : "again";
+      reprobed = true;
+      return verdict;
+    },
+    spent: (last, spentMs) => ({ probe: last, waitedMs: spentMs }),
+  });
 }
 
 /** The thread's local workspace directory under `baseDir`: the threadKey is

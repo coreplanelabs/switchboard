@@ -306,6 +306,49 @@ function wakePause(ms: number, signal: AbortSignal | undefined, route: string): 
   });
 }
 
+/** The wake path's ONE loop over `/status` views (item 65; execution.md item
+ *  9) — the wake wait's (`awaitWake`, which re-attaches inside it) and the
+ *  selection probe's wait through a typed blip (the factory's) both run here,
+ *  so one pause (`WAKE_POLL_MS`, clipped to the budget), one stop check and
+ *  one budget rule serve both; each caller's `probe` keeps its own deadline
+ *  and is handed the run's stop. `judge` reads the view in hand — `{ end }`
+ *  finishes with that value, `"wait"` pauses then probes again, `"again"`
+ *  probes again at once (a view worth re-reading without a pause) — and is
+ *  handed the wait's one clock, `spent()`, for every message it words. The
+ *  budget bounds the PROBING, on a clock that starts where the caller says
+ *  (`since`; now when absent): when it is spent before the next probe, `spent`
+ *  answers (or throws) from the last view. The run's stop, riding into the
+ *  pause and every probe, ends the loop with `wakeStopped`'s typed error. */
+export async function waitOnStatus<T>(input: {
+  first: ResidentStatusProbe;
+  /** When the wait began, on the caller's clock; now when absent. */
+  since?: number;
+  probe: (signal: AbortSignal | undefined) => Promise<ResidentStatusProbe>;
+  budgetMs: number;
+  signal?: AbortSignal;
+  route: string;
+  /** Reads the view in hand; `spent()` is the wait's one clock, read whenever a message or a verdict needs it. */
+  judge: (view: ResidentStatusProbe, spent: () => number) => Promise<{ end: T } | "wait" | "again">;
+  spent: (last: ResidentStatusProbe, spentMs: number) => T;
+}): Promise<T> {
+  const t0 = input.since ?? systemClock();
+  const spent = (): number => systemClock() - t0;
+  let view = input.first;
+  for (;;) {
+    const verdict = await input.judge(view, spent);
+    if (verdict !== "wait" && verdict !== "again") return verdict.end;
+    const spentMs = spent();
+    if (spentMs >= input.budgetMs) return input.spent(view, spentMs);
+    if (verdict === "wait")
+      await wakePause(Math.min(WAKE_POLL_MS, input.budgetMs - spentMs), input.signal, input.route);
+    view = await input.probe(input.signal);
+    // The run's stop rides into the probe as into every send: a stop during one
+    // is the stop's own typed error, as the pause throws it — never a verdict on
+    // an "unreachable" view the stop itself produced.
+    if (input.signal?.aborted) throw wakeStopped(input.route);
+  }
+}
+
 export interface ResidentExecutorOptions {
   /** Base URL of the resident Worker. */
   baseUrl: string;
@@ -727,39 +770,6 @@ export class ResidentExecutor implements Executor {
       reason: String(data.reason ?? ""),
       ...(seed ? { seed } : {}),
     };
-  }
-
-  /** The selection probe, waited through a blip the Worker typed transient
-   *  (execution.md item 9): a 5xx carrying `transient: true` — the Durable
-   *  Object reset or lost under the probe, which the attach's own wait would
-   *  have waited through a moment later — is re-probed every `WAKE_POLL_MS`
-   *  under `budgetMs`, the run's stop ending the wait at once with its typed
-   *  error. Starts from the view the caller already has (`first`), re-probes
-   *  at once — a blip the Durable Object has already recovered from costs no
-   *  pause, as the wake wait's first view costs none — then every poll; answers
-   *  the last view and how long was waited. A transport failure or any other
-   *  answer is returned at once — untyped, it is the caller's outage breaker's
-   *  case, never a wait. */
-  static async probeStatusThroughBlip(
-    baseUrl: string,
-    token: string,
-    resource: string,
-    timeoutMs: number,
-    first: ResidentStatusProbe,
-    wait: { budgetMs: number; signal?: AbortSignal; span?: Span },
-  ): Promise<{ probe: ResidentStatusProbe; waitedMs: number }> {
-    const t0 = systemClock();
-    let probe = first;
-    let reprobed = false;
-    for (;;) {
-      if (probe.kind !== "unreachable" || !probe.transient) return { probe, waitedMs: systemClock() - t0 };
-      const spent = systemClock() - t0;
-      if (spent >= wait.budgetMs) return { probe, waitedMs: spent };
-      if (reprobed) await wakePause(Math.min(WAKE_POLL_MS, wait.budgetMs - spent), wait.signal, "/status");
-      reprobed = true;
-      probe = await ResidentExecutor.probeStatus(baseUrl, token, resource, timeoutMs, wait.span, wait.signal);
-      if (wait.signal?.aborted) throw wakeStopped("/status");
-    }
   }
 
   /** The one held request while the resident restores (item 27): POST
@@ -1212,7 +1222,6 @@ export class ResidentExecutor implements Executor {
     },
   ): Promise<{ waitedMs: number; binding: ResidentBinding }> {
     const t0 = systemClock();
-    const waited = () => systemClock() - t0;
     let transient = opts.origin === "transient-refusal";
     /** A definite engine view — no wake recovers from it — or a Worker that did not answer: refused. */
     const definite = (why: string): ExecInfraError => residentWakeStrike(route, refusal, why, "refused", opts.origin);
@@ -1226,94 +1235,101 @@ export class ResidentExecutor implements Executor {
             why: `the resident Worker did not answer /status (${view.error}) after a transient refusal: the same blip, waited through`,
           }
         : wakeDecision(view);
-    const probe = async (): Promise<ResidentStatusProbe> => {
-      const seen = await ResidentExecutor.probeStatus(
+    /** The one probe, for the first view and every re-probe: the wake's own deadline, the run's stop riding in. */
+    const probe = (signal: AbortSignal | undefined): Promise<ResidentStatusProbe> =>
+      ResidentExecutor.probeStatus(
         this.opts.baseUrl,
         this.opts.token,
         this.opts.resource,
         WAKE_PROBE_TIMEOUT_MS,
         opts.span,
-        opts.signal,
+        signal,
       );
-      // The run's stop rides into the probe as into every send: a stop during
-      // one is the stop's own typed error, as the pause throws it — never a
-      // strike on an "unreachable" view the stop itself produced.
-      if (opts.signal?.aborted) throw wakeStopped(route);
-      return seen;
-    };
-    let seen = await probe();
-    const decision = decide(seen);
-    if (!decision.wait) throw definite(decision.why);
+    const first = await probe(opts.signal);
+    // The run's stop rides into the probe as into every send: a stop during
+    // one is the stop's own typed error, as the pause throws it — never a
+    // strike on an "unreachable" view the stop itself produced. (The loop
+    // makes this check after each of its own probes.)
+    if (opts.signal?.aborted) throw wakeStopped(route);
     const budget = wakeWaitBudget(opts.budgetMs);
-    // Each turn: re-attach when the engine view says the resident serves, else
-    // (or after a re-attach the wait goes on from) pause and probe again, under
-    // the budget. The very first view counts only in a wait a transient refusal
-    // began — the engine was never told of an exit, so a serving view is
-    // current and a blip the first probe already shows cleared costs no pause
-    // and no second probe; after a container's exit the engine view lags the
-    // exit, so the first re-attach follows the first pause, never a full
+    // Each turn of the wake path's one loop (`waitOnStatus`), the first view
+    // included: judge the view — a definite one is the strike at once, before
+    // any pause — then re-attach when it says the resident serves, else (or
+    // after a re-attach the wait goes on from) pause and probe again, under
+    // the budget. The very first view counts only in a wait a transient
+    // refusal began — the engine was never told of an exit, so a serving view
+    // is current and a blip the first probe already shows cleared costs no
+    // pause and no second probe; after a container's exit the engine view lags
+    // the exit, so the first re-attach follows the first pause, never a full
     // /attach into a container still starting.
     let firstView = true;
-    for (;;) {
-      if (seen.kind === "status" && isServiceable(seen.state, seen.reason) && (transient || !firstView)) {
-        let answer: AttachAnswer;
-        try {
-          // The wake budget bounds the PROBING; the re-attach's own bound is the
-          // caller's. A caller with none — a first attach, a resume, a head move
-          // — gets the attach's own timeout, the exec default, uncapped: a cold
-          // clone and deps install may run past the wake ceiling, and clipped to
-          // the budget's remainder or the ceiling the re-attach would strike a
-          // resident still attaching and provision the run cold beside it. An
-          // operation's wait gets the longer of the budget's remainder and its
-          // own call bound, and never past the wake ceiling: an operation never
-          // waits past its wall clock, nor past three minutes whatever its
-          // command's budget (item 65).
-          const bound =
-            opts.attachTimeoutMs === undefined
-              ? Math.max(budget - waited(), BASH_TIMEOUT_MS)
-              : Math.min(WAKE_WAIT_MAX_MS, Math.max(budget - waited(), opts.attachTimeoutMs));
-          answer = await this.attachOnce(opts.span, bound, opts.signal);
-        } catch (err) {
-          if (!(err instanceof ExecInfraError)) throw err;
-          // The run's own stop: its signal rides into the re-attach as into every
-          // send, and the failure is the call's own — the stop as its request
-          // site classified it — never a strike counted as a container exit.
-          if (err.reason === "aborted") throw err;
-          // The re-attach's own verdict — a deadline passed, the transport lost —
-          // says nothing about the resident: the strike reads the last engine
-          // view, as the budget strike does.
-          throw residentWakeStrike(
-            route,
-            refusal,
-            `the re-attach after ${Math.round(waited() / 1000)}s did not answer (${err.message})`,
-            wakeStrikeReason(seen, transient),
-            opts.origin,
-          );
+    return waitOnStatus<{ waitedMs: number; binding: ResidentBinding }>({
+      first,
+      since: t0,
+      probe,
+      budgetMs: budget,
+      signal: opts.signal,
+      route,
+      judge: async (view, spent) => {
+        const verdict = decide(view);
+        if (!verdict.wait) throw definite(verdict.why);
+        if (view.kind === "status" && isServiceable(view.state, view.reason) && (transient || !firstView)) {
+          let answer: AttachAnswer;
+          try {
+            // The wake budget bounds the PROBING; the re-attach's own bound is the
+            // caller's. A caller with none — a first attach, a resume, a head move
+            // — gets the attach's own timeout, the exec default, uncapped: a cold
+            // clone and deps install may run past the wake ceiling, and clipped to
+            // the budget's remainder or the ceiling the re-attach would strike a
+            // resident still attaching and provision the run cold beside it. An
+            // operation's wait gets the longer of the budget's remainder and its
+            // own call bound, and never past the wake ceiling: an operation never
+            // waits past its wall clock, nor past three minutes whatever its
+            // command's budget (item 65).
+            const bound =
+              opts.attachTimeoutMs === undefined
+                ? Math.max(budget - spent(), BASH_TIMEOUT_MS)
+                : Math.min(WAKE_WAIT_MAX_MS, Math.max(budget - spent(), opts.attachTimeoutMs));
+            answer = await this.attachOnce(opts.span, bound, opts.signal);
+          } catch (err) {
+            if (!(err instanceof ExecInfraError)) throw err;
+            // The run's own stop: its signal rides into the re-attach as into every
+            // send, and the failure is the call's own — the stop as its request
+            // site classified it — never a strike counted as a container exit.
+            if (err.reason === "aborted") throw err;
+            // The re-attach's own verdict — a deadline passed, the transport lost —
+            // says nothing about the resident: the strike reads the last engine
+            // view, as the budget strike does.
+            throw residentWakeStrike(
+              route,
+              refusal,
+              `the re-attach after ${Math.round(spent() / 1000)}s did not answer (${err.message})`,
+              wakeStrikeReason(view, transient),
+              opts.origin,
+            );
+          }
+          if (answer.ok) return { end: { waitedMs: spent(), binding: answer.binding } };
+          // A 500 the Worker typed transient (the Durable Object reset or lost under
+          // the re-attach): the resident is coming back as far as anyone can tell,
+          // so the wait goes on — the next probe and re-attach follow — instead of
+          // ending in the attach's own error; and from here an unreachable probe
+          // is that same blip. A refusal still naming a rolling container waits on
+          // too; anything else is the attach's own error, a needs-ref carrying the
+          // wait so its caller's retry draws on one budget and names the total.
+          if (isTransientRefusal(answer)) transient = true;
+          else if (!isContainerRolling(answer.data.error)) {
+            const refused = this.attachRefusal(answer);
+            if (refused instanceof ResidentNeedsRefError) refused.wokeAfterMs = spent();
+            throw refused;
+          }
         }
-        if (answer.ok) return { waitedMs: waited(), binding: answer.binding };
-        // A 500 the Worker typed transient (the Durable Object reset or lost under
-        // the re-attach): the resident is coming back as far as anyone can tell,
-        // so the wait goes on — the next probe and re-attach follow — instead of
-        // ending in the attach's own error; and from here an unreachable probe
-        // is that same blip. A refusal still naming a rolling container waits on
-        // too; anything else is the attach's own error, a needs-ref carrying the
-        // wait so its caller's retry draws on one budget and names the total.
-        if (isTransientRefusal(answer)) transient = true;
-        else if (!isContainerRolling(answer.data.error)) {
-          const refused = this.attachRefusal(answer);
-          if (refused instanceof ResidentNeedsRefError) refused.wokeAfterMs = waited();
-          throw refused;
-        }
-      }
-      firstView = false;
-      const spent = waited();
-      if (spent >= budget)
-        throw residentWakeBudgetStrike(route, refusal, spent, seen, { origin: opts.origin, transient });
-      await wakePause(Math.min(WAKE_POLL_MS, budget - spent), opts.signal, route);
-      seen = await probe();
-      const again = decide(seen);
-      if (!again.wait) throw definite(again.why);
-    }
+        firstView = false;
+        return "wait";
+      },
+      spent: (last, spentMs) => {
+        throw residentWakeBudgetStrike(route, refusal, spentMs, last, { origin: opts.origin, transient });
+      },
+    });
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<string> {
