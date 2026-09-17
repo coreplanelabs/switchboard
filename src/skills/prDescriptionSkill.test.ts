@@ -23,6 +23,7 @@ describe("the pr-description skill carries the PR description contract", () => {
 
   it("names the map's fields in order with the schema's caps, and says caps count visible characters with link targets excluded", () => {
     const order = [
+      `\`title\` (${PR_DESCRIPTION_CAPS.title})`,
       `\`tldr\` (${PR_DESCRIPTION_CAPS.tldr})`,
       `\`why\` (${PR_DESCRIPTION_CAPS.why})`,
       `\`pointers\` (1 to ${PR_DESCRIPTION_CAPS.pointers})`,

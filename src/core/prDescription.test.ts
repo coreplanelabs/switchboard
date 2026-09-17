@@ -107,6 +107,13 @@ describe("parsePrDescription (the schema)", () => {
 
   it("caps every map field in visible characters and names the cap and the count; a link's target is not counted", () => {
     const long = (n: number) => "x".repeat(n);
+    // The title is the squash subject and the changelog line: 72, the same
+    // number the title gate (`npm run check:pr-title`) holds it to.
+    expect(PR_DESCRIPTION_CAPS.title).toBe(72);
+    expect(issueAt(() => parsePrDescription({ ...desc(), title: long(73) }), "title")).toBe(
+      "at most 72 visible characters (got 73)",
+    );
+    expect(parsePrDescription({ ...desc(), title: long(72) }).title).toBe(long(72));
     expect(issueAt(() => parsePrDescription({ ...desc(), tldr: long(301) }), "tldr")).toBe(
       "at most 300 visible characters (got 301)",
     );

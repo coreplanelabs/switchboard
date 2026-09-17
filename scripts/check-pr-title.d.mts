@@ -1,6 +1,10 @@
 export const TITLE_GRAMMAR: RegExp;
 export const CODE_MAP_PATH: string;
 export const MIGRATIONS_PATH: string;
+/** The most characters a title may run to, the whole line counted; `PR_DESCRIPTION_CAPS.title` holds the same number. */
+export const TITLE_MAX_VISIBLE: number;
+/** The scopes only bots write (`deps`, `main`); their titles are not held to the cap. */
+export const BOT_SCOPES: readonly string[];
 export function allowedTypes(releasePleaseConfig: unknown): string[];
 export function allowedScopes(codeMapMarkdown: string): string[];
 export interface TitleVocabulary {

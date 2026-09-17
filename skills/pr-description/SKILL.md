@@ -10,6 +10,10 @@ The description is the `PrDescription` object you submit through `submit_pr_desc
 
 The map is the same size for a 3-file and an 80-file PR. The schema enforces that: every field has a cap and the tool refuses an object over it, naming the field. Caps count visible characters; a markdown link's target is not counted, so link freely.
 
+## The title
+
+`title` (72): the changelog line and the squash subject, `type(scope): what a reader can now do or expect`, the whole line counted. One change, one clause, present tense; the type and the scope spend the same budget as the description, so the description is short and the body carries the rest. Judge it with `npm run check:pr-title -- "<title>"` before submitting: the same gate refuses the PR in CI, and the schema refuses a longer title naming the count.
+
 ## The map (above the fold, in this order)
 
 1. `tldr` (300): two sentences for a reader with zero context, what this PR does and why it matters.
