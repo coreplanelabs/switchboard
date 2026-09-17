@@ -2,8 +2,8 @@
 
 The Linear integration is being built in stages. OAuth, durable webhook intake,
 native conversations, edge acknowledgements, dispatcher consumption, outbound
-files, issue tools and lifecycle cancellation are wired. Inbound files and live
-deployment verification remain in progress. Do not install the app for end users until the completed channel
+files, inline incoming files, issue tools and lifecycle cancellation are wired.
+Large-file staging and live deployment verification remain in progress. Do not install the app for end users until the completed channel
 is deployed. See the [delivery plan](../plans/2026-09-17-001-linear-channel.md).
 
 ## Register the application
@@ -97,6 +97,20 @@ visibility of that run. Stop can also end your current waiting question. A denie
 or stale Stop leaves the session unchanged. A Linear session does not establish team-wide membership;
 configure an operator's channel grants explicitly. Revocation and access removal are
 infrastructure cancellations and require no new grant from the former requester.
+
+Private images, PDFs and text/code files linked in the issue description,
+issue comments or native prompts can reach the model. The edge verifies the
+requester's current team access and finds the link in current session context
+before downloading from Linear's private storage. OAuth credentials remain at
+the edge, and signed URL query strings are removed before download.
+
+Each prompt can carry up to 10 files; restored history allows 20 distinct files,
+newest first. Images are capped at 5 MiB each, documents at 10 MiB, with a 12 MiB
+combined budget per prompt or history load. Repeated history links carry bytes
+only on the newest user turn. Credential-shaped filenames, unsupported formats,
+missing files and files over those limits are named as unread in the prompt.
+Large files and binary formats are not yet staged into the workspace. Temporary
+failures downloading a new prompt's files retry before dispatch starts.
 
 Coding runs can return files through `attach_file`. With an artifact store,
 the executor streams the file to a private Linear upload using a short-lived

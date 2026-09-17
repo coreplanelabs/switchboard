@@ -1,3 +1,10 @@
+import {
+  downloadLinearFiles,
+  fileReferences,
+  LINEAR_FILE_LIMITS,
+  type LinearFile,
+  type LinearFileReference,
+} from "./files.js";
 import { LINEAR_TIMING } from "../../core/budgets.js";
 import { contentTypeFor } from "../../artifacts/contentType.js";
 import type { WorkItemRequest, WorkItemResult } from "../../core/workItems.js";
@@ -40,6 +47,7 @@ export interface LinearActivity {
 
 /** Bound to one installation. Implementations keep its token at the edge. */
 export interface LinearApi {
+  files(sessionId: string, userId: string, urls: string[], history?: boolean): Promise<LinearFile[]>;
   canRead(sessionId: string, userId: string): Promise<boolean>;
   session(id: string): Promise<LinearSession>;
   activities(sessionId: string): Promise<LinearActivity[]>;
@@ -117,6 +125,63 @@ export class DirectLinearApi implements LinearApi {
       if (error instanceof Error && error.message === "linear_human_required") return false;
       throw error;
     }
+  }
+
+  async files(sessionId: string, userId: string, urls: string[], history = false): Promise<LinearFile[]> {
+    if (!Array.isArray(urls) || urls.length > 1000 || urls.some((url) => typeof url !== "string" || url.length > 4096))
+      throw new Error("linear_invalid_files");
+    if (!urls.length) return [];
+    if (!(await this.canRead(sessionId, userId))) throw new Error("linear_file_denied");
+    const requested = [...new Set(urls)];
+    const wanted = new Set(requested);
+    const allowed = new Map<string, LinearFileReference>();
+    const collect = (value: unknown) => {
+      if (typeof value === "string")
+        for (const ref of fileReferences(value))
+          if (wanted.has(ref.url) && !allowed.has(ref.url)) allowed.set(ref.url, ref);
+    };
+    let after: string | undefined;
+    const cursors = new Set<string>();
+    for (let page = 0; ; page++) {
+      if (page >= 100) throw new Error("linear_file_context_too_large");
+      const data = await this.query(
+        `query SwitchboardFileContext($id: String!, $after: String) {
+        organization { id }
+        agentSession(id: $id) { id dismissedAt appUser { id } comment { body }
+          issue { description comments(first: 100, after: $after) { nodes { body } pageInfo { hasNextPage endCursor } } } }
+      }`,
+        { id: sessionId, after },
+      );
+      const session = object(data.agentSession);
+      if (
+        object(data.organization).id !== this.deps.organizationId ||
+        session.id !== sessionId ||
+        object(session.appUser).id !== this.deps.appUserId ||
+        session.dismissedAt
+      )
+        throw new Error("linear_file_denied");
+      const issue = object(session.issue);
+      collect(issue.description);
+      collect(object(session.comment).body);
+      const comments = object(issue.comments);
+      if (!Array.isArray(comments.nodes)) throw new Error("linear_invalid_response");
+      for (const comment of comments.nodes) collect(object(comment).body);
+      const info = object(comments.pageInfo);
+      if (info.hasNextPage === false) break;
+      after = required(info.endCursor);
+      if (cursors.has(after)) throw new Error("linear_invalid_pagination");
+      cursors.add(after);
+    }
+    for (const activity of await this.activities(sessionId)) collect(activity.body);
+    const downloaded = await downloadLinearFiles(
+      requested.flatMap((url) => (allowed.has(url) ? [allowed.get(url)!] : [])),
+      this.deps,
+      history ? LINEAR_FILE_LIMITS.historyCount : LINEAR_FILE_LIMITS.count,
+    );
+    const byUrl = new Map(downloaded.map((file) => [file.url, file]));
+    return requested.map(
+      (url) => byUrl.get(url) ?? { url, name: "attachment", skipped: "not found in current session context" },
+    );
   }
 
   workItems(_sessionId: string, actor: LinearWorkItemActor, input: WorkItemRequest): Promise<WorkItemResult> {

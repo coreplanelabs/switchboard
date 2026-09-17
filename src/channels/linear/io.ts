@@ -1,3 +1,4 @@
+import { applyLinearFiles, fileReferences } from "./files.js";
 import type {
   ChannelIO,
   ConfirmationOffer,
@@ -21,6 +22,7 @@ export class LinearChannelIO implements ChannelIO {
   readonly isolateFollowUps = true;
   private writes: Promise<void> = Promise.resolve();
   private receipt?: RunReceipt;
+  private requesterId?: string;
   private lastProgress = -Infinity;
   private lastContent = "";
   private linked = new Set<string>();
@@ -40,8 +42,11 @@ export class LinearChannelIO implements ChannelIO {
     },
   ) {}
 
-  checkAccess(userId: string): Promise<boolean> {
-    return this.deps.api.canRead(this.deps.sessionId, userId);
+  async checkAccess(userId: string): Promise<boolean> {
+    this.requesterId = undefined;
+    const allowed = await this.deps.api.canRead(this.deps.sessionId, userId);
+    if (allowed) this.requesterId = userId;
+    return allowed;
   }
 
   workItems(actor: Actor): WorkItems {
@@ -200,6 +205,29 @@ export class LinearChannelIO implements ChannelIO {
           ? `Linear issue ${session.issue.identifier}: ${session.issue.title}\n\n${session.issue.description ?? ""}`
           : "Earlier assistant messages in this Linear session follow.",
       });
+    }
+    const urls = [
+      ...new Set(
+        [...history]
+          .reverse()
+          .filter((turn) => turn.role === "user")
+          .flatMap((turn) => fileReferences(turn.text).map((ref) => ref.url)),
+      ),
+    ];
+    if (urls.length) {
+      if (!this.requesterId) throw new Error("linear_file_requester_required");
+      const files = await this.deps.api.files(this.deps.sessionId, this.requesterId, urls, true);
+      const used = new Set<string>();
+      for (let i = history.length - 1; i >= 0; i--) {
+        const turn = history[i]!;
+        if (turn.role !== "user") continue;
+        // Carry each file's bytes once, on its most recent user turn.
+        history[i] = applyLinearFiles(
+          turn,
+          files.filter((file) => !used.has(file.url)),
+        );
+        for (const ref of fileReferences(turn.text)) used.add(ref.url);
+      }
     }
     return history;
   }

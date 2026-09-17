@@ -7,6 +7,7 @@ function fixture() {
   const inbox = new InMemoryLinearInbox();
   const api: LinearApi = {
     workItems: vi.fn(),
+    files: vi.fn(async () => []),
     canRead: vi.fn(async () => true),
     upload: vi.fn(),
     session: vi.fn(async (id) => ({ id, appUserId: "bot" })),
@@ -20,6 +21,18 @@ function fixture() {
 }
 
 describe("Linear edge bridge", () => {
+  it("binds file downloads to a session and requester without accepting arbitrary fetch options", async () => {
+    const { api, transport } = fixture();
+    const remote = new RemoteLinearApi(transport, "org");
+    const urls = ["https://uploads.linear.app/org/file"];
+    vi.mocked(api.files).mockResolvedValue([
+      { url: urls[0]!, name: "file.txt", document: { mediaType: "text/plain", data: "text" } },
+    ]);
+    expect(await remote.files("s", "linear:org:alice", urls, true)).toHaveLength(1);
+    expect(api.files).toHaveBeenCalledWith("s", "linear:org:alice", urls, true);
+    vi.mocked(api.files).mockRejectedValueOnce(new Error("linear_file_denied"));
+    await expect(remote.files("s", "linear:org:bob", urls)).rejects.toThrow("linear_file_denied");
+  });
   it("relays a requester access verdict and preserves lookup failure as retryable", async () => {
     const { api, transport } = fixture();
     const remote = new RemoteLinearApi(transport, "org");

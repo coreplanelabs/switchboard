@@ -31,6 +31,7 @@ function fixture() {
   };
   const api: LinearApi = {
     workItems: vi.fn(),
+    files: vi.fn(async () => []),
     canRead: vi.fn(async () => true),
     upload: vi.fn(),
     session: vi.fn(async (id) => ({ id, appUserId: "bot", creatorId: "alice" })),
@@ -63,6 +64,47 @@ function fixture() {
 afterEach(() => vi.useRealTimers());
 
 describe("Linear event consumer", () => {
+  it("leaves access refusal to dispatch and never claims a denied file was read", async () => {
+    const f = fixture();
+    const ev = event();
+    ev.payload.promptContext = "Read [file.txt](https://uploads.linear.app/org/file)";
+    await f.store.accept(ev);
+    vi.mocked(f.api.files).mockRejectedValue(new Error("linear_file_denied"));
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining("Attachments not read: the requester could not access this session"),
+      }),
+      expect.anything(),
+    );
+    expect(f.inbox.complete).toHaveBeenCalledOnce();
+  });
+  it("loads private prompt files before beginning dispatch and retries a failed download without a begun marker", async () => {
+    const f = fixture();
+    const url = "https://uploads.linear.app/org/image";
+    const ev = event();
+    ev.payload.promptContext = `Describe ![screen.png](${url})`;
+    await f.store.accept(ev);
+    vi.mocked(f.api.files)
+      .mockRejectedValueOnce(new Error("linear_file_unavailable"))
+      .mockResolvedValueOnce([
+        { url, name: "screen.png", image: { name: "screen.png", mediaType: "image/png", data: "cGl4ZWxz" } },
+      ]);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.inbox.begin).not.toHaveBeenCalled();
+    expect(f.deps.dispatch).not.toHaveBeenCalled();
+    f.advance(5000);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.api.files).toHaveBeenCalledWith("s", "linear:org:alice", [url]);
+    expect(f.deps.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ images: [{ name: "screen.png", mediaType: "image/png", data: "cGl4ZWxz" }] }),
+      expect.anything(),
+    );
+    expect(f.inbox.complete).toHaveBeenCalledOnce();
+  });
   it("retries an explicitly deferred turn as its own requester instead of treating it as interrupted", async () => {
     const f = fixture();
     await f.store.accept(event());

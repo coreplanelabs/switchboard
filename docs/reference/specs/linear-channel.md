@@ -5,8 +5,8 @@ Its OAuth app is the API identity; the dispatch actor is the authenticated perso
 the session. Native delegation names the app in `Issue.delegate` and preserves
 the human assignee.
 
-- **Code**: `src/channels/attachmentTypes.ts`, `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/channels/linear/api.ts`, `src/channels/linear/session.ts`, `src/channels/linear/io.ts`, `src/channels/linear/bridge.ts`, `src/channels/linear/consumer.ts`, `src/channels/linear/acknowledgement.ts`, `src/channels/linear/control.ts`, `src/channels/linear/recovery.ts`, `src/channels/linear/lifecycle.ts`, `src/channels/linear/workItems.ts`, `src/channels/linear/access.ts`, `src/core/dispatch/channelAccess.ts`, `src/core/question.ts`, `src/tools/question.ts`, `src/core/workItems.ts`, `src/tools/workItems.ts`, `src/tools/toolsets.ts`, `src/tools/runnableTool.ts`, `src/core/dispatch/runLoop.ts`, `src/core/authz/policy.ts`, `src/index.ts`, `src/core/authz/actor.ts`, `src/core/authz/grants.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
-- **Tests**: `src/channels/linear/oauth.test.ts`, `src/channels/linear/store.test.ts`, `src/channels/linear/webhook.test.ts`, `src/channels/linear/inbox.test.ts`, `src/channels/linear/api.test.ts`, `src/channels/linear/session.test.ts`, `src/channels/linear/io.test.ts`, `src/channels/linear/bridge.test.ts`, `src/channels/linear/consumer.test.ts`, `src/channels/linear/acknowledgement.test.ts`, `src/channels/linear/control.test.ts`, `src/channels/linear/recovery.test.ts`, `src/channels/linear/lifecycle.test.ts`, `src/channels/linear/workItems.test.ts`, `src/tools/workItems.test.ts`, `src/tools/question.test.ts`, `src/core/dispatch/runLoop.test.ts`, `src/core/authz/actor.test.ts`.
+- **Code**: `src/channels/linear/files.ts`, `src/channels/attachmentTypes.ts`, `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/channels/linear/api.ts`, `src/channels/linear/session.ts`, `src/channels/linear/io.ts`, `src/channels/linear/bridge.ts`, `src/channels/linear/consumer.ts`, `src/channels/linear/acknowledgement.ts`, `src/channels/linear/control.ts`, `src/channels/linear/recovery.ts`, `src/channels/linear/lifecycle.ts`, `src/channels/linear/workItems.ts`, `src/channels/linear/access.ts`, `src/core/dispatch/channelAccess.ts`, `src/core/question.ts`, `src/tools/question.ts`, `src/core/workItems.ts`, `src/tools/workItems.ts`, `src/tools/toolsets.ts`, `src/tools/runnableTool.ts`, `src/core/dispatch/runLoop.ts`, `src/core/authz/policy.ts`, `src/index.ts`, `src/core/authz/actor.ts`, `src/core/authz/grants.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
+- **Tests**: `src/channels/linear/files.test.ts`, `src/channels/linear/oauth.test.ts`, `src/channels/linear/store.test.ts`, `src/channels/linear/webhook.test.ts`, `src/channels/linear/inbox.test.ts`, `src/channels/linear/api.test.ts`, `src/channels/linear/session.test.ts`, `src/channels/linear/io.test.ts`, `src/channels/linear/bridge.test.ts`, `src/channels/linear/consumer.test.ts`, `src/channels/linear/acknowledgement.test.ts`, `src/channels/linear/control.test.ts`, `src/channels/linear/recovery.test.ts`, `src/channels/linear/lifecycle.test.ts`, `src/channels/linear/workItems.test.ts`, `src/tools/workItems.test.ts`, `src/tools/question.test.ts`, `src/core/dispatch/runLoop.test.ts`, `src/core/authz/actor.test.ts`.
 - **Docs**: [Delivery plan](../../plans/2026-09-17-001-linear-channel.md).
 
 ## Behavior
@@ -136,6 +136,14 @@ the human assignee.
     predates the Stop. An older question cannot hide a newer invisible run. A
     missing history snapshot retries rather than guessing whether a question waits.
 
+21. Private file references in issue and session text can supply inline images, PDFs
+    and text documents. The edge rechecks the human and session, accepts only links
+    found in current authorized context, authenticates only to uploads.linear.app
+    without redirects, and bounds count and streamed bytes. Credential-shaped
+    files are never read. Permanent omissions are named in the prompt; transient
+    download failures before dispatch leave the delivery retryable. History restores
+    attachments with a shared budget that favors recent turns.
+
 ## Proof
 
 | Criterion | Proof |
@@ -156,7 +164,7 @@ the human assignee.
 | 15: private file tickets, session checks and native sharing | `[unit]` `src/channels/linear/api.test.ts::*`, `src/channels/linear/bridge.test.ts::*`, `src/channels/linear/io.test.ts::*` |
 | 16: issue actions and delegated queue privacy | `[unit]` `src/channels/linear/workItems.test.ts::*` |
 | Work-item tool exposure and dispatcher binding | `[unit]` `src/tools/workItems.test.ts::*`, `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::binds work tracking to the resolved requester before a model can call an issue tool` |
-| Inbound files and deployed installation | `[gap]` Delivery plan acceptance ledger; not implemented by OAuth alone |
+| Large inbound file staging and deployed installation | `[gap]` Delivery plan acceptance ledger; inline file support does not prove these |
 | 12: independent channel startup | `[unit]` `src/channels/startup.test.ts::*` |
 | Requester isolation before follow-up effects | `[unit]` `src/core/dispatch/admission.test.ts::admit — the thread admission claim::defers another requester without writing either inbox, locally or across generations` |
 | Requester-bound execution after deferral | `[unit]` `src/core/dispatcher.test.ts::thread admission (docs/reference/specs/thread-admission.md)::an isolated channel defers another person and later binds a fresh run to that person` |
@@ -166,3 +174,5 @@ the human assignee.
 | 19: question outcome and cleanup | `[unit]` `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::keeps a typed question in the turn outcome, receipt and durable run record`, `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::ends the model process when a question skips the publishing steps`, `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::clears a pending question when a follow-up arrives before the turn finishes` |
 | 19: restored questions and stop precedence | `[unit]` `src/core/dispatch/runLoop.test.ts::a resume with the answer in hand (the \`finish\` plan)::restores a pending question without more model calls or automatic PR or review publication`, `src/core/dispatch/runLoop.test.ts::a resume with the answer in hand (the \`finish\` plan)::an operator stop takes precedence over a restored question` |
 | 20: stop while awaiting input | `[unit]` `src/channels/linear/control.test.ts::*` |
+| 21: private file ingestion | `[unit]` `src/channels/linear/files.test.ts::*` |
+| 21: file identity, transport and turn binding | `[unit]` `src/channels/linear/api.test.ts::*`, `src/channels/linear/bridge.test.ts::*`, `src/channels/linear/io.test.ts::*`, `src/channels/linear/consumer.test.ts::*` |

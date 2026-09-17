@@ -1,3 +1,4 @@
+import type { LinearFile } from "./files.js";
 import type { Clock } from "../../core/trace/types.js";
 import { LINEAR_TIMING } from "../../core/budgets.js";
 import {
@@ -18,6 +19,8 @@ export const LINEAR_BRIDGE_PATH = "/internal/linear";
 
 const WORK_ITEM_ERRORS: Readonly<Record<string, number>> = {
   linear_work_item_denied: 403,
+  linear_file_denied: 403,
+  linear_invalid_files: 400,
   linear_human_required: 403,
   linear_invalid_work_item_input: 400,
   linear_empty_work_item_update: 400,
@@ -63,6 +66,9 @@ export class RemoteLinearApi implements LinearApi {
     private readonly transport: LinearTransport,
     private readonly organizationId: string,
   ) {}
+  files(sessionId: string, userId: string, urls: string[], history = false): Promise<LinearFile[]> {
+    return call(this.transport, { op: "files", organizationId: this.organizationId, sessionId, userId, urls, history });
+  }
   canRead(sessionId: string, userId: string): Promise<boolean> {
     return call(this.transport, { op: "canRead", organizationId: this.organizationId, sessionId, userId });
   }
@@ -183,6 +189,7 @@ export async function handleLinearBridge(
       "complete",
       "session",
       "canRead",
+      "files",
       "activities",
       "activity",
       "link",
@@ -214,6 +221,8 @@ export async function handleLinearBridge(
       const session = await api.session(id);
       if (op === "session") result = session;
       else if (session.dismissedAt) return answer(409, { error: "session_dismissed" });
+      else if (op === "files")
+        result = await api.files(id, required(body.userId), body.urls as string[], body.history === true);
       else if (op === "activities") result = await api.activities(id);
       else if (op === "activity") {
         const options = object(body.options);
@@ -240,7 +249,11 @@ export async function handleLinearBridge(
     }
     return answer(200, { result: result ?? null });
   } catch (error) {
-    if (op === "workItems" && error instanceof Error && Object.hasOwn(WORK_ITEM_ERRORS, error.message))
+    if (
+      (op === "workItems" || op === "files") &&
+      error instanceof Error &&
+      Object.hasOwn(WORK_ITEM_ERRORS, error.message)
+    )
       return answer(WORK_ITEM_ERRORS[error.message]!, { error: error.message });
     return answer(503, { error: "linear_bridge_unavailable" });
   }

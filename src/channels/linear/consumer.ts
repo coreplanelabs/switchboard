@@ -1,3 +1,4 @@
+import { applyLinearFiles, fileReferences } from "./files.js";
 import type { ChannelIO, IncomingMessage } from "../../core/types.js";
 import type { Clock } from "../../core/trace/types.js";
 import { LINEAR_TIMING } from "../../core/budgets.js";
@@ -196,6 +197,17 @@ export class LinearConsumer {
           if ((await this.deps.recover(delivery, input.msg)) === "unknown")
             await api.activity(session.id, { type: "error", body: INTERRUPTED });
         } else {
+          const urls = fileReferences(input.msg.text).map((ref) => ref.url);
+          if (urls.length) {
+            try {
+              input.msg = applyLinearFiles(input.msg, await api.files(session.id, input.msg.userId, urls));
+            } catch (error) {
+              if (!(error instanceof Error) || error.message !== "linear_file_denied") throw error;
+              // Dispatch still checks current access and issues the refusal. If
+              // access returns in between, it must not claim the files were read.
+              input.msg.text += "\n\n[Attachments not read: the requester could not access this session.]";
+            }
+          }
           if (!(await inbox.begin(event.key, lease))) return;
           if (!owned) return;
           const outcome = await this.deps.dispatch(input.msg, io);

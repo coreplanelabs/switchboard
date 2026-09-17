@@ -6,6 +6,7 @@ function fixture() {
   let now = 100;
   const api: LinearApi = {
     workItems: vi.fn(),
+    files: vi.fn(async () => []),
     canRead: vi.fn(async () => true),
     upload: vi.fn(),
     session: vi.fn(async () => ({ id: "s", appUserId: "bot" })),
@@ -24,6 +25,28 @@ function fixture() {
 }
 
 describe("Linear channel output", () => {
+  it("rebuilds private history files for the checked requester, newest first without duplicating bytes", async () => {
+    const { api, io } = fixture();
+    const url = "https://uploads.linear.app/org/image";
+    vi.mocked(api.activities).mockResolvedValue([
+      { id: "old", at: 1, userId: "alice", type: "prompt", body: `![old](${url})` },
+      { id: "answer", at: 2, userId: "bot", type: "response", body: "I see it." },
+      { id: "new", at: 3, userId: "alice", type: "prompt", body: `![new](${url})` },
+    ]);
+    vi.mocked(api.files).mockResolvedValue([
+      { url, name: "screen.png", image: { mediaType: "image/png", data: "bytes" } },
+    ]);
+    await expect(io.history()).rejects.toThrow("linear_file_requester_required");
+    expect(api.files).not.toHaveBeenCalled();
+    await io.checkAccess("linear:org:alice");
+    const history = await io.history();
+    expect(api.files).toHaveBeenCalledWith("s", "linear:org:alice", [url], true);
+    expect(history[2]?.images).toEqual([{ mediaType: "image/png", data: "bytes" }]);
+    expect(history[0]?.images).toBeUndefined();
+    vi.mocked(api.canRead).mockResolvedValue(false);
+    await io.checkAccess("linear:org:bob");
+    await expect(io.history()).rejects.toThrow("linear_file_requester_required");
+  });
   it("preserves an opening question when delegation created no initial user activity", async () => {
     const { api, io } = fixture();
     vi.mocked(api.session).mockResolvedValue({

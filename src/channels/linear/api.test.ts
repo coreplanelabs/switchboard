@@ -2,6 +2,65 @@ import { describe, expect, it, vi } from "vitest";
 import { DirectLinearApi } from "./api.js";
 
 describe("Linear API boundary", () => {
+  it("refuses malformed file operations and a session whose installation changes during context lookup", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const api = new DirectLinearApi({ organizationId: "org", appUserId: "bot", token: async () => "secret", fetch });
+    const canRead = vi.spyOn(api, "canRead").mockResolvedValue(true);
+    await expect(api.files("s", "linear:org:alice", null as unknown as string[])).rejects.toThrow(
+      "linear_invalid_files",
+    );
+    expect(canRead).not.toHaveBeenCalled();
+    fetch.mockResolvedValueOnce(
+      Response.json({ data: { organization: { id: "other" }, agentSession: { id: "s", appUser: { id: "bot" } } } }),
+    );
+    await expect(api.files("s", "linear:org:alice", ["https://uploads.linear.app/org/file"])).rejects.toThrow(
+      "linear_file_denied",
+    );
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(String(fetch.mock.calls[0]?.[0])).toBe("https://api.linear.app/graphql");
+  });
+  it("reads private files only from current session context after checking the requesting human", async () => {
+    const file = "https://uploads.linear.app/org/file";
+    const commentFile = "https://uploads.linear.app/org/comment-file";
+    const outsider = "https://uploads.linear.app/org/another-team";
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
+      if (String(url).startsWith("https://uploads.linear.app/"))
+        return new Response("hello", { headers: { "content-type": "text/plain" } });
+      const { query, variables } = JSON.parse(String(init?.body));
+      if (!query.includes("SwitchboardFileContext")) throw new Error("unexpected query");
+      return Response.json({
+        data: {
+          organization: { id: "org" },
+          agentSession: {
+            id: "s",
+            appUser: { id: "bot" },
+            issue: {
+              description: `[notes.txt](${file})`,
+              comments: {
+                nodes: variables.after ? [{ body: `[details.txt](${commentFile})` }] : [],
+                pageInfo: variables.after ? { hasNextPage: false } : { hasNextPage: true, endCursor: "next" },
+              },
+            },
+          },
+        },
+      });
+    });
+    const api = new DirectLinearApi({ organizationId: "org", appUserId: "bot", token: async () => "secret", fetch });
+    vi.spyOn(api, "canRead").mockResolvedValue(true);
+    vi.spyOn(api, "activities").mockResolvedValue([]);
+    const files = await api.files("s", "linear:org:alice", [file, commentFile, outsider]);
+    expect(files[0]).toMatchObject({ document: { data: "hello", name: "notes.txt" } });
+    expect(files[1]).toMatchObject({ document: { data: "hello", name: "details.txt" } });
+    expect(files[2]?.skipped).toContain("current session context");
+    expect(
+      fetch.mock.calls.filter(([url]) => String(url).startsWith("https://uploads.linear.app/")).map(([url]) => url),
+    ).toEqual([file, commentFile]);
+    fetch.mockClear();
+    vi.mocked(api.canRead).mockResolvedValue(false);
+    await expect(api.files("s", "linear:org:bob", [file])).rejects.toThrow("linear_file_denied");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("rechecks the requesting human and current team access before a session can run", async () => {
     const team = { id: "private", visibility: "private", restrictedBy: null };
     const user = {
