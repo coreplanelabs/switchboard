@@ -31,6 +31,8 @@ import {
   execDeadline,
   infraReasonOfRequestFailure,
   infraReasonOfStatus,
+  requestFailedMessage,
+  type ExecInfraReason,
   truncate,
   type ExecOptions,
   type Executor,
@@ -89,15 +91,37 @@ import type { LeftBehind } from "./residentCleanliness.js";
  *  seconds, not a multi-minute exec budget. */
 const DETACH_TIMEOUT_MS = 10_000;
 
-/** The infra failure for a request to the resident Worker that failed on its
- *  transport or hit its deadline before or while the Worker answered: what the
- *  caller reads, and what the tests that assert the harness waits on this
- *  failure build their fixtures from — never a retyped copy of it. */
-export function residentRequestFailedMessage(route: string, err: unknown): string {
-  return (
-    `resident worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
-    "The operation may still have run in the resident; re-check its effects before re-running it."
-  );
+/** The typed reason for a resident answer the client got no result from,
+ *  decided by the status first and the body after (execution.md item 9). A 5xx
+ *  is the resident unavailable — a restore under way, the mirror mutex held by
+ *  a refresh, a hydration failing mid-restore, the isolate's own 500 — which a
+ *  wait may clear, unless the body names a refusal no wait clears: the resident
+ *  `down` (only a watchdog rebuild ends it; `state`) or the resource
+ *  unregistered (`reason: "unregistered"`: no record or facts to serve from).
+ *  A body on any other status is the resident's words — the SDK's text
+ *  forwarded, a named refusal — whose meaning is in the words, read at the
+ *  harness's seam; a bare 4xx is refused. The two refusals are read from the
+ *  fields the resident types on its answer, never from its prose. */
+export function residentAnswerReason(status: number, data: Record<string, unknown>): ExecInfraReason {
+  if (status >= 500 && status <= 599) {
+    if (data.state === "down" || data.reason === "unregistered") return "refused";
+    return "worker-unavailable";
+  }
+  if (typeof data.error === "string" && data.error) return "answered";
+  return infraReasonOfStatus(status);
+}
+
+/** The strike after the wake wait (item 65): the refusal that named a
+ *  container gone for a moment, and why the wait ended without it back. Typed
+ *  `refused` — the wait this client owed was spent here, so the harness's one
+ *  more command judges it at once by the type although the words are still the
+ *  container's — and counted by the tracker (`container-exited`). Exported so
+ *  the seam's tests build the strike as this client throws it. */
+export function residentWakeStrike(route: string, refusal: string, why: string): ExecInfraError {
+  return classifyError(new ExecInfraError(`resident ${route}: ${refusal}; ${why}`, "refused"), {
+    kind: "infra",
+    code: "container-exited",
+  });
 }
 
 /** Resolve after `ms`; reject the moment `signal` fires. A hard stop never
@@ -587,16 +611,15 @@ export class ResidentExecutor implements Executor {
       // legible request-failed error below and NOT a raw TimeoutError.
       return { status: res.status, data: await parseResidentBody(res) };
     } catch (err) {
-      // Network-level failure or a deadline abort mid-body: the command may
-      // still be running (or have run) in the resident — never blind-retry a
-      // possibly side-effectful call. Infra (not a command exit): the runner
-      // counts these toward fail-fast.
-      throw classifyError(
-        new ExecInfraError(residentRequestFailedMessage(route, err), infraReasonOfRequestFailure(err)),
-        {
-          kind: err instanceof Error && err.name === "TimeoutError" ? "timeout" : "transport",
-        },
-      );
+      // Network-level failure, a deadline abort mid-body, or the run's own
+      // stop: the command may still be running (or have run) in the resident —
+      // never blind-retry a possibly side-effectful call. Infra (not a command
+      // exit): the runner counts these toward fail-fast. One decision for the
+      // reason; the tracker's kind derives from it.
+      const reason = infraReasonOfRequestFailure(err, signal);
+      throw classifyError(new ExecInfraError(requestFailedMessage("resident", route, err), reason), {
+        kind: reason === "deadline-passed" ? "timeout" : "transport",
+      });
     }
   }
 
@@ -869,11 +892,7 @@ export class ResidentExecutor implements Executor {
   ): Promise<{ waitedMs: number; ref: string; sha: string }> {
     const t0 = systemClock();
     const waited = () => systemClock() - t0;
-    const strike = (why: string): ExecInfraError =>
-      classifyError(new ExecInfraError(`resident ${route}: ${refusal}; ${why}`, "refused"), {
-        kind: "infra",
-        code: "container-exited",
-      });
+    const strike = (why: string): ExecInfraError => residentWakeStrike(route, refusal, why);
     const probe = () =>
       ResidentExecutor.probeStatus(
         this.opts.baseUrl,
@@ -946,14 +965,17 @@ export class ResidentExecutor implements Executor {
     if (typeof data.error === "string" && data.error) {
       // post-validation failure (exitCode 127 shape) — legible, never retried.
       // Infra (the exec transport failed), not a command exit: counts toward
-      // fail-fast.
-      // The resident's own words — the SDK's text forwarded, a named refusal —
-      // whose meaning is in the words: the harness's seam reads the
-      // container-down ones and waits on nothing else here.
-      throw classifyError(new ExecInfraError(`resident /exec: ${data.error}`, "answered"), { kind: "infra" });
+      // fail-fast. Typed by the status first, the words after
+      // (`residentAnswerReason`): a 5xx is the resident unavailable for a
+      // moment unless it names a refusal; the resident's words on any other
+      // status — the SDK's text forwarded, a named refusal — mean what they
+      // say, and the harness's seam reads the container-down ones.
+      throw classifyError(new ExecInfraError(`resident /exec: ${data.error}`, residentAnswerReason(status, data)), {
+        kind: "infra",
+      });
     }
     if (status !== 200) {
-      throw classifyError(new ExecInfraError(`resident /exec HTTP ${status}`, infraReasonOfStatus(status)), {
+      throw classifyError(new ExecInfraError(`resident /exec HTTP ${status}`, residentAnswerReason(status, data)), {
         kind: "http",
         code: String(status),
       });
@@ -968,7 +990,10 @@ export class ResidentExecutor implements Executor {
     const { status, data } = await this.opWithReattach("/read", { path }, { span: opts?.span });
     if (status !== 200) {
       throw classifyError(
-        new ExecInfraError(`resident /read: ${String(data.error ?? `HTTP ${status}`)}`, infraReasonOfStatus(status)),
+        new ExecInfraError(
+          `resident /read: ${String(data.error ?? `HTTP ${status}`)}`,
+          residentAnswerReason(status, data),
+        ),
         { kind: "http", code: String(status) },
       );
     }
@@ -983,7 +1008,10 @@ export class ResidentExecutor implements Executor {
     const { status, data } = await this.opWithReattach("/read", { path, encoding: "base64" }, { span: opts?.span });
     if (status !== 200) {
       throw classifyError(
-        new ExecInfraError(`resident /read: ${String(data.error ?? `HTTP ${status}`)}`, infraReasonOfStatus(status)),
+        new ExecInfraError(
+          `resident /read: ${String(data.error ?? `HTTP ${status}`)}`,
+          residentAnswerReason(status, data),
+        ),
         { kind: "http", code: String(status) },
       );
     }
@@ -994,7 +1022,10 @@ export class ResidentExecutor implements Executor {
     const { status, data } = await this.opWithReattach("/write", { path, content }, { span: opts?.span });
     if (status !== 200) {
       throw classifyError(
-        new ExecInfraError(`resident /write: ${String(data.error ?? `HTTP ${status}`)}`, infraReasonOfStatus(status)),
+        new ExecInfraError(
+          `resident /write: ${String(data.error ?? `HTTP ${status}`)}`,
+          residentAnswerReason(status, data),
+        ),
         { kind: "http", code: String(status) },
       );
     }

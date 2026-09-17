@@ -1722,7 +1722,8 @@ export class ResidentDO extends Sandbox<Env> {
   /** The one decision on a failure the SDK classified as a runtime
    *  replacement, made where it is classified (`run()`): the SDK vouched the
    *  runtime moved, or a restore is under way for this resident. It gates the
-   *  word on `/exec` alone; the incarnation swap there is unconditional. */
+   *  word on `/exec` and the incarnation mint alike; the per-incarnation memos
+   *  clear before it, unconditionally. */
   private async replacementKnown(err: unknown): Promise<boolean> {
     return sdkVouchesRuntimeMoved(err) || (await this.knowsContainerGone());
   }
@@ -5021,7 +5022,10 @@ export class ResidentDO extends Sandbox<Env> {
     const stored = await this.ctx.storage.get<RepoFacts | ThreadBinding>([FACTS_KEY, threadBindingKey(threadKey)]);
     const facts = stored.get(FACTS_KEY) as RepoFacts | undefined;
     const record = recordFromRoute ?? (await this.registry().getRecord(resource));
-    if (!record || !facts) return { error: "not-serviceable: registry record or repo facts missing", status: 503 };
+    // Typed `reason` beside the words: the client reads the field — a refusal no
+    // wait clears, unlike the restore window's 503s — never the sentence.
+    if (!record || !facts)
+      return { error: "not-serviceable: registry record or repo facts missing", status: 503, reason: "unregistered" };
 
     // The binding's ref wins for the thread's whole life, with one exception
     // (item 16): a thread bound to the repo default for want of a named branch
@@ -6993,7 +6997,10 @@ export class ResidentDO extends Sandbox<Env> {
     const resource = (stored.get(RESOURCE_KEY) as string | undefined) ?? "";
     const facts = stored.get(FACTS_KEY) as RepoFacts | undefined;
     const record = await this.registry().getRecord(resource);
-    if (!record || !facts) return { error: "not-serviceable: registry record or repo facts missing", status: 503 };
+    // Typed `reason` beside the words: the client reads the field — a refusal no
+    // wait clears, unlike the restore window's 503s — never the sentence.
+    if (!record || !facts)
+      return { error: "not-serviceable: registry record or repo facts missing", status: 503, reason: "unregistered" };
     const command = record.commands[op];
     if (!command) return { error: `op-unavailable: the command table has no "${op}" entry`, status: 400 };
 

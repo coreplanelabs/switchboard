@@ -2345,6 +2345,27 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(noteKinds(w)).not.toContain("sandbox_restarted");
   });
 
+  it("a hard stop that ends a follow-up turn's wait also aborts pi's turn in flight: the abort line is sent to pi — the one more command may have found the container alive with pi mid-turn, and a write into a lost transport costs nothing — then the turn ends as the stop", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) {
+        bashTurn(w, "call_0", "npm test", "ok");
+        finalTurn(c, "All green.");
+        return;
+      }
+      c.emit({ type: "turn_start" });
+      c.loseTransport("same", "vm-new", 1);
+      c.onDownProbe = () => w.control.requestStop("hard");
+    });
+    const session = await w.open();
+    const sentBefore = w.container.stdin.length;
+    const answer = await session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    expect(w.container.stdin.slice(sentBefore).filter((l) => /"type":"abort"/.test(l))).toHaveLength(1);
+    expect(noteKinds(w).filter((k) => k === "stopped")).toEqual(["stopped"]);
+    expect(w.events.find((e) => e.type === "run_note" && e.kind === "stopped")).toMatchObject({ mode: "hard" });
+  });
+
   it("after a follow-up turn's wait only the hard stop is read: a soft stop or the turn's deadline landing during the wait neither notes a stop nor steers a write-up into the dead transport — the turn fails with the transport error, named, and nothing is sent to pi", async () => {
     const w = world();
     scriptedPi(w.container, (n, c) => {

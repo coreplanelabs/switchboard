@@ -6,15 +6,13 @@ import {
   ExecSandboxRestartedError,
   type ExecOptions,
   type Executor,
+  infraReasonOfRequestFailure,
+  requestFailedMessage,
 } from "../../execution/executor.js";
 import { CONTAINER_GONE_WORDING } from "../../execution/residentWake.js";
 import { STOPPED_CONTAINER_WORDING } from "../../execution/residentRefresh.js";
-import { residentRequestFailedMessage } from "../../execution/resident.js";
-import {
-  sandboxEmptyFailureMessage,
-  sandboxNoAnswerMessage,
-  sandboxRequestFailedMessage,
-} from "../../execution/cloudflareSandbox.js";
+import { residentAnswerReason, residentWakeStrike } from "../../execution/resident.js";
+import { sandboxEmptyFailureMessage, sandboxNoAnswerMessage } from "../../execution/cloudflareSandbox.js";
 import { SANDBOX_START_BACKOFF_MS, SANDBOX_START_WAIT_MAX_MS } from "../../execution/sandboxErrors.js";
 import {
   CONTAINER_DOWN_WORDING,
@@ -820,27 +818,41 @@ describe("ExecHarnessContainer — each operation is one command over the execut
     await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerRuntimeReplacedError);
   });
 
-  it("identity throws the container down under the question — the platform's not-running or starting text the resident answers with, and the executors' typed infra reasons a wait can clear (the transport lost, the deadline passed, the empty failure shape, the Worker unavailable), each built by the executor's own message helper — as the typed HarnessContainerDownError, for the one more command to wait on; a typed refusal no wait clears, a Worker answer whose words are not the container's, a command the container itself failed, or an empty answer is still no name", async () => {
+  it("identity throws the container down under the question — the platform's not-running or starting text the resident answers with, and the executors' typed infra reasons a wait can clear (the transport lost, the deadline passed, the empty failure shape, the Worker unavailable — the resident's 5xx in the restore window among them), each built by the executor's own helper — as the typed HarnessContainerDownError, for the one more command to wait on; the type decides first: a typed refusal no wait clears is no name even when its words are the container's (the resident client's strike after its own wake wait), as are the run's own stop, a Worker answer whose words are not the container's, a command the container itself failed, or an empty answer", async () => {
     const deadline = new DOMException("the 90s call deadline passed", "TimeoutError");
     const network = new TypeError("fetch failed");
+    const stopped = new AbortController();
+    stopped.abort();
+    /** A resident answer as the client types it: the status first, then the body. */
+    const answer = (status: number, data: Record<string, unknown>) =>
+      new ExecInfraError(`resident /exec: ${String(data.error)}`, residentAnswerReason(status, data));
     const { executor } = recordingExecutor([
-      // The resident forwards the SDK's words in its answer: judged by the words.
-      new ExecInfraError("resident /exec: The container is not running, consider calling start()", "answered"),
-      new ExecInfraError(
-        "resident /exec: Peer closed WebSocket: 1006 WebSocket disconnected without sending Close frame.",
-        "answered",
-      ),
-      // The executors' own failures, as they build them (src/execution/resident.ts, cloudflareSandbox.ts).
-      new ExecInfraError(residentRequestFailedMessage("/exec", deadline), "deadline-passed"),
-      new ExecInfraError(residentRequestFailedMessage("/exec", network), "transport-lost"),
+      // The resident forwards the SDK's words in its answer (a 409 with no word for a replacement it did not know): judged by the words.
+      answer(409, { error: "The container is not running, consider calling start()" }),
+      answer(409, { error: "Peer closed WebSocket: 1006 WebSocket disconnected without sending Close frame." }),
+      // The executors' own failures, as they build them (src/execution/executor.ts, resident.ts, cloudflareSandbox.ts).
+      new ExecInfraError(requestFailedMessage("resident", "/exec", deadline), infraReasonOfRequestFailure(deadline)),
+      new ExecInfraError(requestFailedMessage("resident", "/exec", network), infraReasonOfRequestFailure(network)),
       new ExecInfraError(sandboxNoAnswerMessage("/exec", 60_000), "deadline-passed"),
-      new ExecInfraError(sandboxRequestFailedMessage("/exec", network), "transport-lost"),
+      new ExecInfraError(requestFailedMessage("sandbox", "/exec", network), infraReasonOfRequestFailure(network)),
       new ExecInfraError(sandboxEmptyFailureMessage("/exec"), "empty-failure"),
-      new ExecInfraError("resident /exec HTTP 502", "worker-unavailable"),
-      new ExecInfraError("resident /exec HTTP 503", "worker-unavailable"),
-      // Typed refusals no wait clears, and answers whose words are not the container's.
-      new ExecInfraError("resident /exec HTTP 400", "refused"),
-      new ExecInfraError("resident /exec: not-serviceable: registry record or repo facts missing", "answered"),
+      // The resident unavailable for a moment — the restore window's answers, typed by their 5xx before their words.
+      answer(503, { error: "not-serviceable: restore in progress", state: "restoring", reason: "rehydrating" }),
+      answer(503, { error: "mirror-busy: mutex not acquired within 30000ms", state: "ready", reason: "mirror-busy" }),
+      new ExecInfraError("resident /exec HTTP 502", residentAnswerReason(502, {})),
+      // Typed refusals no wait clears — no name BY THE TYPE, the strike's words the container's own.
+      residentWakeStrike(
+        "/exec",
+        "not-serviceable: The container just exited",
+        "waited 30s for the resident to wake (last seen restoring) and gave up",
+      ),
+      answer(503, {
+        error: "not-serviceable: no-snapshot: nothing to rehydrate from",
+        state: "down",
+        reason: "no-snapshot",
+      }),
+      answer(503, { error: "not-serviceable: registry record or repo facts missing", reason: "unregistered" }),
+      new ExecInfraError("resident /exec HTTP 400", residentAnswerReason(400, {})),
       new ExecInfraError(
         "resident /exec: worktree still unavailable after a re-attach (evicted: …) — the resident may be mid-restore; try again shortly.",
         "refused",
@@ -849,13 +861,20 @@ describe("ExecHarnessContainer — each operation is one command over the execut
         "resident /exec: runtime replaced 2 times in a row with no successful operation between (…) — a deploy storm or a flapping resident, not a one-off deploy.",
         "refused",
       ),
+      // The run's own stop aborting the request: nothing to wait for.
+      new ExecInfraError(
+        requestFailedMessage("resident", "/exec", new DOMException("This operation was aborted", "AbortError")),
+        infraReasonOfRequestFailure(new DOMException("This operation was aborted", "AbortError"), stopped.signal),
+      ),
+      // An answer whose words are not the container's.
+      answer(200, { error: "Command execution failed" }),
       "exit 1:\nno shell",
       "(no output)",
     ]);
     const c = new ExecHarnessContainer(executor);
-    for (let i = 0; i < 9; i++) await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerDownError);
-    // No name, so the one more command judges at once.
-    for (let i = 0; i < 4; i++) expect(await c.identity()).toBeUndefined();
+    for (let i = 0; i < 10; i++) await expect(c.identity()).rejects.toBeInstanceOf(HarnessContainerDownError);
+    // No name, so the one more command judges at once — the strike first: its words say the container just exited, its type says the wait was spent.
+    for (let i = 0; i < 8; i++) expect(await c.identity()).toBeUndefined();
     // A command the container ran and failed, or an empty answer, is no identity — the container answered.
     expect(await c.identity()).toBeUndefined();
     expect(await c.identity()).toBeUndefined();

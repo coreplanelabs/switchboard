@@ -15,7 +15,9 @@ import { defineConfig } from "vitest/config";
 // the watchdog as backstop (autoRebuild.test.ts), for the held
 // /await-restore route and its waiter ledger wiring (awaitRestore.test.ts)
 // and for the /exec answer's runtime-replaced word being given only when the
-// resident knows the container it held is gone (execReplacedWord.test.ts);
+// resident knows the container it held is gone (execReplacedWord.test.ts), and
+// for the not-serviceable answers naming, as fields, the two refusals the
+// client cannot wait through (notServiceable.test.ts);
 // testing/sourceScan.ts is their helper. Every
 // test file of this directory is listed here — src/vitestWorkspace.test.ts
 // holds that.
@@ -34,6 +36,7 @@ export default defineConfig({
       "lifecycle.test.ts",
       "runtimeUnreachable.test.ts",
       "controlReset.test.ts",
+      "notServiceable.test.ts",
       "reuseAttach.test.ts",
       "rebindAttach.test.ts",
       "releaseAtRunEnd.test.ts",
