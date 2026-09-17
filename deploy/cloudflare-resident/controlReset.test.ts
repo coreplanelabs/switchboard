@@ -97,6 +97,64 @@ describe("a DO code-update reset answers control-reset, distinct from runtime-re
     expect(collectControlReset).toBeLessThan(collectSwap);
   });
 
+  it("the replacement's two consequences are split after the reset check, in both phases: the memos clear unconditionally, the incarnation (the lease fencing token) is minted only when the replacement is known, and the reset path reaches neither — so a DO reset over a live pi clears nothing and mints nothing, and the re-send lands on the same pi", () => {
+    const run = methodOf(residentDO, "run");
+    expect(run, "worker.ts declares ResidentDO.run").not.toBeNull();
+    const body = run!;
+    const spawnCatch = body.indexOf("proc = await createExtensionProcessSandbox(this).exec");
+    const collect = body.indexOf("await proc.output(");
+    for (const [phase, from, to] of [
+      ["spawn", spawnCatch, collect],
+      ["collect", collect, body.length],
+    ] as const) {
+      const reset = body.indexOf(`throw new ControlResetError("${phase}"`, from);
+      const clear = body.indexOf("this.clearIncarnationMemos();", from);
+      const known = body.indexOf("const known = await this.replacementKnown(err);", from);
+      const mint = body.indexOf("if (known) this.swapIncarnation();", from);
+      const thrown = body.indexOf(`throw new RuntimeReplacedError("${phase}", err, known)`, from);
+      for (const [what, at] of [
+        ["the memo clear", clear],
+        ["the decision", known],
+        ["the gated mint", mint],
+        ["the throw", thrown],
+      ] as const) {
+        expect(at, `${phase}: ${what} is in the catch`).toBeGreaterThan(-1);
+        expect(at, `${phase}: ${what} is this phase's`).toBeLessThan(to);
+        expect(reset, `${phase}: the control-reset throw precedes ${what}`).toBeLessThan(at);
+      }
+      expect(clear).toBeLessThan(known);
+      expect(known).toBeLessThan(mint);
+      expect(mint).toBeLessThan(thrown);
+      // Nothing clears or mints between the reset check and its throw: the
+      // reset path is a bare throw.
+      const resetLine = body.slice(body.lastIndexOf("\n", reset) + 1, body.indexOf("\n", reset));
+      expect(resetLine.trim()).toMatch(
+        /^if \(isControlReset\(err\)\) throw new ControlResetError\("(spawn|collect)", err\);$/,
+      );
+      // The memo clear is unconditional (no `if` on its line) and the mint is
+      // conditional on `known` alone.
+      const clearLine = body.slice(body.lastIndexOf("\n", clear) + 1, body.indexOf("\n", clear));
+      expect(clearLine.trim()).toBe("this.clearIncarnationMemos();");
+    }
+    // No unconditional swap is left in either catch.
+    expect(body.match(/^\s*this\.swapIncarnation\(\);\s*$/m)).toBeNull();
+  });
+
+  it("the restore path's fold keeps minting: a DO reset under a restore is a new isolate, so its swapIncarnation() stays unconditional there", () => {
+    const fold = residentDO.indexOf("const runtimeReplaced = isRuntimeReplacement(err) || isControlReset(err);");
+    expect(fold, "the restore path folds the DO reset in").toBeGreaterThan(-1);
+    const interrupted = residentDO.indexOf('if (disposition.action === "interrupted") {', fold);
+    const swap = residentDO.indexOf("this.swapIncarnation();", interrupted);
+    expect(interrupted).toBeGreaterThan(-1);
+    expect(swap).toBeGreaterThan(interrupted);
+    // The mint is inside the interrupted branch and not under any further condition.
+    const between = residentDO.slice(interrupted, swap);
+    expect(between).not.toMatch(/if \(known\)/);
+    expect(residentDO.slice(residentDO.lastIndexOf("\n", swap) + 1, residentDO.indexOf("\n", swap)).trim()).toMatch(
+      /^this\.swapIncarnation\(\);/,
+    );
+  });
+
   it("every thread route that names a runtime replacement names a control reset first, so a DO reset answers control-reset on exec, read and write", () => {
     const runtimeMappings = source.match(
       /if \(err instanceof RuntimeReplacedError\) return runtimeReplacedErr\(err\);/g,

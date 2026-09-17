@@ -1590,11 +1590,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             note("sandbox_restarted", turnReplaced.message);
             throw turnReplaced;
           }
-          // The wait ends with the run's own stop: read it here once it has,
-          // as the loop does — the turn then ends as the stop, not as the
-          // transport failure the wait was judging.
-          turnCheck();
-          if (hardStopped) {
+          // The wait ends with the run's own stop: read the HARD stop here once
+          // it has, as the loop's `judgeUnsettled` does — the turn then ends as
+          // the stop, not as the transport failure the wait was judging. Only
+          // the hard stop: the full `turnCheck()` would note a soft stop or the
+          // turn's deadline and steer a write-up into a transport already known
+          // lost, then the turn would fail anyway.
+          if (run.control?.requested === "hard") {
+            hardStopped = true;
             note("stopped", hardStopNote(), "hard");
             return HARD_STOP_MESSAGE;
           }
