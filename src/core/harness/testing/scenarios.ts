@@ -29,6 +29,7 @@ import {
   type HarnessName,
   type HarnessResume,
 } from "../contract.js";
+import { ALLOWANCES, MINUTE_MS } from "../../budgets.js";
 import { HARD_STOP_MESSAGE, MODEL_CALL_IN_FLIGHT, timeBudgetAnswer, timeBudgetNote } from "../windDown.js";
 
 /** The wall clock every conformance run is given: the drivers' preset budget. */
@@ -437,17 +438,18 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     id: "record-vocabulary-and-steps",
     clause: "record",
     title:
-      "the run's events are the record's vocabulary — tool_call, tool_result, run_note — and every assistant turn is one ledger step with its calls in flight, the results as the next step's user turn",
+      "the run's events are the record's vocabulary — tool_call, tool_result, run_note, and the lease the harness started — and every assistant turn is one ledger step with its calls in flight, the results as the next step's user turn",
     script: { turns: [call("c1", "bash", { command: "echo hi" }), text("all done")] },
     check: (run) => {
       assert.equal(answered(run), "all done");
       const kinds = new Set(run.events.map((e) => e.type));
       for (const k of kinds)
         assert.ok(
-          ["tool_call", "tool_result", "run_note", "assistant", "input"].includes(k),
+          ["tool_call", "tool_result", "run_note", "assistant", "input", "lease"].includes(k),
           `an event kind outside the record's vocabulary: ${k}`,
         );
       assert.ok(kinds.has("tool_call") && kinds.has("tool_result"));
+      assert.ok(kinds.has("lease"), "the harness published no lease event");
       assert.equal(run.steps.length, 2, "one step per assistant turn");
       assert.deepEqual(run.steps[0].inFlight, [{ callId: "c1", tool: "bash" }]);
       assert.deepEqual(run.steps[1].inFlight, []);
@@ -555,6 +557,42 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       assert.equal(failed.length, 1, "the failed call is not exactly one harness_error note");
       assert.match(failed[0].summary, /during the wind-down/);
       assert.ok(failed[0].summary.includes(FAILED_MODEL_CALL_ERROR), "the note does not carry the provider's words");
+    },
+  },
+  {
+    id: "budget-loop-ends-inside-the-lease",
+    clause: "conversation",
+    title:
+      "the loop ends inside the lease: the lease event names the start, the end and the loop's cut; the write-up is steered at the cut, tools refused meanwhile; the run finishes before the lease ends",
+    script: {
+      turns: [call("c1", "bash", { command: "echo hi" }), text("findings so far: hi")],
+      budgetBeforeModelCall: 2,
+    },
+    check: (run) => {
+      const lease = run.events.find((e) => e.type === "lease");
+      assert.ok(lease && lease.type === "lease", "no lease event");
+      assert.equal(
+        lease.endsAt - lease.startedAt,
+        CONFORMANCE_MAX_MINUTES * MINUTE_MS,
+        "the lease is not the run's minutes",
+      );
+      // The conformance preset runs no post-step: the loop's cut holds back the write-up alone.
+      assert.equal(
+        lease.endsAt - lease.loopEndsAt,
+        ALLOWANCES.writeUp * MINUTE_MS,
+        "the loop's cut is not the write-up allowance",
+      );
+      assert.equal(answered(run), timeBudgetAnswer("findings so far: hi", CONFORMANCE_MAX_MINUTES));
+      assert.deepEqual(
+        notes(run)
+          .filter((n) => n.kind === "time_budget_exhausted")
+          .map((n) => n.summary),
+        [timeBudgetNote(MODEL_CALL_IN_FLIGHT)],
+      );
+      // Every event of the run — the write-up's answer included — lands before the lease ends.
+      const last = Math.max(...run.events.map((e) => e.at ?? 0));
+      assert.ok(last <= lease.endsAt, `the run outlived its lease: ${last} > ${lease.endsAt}`);
+      assert.ok(last > lease.loopEndsAt, "the clock never passed the loop's cut");
     },
   },
   {

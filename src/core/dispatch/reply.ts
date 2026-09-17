@@ -264,6 +264,8 @@ export function activityLine(e: RunEvent): string {
       return "answer ready";
     case "run_meta":
       return "run context recorded"; // published straight to the registry too — never arrives here
+    case "lease":
+      return "lease started"; // the harness's clocks: head material the run loop keeps off the card — never arrives here
     case "skill_use":
       return `📚 skill ${e.skill} loaded`;
     case "artifact":

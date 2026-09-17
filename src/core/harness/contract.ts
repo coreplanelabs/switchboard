@@ -328,12 +328,14 @@ export class HarnessContainerReplacedError extends HarnessInterruptedError {
  *  the loop labels a write-up. The tool context is the turn's own — the
  *  relayed tools read it for the turn's duration, so a hook the caller
  *  overrides (the description's, the verdict's) is the one fed. The turn is
- *  bounded by its own budget, never the run's remainder, and its tool spans
- *  hang under a `run.agent` opened under `span`. The system prompt stays the
- *  session's. */
+ *  bounded by the lesser of `maxMinutes`, its ask, and what the run's lease
+ *  still holds — never under a minute, which the bearer's grace covers
+ *  (`turnLeaseMs`, decision 0046) — and its tool spans hang under a
+ *  `run.agent` opened under `span`. The system prompt stays the session's. */
 export interface FollowUpTurnInput {
   text: string;
   maxTurns: number;
+  /** The turn's ask, in minutes; the harness carves the lesser of it and the lease's remainder. */
   maxMinutes: number;
   toolContext: ToolContext;
   span?: Span;
@@ -347,6 +349,10 @@ export type FollowUpTurn = (input: FollowUpTurnInput) => Promise<string>;
 export interface HarnessSession {
   answer: string;
   followUp: FollowUpTurn;
+  /** What the run's lease still holds, in ms, read at the call — what the
+   *  post-step turns carve their minutes from (`postStepLease`); negative once
+   *  the lease has ended. */
+  remainingMs: () => number;
   /** Ends the process, removes its files, forgets the run on the relay. */
   end(): Promise<void>;
 }
@@ -460,8 +466,6 @@ export interface HarnessDeps {
   pollMs?: number;
   /** How often the loop wakes without an event to check budgets, stops and the inbox. */
   tickMs?: number;
-  /** How long a write-up may take before the process is aborted. */
-  finaleTimeoutMs?: number;
 }
 
 /** A harness: a process that runs the model loop for one run, in the container

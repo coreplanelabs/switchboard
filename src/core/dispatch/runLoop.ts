@@ -360,6 +360,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const onEvent = (e: RunEvent) => {
     registry.publish(run.id, e); // feed the external live-view stream
     if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md): the card and its clock ignore it
+    if (e.type === "lease") return; // the harness's clocks: head material for the record (harness-pi item 15), not activity — the card and its clock ignore it
     if (e.type === "tool_call") toolCalls++;
     if (e.type === "run_note" && e.kind === "time_budget_exhausted") budgetEnded = true;
     if (isCodingPrRun) {
@@ -1031,7 +1032,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             toolContext,
             onProgress,
             onEvent,
-            ...(harnessSession ? { followUp: harnessSession.followUp } : {}),
+            ...(harnessSession ? { followUp: harnessSession.followUp, remainingMs: harnessSession.remainingMs } : {}),
           },
           logKey: msg.threadKey,
         }),
@@ -1178,7 +1179,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               toolContext,
               onProgress,
               onEvent,
-              ...(harnessSession ? { followUp: harnessSession.followUp } : {}),
+              ...(harnessSession ? { followUp: harnessSession.followUp, remainingMs: harnessSession.remainingMs } : {}),
             },
             logKey: msg.threadKey,
           }),

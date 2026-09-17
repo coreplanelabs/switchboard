@@ -425,7 +425,8 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       ev.type === "review_posted" ||
       ev.type === "ship_round" ||
       ev.type === "route" ||
-      ev.type === "reference"
+      ev.type === "reference" ||
+      ev.type === "lease"
     ) {
       sideFactEvents++;
       return;

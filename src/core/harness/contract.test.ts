@@ -148,7 +148,6 @@ function world(opts: { resume?: HarnessRun["resume"]; provider?: Provider } = {}
     sleep: () => new Promise((r) => setImmediate(r)),
     pollMs: 1,
     tickMs: 1,
-    finaleTimeoutMs: 60_000,
   };
   return { container, registry, events, steps, facts, notes, run, deps };
 }
@@ -389,7 +388,7 @@ describe("PiHarness — pi as the contract's object", () => {
       resume: {
         messages: [],
         settlements: [],
-        remainingMs: 60_000,
+        remainingMs: 20 * 60_000,
         turn: 0,
         inboxConsumedSeq: 0,
         facts: OPENCODE_FACTS,
@@ -429,7 +428,7 @@ describe("PiHarness — pi as the contract's object", () => {
       futureField: "kept",
     })!;
     const reattach = world({
-      resume: { messages: [], settlements: [], remainingMs: 60_000, turn: 0, inboxConsumedSeq: 0, facts: row },
+      resume: { messages: [], settlements: [], remainingMs: 20 * 60_000, turn: 0, inboxConsumedSeq: 0, facts: row },
       provider: textOnlyProvider(),
     });
     // The previous generation's pi, still alive: started as the harness starts one, so the scripted double reads its run and model off the start.
@@ -450,7 +449,7 @@ describe("PiHarness — pi as the contract's object", () => {
       resume: {
         messages: [],
         settlements: [],
-        remainingMs: 60_000,
+        remainingMs: 20 * 60_000,
         turn: 0,
         inboxConsumedSeq: 0,
         facts: harnessFactsOf({ pid: 4242, logOffset: 0, root: paths.dir, relaunches: 1 })!,
@@ -488,7 +487,7 @@ describe("openThroughSeam — the seam's door", () => {
       resume: {
         messages: [],
         settlements: [],
-        remainingMs: 60_000,
+        remainingMs: 20 * 60_000,
         turn: 0,
         inboxConsumedSeq: 0,
         facts: OPENCODE_FACTS,
@@ -506,7 +505,7 @@ describe("openThroughSeam — the seam's door", () => {
 
   it("opens the run on the harness otherwise, handing deps and run through untouched, a resume of the harness's own facts included", async () => {
     const seen: [HarnessDeps, HarnessRun][] = [];
-    const session = { answer: "opened", followUp: async () => "", end: async () => {} };
+    const session = { answer: "opened", followUp: async () => "", remainingMs: () => 20 * 60_000, end: async () => {} };
     const harness = stubHarness(async (deps, run) => {
       seen.push([deps, run]);
       return session;
@@ -514,7 +513,14 @@ describe("openThroughSeam — the seam's door", () => {
     const fresh = world();
     expect(await openThroughSeam(harness, fresh.deps, fresh.run)).toBe(session);
     const own = world({
-      resume: { messages: [], settlements: [], remainingMs: 60_000, turn: 0, inboxConsumedSeq: 0, facts: piFactsIn() },
+      resume: {
+        messages: [],
+        settlements: [],
+        remainingMs: 20 * 60_000,
+        turn: 0,
+        inboxConsumedSeq: 0,
+        facts: piFactsIn(),
+      },
     });
     expect(await openThroughSeam(harness, own.deps, own.run)).toBe(session);
     expect(seen).toEqual([

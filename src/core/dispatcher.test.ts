@@ -1,3 +1,4 @@
+import { bearerExpiresAt } from "./budgets.js";
 import { contractFromPlan, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./ship/contract.js";
 import { NO_VERDICT_LINE } from "./reviewVerdict.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
@@ -89,7 +90,7 @@ import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js
 import type { CoordinatorInstance } from "./coordinator/contract.js";
 import type { Operations } from "./operations.js";
 import type { ResidentAdminClient } from "./residentAdmin.js";
-import { BEARER_MARGIN_MS, bearerHashOf, RunBearerStore } from "./modelProxy/runBearers.js";
+import { bearerHashOf, RunBearerStore } from "./modelProxy/runBearers.js";
 
 /** `CoreDeps` plus the two backends the registry's `repo.*` commands reach
  *  through the catalogue wiring (tests inject them here; production resolves
@@ -161,7 +162,12 @@ vi.mock("./harness/pi/harness.js", async (importOriginal) => {
 });
 
 /** What a scripted pi run answers: the loop's answer with a session that takes no follow-up and ends at once. */
-const piAnswered = (answer: string): HarnessSession => ({ answer, followUp: async () => answer, end: async () => {} });
+const piAnswered = (answer: string): HarnessSession => ({
+  answer,
+  followUp: async () => answer,
+  remainingMs: () => 20 * 60_000,
+  end: async () => {},
+});
 
 /** The harness every test process drives runs with (harness.md item 7): pi, with no deployment settings behind it. */
 const piHarness = new PiHarness();
@@ -4560,6 +4566,7 @@ describe("live run-view wiring (Area 2)", () => {
       "input",
       "run_meta",
       "+run.agent",
+      "lease", // the harness's clocks, published as the loop starts (harness-pi item 15)
       "+model.turn",
       "-model.turn",
       "+tool.bash",
@@ -4710,6 +4717,7 @@ describe("live run-view wiring (Area 2)", () => {
       "input",
       "run_meta",
       "+run.agent",
+      "lease", // the harness's clocks, published as the loop starts (harness-pi item 15)
       "+model.turn",
       "-model.turn",
       "+tool.bash",
@@ -10399,7 +10407,16 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await ledger.step(
       "run-old",
       "gen-OLD",
-      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      {
+        step: 0,
+        seq: 0,
+        turnIndex: 1,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 20 * 60_000,
+        turn: 0,
+        iteration: 0,
+      },
       [],
     );
     ledger.live.get("run-old")!.leaseUntil = 0;
@@ -10924,7 +10941,16 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await inner.step(
       "run-old",
       "gen-A",
-      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      {
+        step: 0,
+        seq: 0,
+        turnIndex: 1,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 20 * 60_000,
+        turn: 0,
+        iteration: 0,
+      },
       [],
     );
     await inner.step(
@@ -10936,7 +10962,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         turnIndex: 2,
         inFlight: [{ callId: "c1", tool: "bash" }],
         inboxConsumedSeq: 0,
-        remainingMs: 240_000,
+        remainingMs: 19 * 60_000,
         turn: 1,
         iteration: 0,
       },
@@ -11867,7 +11893,7 @@ describe("no gaps: every awaited step runs inside a span (docs/reference/specs/t
     // The follow-up carries its platform stamp (a Slack `ts`): the fresh turn
     // must not turn that into a `queued … before we saw it`.
     await dispatch(deps, { ...msg("and also the numbers", "slack:UY"), originAt: clock.now() - 5_000 }, second);
-    clock.tick(250_000); // the follow-up waits behind the run
+    clock.tick(100_000); // the follow-up waits behind the run — inside the loop's time (general: a 5-minute lease ends its loop at 2), so the provider's failure is the run's, not a note under the wind-down
     fail(new Error("provider exploded"));
     await run;
     // Three requests: the first run's, the steered follow-up's own (no run), the fresh turn's.
@@ -11879,7 +11905,7 @@ describe("no gaps: every awaited step runs inside a span (docs/reference/specs/t
     ]);
     const [, firstRoot, fresh] = roots;
     expect(firstRoot!.endedAt).toBeLessThanOrEqual(fresh!.startedAt);
-    expect(fresh!.attrs.queuedBehindMs).toBeGreaterThanOrEqual(250_000);
+    expect(fresh!.attrs.queuedBehindMs).toBeGreaterThanOrEqual(100_000);
     // The queued numbers are on the roots AT START — the record's `request`
     // span_start is the only streamed event of a root, and the page's caption
     // reads it (tracing item 18): the follow-up's own root started with its
@@ -13258,7 +13284,7 @@ describe("the model proxy's run bearer through dispatch()", () => {
       maxTokens: 16000,
       turns: 1, // the one model call, metered as the proxy meters it
       revoked: true,
-      expiresAt: clock.now + 5 * 60_000 + BEARER_MARGIN_MS, // the general preset's five minutes, plus the margin
+      expiresAt: bearerExpiresAt(clock.now + 5 * 60_000), // the lease started at the harness's clock: the general preset's five minutes, plus the grace
     });
     expect(store.issue(runId!)).toBeUndefined(); // nothing buys a call after the run's end
   });

@@ -26,6 +26,7 @@
 // reads the feed, acts on the observations, paces the budgets and the
 // wind-down, and answers.
 
+import { loopClock, MINUTE_MS } from "../../budgets.js";
 import {
   COMMAND_CAP,
   prepareToolResult,
@@ -1012,14 +1013,27 @@ export async function driveOpenCode(
   deps: HarnessDeps,
   run: HarnessRun,
   conn: OpenCodeConnection,
-): Promise<{ answer: string }> {
+  /** `turn` for a post-turn on the session (the harness's `followUp`): its
+   *  lease is the caller's carved minutes, it holds nothing back for a
+   *  write-up, and it publishes no `lease` event — the loop's stands. */
+  kind: "loop" | "turn" = "loop",
+): Promise<{ answer: string; remainingMs: () => number }> {
   const now = () => deps.clock();
   const agentSpan = run.span?.start("run.agent");
   if (agentSpan) deps.bearers?.reparent(run.runId, agentSpan);
-  const remainingMs = run.resume?.remainingMs ?? run.agent.maxMinutes * 60_000;
-  const deadline = now() + remainingMs;
-  const warnAt = deadline - Math.min(3 * 60_000, run.agent.maxMinutes * 15_000);
+  // The lease's clocks (harness-pi item 15; decision 0046), as pi keeps them:
+  // the lease ends at `deadline`, the loop at `loopEnd` with the write-up and
+  // the post-step held back, the warning lands at `warnAt`, the write-up is
+  // bounded by `finaleMs`. A resume continues the lease the record holds.
+  const remainingMs = run.resume?.remainingMs ?? run.agent.maxMinutes * MINUTE_MS;
+  const lease = loopClock(now(), remainingMs, run.agent.name, kind);
+  const { deadline, loopEnd, warnAt } = lease;
   const emit = (event: RunEvent) => run.onEvent?.(event.at === undefined ? { ...event, at: now() } : event);
+  if (kind === "loop") {
+    deps.bearers?.leaseStarted(run.runId, deadline);
+    if (!run.resume)
+      emit({ type: "lease", startedAt: lease.startedAt, endsAt: deadline, loopEndsAt: loopEnd, at: lease.startedAt });
+  }
   const note = (kind: RunNoteKind, summary: string) => {
     run.onProgress?.(summary);
     emit({ type: "run_note", kind, summary });
@@ -1077,6 +1091,11 @@ export async function driveOpenCode(
   });
 
   let writeUp: { kind: "time" } | { kind: "turns"; pace: string } | undefined;
+  /** When the write-up was steered: the finale bound counts from here. */
+  let writeUpAt: number | undefined;
+  /** The finale bound interrupted the session during a write-up: the run ends
+   *  by the wind-down's answer, and the interrupted call's failure is not the run's. */
+  let finaleAborted = false;
   let hardStopped = false;
   let warned = false;
   let bypass: OpenCodeGateBypassedError | undefined;
@@ -1100,6 +1119,7 @@ export async function driveOpenCode(
 
   const startWriteUp = (w: NonNullable<typeof writeUp>, instruction: string) => {
     writeUp = w;
+    writeUpAt = now();
     // The relay's door refuses new tool calls while the run writes up (the
     // minor the review named), as pi's `toolsBlocked` does.
     if (conn.writeUp)
@@ -1122,21 +1142,32 @@ export async function driveOpenCode(
       }
       return;
     }
-    if (writeUp) return;
-    if (now() >= deadline) {
+    if (writeUp) {
+      // The write-up is bounded by its allowance, as pi's is: past it the run
+      // closes by the wind-down's own answer — the interrupt ends whatever
+      // call is in flight, and `finaleAborted` keeps that failure the run's own.
+      if (writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) {
+        writeUpAt = undefined;
+        finaleAborted = true;
+        run.onProgress?.("finale timed out — closing the run without a write-up");
+        void request(sessionRoutes["session.interrupt"]).catch(() => {});
+      }
+      return;
+    }
+    if (now() >= loopEnd) {
       note("time_budget_exhausted", timeBudgetNote(bridge.doingNow()));
       startWriteUp({ kind: "time" }, timeBudgetInstruction());
       return;
     }
     if (turnCount() >= run.agent.maxTurns) {
-      const pace = turnGuardPace(turnCount(), run.agent.maxMinutes * 60_000 - (deadline - now()));
+      const pace = turnGuardPace(turnCount(), now() - lease.startedAt);
       note("turn_budget_exhausted", turnGuardNote(pace));
       startWriteUp({ kind: "turns", pace }, turnGuardInstruction(pace));
       return;
     }
     if (!warned && now() >= warnAt) {
       warned = true;
-      const minutesLeft = Math.max(1, Math.round((deadline - now()) / 60_000));
+      const minutesLeft = Math.max(1, Math.round((loopEnd - now()) / MINUTE_MS));
       note("wrap_up", wrapUpNote(minutesLeft));
       void request(sessionRoutes["session.prompt"], { text: wrapUpInstruction(minutesLeft), delivery: "steer" }).catch(
         () => {},
@@ -1258,7 +1289,7 @@ export async function driveOpenCode(
         continue;
       }
       if (obs.budgetStop && !writeUp) {
-        const pace = turnGuardPace(turnCount(), run.agent.maxMinutes * 60_000 - (deadline - now()));
+        const pace = turnGuardPace(turnCount(), now() - lease.startedAt);
         note("turn_budget_exhausted", turnGuardNote(pace));
         startWriteUp({ kind: "turns", pace }, turnGuardInstruction(pace));
       }
@@ -1309,15 +1340,16 @@ export async function driveOpenCode(
   }
   if (bypass) throw bypass;
   if (replyFailed) throw replyFailed;
-  if (hardStopped) return { answer: HARD_STOP_MESSAGE };
+  const remaining = () => deadline - now();
+  if (hardStopped) return { answer: HARD_STOP_MESSAGE, remainingMs: remaining };
   if (providerError !== undefined) throw new Error(`the model call failed: ${providerError}`);
-  if (!settled) throw new Error("the OpenCode run ended before its execution settled");
+  if (!settled && !finaleAborted) throw new Error("the OpenCode run ended before its execution settled");
   // Every refill the loop saw has landed as its steps, and the last text-only
   // turn is the answer.
   await bridge.flush();
   const text = bridge.answer() ?? "";
   const answer = writeUpAnswer(writeUp, text, run.agent.maxMinutes, writeUpFailed);
-  return { answer };
+  return { answer, remainingMs: remaining };
 }
 
 function writeUpAnswer(

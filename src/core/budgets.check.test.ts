@@ -9,21 +9,28 @@ import {
   ALLOWANCES,
   ASKS,
   BASH_COMMAND,
+  bearerExpiresAt,
   carve,
   carveChildOfParent,
   FLOORS,
   fit,
   LOOP_PRESETS,
+  loopClock,
   loopPosition,
   loopRounds,
   MERGE_WAIT_ASK_MINUTES,
   MINUTE_MS,
   POST_STEP_MINUTES,
+  postStepLease,
+  postStepMinutes,
   PRESET_FLOORS,
+  provisionalBearerExpiresAt,
   reserveMinutes,
   SHIP_WAIT,
   RUNAWAY_TURNS_PER_MINUTE,
   runawayTurnCap,
+  turnLeaseMs,
+  WRAP_UP_WARNING,
 } from "./budgets.js";
 
 const SHIP_DEFAULT = { maxMinutes: ASKS.ship, maxRounds: 3 };
@@ -223,5 +230,58 @@ describe("the derivations the registry reads from the module", () => {
     expect(AGENTS.ship.maxMinutes).toBe(ASKS.ship);
     expect(AGENTS.ship.maxTurns).toBe(1);
     expect(RUNAWAY_TURNS_PER_MINUTE).toBe(6);
+  });
+});
+
+describe("the loop's clocks — the loop ends inside the lease, so the write-up and the post-step fit", () => {
+  const T0 = 1_700_000_000_000;
+  it("a coding lease of 45 minutes ends its loop at 37: the write-up's 3 and the post-step's 5 are held back; the warning lands 3 minutes before the loop's end; the write-up is bounded by its allowance", () => {
+    const c = loopClock(T0, 45 * MINUTE_MS, "coding");
+    expect(c).toEqual({
+      startedAt: T0,
+      deadline: T0 + 45 * MINUTE_MS,
+      loopEnd: T0 + 37 * MINUTE_MS,
+      warnAt: T0 + 34 * MINUTE_MS,
+      finaleMs: ALLOWANCES.writeUp * MINUTE_MS,
+    });
+    expect(c.deadline - c.loopEnd).toBe((ALLOWANCES.writeUp + POST_STEP_MINUTES.coding) * MINUTE_MS);
+  });
+  it("a preset without a post-step holds back the write-up alone: a general lease of 5 ends its loop at 2, and its warning is a quarter of the loop before that", () => {
+    const c = loopClock(T0, 5 * MINUTE_MS, "general");
+    expect(c.loopEnd).toBe(T0 + 2 * MINUTE_MS);
+    expect(c.warnAt).toBe(T0 + 1.5 * MINUTE_MS);
+    expect(WRAP_UP_WARNING).toEqual({ minutes: 3, fraction: 0.25 });
+  });
+  it("a lease shorter than its hold-back has no loop time: the loop ends at its start, never before it", () => {
+    const c = loopClock(T0, 3 * MINUTE_MS, "coding");
+    expect(c.loopEnd).toBe(T0);
+    expect(c.warnAt).toBe(T0);
+    expect(c.deadline).toBe(T0 + 3 * MINUTE_MS);
+  });
+  it("a follow-up turn on the session holds nothing back — its deliverable is a tool call, not a write-up — and is still bounded by the write-up allowance past its deadline", () => {
+    const c = loopClock(T0, 5 * MINUTE_MS, "coding", "turn");
+    expect(c.loopEnd).toBe(c.deadline);
+    expect(c.finaleMs).toBe(ALLOWANCES.writeUp * MINUTE_MS);
+  });
+  it("a preset name outside the table has no post-step; the post-step of a run is carved from the lease's remainder with a floor of one minute: 20 minutes left give coding 5 and review 3, one minute left gives 1, none left still gives 1", () => {
+    expect(postStepMinutes("coding")).toBe(5);
+    expect(postStepMinutes("conformance")).toBe(0);
+    expect(postStepLease("coding", 20 * MINUTE_MS)).toBe(5);
+    expect(postStepLease("review", 20 * MINUTE_MS)).toBe(3);
+    expect(postStepLease("coding", 1 * MINUTE_MS)).toBe(1);
+    expect(postStepLease("coding", 0)).toBe(1);
+    expect(postStepLease("coding", undefined)).toBe(5);
+    expect(postStepLease("general", 20 * MINUTE_MS)).toBe(0);
+  });
+  it("a follow-up turn's lease is the lesser of its ask and the lease's remainder, never under a minute", () => {
+    expect(turnLeaseMs(5, 20 * MINUTE_MS)).toBe(5 * MINUTE_MS);
+    expect(turnLeaseMs(5, 2.5 * MINUTE_MS)).toBe(2.5 * MINUTE_MS);
+    expect(turnLeaseMs(5, 0)).toBe(MINUTE_MS);
+    expect(turnLeaseMs(25, -MINUTE_MS)).toBe(MINUTE_MS);
+  });
+  it("the bearer outlives the lease by its grace of one minute; the mint at provisioning is provisional — the provisioning allowance, the lease and the grace — until the lease starts", () => {
+    expect(bearerExpiresAt(T0 + 45 * MINUTE_MS)).toBe(T0 + 46 * MINUTE_MS);
+    expect(provisionalBearerExpiresAt(T0, 45)).toBe(T0 + (3 + 45 + 1) * MINUTE_MS);
+    expect(ALLOWANCES.bearerGrace).toBe(1);
   });
 });

@@ -1,3 +1,4 @@
+import { ALLOWANCES, bearerExpiresAt, loopClock, MINUTE_MS } from "../../budgets.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentDef } from "../../../agents/registry.js";
 import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../../execution/executor.js";
@@ -286,7 +287,6 @@ function world(
     sleep: opts.sleep ?? (() => new Promise((r) => setImmediate(r))),
     pollMs: 10,
     tickMs: 10,
-    finaleTimeoutMs: 60_000,
   };
   const start = () => runPiHarness(harnessDeps, run);
   /** The open form (harness-pi item 14): the loop's answer with pi still alive for a follow-up turn. */
@@ -682,11 +682,15 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     ).toEqual([expect.stringContaining("the notepad could not be read for the compaction steer (ledger 503)")]);
   });
 
-  it("the wrap-up warning is steered once as the deadline nears", async () => {
+  it("the wrap-up warning is steered once as the loop's end nears — the lease's end less the write-up and the post-step it holds back", async () => {
     const clock = { now: NOW };
-    const w = world({ clock, agent: { maxMinutes: 10 } });
+    const w = world({ clock, agent: { maxMinutes: 20 } });
+    // A coding lease of 20: the loop ends at 12 (3 for the write-up, 5 for the description turn held back), the warning lands at 9.
+    const lease = loopClock(NOW, 20 * MINUTE_MS, "coding");
+    expect(lease.loopEnd).toBe(NOW + 12 * MINUTE_MS);
+    expect(lease.warnAt).toBe(NOW + 9 * MINUTE_MS);
     scriptedPi(w.container, (n, c) => {
-      clock.now += 8 * 60_000; // two minutes left: inside the warning window
+      clock.now += 10 * MINUTE_MS; // two minutes of loop left: inside the warning window
       bashTurn(w, "c1", "ls", "files");
       finalTurn(c, "done");
     });
@@ -696,13 +700,13 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(w.events.filter((e) => e.type === "run_note" && e.kind === "wrap_up")).toHaveLength(1);
   });
 
-  it("at the deadline the write-up is steered with the loop's words, every tool is refused meanwhile, and the answer carries the budget label", async () => {
+  it("at the loop's end the write-up is steered with the loop's words, every tool is refused meanwhile, the answer carries the budget label, the lease event names the start, the end and the cut, and the bearer expires a minute past the lease", async () => {
     const clock = { now: NOW };
-    const w = world({ clock, agent: { maxMinutes: 10 } });
+    const w = world({ clock, agent: { maxMinutes: 20 } });
     let blockedDuring: string | undefined;
     scriptedPi(w.container, (n, c) => {
       bashTurn(w, "c1", "ls", "files");
-      clock.now += 11 * 60_000;
+      clock.now += 13 * MINUTE_MS; // past the loop's end at 12, inside the lease of 20
       // pi would now be steered; a tool it still asks for is refused by the gate.
       setImmediate(() => {
         const live = w.registry.get("run-7")!;
@@ -712,8 +716,16 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     const answer = await w.start();
     expect(answer).toBe(
-      "⚠️ _Hit the 10-minute budget before finishing — findings so far:_\n\nFindings so far: the tests were not run.",
+      "⚠️ _Hit the 20-minute budget before finishing — findings so far:_\n\nFindings so far: the tests were not run.",
     );
+    expect(w.events.find((e) => e.type === "lease")).toEqual({
+      type: "lease",
+      startedAt: NOW,
+      endsAt: NOW + 20 * MINUTE_MS,
+      loopEndsAt: NOW + 12 * MINUTE_MS,
+      at: NOW,
+    });
+    expect(w.bearers.grantOf("run-7")?.expiresAt).toBe(bearerExpiresAt(NOW + 20 * MINUTE_MS));
     expect(
       w.container
         .commands()
@@ -788,19 +800,19 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(w.container.commands().filter((c) => c.type === "steer")).toEqual([]);
   });
 
-  it("a write-up that never comes is bounded: pi is aborted at the finale timeout and the answer is the reason alone", async () => {
+  it("a write-up that never comes is bounded by its allowance: pi is aborted three minutes after the steer and the answer is the reason alone", async () => {
     const clock = { now: NOW };
-    const w = world({ clock, agent: { maxMinutes: 10 } });
+    const w = world({ clock, agent: { maxMinutes: 20 } });
     scriptedPi(w.container, () => {
       bashTurn(w, "c1", "ls", "a");
-      clock.now += 11 * 60_000;
+      clock.now += 13 * MINUTE_MS;
       setImmediate(() => {
-        clock.now += 61_000; // past the finale bound with no write-up
+        clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000; // past the finale bound with no write-up
       });
     });
     const answer = await w.start();
     expect(answer).toBe(
-      "Stopped at the 10-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.",
+      "Stopped at the 20-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.",
     );
     expect(w.container.commands().some((c) => c.type === "abort")).toBe(true);
     expect(w.notes).toContain("finale timed out — closing the run without a write-up");
@@ -808,7 +820,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
 
   it("a model call in flight at the budget ends by the wind-down, not an aborted call: the budget answer stands, the failure is a note, and the budget note says what the run was doing", async () => {
     const clock = { now: NOW };
-    const w = world({ clock, agent: { maxMinutes: 10 } });
+    const w = world({ clock, agent: { maxMinutes: 20 } });
     scriptedPi(w.container, (n, c) => {
       bashTurn(w, "c1", "ls", "a");
       c.emit({ type: "turn_start" }); // pi opens the next turn: its model call is under way…
@@ -817,7 +829,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       void vi
         .waitFor(() => expect(w.events.some((e) => e.type === "tool_result" && e.callId === "c1")).toBe(true))
         .then(() => {
-          clock.now += 11 * 60_000;
+          clock.now += 13 * MINUTE_MS;
           setImmediate(() => {
             // pi's in-flight model call dies as an abort while the run winds down.
             c.emit(
@@ -838,9 +850,9 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     const answer = await w.start();
     // The wind-down's own words, naming the failed call where the write-up would have been.
     expect(answer).toBe(
-      "Stopped at the 10-minute budget without finishing; the model call failed during the wind-down (This operation was aborted), so no write-up came. Partial work may exist in the workspace — narrow the task and try again.",
+      "Stopped at the 20-minute budget without finishing; the model call failed during the wind-down (This operation was aborted), so no write-up came. Partial work may exist in the workspace — narrow the task and try again.",
     );
-    expect(w.notes.some((note) => note.includes("time budget exhausted while a model call was in flight"))).toBe(true);
+    expect(w.notes.some((note) => note.includes("the loop's time is up while a model call was in flight"))).toBe(true);
     expect(
       w.notes.some((note) => note.includes("the model call failed during the wind-down (This operation was aborted)")),
     ).toBe(true);

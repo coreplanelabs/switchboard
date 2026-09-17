@@ -27,6 +27,7 @@
 import type { AgentDef } from "../agents/registry.js";
 import { resolveBaseRef, type OpenPrRef } from "../execution/githubPulls.js";
 import type { ToolContext } from "../tools/runnableTool.js";
+import { postStepLease } from "./budgets.js";
 import type { CodingPrTarget, WorkspaceObservation } from "./codingPrPostStep.js";
 import type { FollowUpTurn } from "./harness/contract.js";
 import type { PrDescription } from "./prDescription.js";
@@ -35,10 +36,11 @@ import type { RunEvent } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
 import type { Span } from "./trace/types.js";
 
-/** The turn's budget, well under the coding agent's own wall clock and turn
- *  guard: one read of the PR, one look at the diff, one submit, one line back. */
+/** The turn's turn guard, well under the coding agent's own: one read of the
+ *  PR, one look at the diff, one submit, one line back. Its minutes are the
+ *  coding post-step's allowance carved from the lease's remainder
+ *  (`postStepLease`, decision 0046). */
 export const DESCRIPTION_TURN_MAX_TURNS = 8;
-export const DESCRIPTION_TURN_MAX_MINUTES = 5;
 
 /** What the turn is about: the pushed branch, its proven head, and the open
  *  PR that branch heads. */
@@ -114,13 +116,16 @@ export interface CodingTurnSpec {
    *  a `finish` plan, whose session ended with the previous generation — the
    *  turn is not run and nothing is submitted. */
   followUp?: FollowUpTurn;
+  /** What the run's lease still holds, read at the call (`HarnessSession.remainingMs`):
+   *  the turn's minutes are carved from it. Absent, the allowance stands. */
+  remainingMs?: () => number;
 }
 
 /**
  * Run the description turn: publish the `description_turn` run note and prompt
  * the run's pi session once more with the follow-up (`followUp`), under a clip
- * below the agent's own budgets (`DESCRIPTION_TURN_MAX_TURNS`,
- * `DESCRIPTION_TURN_MAX_MINUTES`). The description arrives through the tool
+ * below the agent's own budgets (`DESCRIPTION_TURN_MAX_TURNS`; the coding
+ * post-step's minutes, carved from the lease's remainder). The description arrives through the tool
  * context's `onPrDescription` hook — the same one the first turn fed — and is
  * ALSO returned, so the caller can tell "submitted" from "the turn ran and
  * still submitted nothing" without reaching into its own state. Never throws
@@ -162,7 +167,7 @@ export async function runDescriptionTurn(input: {
     await turn.followUp({
       text: followUpText,
       maxTurns: Math.min(turn.agent.maxTurns, DESCRIPTION_TURN_MAX_TURNS),
-      maxMinutes: Math.min(turn.agent.maxMinutes, DESCRIPTION_TURN_MAX_MINUTES),
+      maxMinutes: Math.min(turn.agent.maxMinutes, postStepLease("coding", turn.remainingMs?.())),
       toolContext,
       ...(input.span ? { span: input.span } : {}),
     });

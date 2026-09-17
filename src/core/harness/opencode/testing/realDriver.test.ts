@@ -232,7 +232,9 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
     expect(toolResults.some((r) => r.tool === "bash" && r.ok)).toBe(true); // echo hi ran
     expect(toolResults.some((r) => r.tool === "bash" && !r.ok)).toBe(true); // git push refused
     // The record clause: the run's events are the record's vocabulary.
-    for (const e of events) expect(["tool_call", "tool_result", "run_note", "assistant", "input"]).toContain(e.type);
+    for (const e of events)
+      expect(["tool_call", "tool_result", "run_note", "assistant", "input", "lease"]).toContain(e.type);
+    expect(events.some((e) => e.type === "lease")).toBe(true); // the harness started the lease (harness-pi item 15)
     // The conversation clause: the run answered; the record mirrored steps.
     expect(session.answer.length).toBeGreaterThan(0);
     expect(steps.length).toBeGreaterThan(0);

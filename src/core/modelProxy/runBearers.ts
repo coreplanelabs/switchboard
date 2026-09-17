@@ -25,10 +25,8 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ProviderConfig } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import type { Clock, Span } from "../trace/types.js";
+import { bearerExpiresAt } from "../budgets.js";
 
-/** How far past the run's budget a bearer stays valid: the write-up a budget
- *  exhaustion asks for, and the post-step, still have a credential. */
-export const BEARER_MARGIN_MS = 5 * 60_000;
 export const BEARER_PREFIX = "sbr_";
 const SECRET_BYTES = 32;
 
@@ -46,7 +44,10 @@ export interface RunBearerGrant {
   /** The per-call output cap and the turn cap, the preset's. */
   maxTokens: number;
   maxTurns: number;
-  /** Absolute: the run's budget plus `BEARER_MARGIN_MS`, from the mint. */
+  /** Absolute. The mint sets it provisionally (`provisionalBearerExpiresAt`:
+   *  the provisioning allowance, the lease and the grace); the harness
+   *  replaces it when the lease starts (`leaseStarted`: the lease's end plus
+   *  the grace, docs/reference/specs/model-proxy.md item 2). */
   expiresAt: number;
   /** The span every proxied `model.turn` hangs under: the request root today;
    *  the harness bridge's `run.agent` once a harness drives the run. */
@@ -111,6 +112,17 @@ export class RunBearerStore {
     const secret = randomBytes(SECRET_BYTES);
     this.entries.set(grant.runId, { grant, hashes: [hashOf(secret)], turns: 0, revoked: false });
     return token(grant.runId, secret);
+  }
+
+  /** The run's lease has started (the harness set its deadline): the bearer
+   *  now expires at the lease's end plus the grace, replacing the mint's
+   *  provisional expiry — so the grace is measured from the lease, not from
+   *  the attach. False for a run this store never minted or one that ended. */
+  leaseStarted(runId: string, leaseEndsAt: number): boolean {
+    const entry = this.entries.get(runId);
+    if (!entry || entry.revoked) return false;
+    entry.grant = { ...entry.grant, expiresAt: bearerExpiresAt(leaseEndsAt) };
+    return true;
   }
 
   /** Another bearer for a run still live: the same entry, expiry and turn

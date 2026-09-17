@@ -683,6 +683,14 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
+  /** The run's lease as the harness started it (docs/reference/specs/run-history.md
+   *  item 2; decision 0046): when the wall clock began, when the lease ends,
+   *  and when the loop ends — the lease's end less the write-up and the
+   *  post-step the lease holds back — so a record says how long the run had
+   *  and where its loop was cut. Published by the harness once, at the first
+   *  start of the loop; a resumed run carries the original. Head material,
+   *  like `run_meta`. Additive: unknown → ignored. */
+  | { type: "lease"; startedAt: number; endsAt: number; loopEndsAt: number; seq?: number; at?: number }
   /** The coordinator tag as a fact of the run (docs/reference/specs/run-history.md
    *  item 48a): the instance the run is a child of, the unit its idempotency
    *  key named, and the base branch its pull request targets — published by

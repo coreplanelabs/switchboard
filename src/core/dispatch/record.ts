@@ -12,16 +12,17 @@ import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import { usageOfEvents } from "../runUsage.js";
 import {
   fitRecordToBudget,
+  leaseOfEvents,
+  prOfEvents,
+  routeOfEvents,
   type RunFailure,
   type RunProfileRecord,
   type RunRecord,
   type RunReference,
+  type RunRouteDecision,
   type RunSeed,
   type RunSession,
   type RunStatus,
-  type RunRouteDecision,
-  prOfEvents,
-  routeOfEvents,
 } from "../runRecord.js";
 import type { RunProfile } from "../../config/profile.js";
 import { redactHandoff, type Handoff } from "../ship/handoff.js";
@@ -338,6 +339,8 @@ export function assembleRunRecord(input: {
   // The pull request the run reached (run-history item 2): the post-step's
   // `pr_opened`, published before the stream finished, so it is in the events.
   const pr = prOfEvents(events);
+  // The lease the harness started (run-history item 2): its `lease` event.
+  const lease = leaseOfEvents(events);
   // The route the run ran under: the caller's (a sticky-carried decision has
   // no `route` event), else what the events say.
   const route = input.route ?? routeOfEvents(events);
@@ -388,6 +391,7 @@ export function assembleRunRecord(input: {
     ...(input.session !== undefined ? { session: input.session } : {}),
     ...(input.failure !== undefined ? { failure: input.failure } : {}),
     ...(pr !== undefined ? { pr } : {}),
+    ...(lease !== undefined ? { lease } : {}),
     // What the run cost (cost by user): summed here, before the budget can cut
     // a middle event, from every model.turn span the run published.
     usage: usageOfEvents(events),

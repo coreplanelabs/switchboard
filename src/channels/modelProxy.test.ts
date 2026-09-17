@@ -4,6 +4,7 @@
 // forwarded to the real provider with the real key — which never leaves this
 // process. A fake upstream stands in for the provider; nothing here reaches
 // the network.
+import { provisionalBearerExpiresAt } from "../core/budgets.js";
 import { describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { EventEmitter } from "node:events";
@@ -11,7 +12,7 @@ import { secretsFrom } from "../secrets.js";
 import { createTracer } from "../core/trace/tracer.js";
 import type { SpanRecord } from "../core/trace/types.js";
 import type { RunEvent } from "../core/runEvents.js";
-import { BEARER_MARGIN_MS, RunBearerStore, type RunBearerGrant } from "../core/modelProxy/runBearers.js";
+import { RunBearerStore, type RunBearerGrant } from "../core/modelProxy/runBearers.js";
 import type { ProviderConfig } from "../core/provider.js";
 import {
   ANTHROPIC_MESSAGES_PATH,
@@ -97,7 +98,7 @@ function harness(
     model: "claude-opus-5",
     maxTokens: 64000,
     maxTurns: 60,
-    expiresAt: clock.now + 45 * 60_000 + BEARER_MARGIN_MS,
+    expiresAt: provisionalBearerExpiresAt(clock.now, 45),
     span: root,
     publish: (e) => void published.push(e),
     ...over,

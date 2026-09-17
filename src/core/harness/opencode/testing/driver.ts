@@ -38,6 +38,7 @@
 // before it launches, the model and the system prompt from the configuration it
 // wrote — so one implementation answers both doors and no second serve exists.
 
+import { loopClock, MINUTE_MS } from "../../../budgets.js";
 import type { AgentDef, Identity } from "../../../../agents/registry.js";
 import type { Executor } from "../../../../execution/executor.js";
 import { updateStatusTool } from "../../../../tools/status.js";
@@ -1220,7 +1221,6 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 2))),
     pollMs: 1,
     tickMs: 5,
-    finaleTimeoutMs: 60_000,
   };
 
   const harness = new OpenCodeHarness();
@@ -1238,7 +1238,8 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     registry,
     sleep: deps.sleep,
     ...(deps.tickMs !== undefined ? { tickMs: deps.tickMs } : {}),
-    spendBudget: () => void (clock.now = NOW + run.agent.maxMinutes * 60_000 + 1),
+    // The clock lands past the LOOP's end, inside the lease (pi's driver does the same).
+    spendBudget: () => void (clock.now = loopClock(NOW, run.agent.maxMinutes * MINUTE_MS, run.agent.name).loopEnd + 1),
   };
   const serve = new ScriptedServe(container, source, script, serveDeps, options);
   const recorded = script.processAliveOnResume
