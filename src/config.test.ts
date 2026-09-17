@@ -19,8 +19,9 @@ import {
   type AppConfig,
   type ConfigStoreOptions,
   type Overrides,
+  type Scope,
 } from "./config.js";
-import { MAX_INSTRUCTIONS_LENGTH } from "./config/validate.js";
+import { MAX_INSTRUCTIONS_LENGTH, validateHarnessWords } from "./config/validate.js";
 import { declaredProfile, effectiveProfile } from "./config/profile.js";
 import { AGENTS } from "./agents/registry.js";
 import { hasAction } from "./core/authz/authorize.js";
@@ -829,6 +830,161 @@ describe("harness block (harness.<preset>: pi or opencode)", () => {
     expect(() => store(YAML_FIXTURE + "harness:\n  - coding\n")).toThrow(
       /harness must be a mapping of preset to a harness name \(pi or opencode\)/,
     );
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md items 2, 5 and 12;
+// harness.md item 8 — the harness word is a scope setting: `harness.<preset>`
+// under `channels.<id>` and `users.<id>` (static, or written at run time by
+// `config set … --harness.<preset>`) resolves user > channel > the
+// deployment's top-level block, with no request directive and no thread
+// stickiness; a preset no layer names resolves to no word, and the loop opens
+// it on pi. Every layer is held to the roster's words at load and on write, a
+// hand-edited or stored overrides document included — a word that read as
+// "your runs are on X" while nothing was would be the worst kind of quiet.
+describe("harness as a scope setting (users.<id>.harness, channels.<id>.harness)", () => {
+  const HARNESS_BASE = `
+organization: acme
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+    coding: anthropic/coding-model
+    review: anthropic/review-model
+`;
+  const HARNESS_YAML =
+    HARNESS_BASE +
+    `harness:
+  review: opencode
+channels:
+  "slack:COC":
+    harness:
+      coding: opencode
+  "slack:CPI":
+    harness:
+      coding: pi
+      review: pi
+users:
+  "slack:UPI":
+    harness:
+      coding: pi
+  "slack:UOC":
+    harness:
+      general: opencode
+`;
+  const at = (s: ConfigStore, channelId: string, userId: string, agent: string) =>
+    s.resolve({ channelId, userId, request: { agent } }).harness;
+
+  it("resolves user > channel > the deployment's block, each naming the scope whose word won; an unset layer falls through; a preset no layer names resolves to no word", () => {
+    const s = store(HARNESS_YAML);
+    // Nothing names coding on this path: no word, so the loop opens it on pi.
+    expect(at(s, "slack:CX", "slack:UX", "coding")).toBeUndefined();
+    // The deployment's top-level block is the defaults layer.
+    expect(at(s, "slack:CX", "slack:UX", "review")).toEqual({ name: "opencode", scope: "defaults" });
+    // A channel's word beats the deployment's; a user's beats the channel's.
+    expect(at(s, "slack:COC", "slack:UX", "coding")).toEqual({ name: "opencode", scope: "channel" });
+    expect(at(s, "slack:CPI", "slack:UX", "review")).toEqual({ name: "pi", scope: "channel" });
+    expect(at(s, "slack:COC", "slack:UPI", "coding")).toEqual({ name: "pi", scope: "user" });
+    // A user's word for another preset is not this preset's: it falls through to the channel's.
+    expect(at(s, "slack:COC", "slack:UOC", "coding")).toEqual({ name: "opencode", scope: "channel" });
+    expect(at(s, "slack:COC", "slack:UOC", "general")).toEqual({ name: "opencode", scope: "user" });
+    // The triple is untouched beside it.
+    expect(s.resolve({ channelId: "slack:COC", userId: "slack:UPI", request: { agent: "coding" } })).toEqual({
+      agentName: "coding",
+      agentLayer: "request",
+      modelRef: "anthropic/coding-model",
+      harness: { name: "pi", scope: "user" },
+    });
+  });
+
+  it("runtime overrides set the word per scope, win over the static word for the same scope, persist through the store and clear", async () => {
+    const s = store(HARNESS_YAML);
+    await s.setUserOverride("slack:UPI", { harness: { coding: "opencode" } });
+    expect(at(s, "slack:CPI", "slack:UPI", "coding")).toEqual({ name: "opencode", scope: "user" });
+    await s.setChannelOverride("slack:CPI", { harness: { review: "opencode" } });
+    expect(at(s, "slack:CPI", "slack:UX", "review")).toEqual({ name: "opencode", scope: "channel" });
+    await s.clearUserOverride("slack:UPI");
+    expect(at(s, "slack:CPI", "slack:UPI", "coding")).toEqual({ name: "pi", scope: "user" }); // the static word shows through
+    await s.setUserOverride("slack:UX", { harness: { coding: "opencode" } });
+    expect(at(s, "slack:CX", "slack:UX", "coding")).toEqual({ name: "opencode", scope: "user" });
+    await s.clearUserOverride("slack:UX");
+    expect(at(s, "slack:CX", "slack:UX", "coding")).toBeUndefined();
+  });
+
+  it("a word that is not a harness, an unknown preset and a non-mapping under a channel or a user fail the load by name — the path and the two harnesses", () => {
+    expect(() => store(HARNESS_BASE + 'users:\n  "slack:UBAD":\n    harness:\n      coding: codex\n')).toThrow(
+      /config\.yaml: users\.slack:UBAD\.harness\.coding: codex is not a harness; the harnesses are pi and opencode/,
+    );
+    expect(() => store(HARNESS_BASE + 'channels:\n  "slack:CBAD":\n    harness:\n      review: OpenCode\n')).toThrow(
+      /channels\.slack:CBAD\.harness\.review: OpenCode is not a harness; the harnesses are pi and opencode/,
+    );
+    expect(() => store(HARNESS_BASE + 'channels:\n  "slack:CBAD":\n    harness:\n      codng: opencode\n')).toThrow(
+      /config\.yaml: channels\.slack:CBAD\.harness\.codng is not a known agent/,
+    );
+    expect(() => store(HARNESS_BASE + 'users:\n  "slack:UBAD":\n    harness: opencode\n')).toThrow(
+      /users\.slack:UBAD\.harness must be a mapping of preset to a harness name \(pi or opencode\)/,
+    );
+  });
+
+  it("a scope that is not a mapping — a scalar or a list under a channel or user id — is refused by name before its harness is read", () => {
+    expect(() =>
+      validateHarnessWords({ users: { "slack:UBAD": "opencode" as unknown as Scope } }, "config.yaml"),
+    ).toThrow(/^config\.yaml: users\.slack:UBAD must be a mapping of settings$/);
+    expect(() =>
+      validateHarnessWords({ channels: { "slack:CBAD": null as unknown as Scope } }, "overrides (in-memory)"),
+    ).toThrow(/^overrides \(in-memory\): channels\.slack:CBAD must be a mapping of settings$/);
+    expect(() =>
+      validateHarnessWords({ channels: { "slack:CBAD": ["coding"] as unknown as Scope } }, "config.yaml"),
+    ).toThrow(/channels\.slack:CBAD must be a mapping of settings/);
+    expect(() => validateHarnessWords({ users: { "slack:UX": {} } }, "config.yaml")).not.toThrow();
+  });
+
+  it("`defaults.harness` is refused by name pointing at the top-level block — the deployment's words have one spelling", () => {
+    expect(() => store(HARNESS_BASE.replace("defaults:\n", "defaults:\n  harness:\n    coding: opencode\n"))).toThrow(
+      /config\.yaml: defaults\.harness is not a key; the deployment's harness words are the top-level harness block/,
+    );
+  });
+
+  it("a stored overrides document is held to the same rule at load, naming the backing and the path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, HARNESS_BASE);
+    const overrides = join(dir, "overrides.json");
+    writeFileSync(overrides, JSON.stringify({ channels: {}, users: { "slack:UX": { harness: { coding: "codex" } } } }));
+    expect(() => new ConfigStore(cfg, overrides)).toThrow(
+      /overrides \(file .*overrides\.json\): users\.slack:UX\.harness\.coding: codex is not a harness; the harnesses are pi and opencode/,
+    );
+    writeFileSync(overrides, JSON.stringify({ channels: { "slack:CX": { harness: { wizard: "pi" } } }, users: {} }));
+    expect(() => new ConfigStore(cfg, overrides)).toThrow(
+      /overrides \(file .*\): channels\.slack:CX\.harness\.wizard is not a known agent/,
+    );
+    writeFileSync(
+      overrides,
+      JSON.stringify({ channels: {}, users: { "slack:UX": { harness: { coding: "opencode" } } } }),
+    );
+    expect(at(new ConfigStore(cfg, overrides), "slack:CX", "slack:UX", "coding")).toEqual({
+      name: "opencode",
+      scope: "user",
+    });
+  });
+
+  it("config show renders the effective harness per named preset with the scope that set it, the defaults' words and each scope's own — and no harness line when no layer names one", () => {
+    const s = store(HARNESS_YAML);
+    const text = s.describe("slack:COC", "slack:UPI");
+    expect(text).toContain("*Effective harness:* coding `pi` (user), review `opencode` (defaults)");
+    expect(text).toMatch(/\*Defaults:\*.*harness `review=opencode`/);
+    expect(text).toMatch(/\*Channel scope:\* harness `coding=opencode`/);
+    expect(text).toMatch(/\*Your scope:\* harness `coding=pi`/);
+    expect(s.describeConfig("slack:COC", "slack:UPI").effective.harness).toEqual({
+      coding: { name: "pi", scope: "user" },
+      review: { name: "opencode", scope: "defaults" },
+    });
+    const plain = store();
+    expect(plain.describe("slack:CX", "slack:UX")).not.toContain("harness");
+    expect(plain.describeConfig("slack:CX", "slack:UX").effective).not.toHaveProperty("harness");
   });
 });
 

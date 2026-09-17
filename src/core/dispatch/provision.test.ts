@@ -500,6 +500,51 @@ describe("registerRun — the run's row on every surface before the attach", () 
     expect(bare.snapshotById("run-q")!.events.find((e) => e.type === "run_meta")).not.toHaveProperty("harness");
   });
 
+  // harness.md items 8 and 10 with routing-and-config item 2: the word is a
+  // scope setting, so the meta says whose word put the run where —
+  // `harnessScope` names the user's scope, the channel's or the deployment's
+  // block — and carries no scope when no layer named the preset (pi by default).
+  it("run_meta names the scope whose word picked the harness — user, channel or defaults — and no scope when no layer named the preset", async () => {
+    const roster = { pi: new PiHarness(), opencode: new OpenCodeHarness() };
+    const metaOf = async (d: ProvisionDeps, agentName: string, id: string) => {
+      const r = request(d, "fix the login bug", agentName);
+      const registry = new RunRegistry({ genId: () => id, genToken: () => "tok" });
+      await registerRun(
+        { ...d, harness: { harnesses: roster, registry: new HarnessRegistry() } },
+        {
+          agentSource: "directive",
+          msg: r.message,
+          io: fakeIO().io,
+          agent: r.agent,
+          resolved: r.resolved,
+          directives: r.directives,
+          history: [],
+          repoCtx,
+          carriedRow: undefined,
+          resume: undefined,
+          startedAt: NOW,
+          receivedAt: NOW,
+          clock: () => NOW,
+          root: r.root,
+          trace: r.trace,
+          registry,
+          shell: r.shell,
+          admitted: r.admitted,
+        },
+      );
+      return registry.snapshotById(id)!.events.find((e) => e.type === "run_meta")!;
+    };
+    const mine = deps('users:\n  "slack:UX":\n    harness:\n      coding: opencode\n');
+    expect(await metaOf(mine, "coding", "run-u")).toMatchObject({ harness: "opencode", harnessScope: "user" });
+    const general = await metaOf(mine, "general", "run-g");
+    expect(general).toMatchObject({ harness: "pi" });
+    expect(general).not.toHaveProperty("harnessScope");
+    const here = deps('channels:\n  "slack:CX":\n    harness:\n      coding: opencode\n');
+    expect(await metaOf(here, "coding", "run-c")).toMatchObject({ harness: "opencode", harnessScope: "channel" });
+    const everyone = deps("harness:\n  coding: opencode\n");
+    expect(await metaOf(everyone, "coding", "run-d")).toMatchObject({ harness: "opencode", harnessScope: "defaults" });
+  });
+
   it("a resume keeps its row's id and start and publishes nothing new: its events were replayed", async () => {
     const d = deps();
     const r = request(d, "(resume)");

@@ -27,7 +27,7 @@ import {
   type HarnessSession,
 } from "../harness/contract.js";
 import { prepareRelaunch } from "./relaunch.js";
-import { harnessForPreset } from "../harness/roster.js";
+import { harnessNamed } from "../harness/roster.js";
 import { harnessContainerFor } from "../harness/botHostContainer.js";
 import { workspaceBindingFor } from "../../execution/factory.js";
 import { isContainerGone } from "../harness/container.js";
@@ -659,15 +659,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // whichever harness wrote them: for the harness's re-attach or, on a finish,
   // for ending the process the previous generation left behind. The row's
   // word wins (item 8): the harness that judges, ends or resumes this run is
-  // the one the facts name, picked off the roster, whatever the preset's
-  // configuration word says now — a preset flipped between generations never
-  // mismatches a run in flight. A fresh run, or a row with no facts, opens on
-  // the preset's word.
+  // the one the facts name, picked off the roster, whatever the scopes' word
+  // says now — a preset flipped between generations, or a person who moved
+  // their own runs mid-flight, never mismatches a run in flight. A fresh run,
+  // or a row with no facts, opens on the word the scopes resolved for the
+  // preset (`resolved.harness`: the requester's own scope, the channel's, the
+  // deployment's block), pi when none named it.
   const facts = resume ? harnessFactsOf(resume.row.state.harness) : undefined;
   const harnessOf = (roster: NonNullable<RunDeps["harness"]>) =>
-    facts
-      ? roster.harnesses[facts.harness]
-      : harnessForPreset(roster.harnesses, deps.config.config.harness, agent.name);
+    facts ? roster.harnesses[facts.harness] : harnessNamed(roster.harnesses, resolved.harness?.name);
   // A row that names a harness this build does not know (a rollback under a
   // newer build's row, a harness removed) is no facts, so the run is rebuilt on
   // the preset's harness — the survival clause working — but the process the
@@ -762,7 +762,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // run's own container, the bearer as its key, its bridge putting its
       // events on this same stream, the relayed tools running here under this
       // same tool context. Which object: the row's word for a resume, the
-      // preset's configuration word for a fresh run (item 8, `harnessOf`).
+      // scopes' word for the preset on a fresh run (item 8, `harnessOf`).
       if (!deps.harness)
         throw new Error(`the ${agent.name} preset runs on a harness, but this process has no harness roster`);
       const harnessDeps = deps.harness;

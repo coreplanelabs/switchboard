@@ -6000,6 +6000,24 @@ channels:
     expect(sys).not.toMatch(/using defaults/i);
   });
 
+  // harness.md item 8 with routing-and-config item 8: the word a person sets for
+  // their own runs reaches the block of the next run as the harness and whose
+  // word it was; a run whose preset no scope names says nothing about it.
+  it("a `config set me --harness.general pi` word is named on the next run as the harness and your scope — and the block says nothing about the harness when no scope names the run's preset", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await dispatch(deps, msg("hello"), fakeIO().io);
+    expect(provider.requests[0].system ?? "").not.toMatch(/Harness:/);
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("config set me --harness.general pi"), io);
+    expect(replies[0]).toMatch(/Updated your scope.*"harness":\{"general":"pi"\}/);
+    await dispatch(deps, msg("which harness am I on?"), fakeIO().io);
+    const sys = provider.requests[1].system ?? "";
+    expect(sys).toContain("Harness: pi (your scope)");
+    expect(sys).toContain("`config set me --harness.<agent> <pi|opencode>`");
+    expect(sys).toContain("user override: harness general=`pi`");
+  });
+
   it("effort resolves like model: `effort:` directive → provider request + awareness block; `config set me effort=` sticks per user", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);

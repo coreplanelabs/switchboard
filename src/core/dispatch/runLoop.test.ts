@@ -156,7 +156,12 @@ function provider(answer: string | Error): Provider {
   };
 }
 
-const msg = (text: string): IncomingMessage => ({ channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD, text });
+const msg = (text: string, userId = "slack:UX"): IncomingMessage => ({
+  channelId: "slack:CX",
+  userId,
+  threadKey: THREAD,
+  text,
+});
 
 /** Everything the loop is handed for one general-agent run, with a recording
  *  channel, card and registry, and a real writer over an in-memory store.
@@ -201,6 +206,8 @@ function setup(
     spawn?: SpawnCapability;
     /** The run's reach into its session log, as the dispatcher hands it to a run with a session. */
     session?: SessionCapability;
+    /** Who asked; `slack:UX` unless a test needs a second person's scope. */
+    userId?: string;
   } = {},
 ) {
   const config = configStore(opts.yaml);
@@ -244,7 +251,7 @@ function setup(
         }
       : {}),
   };
-  const message = msg("hello there");
+  const message = msg("hello there", opts.userId);
   const { resolved } = resolveRun(
     { config },
     { msg: message, directives: { text: "hello there", ...(opts.agent ? { agent: opts.agent } : {}) }, history: [] },
@@ -255,7 +262,7 @@ function setup(
     agent: agentName,
     model: resolved.modelRef,
     channelId: "slack:CX",
-    userId: "slack:UX",
+    userId: message.userId,
     threadKey: THREAD,
     receivedAt: NOW,
   });
@@ -3010,6 +3017,33 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
   });
 
+  // harness.md item 8: the row's word wins over every scope's — a person who
+  // moved their runs to OpenCode while one was in flight on pi resumes that run
+  // on pi, and OpenCode is never opened for it.
+  it("a resume mid-loop whose row carries pi's facts opens on pi with the row's facts, though the requester's own scope says opencode now; OpenCode is never opened", async () => {
+    const container = new FakeHarnessContainer();
+    const pi = watched(piHarness, { answer: "Resumed on pi." });
+    const oc = watched(openCodeHarness);
+    const s = setup("unused", {
+      agent: "general",
+      yaml: YAML + 'users:\n  "slack:UX":\n    harness:\n      general: opencode\n',
+      harness: {
+        harnesses: roster(pi.harness, oc.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => container,
+      },
+    });
+    const PI_ROW = { harness: "pi", pid: 4242, logOffset: 10, root: "/tmp/switchboard-pi-run-l", container: "vm-1" };
+    const resume = reentering({ harness: PI_ROW }, "general");
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect(out.answer).toBe("Resumed on pi.");
+    expect(pi.calls.open).toEqual([expect.objectContaining(PI_ROW)]);
+    expect(oc.calls.open).toEqual([]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+  });
+
   // docs/reference/specs/harness.md item 8: a row naming a harness this build
   // does not know (a rollback under a newer build's row, a harness removed) is
   // no facts, so the run is rebuilt on the preset's harness — and the record
@@ -3115,6 +3149,79 @@ describe("the configuration word — harness.<preset> picks a fresh run's harnes
     expect(picked.calls.open).toEqual([undefined]); // a fresh run: no facts to resume
     expect(other.calls.open).toEqual([]);
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+  });
+});
+
+// Feature: docs/reference/specs/harness.md item 8; routing-and-config.md item 2
+// — the word is a scope setting: a user's or a channel's `harness.<preset>`
+// picks a fresh run's harness ahead of the deployment's block, on the same
+// ladder as the model (user > channel > defaults, an unset layer falling
+// through, no word anywhere → pi), so one person moves their own runs without
+// moving the deployment; two people's runs in one process open on different
+// harnesses off one roster. A resumed row keeps the harness its facts name
+// whatever the scopes say now.
+describe("the harness word through the scopes — user beats channel beats the deployment's block", () => {
+  const scoped = (block: string) => YAML + block;
+  const roster2 = () => {
+    const pi = watched(piHarness, { answer: "from pi" });
+    const oc = watched(openCodeHarness, { answer: "from opencode" });
+    return {
+      pi,
+      oc,
+      harness: {
+        harnesses: roster(pi.harness, oc.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    };
+  };
+  const cases: Array<{ name: string; yaml: string; opens: "pi" | "opencode" }> = [
+    { name: "the deployment's block alone", yaml: scoped("harness:\n  general: opencode\n"), opens: "opencode" },
+    {
+      name: "the channel's word beats the deployment's",
+      yaml: scoped('harness:\n  general: opencode\nchannels:\n  "slack:CX":\n    harness:\n      general: pi\n'),
+      opens: "pi",
+    },
+    {
+      name: "the user's word beats the channel's",
+      yaml: scoped(
+        'channels:\n  "slack:CX":\n    harness:\n      general: pi\nusers:\n  "slack:UX":\n    harness:\n      general: opencode\n',
+      ),
+      opens: "opencode",
+    },
+    {
+      name: "a user's word for another preset falls through to the channel's",
+      yaml: scoped(
+        'channels:\n  "slack:CX":\n    harness:\n      general: opencode\nusers:\n  "slack:UX":\n    harness:\n      coding: pi\n',
+      ),
+      opens: "opencode",
+    },
+    { name: "no word at any layer", yaml: YAML, opens: "pi" },
+  ];
+
+  it.each(cases)("$name → a general run opens on $opens", async ({ yaml, opens }) => {
+    const { pi, oc, harness } = roster2();
+    const s = setup("unused", { agent: "general", yaml, harness });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    const picked = opens === "pi" ? pi : oc;
+    const other = opens === "pi" ? oc : pi;
+    expect(out.answer).toBe(`from ${opens}`);
+    expect(picked.calls.open).toEqual([undefined]);
+    expect(other.calls.open).toEqual([]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+  });
+
+  it("two people in one process: the requester whose own scope says opencode opens on OpenCode, another person's run of the same preset opens on pi, off one roster", async () => {
+    const { pi, oc, harness } = roster2();
+    const yaml = scoped('users:\n  "slack:UX":\n    harness:\n      general: opencode\n');
+    const mine = setup("unused", { agent: "general", yaml, harness });
+    expect(answered(await runLoop(mine.deps, mine.ctx)).answer).toBe("from opencode");
+    const theirs = setup("unused", { agent: "general", yaml, harness, userId: "slack:UY" });
+    expect(answered(await runLoop(theirs.deps, theirs.ctx)).answer).toBe("from pi");
+    expect(oc.calls.open).toEqual([undefined]);
+    expect(pi.calls.open).toEqual([undefined]);
   });
 });
 

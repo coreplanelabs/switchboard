@@ -213,6 +213,8 @@ const HIST_EVENTS = [
     agent: "coding",
     model: "anthropic/claude-fable-5",
     effort: "high",
+    harness: "opencode",
+    harnessScope: "user",
     repo: "acme/web",
     ref: "main",
     pr: 42,

@@ -1,6 +1,7 @@
 // The roster (docs/reference/specs/harness.md item 8): every harness a process
 // can drive a run on, keyed by the name each object declares. That name is the
-// configuration word — `harness: { <preset>: pi | opencode }` — so the
+// configuration word — `harness: { <preset>: pi | opencode }` at the
+// deployment's block or under a channel's or a user's scope — so the
 // validator, the loop's pick for a fresh run and a resumed row's judge all read
 // one list, and no second spelling of the harness names exists to drift. The
 // roster's objects are constructed in the process wiring (`src/index.ts`,
@@ -29,14 +30,28 @@ export function isHarnessName(word: unknown): word is HarnessName {
   return typeof word === "string" && (HARNESS_NAMES as readonly string[]).includes(word);
 }
 
-/** The harness a preset's fresh runs open on under a configuration: the word
- *  `harness.<preset>` names, else the default. A resumed row is not picked
+/** Where a preset's word is set — `user`, `channel`, `defaults` — defined in a
+ *  module of its own (`scope.ts`) because the run record and the timeline fold
+ *  read it from programs the harness objects must not enter; offered here too,
+ *  where the word's other readers already look. */
+export { HARNESS_SCOPES, isHarnessScope, type HarnessScope } from "./scope.js";
+
+/** The roster's object for the word the scopes resolved for a preset
+ *  (`ResolvedRequest.harness`), or the default when no scope named it: what a
+ *  fresh run opens on and what `run_meta` names. A resumed row is not picked
  *  here — its facts name the harness that judges and drives it
- *  (`roster[facts.harness]`), whatever the preset's word says now. */
+ *  (`roster[facts.harness]`), whatever the scopes say now. */
+export function harnessNamed(roster: HarnessRoster, word: HarnessName | undefined): Harness {
+  return roster[word ?? DEFAULT_HARNESS];
+}
+
+/** The pick for one layer's words alone — `harness.<preset>` off a single
+ *  block, else the default: `harnessNamed` over that block's entry, so the two
+ *  agree by construction. */
 export function harnessForPreset(
   roster: HarnessRoster,
   words: Readonly<Record<string, HarnessName>> | undefined,
   preset: string,
 ): Harness {
-  return roster[words?.[preset] ?? DEFAULT_HARNESS];
+  return harnessNamed(roster, words?.[preset]);
 }

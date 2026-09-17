@@ -433,6 +433,19 @@ describe("createRunTimeline — run_meta (item 19)", () => {
     expect(t.push({ type: "run_meta", agent: "", model: "x" })).toEqual([]);
     expect(t.steps()).toEqual([]); // not a step
   });
+
+  // harness.md item 10: the harness and the scope whose word picked it ride
+  // the meta onto the page; a scope the roster does not know is dropped like
+  // any other ill-typed field, and the harness alone still shows.
+  it("keeps `harness` and a known `harnessScope`, and drops a scope that is not one of the roster's", () => {
+    const t = createRunTimeline();
+    expect(
+      t.push({ type: "run_meta", agent: "coding", model: "a/m", harness: "opencode", harnessScope: "user", at: 5 }),
+    ).toEqual([{ kind: "meta", agent: "coding", model: "a/m", harness: "opencode", harnessScope: "user", at: 5 }]);
+    expect(t.push({ type: "run_meta", agent: "coding", model: "a/m", harness: "pi", harnessScope: "banana" })).toEqual([
+      { kind: "meta", agent: "coding", model: "a/m", harness: "pi", at: undefined },
+    ]);
+  });
 });
 
 // Feature: docs/reference/specs/tracing.md — span records on the stream: step rows, the

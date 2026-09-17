@@ -1,6 +1,14 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { Harness, HarnessName } from "./contract.js";
-import { DEFAULT_HARNESS, HARNESS_NAMES, harnessForPreset, isHarnessName, type HarnessRoster } from "./roster.js";
+import {
+  DEFAULT_HARNESS,
+  HARNESS_NAMES,
+  HARNESS_SCOPES,
+  harnessForPreset,
+  harnessNamed,
+  isHarnessName,
+  type HarnessRoster,
+} from "./roster.js";
 
 // Feature: docs/reference/specs/harness.md item 8 — one roster, one word. The
 // name a harness object declares IS the configuration word `harness.<preset>`
@@ -33,5 +41,19 @@ describe("the harness roster — the names, the default and the pick", () => {
     expect(harnessForPreset(roster, { coding: "pi", review: "opencode" }, "review")).toBe(roster.opencode);
     expect(harnessForPreset(roster, {}, "coding")).toBe(roster.pi);
     expect(harnessForPreset(roster, undefined, "coding")).toBe(roster.pi);
+  });
+
+  it("HARNESS_SCOPES names where a preset's word is set, most specific first — the user's scope, the channel's, the deployment's block", () => {
+    expect([...HARNESS_SCOPES]).toEqual(["user", "channel", "defaults"]);
+  });
+
+  it("harnessNamed picks the word the scopes resolved off the roster, and pi when no scope named the preset — the same pick harnessForPreset makes for one layer's words", () => {
+    expect(harnessNamed(roster, "opencode")).toBe(roster.opencode);
+    expect(harnessNamed(roster, "pi")).toBe(roster.pi);
+    expect(harnessNamed(roster, undefined)).toBe(roster.pi);
+    for (const preset of ["coding", "review"])
+      expect(harnessForPreset(roster, { coding: "opencode" }, preset)).toBe(
+        harnessNamed(roster, preset === "coding" ? "opencode" : undefined),
+      );
   });
 });

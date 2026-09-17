@@ -9,6 +9,8 @@ import { boundaryProblem, MAX_INSTRUCTIONS_LENGTH, MIN_BOUNDARY_MINUTES } from "
 import type { Boundary } from "../../config/profile.js";
 import { IDENTITIES, MACHINE_CLASSES, type MachineClass } from "../../agents/registry.js";
 import { EFFORT_LEVELS, type Effort } from "../../effort.js";
+import type { HarnessName } from "../harness/contract.js";
+import { HARNESS_NAMES } from "../harness/roster.js";
 import { ADDRESS_SEVERITIES } from "../shipPipeline.js";
 import { authorize } from "../authz/authorize.js";
 import { pointingActor } from "../authz/pointingActor.js";
@@ -27,6 +29,7 @@ import {
 //   config show [--channel <id>]
 //   config overrides                       — the channels that carry a scope, setting names only
 //   config set <channel|me> [--agent x] [--model p/m] [--models.<agent> p/m] [--effort e] [--efforts.<agent> e]
+//                           [--harness.<agent> pi|opencode]
 //                           [--boundary.maxMinutes n] [--boundary.maxIdentity none|read|write] [--boundary.machines a,b] [--channel <id>]
 //   config clear <channel|me> [--channel <id>]
 //   config instructions <channel|me> [text…] [--channel <id>]
@@ -85,6 +88,12 @@ const effort = z.enum(EFFORT_LEVELS);
  *  schemas without anyone retyping the list. */
 const effortLevels = `<${EFFORT_LEVELS.join("|")}>`;
 const modelRef = z.string().min(1);
+/** The roster's words as the option accepts them (`--harness.<agent> pi|opencode`;
+ *  docs/reference/specs/harness.md item 8): derived from `HARNESS_NAMES`, so a
+ *  harness added to the roster reaches help and the machine schemas by itself,
+ *  and a word that is not one is refused by the schema without echoing it. */
+const harnessWord = z.enum(HARNESS_NAMES);
+const harnessWords = `<${HARNESS_NAMES.join("|")}>`;
 /** The boundary axes as dotted options (`--boundary.maxMinutes 45`): the
  *  minutes coerced from the chat grammar's string, the identity one of the
  *  ladder, the classes a comma-separated list the handler splits and checks
@@ -268,6 +277,12 @@ export const configSet = defineCommand({
     models: z.record(z.string(), modelRef).optional().describe("per-agent model: --models.<agent> provider/model"),
     effort: effort.optional().describe(`force a model effort ${effortLevels}`),
     efforts: z.record(z.string(), effort).optional().describe(`per-agent effort: --efforts.<agent> ${effortLevels}`),
+    harness: z
+      .record(z.string(), harnessWord)
+      .optional()
+      .describe(
+        `per-agent harness: --harness.<agent> ${harnessWords} — which process drives that agent's runs (under me, your own runs only)`,
+      ),
     boundary: boundaryOption,
     ship: z
       .object({
@@ -282,7 +297,7 @@ export const configSet = defineCommand({
   action: "config:write",
   effect: "write",
   describe:
-    "Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
+    "Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
   render: (output) => {
     const o = output as JsonObject;
     return `Updated ${who(o.scope as "channel" | "me")} scope. Now: ${JSON.stringify(o.effective)}`;
@@ -299,6 +314,7 @@ export const configSet = defineCommand({
     for (const [key, map] of [
       ["models", options.models],
       ["efforts", options.efforts],
+      ["harness", options.harness],
     ] as const) {
       if (!map) continue;
       for (const agent of Object.keys(map))
@@ -311,6 +327,9 @@ export const configSet = defineCommand({
     if (options.models) patch.models = options.models;
     if (options.effort !== undefined) patch.effort = options.effort as Effort;
     if (options.efforts) patch.efforts = options.efforts as Record<string, Effort>;
+    // The word was held to the roster by the schema; the store holds a stored
+    // document to the same rule at load, so the two paths cannot drift.
+    if (options.harness) patch.harness = options.harness as Record<string, HarnessName>;
     if (options.ship?.addressSeverity !== undefined) patch.ship = { addressSeverity: options.ship.addressSeverity };
     if (options.boundary) {
       // The list arrives as one comma-separated token; the boundary is then
@@ -334,7 +353,7 @@ export const configSet = defineCommand({
     if (Object.keys(patch).length === 0)
       throw new CommandError(
         "invalid_input",
-        "nothing to set: pass --agent, --model, --models.<agent>, --effort, --efforts.<agent>, or --boundary.<maxMinutes|maxIdentity|machines>",
+        "nothing to set: pass --agent, --model, --models.<agent>, --effort, --efforts.<agent>, --harness.<agent>, or --boundary.<maxMinutes|maxIdentity|machines>",
       );
     let effective: Scope;
     if (args.scope === "channel") {

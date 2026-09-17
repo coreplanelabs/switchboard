@@ -32,6 +32,7 @@ const viewerScopeLines = computed((): string[] => {
   for (const [a, m] of Object.entries(s.models ?? {})) lines.push(`${a} → ${m}`);
   if (s.effort) lines.push(`effort ${s.effort}`);
   for (const [a, e] of Object.entries(s.efforts ?? {})) lines.push(`${a} effort ${e}`);
+  for (const [a, h] of Object.entries(s.harness ?? {})) lines.push(`${a} on ${h}`);
   if (s.boundary?.maxMinutes) lines.push(`at most ${s.boundary.maxMinutes} min`);
   if (s.boundary?.maxIdentity) lines.push(`identity ≤ ${s.boundary.maxIdentity}`);
   if (s.boundary?.machines) lines.push(`machines ${s.boundary.machines.join(", ")}`);

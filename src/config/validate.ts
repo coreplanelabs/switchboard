@@ -283,6 +283,7 @@ export function validateConfig(cfg: AppConfig): void {
   for (const key of unknownKeys(cfg, CONFIG_KEYS)) throw new Error(`config.yaml: unknown key \`${key}\``);
   validateScopeEfforts(cfg, "config.yaml");
   validateBoundaries(cfg, "config.yaml");
+  validateHarnessWords(cfg, "config.yaml");
   validateMcpServers(cfg, "config.yaml");
   if (typeof cfg.organization !== "string" || cfg.organization.trim() === "") {
     throw new Error(
@@ -313,7 +314,6 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.routing !== undefined) validateRouting(cfg.routing, cfg.providers);
   if (cfg.references !== undefined) validateReferences(cfg.references);
   if (cfg.artifacts !== undefined) validateArtifacts(cfg.artifacts);
-  if (cfg.harness !== undefined) validateHarness(cfg.harness);
   if (cfg.pi !== undefined) validatePi(cfg.pi);
   if (cfg.opencode !== undefined) validateOpenCode(cfg.opencode);
   validateDashboardConfig(cfg.dashboard);
@@ -349,22 +349,59 @@ function validatePi(pi: unknown): void {
 /** The roster's words as the messages name them: `pi and opencode`, `pi or opencode`. */
 const harnessWords = (joiner: string): string => HARNESS_NAMES.join(joiner);
 
-/** `harness` (docs/reference/specs/harness.md item 8): a mapping of registered
- *  presets to a harness's name — the words the roster has (`HARNESS_NAMES`),
- *  read here so the validator spells no list of its own. A preset the registry
- *  does not know, and any value that is not one of those words — `codex`,
- *  `native` (the loop that no longer exists), a case slip, a non-string —
- *  fail the load by name, naming the words that exist: a setting that read as
- *  "this preset runs on X" while nothing did would be the worst kind of silent. */
-function validateHarness(harness: unknown): void {
-  if (typeof harness !== "object" || harness === null || Array.isArray(harness))
-    throw new Error(`config.yaml: harness must be a mapping of preset to a harness name (${harnessWords(" or ")})`);
-  for (const [preset, value] of Object.entries(harness)) {
-    if (!Object.hasOwn(AGENTS, preset)) throw new Error(`config.yaml: harness.${preset} is not a known agent`);
-    if (!isHarnessName(value))
-      throw new Error(
-        `config.yaml: harness.${preset}: ${typeof value === "string" ? value : JSON.stringify(value)} is not a harness; the harnesses are ${harnessWords(" and ")}`,
-      );
+/**
+ * Every `harness` map a config layer can carry (docs/reference/specs/harness.md
+ * item 8) — the deployment's top-level block, a channel's or a user's scope,
+ * static or stored: a mapping of registered presets to a harness's name — the
+ * words the roster has (`HARNESS_NAMES`), read here so the validator spells no
+ * list of its own. A preset the registry does not know, and any value that is
+ * not one of those words — `codex`, `native` (the loop that no longer exists),
+ * a case slip, a non-string — fail by name, naming the path and the words that
+ * exist; a non-mapping fails naming the shape. The chat command enforces the
+ * same on write; this holds `config.yaml` and a hand-edited or stored overrides
+ * document to the rule at load: a setting that read as "your runs are on X"
+ * while nothing was would be the worst kind of silent. `defaults.harness` is
+ * refused pointing at the top-level block, so the deployment's words have one
+ * spelling.
+ */
+export function validateHarnessWords(
+  layer: {
+    harness?: unknown;
+    /** The `defaults` block as loaded — read only for the `harness` key it must not carry. */
+    defaults?: Record<string, unknown>;
+    channels?: Record<string, Scope>;
+    users?: Record<string, Scope>;
+  },
+  source: string,
+): void {
+  const check = (path: string, harness: unknown) => {
+    if (harness === undefined) return;
+    if (typeof harness !== "object" || harness === null || Array.isArray(harness))
+      throw new Error(`${source}: ${path} must be a mapping of preset to a harness name (${harnessWords(" or ")})`);
+    for (const [preset, value] of Object.entries(harness)) {
+      if (!Object.hasOwn(AGENTS, preset)) throw new Error(`${source}: ${path}.${preset} is not a known agent`);
+      if (!isHarnessName(value))
+        throw new Error(
+          `${source}: ${path}.${preset}: ${typeof value === "string" ? value : JSON.stringify(value)} is not a harness; the harnesses are ${harnessWords(" and ")}`,
+        );
+    }
+  };
+  if (layer.defaults?.harness !== undefined)
+    throw new Error(
+      `${source}: defaults.harness is not a key; the deployment's harness words are the top-level harness block (harness.<preset>: ${harnessWords(" or ")})`,
+    );
+  check("harness", layer.harness);
+  for (const [kind, scopes] of [
+    ["channels", layer.channels],
+    ["users", layer.users],
+  ] as const) {
+    for (const [id, scope] of Object.entries(scopes ?? {})) {
+      // A scope is a mapping of settings; a scalar or a list under an id is
+      // refused by name here rather than read for a key it cannot carry.
+      if (typeof scope !== "object" || scope === null || Array.isArray(scope))
+        throw new Error(`${source}: ${kind}.${id} must be a mapping of settings`);
+      check(`${kind}.${id}.harness`, scope.harness);
+    }
   }
 }
 

@@ -190,6 +190,40 @@ describe("configAwarenessBlock — MCP (docs/reference/specs/mcp-tools.md item 1
   });
 });
 
+// Feature: docs/reference/specs/routing-and-config.md item 8; harness.md item 8
+// — the block names the run's harness and the scope whose word picked it when a
+// scope names one, and how a person moves their own runs; when no scope names
+// the run's preset (every run on pi by default) the block says nothing about it.
+describe("configAwarenessBlock — the harness", () => {
+  it("is byte-identical to before when no scope names the run's preset", () => {
+    expect(configAwarenessBlock(base)).not.toMatch(/harness/i);
+    expect(configAwarenessBlock({ ...base, harness: undefined })).toBe(configAwarenessBlock(base));
+  });
+
+  it("names the harness and the scope that set it — your scope, the channel's, the deployment's defaults — and the form that moves your own runs", () => {
+    const mine = configAwarenessBlock({ ...base, agentName: "coding", harness: { name: "opencode", scope: "user" } });
+    expect(mine).toContain("Harness: opencode (your scope)");
+    expect(mine).toContain("`config set me --harness.<agent> <pi|opencode>`");
+    expect(mine).toMatch(/your own runs/);
+    expect(configAwarenessBlock({ ...base, harness: { name: "opencode", scope: "channel" } })).toContain(
+      "Harness: opencode (the channel's scope)",
+    );
+    expect(configAwarenessBlock({ ...base, harness: { name: "pi", scope: "defaults" } })).toContain(
+      "Harness: pi (the deployment's defaults)",
+    );
+  });
+
+  it("reports a scope's harness words on its override line, verbatim", () => {
+    const block = configAwarenessBlock({
+      ...base,
+      user: { harness: { coding: "opencode" } },
+      channel: { harness: { review: "pi", coding: "pi" } },
+    });
+    expect(block).toContain("user override: harness coding=`opencode`");
+    expect(block).toContain("channel override: harness review=`pi`, coding=`pi`");
+  });
+});
+
 // Feature: docs/reference/specs/routing-and-config.md item 8 — the block names the
 // boundary in force and the budget it clipped, so an agent asked "how long do
 // you have?" answers from fact; with no boundary the block is byte-identical

@@ -85,7 +85,7 @@ commands:
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
-  config set           — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+  config set           — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -232,7 +232,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
-• \`config set\` — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+• \`config set\` — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
 • \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
@@ -326,7 +326,7 @@ commands:
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
-  config set           — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+  config set           — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -449,7 +449,7 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
-• \`config set\` — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+• \`config set\` — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
 • \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
@@ -532,7 +532,7 @@ commands:
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
   config overrides     — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
-  config set           — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+  config set           — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
   config clear         — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
@@ -622,7 +622,7 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 *config*
 • \`config show\` — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
 • \`config overrides\` — Which channels carry a scope (a config.yaml block or a runtime override) and which settings each one names — never a value; \`config show --channel <id>\` reads one.
-• \`config set\` — Set the agent, model, effort or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
+• \`config set\` — Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).
 • \`config clear\` — Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*

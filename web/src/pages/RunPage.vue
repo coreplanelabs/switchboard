@@ -410,6 +410,14 @@ const links = computed(() => {
     pr: githubPrUrl(m?.repo, m?.pr),
   };
 });
+/** The harness and whose word put the run there (harness.md item 10) — `opencode
+ *  harness (user scope)`; the bare harness when no scope named the preset. */
+const harnessFact = computed(() => {
+  const m = state.meta;
+  if (!m?.harness) return "";
+  const scope = m.harnessScope === "defaults" ? "defaults" : m.harnessScope ? `${m.harnessScope} scope` : "";
+  return scope ? `${m.harness} harness (${scope})` : `${m.harness} harness`;
+});
 /** What the Reply is, from the run's facts (`replyCaption`). */
 const reply = computed(() =>
   replyCaption({ meta: state.meta, requestText: state.request?.text ?? "", prOpened: state.prOpened }),
@@ -499,7 +507,8 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
            card and then the steps; REPLY — what went back. -->
 
       <!-- The facts bar (item 19/21): what the run is about, first thing under the
-         header — agent · model · effort · linked repo · the branch (a link to it
+         header — agent · model · effort · the harness and whose word put the run
+         on it · linked repo · the branch (a link to it
          on GitHub) · the head commit (a link) · GitHub-marked #PR · the Reading
          diff control at the right edge. Every link is built from a
          shape-verified value; an odd one stays text. A reader with three
@@ -512,6 +521,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         <span class="agent text-[0.68rem] font-medium uppercase tracking-wider text-toned">{{ state.meta.agent }}</span>
         <span class="model">{{ state.meta.model }}</span>
         <span v-if="state.meta.effort" class="effort">{{ state.meta.effort }} effort</span>
+        <span v-if="harnessFact" class="harness">{{ harnessFact }}</span>
         <a
           v-if="links.repo"
           class="text-primary no-underline hover:underline"
