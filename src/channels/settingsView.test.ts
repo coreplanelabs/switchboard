@@ -6,7 +6,13 @@ import type { InstallationView } from "../core/installationSettings.js";
 import { callerWith } from "../core/testing/callers.js";
 import type { McpServerView } from "../mcp/registry.js";
 import type { AccessIdentity } from "./accessAuth.js";
-import { channelScopeView, createSettingsViewHandler, homeTab, parseSettingsRoute } from "./settingsView.js";
+import {
+  channelScopeView,
+  viewerSettingsView,
+  createSettingsViewHandler,
+  homeTab,
+  parseSettingsRoute,
+} from "./settingsView.js";
 import { SEED_ELEMENT_ID, type SettingsSeed } from "./webSeed.js";
 import { makeShellRenderer } from "./webShell.js";
 
@@ -298,12 +304,28 @@ describe("the settings view", () => {
     expect(seed.tab).toBe("channels");
     expect(seed.channels).toEqual({
       index: INDEX,
+      viewer: viewerSettingsView(DESCRIPTION),
       selected: { channelId: "slack:C1", scope: channelScopeView(DESCRIPTION), canWrite: true },
     });
-    expect(commands.calls.map((c) => c.id).sort()).toEqual(["config.overrides", "config.show"]);
-    expect(commands.calls.find((c) => c.id === "config.show")?.input).toEqual({ options: { channel: "slack:C1" } });
+    // The viewer's own settings are read without a channel, every time (record 0041: never "no data").
+    expect(commands.calls.map((c) => c.id).sort()).toEqual(["config.overrides", "config.show", "config.show"]);
+    expect(commands.calls.filter((c) => c.id === "config.show").map((c) => c.input)).toEqual([
+      {},
+      { options: { channel: "slack:C1" } },
+    ]);
     const bare = seedOf((await get(view, "/settings/channels")).body);
-    expect(bare.channels).toEqual({ index: INDEX });
+    expect(bare.channels).toEqual({ index: INDEX, viewer: viewerSettingsView(DESCRIPTION) });
+    expect(bare.channels?.viewer?.user).toEqual({ model: "anthropic/mine" }); // the viewer's scope, mcpServers stripped
+  });
+
+  it("Channels: a refused config show for the viewer's own settings puts its sentence beside the index, never an empty tab", async () => {
+    const { view } = handler((id, input, caller) =>
+      id === "config.show" && !(input as { options?: { channel?: string } }).options?.channel
+        ? refused("config:read is missing")
+        : happy(id, input, caller),
+    );
+    const seed = seedOf((await get(view, "/settings/channels", MEMBER)).body);
+    expect(seed.channels).toEqual({ index: INDEX, viewerUnavailable: "config:read is missing" });
   });
 
   it("Channels: a refused `config show` carries the refusal beside the channel id, and a member's canWrite is false", async () => {

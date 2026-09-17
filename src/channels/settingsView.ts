@@ -6,7 +6,7 @@ import type { Caller, CommandInvoker, InvokeResult } from "../core/commandRegist
 import type { InstallationView } from "../core/installationSettings.js";
 import type { McpServerView } from "../mcp/registry.js";
 import type { AccessIdentity } from "./accessAuth.js";
-import type { ChannelScopeView, SettingsSeed, SettingsTab, SettingsVocabulary } from "./webSeed.js";
+import type { ChannelScopeView, ViewerSettingsView, SettingsSeed, SettingsTab, SettingsVocabulary } from "./webSeed.js";
 import type { ShellRenderer } from "./webShell.js";
 import { WEB_HTML_HEADERS } from "./webShell.js";
 
@@ -89,6 +89,23 @@ function plain(res: ServerResponse, status: number, body: string, extra: Record<
 
 const failureText = (r: Extract<InvokeResult, { ok: false }>) => r.message;
 
+/** The viewer's settings for the Channels tab's head: `config show` without a channel, the
+ *  channel half dropped (there is none) and the `mcpServers` maps left to the MCPs tab. */
+export function viewerSettingsView(description: ConfigDescription): ViewerSettingsView {
+  const strip = (s: Scope | undefined): Omit<Scope, "mcpServers"> | undefined => {
+    if (!s) return undefined;
+    const { mcpServers: _servers, ...kept } = s;
+    return kept;
+  };
+  return {
+    effective: description.effective,
+    defaults: description.defaults,
+    restrictedAgents: description.restrictedAgents,
+    user: strip(description.user) ?? {},
+    ...(description.org ? { org: strip(description.org) } : {}),
+  };
+}
+
 /** `config show`'s answer as the page shows it: no viewer scope, no `mcpServers`. */
 export function channelScopeView(description: ConfigDescription): ChannelScopeView {
   const { user: _user, channel, org, ...rest } = description;
@@ -153,13 +170,17 @@ export function createSettingsViewHandler(
     caller: Caller,
     channel: string | undefined,
   ): Promise<NonNullable<SettingsSeed["channels"]>> {
-    const [indexed, shown] = await Promise.all([
+    const [indexed, mine, shown] = await Promise.all([
       deps.commands.invoke("config.overrides", {}, caller),
+      // The viewer's own settings, always: a settings page never has "no data" (record 0041).
+      deps.commands.invoke("config.show", {}, caller),
       channel ? deps.commands.invoke("config.show", { options: { channel } }, caller) : Promise.resolve(undefined),
     ]);
     const out: NonNullable<SettingsSeed["channels"]> = indexed.ok
       ? { index: ((indexed.value as { channels?: ChannelScopeIndexRow[] }).channels ?? []) as ChannelScopeIndexRow[] }
       : { index: [], unavailable: failureText(indexed) };
+    if (mine.ok) out.viewer = viewerSettingsView(mine.value as unknown as ConfigDescription);
+    else out.viewerUnavailable = failureText(mine);
     if (channel && shown) {
       const write = canWrite(caller, "config:write", "channel", channel);
       out.selected = shown.ok

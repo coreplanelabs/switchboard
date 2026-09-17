@@ -21,6 +21,23 @@ const props = defineProps<{
 const fetchFn: FetchLike = (input, init) => (props.fetch ?? ((i, o) => globalThis.fetch(i, o)))(input, init);
 
 const selected = computed(() => props.channels.selected ?? null);
+const viewer = computed(() => props.channels.viewer ?? null);
+/** The viewer's own scope, as `key: value` lines; an empty scope is a sentence, never a blank. */
+const viewerScopeLines = computed((): string[] => {
+  const s = viewer.value?.user;
+  if (!s) return [];
+  const lines: string[] = [];
+  if (s.agent) lines.push(`agent ${s.agent}`);
+  if (s.model) lines.push(`model ${s.model}`);
+  for (const [a, m] of Object.entries(s.models ?? {})) lines.push(`${a} → ${m}`);
+  if (s.effort) lines.push(`effort ${s.effort}`);
+  for (const [a, e] of Object.entries(s.efforts ?? {})) lines.push(`${a} effort ${e}`);
+  if (s.boundary?.maxMinutes) lines.push(`at most ${s.boundary.maxMinutes} min`);
+  if (s.boundary?.maxIdentity) lines.push(`identity ≤ ${s.boundary.maxIdentity}`);
+  if (s.boundary?.machines) lines.push(`machines ${s.boundary.machines.join(", ")}`);
+  if (s.instructions) lines.push(`instructions (${s.instructions.length} chars)`);
+  return lines;
+});
 const scope = computed(() => selected.value?.scope?.channel ?? null);
 
 const openField = ref("");
@@ -108,9 +125,47 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
 <template>
   <section class="grid gap-4">
     <p class="text-sm text-muted">
-      A channel's scope sets which agent, model and effort its runs get, caps every run there, and adds advisory
-      instructions. It layers over the installation defaults; a person's own settings (<code>config set me</code> in
-      chat) layer over it.
+      What a run gets is layered: the installation defaults, then the channel's scope, then your own settings (<code
+        >config set me</code
+      >). This tab shows yours and lets you set a channel's.
+    </p>
+
+    <!-- The viewer's settings, always: every installation has defaults and every viewer a scope (record 0041). -->
+    <section
+      v-if="viewer"
+      class="mine grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4 text-sm sm:grid-cols-3"
+      aria-labelledby="mine-heading"
+    >
+      <h2 id="mine-heading" class="font-mono text-xs font-medium uppercase tracking-wider text-muted sm:col-span-3">
+        Your settings
+      </h2>
+      <div class="grid content-start gap-1">
+        <span class="text-xs text-dimmed">A run you ask for outside any channel gets</span>
+        <span class="effective font-mono text-xs text-highlighted"
+          >agent {{ viewer.effective.agent }} · {{ viewer.effective.model
+          }}<template v-if="viewer.effective.effort"> · effort {{ viewer.effective.effort }}</template></span
+        >
+      </div>
+      <div class="grid content-start gap-1">
+        <span class="text-xs text-dimmed">Installation defaults</span>
+        <span class="defaults font-mono text-xs text-muted">
+          agent {{ viewer.defaults.agent }}
+          <template v-for="(m, a) in viewer.defaults.models" :key="a"><br />{{ a }} → {{ m }}</template>
+        </span>
+      </div>
+      <div class="grid content-start gap-1">
+        <span class="text-xs text-dimmed">Yours (<code>config set me</code>)</span>
+        <span v-if="viewerScopeLines.length > 0" class="yours font-mono text-xs text-muted">
+          <template v-for="(line, i) in viewerScopeLines" :key="line"><br v-if="i > 0" />{{ line }}</template>
+        </span>
+        <span v-else class="yours text-xs text-muted">Nothing of your own yet — the defaults apply.</span>
+      </div>
+    </section>
+    <p
+      v-else-if="channels.viewerUnavailable"
+      class="unavailable rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-sm"
+    >
+      {{ channels.viewerUnavailable }}
     </p>
 
     <div class="grid gap-3 lg:grid-cols-[minmax(16rem,22rem)_1fr]">
@@ -123,7 +178,7 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
           </h2>
           <p v-if="channels.unavailable" class="unavailable px-4 py-3 text-sm text-warn">{{ channels.unavailable }}</p>
           <p v-else-if="channels.index.length === 0" class="empty px-4 py-3 text-sm text-muted">
-            No channel carries a scope yet.
+            Every channel runs on the defaults. Open one below to give it settings of its own.
           </p>
           <ul v-else class="index text-sm">
             <li
@@ -160,7 +215,7 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
         v-if="!selected"
         class="placeholder rounded-lg border border-dashed border-default px-5 py-8 text-center text-sm text-muted"
       >
-        Pick a channel to see and change its scope.
+        Pick a channel on the left to see and change its own settings.
       </div>
 
       <div v-else-if="selected.refused" class="refused rounded-lg border border-warn/30 bg-warn/10 px-5 py-4 text-sm">

@@ -289,6 +289,15 @@ export type ChannelScopeView = Omit<ConfigDescription, "user" | "channel" | "org
   org?: Omit<Scope, "mcpServers">;
 };
 
+/** The viewer's settings outside any channel (`config show` with no channel): what a run they
+ *  ask for gets by default — the installation defaults under their own scope. Always present
+ *  on the Channels tab (record 0041, accepted: a settings page never has "no data"); the
+ *  `mcpServers` maps are the MCPs tab's. */
+export type ViewerSettingsView = Pick<ConfigDescription, "effective" | "defaults" | "restrictedAgents"> & {
+  user: Omit<Scope, "mcpServers">;
+  org?: Omit<Scope, "mcpServers">;
+};
+
 /** The settings page (docs/reference/specs/settings-page.md): three tabs, one
  *  seed each, every value the answer of a registry command invoked as the
  *  viewer, and `canWrite` the same `authorize` question the write handlers ask
@@ -314,6 +323,10 @@ export interface SettingsSeed {
     canWrite: { org: boolean; channel: boolean };
   };
   channels?: {
+    /** The viewer's own settings — the defaults under their scope — shown before any channel is picked. */
+    viewer?: ViewerSettingsView;
+    /** `config show` without a channel could not be read: the reason. */
+    viewerUnavailable?: string;
     index: ChannelScopeIndexRow[];
     /** `config overrides` could not be read: the reason. */
     unavailable?: string;

@@ -600,12 +600,13 @@ describe("buildCoreCommands — the one catalogue every in-process binding share
       steps: [{ name: "memory" }],
       affected: { selected: ["memory"], markdown: "(md)" },
     });
-    // `config show` from the CLI needs a channel: the caller has no origin.
+    // `config show` from the CLI without a channel (the caller has no origin) is the caller's
+    // settings outside any channel — the defaults under its own scope, no channel scope
+    // (record 0041, accepted: a settings page never has "no data").
     const show = await runCommand(commands, command(["config", "show"], commands), CLI_CALLER);
-    expect(show).toMatchObject({
-      exitCode: 2,
-      stderr: "error (invalid_input): channel: required on this surface — pass --channel <id>",
-    });
+    expect(show.exitCode).toBe(0);
+    expect(show.stdout).toMatch(/agent `/);
+    expect(show.stderr).toBe("");
     const shown = await runCommand(
       commands,
       command(["config", "show", "--channel", "slack:C1"], commands),

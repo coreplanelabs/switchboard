@@ -6,6 +6,7 @@ import InstallationPanel from "../components/settings/InstallationPanel.vue";
 import McpServersPanel from "../components/settings/McpServersPanel.vue";
 import SettingsTabs from "../components/settings/SettingsTabs.vue";
 import { useSeed } from "../lib/seed";
+import { browser } from "../lib/browser";
 
 // The settings page (record 0041): three tabs over one seed each, the server
 // having invoked the registry commands as the viewer. The page decides
@@ -34,8 +35,13 @@ const tab = computed(() => seed?.tab ?? "channels");
     <InstallationPanel v-else-if="tab === 'installation' && seed.installation" :installation="seed.installation" />
   </AppShell>
   <AppShell v-else title="Settings" nav="settings">
-    <p class="empty py-8 text-center text-sm text-muted">
-      Settings are unavailable: the page was served without its data.
-    </p>
+    <!-- Every installation has settings, so a page without its seed is a fault, not a state (record 0041). -->
+    <div class="error mx-auto my-8 max-w-lg rounded-lg border border-err/30 bg-err/10 px-5 py-4 text-sm" role="alert">
+      <p class="font-medium text-highlighted">Settings could not be loaded.</p>
+      <p class="mt-1 text-muted">
+        The page arrived without its data. Reload to try again; if it keeps happening, the bot's log has the reason.
+      </p>
+      <UButton class="mt-3" size="xs" color="neutral" variant="outline" @click="browser.reload()">Reload</UButton>
+    </div>
   </AppShell>
 </template>
