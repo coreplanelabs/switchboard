@@ -686,6 +686,23 @@ describe("budgetClipLabel — the card's budget line", () => {
     );
   });
 
+  // agent-ship item 8: a plan runner's child took its minutes from the runner's carve — the directive on its request is the runner's, not a person's.
+  it("names the plan runner's carve for a coordinator's child whose directive is the runner's, and keeps `budget directive` for a person's", () => {
+    const coding = getAgent("coding");
+    const clipped = { ...declaredProfile(coding), minutes: 45, boundedBy: "directive" as const };
+    expect(budgetClipLabel(coding, clipped, 45, { coordinator: true })).toBe(
+      "budget 45 min (carved by the plan runner from the pipeline's remaining clock; preset asks 45)",
+    );
+    expect(budgetClipLabel(coding, clipped, 45, { coordinator: false })).toBe(
+      "budget 45 min (budget directive; preset asks 45)",
+    );
+    expect(
+      budgetClipLabel(coding, { ...declaredProfile(coding), minutes: 30, boundedBy: "channel" }, undefined, {
+        coordinator: true,
+      }),
+    ).toBe("budget 30 min (channel boundary; preset asks 45)");
+  });
+
   it("says when a directive narrowed nothing — alone against the preset, or beside the boundary that clipped tighter", () => {
     expect(budgetClipLabel(explore, declared, 200)).toBe("budget:200 narrowed nothing (preset asks 120)");
     expect(budgetClipLabel(explore, { ...declared, minutes: 45, boundedBy: "channel" }, 60)).toBe(

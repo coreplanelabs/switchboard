@@ -46,7 +46,7 @@ export interface MergeWaitRegistry {
   waitingAt(headSha: string, now: number): string[];
 }
 
-/** One entry lives as long as the merge step's whole wait can (MERGE_WAIT_MAX_MS). */
+/** One entry lives as long as the merge step's whole wait can (the merge wait's ask, `MERGE_WAIT_ASK_MINUTES` in the budgets module). */
 export const MERGE_WAIT_TTL_MS = 60 * 60_000;
 
 export function createMergeWaitRegistry(ttlMs: number = MERGE_WAIT_TTL_MS): MergeWaitRegistry {

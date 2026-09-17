@@ -623,7 +623,7 @@ export async function dispatch(
     // through the attach and the run, the way a resident note is
     // (dispatch/provision.ts). Before the ship fork: a ship pipeline's wall
     // clock is its clipped budget too, and its card says so.
-    const clip = budgetClipLabel(agent, profile, directives.budget);
+    const clip = budgetClipLabel(agent, profile, directives.budget, { coordinator: opts.coordinator !== undefined });
     if (clip) shell.setLabel(`${shell.label} · ${clip}`);
 
     // agent:ship fork (docs/reference/specs/agent-ship.md): after agent resolution and the

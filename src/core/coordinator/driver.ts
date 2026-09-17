@@ -54,7 +54,6 @@ import {
   type ShipCaps,
   type StepReturn,
   type UnitEnding,
-  type UnitPipelineInput,
   type UnitPipelineState,
 } from "../ship/coordinator.js";
 import { checksSettledEventType, isCoordinatorUnit, runFinishedEventType, type CoordinatorUnit } from "./contract.js";
@@ -170,7 +169,6 @@ interface PlanFacts {
   repo: string;
   base: string;
   caps: ShipCaps;
-  childMinutes: UnitPipelineInput["childMinutes"];
   units: CoordinatorUnit[];
 }
 
@@ -184,12 +182,6 @@ function readPlan(a: BotAnswer): PlanFacts {
   if (typeof b.repo !== "string" || typeof b.base !== "string") throw new UnreadableAnswer("plan", a, "repo and base");
   if (!isMinutes(b.caps) || typeof b.caps.maxRounds !== "number" || typeof b.caps.maxMinutes !== "number")
     throw new UnreadableAnswer("plan", a, "caps");
-  if (
-    !isMinutes(b.childMinutes) ||
-    typeof b.childMinutes.coding !== "number" ||
-    typeof b.childMinutes.review !== "number"
-  )
-    throw new UnreadableAnswer("plan", a, "childMinutes");
   const units: unknown = b.units;
   if (!Array.isArray(units) || !units.every(isCoordinatorUnit)) throw new UnreadableAnswer("plan", a, "units");
   return {
@@ -204,7 +196,6 @@ function readPlan(a: BotAnswer): PlanFacts {
     repo: b.repo,
     base: b.base,
     caps: { maxRounds: b.caps.maxRounds, maxMinutes: b.caps.maxMinutes },
-    childMinutes: { coding: b.childMinutes.coding, review: b.childMinutes.review },
     units,
   };
 }
@@ -486,7 +477,6 @@ async function runUnit(
       repo: plan.repo,
       base: plan.base,
       caps: plan.caps,
-      childMinutes: plan.childMinutes,
       // The instance's field decides who merges (record 0031's merge grant),
       // carried here by the plan route: the hand-off wrote `runner` on a
       // seeded plan and `person` on a task, and the door re-checks it — the

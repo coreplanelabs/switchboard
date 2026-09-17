@@ -8,10 +8,9 @@
 // and the post-step, each an ALLOWANCE named here. The registry reads its
 // `maxMinutes` and `maxTurns` from this module and `budgets.check.test.ts`
 // asserts the fits, so a number that breaks another's assumption is a red
-// build. `carve` and `fit` have no production caller yet: the ship coordinator
-// (which still carves with its own reserves, agent-ship item 8), the config
-// validator, the fork and the conductor's spawn move onto them in the plan's
-// unit two (the plan that executes decision 0046).
+// build. `carve` is called by the ship coordinator for every round (agent-ship
+// item 8), `fit` by the config validator at load and by the fork over a clipped
+// request, and `carveChildOfParent` by the conductor's spawn.
 //
 // Deliberately free of node: imports and of the agent registry, so the
 // Workflow-driven coordinator and the deploy Workers can bundle it — the
@@ -46,16 +45,29 @@ export type RoundKind = "coding" | "review" | "fix" | "merge";
  *  review or fix costs an attach and a model turn and finishes nothing.
  *  Review's is the ledger's 90th percentile of completed reviews (5.1 min over
  *  181); coding's and the merge wait's are guesses until the ledger says. */
-export const FLOORS: Readonly<Record<RoundKind, number>> = {
+export const PRESET_FLOORS: Readonly<Record<LoopPreset, number>> = {
+  general: 2,
   coding: 10,
-  fix: 10,
   review: 5,
+  research: 3,
+  explore: 15,
+  conductor: 15,
+};
+export const FLOORS: Readonly<Record<RoundKind, number>> = {
+  coding: PRESET_FLOORS.coding,
+  fix: PRESET_FLOORS.coding,
+  review: PRESET_FLOORS.review,
   merge: 10,
 };
 
 /** The merge wait's own ask: how long the runner waits on the guards at most
  *  when the remainder allows it. */
 export const MERGE_WAIT_ASK_MINUTES = 60;
+
+/** The ship runner's waits, in minutes: the margin a child's wait allows past
+ *  its budget, the slice a wait is asked in, the merge door's re-ask cadence,
+ *  and the pause before a busy spawn is asked again. */
+export const SHIP_WAIT = { marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes: 5, busyRetryMinutes: 2 } as const;
 
 /** The named amounts a lease holds back, in minutes. Each stands for a step
  *  every run or round pays: `provision` is attach and restore before the
@@ -127,6 +139,36 @@ export function loopRounds(loop: Loop): RoundKind[] {
   return rounds;
 }
 
+/** Where a round sits in `loopRounds`: the coding round first; review round
+ *  `n` (counted from 1) and the fix that follows it at `2n − 1` and `2n`; the
+ *  merge wait last. The ship coordinator numbers its rounds this way, so the
+ *  reserve it carves with is the one the fit assumed. */
+export function loopPosition(loop: Loop, kind: RoundKind, n = 0): number {
+  switch (kind) {
+    case "coding":
+      return 0;
+    case "review":
+      return 2 * n - 1;
+    case "fix":
+      return 2 * n;
+    case "merge":
+      return 2 * loop.maxRounds;
+  }
+}
+
+/** A child spawned outside any loop (a conductor's): the parent's whole
+ *  remainder in whole minutes, refused under the child preset's floor — a
+ *  child under its floor costs a thread and a model turn and finishes nothing. */
+export function carveChildOfParent(
+  remainingMs: number,
+  preset: LoopPreset,
+): { kind: "carved"; minutes: number } | { kind: "refused"; reason: "under floor"; minutes: number; floor: number } {
+  const minutes = Math.max(0, Math.floor(remainingMs / MINUTE_MS));
+  const floor = PRESET_FLOORS[preset];
+  if (minutes < floor) return { kind: "refused", reason: "under floor", minutes, floor };
+  return { kind: "carved", minutes };
+}
+
 /** The minutes a round holds back for what must follow it in the loop: the
  *  floor plus provisioning of every later review and fix, and the merge
  *  wait's floor. A merge holds nothing back; a round with no loop (a
@@ -187,9 +229,9 @@ export interface Pipeline extends Loop {
 
 /** The fit: a pipeline holds its first child at its ask and every later round
  *  at its floor — `provision + ask(coding) + reserve(coding, loop) ≤
- *  maxMinutes`. Asserted at verify over the registry today; the config
- *  validator and the fork adopt it in the plan's unit two. `need` is the sum a
- *  refusal names. */
+ *  maxMinutes`. Asserted at verify over the registry, at config load over the
+ *  deployment's `ship` block (`validateShip`), and at the fork over a request a
+ *  boundary or a `budget:` directive clipped. `need` is the sum a refusal names. */
 export function fit(pipeline: Pipeline): { ok: boolean; need: number; have: number } {
   const need = ALLOWANCES.provision + ASKS.coding + reserveMinutes({ kind: "coding", index: 0 }, pipeline);
   return { ok: pipeline.maxMinutes >= need, need, have: pipeline.maxMinutes };

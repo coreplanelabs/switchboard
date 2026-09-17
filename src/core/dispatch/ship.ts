@@ -21,6 +21,7 @@ import type { RepoContext } from "../repoContext.js";
 import { fetchPullRequestFacts, fetchRepoShipInfo, type PullRequestFacts } from "../../execution/githubPulls.js";
 import { processSecrets } from "../../secrets.js";
 import { handOffToCoordinator, type HandOffOutcome } from "../coordinator/handOff.js";
+import { ALLOWANCES, ASKS, fit } from "../budgets.js";
 import { createInstanceViaShim, fetchInstanceStatusViaShim } from "../coordinator/instancesClient.js";
 import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../coordinator/instancesRoute.js";
@@ -322,6 +323,24 @@ export async function runShipBranch(
   // declared `ship.maxMinutes` as a boundary or a `budget:` directive clipped
   // it — so every child round the runner spawns is clipped to what remains of THAT.
   const caps = { ...resolveShipCaps(deps.config.config.ship), maxMinutes: profile.minutes };
+  // The fit at the fork (agent-ship item 8, decision 0046): a boundary or a
+  // `budget:` directive that clipped the pipeline under the loop it allows is
+  // refused here with the sum on the card, never carved into a child that
+  // cannot do useful work.
+  const held = fit(caps);
+  if (!held.ok) {
+    const reason = `budget ${caps.maxMinutes} min cannot hold the ship loop (${caps.maxRounds} review rounds need ${held.need} min)`;
+    console.log(`[ship] ${msg.threadKey} not started: ${reason}`);
+    await refuse("ship_budget", async () => {
+      await card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) }));
+      await io.reply(
+        `🚫 Ship cannot start under a ${caps.maxMinutes}-minute budget: the loop it allows (${caps.maxRounds} review rounds) needs ${held.need} minutes — ` +
+          `${ALLOWANCES.provision} to provision, the coding child's ${ASKS.coding}, and the reserve for the rounds after it at their floors. ` +
+          `Widen the budget or the boundary that clipped it, or run \`agent:coding\` for a single pass without the review loop.`,
+      );
+    });
+    return;
+  }
   // The severity to address, resolved once here — the request's
   // `severity:` directive over the user's scope over the channel's over the
   // org's — and handed to the runner on the instance beside `merge`.

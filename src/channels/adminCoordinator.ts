@@ -986,8 +986,9 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
 // ---- the plan runner's own steps: the plan, a unit's start and end, the branch, the card, the record ----
 
 /** What the coordinator reads first: the instance's units with where each
- *  stands, the caps and the children's own budgets — the numbers its machine
- *  runs on, none of them in the instance's params. */
+ *  stands and the caps — the numbers its machine runs on, none of them in the
+ *  instance's params; the children's asks and floors it reads from the budgets
+ *  module itself. */
 async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -1008,7 +1009,6 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
     repo: instance.repo,
     base: instance.base ?? "main",
     caps: instance.caps ?? resolveShipCaps(undefined),
-    childMinutes: { coding: AGENTS.coding.maxMinutes, review: AGENTS.review.maxMinutes },
     units,
     at,
   });
