@@ -35,6 +35,7 @@ import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind } from "..
 import {
   identityOrNothing,
   isContainerGone,
+  isControlReset,
   LOG_READ_BYTES,
   OP_TIMEOUT_MS,
   type HarnessContainer,
@@ -55,6 +56,7 @@ import { OPENCODE_EVENT_DISPOSITION } from "./dispositions.js";
 import {
   driveOpenCode,
   OpenCodeRequestRefusedError,
+  OpenCodeWriteUnresolvedError,
   openCodeToolNameWord,
   type OpenCodeConnection,
   type OpenCodeReattach,
@@ -65,9 +67,10 @@ import {
   OPENCODE_VERSION,
   openCodeSessionRoutes,
   parseHealth,
-  parseMessageId,
+  parseAnswerId,
   parsePermissionList,
   readSessionStore,
+  readStoreSince,
 } from "./client.js";
 import {
   launchOpenCode,
@@ -298,6 +301,9 @@ export async function openOpenCodeRun(
   // prompt of its own that landed from what was there before (the control
   // reset's resolution, `OpenCodeConnection.knownMessageIds`).
   const known = new Set<string>();
+  // The import's rows among them: an imported row newest is an idle session (the
+  // import writes no idle marker; measured, a steer there landed at once).
+  const imported = new Set<string>();
   const end = async (): Promise<void> => {
     forget();
     if (replaced || server === undefined) return;
@@ -434,7 +440,14 @@ export async function openOpenCodeRun(
         opts: Parameters<typeof openCodeImportBody>[1],
       ) => {
         const body = openCodeImportBody(messages, opts);
-        for (const m of body.messages) if (typeof m.id === "string") known.add(m.id);
+        // Measured against the pinned binary: the import keeps the ids the body
+        // carries (a 260-message import listed back under its own ids), so the
+        // body's ids are the server's — known before the answer comes.
+        for (const m of body.messages)
+          if (typeof m.id === "string") {
+            known.add(m.id);
+            imported.add(m.id);
+          }
         const res = await request(deps.container, started, auth, OPENCODE_ROUTES["session.import"], body);
         if (res.status < 200 || res.status >= 300) throw refusedBy("session import", res);
       };
@@ -467,7 +480,7 @@ export async function openOpenCodeRun(
             model: modelRef(run, undefined),
           });
           if (res.status < 200 || res.status >= 300) throw refusedBy("session create", res);
-          const created = parseSessionId(res.body);
+          const created = parseAnswerId(res.body);
           if (created !== undefined) server.sessionID = created;
         }
       }
@@ -494,6 +507,7 @@ export async function openOpenCodeRun(
       container: deps.container,
       posted,
       knownMessageIds: known,
+      writes: { seq: 0, ownPrompts: new Map<string, number>(), imported },
       paths: server.paths,
       port: server.port,
       password: server.password,
@@ -516,18 +530,26 @@ export async function openOpenCodeRun(
     // note on the record; the drainer runs beside the loop and stops when it
     // settles. `driveOpenCode` owns the wind-down and the hard stop.
     let draining = true;
-    const drainer = drainFollowUps(deps, run, conn, () => draining, emit, note);
+    // The drainer's own failure — a follow-up's steer the store could not
+    // resolve — is held for the loop's end (a rejection with no one waiting on
+    // it would be unhandled), then thrown once the loop has left.
+    const drainer = drainFollowUps(deps, run, conn, () => draining, emit, note).then(
+      () => undefined,
+      (err: unknown) => err,
+    );
 
     let answer: string;
     let remainingMs: () => number;
+    let drained: unknown;
     try {
       let storeIds: string[];
       ({ answer, remainingMs, storeIds } = await driveOpenCode(deps, run, conn));
       for (const id of storeIds) known.add(id);
     } finally {
       draining = false;
-      await drainer.catch(() => {});
+      drained = await drainer;
     }
+    if (drained instanceof OpenCodeWriteUnresolvedError) throw drained;
 
     return {
       answer,
@@ -764,8 +786,51 @@ function drainFollowUps(
         // write the control plane's reset left unknown is resolved only once
         // this steer has answered — and its answer names the user message it
         // became (measured), known from here: a steer's row of the prompt's
-        // own text is never read as the prompt landed.
+        // own text is never read as the prompt landed. An answer that names
+        // none, or a control reset that cut the answer, is told from the store
+        // instead: the rows newer than any known, newest first, a user row of
+        // the steer's text being the steer landed (measured: an idle
+        // session's steer has its row in the store at once) — its id learned,
+        // the follow-up delivered; none, and the session idle when the steer was
+        // posted — nothing newer than the loop's own prompts posted AFTER the
+        // steer (the session's writes are counted in order, `conn.writes`), and
+        // below them the idle marker, an imported row or nothing at all — the
+        // steer lost, handed back. None, with an execution under way at the
+        // steer (anything else newest below the later prompts), the store
+        // cannot yet say: a steer into a running execution lands only at its
+        // next step boundary (measured), so the steer is unresolved.
+        // Unresolved — that, or a store that cannot be read — fails the run by
+        // name as the loop's own writes do, one rule, the loop stopped hard
+        // here and the harness throwing once it has left: never a landed steer
+        // handed back for a second delivery.
+        const learnRow = async (steerSeq: number): Promise<boolean> => {
+          const known = conn.knownMessageIds ?? new Set<string>();
+          const read = await readStoreSince(
+            (path) => conn.container.request(conn.paths, { method: "GET", port: conn.port, path, secretHeaders: auth }),
+            conn.sessionID,
+            known,
+          ).catch((err: unknown): { ok: false; why: string } => ({
+            ok: false,
+            why: `the store could not be listed: ${redactAndCap(err instanceof Error ? err.message : String(err), 200)}`,
+          }));
+          if (!read.ok) throw new OpenCodeWriteUnresolvedError("the follow-up's steer", read.why);
+          // The rows newer than any known, newest first; a prompt of the loop's
+          // own posted after this steer, and everything above it, set aside.
+          const later = read.messages.findIndex((m) => (conn.writes?.ownPrompts.get(m.id) ?? -1) > steerSeq);
+          const since = later === -1 ? read.messages : read.messages.slice(later + 1);
+          const rows = since.filter((m) => m.type === "user" && (m as { text?: unknown }).text === text);
+          for (const row of rows) known.add(row.id);
+          if (rows.length > 0) return true;
+          const atSteer = since[0] ?? read.stopped;
+          if (atSteer === undefined || atSteer.type === "idle" || conn.writes?.imported.has(atSteer.id) === true)
+            return false;
+          throw new OpenCodeWriteUnresolvedError(
+            "the follow-up's steer",
+            "an execution is under way and a steer into it lands only at its next step boundary, so the store cannot yet say whether the server took it",
+          );
+        };
         const sent = (async () => {
+          const steerSeq = conn.writes ? ++conn.writes.seq : 0;
           try {
             const res = await conn.container.request(conn.paths, {
               method: routes["session.prompt"].method,
@@ -777,16 +842,24 @@ function drainFollowUps(
             });
             if (res.status < 200 || res.status >= 300) failure = `the server answered ${res.status}`;
             else {
-              const id = parseMessageId(res.body);
+              const id = parseAnswerId(res.body);
               if (id !== undefined) conn.knownMessageIds?.add(id);
+              else await learnRow(steerSeq);
             }
           } catch (err) {
             failure = err instanceof Error ? err.message : String(err);
+            if (isControlReset(err) && (await learnRow(steerSeq))) failure = undefined;
           }
         })();
         conn.posted?.add(sent);
         try {
           await sent;
+        } catch (err) {
+          if (err instanceof OpenCodeWriteUnresolvedError) {
+            note("harness_error", `${err.message} — the run is stopped`);
+            run.control?.requestStop("hard");
+          }
+          throw err;
         } finally {
           conn.posted?.delete(sent);
         }
@@ -832,14 +905,4 @@ function request(
     secretHeaders: auth,
     ...(body !== undefined ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}),
   });
-}
-
-/** The session id a create answered, or nothing for a body of another shape. */
-function parseSessionId(body: string): string | undefined {
-  try {
-    const value = JSON.parse(body) as { data?: { id?: unknown } };
-    return typeof value.data?.id === "string" ? value.data.id : undefined;
-  } catch {
-    return undefined;
-  }
 }

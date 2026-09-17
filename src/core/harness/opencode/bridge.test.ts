@@ -12,7 +12,7 @@ import { HarnessContainerReplacedError } from "../contract.js";
 import { piDriver } from "../pi/testing/driver.js";
 import { TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import type { DrivenRun, RunScript } from "../testing/scenarios.js";
-import type { OpenCodeFeedRecord } from "./client.js";
+import { readStoreSince, type OpenCodeFeedRecord } from "./client.js";
 import {
   judgeOpenCodeAsk,
   openCodeToolNameWord,
@@ -911,7 +911,7 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
     expect(notes(events).filter((n) => n.kind === "tool_refused" || n.kind === "harness_error")).toEqual([]);
   });
 
-  it("a call of the tail's step that settles only once the loop's own execution has started is that execution's still: set aside in own mode, no bypass, no tool event", () => {
+  it("a call of the tail's step that settles only once the loop's own execution has started is that execution's still: set aside in own mode under the note naming the call and the step, no bypass, no tool event", () => {
     const { bridge, events } = earlier();
     bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_old", agent: "x" }));
     bridge.observe(
@@ -934,11 +934,43 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
     );
     expect(late.bypass).toBeUndefined();
     expect(toolEvents(events)).toEqual([]);
-    expect(notes(events).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(notes(events).map((n) => [n.kind, n.summary])).toEqual([
+      [
+        "settle_set_aside",
+        "OpenCode settled bash (call c-old) of a step this loop never saw start (msg_old); set aside — an earlier execution's late settle, or a step lost with the stream",
+      ],
+    ]);
   });
 
-  it("a settle whose step this loop never saw start — an earlier execution's, landing however late, no hand-over needed — is set aside in own mode, while a settle of the loop's own step with no decision is still the bypass it always was", () => {
+  it("catching up, a settle of a step this bridge never saw start is the dead generation's, narrated again under its own rules — no set-aside note", () => {
     const { bridge, events } = harness();
+    bridge.observing = "catching-up";
+    const dead = bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_dead",
+        id: "c-dead",
+        content: [{ type: "text", text: "done long ago" }],
+        executed: true,
+      }),
+    );
+    expect(dead.bypass).toBeUndefined();
+    expect(events.filter((e) => e.type === "tool_result").map((e) => e.callId)).toEqual(["c-dead"]);
+    expect(notes(events)).toEqual([]);
+  });
+
+  it("a settle whose step this loop never saw start — an earlier execution's, landing however late, no hand-over needed — is set aside in own mode under a settle_set_aside note naming the call and the step, while a settle of the loop's own step with no decision is still the bypass it always was", () => {
+    const { bridge, events } = harness();
+    bridge.observing = "earlier";
+    bridge.observe(
+      ev("session.tool.input.started", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_prev",
+        id: "c-prev",
+        name: "shell",
+      }),
+    );
+    bridge.observing = "own";
     const prev = bridge.observe(
       ev("session.tool.success", {
         sessionID: "ses_c",
@@ -950,6 +982,12 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
     );
     expect(prev.bypass).toBeUndefined();
     expect(toolEvents(events)).toEqual([]);
+    expect(notes(events).map((n) => [n.kind, n.summary])).toEqual([
+      [
+        "settle_set_aside",
+        "OpenCode settled bash (call c-prev) of a step this loop never saw start (msg_prev); set aside — an earlier execution's late settle, or a step lost with the stream",
+      ],
+    ]);
     bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_own", agent: "x" }));
     bridge.observe(
       ev("session.tool.input.started", {
@@ -1036,6 +1074,44 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
     expect(bridge.answer()).toBe("earlier answer");
   });
 
+  it("an ask answered from the store's permissions refill — the stream dropped before the step's events — teaches its step as the event would: the tool's settle is judged and recorded, never set aside as foreign", async () => {
+    const { bridge, events } = harness();
+    const refilled = bridge.observe({
+      feed: "permissions",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "reconnect",
+      data: [
+        {
+          id: "per_c-lost",
+          sessionID: "ses_c",
+          action: "shell",
+          resources: ["echo hi"],
+          source: { type: "tool", messageID: "msg_lost", id: "c-lost" },
+        },
+      ],
+    });
+    expect(refilled.replies.map((r) => r.reply)).toEqual(["once"]);
+    bridge.observe(ev("permission.replied", { sessionID: "ses_c", requestID: "per_c-lost", reply: "once" }));
+    const settled = bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_lost",
+        id: "c-lost",
+        content: [{ type: "text", text: "hi" }],
+        executed: true,
+      }),
+    );
+    expect(settled.bypass).toBeUndefined();
+    // The call the stream never announced is opened from the ask — the tool named, its command summarised — so the result lands on a call the record knows.
+    expect(
+      events
+        .filter((e) => e.type === "tool_call" || e.type === "tool_result")
+        .map((e) => `${e.type}:${e.callId}:${e.tool}${e.type === "tool_call" ? `:${e.command ?? ""}` : `:${e.ok}`}`),
+    ).toEqual(["tool_call:c-lost:bash:echo hi", "tool_result:c-lost:bash:true"]);
+    expect(notes(events).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
   it("catching up on a dead generation's feed, its execution failing is history the bridge says — a model call failed while the bot was away, or the proxy's turn budget reached while the bot was away — never this generation's settle, and its step is closed", () => {
     const { bridge, events } = harness();
     bridge.observing = "catching-up";
@@ -1058,6 +1134,61 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
       "a model call failed while the bot was away (the proxy answered 400); continuing",
       "the execution reached the proxy's turn budget while the bot was away (403 turn_budget_exhausted: the run is past its 60-turn guard); continuing",
     ]);
+  });
+});
+
+// Feature: docs/reference/specs/harness.md item 13 — the store read newest
+// first for a write the reset left unknown: the order on every page, the read
+// stopping at the first row the caller knew before the write.
+describe("readStoreSince — the newest rows, page by page, down to what was there before", () => {
+  const row = (i: number) => ({ id: `m${i}`, type: "user", text: `t${i}`, time: { created: NOW } });
+  const page = (rows: unknown[], next?: string) => ({
+    status: 200,
+    body: JSON.stringify({ data: rows, cursor: next ? { next } : {} }),
+  });
+
+  it("asks for order=desc and the limit on the first page and on every cursor page, stops at the first row known before — not at a row learned since — and hands back the store's newest row", async () => {
+    const paths: string[] = [];
+    const first = Array.from({ length: 200 }, (_, i) => row(400 - i));
+    const second = [row(200), row(199), row(198)];
+    const get = async (path: string) => {
+      paths.push(path);
+      return path.includes("cursor=") ? page(second) : page(first, "c:desc:200");
+    };
+    const read = await readStoreSince(get, "ses_c", new Set(["m199"]));
+    expect(paths).toEqual([
+      "/api/session/ses_c/message?order=desc&limit=200",
+      "/api/session/ses_c/message?cursor=c%3Adesc%3A200&order=desc&limit=200",
+    ]);
+    expect(read.ok && read.messages.slice(0, 3).map((m) => m.id)).toEqual(["m400", "m399", "m398"]);
+    expect(read.ok && read.messages.length).toBe(201);
+    expect(read.ok && read.messages.at(-1)?.id).toBe("m200");
+    expect(read.ok && read.newest?.id).toBe("m400");
+  });
+
+  it("a store whose newest row is already known answers no rows and still names that newest row — what a steer's resolution reads the session's state from", async () => {
+    const read = await readStoreSince(
+      async () => page([{ id: "idle1", type: "idle", time: { created: NOW } }, row(1)]),
+      "ses_c",
+      new Set(["idle1", "m1"]),
+    );
+    expect(read).toEqual({
+      ok: true,
+      messages: [],
+      newest: { id: "idle1", type: "idle", time: { created: NOW } },
+      stopped: { id: "idle1", type: "idle", time: { created: NOW } },
+    });
+  });
+
+  it("a page the server refuses or a page of another shape leaves the read refused by name, never partial", async () => {
+    expect(await readStoreSince(async () => ({ status: 500, body: "" }), "ses_c", new Set())).toEqual({
+      ok: false,
+      why: "the server refused the session (500)",
+    });
+    expect(await readStoreSince(async () => ({ status: 200, body: "nope" }), "ses_c", new Set())).toEqual({
+      ok: false,
+      why: "the session's messages answered something that is not the page shape",
+    });
   });
 });
 

@@ -3,7 +3,7 @@ import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { updateStatusTool } from "../../../tools/status.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import type { RunEvent } from "../../runEvents.js";
-import { HarnessContainerError } from "../container.js";
+import { HarnessContainerError, OP_TIMEOUT_MS } from "../container.js";
 import {
   openThroughSeam,
   type HarnessDeps,
@@ -906,7 +906,9 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       harnessUrl: "https://bot.example.com",
       registry,
       clock: () => clock.now,
-      sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 2))),
+      // Every wait is two real milliseconds, but the executor's own bound on a
+      // command stays a bound: the join in `end()` must be seen to wait.
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms === OP_TIMEOUT_MS ? 200 : Math.min(ms, 2))),
       pollMs: 1,
       tickMs: 5,
     };
@@ -978,9 +980,8 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         },
         { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
       ],
-      hangToolCall: 1,
     };
-    const o = openRun({ interruptSettlesLate: "interrupted" }, hungTool);
+    const o = openRun({ interruptSettlesLate: "interrupted", hangToolCall: 1 }, hungTool);
     const session = await o.opened;
     const reason = finaleAbortReason(o.lease.finaleMs);
     expect(o.progress).toContain(finaleTimedOutNote());
@@ -990,6 +991,14 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         .filter((n) => n.kind === "harness_error")
         .map((n) => n.summary),
     ).toEqual([windDownFailureNote(reason)]);
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "settle_set_aside")
+        .map((n) => n.summary),
+    ).toEqual([
+      // The post-turn's bridge never saw the hung call named: `tool` is the word it has.
+      "OpenCode settled tool (call c1) of a step this loop never saw start (msg_a0); set aside — an earlier execution's late settle, or a step lost with the stream",
+    ]);
     // The hung call is on the record once, as the loop's call, with no result: its late success is nobody's; the post-turn's own call (the fake replays the script under the same call id, under a step of its own) is judged as its own.
     expect(
       o.events.filter((e) => e.type === "tool_call" || e.type === "tool_result").map((e) => `${e.type}:${e.callId}`),
@@ -1006,9 +1015,8 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         },
         { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
       ],
-      hangToolCall: 1,
     };
-    const o = openRun({ interruptSettlesLate: "interrupted", hungToolSettlesOnPlay: 3 }, hungTool);
+    const o = openRun({ interruptSettlesLate: "interrupted", hungToolSettlesOnPlay: 3, hangToolCall: 1 }, hungTool);
     const session = await o.opened;
     const reason = finaleAbortReason(o.lease.finaleMs);
     expect(await session.followUp(postTurn)).toBe("never");
@@ -1018,9 +1026,38 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         .filter((n) => n.kind === "harness_error")
         .map((n) => n.summary),
     ).toEqual([windDownFailureNote(reason)]);
+    expect(notes(o.events).filter((n) => n.kind === "settle_set_aside")).toHaveLength(1);
     expect(
       o.events.filter((e) => e.type === "tool_call" || e.type === "tool_result").map((e) => `${e.type}:${e.callId}`),
     ).toEqual(["tool_call:c1", "tool_call:c1", "tool_result:c1", "tool_call:c1", "tool_result:c1"]);
+    await session.end();
+  });
+
+  it("the stream drops as a step begins and the ask reaches the bot through the permissions refill alone: the reply lands, the tool runs, and its settle — naming a step no event announced — is judged and recorded as the loop's own, the run answering its own text", async () => {
+    const o = openRun(
+      { dropStreamAtStep: 1 },
+      {
+        turns: [
+          {
+            content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo hi" } }],
+            stopReason: "tool_use",
+          },
+          { content: [{ type: "text", text: "done" }], stopReason: "end_turn" },
+        ],
+      },
+    );
+    const session = await o.opened;
+    expect(session.answer).toBe("done");
+    expect(o.progress).toContain("opencode feed: stream closed");
+    expect(o.container.requests.filter((q) => /\/permission\/per_c1\/reply$/.test(q.path))).toHaveLength(1);
+    // The call the stream never announced is opened from the refilled ask — named, its command summarised, its span ended — and its result lands on it.
+    expect(
+      o.events
+        .filter((e) => e.type === "tool_call" || e.type === "tool_result")
+        .map((e) => `${e.type}:${e.callId}:${e.tool}${e.type === "tool_call" ? `:${e.command ?? ""}` : `:${e.ok}`}`),
+    ).toEqual(["tool_call:c1:bash:echo hi", "tool_result:c1:bash:true"]);
+    expect(o.sink.ended("tool.bash")?.status).toBe("ok");
+    expect(notes(o.events).filter((n) => n.kind === "harness_error")).toEqual([]);
     await session.end();
   });
 
@@ -1035,6 +1072,8 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     // Not yet answered when the loop left; nothing on the card, ever.
     expect(notes(o.events).some((n) => refusal.test(n.summary))).toBe(false);
     await session.end();
+    // The answer came several ticks after the kill, and end() had waited for it: on the record before the run finishes.
+    expect(notes(o.events).some((n) => refusal.test(n.summary))).toBe(true);
     registry.finish(handle.id, "completed");
     const recorded = registry.snapshotById(handle.id)?.events ?? [];
     expect(recorded.filter((e) => e.type === "run_note" && refusal.test(e.summary))).toHaveLength(1);
@@ -1168,7 +1207,7 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     ],
   };
 
-  /** The store's listings: the resolution reads the store page by page (`order=asc&limit=200`, the cursor followed), never one unqueried page. */
+  /** The store's listings: the resolution reads newest first (`order=desc&limit=200`), down to the newest row it already knew — one page in practice, never one unqueried page and never the whole store. */
   const storeReads = (r: DrivenRun) => r.requests.filter((q) => q.method === "GET" && q.path.includes("/message?"));
   /** A seed longer than one page of the store (`STORE_PAGE_LIMIT`, 200 rows): 125 exchanges, 250 messages. */
   const longSeed: ChatMessage[] = [];
@@ -1199,21 +1238,98 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
   });
 
-  it("on a store longer than one page, a prompt that landed is found on the last page — the store read page by page, never one unqueried page — and is not re-issued", async () => {
+  it("on a store longer than one page, a prompt that landed is the newest user row: found on the first page read newest first, the read stopping at the newest row the loop already knew, and not re-issued", async () => {
     const r = await openCodeDriver({ controlResetOnPrompt: "landed" }).run({ ...oneTurn, seed: longSeed });
     expect(answered(r)).toBe("done");
     expect(posts(r, "/prompt")).toHaveLength(1);
-    expect(storeReads(r).length).toBeGreaterThanOrEqual(2);
-    expect(storeReads(r).every((q) => /order=asc&limit=200|cursor=/.test(q.path))).toBe(true);
+    expect(storeReads(r).map((q) => q.path.split("?")[1])).toEqual(["order=desc&limit=200"]);
     expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
   });
 
-  it("on a store longer than one page, a prompt that was lost is told lost by every page and re-issued once", async () => {
+  it("on a store longer than one page, a prompt that was lost is told lost by the one page down to the newest known row — never the whole store — and re-issued once", async () => {
     const r = await openCodeDriver({ controlResetOnPrompt: "lost" }).run({ ...oneTurn, seed: longSeed });
     expect(answered(r)).toBe("done");
     expect(posts(r, "/prompt")).toHaveLength(2);
-    expect(storeReads(r).length).toBeGreaterThanOrEqual(2);
+    expect(storeReads(r).map((q) => q.path.split("?")[1])).toEqual(["order=desc&limit=200"]);
     expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a follow-up's steer whose answer the reset cut after the row landed is learned from the store — folded in, its row's id known — so a later lost prompt of the same text is still re-issued", async () => {
+    const NOW = 1_700_000_000_000;
+    const sameWords = followUpPrompt([{ text: "same words", userId: "user:conformance", at: NOW }]);
+    const r = await openCodeDriver({ controlResetOnSteer: "landed", controlResetOnPrompt: "lost" }).run({
+      ...oneTurn,
+      request: sameWords,
+      followUp: "same words",
+    });
+    expect(answered(r)).toBe("done");
+    expect(posts(r, "/prompt").map((q) => (JSON.parse(q.body ?? "{}") as { delivery?: string }).delivery)).toEqual([
+      "steer",
+      "queue",
+      "queue",
+    ]);
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(followUps.some((s) => /follow-up folded in/.test(s))).toBe(true);
+    expect(followUps.some((s) => /not delivered/.test(s))).toBe(false);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a steer that lands after the cut prompt — its row newer than the prompt's, known by its answer — does not hide a landed prompt: the read stops at what was known when the prompt was posted, so the prompt is not re-issued", async () => {
+    const r = await openCodeDriver({ controlResetOnPrompt: "landed", steerLandsAfterNextPrompt: true }).run({
+      ...oneTurn,
+      followUp: "also check the docs",
+    });
+    expect(answered(r)).toBe("done");
+    expect(posts(r, "/prompt").map((q) => (JSON.parse(q.body ?? "{}") as { delivery?: string }).delivery)).toEqual([
+      "steer",
+      "queue",
+    ]);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a follow-up's steer whose answer the reset cut and whose row the store cannot be asked about fails the run by name — OpenCodeWriteUnresolvedError naming the follow-up's steer, a harness_error, the loop stopped — one rule for the loop's writes and the drainer's", async () => {
+    const r = await openCodeDriver({ controlResetOnSteer: "landed", storeListingResets: true }).run({
+      ...oneTurn,
+      followUp: "also check the docs",
+    });
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err?.name).toBe("OpenCodeWriteUnresolvedError");
+    expect(err?.message).toMatch(
+      /^the follow-up's steer was in flight when the resident's control plane reset under the run and its outcome could not be resolved from the server \(the store could not be listed/,
+    );
+    expect(
+      notes(r).some((n) => n.kind === "harness_error" && /^the follow-up's steer was in flight/.test(n.summary)),
+    ).toBe(true);
+    expect(notes(r).some((n) => n.kind === "follow_up" && /not delivered/.test(n.summary))).toBe(false);
+    expect(posts(r, "/interrupt")).toHaveLength(1);
+  });
+
+  it("a follow-up's steer into a RUNNING execution whose answer the reset cut is unresolved, not lost — its row lands only at the next step boundary — and the run fails by name rather than hand a steer the server may have taken back for a second delivery", async () => {
+    const r = await openCodeDriver({ controlResetOnSteer: "landed", followUpAtFirstAsk: "also check the docs" }).run(
+      toolTurn,
+    );
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err?.name).toBe("OpenCodeWriteUnresolvedError");
+    expect(err?.message).toMatch(/an execution is under way and a steer into it lands only at its next step boundary/);
+    expect(notes(r).some((n) => n.kind === "follow_up" && /not delivered/.test(n.summary))).toBe(false);
+    expect(notes(r).some((n) => n.kind === "follow_up" && /folded in/.test(n.summary))).toBe(false);
+  });
+
+  it("a follow-up's steer the reset cut before the server took it is handed back to the inbox, as any steer the server never took", async () => {
+    const r = await openCodeDriver({ controlResetOnSteer: "lost" }).run({
+      ...oneTurn,
+      followUp: "also check the docs",
+    });
+    expect(answered(r)).toBe("done");
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(followUps.some((s) => /not delivered — the steer did not reach the session/.test(s))).toBe(true);
+    expect(followUps.some((s) => /folded in/.test(s))).toBe(false);
   });
 
   it("a steer this generation posted whose row carries the prompt's exact text is not the prompt landed: the steer's message id is known from its answer, so a lost prompt is still re-issued", async () => {

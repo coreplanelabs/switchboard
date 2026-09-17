@@ -260,8 +260,38 @@ export interface FakeServeOptions {
   interruptSettlesLate?: "interrupted" | "failed" | "budget";
   /** The late tail also carries a tailer note (`stream closed`), an event kind no table names and a compaction of the earlier execution, as a feed under a dropped stream would. */
   lateTailNoise?: boolean;
+  /** The tool call of this 1-based turn, once the bot allows it, never settles:
+   *  the serve runs the tool and nothing follows — its step never ends, the
+   *  write-up's steer is taken and never acted on. The clock is moved as the
+   *  silence would move it (as `hangModelCall` does), so the wind-down, the
+   *  finale bound and the interrupt are exercised with the call open; the
+   *  tool's late settle is a later prompt's tail's (`interruptSettlesLate`,
+   *  `hungToolSettlesOnPlay`). The OpenCode fake's alone: pi has no late tail. */
+  hangToolCall?: number;
   /** The play whose `session.execution.started` the hung tool's late success (`hangToolCall`) lands after: the next play (2) unless given — 3 is the second post-turn. */
   hungToolSettlesOnPlay?: number;
+  /** The tailer's stream drops as the tool call of this 1-based turn is made:
+   *  the step's events — `session.step.started`, `session.tool.input.*`,
+   *  `session.tool.called`, `permission.asked` — never reach the feed; the
+   *  tailer's `stream closed` note and its reconnect refills do, so the ask is
+   *  answered from the permissions refill, and the events after the reconnect
+   *  (`permission.replied`, the settle) flow again. */
+  dropStreamAtStep?: number;
+  /** The resident's control plane resets under the run's first steer POST:
+   *  `landed`, the server took the steer (its row in the store, the session
+   *  idle) before the reset cut the answer; `lost`, it never reached the server. */
+  controlResetOnSteer?: "landed" | "lost";
+  /** A steer on the idle session has its row land only once the next `queue`
+   *  prompt is admitted, after that prompt's row — the shape of a steer into a
+   *  running execution, delivered at its step boundary — while its answer names
+   *  the message as ever. */
+  steerLandsAfterNextPrompt?: boolean;
+  /** Every `GET …/message` meets the control plane's reset: the store cannot be listed. */
+  storeListingResets?: boolean;
+  /** A thread follow-up arrives in the run's inbox as the first ask of the
+   *  first play is raised — an execution under way — so the drainer steers it
+   *  into a running execution (the row landing at the next step boundary). */
+  followUpAtFirstAsk?: string;
   /** The resident's control plane resets under the run's first `queue` prompt
    *  POST (a control reset, the container unchanged): `landed`, the server took
    *  the prompt before the reset cut the answer; `lost`, the prompt never
@@ -368,6 +398,8 @@ interface ServeDeps {
   advanceClock?: (ms: number) => void;
   /** The run's finale bound (`loopClock(...).finaleMs`), for a hung turn's clock. */
   finaleMs?: number;
+  /** The run's follow-up inbox, for a follow-up the serve times (`followUpAtFirstAsk`); a bare container's serve has none. */
+  inbox?: FollowUpInbox;
 }
 
 /** The serve as a test holds it: the model requests it recorded. */
@@ -416,6 +448,19 @@ class ScriptedServe {
   /** The hung tool's late success, emitted right after the `session.execution.started` of the play `hungToolSettlesOnPlay` names (`emitLateTail`). */
   private settleAfterStart: (() => void) | undefined;
   private readonly hungToolSettlesOnPlay: number;
+  private readonly hangToolCall: number | undefined;
+  private readonly dropStreamAtStep: number | undefined;
+  private readonly controlResetOnSteer: "landed" | "lost" | undefined;
+  private readonly steerLandsAfterNextPrompt: boolean;
+  private readonly storeListingResets: boolean;
+  private readonly followUpAtFirstAsk: string | undefined;
+  private followUpPushed = false;
+  /** A steer POST has reached the serve (`followUpAtFirstAsk` waits on it). */
+  private steerSeen = false;
+  /** Steer rows held back until the next queue prompt lands (`steerLandsAfterNextPrompt`). */
+  private readonly deferredSteerRows: { id: string; text: string }[] = [];
+  /** The first steer POST met the reset (`controlResetOnSteer`). */
+  private steerReset = false;
   private readonly interruptAnswersAfterKill: boolean | "refused";
   private readonly interruptPostFails: boolean;
   /** An execution is under way — a play has started and not returned: what the interrupt route answers `interrupted` for. */
@@ -475,6 +520,12 @@ class ScriptedServe {
     this.controlResetOnPrompt = options.controlResetOnPrompt;
     this.controlResetOnReply = options.controlResetOnReply;
     this.hungToolSettlesOnPlay = options.hungToolSettlesOnPlay ?? 2;
+    this.hangToolCall = options.hangToolCall;
+    this.dropStreamAtStep = options.dropStreamAtStep;
+    this.controlResetOnSteer = options.controlResetOnSteer;
+    this.steerLandsAfterNextPrompt = options.steerLandsAfterNextPrompt === true;
+    this.storeListingResets = options.storeListingResets === true;
+    this.followUpAtFirstAsk = options.followUpAtFirstAsk;
     this.interruptAnswersAfterKill = options.interruptAnswersAfterKill ?? false;
     this.interruptPostFails = options.interruptPostFails === true;
     this.mutate = options.mutate;
@@ -751,9 +802,13 @@ class ScriptedServe {
       return j(200, { healthy: true, version: OPENCODE_VERSION, pid: 77 });
     // The store and the pending asks as the server holds them: what a re-attach
     // and a reset's resolution read back. Measured against the pinned binary:
-    // newest first unless `order=asc`, 50 rows unless `limit` — at most 200, a
-    // 400 above — and a `cursor.next` to the following page.
+    // the listing's order is the server's insertion order (not the rows' ids,
+    // not their `time.created` — an import stamped an hour ahead still listed
+    // before the prompt posted after it), newest first unless `order=asc`, 50
+    // rows unless `limit` — at most 200, a 400 above — and a `cursor.next` to
+    // the following page. The fake's store is its insertion order.
     if (req.method === "GET" && req.path.split("?")[0] === `/api/session/${this.sessionID}/message`) {
+      if (this.storeListingResets) throw controlReset("request");
       const query = new URLSearchParams(req.path.split("?")[1] ?? "");
       const limit = query.has("limit") ? Number(query.get("limit")) : 50;
       if (!Number.isInteger(limit) || limit < 1 || limit > 200)
@@ -819,13 +874,23 @@ class ScriptedServe {
         // (the execution it starts there is not modelled — the next play reads
         // the row); into a running execution the row lands at delivery, the
         // next step boundary.
+        // The resident's control plane resets under the steer (`controlResetOnSteer`):
+        // lost, it never reached the server; landed, the row is in the store and
+        // the answer alone is cut — the harness learns the row from the store.
+        this.steerSeen = true;
+        const steerReset =
+          this.controlResetOnSteer !== undefined && !this.steerReset ? this.controlResetOnSteer : undefined;
+        if (steerReset !== undefined) this.steerReset = true;
+        if (steerReset === "lost") throw controlReset("request");
         const id = `msg_s${this.ordinal++}`;
         const inStore = !this.executing;
-        if (inStore) this.store.push({ id, type: "user", text, time: { created: NOW } });
+        if (inStore && this.steerLandsAfterNextPrompt) this.deferredSteerRows.push({ id, text });
+        else if (inStore) this.store.push({ id, type: "user", text, time: { created: NOW } });
         this.pendingSteers.push({ id, text, inStore });
         // A steer into the recorded server's execution lands at its next step
         // boundary: at once when nothing is in flight, else when the calls settle.
         this.stepBoundary();
+        if (steerReset === "landed") throw controlReset("request");
         return j(200, { data: { id, sessionID: this.sessionID, type: "user", payload: { text }, delivery: "steer" } });
       }
       {
@@ -872,6 +937,9 @@ class ScriptedServe {
           promptId = `msg_u${this.store.length}`;
           this.store.push({ id: promptId, type: "user", text, time: { created: NOW } });
         }
+        // A steer held back lands now, after the prompt's row (`steerLandsAfterNextPrompt`).
+        for (const row of this.deferredSteerRows.splice(0))
+          this.store.push({ id: row.id, type: "user", text: row.text, time: { created: NOW } });
         // A hung turn's late tail (`interruptSettlesLate`): the aborted
         // execution's last records land on the feed now — after the harness
         // moved on, before this prompt's execution starts — as the real server
@@ -983,8 +1051,13 @@ class ScriptedServe {
       // is killed, and then with the reset the kill caused.
       if (this.interruptAnswersAfterKill === "refused")
         return new Promise<HarnessResponse>((resolve) => {
+          // Several ticks after the kill: a join that returned on the kill alone
+          // would miss it, so the test proves the wait and not the scheduler.
           this.container.onKill = () =>
-            void this.deps.sleep(this.deps.tickMs ?? 1).then(() => resolve(j(500, { error: "interrupt refused" })));
+            void (async () => {
+              for (let i = 0; i < 4; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+              resolve(j(500, { error: "interrupt refused" }));
+            })();
         });
       if (this.interruptAnswersAfterKill)
         return new Promise<HarnessResponse>((_, reject) => {
@@ -1320,7 +1393,12 @@ class ScriptedServe {
 
   private async playTurn(turn: ModelTurn, index: number): Promise<void> {
     const assistantMessageID = this.stepId(index);
-    this.emitEvent("session.step.started", { sessionID: this.sessionID, assistantMessageID, agent: "switchboard" });
+    // The tailer's stream drops as this step begins (`dropStreamAtStep`): the
+    // step's events are lost with it; the tailer says so and refills.
+    const dropped = this.dropStreamAtStep === index + 1 && this.plays === 1;
+    if (dropped) this.container.emit({ feed: "tailer", at: NOW, note: "stream closed" });
+    else
+      this.emitEvent("session.step.started", { sessionID: this.sessionID, assistantMessageID, agent: "switchboard" });
     const content: Record<string, unknown>[] = [];
     for (const part of turn.content) {
       if (part.type === "text") {
@@ -1390,21 +1468,26 @@ class ScriptedServe {
     const callId = part.id;
     const input = (typeof part.input === "object" && part.input !== null ? part.input : {}) as Record<string, unknown>;
     const ask = toolAsk(part.name, input);
-    this.emitEvent("session.tool.input.started", {
-      sessionID: this.sessionID,
-      assistantMessageID,
-      id: callId,
-      name: ask.name,
-    });
-    this.emitEvent("session.tool.input.ended", {
-      sessionID: this.sessionID,
-      assistantMessageID,
-      id: callId,
-      text: JSON.stringify(input),
-    });
+    // The tailer's stream is down for this step (`dropStreamAtStep`): none of the
+    // call's events reach the feed until the reply; the permissions refill does.
+    const dropped = this.dropStreamAtStep === turnIndex + 1 && this.plays === 1;
+    if (!dropped) {
+      this.emitEvent("session.tool.input.started", {
+        sessionID: this.sessionID,
+        assistantMessageID,
+        id: callId,
+        name: ask.name,
+      });
+      this.emitEvent("session.tool.input.ended", {
+        sessionID: this.sessionID,
+        assistantMessageID,
+        id: callId,
+        text: JSON.stringify(input),
+      });
+    }
     // The record clause switched off: the tool call never reaches the stream, so
     // the record loses its `tool_call` vocabulary.
-    if (this.mutate !== "record")
+    if (this.mutate !== "record" && !dropped)
       this.emitEvent("session.tool.called", {
         sessionID: this.sessionID,
         assistantMessageID,
@@ -1448,7 +1531,7 @@ class ScriptedServe {
       resources: ask.resources,
       source: { type: "tool", messageID: assistantMessageID, id: callId },
     };
-    this.emitEvent("permission.asked", request);
+    if (!dropped) this.emitEvent("permission.asked", request);
     // The declared cannot: the model's shell forges a `once` under the real
     // request id before the bot's reply lands; the server runs the tool against
     // the bot's decision.
@@ -1466,7 +1549,15 @@ class ScriptedServe {
     }
     this.emitPermissions([request]);
     this.liveAsks.set(requestID, request);
+    const timedFollowUp = this.followUpAtFirstAsk !== undefined && !this.followUpPushed;
+    if (timedFollowUp) {
+      this.followUpPushed = true;
+      this.deps.inbox?.push({ text: this.followUpAtFirstAsk!, userId: "user:conformance", at: NOW });
+    }
     const decision = await this.waitReply(requestID);
+    // The execution stays under way until the drainer's steer for that follow-up
+    // has been posted, so the steer meets a running execution, as the option says.
+    if (timedFollowUp) for (let i = 0; i < 400 && !this.steerSeen; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
     this.liveAsks.delete(requestID);
     if (this.interruptedAsks.has(requestID)) {
       // The interrupt dropped the ask while it was pending: the binary emits no
@@ -1490,7 +1581,7 @@ class ScriptedServe {
     // play waits for the harness's interrupt and stops, the step never ended.
     // The tool's late success is owed to the next prompt's tail
     // (`interruptSettlesLate`), landing after that execution's start.
-    if (this.script.hangToolCall === turnIndex + 1 && this.plays === 1 && decision.reply === "once") {
+    if (this.hangToolCall === turnIndex + 1 && this.plays === 1 && decision.reply === "once") {
       if (
         this.deps.advanceClock === undefined ||
         this.deps.finaleMs === undefined ||
@@ -1840,6 +1931,7 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     spendBudget: () => void (clock.now = lease.loopEnd + 1),
     advanceClock: (ms) => void (clock.now += ms),
     finaleMs: lease.finaleMs,
+    inbox,
   };
   const serve = new ScriptedServe(container, source, script, serveDeps, options);
   const recorded = script.processAliveOnResume

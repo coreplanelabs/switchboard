@@ -93,14 +93,6 @@ export interface RunScript {
    *  write-up's steer has landed, so the harness's wind-down, its finale bound
    *  and the process's end are exercised without a real wait. */
   hangModelCall?: number;
-  /** The tool call of this 1-based turn, once the bot allows it, never settles:
-   *  the process runs the tool and nothing follows — its step never ends, the
-   *  write-up's steer is taken and never acted on. The driver moves the run's
-   *  clock as the silence would (as `hangModelCall` does), so the wind-down,
-   *  the finale bound and the interrupt are exercised with the call open; the
-   *  tool's late settle is the next prompt's tail's (the OpenCode fake's
-   *  `interruptSettlesLate`). */
-  hangToolCall?: number;
   /** The run's wall clock runs out before the model call of this 1-based
    *  number: the clock passes the deadline with that call under way, so the
    *  harness winds the run down — the budget note, the write-up steered — and

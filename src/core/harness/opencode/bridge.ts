@@ -93,9 +93,9 @@ import {
   openCodePermissionReplyRoute,
   openCodeSessionRoutes,
   parseFeedRecord,
-  parseMessageId,
+  parseAnswerId,
   parsePermissionList,
-  readSessionStore,
+  readStoreSince,
   type OpenCodeAssistantMessage,
   type OpenCodeEvent,
   type OpenCodeFeedRecord,
@@ -728,17 +728,14 @@ export class OpenCodeBridge {
       case "session.tool.failed":
         this.onToolSettled(data, false, out);
         break;
-      case "permission.asked": {
+      case "permission.asked":
         // Not this loop's to answer in `earlier` mode (the binary drops it at
         // the interrupt anyway); in its own, an ask is answered whatever step it
         // names — an ask left pending hangs the execution, and the gate decides
         // per call.
         if (earlier) break;
-        const source = isRecord(data.source) ? data.source : {};
-        if (typeof source.messageID === "string") this.ownSteps.add(source.messageID);
         this.onPermissionAsked(data as unknown as OpenCodePermissionRequest, out);
         break;
-      }
       case "permission.replied":
         if (earlier) break;
         this.onPermissionReplied(data, out);
@@ -805,12 +802,19 @@ export class OpenCodeBridge {
 
   private onToolCalled(data: Record<string, unknown>): void {
     const callId = str(data.id);
-    const name = this.toolNames.get(callId) ?? "tool";
+    this.openCall(callId, this.toolNames.get(callId) ?? "tool", isRecord(data.input) ? data.input : undefined);
+  }
+
+  /** The call opened on the record — its span, its `tool_call` with the
+   *  narration before it — from the stream's `session.tool.called`, or from an
+   *  ask the store's permissions refill carried after the stream dropped the
+   *  step's events (the ask names the tool and its resources), so the settle
+   *  that follows lands on a call the record announced, never an orphan. */
+  private openCall(callId: string, name: string, input: Record<string, unknown> | undefined): void {
     const tool = openCodeToolNameWord(name);
     const span = this.deps.agentSpan?.start(`tool.${tool}`);
     this.openTools.set(callId, { span, tool });
     this.toolCalls++;
-    const input = isRecord(data.input) ? data.input : undefined;
     if (this.pendingNarration) {
       this.emit({ type: "assistant", text: redactSecrets(this.pendingNarration) });
       this.pendingNarration = undefined;
@@ -836,12 +840,24 @@ export class OpenCodeBridge {
     // however many turns later: its `assistantMessageID` names a step this
     // loop never saw, so it is that execution's, decided by the loop before
     // and on its record. Set aside, whatever mode this is; never this loop's
-    // result or bypass. (A step missed whole on a dropped stream would read
-    // the same way; the tailer's own note says the stream dropped.) A settle
-    // that names no step — none of the pinned binary's do — is judged as this
-    // loop's, the fail-closed side.
+    // result or bypass. In the loop's own mode — and there alone: catching up,
+    // the dead generation's records have rules of their own below — the
+    // set-aside is said on the record under its own kind, naming the call and
+    // the step, so an operator tells an earlier execution's tail from a step
+    // this loop lost with the stream (whose ask, had there been one, the refill
+    // would have taught); it is information, not a failure of the harness. A
+    // settle that names no step — none of the pinned binary's do — is judged as
+    // this loop's, the fail-closed side.
+    if (this.observing === "earlier") return;
     const step = typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined;
-    if (this.observing === "earlier" || (step !== undefined && !this.ownSteps.has(step))) return;
+    if (this.observing === "own" && step !== undefined && !this.ownSteps.has(step)) {
+      const named = openCodeToolNameWord(this.toolNames.get(callId) ?? "tool");
+      this.note(
+        "settle_set_aside",
+        `OpenCode settled ${named} (call ${callId}) of a step this loop never saw start (${redactAndCap(step, 80)}); set aside — an earlier execution's late settle, or a step lost with the stream`,
+      );
+      return;
+    }
     const open = this.openTools.get(callId);
     this.openTools.delete(callId);
     const tool = open?.tool ?? openCodeToolNameWord(this.toolNames.get(callId) ?? "tool");
@@ -926,8 +942,25 @@ export class OpenCodeBridge {
 
   private onPermissionAsked(request: OpenCodePermissionRequest, out: OpenCodeBridgeObservation): void {
     const callId = request.source?.id ?? request.id;
+    // The ask names its step, and the ask is this loop's to answer whichever way
+    // it came — the stream's event, or the store's permissions refill after a
+    // dropped stream lost the step's events — so its step is this loop's own
+    // from here: the tool the reply lets run settles under a step the loop
+    // knows, judged and recorded, never set aside as foreign.
+    if (typeof request.source?.messageID === "string") this.ownSteps.add(request.source.messageID);
     if (this.answered.has(callId)) return; // a refill re-asked one the stream already carried
     if (this.decidedReplies.has(request.id)) return; // met again while catching up
+    // An ask for a call the record saw nothing of — neither named
+    // (`session.tool.input.started`) nor called: the stream dropped the step's
+    // events and the store's refill carries the ask alone — opens the call
+    // from what the ask names (the tool, its resources), so its settle lands
+    // on a `tool_call` the record announced. A call the stream named and never
+    // called is the stream's own record hole (the record clause's mutation
+    // switch) and stays one.
+    if (this.observing === "own" && !this.openTools.has(callId) && !this.toolNames.has(callId)) {
+      this.toolNames.set(callId, request.action);
+      this.openCall(callId, request.action, askInput(request));
+    }
     // An ask read while catching up that the server no longer holds pending:
     // for a call whose result the ledger holds, the dead generation decided it
     // and the echo that follows names its decision; for a call the record
@@ -1066,6 +1099,15 @@ export class OpenCodeBridge {
     if (this.deps.onStep)
       this.mirrorChain = this.mirrorChain.then(() => void this.mirror.onCompaction(entry, this.turnCounted));
   }
+}
+
+/** The input an ask implies for its call, in pi's shape for the record's
+ *  summary: a shell's first resource is its command, any other tool's its
+ *  path. What `session.tool.called` would have carried had the stream kept it. */
+function askInput(request: OpenCodePermissionRequest): Record<string, unknown> | undefined {
+  const resources = Array.isArray(request.resources) ? request.resources.filter((r) => typeof r === "string") : [];
+  if (resources.length === 0) return undefined;
+  return openCodeToolNameWord(request.action) === "bash" ? { command: resources.join(" ") } : { path: resources[0] };
 }
 
 /** The bypass's words for a call in flight at the death answered while the bot was away (the gate clause during the bot's absence). */
@@ -1245,6 +1287,14 @@ export interface OpenCodeConnection {
    *  after the kill that cuts the unanswered, so no answer can reach a record
    *  the run has finished. */
   posted?: Set<Promise<unknown>>;
+  /** The session's writes in the order this generation made them (`seq`, one
+   *  counter the loop and the follow-up drainer share), the prompts the loop
+   *  posted by the message id each became and its `seq`, and the import's
+   *  rows: what a steer's resolution reads the session's state at the steer
+   *  from — a prompt posted after the steer, and everything its execution
+   *  wrote, is not the steer's concern; an imported row newest is an idle
+   *  session (measured: a steer there landed at once). */
+  writes?: { seq: number; ownPrompts: Map<string, number>; imported: ReadonlySet<string> };
 }
 
 /** What a re-attach found on the still-answering server and in its feed. */
@@ -1445,7 +1495,7 @@ export async function driveOpenCode(
           // A steer's answer names the user message it became (measured): known
           // from here, so a prompt the control plane's reset cuts is never told
           // landed by a steer's row of the same text.
-          const id = parseMessageId(res.body);
+          const id = parseAnswerId(res.body);
           if (id !== undefined) conn.knownMessageIds?.add(id);
           return;
         }
@@ -1590,29 +1640,34 @@ export async function driveOpenCode(
     note("resumed", CONTROL_RESET_RESUMED_NOTE);
     reattachInPlace();
   };
-  /** Whether a `queue` prompt the reset cut landed. The store is read whole,
-   *  page by page (`readSessionStore`: `order=asc&limit=200`, the cursor
-   *  followed — measured against the pinned binary, whose default page is 50
-   *  rows newest first, so one unqueried page misses a landed prompt on a
+  /** Whether a `queue` prompt the reset cut landed. The store is read newest
+   *  first down to the newest row the loop already knew (`readStoreSince`:
+   *  `order=desc&limit=200`, the cursor followed — one page in practice, never
+   *  the whole store; measured against the pinned binary, whose default page
+   *  is 50 rows newest first, so one unqueried page misses a landed prompt on a
    *  long session), after every request this generation posted and did not
    *  wait on has answered (`conn.posted`) — a steer's answer names the message
-   *  it became. Measured too: the store lists a `queue` prompt's user message
-   *  the moment the prompt is admitted, before its execution starts. So a user
-   *  message carrying the prompt's text that the loop did not know the store to
-   *  hold (`conn.knownMessageIds`: the import's, a re-attach's store, the
-   *  refills the loops before read, the steers posted) is the prompt landed,
-   *  and none is the prompt lost. A store that cannot be read whole leaves the
-   *  outcome unresolved. */
-  const promptLanded = async (text: string, what: string): Promise<boolean> => {
+   *  it became. The read stops at the newest row the loop knew WHEN IT POSTED
+   *  the prompt (`knownAtPrompt`), not at everything known now: a steer posted
+   *  since, known by its answer, landed after the prompt and its row is read
+   *  past, or a landed prompt would hide behind it and be re-issued. Measured
+   *  too: the store lists a `queue` prompt's user message the moment the prompt
+   *  is admitted, before its execution starts. So a user message carrying the
+   *  prompt's text among the rows read that the loop does not know now
+   *  (`conn.knownMessageIds`: the import's, a re-attach's store, the refills
+   *  the loops before read, the steers posted since) is the prompt landed, and
+   *  none is the prompt lost. A store that cannot be read leaves the outcome
+   *  unresolved. */
+  const promptLanded = async (text: string, what: string, knownAtPrompt: ReadonlySet<string>): Promise<boolean> => {
     await Promise.allSettled([...(conn.posted ?? [])]);
-    const read = await readSessionStore((path) => request({ method: "GET", path }), conn.sessionID).catch(
+    const known = conn.knownMessageIds ?? new Set<string>();
+    const read = await readStoreSince((path) => request({ method: "GET", path }), conn.sessionID, knownAtPrompt).catch(
       (err: unknown): { ok: false; why: string } => ({
         ok: false,
         why: `the store could not be listed: ${redactAndCap(err instanceof Error ? err.message : String(err), 200)}`,
       }),
     );
     if (!read.ok) throw new OpenCodeWriteUnresolvedError(what, read.why);
-    const known = conn.knownMessageIds ?? new Set<string>();
     return read.messages.some((m) => m.type === "user" && !known.has(m.id) && (m as { text?: unknown }).text === text);
   };
   /** A gate reply the reset cut, resolved from the pending asks: still pending,
@@ -1714,7 +1769,10 @@ export async function driveOpenCode(
       text: run.resume !== undefined ? CONTINUE_PROMPT : openCodePromptText(run.messages),
       delivery,
     };
+    // What the store held before this prompt, for a reset's resolution to stop at.
+    const knownAtPrompt: ReadonlySet<string> = new Set(conn.knownMessageIds ?? []);
     let admitted: HarnessResponse | "landed";
+    const promptSeq = conn.writes ? ++conn.writes.seq : 0;
     try {
       admitted = await request(sessionRoutes["session.prompt"], promptBody);
     } catch (err) {
@@ -1727,7 +1785,7 @@ export async function driveOpenCode(
           // to its end and the loop reads it there; a doubled continue would
           // land twice as the model's next input.
           admitted = "landed";
-        } else if (await promptLanded(promptBody.text, promptName)) admitted = "landed";
+        } else if (await promptLanded(promptBody.text, promptName, knownAtPrompt)) admitted = "landed";
         else {
           try {
             admitted = await request(sessionRoutes["session.prompt"], promptBody);
@@ -1746,6 +1804,11 @@ export async function driveOpenCode(
       refused = new OpenCodeRequestRefusedError(promptPhase, admitted.status, admitted.body);
       note("harness_error", `${refused.message} — the run is stopped`);
       throw refused;
+    }
+    // The prompt's message, by the id its answer names, in the session's write order.
+    if (admitted !== "landed") {
+      const promptId = parseAnswerId(admitted.body);
+      if (promptId !== undefined) conn.writes?.ownPrompts.set(promptId, promptSeq);
     }
     if (delivery === "queue") awaiting = { phase: promptName, since: now() };
     check();
