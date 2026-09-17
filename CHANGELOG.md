@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.241.0](https://github.com/coreplanelabs/switchboard/compare/v1.240.0...v1.241.0) (2026-09-17)
+
+
+### Features
+
+* **config:** a settings page never shows "no data" — the Channels tab opens on the viewer's own settings, config show without a channel describes them on every surface, and a page without its seed is an application error ([#1445](https://github.com/coreplanelabs/switchboard/issues/1445)) ([59ff289](https://github.com/coreplanelabs/switchboard/commit/59ff2899de40ea3eeb78a2f3f7180f37ad93259e))
+* **harness:** the harness configuration word returns with two values — a preset goes on pi or opencode by name, the roster lives in the wiring, and a resumed run keeps the harness it started on ([#1437](https://github.com/coreplanelabs/switchboard/issues/1437)) ([986a591](https://github.com/coreplanelabs/switchboard/commit/986a5916731564d025cffb9fccd306a5aca8dafb))
+* **runs:** the repo tag reads as a repository — `owner/name` with the owner dimmed — and the surface chip has one width so names line up ([#1454](https://github.com/coreplanelabs/switchboard/issues/1454)) ([de25016](https://github.com/coreplanelabs/switchboard/commit/de2501677ab9d8e3abecf308241df03c0a154f67))
+* **runs:** the runs index names a run's surface in words — a `slack` / `http` / `mcp` / `cli` text label leads the requester cell, and the glyphs are gone ([#1448](https://github.com/coreplanelabs/switchboard/issues/1448)) ([076bc9c](https://github.com/coreplanelabs/switchboard/commit/076bc9c1ee203fd0f0df6f9d5ec71b7537993f3c))
+* **ship:** the merge step settles on the intake's checks-settled event instead of a five-minute poll ([#1453](https://github.com/coreplanelabs/switchboard/issues/1453)) ([5764631](https://github.com/coreplanelabs/switchboard/commit/57646313c1918249bd45202be59f7a3e84455ece))
+* **web:** the home page is Threads at /threads with a constant Switchboard header, and a turn attaches to its run's stream through the run page's own code ([#1430](https://github.com/coreplanelabs/switchboard/issues/1430)) ([003adca](https://github.com/coreplanelabs/switchboard/commit/003adca40d9e0e53e529a99bfec0564c69574d24))
+* **web:** the web chat is channel adapter [#5](https://github.com/coreplanelabs/switchboard/issues/5) — a message at /threads dispatches as the signed-in person, the page seeds from the run store, and the rail lists every thread of theirs across channels ([#1447](https://github.com/coreplanelabs/switchboard/issues/1447)) ([ef2b502](https://github.com/coreplanelabs/switchboard/commit/ef2b502e380b87c1dfa8d02ce0d8742642346f88))
+
+
+### Bug fixes
+
+* **agents:** the status-card checklist is truthful at every moment — one rule for every preset: ✱ from the item's first command, ✓ only after its result is read ([#1443](https://github.com/coreplanelabs/switchboard/issues/1443)) ([1086332](https://github.com/coreplanelabs/switchboard/commit/1086332767244d9edb38728c5c492998906a1db3))
+* **conductor:** a parent awaiting a child whose thread continued listens for the continuation's end — the finished child's replayed end no longer spins the wait and starves the bot until the child is evicted ([#1446](https://github.com/coreplanelabs/switchboard/issues/1446)) ([9588523](https://github.com/coreplanelabs/switchboard/commit/958852323218ccf3f76c84ad9c204ac87e6604db))
+* **costs:** the snapshot window and the page's widest range are 31 days — the most Cloudflare's analytics answer — so the daily take lands instead of being refused for asking 90 ([#1451](https://github.com/coreplanelabs/switchboard/issues/1451)) ([98c8e9f](https://github.com/coreplanelabs/switchboard/commit/98c8e9f421623b110e795013acf79533c74a82d5))
+* **resident:** the resident debug view reads the auto-rebuild history it reports, so the instants behind the budget are visible instead of an always-empty list ([#1452](https://github.com/coreplanelabs/switchboard/issues/1452)) ([42ded21](https://github.com/coreplanelabs/switchboard/commit/42ded21af385b943f66f77a436dfdcdd0decede9))
+
+
+### Documentation
+
+* **docs:** record 0041 is accepted — the settings page stays an adapter over the registry, its validation rows carry their proofs, and a settings page never shows a no-data state ([#1441](https://github.com/coreplanelabs/switchboard/issues/1441)) ([76df0d5](https://github.com/coreplanelabs/switchboard/commit/76df0d535a73baa59c71ad66f9f6313ef7afbbaf))
+* **docs:** record 0044 proposes that a routed write is confirmed in proportion to its blast radius — the definition declares it, the org floors it, the channel asks with one click, and a test run never asks ([#1455](https://github.com/coreplanelabs/switchboard/issues/1455)) ([1eee019](https://github.com/coreplanelabs/switchboard/commit/1eee0192355df963c8891195b040688a5216fd6d))
+
 ## [1.240.0](https://github.com/coreplanelabs/switchboard/compare/v1.239.0...v1.240.0) (2026-09-17)
 
 
