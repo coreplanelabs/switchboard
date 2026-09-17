@@ -26,6 +26,7 @@ import { EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
 import { DISK_PRESSURE_REASON } from "./residentDiskBudget.js";
 import {
   BASH_TIMEOUT_MS,
+  BASH_TIMEOUT_MAX_MS,
   ExecControlResetError,
   ExecInfraError,
   ExecSandboxRestartedError,
@@ -461,10 +462,11 @@ export class ResidentOperations implements Operations {
           headers: { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` },
           body: JSON.stringify({ resource: repoResourceId(req.repo), op, ...(req.ref ? { ref: req.ref } : {}) }),
           // Bound the request so a hung resident can't stall the dispatch; an op
-          // (test/build) legitimately runs minutes, so use the exec ceiling. A
-          // timeout throws here and becomes the same legible error as any other
+          // (test/build) legitimately runs minutes — a long suite outlives the
+          // per-command default — so the bound is the exec ceiling. A timeout
+          // throws here and becomes the same legible error as any other
           // transport failure below.
-          signal: AbortSignal.timeout(BASH_TIMEOUT_MS),
+          signal: AbortSignal.timeout(BASH_TIMEOUT_MAX_MS),
         },
         { route: "/op" },
       );
