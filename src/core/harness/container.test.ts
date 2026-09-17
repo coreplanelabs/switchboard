@@ -11,7 +11,12 @@ import {
 } from "../../execution/executor.js";
 import { CONTAINER_GONE_WORDING } from "../../execution/residentWake.js";
 import { STOPPED_CONTAINER_WORDING } from "../../execution/residentRefresh.js";
-import { residentAnswerReason, residentWakeBudgetStrike, residentWakeStrike } from "../../execution/resident.js";
+import {
+  ResidentLeaseSpentError,
+  residentAnswerReason,
+  residentWakeBudgetStrike,
+  residentWakeStrike,
+} from "../../execution/resident.js";
 import { sandboxEmptyFailureMessage, sandboxNoAnswerMessage } from "../../execution/cloudflareSandbox.js";
 import { SANDBOX_START_BACKOFF_MS, SANDBOX_START_WAIT_MAX_MS } from "../../execution/sandboxErrors.js";
 import {
@@ -862,6 +867,22 @@ describe("ExecHarnessContainer — each operation is one command over the execut
     expect(calls[0].command).toBe(identityScript());
     expect(await c.identity()).toBeUndefined();
     expect(await c.identity()).toBeUndefined();
+    expect(await c.identity()).toBeUndefined();
+  });
+
+  // A refusal no wait clears is no name and never the container's verdict:
+  // the executor's attach not opened because the run's lease is inside its
+  // write-up reserve (execution.md item 9) answers `undefined` — neither a
+  // container down to wait on nor a replaced one — so the one more command
+  // judges nothing on it and the run ends as its budget ends it.
+  it("identity answers no name on the executor's lease-spent refusal — a `refused` no wait clears, never HarnessContainerDownError, never a replaced verdict", async () => {
+    const spent = new ResidentLeaseSpentError(
+      "/exec",
+      "the run has 30s of wall clock left, inside the 60s write-up reserve, so no attach was opened",
+      30_000,
+    );
+    const { executor } = recordingExecutor([spent]);
+    const c = new ExecHarnessContainer(executor);
     expect(await c.identity()).toBeUndefined();
   });
 

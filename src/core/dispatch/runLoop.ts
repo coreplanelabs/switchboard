@@ -371,7 +371,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const onEvent = (e: RunEvent) => {
     registry.publish(run.id, e); // feed the external live-view stream
     if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md): the card and its clock ignore it
-    if (e.type === "lease") return; // the harness's clocks: head material for the record (harness-pi item 15), not activity — the card and its clock ignore it
+    if (e.type === "lease") {
+      // The harness's clocks: head material for the record (harness-pi item
+      // 15), not activity — the card and its clock ignore it. The run's control
+      // starts its lease clock on it, whichever harness published it, so every
+      // attach the run's resident executor opens is clipped to the run
+      // (execution.md item 9); a resume's is started from the record's remainder below.
+      run.control.startLease(() => e.endsAt - clock());
+      return;
+    }
     if (e.type === "tool_call") toolCalls++;
     if (e.type === "run_note" && e.kind === "time_budget_exhausted") budgetEnded = true;
     if (isCodingPrRun) {
@@ -634,6 +642,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // `finish` plan has none: the loop had answered before the restart and its
   // process is ended below, so the post-turns run no turn (item 14).
   let harnessSession: HarnessSession | undefined;
+  /** The budget's answer when a relaunch found the run inside its write-up reserve (`lease_spent`): the run ends on its budget with no process to write up. */
+  let leaseSpentDuringRelaunch: string | undefined;
   // Give the workspace back now rather than at the inactivity sweep: a
   // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
   // 16a). The release mode is paired to the round's agent by the attach
@@ -916,6 +926,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // death's resume plan when there is one — or, after a relaunch, the
       // rotated bearer and the record the harness held at the interruption.
       let bearer = ctx.bearer;
+      if (reentry) {
+        // A resume publishes no second `lease` event (the record holds the
+        // lease), so the control's clock starts here from the remainder the
+        // record kept — the run loop's reading of the same lease the harness
+        // continues, a moment earlier than the harness's own.
+        const resumeDeadline = clock() + reentry.remainingMs;
+        run.control.startLease(() => resumeDeadline - clock());
+      }
       let harnessResume: HarnessResume | undefined = reentry
         ? {
             messages: reentry.messages,
@@ -1005,6 +1023,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               facts: lastFacts,
               binding: workspaceBinding,
               stopSignal: run.control.hardSignal,
+              remainingMs: () => run.control.remainingMs(),
               saveFacts,
             });
           } catch (failed) {
@@ -1029,12 +1048,31 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             // restarted from the request. The registration left for the
             // relaunch goes with it.
             harnessDeps.registry.forget(run.id);
+            leaseSpentDuringRelaunch = undefined;
+            // The stop's own note kind, with its mode — never a second
+            // `sandbox_restarted`, which every reader counts as a replaced
+            // container's verdict: the harness's note already said that.
             onEvent({
               type: "run_note",
-              kind: "sandbox_restarted",
+              kind: "stopped",
+              mode: "hard",
               summary:
-                "the container was replaced under the run, and the run was stopped while its workspace was being re-attached in the replacement",
+                "the run was stopped while its workspace was being re-attached in the replacement container; pi was not relaunched",
             });
+            break;
+          }
+          if (decision.kind === "lease_spent") {
+            // The container was replaced with the run inside its write-up
+            // reserve: nothing is re-attached or relaunched, and the run ends on
+            // its budget as a run whose loop ran out of time does — the budget's
+            // own note and answer, the status `completed` — never `workspace_lost`
+            // (the worktree was never asked for) and never a new run from the
+            // request with a fresh lease. The registration left for the relaunch
+            // goes with it.
+            harnessDeps.registry.forget(run.id);
+            budgetEnded = true;
+            onEvent({ type: "run_note", kind: "time_budget_exhausted", summary: decision.why });
+            leaseSpentDuringRelaunch = timeBudgetAnswer("", agent.maxMinutes, "the container was replaced inside it");
             break;
           }
           if (decision.round !== undefined) {
@@ -1053,8 +1091,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           harnessResume = decision.resume;
         }
       }
-      // No session only when a stop ended the relaunch's re-attach: the stop's answer is the run's.
-      answer = harnessSession?.answer ?? HARD_STOP_MESSAGE;
+      // No session only when the relaunch's re-attach ended the run: on the
+      // lease's end, the budget's answer; on a stop, the stop's.
+      answer = harnessSession?.answer ?? leaseSpentDuringRelaunch ?? HARD_STOP_MESSAGE;
     }
     // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
     // settleReviewedHead in reviewRound.ts): for a PR review, read the

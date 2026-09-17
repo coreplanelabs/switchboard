@@ -20,12 +20,14 @@ import { reattachWorkspace } from "./provision.js";
 import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import { RUN_BEARER_ENV } from "../harness/pi/process.js";
 import {
+  HarnessContainerReplacedError,
   HarnessGateBypassedError,
   HarnessMismatchError,
   openThroughSeam,
   type Finding,
   type Harness,
   type HarnessFacts,
+  type HarnessRecord,
   type HarnessRun,
   type HarnessSession,
 } from "../harness/contract.js";
@@ -3624,6 +3626,115 @@ describe("the configuration word — harness.<preset> picks a fresh run's harnes
 // moving the deployment; two people's runs in one process open on different
 // harnesses off one roster. A resumed row keeps the harness its facts name
 // whatever the scopes say now.
+// Feature: docs/reference/specs/execution.md item 9 — the run control's lease
+// clock is started by the RUN LOOP on the harness's own `lease` event,
+// whichever harness published it (pi and OpenCode both do), so every attach
+// the run's resident executor opens is clipped to the run; a relaunch that
+// finds the run inside its write-up reserve asks for no workspace and ends the
+// run on its budget, never `workspace_lost`.
+describe("the run control's lease clock — started by the run loop on the harness's lease event, read by the relaunch", () => {
+  /** A harness of the roster whose `open` publishes the lease as the real ones
+   *  do and reads the control's clock before and after it; `then` runs on the
+   *  opened run before the scripted answer (a throw ends the open with it). */
+  function leasing(base: Harness, endsInMs: number, seen: Array<number | undefined>, then?: (run: HarnessRun) => void) {
+    const harness: Harness = {
+      name: base.name,
+      history: base.history,
+      dispositions: base.dispositions,
+      effort: (tier) => base.effort(tier),
+      builtinTools: (identity) => base.builtinTools(identity),
+      open: async (_deps, run) => {
+        seen.push(run.control?.remainingMs());
+        run.onEvent?.({ type: "lease", startedAt: NOW, endsAt: NOW + endsInMs, loopEndsAt: NOW + endsInMs, at: NOW });
+        seen.push(run.control?.remainingMs());
+        then?.(run);
+        return { answer: "Done.", followUp: async () => "", remainingMs: () => endsInMs, end: async () => {} };
+      },
+      find: async () => "alive-here",
+      end: async () => {},
+    };
+    return harness;
+  }
+  const harnessDeps = (h: Harness): HarnessProcessDeps => ({
+    harnesses: roster(h, h),
+    registry: new HarnessRegistry(),
+    harnessUrl: "https://bot.example.com",
+    loopbackUrl: "http://127.0.0.1:8080",
+    containerFor: () => new FakeHarnessContainer(),
+  });
+
+  it("an OpenCode run: the control's clock is undefined before the harness's `lease` event and the lease's remainder after it — the run loop started it on the event; the harness never touched the control", async () => {
+    const seen: Array<number | undefined> = [];
+    const s = setup("unused", {
+      agent: "general",
+      yaml: YAML + "harness:\n  general: opencode\n",
+      harness: harnessDeps(leasing(openCodeHarness, 5 * 60_000, seen)),
+    });
+    expect(s.run.control.remainingMs()).toBeUndefined(); // the dispatch's attach runs here, before the lease
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.answer).toBe("Done.");
+    expect(seen).toEqual([undefined, 5 * 60_000]);
+    expect(s.run.control.remainingMs()).toBe(5 * 60_000);
+  });
+
+  it("a container replaced with the run inside its write-up reserve: the relaunch asks for no workspace and the run ends on its budget — the `time_budget_exhausted` note saying why, the budget's answer, the status `completed`; no `resumed`, no `sandbox_restarted` from the loop, no restart from the request", async () => {
+    const record: HarnessRecord = {
+      messages: [],
+      compactions: [],
+      settlements: [],
+      turn: 1,
+      inboxConsumedSeq: 0,
+      deadline: NOW + 30_000,
+    };
+    const facts: HarnessFacts = {
+      harness: "pi",
+      pid: 4242,
+      logOffset: 0,
+      root: "/tmp/switchboard-pi-run-l",
+      container: "vm-a",
+      relaunches: 0,
+    };
+    const seen: Array<number | undefined> = [];
+    let opens = 0;
+    // The first open dies with its container after leaving its facts; a second
+    // open would be the relaunch the decision must not make.
+    const replaced = leasing(piHarness, 30_000, seen, (run) => {
+      if (opens++ > 0) return;
+      run.saveFacts?.(facts);
+      throw new HarnessContainerReplacedError(
+        "the container running pi was replaced (vm-a → vm-b)",
+        "the sandbox restarted under the run (waited 42 s)",
+        "vm-a",
+        "vm-b",
+        record,
+      );
+    });
+    // A coding run: its round has a workspace to re-attach (the machine class
+    // of `general` has none, and a run without one never reaches the re-attach).
+    const s = setup("unused", {
+      agent: "coding",
+      yaml: YAML + "harness:\n  coding: pi\n",
+      harness: harnessDeps(replaced),
+      binding: { ref: "main", sha: "abc", workspace: "/workspace/threads/t/main", user: "worker2" },
+    });
+    const { ledgerRun, record: recorded } = recordingLedgerRun();
+    const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun }));
+    expect(opens).toBe(1);
+    expect(seen).toEqual([undefined, 30_000]);
+    expect(out.answer).toContain(`Stopped at the ${s.ctx.agent.maxMinutes}-minute budget without finishing`);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const notes = (recorded().events as Array<{ type: string; kind?: string; summary?: string }>).filter(
+      (e) => e.type === "run_note",
+    );
+    expect(notes.filter((n) => n.kind === "time_budget_exhausted").map((n) => n.summary)).toEqual([
+      "the container was replaced under the run with its lease inside the write-up reserve (the run has 30s of wall clock left, inside the 60s write-up reserve, so no attach was opened); its workspace was not re-attached and pi was not relaunched — the run ends on its budget",
+    ]);
+    expect(notes.some((n) => n.kind === "resumed" || n.kind === "sandbox_restarted")).toBe(false);
+  });
+});
+
 describe("the harness word through the scopes — user beats channel beats the deployment's block", () => {
   const scoped = (block: string) => YAML + block;
   const roster2 = () => {

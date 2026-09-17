@@ -17,6 +17,7 @@ import { chatActorOf } from "../authz/actor.js";
 import { clipSourceLabel, type RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import {
+  WorkspaceReattachLeaseSpentError,
   WorkspaceReattachRefusedError,
   type ExecutorSelection,
   type WorkspaceBinding,
@@ -698,6 +699,11 @@ export interface AttachContext {
    *  attach): a stop during the attach's wake wait ends it at once, and a
    *  stopped run is never provisioned cold (execution.md item 9). */
   stopSignal?: AbortSignal;
+  /** The run's remaining wall clock (its control's `remainingMs`, read at each
+   *  attach the executor opens; undefined until the harness starts the lease):
+   *  every attach the run's resident executor opens is clipped to it
+   *  (execution.md item 9). Absent for a caller with no run control. */
+  remainingMs?: () => number | undefined;
 }
 
 /** How a recorded workspace's re-attach ended: the round's workspace
@@ -731,7 +737,7 @@ async function attachRound(
   deps: Pick<ProvisionDeps, "config" | "dataDir">,
   ctx: AttachContext,
 ): Promise<RoundWorkspace> {
-  const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal } = ctx;
+  const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal, remainingMs } = ctx;
   const ownPr = ownPrOf(repoCtx);
   return root.span("dispatch.workspace.attach", async (span) => {
     // The resident's own steps (clone, install, the mutex wait…) graft under
@@ -765,6 +771,7 @@ async function attachRound(
           ...(ownPr !== undefined ? { ownPr } : {}),
           ...(reattach !== undefined ? { reattach } : {}),
           ...(stopSignal !== undefined ? { stopSignal } : {}),
+          ...(remainingMs !== undefined ? { remainingMs } : {}),
         },
         logKey: threadKey,
         span,
@@ -792,10 +799,14 @@ async function attachRound(
 export async function reattachWorkspace(
   deps: Pick<ProvisionDeps, "config" | "dataDir">,
   ctx: AttachContext & { reattach: WorkspaceBinding },
-): Promise<WorkspaceReattach> {
+): Promise<WorkspaceReattach | { kind: "lease_spent"; why: string }> {
   try {
     return { kind: "attached", round: await attachRound(deps, ctx) };
   } catch (err) {
+    // The run's lease is inside its write-up reserve (execution.md item 9): the
+    // factory asked for nothing, and the caller ends the run on its budget —
+    // never a refusal that restarts it from its request.
+    if (err instanceof WorkspaceReattachLeaseSpentError) return { kind: "lease_spent", why: err.why };
     // The run's workspace is where its row says or nowhere (item 54): the
     // factory tried that backend alone and refused by name.
     if (err instanceof WorkspaceReattachRefusedError) return { kind: "reattach_refused", why: err.why };
@@ -820,6 +831,7 @@ export async function attachWorkspace(
   ctx: GateContext & GateCard & Omit<AttachContext, "threadKey">,
 ): Promise<WorkspaceAttach> {
   const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach, stopSignal } = ctx;
+  const { remainingMs } = ctx;
   let round: RoundWorkspace;
   try {
     round = await attachRound(deps, {
@@ -831,6 +843,7 @@ export async function attachWorkspace(
       clock,
       ...(reattach !== undefined ? { reattach } : {}),
       ...(stopSignal !== undefined ? { stopSignal } : {}),
+      ...(remainingMs !== undefined ? { remainingMs } : {}),
     });
   } catch (err) {
     // Ask-once: the resident has no ref binding for this thread, the

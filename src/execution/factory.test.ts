@@ -6,7 +6,7 @@ import { secretsFrom } from "../secrets.js";
 import { AGENTS, type AgentDef } from "../agents/registry.js";
 import { declaredProfile } from "../config/profile.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
-import { LocalExecutor } from "./executor.js";
+import { ExecInfraError, LocalExecutor } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
 import {
   makeExecutor,
@@ -215,8 +215,8 @@ describe("makeExecutor resident selection", () => {
     return { fn, calls };
   }
 
-  /** FIFO fetch stub; a canned {reject} entry simulates a network failure. */
-  function stubFetch(...responses: Array<{ status?: number; body?: unknown; reject?: string }>) {
+  /** FIFO fetch stub; a canned {reject} entry simulates a network failure, a {raw} entry a non-JSON body (the edge's page). */
+  function stubFetch(...responses: Array<{ status?: number; body?: unknown; raw?: string; reject?: string }>) {
     const calls: string[] = [];
     const bodies: Array<Record<string, unknown> | undefined> = [];
     const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
@@ -225,7 +225,7 @@ describe("makeExecutor resident selection", () => {
       const next = responses.shift();
       if (!next) throw new Error(`unexpected fetch: ${String(url)}`);
       if (next.reject) throw new TypeError(next.reject);
-      return new Response(JSON.stringify(next.body ?? {}), { status: next.status ?? 200 });
+      return new Response(next.raw ?? JSON.stringify(next.body ?? {}), { status: next.status ?? 200 });
     });
     vi.stubGlobal("fetch", fn);
     return { fn, calls, bodies };
@@ -1000,6 +1000,268 @@ describe("makeExecutor resident selection", () => {
     expect(second.executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(second.note).toMatch(/unreachable/);
     expect(fn).toHaveBeenCalledTimes(1); // circuit breaker: one timeout per outage window
+  });
+
+  it("a transport failure met on a re-probe inside the blip wait ends the wait at once AND opens the outage breaker, as the first probe's would: the next dispatch inside the window skips the fetch", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const { fn } = stubFetch(
+        { status: 500, body: { error: "internal error", status: 500, transient: true } },
+        { reject: "fetch failed" },
+      );
+      const first = await makeExecutor(residentOpts(), repoCtx());
+      expect(first.executor).toBeInstanceOf(CloudflareSandboxExecutor);
+      expect(first.note).toMatch(/^resident unreachable \(.*fetch failed.*\) — using fresh sandbox$/);
+      const second = await makeExecutor(residentOpts(), repoCtx());
+      expect(second.executor).toBeInstanceOf(CloudflareSandboxExecutor);
+      expect(second.note).toMatch(/probe skipped during outage window/);
+      expect(fn).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a hard stop that lands inside a re-probe of the blip wait opens NO outage window — the stop's signal decides before the error's name, as at every send — so the next dispatch in the process probes", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const transient = { status: 500, body: { error: "internal error", status: 500, transient: true } };
+      // The probe is the blip; its at-once re-probe hangs; the stop lands inside it.
+      const hung = stubFetchLate(transient, { ...transient, afterMs: 60_000 });
+      const control = new AbortController();
+      let settled: unknown;
+      void makeExecutor(residentOpts(), { ...repoCtx(), stopSignal: control.signal }).catch(
+        (e: unknown) => (settled = e),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBeUndefined();
+      control.abort();
+      await vi.advanceTimersByTimeAsync(1);
+      expect((settled as { reason?: string }).reason).toBe("aborted");
+      expect(hung.calls).toEqual(["/status", "/status"]);
+      // The next dispatch fetches: no `probe skipped during outage window`.
+      const next = stubFetch(
+        { body: { state: "warm", reason: "" } },
+        { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" } },
+      );
+      const { executor, note } = await makeExecutor(residentOpts(), repoCtx());
+      expect(executor).toBeInstanceOf(ResidentExecutor);
+      expect(note).toBe("resident · jshttp/vary · master@abc");
+      expect(next.calls).toEqual(["/status", "/attach"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a hard stop that lands inside the FIRST probe of a dead resident is the stop, not a transport failure that arms the breaker: the probe carries the run's stop as every re-probe does, the run ends `aborted`, and the next dispatch probes", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      // A dead resident: the first probe hangs; the stop lands 200 ms in.
+      const hung = stubFetchLate({ body: { state: "warm", reason: "" }, afterMs: 60_000 });
+      const control = new AbortController();
+      let settled: unknown;
+      void makeExecutor(residentOpts(), { ...repoCtx(), stopSignal: control.signal }).catch(
+        (e: unknown) => (settled = e),
+      );
+      await vi.advanceTimersByTimeAsync(200);
+      expect(settled).toBeUndefined();
+      control.abort();
+      await vi.advanceTimersByTimeAsync(1);
+      expect((settled as { reason?: string }).reason).toBe("aborted");
+      expect(hung.calls).toEqual(["/status"]);
+      const next = stubFetch(
+        { body: { state: "warm", reason: "" } },
+        { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" } },
+      );
+      const { executor } = await makeExecutor(residentOpts(), repoCtx());
+      expect(executor).toBeInstanceOf(ResidentExecutor);
+      expect(next.calls).toEqual(["/status", "/attach"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an edge 5xx — the platform's own page, no Worker document — held for the whole blip wait arms the outage window as a transport failure would, so an edge outage costs one wait, not one per concurrent dispatch; the Worker's own typed blip never arms it", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const edge = {
+        status: 502,
+        raw: "<html><head><title>502 Bad Gateway</title></head><body>cloudflare</body></html>",
+      };
+      // The probe, its at-once re-probe, then one every 5 s to the budget's edge: 14 in all.
+      const { fn } = stubFetch(...Array.from({ length: 14 }, () => edge));
+      let settled: { note?: string } | undefined;
+      const p = makeExecutor(residentOpts(), repoCtx()).then((s) => (settled = s));
+      await vi.advanceTimersByTimeAsync(60_000);
+      await p;
+      expect(settled?.note).toBe(
+        "resident unreachable (probe HTTP 502: no Worker document in the answer) after waiting 60s — using fresh sandbox",
+      );
+      expect(fn).toHaveBeenCalledTimes(14);
+      // Inside the window the next dispatch skips the fetch, the wait named.
+      const second = await makeExecutor(residentOpts(), repoCtx());
+      expect(second.executor).toBeInstanceOf(CloudflareSandboxExecutor);
+      expect(second.note).toMatch(
+        /the edge's own page \(no Worker document\) for 14 of 14 probes over 60s; probe skipped during outage window/,
+      );
+      expect(fn).toHaveBeenCalledTimes(14);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the window is armed by what the wait was SPENT on — more edge pages than Worker-typed blips among its views — never by its last view alone: an edge wait that ends on one Worker-typed view still arms it, and a Worker-typed wait that ends on one edge page arms nothing", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const edge = {
+        status: 502,
+        raw: "<html><head><title>502 Bad Gateway</title></head><body>cloudflare</body></html>",
+      };
+      const typed = { status: 500, body: { error: "internal error", status: 500, transient: true } };
+      // (a) 13 edge pages, then the last view Worker-typed: the platform did not answer for the wait — armed.
+      const a = stubFetch(...Array.from({ length: 13 }, () => edge), typed);
+      let first: { note?: string } | undefined;
+      const p1 = makeExecutor(residentOpts(), repoCtx()).then((s) => (first = s));
+      await vi.advanceTimersByTimeAsync(60_000);
+      await p1;
+      expect(first?.note).toBe(
+        "resident unreachable (probe HTTP 500: internal error) after waiting 60s — using fresh sandbox",
+      );
+      const afterA = await makeExecutor(residentOpts(), repoCtx());
+      expect(afterA.note).toMatch(/probe skipped during outage window/);
+      expect(a.fn).toHaveBeenCalledTimes(14);
+      // (b) 13 Worker-typed blips, then one edge page at the end: the Durable Object's blip, not an outage — nothing armed.
+      resetResidentProbeCache();
+      const b = stubFetch(
+        ...Array.from({ length: 13 }, () => typed),
+        edge,
+        { body: { state: "warm", reason: "" } },
+        { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" } },
+      );
+      let second: { note?: string } | undefined;
+      const p2 = makeExecutor(residentOpts(), repoCtx()).then((s) => (second = s));
+      await vi.advanceTimersByTimeAsync(60_000);
+      await p2;
+      expect(second?.note).toBe(
+        "resident unreachable (probe HTTP 502: no Worker document in the answer) after waiting 60s — using fresh sandbox",
+      );
+      const afterB = await makeExecutor(residentOpts(), repoCtx());
+      expect(afterB.executor).toBeInstanceOf(ResidentExecutor);
+      expect(b.fn).toHaveBeenCalledTimes(16);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an edge 5xx on the selection's /attach is the same blip: `attach()` waits it through and the next serving view binds, instead of a plain error that falls cold a minute after the probe waited", async () => {
+    stubEnvs();
+    const { calls } = stubFetch(
+      { body: { state: "warm", reason: "" } },
+      { status: 502, raw: "<html><head><title>502 Bad Gateway</title></head><body>cloudflare</body></html>" },
+      { body: { state: "warm", reason: "", inFlight: 0 } },
+      { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" } },
+    );
+    const { executor, note, binding } = await makeExecutor(residentOpts(), repoCtx());
+    expect(executor).toBeInstanceOf(ResidentExecutor);
+    expect(binding).toMatchObject({ ref: "master", sha: "abc", wokeAfterMs: 0 });
+    expect(note).toBe("resident · jshttp/vary · master@abc");
+    expect(calls).toEqual(["/status", "/attach", "/status", "/attach"]);
+  });
+
+  it("the executor a dispatch builds carries the run's clock (`ExecutorContext.remainingMs` → `ResidentExecutorOptions.remainingMs`): a container op it runs later with 90s of run left meets a rollout and its re-attach is struck at 30s, never held for the five-minute default", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const { calls } = stubFetchLate(
+        { body: { state: "warm", reason: "" } },
+        { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" } },
+        { body: { error: "not-serviceable: The container just exited", status: 503, state: "warm", reason: "" } },
+        { body: { state: "warm", reason: "" } },
+        { body: { state: "warm", reason: "" } },
+        {
+          body: { workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" },
+          afterMs: 30 * 60_000,
+        },
+      );
+      let left: number | undefined; // undefined until the harness starts the lease
+      const { executor } = await makeExecutor(residentOpts(), { ...repoCtx(), remainingMs: () => left });
+      expect(executor).toBeInstanceOf(ResidentExecutor);
+      left = 90_000;
+      let settled: unknown;
+      const p = executor.exec("alive-probe", { timeoutMs: 60_000 }).catch((e: unknown) => (settled = e));
+      await vi.advanceTimersByTimeAsync(34_999);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      await p;
+      expect(settled).toBeInstanceOf(ExecInfraError);
+      expect((settled as ExecInfraError).reason).toBe("worker-unavailable");
+      expect((settled as Error).message).toContain("the re-attach after 35s did not answer");
+      expect((settled as Error).message).toContain("the 30s call deadline passed");
+      expect(calls).toEqual(["/status", "/attach", "/exec", "/status", "/status", "/attach"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a configured `probeTimeoutMs` bounds every probe of the selection's wait, not only the first: a re-probe that hangs is the transport failing at the configured second (2 s by default), never at the wake's 5 s, so the operator's cold-fallback pace holds through the blip", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const transient = { status: 500, body: { error: "internal error", status: 500, transient: true } };
+      for (const { probeTimeoutMs, deadline } of [
+        { probeTimeoutMs: 1_000, deadline: "1s" },
+        { probeTimeoutMs: undefined, deadline: "2s" },
+      ]) {
+        resetResidentProbeCache();
+        const { calls } = stubFetchLate(transient, { ...transient, afterMs: 60_000 });
+        const opts: ExecutorFactoryOptions = {
+          ...residentOpts(),
+          execution: {
+            type: "cloudflare",
+            url: "https://sandbox.example",
+            resident: { baseUrl: "https://resident.example", ...(probeTimeoutMs ? { probeTimeoutMs } : {}) },
+          },
+        };
+        let settled: { note?: string } | undefined;
+        void makeExecutor(opts, repoCtx()).then((s) => (settled = s));
+        await vi.advanceTimersByTimeAsync((probeTimeoutMs ?? 2_000) - 1);
+        expect(settled, deadline).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(settled?.note).toBe(
+          `resident unreachable (the ${deadline} call deadline passed) after waiting ${deadline} — using fresh sandbox`,
+        );
+        expect(calls).toEqual(["/status", "/status"]);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an attach that fails after the probe waited through a blip names that wait too, so a run that started late and then fell cold says why", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const transient = { status: 500, body: { error: "internal error", status: 500, transient: true } };
+      // The probe, its at-once re-probe, then one every 5 s: transient until the view at t=45 s serves.
+      const { calls } = stubFetch(
+        ...Array.from({ length: 10 }, () => transient),
+        { body: { state: "warm", reason: "" } },
+        { body: { error: "attach-failed at clone: exit 128", status: 500 } },
+      );
+      const p = makeExecutor(residentOpts(), repoCtx());
+      await vi.advanceTimersByTimeAsync(45_000);
+      const { executor, note } = await p;
+      expect(executor).toBeInstanceOf(CloudflareSandboxExecutor);
+      expect(note).toMatch(/^resident attach failed \(.*exit 128.*\) after waiting 45s — using fresh sandbox$/);
+      expect(calls.filter((c) => c === "/status")).toHaveLength(11);
+      expect(calls.at(-1)).toBe("/attach");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // The selection probe meets the blip the attach's wait exists for, a moment

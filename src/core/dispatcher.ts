@@ -901,6 +901,7 @@ export async function dispatch(
     // run-history item 54), never provisioning again; a fresh run attaches as
     // it always did.
     const reattach = resume ? carriedWorkspaceBinding(resume.row) : undefined;
+    const control = registered?.control;
     const attach = await attachWorkspace(deps, {
       msg,
       io,
@@ -915,8 +916,10 @@ export async function dispatch(
       root,
       ...(reattach !== undefined ? { reattach } : {}),
       // The run's control exists from the registry row above: a stop relayed
-      // during the attach ends its wake wait at once (execution.md item 9).
-      ...(registered ? { stopSignal: registered.control.hardSignal } : {}),
+      // during the attach ends its wake wait at once, and once the harness
+      // starts the lease every attach the executor opens is clipped to the
+      // run's remaining clock (execution.md item 9).
+      ...(control ? { stopSignal: control.hardSignal, remainingMs: () => control.remainingMs() } : {}),
     });
     if (attach.kind === "refused") return ended;
     if (attach.kind === "stopped") {
