@@ -1,4 +1,11 @@
-import { GithubApiError, type GithubApi, type IssueSummary } from "../execution/githubApi.js";
+import {
+  ACTIONS_LOG_MAX_CHARS,
+  GithubApiError,
+  type ActionsJob,
+  type GithubApi,
+  type IssueSummary,
+} from "../execution/githubApi.js";
+import { redactSecrets, stripAnsi } from "../core/redact.js";
 import type { RunnableTool } from "./runnableTool.js";
 
 // The `github_*` tools (docs/reference/specs/github-tools.md): every agent with a tool
@@ -431,6 +438,244 @@ export const githubIssueDeleteTool: RunnableTool = {
   },
 };
 
+// ---- Actions triage (docs/reference/specs/github-tools.md item 9) ---------------------
+
+const ACTIONS_URL_RE =
+  /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)\/actions\/runs\/(\d+)(?:\/attempts\/\d+)?(?:\/job\/(\d+))?(?:[/?#].*)?$/i;
+/** The line prefix GitHub puts on every log line: an ISO timestamp with 7 fractional digits. */
+const LOG_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?/;
+const DEFAULT_TAIL_LINES = 200;
+const MAX_TAIL_LINES = 2000;
+const MAX_ERROR_LINES = 30;
+/** Conclusions that read as "this went wrong" — they sort first and get the ✗. */
+const BAD = new Set(["failure", "cancelled", "timed_out", "action_required", "startup_failure", "stale"]);
+/** The order jobs and their counts are shown in: what went wrong, what is still going, what passed, the rest. */
+const OUTCOME_RANK = [
+  "failure",
+  "cancelled",
+  "timed_out",
+  "action_required",
+  "startup_failure",
+  "stale",
+  "in_progress",
+  "queued",
+  "waiting",
+  "pending",
+  "requested",
+  "success",
+  "skipped",
+  "neutral",
+];
+
+/** The repo and the one id the tool reads: a run id for `github_actions_run`, a job id for `github_actions_job_log`. */
+type ActionsRef = { repo: string; id: number } | { error: string };
+
+/** `run`/`job` as an id (with `repo`) or a github.com Actions URL (which names the repo itself). */
+function actionsRef(
+  tool: "github_actions_run" | "github_actions_job_log",
+  input: Record<string, unknown>,
+  key: "run" | "job",
+): ActionsRef {
+  const raw = input[key];
+  const s = String(raw ?? "").trim();
+  const noun = key === "run" ? "run" : "job";
+  const shape =
+    key === "run"
+      ? "github.com/<owner>/<repo>/actions/runs/<id>"
+      : "github.com/<owner>/<repo>/actions/runs/<run>/job/<id>";
+  const explicit = input.repo !== undefined && String(input.repo).trim() !== "" ? repoOf(input) : undefined;
+  if (typeof explicit === "object") return { error: `${tool}: ${explicit.error}` };
+  if (/^\d+$/.test(s)) {
+    if (!explicit)
+      return { error: `${tool}: repo is required when ${noun} is an id (owner/name), or pass the ${noun}'s URL.` };
+    return { repo: explicit, id: Number(s) };
+  }
+  const m = ACTIONS_URL_RE.exec(s);
+  if (!m) return { error: `${tool}: ${noun} must be a ${noun} id or a ${shape} URL (got ${JSON.stringify(s)}).` };
+  const repo = `${m[1]}/${m[2]}`.toLowerCase();
+  if (explicit && explicit !== repo)
+    return { error: `${tool}: the URL names ${repo} but repo says ${explicit} — pass one or the other.` };
+  if (key === "run") return { repo, id: Number(m[3]) };
+  if (!m[4])
+    return { error: `${tool}: that URL names a run, not a job — github_actions_run lists its jobs with their ids.` };
+  return { repo, id: Number(m[4]) };
+}
+
+/** `4m12s`, `2s`, `1h03m` — the span between two ISO instants, or undefined without both. */
+function spanOf(from: string | null | undefined, to: string | null | undefined): string | undefined {
+  if (!from || !to) return undefined;
+  const ms = Date.parse(to) - Date.parse(from);
+  if (!Number.isFinite(ms) || ms < 0) return undefined;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+
+const outcomeOf = (x: { status: string; conclusion: string | null }): string => x.conclusion ?? x.status;
+const rankOf = (outcome: string): number => {
+  const i = OUTCOME_RANK.indexOf(outcome);
+  return i < 0 ? OUTCOME_RANK.length : i;
+};
+const markOf = (outcome: string): string => (BAD.has(outcome) ? "✗" : outcome === "success" ? "✓" : "·");
+const quote = (s: string): string => `“${s}”`;
+
+function stepsLine(job: ActionsJob): string {
+  if (job.steps.length === 0) return "Steps: none reported yet";
+  return `Steps: ${job.steps
+    .map((s) => {
+      const outcome = outcomeOf(s);
+      const mark = BAD.has(outcome) ? "✗" : outcome === "success" ? "✓" : "–";
+      // A finished step shows how long it took; a skipped or still-running one shows that instead.
+      const tail = outcome === "success" || BAD.has(outcome) ? spanOf(s.startedAt, s.completedAt) : outcome;
+      return `${mark} ${s.number} ${s.name}${tail ? ` (${tail})` : ""}`;
+    })
+    .join(" · ")}`;
+}
+
+export const githubActionsRunTool: RunnableTool = {
+  sideEffectFree: true,
+  name: "github_actions_run",
+  description:
+    'Read one GitHub Actions workflow run: its status and conclusion, the branch, sha and event, and every job with its conclusion, duration and failed steps. Pass the run URL a person pasted (github.com/<owner>/<repo>/actions/runs/<id>, a /job/<id> URL works too) or repo + run id. Start here for "why did this run fail?", then read the failed job with github_actions_job_log.',
+  inputSchema: {
+    type: "object",
+    properties: {
+      run: { type: "string", description: "The run's github.com URL, or its numeric id (then repo is required)" },
+      repo: { type: "string", description: "owner/name — only when run is an id" },
+    },
+    required: ["run"],
+  },
+  async run(input, ctx) {
+    if (!ctx.github) return UNAVAILABLE;
+    const ref = actionsRef("github_actions_run", input, "run");
+    if ("error" in ref) return ref.error;
+    try {
+      const { run, jobs } = await ctx.github.api.getActionsRun(ref.repo, ref.id);
+      const sorted = [...jobs].sort(
+        (a, b) => rankOf(outcomeOf(a)) - rankOf(outcomeOf(b)) || a.name.localeCompare(b.name),
+      );
+      const counts = new Map<string, number>();
+      for (const j of sorted) counts.set(outcomeOf(j), (counts.get(outcomeOf(j)) ?? 0) + 1);
+      const attempt = run.runAttempt > 1 ? ` (attempt ${run.runAttempt})` : "";
+      const verdict = run.conclusion ? `${run.conclusion} (${run.status})` : run.status;
+      const title = run.displayTitle ? ` · ${quote(run.displayTitle)}` : "";
+      const lines = [
+        `${ref.repo} · ${run.name} run #${run.runNumber}${attempt} — ${verdict} · ${run.event} on ${run.headBranch} @ ${run.headSha.slice(0, 7)}${title}`,
+        `${run.url} · started ${run.runStartedAt}, ${spanOf(run.runStartedAt, run.updatedAt) ?? "?"} to the last update · ${run.workflowPath}`,
+        "",
+        `Jobs (${jobs.length}): ${[...counts.entries()].map(([k, n]) => `${n} ${k}`).join(", ") || "none"}`,
+      ];
+      for (const j of sorted) {
+        const outcome = outcomeOf(j);
+        const took = spanOf(j.startedAt, j.completedAt);
+        lines.push(`${markOf(outcome)} ${j.name} — ${outcome}${took ? `, ${took}` : ""} (job ${j.id})`);
+        if (outcome === "success") continue;
+        const notable = j.steps.filter((s) => outcomeOf(s) !== "success");
+        if (notable.length)
+          lines.push(
+            `   ${notable
+              .map((s) => {
+                const o = outcomeOf(s);
+                const took = BAD.has(o) ? spanOf(s.startedAt, s.completedAt) : undefined;
+                return `${o === "failure" ? "failed" : o} step ${s.number} ${quote(s.name)}${took ? ` (${took})` : ""}`;
+              })
+              .join("; ")}`,
+          );
+        if (j.url) lines.push(`   ${j.url}`);
+      }
+      const failed = sorted.filter((j) => BAD.has(outcomeOf(j)));
+      lines.push("");
+      if (failed.length) {
+        const [first, ...rest] = failed;
+        const others = rest.length ? ` (or ${rest.map((j) => j.id).join(", ")})` : "";
+        lines.push(
+          `Next: github_actions_job_log with job ${first.id}${others} shows the failed job's errors and the end of its log.`,
+        );
+      } else if (run.status !== "completed") lines.push("The run is still running; ask again for its final state.");
+      else lines.push("Every job succeeded.");
+      return lines.join("\n");
+    } catch (err) {
+      return describeError("github_actions_run", err, ref.repo);
+    }
+  },
+};
+
+export const githubActionsJobLogTool: RunnableTool = {
+  sideEffectFree: true,
+  name: "github_actions_job_log",
+  description:
+    "Read one GitHub Actions job's log: its steps with their conclusions, every ##[error] line, and the last `lines` lines of the log (default 200, max 2000) — or, with `match`, only the lines containing that text. Pass the job URL (github.com/<owner>/<repo>/actions/runs/<run>/job/<id>) or repo + job id; github_actions_run lists a run's jobs with their ids. Timestamps are stripped.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      job: { type: "string", description: "The job's github.com URL, or its numeric id (then repo is required)" },
+      repo: { type: "string", description: "owner/name — only when job is an id" },
+      lines: { type: "integer", description: "How many lines of the log's end to show (default 200, max 2000)" },
+      match: {
+        type: "string",
+        description: "Show only lines containing this text (case-insensitive) instead of the tail",
+      },
+    },
+    required: ["job"],
+  },
+  async run(input, ctx) {
+    if (!ctx.github) return UNAVAILABLE;
+    const ref = actionsRef("github_actions_job_log", input, "job");
+    if ("error" in ref) return ref.error;
+    const want = Math.min(MAX_TAIL_LINES, Math.max(1, Math.trunc(Number(input.lines)) || DEFAULT_TAIL_LINES));
+    const match = input.match === undefined || input.match === null ? "" : String(input.match).trim();
+    try {
+      const [job, log] = await Promise.all([
+        ctx.github.api.getActionsJob(ref.repo, ref.id),
+        ctx.github.api.getActionsJobLog(ref.repo, ref.id),
+      ]);
+      const outcome = outcomeOf(job);
+      const took = spanOf(job.startedAt, job.completedAt);
+      const out = [
+        `${ref.repo} · job ${quote(job.name)} (${job.id}) of run ${job.runId} — ${outcome}${took ? `, ${took}` : ""} · runner ${job.runnerName ?? "unknown"}`,
+        job.url,
+        stepsLine(job),
+      ];
+      if (job.status !== "completed") out.push("The job is still running; the log is what GitHub has so far.");
+      if (!log.complete) out.push(`The log ran past ${ACTIONS_LOG_MAX_CHARS} characters; only its end is shown.`);
+      // Remote text: redact before anything else reads it (resident-repos item 62's rule), then drop
+      // the per-line timestamp so a line costs its words, not its clock.
+      const all = redactSecrets(stripAnsi(log.text))
+        .split("\n")
+        .map((l) => l.replace(LOG_TIMESTAMP_RE, ""));
+      if (all.length && all[all.length - 1] === "") all.pop();
+      const errors = all.filter((l) => l.includes("##[error]"));
+      out.push("");
+      if (errors.length === 0) out.push("Errors: no ##[error] lines.");
+      else {
+        out.push(`Errors (${errors.length}):`, ...errors.slice(0, MAX_ERROR_LINES));
+        if (errors.length > MAX_ERROR_LINES) out.push(`… (${errors.length - MAX_ERROR_LINES} more)`);
+      }
+      out.push("");
+      if (match) {
+        const needle = match.toLowerCase();
+        const hits = all.filter((l) => l.toLowerCase().includes(needle));
+        if (hits.length === 0) out.push(`Lines matching ${JSON.stringify(match)} (0 of ${all.length}): none.`);
+        else {
+          out.push(
+            `Lines matching ${JSON.stringify(match)} (${hits.length} of ${all.length}):`,
+            ...hits.slice(0, want),
+          );
+          if (hits.length > want) out.push(`… (${hits.length - want} more; raise lines or narrow match)`);
+        }
+      } else {
+        const tail = all.slice(-want);
+        out.push(`Last ${tail.length} lines of ${all.length}:`, ...tail);
+      }
+      return out.join("\n");
+    } catch (err) {
+      return describeError("github_actions_job_log", err, ref.repo);
+    }
+  },
+};
+
 /** Repository + issue READS — safe for every agent with a tool loop. */
 export const GITHUB_READ_TOOLS: RunnableTool[] = [
   githubReposTool,
@@ -439,6 +684,8 @@ export const GITHUB_READ_TOOLS: RunnableTool[] = [
   githubSearchCodeTool,
   githubIssueListTool,
   githubIssueGetTool,
+  githubActionsRunTool,
+  githubActionsJobLogTool,
 ];
 /** Issue WRITES — gated per repo by the requesting user's permission. */
 export const GITHUB_ISSUE_WRITE_TOOLS: RunnableTool[] = [

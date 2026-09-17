@@ -3,6 +3,7 @@ import type { Span } from "../core/trace/types.js";
 import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
 import { classifyError } from "../core/trace/classify.js";
 import { redactAndCap } from "../core/redact.js";
+import { MINUTE_MS } from "../core/budgets.js";
 
 // The GitHub capability behind the `github_*` agent tools
 // (docs/reference/specs/github-tools.md): repository reads (files, trees, code search, the
@@ -17,6 +18,10 @@ import { redactAndCap } from "../core/redact.js";
 const REQUEST_TIMEOUT_MS = 15_000;
 /** `listIssues` reads at most this many 100-row pages while filling `limit`. */
 const MAX_ISSUE_PAGES = 3;
+/** `getActionsRun` reads at most this many 100-row job pages. */
+const MAX_JOB_PAGES = 3;
+/** A job log is read to its end (a tail window), so it gets a longer deadline than a JSON call. */
+const LOG_TIMEOUT_MS = MINUTE_MS;
 /** GitHub rejects an issue body over 65536 chars; clip with a visible note. */
 const MAX_BODY_CHARS = 65_000;
 /** A file the model can usefully read in one call; larger files are clipped
@@ -117,6 +122,12 @@ export interface GithubApi {
    *  says the diff went on past the cap. GitHub itself answers 406 for a
    *  comparison too large to render as a diff (a `GithubApiError`). */
   compareDiff(repo: string, base: string, head: string, maxChars?: number): Promise<CompareDiff>;
+  /** A workflow run and its jobs with their steps (item 9) — `actions: read` on the read token. */
+  getActionsRun(repo: string, runId: number): Promise<{ run: ActionsRun; jobs: ActionsJob[] }>;
+  getActionsJob(repo: string, jobId: number): Promise<ActionsJob>;
+  /** One job's log, its last `maxChars` characters (default `ACTIONS_LOG_MAX_CHARS`);
+   *  the 302 to the signed blob URL is followed without the App credential. */
+  getActionsJobLog(repo: string, jobId: number, maxChars?: number): Promise<ActionsJobLog>;
 }
 
 export interface CompareDiff {
@@ -128,6 +139,63 @@ export interface CompareDiff {
 /** The most of a compare diff the bot reads: about ten times the recorded
  *  artifact's cap — beyond it no model abridges the change usefully anyway. */
 export const COMPARE_DIFF_MAX_CHARS = 1_200_000;
+
+/** One workflow run as the triage tools show it (docs/reference/specs/github-tools.md item 9). */
+export interface ActionsRun {
+  id: number;
+  /** The workflow's name (`CI`). */
+  name: string;
+  /** The run's title: the commit subject or the PR title. */
+  displayTitle: string;
+  /** The workflow file (`.github/workflows/ci.yml`). */
+  workflowPath: string;
+  /** `queued` | `in_progress` | `completed` | … as GitHub words it. */
+  status: string;
+  /** `success` | `failure` | `cancelled` | … ; null while the run is live. */
+  conclusion: string | null;
+  event: string;
+  headBranch: string;
+  headSha: string;
+  runNumber: number;
+  runAttempt: number;
+  url: string;
+  createdAt: string;
+  runStartedAt: string;
+  updatedAt: string;
+}
+
+export interface ActionsStep {
+  number: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface ActionsJob {
+  id: number;
+  runId: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  url: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  runnerName: string | null;
+  steps: ActionsStep[];
+}
+
+export interface ActionsJobLog {
+  /** The log's text — its LAST `maxChars` characters when it ran past the cap. */
+  text: string;
+  /** False when the log was longer than the cap and its head was dropped. */
+  complete: boolean;
+}
+
+/** The most of a job log the bot keeps: its tail, where a failed job's failure
+ *  is — a multi-MB log costs this much memory and no more. */
+export const ACTIONS_LOG_MAX_CHARS = 2_000_000;
 
 /** Thrown for every non-success GitHub answer; `status` lets a tool word 404s
  *  ("outside the installation, or no such path") apart from the rest. */
@@ -164,6 +232,11 @@ export type GithubRoute =
   | "issue_update"
   | "issue_comment_create"
   | "compare"
+  | "actions_run"
+  | "actions_run_jobs"
+  | "actions_job"
+  | "actions_job_logs"
+  | "actions_job_logs_blob"
   | "graphql"
   | "app_installation_token";
 
@@ -401,6 +474,71 @@ export class RestGithubApi implements GithubApi {
     }
   }
 
+  // ---- Actions (docs/reference/specs/github-tools.md item 9) ----------------------------
+
+  async getActionsRun(repo: string, runId: number): Promise<{ run: ActionsRun; jobs: ActionsJob[] }> {
+    const res = await this.request("read", "GET", "actions_run", `/repos/${repo}/actions/runs/${runId}`);
+    const run = toActionsRun((await res.json()) as Record<string, unknown>);
+    const jobs: ActionsJob[] = [];
+    for (let page = 1; page <= MAX_JOB_PAGES; page++) {
+      const j = await this.request(
+        "read",
+        "GET",
+        "actions_run_jobs",
+        `/repos/${repo}/actions/runs/${runId}/jobs?per_page=100&page=${page}`,
+      );
+      const body = (await j.json()) as { jobs?: Array<Record<string, unknown>> };
+      const rows = body.jobs ?? [];
+      jobs.push(...rows.map(toActionsJob));
+      if (rows.length < 100) break;
+    }
+    return { run, jobs };
+  }
+
+  async getActionsJob(repo: string, jobId: number): Promise<ActionsJob> {
+    const res = await this.request("read", "GET", "actions_job", `/repos/${repo}/actions/jobs/${jobId}`);
+    return toActionsJob((await res.json()) as Record<string, unknown>);
+  }
+
+  async getActionsJobLog(repo: string, jobId: number, maxChars = ACTIONS_LOG_MAX_CHARS): Promise<ActionsJobLog> {
+    // GitHub answers the log with a 302 to a short-lived signed URL on a blob
+    // host. The redirect is followed by hand so the App credential never
+    // leaves for that host: the signed URL is its own credential.
+    const first = await this.request(
+      "read",
+      "GET",
+      "actions_job_logs",
+      `/repos/${repo}/actions/jobs/${jobId}/logs`,
+      undefined,
+      "application/vnd.github+json",
+      { redirect: "manual" },
+    );
+    let res = first;
+    if (first.status >= 300 && first.status < 400) {
+      const location = first.headers.get("location");
+      await first.body?.cancel().catch(() => undefined);
+      if (!location)
+        throw classifyError(
+          new GithubApiError(502, `GitHub answered HTTP ${first.status} for the job log without a location`),
+          { kind: "http", code: String(first.status) },
+        );
+      res = await tracedFetch(
+        this.parent,
+        location,
+        { method: "GET", headers: { "user-agent": "switchboard" }, signal: AbortSignal.timeout(LOG_TIMEOUT_MS) },
+        { route: "actions_job_logs_blob", name: "github.rest", fetchImpl: this.fetchImpl },
+      );
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => undefined);
+        throw classifyError(new GithubApiError(res.status, `the job log's blob URL answered HTTP ${res.status}`), {
+          kind: "http",
+          code: String(res.status),
+        });
+      }
+    }
+    return readTailCapped(res, maxChars);
+  }
+
   /** One call. Non-2xx throws `GithubApiError` with the status and the start
    *  of GitHub's message. */
   private async request(
@@ -410,6 +548,7 @@ export class RestGithubApi implements GithubApi {
     path: string,
     body?: unknown,
     accept = "application/vnd.github+json",
+    opts: { redirect?: "manual" } = {},
   ): Promise<Response> {
     const token = await this.token(scope, this.parent);
     if (!token) throw new GithubApiError(401, "no GitHub credential available (configure the GitHub App or GH_TOKEN)");
@@ -429,10 +568,12 @@ export class RestGithubApi implements GithubApi {
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        ...(opts.redirect ? { redirect: opts.redirect } : {}),
       },
       { route, name: "github.rest", fetchImpl: this.fetchImpl },
     );
-    if (!res.ok) {
+    const redirected = opts.redirect === "manual" && res.status >= 300 && res.status < 400;
+    if (!res.ok && !redirected) {
       const text = await res.text().catch(() => "");
       // Item 62: a GitHub error body is remote text — redact BEFORE the slice.
       let detail = redactAndCap(text, 300);
@@ -481,6 +622,87 @@ export async function readTextCapped(res: Response, maxChars: number): Promise<s
   return text.slice(0, maxChars);
 }
 
+/** Read a response's text keeping only its LAST `maxChars` characters: a job
+ *  log's failure is at its end, and a multi-MB log must cost the cap's memory,
+ *  not its own. `complete` says whether anything was dropped. */
+export async function readTailCapped(res: Response, maxChars: number): Promise<ActionsJobLog> {
+  if (!res.body) {
+    const all = await res.text();
+    return { text: all.slice(-maxChars), complete: all.length <= maxChars };
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let dropped = false;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+      // Trim once the buffer is twice the cap, so the slice is amortised over
+      // the stream instead of running per chunk.
+      if (text.length > maxChars * 2) {
+        text = text.slice(-maxChars);
+        dropped = true;
+      }
+    }
+    text += decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+  if (text.length > maxChars) {
+    text = text.slice(-maxChars);
+    dropped = true;
+  }
+  return { text, complete: !dropped };
+}
+
+const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
+const strOrNull = (v: unknown): string | null => (typeof v === "string" ? v : null);
+
+function toActionsRun(row: Record<string, unknown>): ActionsRun {
+  return {
+    id: Number(row.id),
+    name: str(row.name),
+    displayTitle: str(row.display_title),
+    workflowPath: str(row.path),
+    status: str(row.status, "unknown"),
+    conclusion: strOrNull(row.conclusion),
+    event: str(row.event),
+    headBranch: str(row.head_branch),
+    headSha: str(row.head_sha),
+    runNumber: Number(row.run_number ?? 0),
+    runAttempt: Number(row.run_attempt ?? 1),
+    url: str(row.html_url),
+    createdAt: str(row.created_at),
+    runStartedAt: str(row.run_started_at, str(row.created_at)),
+    updatedAt: str(row.updated_at),
+  };
+}
+
+function toActionsJob(row: Record<string, unknown>): ActionsJob {
+  const steps = Array.isArray(row.steps) ? (row.steps as Array<Record<string, unknown>>) : [];
+  return {
+    id: Number(row.id),
+    runId: Number(row.run_id ?? 0),
+    name: str(row.name),
+    status: str(row.status, "unknown"),
+    conclusion: strOrNull(row.conclusion),
+    url: str(row.html_url),
+    startedAt: strOrNull(row.started_at),
+    completedAt: strOrNull(row.completed_at),
+    runnerName: strOrNull(row.runner_name),
+    steps: steps.map((s) => ({
+      number: Number(s.number ?? 0),
+      name: str(s.name),
+      status: str(s.status, "unknown"),
+      conclusion: strOrNull(s.conclusion),
+      startedAt: strOrNull(s.started_at),
+      completedAt: strOrNull(s.completed_at),
+    })),
+  };
+}
+
 function encodePath(path: string): string {
   return path
     .replace(/^\/+/, "")
@@ -524,6 +746,16 @@ export interface InMemoryRepo {
   /** Seeded comparisons by `base...head`: the diff text, or the HTTP status
    *  GitHub would answer (406 for a diff too large to render). */
   compares?: Record<string, string | { status: number }>;
+  /** Seeded workflow runs (item 9). */
+  actions?: InMemoryActionsRun[];
+}
+
+/** A seeded run with its jobs; a job may carry its log text. */
+export interface InMemoryActionsJob extends ActionsJob {
+  log?: string;
+}
+export interface InMemoryActionsRun extends ActionsRun {
+  jobs: InMemoryActionsJob[];
 }
 
 /** The test double and the second implementation: a map of repos with files
@@ -695,6 +927,36 @@ export class InMemoryGithubApi implements GithubApi {
     if (idx < 0) throw new GithubApiError(404, `GitHub GET /repos/${repo}/issues/${number} failed: HTTP 404 Not Found`);
     r.issues.splice(idx, 1);
     this.deleted.push(`${repo.toLowerCase()}#${number}`);
+  }
+
+  private actionsRun(repo: string, runId: number): InMemoryActionsRun {
+    const run = (this.repo(repo).actions ?? []).find((r) => r.id === runId);
+    if (!run)
+      throw new GithubApiError(404, `GitHub GET /repos/${repo}/actions/runs/${runId} failed: HTTP 404 Not Found`);
+    return run;
+  }
+
+  private actionsJob(repo: string, jobId: number): InMemoryActionsJob {
+    for (const run of this.repo(repo).actions ?? []) {
+      const job = run.jobs.find((j) => j.id === jobId);
+      if (job) return job;
+    }
+    throw new GithubApiError(404, `GitHub GET /repos/${repo}/actions/jobs/${jobId} failed: HTTP 404 Not Found`);
+  }
+
+  async getActionsRun(repo: string, runId: number): Promise<{ run: ActionsRun; jobs: ActionsJob[] }> {
+    const { jobs, ...run } = this.actionsRun(repo, runId);
+    return { run, jobs: jobs.map(({ log: _log, ...job }) => job) };
+  }
+
+  async getActionsJob(repo: string, jobId: number): Promise<ActionsJob> {
+    const { log: _log, ...job } = this.actionsJob(repo, jobId);
+    return job;
+  }
+
+  async getActionsJobLog(repo: string, jobId: number, maxChars = ACTIONS_LOG_MAX_CHARS): Promise<ActionsJobLog> {
+    const text = this.actionsJob(repo, jobId).log ?? "";
+    return { text: text.slice(-maxChars), complete: text.length <= maxChars };
   }
 
   async compareDiff(repo: string, base: string, head: string, maxChars = COMPARE_DIFF_MAX_CHARS): Promise<CompareDiff> {
