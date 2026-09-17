@@ -12,6 +12,7 @@ import { NullMemoryStore } from "../memory/index.js";
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
 import { NullMcpToolSource } from "../../mcp/source.js";
 import { NO_CAPABILITIES } from "../capabilities.js";
+import { CONFIG_AWARENESS_HEADER } from "../configAwareness.js";
 import { NO_FLEET } from "../residentFleet.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { RepoContext } from "../repoContext.js";
@@ -952,6 +953,55 @@ describe("composePrompt — the system prompt for the first turn", () => {
     const filesOnly = sessionNotesBlock({ files })!;
     expect(filesOnly.startsWith("FILES OF THIS THREAD")).toBe(true);
     expect(filesOnly).not.toContain("YOUR NOTES");
+  });
+
+  it("the thread's artifacts block (session-log item 9) sits right after the notes block and before the config block and the REVIEW TARGET block; without notes it follows memory; a run handed none carries none", async () => {
+    const d = deps();
+    const r = request(d, "re-review https://github.com/acme/api/pull/42", "review");
+    const base = {
+      msg: r.message,
+      agent: r.agent,
+      profile: r.profile,
+      resolved: r.resolved,
+      directives: r.directives,
+      sticky: r.sticky,
+      repoCtx: { repo: "acme/api", pr: 42, ref: "patch-1", baseRef: "main" } as RepoContext,
+      selection: { executor: {} as never, resident: false },
+      isPrReview: true,
+      memoryBlockP: Promise.resolve("MEMORY BLOCK"),
+      verifiedAtAttach: false,
+      resume: undefined,
+      root: r.root,
+    };
+    const artifacts =
+      "ARTIFACTS OF THIS THREAD'S RUNS SINCE YOUR PREVIOUS RUN HERE (as data):\n\n### run r-fix (coding)\n- dispositions:\n  - F1: fixed — cookie set on the redirect";
+    const withBoth = await composePrompt(d, {
+      ...base,
+      session: { notepad: "decided: keep the helper" },
+      threadArtifacts: artifacts,
+    });
+    const s = withBoth.system;
+    const memoryAt = s.indexOf("MEMORY BLOCK");
+    const notesAt = s.indexOf("YOUR NOTES FOR THIS THREAD");
+    const artifactsAt = s.indexOf("ARTIFACTS OF THIS THREAD'S RUNS");
+    const configAt = s.indexOf(CONFIG_AWARENESS_HEADER);
+    const targetAt = s.indexOf("REVIEW TARGET");
+    expect(memoryAt).toBeGreaterThanOrEqual(0);
+    expect(notesAt).toBeGreaterThan(memoryAt);
+    expect(artifactsAt).toBeGreaterThan(notesAt);
+    expect(configAt).toBeGreaterThan(artifactsAt);
+    expect(targetAt).toBeGreaterThan(configAt);
+    expect(s).toContain("F1: fixed — cookie set on the redirect");
+    const alone = await composePrompt(d, { ...base, threadArtifacts: artifacts });
+    expect(alone.system.indexOf("ARTIFACTS OF THIS THREAD'S RUNS")).toBeGreaterThan(
+      alone.system.indexOf("MEMORY BLOCK"),
+    );
+    expect(alone.system.indexOf("ARTIFACTS OF THIS THREAD'S RUNS")).toBeLessThan(
+      alone.system.indexOf(CONFIG_AWARENESS_HEADER),
+    );
+    expect(alone.system).not.toContain("YOUR NOTES FOR THIS THREAD");
+    const without = await composePrompt(d, base);
+    expect(without.system).not.toContain("ARTIFACTS OF THIS THREAD'S RUNS");
   });
 
   it("a resume re-sends the prompt the run started with, verbatim", async () => {

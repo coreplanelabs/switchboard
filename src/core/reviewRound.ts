@@ -307,6 +307,10 @@ export function makeSystemComposer(input: {
      *  compaction wrote (docs/reference/specs/session-log.md item 10): advisory
      *  context like memory, right after it — what this session already knows. */
     notes?: string | undefined;
+    /** The thread's artifacts since the agent's previous run (docs/reference/specs/session-log.md
+     *  item 9): what other runs of the thread recorded, as data — right after
+     *  the notes, since both are what the run knows before it reads anything. */
+    artifacts?: string | undefined;
     config: string | undefined;
     about?: string | undefined;
     instructions: string | undefined;
@@ -361,7 +365,7 @@ export function makeSystemComposer(input: {
       .join("\n\n");
   };
   return (head) =>
-    [blocks.memory, blocks.notes, blocks.config, blocks.about, blocks.instructions, agentSystem(head)]
+    [blocks.memory, blocks.notes, blocks.artifacts, blocks.config, blocks.about, blocks.instructions, agentSystem(head)]
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
 }

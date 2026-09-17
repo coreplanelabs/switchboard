@@ -83,6 +83,7 @@ import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispa
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
 import { readThread, stickyAgentOf, threadPrOf, threadRouteOf } from "./dispatch/thread.js";
+import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import { createRunsService } from "./runsService.js";
@@ -675,9 +676,15 @@ export async function dispatch(
     // run ended, the request — the tail's rows reused, not rewritten); every
     // other run from its thread's history. A log that could not be read is the
     // channel, and a note on the record says why.
-    const fromSession =
+    // Beside the seed, the thread's artifacts since the agent's previous run
+    // (session-log item 9; dispatch/threadArtifacts.ts): the records of the
+    // finished runs newer than that run — another agent's, a coordinator's
+    // child — read off the same page, whatever the seed's source, and rendered
+    // as data into the prompt (composePrompt below), never into the
+    // conversation. Both reads are of the thread and neither needs the other.
+    const [fromSession, threadArtifacts] = await Promise.all([
       !resume && !opts.seed && thread
-        ? await sessionSeedFor({
+        ? sessionSeedFor({
             ledger: deps.runLedger,
             threadKey: msg.threadKey,
             agent: agent.name,
@@ -690,9 +697,11 @@ export async function dispatch(
               ...(references.blocks.length > 0 ? { references: references.blocks } : {}),
             },
           })
-        : undefined;
+        : undefined,
+      thread ? threadArtifactsFor({ runs: runsService, thread, agent: agent.name }) : undefined,
+    ]);
     const session = fromSession?.seed;
-    const seedNotes = fromSession?.notes ?? [];
+    const seedNotes = [...(fromSession?.notes ?? []), ...(threadArtifacts?.notes ?? [])];
     const seed: RunSeed = opts.seed ? "parent" : session ? "session" : "channel";
     const seedTurns: TextTurn[] | undefined =
       opts.seed ?? (session ? textTurnsOf(session.messages.slice(0, -1)) : undefined);
@@ -1023,6 +1032,9 @@ export async function dispatch(
       resume,
       root,
       ...(contractBlock !== undefined && agent.name === "review" ? { contract: contractBlock } : {}),
+      // What the thread's other runs recorded since this agent last ran here
+      // (session-log item 9), as data, right after the notes.
+      ...(threadArtifacts?.block !== undefined ? { threadArtifacts: threadArtifacts.block.text } : {}),
       // What the session already knows (session-log item 10): the notepad and
       // the newest compaction's summary the seed brought back, and the thread's
       // files (record 0033) with where each is for this run, for the prompt.

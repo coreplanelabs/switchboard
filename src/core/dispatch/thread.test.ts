@@ -5,6 +5,7 @@ import {
   previousRunOf,
   readThread,
   refusedRequestsOf,
+  runsSince,
   stickyAgentOf,
   THREAD_READ_LIMIT,
   threadPrOf,
@@ -192,5 +193,38 @@ describe("threadPrOf — the pull request the thread's work lives on (docs/refer
       threadPrOf([run({ id: "live", agent: "coding", finished: false, repo: "acme/api", pr: pr(7) })]),
     ).toBeUndefined();
     expect(threadPrOf([])).toBeUndefined();
+  });
+});
+
+describe("runsSince — the finished runs newer than the agent's previous run (session-log item 9)", () => {
+  // The page newest first: a live run, another agent's run, a coordinator's child, the agent's previous
+  // run, a run of the agent from before the log (not continuable), an older run of another agent.
+  const page: RunView[] = [
+    run({ id: "r6", agent: "general", finished: false }),
+    run({ id: "r5", agent: "review", session: closed }),
+    run({ id: "r4", agent: "review", session: closed, parentInstanceId: "inst-1", idempotencyKey: "inst-1:review-1" }),
+    run({ id: "r3", agent: "coding", session: closed }),
+    run({ id: "r2", agent: "coding" }),
+    run({ id: "r1", agent: "review", session: closed }),
+  ];
+
+  it("the finished runs before the agent's previous continuable run on the page, oldest first — another agent's run and a coordinator's child alike; a live run and the previous run itself are left out", () => {
+    expect(runsSince(page, "coding").map((r) => r.id)).toEqual(["r4", "r5"]);
+  });
+
+  it("an agent with no continuable run in the thread is handed every finished run, oldest first", () => {
+    expect(runsSince(page, "explore").map((r) => r.id)).toEqual(["r1", "r2", "r3", "r4", "r5"]);
+    // A run of the agent from before the log is not a previous run to continue: everything finished is since.
+    expect(
+      runsSince(
+        [run({ id: "r6", agent: "general", finished: false }), run({ id: "r2", agent: "coding" })],
+        "coding",
+      ).map((r) => r.id),
+    ).toEqual(["r2"]);
+  });
+
+  it("nothing newer than the previous run is an empty list; an empty page too", () => {
+    expect(runsSince(page, "review")).toEqual([]);
+    expect(runsSince([], "coding")).toEqual([]);
   });
 });

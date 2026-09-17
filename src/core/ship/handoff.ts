@@ -196,6 +196,15 @@ function entryLines(h: Handoff): Array<{ list: ListKey; bullet: string; row: str
   ];
 }
 
+/** Each entry as one line, list by list — a deviation as `Deviation: from → to
+ *  — why`, a follow-up as `what — where`, an unproven criterion as `Unproven:
+ *  criterion — why` — the same words the ledger rows carry, for a reader that
+ *  wants the handoff as plain lines (the thread's artifacts block). Empty for
+ *  an empty handoff. */
+export function handoffLines(h: Handoff): string[] {
+  return entryLines(h).map((e) => e.row);
+}
+
 function prLink(pr: HandoffRenderContext["pr"]): string | undefined {
   return pr ? `[#${pr.number}](${pr.url})` : undefined;
 }
