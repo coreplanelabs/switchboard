@@ -19,7 +19,7 @@ providers:
     apiKeyEnv: GROQ_API_KEY
 ```
 
-An aggregator is the same shape too: the example config carries a commented OpenRouter block, and [Configure your defaults](configure-your-defaults.md) says what the compatible adapter does not do for it. A local server is the same shape; Ollama, for example:
+OpenAI itself is the same shape, as the example configuration's `openai:` block shows — with the same limits that block's comment names (Chat Completions only, no reasoning control, tokens metered but not priced). An aggregator is the same shape too: the example config carries a commented OpenRouter block, and [Configure your defaults](configure-your-defaults.md) says what the compatible adapter does not do for it. A local server is the same shape; Ollama, for example:
 
 ```yaml
 providers:
