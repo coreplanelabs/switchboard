@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.240.0](https://github.com/coreplanelabs/switchboard/compare/v1.239.0...v1.240.0) (2026-09-17)
+
+
+### Features
+
+* **authz:** a run is requested by the person behind the credential — an ingress token's email or the CLI's binds it, the grants stay the credential's, and the runs row leads with the surface glyph ([#1425](https://github.com/coreplanelabs/switchboard/issues/1425)) ([5435cdf](https://github.com/coreplanelabs/switchboard/commit/5435cdf6834e8f8c39eb7720aa9e035d4c5eded0))
+* **costs:** the costs page serves a daily snapshot of both billing sources — taken by the bot's own loop or on demand with `costs snapshot` — and names the snapshot's age and the next due time, so a load is arithmetic over stored rows, never a live read ([#1427](https://github.com/coreplanelabs/switchboard/issues/1427)) ([8c29c63](https://github.com/coreplanelabs/switchboard/commit/8c29c63132c5c8f962bd41e92807222325dce116))
+* **costs:** the costs page streams its snapshot's status — a take starting, landing or failing — to every viewer and repaints when a new one lands, and a `costs:write` holder can take one with a Snapshot now button ([#1436](https://github.com/coreplanelabs/switchboard/issues/1436)) ([0101e6e](https://github.com/coreplanelabs/switchboard/commit/0101e6ee07062a486d0a96c79ef8e89df331aea6))
+* **harness:** OpenCodeHarness — the relay as a local plugin, the conversation over prompt/steer/interrupt, the seed and rebuild as an authored-session import, OpenCode green on the conformance table against the real binary (stage A U12) ([#1403](https://github.com/coreplanelabs/switchboard/issues/1403)) ([41b8490](https://github.com/coreplanelabs/switchboard/commit/41b8490278cad1225b1b90fe98d9033d79a5ab6c))
+* **mcp:** a promoted server's personal entry retires once the org copy works; the MCPs tab names people, wears the run page's agent chips and marks shadowed rows; a connect link opens in a new tab while the page watches for it ([#1428](https://github.com/coreplanelabs/switchboard/issues/1428)) ([0bad801](https://github.com/coreplanelabs/switchboard/commit/0bad801cc3cd3eb6c149aeb3271e98d865012f48))
+* **resident:** a run that finds the resident restoring waits for its restore event instead of falling cold ([#1424](https://github.com/coreplanelabs/switchboard/issues/1424)) ([8290c17](https://github.com/coreplanelabs/switchboard/commit/8290c1701fd8446482780e9870111f69cc33f8ce))
+* **runs:** the runs index aligns its requester column and folds Stop/Kill into one ⋮ menu per row ([#1434](https://github.com/coreplanelabs/switchboard/issues/1434)) ([c3b65d8](https://github.com/coreplanelabs/switchboard/commit/c3b65d8fb2977fc39e76bd83ead6e4be4f4f0732))
+* **ship:** an approve is held to a configurable severity — findings at or above ship.addressSeverity send the round into a fix step ([#1431](https://github.com/coreplanelabs/switchboard/issues/1431)) ([c0bbc79](https://github.com/coreplanelabs/switchboard/commit/c0bbc79c67ecc5fc39a825a40e99b15b4063cc16))
+* **web:** the home page is a chat over fixtures, where a typed request lands as your turn and the run it starts draws itself under it ([#1410](https://github.com/coreplanelabs/switchboard/issues/1410)) ([45a587a](https://github.com/coreplanelabs/switchboard/commit/45a587a6d105551206399ace06bb7cb1cccbfbd8))
+
+
+### Bug fixes
+
+* **resident:** /status publishes the snapshot handle — the route the bot probes carried no snapshot, so no sandbox could be seeded ([#1433](https://github.com/coreplanelabs/switchboard/issues/1433)) ([f2a2e94](https://github.com/coreplanelabs/switchboard/commit/f2a2e942445d8322fd3989bd2d4d82ba868e0d84))
+* **resident:** a resident down on a snapshot it cannot restore is rebuilt on the transition under a two-a-day budget, and an extract the deploy roll kills is retried, never a down ([#1423](https://github.com/coreplanelabs/switchboard/issues/1423)) ([da55d21](https://github.com/coreplanelabs/switchboard/commit/da55d21ea56dbef2fe3934a270f5308019afc27b))
+* **ship:** the severity gate's comments and spec say what the verdict parser does — a finding outside the ladder never reaches the gate — and the hand-off's default reads plainly ([#1440](https://github.com/coreplanelabs/switchboard/issues/1440)) ([bc698a2](https://github.com/coreplanelabs/switchboard/commit/bc698a2bc49ffcf2389da1badf9f7d64d6ab2993))
+
 ## [1.239.0](https://github.com/coreplanelabs/switchboard/compare/v1.238.0...v1.239.0) (2026-09-16)
 
 
