@@ -811,7 +811,18 @@ export type RunEvent =
    *  round and its fix round share an index. Published by the ship pipeline
    *  straight to the registry (like `pr_opened`), never through the runner.
    *  Additive: unknown → ignored. */
-  | { type: "ship_round"; index: number; agent: string; outcome: ShipRoundOutcome; seq?: number; at?: number }
+  | {
+      type: "ship_round";
+      index: number;
+      agent: string;
+      outcome: ShipRoundOutcome;
+      /** The severity gate fired on this approve (agent-ship item 9): the level
+       *  in force and the gated findings as `id (severity)` — a mismatch the
+       *  child's own parser should have made impossible, kept visible. */
+      gate?: { level: string; findings: string[] };
+      seq?: number;
+      at?: number;
+    }
   /** The request router's decision (docs/reference/specs/routing-and-config.md
    *  item 21): the preset a plain message was routed to, the one-line reason
    *  the router gave (redacted, capped — the same text the card's `routed:`

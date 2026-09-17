@@ -706,6 +706,89 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
   });
 
+  it("a gated approve — one the child's parser should have downgraded — reaches the `round` route with the gate the machine caught, and only that round carries it", async () => {
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U10/1/review/wait/1": "event",
+      "U10/1/findings/wait/1": "event",
+      "U10/2/review/wait/1": "event",
+    });
+    const HEAD_2 = "b".repeat(40);
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [
+        spawned("run-c0"),
+        spawned("run-r1", T0 + 10 * MIN),
+        spawned("run-f1", T0 + 20 * MIN),
+        spawned("run-r2", T0 + 30 * MIN),
+      ],
+      "read-record": [
+        codingDone("run-c0", T0 + 10 * MIN),
+        record(
+          {
+            id: "run-r1",
+            finished: true,
+            status: "completed",
+            verdict: {
+              verdict: "approve",
+              summary: "approved over a minor",
+              findings: [{ id: "F1", severity: "minor", file: "src/a.ts", line: 3, title: "off by one" }],
+            },
+            reviewPosted: true,
+            reviewHead: HEAD,
+          },
+          T0 + 20 * MIN,
+        ),
+        record(
+          {
+            id: "run-f1",
+            finished: true,
+            status: "completed",
+            headSha: HEAD_2,
+            dispositions: [{ findingId: "F1", disposition: "fixed", note: "counted from zero" }],
+          },
+          T0 + 30 * MIN,
+        ),
+        record(
+          {
+            id: "run-r2",
+            finished: true,
+            status: "completed",
+            verdict: { verdict: "approve", summary: "clean", findings: [] },
+            reviewPosted: true,
+            reviewHead: HEAD_2,
+          },
+          T0 + 40 * MIN,
+        ),
+      ],
+      "pr-check": [
+        prNone(),
+        prOpen(T0 + 10 * MIN),
+        ok({ ok: true, state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_2 }, T0 + 30 * MIN),
+      ],
+      round: [acked(), acked(), acked(), acked(), acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 41 * MIN)],
+      "unit-end": [acked(T0 + 41 * MIN)],
+      finish: [acked(T0 + 41 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merged" });
+    const rounds = b.of("round") as Array<{ index: number; agent: string; outcome: string; gate?: unknown }>;
+    expect(rounds.filter((r) => r.gate !== undefined)).toEqual([
+      {
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        index: 1,
+        agent: "review",
+        outcome: "approve",
+        gate: { level: "minor", findings: ["F1 (minor)"] },
+      },
+    ]);
+    expect(rounds.filter((r) => r.outcome === "approve")).toHaveLength(2); // round 2's clean approve carries no gate
+  });
+
   it("a review that requests changes is followed by the findings step under `<unit>/<round>/findings`: a coding spawn briefed with the review run, its wait and read under that name, its pr-check, then the re-review briefed with the review run and the coding run that answered it; one unit-start per unit, and never a `fix` step", async () => {
     const s = steps({
       "U10/0/coding/wait/1": "event",
