@@ -92,11 +92,17 @@ export interface OpenCodeRunPaths extends HarnessPaths {
 }
 
 /** Every path is derived from the run id, so two runs never share a file and a
- *  run's files are removable as one tree: directly under the sticky `/tmp`,
- *  for the reason pi's layout gives (`piRunPaths`). */
+ *  run's files are removable as one tree: directly under the sticky `/var/tmp`
+ *  and outside the shared temp directory a suite or cleanup empties, for the
+ *  reason pi's layout gives (`piRunPaths`). */
 export function openCodeRunPaths(runId: string): OpenCodeRunPaths {
-  return openCodeRunPathsAt(`/tmp/switchboard-oc-${runId}`);
+  return openCodeRunPathsAt(`${OPENCODE_RUN_ROOT_PREFIX}${runId}`);
 }
+
+/** Where a fresh run's root goes, the run id appended: the one constant the
+ *  exec container's `makeRoot` answers as it is. Outside the shared temp
+ *  directory — see pi's `piRunPaths`. */
+export const OPENCODE_RUN_ROOT_PREFIX = "/var/tmp/switchboard-oc-";
 
 /** The run's files under a given root: this build's own for a fresh run, or the
  *  root a row recorded for the server a previous build started, so a re-attach

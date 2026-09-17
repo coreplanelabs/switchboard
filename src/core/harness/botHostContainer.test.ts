@@ -92,7 +92,7 @@ describe("BotHostHarnessContainer: pi as a child of the bot", () => {
     for (const p of [a, b]) {
       expect(p.dir.startsWith(`${predictable}-`)).toBe(true);
       expect(p.dir.slice(predictable.length + 1).length).toBeGreaterThanOrEqual(6);
-      expect(p.dir.split("/").slice(0, -1).join("/")).toBe("/tmp");
+      expect(p.dir.split("/").slice(0, -1).join("/")).toBe("/var/tmp");
       expect(statSync(p.dir).mode & 0o777).toBe(0o700);
       expect(p).toEqual(piRunPathsAt(p.dir));
     }

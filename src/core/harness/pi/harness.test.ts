@@ -34,6 +34,7 @@ import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
 import {
   ExecHarnessContainer,
   HarnessContainerError,
+  HarnessControlFileLostError,
   HarnessContainerRuntimeReplacedError,
   identityChangedCondition,
   type HarnessContainer,
@@ -314,11 +315,11 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   // The run's files live in one directory of the run's own directly under
   // /tmp, whatever OS user the executor runs the commands as, and the
   // directory goes when the run does (harness-pi item 4).
-  it("writes every file and starts pi under the run's own root directly under /tmp, and once the run is over ends pi and removes that root", async () => {
+  it("writes every file and starts pi under the run's own root directly under /var/tmp, and once the run is over ends pi and removes that root", async () => {
     const w = world();
     scriptedPi(w.container, (_n, c) => finalTurn(c, "Done."));
     await w.start();
-    expect(paths.dir).toBe("/tmp/switchboard-pi-run-7");
+    expect(paths.dir).toBe("/var/tmp/switchboard-pi-run-7");
     expect([...w.container.files.keys()].every((f) => f.startsWith(`${paths.dir}/`))).toBe(true);
     expect(w.container.files.has(`${paths.agentDir}/SYSTEM.md`)).toBe(true);
     const [started] = w.container.starts;
@@ -1975,6 +1976,22 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(other.container.killed).toEqual([4242]);
   });
 
+  it("a control file that vanished under a live run fails it by name — a harness_error note saying which file under which root is gone — never a replaced-container verdict: the container is alive and answering", async () => {
+    const w = world();
+    w.container.failNext = {
+      operation: "send",
+      error: new HarnessControlFileLostError("send", paths.fifo, paths.dir),
+    };
+    scriptedPi(w.container, () => {});
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessControlFileLostError);
+    expect((err as Error).message).toContain(`${paths.fifo} under ${paths.dir} vanished while the run was live`);
+    expect(noteKinds(w)).toEqual(["harness_error"]);
+    expect(w.events.filter((e) => e.type === "run_note" && e.kind === "harness_error")[0]).toEqual(
+      expect.objectContaining({ summary: expect.stringContaining(paths.fifo) }),
+    );
+  });
+
   it("a pi found dead without the executor's word, in a container that answers the same word on the one more command, died where it ran: the failure it always was — 'pi exited before the run settled' with the error log's tail, no sandbox_restarted note, pi ended and its root removed — and a name missing on either side judges nothing", async () => {
     const same = world();
     same.container.files.set(paths.errLog, "Error: cannot find module 'foo'\n");
@@ -2354,7 +2371,7 @@ describe("the small pure pieces", () => {
 describe("runPiHarness: the root the container makes", () => {
   class ElsewhereContainer extends FakeHarnessContainer {
     override async makeRoot(wanted: string) {
-      return `${wanted.replace("/tmp/switchboard-pi-", "/tmp/elsewhere-")}-a1b2c3`;
+      return `${wanted.replace("/var/tmp/switchboard-pi-", "/tmp/elsewhere-")}-a1b2c3`;
     }
   }
   it("files a fresh run under the root the container makes, records that root on the facts, and removes it when the run ends", async () => {
@@ -2368,7 +2385,7 @@ describe("runPiHarness: the root the container makes", () => {
     expect(w.container.removed).toEqual([root]);
   });
   it("the fake answers the root the harness proposes, so every other test's run is filed where it always was", async () => {
-    expect(await new FakeHarnessContainer().makeRoot(piRunPaths("run-7").dir)).toBe("/tmp/switchboard-pi-run-7");
+    expect(await new FakeHarnessContainer().makeRoot(piRunPaths("run-7").dir)).toBe("/var/tmp/switchboard-pi-run-7");
   });
 
   // The session file's working directory is the container's answer for the

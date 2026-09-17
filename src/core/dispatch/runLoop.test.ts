@@ -849,7 +849,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(providerCalls).toBe(0);
     expect(container.starts).toHaveLength(1);
     expect(container.starts[0].env.SWITCHBOARD_RUN_BEARER).toBe("sbr_run-l.s3cret");
-    expect(container.files.get("/tmp/switchboard-pi-run-l/agent/SYSTEM.md")).toContain("the system prompt");
+    expect(container.files.get("/var/tmp/switchboard-pi-run-l/agent/SYSTEM.md")).toContain("the system prompt");
     expect(container.killed).toEqual([4242]);
     expect(s.published).toEqual(["answer:pi says done"]);
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
@@ -988,7 +988,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(out.prNote).not.toContain("not resubmitted");
     // pi ended once, after the turn
     expect(container.killed).toEqual([4242]);
-    expect(container.removed).toEqual(["/tmp/switchboard-pi-run-l"]);
+    expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
     s.ending.drain(true);
     await s.writer.settled();
@@ -1005,7 +1005,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
   // The resident's attach names the pool user every /exec runs as, and the
   // run's pi files go under the run's own root all the same: the root never
   // depends on knowing that user, present or not (harness-pi item 4).
-  it("a run on a resident files its pi under the run's own root directly under /tmp, whatever pool user the attach binding names, and removes it when the run ends", async () => {
+  it("a run on a resident files its pi under the run's own root directly under /var/tmp, whatever pool user the attach binding names, and removes it when the run ends", async () => {
     const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     scriptedPi(container, registry, "pi says done");
@@ -1018,11 +1018,11 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     });
     const out = answered(await runLoop(s.deps, s.ctx));
     expect(out.answer).toBe("pi says done");
-    expect(container.starts[0].paths.dir).toBe("/tmp/switchboard-pi-run-l");
-    expect(container.files.get("/tmp/switchboard-pi-run-l/agent/SYSTEM.md")).toContain("the system prompt");
+    expect(container.starts[0].paths.dir).toBe("/var/tmp/switchboard-pi-run-l");
+    expect(container.files.get("/var/tmp/switchboard-pi-run-l/agent/SYSTEM.md")).toContain("the system prompt");
     const roots = [...container.files.keys()].map((f) => f.split("/").slice(0, 3).join("/"));
-    expect(new Set(roots)).toEqual(new Set(["/tmp/switchboard-pi-run-l"]));
-    expect(container.removed).toEqual(["/tmp/switchboard-pi-run-l"]);
+    expect(new Set(roots)).toEqual(new Set(["/var/tmp/switchboard-pi-run-l"]));
+    expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
   });
 
   it("the gate's push rules follow the thread: a pull-request thread's or a unit child's bound branch is the run's own — the one push target, its base protected; a plain thread's binding is the protected base", async () => {
@@ -1888,7 +1888,7 @@ describe("the pi harness — the review preset", () => {
     expect(tools).not.toContain("submit_pr_description");
     expect(tools).not.toContain("write_file");
     expect(container.starts[0].env.SWITCHBOARD_RUN_BEARER).toBe("sbr_run-l.s3cret");
-    const system = container.files.get("/tmp/switchboard-pi-run-l/agent/SYSTEM.md")!;
+    const system = container.files.get("/var/tmp/switchboard-pi-run-l/agent/SYSTEM.md")!;
     expect(system.startsWith("the system prompt\n\nHARNESS NOTE:")).toBe(true);
     expect(system).toContain("no `edit` and no `write`");
     expect(system).not.toContain("`write_file` use `write`");
@@ -2038,7 +2038,7 @@ describe("the pi harness — the review preset", () => {
     expect(s.replies.some((r) => r.startsWith("🔀 o/r#42 moved during the run"))).toBe(true);
     // pi ended once, after the settle
     expect(container.killed).toEqual([4242]);
-    expect(container.removed).toEqual(["/tmp/switchboard-pi-run-l"]);
+    expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
     s.ending.drain(true);
     await s.writer.settled();
@@ -2182,9 +2182,9 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       "github_issue_delete",
     ]);
     for (const own of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(tools).not.toContain(own);
-    const models = JSON.parse(container.files.get("/tmp/switchboard-pi-run-l/agent/models.json")!);
+    const models = JSON.parse(container.files.get("/var/tmp/switchboard-pi-run-l/agent/models.json")!);
     expect(models.providers.switchboard.baseUrl).toBe("http://127.0.0.1:8080");
-    const system = container.files.get("/tmp/switchboard-pi-run-l/agent/SYSTEM.md")!;
+    const system = container.files.get("/var/tmp/switchboard-pi-run-l/agent/SYSTEM.md")!;
     expect(system.startsWith("the system prompt\n\nHARNESS NOTE:")).toBe(true);
     expect(system).toContain("none of pi's own tools");
     expect(refusals).toEqual([
@@ -2196,7 +2196,7 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     // The relayed tool ran in the bot with the run's own context: the card's checklist is its.
     expect(s.frames.some((f) => f.detail?.includes("looked it up"))).toBe(true);
     expect(container.killed).toEqual([4242]);
-    expect(container.removed).toEqual(["/tmp/switchboard-pi-run-l"]);
+    expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
     expect(s.published).toEqual(["answer:General says done."]);
     s.ending.drain(true);
     await s.writer.settled();
@@ -2962,7 +2962,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     });
     const resume = finishing("Done: pushed the fix.", {
       agent: "coding",
-      state: { harness: { pid: 777, logOffset: 10, root: "/tmp/switchboard-pi-run-l", container: "vm-old" } },
+      state: { harness: { pid: 777, logOffset: 10, root: "/var/tmp/switchboard-pi-run-l", container: "vm-old" } },
     });
     const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
     expect(out.answer).toBe("Done: pushed the fix.");
@@ -2993,7 +2993,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     });
     const resume = finishing("Done: pushed the fix.", {
       agent: "coding",
-      state: { harness: { pid: 777, logOffset: 10, root: "/tmp/switchboard-pi-run-l", container: "vm-old" } },
+      state: { harness: { pid: 777, logOffset: 10, root: "/var/tmp/switchboard-pi-run-l", container: "vm-old" } },
     });
     const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
     expect(out.answer).toBe("Done: pushed the fix.");

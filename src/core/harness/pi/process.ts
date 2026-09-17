@@ -70,20 +70,30 @@ export interface PiRunPaths extends HarnessPaths {
  *  a run's files are removable as one tree. Outside the checkout, so nothing
  *  pi writes lands in the repository or its snapshots.
  *
- *  The directory is the run's own, directly under `/tmp`, which is sticky
- *  (mode 1777): whichever OS user runs the run's commands can create a
- *  sibling there, and only that user can remove it. That is the `mkdtemp`
- *  shape, the mechanism the OS has for exactly this, and it asks nothing of
- *  the harness about who runs the commands. There is no parent between `/tmp`
- *  and the root, shared or per user: the resident runs each thread's commands
- *  as that thread's pool user, and `mkdir -p` gives a parent it creates to
- *  its caller, so a parent shared by every run would belong to whichever user
- *  ran first and refuse every other user's run at its own mkdir, and a parent
- *  per user would only move that ownership to the runs that know their user.
- *  The run id is unique, so the name needs no suffix. */
+ *  The directory is the run's own, directly under `/var/tmp`, which is sticky
+ *  (mode 1777) like `/tmp`: whichever OS user runs the run's commands can
+ *  create a sibling there, and only that user can remove it. That is the
+ *  `mkdtemp` shape, the mechanism the OS has for exactly this, and it asks
+ *  nothing of the harness about who runs the commands. It is `/var/tmp` and
+ *  not `/tmp` because the model's shell runs in the same container as the
+ *  same user, and the shared temp directory (`/tmp`, `$TMPDIR`) is exactly
+ *  what a checkout's test suite or cleanup empties — taking the harness's own
+ *  FIFO with it — while nothing has a reason to touch `/var/tmp`. There is no
+ *  parent between `/var/tmp` and the root, shared or per user: the resident
+ *  runs each thread's commands as that thread's pool user, and `mkdir -p`
+ *  gives a parent it creates to its caller, so a parent shared by every run
+ *  would belong to whichever user ran first and refuse every other user's run
+ *  at its own mkdir, and a parent per user would only move that ownership to
+ *  the runs that know their user. The run id is unique, so the name needs no
+ *  suffix. */
 export function piRunPaths(runId: string): PiRunPaths {
-  return piRunPathsAt(`/tmp/switchboard-pi-${runId}`);
+  return piRunPathsAt(`${PI_RUN_ROOT_PREFIX}${runId}`);
 }
+
+/** Where a fresh run's root goes, the run id appended: the one constant the
+ *  exec container's `makeRoot` answers as it is. Outside the shared temp
+ *  directory — see `piRunPaths`. */
+export const PI_RUN_ROOT_PREFIX = "/var/tmp/switchboard-pi-";
 
 /** The run's files under a given root: this build's own for a fresh run
  *  (`piRunPaths`), or the root a row recorded for the pi a previous build
