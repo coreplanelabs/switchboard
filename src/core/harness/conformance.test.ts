@@ -83,26 +83,28 @@ describe("the table", () => {
     expect(() => assertReadsRecord({ id: "x" }, new Set(["facts", "outcome"]))).toThrow(/neither events nor steps/);
   });
 
-  it("the matrix prints every harness × row: pi green on every row, OpenCode green on every row but its one declared cannot, over the fake serve", async () => {
+  it("the matrix prints every harness × row: pi green on every row, OpenCode green on every row but its declared cannots, over the fake serve", async () => {
     const columns = await buildHarnessConformanceMatrix(drivers);
     expect(columns.map((c) => c.harness)).toEqual(["pi", "opencode"]);
     const [pi, opencode] = columns;
     // pi passes every row (it prevents a forged approval by construction).
     expect(Object.values(pi.rows).every((o) => o === "pass")).toBe(true);
-    // OpenCode passes every row but the permanent gate-approval-unforgeable cannot.
-    for (const row of SCENARIOS)
-      expect(opencode.rows[row.id]).toBe(row.id === "gate-approval-unforgeable" ? "cannot" : "pass");
+    // OpenCode passes every row but the ones it declares: the permanent
+    // gate-approval-unforgeable, and the loop-end tool cut it owes.
+    const declared = new Set(Object.keys(drivers.find((d) => d.harness === "opencode")?.cannot ?? {}));
+    expect(declared.size).toBeGreaterThan(0);
+    for (const row of SCENARIOS) expect(opencode.rows[row.id]).toBe(declared.has(row.id) ? "cannot" : "pass");
     expect(Object.keys(pi.rows)).toEqual(SCENARIOS.map((r) => r.id));
     const rendered = renderHarnessConformanceMatrix(columns, ["pi", "opencode"]);
     const lines = rendered.split("\n");
     expect(lines[0]).toContain(`${SCENARIOS.length} rows × 2 harness(es)`);
     expect(lines[2]).toBe("| Clause | Row | pi | opencode |");
     const body = lines.slice(4).filter((l) => l.startsWith("|") && !l.startsWith("| Clause") && !l.startsWith("|---"));
-    expect(body.filter((l) => l.includes("`gate-approval-unforgeable`"))[0].endsWith("| ✅ | ✖ |")).toBe(true);
-    for (const line of body.filter((l) => !l.includes("`gate-approval-unforgeable`")))
-      expect(line.endsWith("| ✅ | ✅ |")).toBe(true);
-    // The declared cannot's reason is printed beneath the table.
-    expect(rendered).toContain("✖ opencode cannot `gate-approval-unforgeable`:");
+    const isDeclared = (l: string) => [...declared].some((id) => l.includes(`\`${id}\``));
+    for (const line of body.filter(isDeclared)) expect(line.endsWith("| ✅ | ✖ |")).toBe(true);
+    for (const line of body.filter((l) => !isDeclared(l))) expect(line.endsWith("| ✅ | ✅ |")).toBe(true);
+    // Every declared cannot's reason is printed beneath the table.
+    for (const id of declared) expect(rendered).toContain(`✖ opencode cannot \`${id}\`:`);
   });
 
   it("a declared cannot is asserted, never skipped: a declared row whose run fails is the verdict cannot, a declared row that passes is a failure naming the stale declaration, an undeclared failure is fail, and the matrix prints the declared cell with its reason beneath the table", async () => {

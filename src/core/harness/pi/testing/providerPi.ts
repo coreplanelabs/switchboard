@@ -169,7 +169,15 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
     }
     if (cmd.type === "abort") {
       container.emit({ type: "response", command: "abort", success: true });
-      aborted?.abort();
+      // pi's abort ends the turn in flight — the tool's result lands as
+      // `aborted`, the model call's as a failed call — and pi goes on with a
+      // steer queued meanwhile as its next turn (measured on a budget probe:
+      // the write-up steered before the finale's abort ran after it); an idle
+      // pi with nothing queued settles. `run`'s exits do the rest (`afterAbort`).
+      if (aborted !== undefined && !aborted.signal.aborted) {
+        aborted.abort();
+        return;
+      }
       if (!settled) {
         settled = true;
         container.emit({ type: "agent_settled" });
@@ -232,6 +240,22 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
     return session;
   }
 
+  /** The turn pi's abort ended. A tool call cut with a steer queued behind it
+   *  (the loop's end, decision 0046's unit seven): pi's turn ends on the cut
+   *  call's result and it goes on with the steer as its next prompt — measured
+   *  on a budget probe, where the write-up steered before the abort ran after
+   *  it. Every other abort — a model call cut by the finale bound, a hard stop
+   *  — settles, as the double always did; the rows built on that stand. */
+  function afterAbort(cutTool = false): void {
+    if (cutTool && queued.length > 0) {
+      container.emit({ type: "agent_end", messages: [], willRetry: false });
+      const text = queued.shift()!;
+      void run(text, []);
+      return;
+    }
+    finish();
+  }
+
   async function run(prompt: string, images: Array<Record<string, unknown>>): Promise<void> {
     const s = current();
     busy = true;
@@ -258,7 +282,7 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
     appendMerged(s.messages, { role: "user", content: userParts });
     const live = () => opts.registry.get(s.runId);
     for (;;) {
-      if (signal.aborted) return;
+      if (signal.aborted) return afterAbort();
       // A steer waits for the turn boundary, then is the next user text pi reads.
       while (queued.length > 0) {
         const text = queued.shift()!;
@@ -284,7 +308,7 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
       requests.push(request);
       container.emit({ type: "turn_start" });
       await opts.beforeModelCall?.();
-      if (signal.aborted) return;
+      if (signal.aborted) return afterAbort();
       const turn = opts.bearers ? opts.bearers.consumeTurn(s.runId) : { ok: true as const, turn: requests.length };
       let result: CompletionResult;
       try {
@@ -301,7 +325,7 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
           ? await meter.span("model.turn", () => opts.provider.complete(request), { attrs: { model: s.model } })
           : await opts.provider.complete(request);
       } catch (err) {
-        if (signal.aborted) return;
+        if (signal.aborted) return afterAbort();
         const message = err instanceof Error ? err.message : String(err);
         const failed = { role: "assistant", content: [], stopReason: "error", errorMessage: message, model: s.model };
         container.emit(
@@ -313,7 +337,7 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
         finish();
         return;
       }
-      if (signal.aborted) return;
+      if (signal.aborted) return afterAbort();
       if (result.stopReason === "refusal") {
         // A call the provider refused under its usage policy, as pi's provider
         // library hands it on: the wire's stop reason kept as `rawStopReason`
@@ -365,7 +389,7 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
       );
       appendMerged(s.messages, { role: "assistant", content: [...result.content] });
       for (const call of calls) {
-        if (signal.aborted) return;
+        if (signal.aborted) return afterAbort();
         const ask: ToolCallAsk = { toolCallId: call.id, tool: call.name, input: call.input };
         container.emit({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.input });
         // The harness reads pi's log on its own cadence; wait for it to have seen
@@ -374,7 +398,6 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
         // ledger in the order a real run's tools land in.
         await (entry ?? live())?.callSeen?.(call.id);
         const answer = await runCall(s, entry ?? live(), ask, signal);
-        if (signal.aborted) return;
         const toolResult = {
           role: "toolResult",
           toolCallId: call.id,
@@ -397,6 +420,8 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
         await (entry ?? live())?.callEnded?.(call.id);
         const asTurn = chatMessageOf(toolResult);
         if (asTurn) appendMerged(s.messages, asTurn);
+        // A cut call's result is on the log first, as pi's is; the turn ends here.
+        if (signal.aborted) return afterAbort(true);
       }
       container.emit({ type: "turn_end", message: assistant, toolResults: [] });
       // A text-only turn ends the loop — unless a steer arrived meanwhile: pi

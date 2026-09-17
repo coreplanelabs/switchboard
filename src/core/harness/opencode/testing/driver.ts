@@ -1911,6 +1911,8 @@ export function openCodeDriver(options: FakeServeOptions = {}): HarnessDriver {
     containerWord: CONTAINER_WORD,
     providerKeySentinel: PROVIDER_KEY_SENTINEL,
     cannot: {
+      "budget-cuts-the-tool-in-flight":
+        "OpenCode's bridge does not cut a tool call at the loop's end: the write-up's steer waits on the hung step until the finale's interrupt, and an interrupted execution's tail lands only with the next queued prompt, so the write-up would have to be re-posted after the interrupt — owed to decision 0046's unit seven, its OpenCode half",
       "gate-approval-unforgeable":
         "OpenCode's approval lives in its server, whose password the model's shell shares, so an effect the bot did not decide — a call with no ask, a reply the bot did not send, a reply that differs from the bot's, a success after the bot's refusal — is caught by detection and fails the run closed, never prevented by construction",
     },

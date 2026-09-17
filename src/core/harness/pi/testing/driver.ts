@@ -217,6 +217,14 @@ export function piDriver(): HarnessDriver {
         // that would carry this call's result is `containerReplacedBeforeModelCall`,
         // so the call is the turn before it.
         holdCallOpen: ({ turn }) => {
+          // A tool that never returns (`hangToolCall`): the call is held open
+          // and the clock lands past the loop's end with it in flight, so the
+          // harness's next tick notes the budget, steers the write-up and cuts
+          // the call — whose result lands `aborted` — and the write-up runs.
+          if (script.hangToolCall === turn) {
+            clock.now = lease.loopEnd + 1;
+            return true;
+          }
           if (script.containerReplacedBeforeModelCall === turn + 1) {
             container.vm = REPLACED_WORD;
             container.failOnceDrained = new HarnessContainerRuntimeReplacedError(

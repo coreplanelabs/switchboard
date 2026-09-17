@@ -50,6 +50,11 @@ export const timeBudgetNote = (doing?: string): string =>
   doing
     ? `the loop's time is up while ${doing} — writing up findings so far inside the lease`
     : "the loop's time is up — writing up findings so far inside the lease";
+/** The loop's end found a tool call in flight and ended it (decision 0046,
+ *  unit seven): the write-up keeps its whole allowance instead of waiting the
+ *  command out; `doing` is the bridge's `running <tools>`. */
+export const toolCutNote = (doing: string): string =>
+  `the loop's end cut the command in flight (${doing}) so the write-up keeps its allowance`;
 export const turnGuardNote = (pace: string): string =>
   `turn guard fired: ${pace}, a pace that looks like a loop — writing up findings so far`;
 export const softStopNote = (): string => "soft stop — no further steps, writing up findings so far";
