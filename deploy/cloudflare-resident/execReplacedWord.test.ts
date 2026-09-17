@@ -9,13 +9,18 @@ import { methodOf, readSource } from "./testing/sourceScan";
 // Object's own reset) is the word whatever else is known. A command the SDK
 // fails saying only that the container is DOWN — "The container is not
 // running, consider calling start()", "Process supervisor is closed", a
-// WebSocket closed under the call — is the word only when the resident saw the
-// container stop (`onStop`, the rollout's signal) or has a restore under way;
-// otherwise the answer says what the SDK said, with no word and no `reason`,
-// and the harness's one more command decides. An asleep or starting container
-// answers the same words, so the platform's view of `running` is never the
-// evidence. This scan over the entry holds the line: plain Node, the file read
-// as text, never loaded — like lifecycle.test.ts.
+// WebSocket closed under the call — is the word only when the resident knows
+// the container it held is gone: the container's exit as the platform's
+// monitor recorded it (the Container base's `stopped_with_code`, the rollout
+// signal's one programmatic trace) or a restore under way; otherwise the
+// answer says what the SDK said, with no word and no `reason`, and the
+// harness's one more command decides. An asleep or starting container answers
+// the same words, so the platform's view of `running` is never the evidence,
+// and the Container base's `onStop` — replayed at the next start for an idle
+// sleep as much as for a roll — is never a source. The same decision, made
+// once where `run()` classifies the failure, gates the incarnation swap. This
+// scan over the entry holds the line: plain Node, the file read as text, never
+// loaded — like lifecycle.test.ts.
 
 const source = readSource("worker.ts");
 
@@ -44,36 +49,52 @@ describe("the /exec answer says runtime-replaced only when the resident knows th
     expect(body).not.toMatch(/RuntimeReplacedError/);
   });
 
-  it("the gate: the word when the SDK vouches the runtime moved or the resident knows the container is gone; otherwise what the SDK said, with no reason", () => {
+  it("the gate: the word when the replacement was known at the choke point — the SDK vouched the runtime moved or the resident knew the container gone, the one decision run() made and carried on the error — otherwise what the SDK said, with no reason", () => {
     const gate = methodOf(source, "replacedExecAnswer");
     expect(gate, "replacedExecAnswer is declared").not.toBeNull();
-    expect(gate).toMatch(/sdkVouchesRuntimeMoved\(err\.cause\)/);
-    expect(gate).toMatch(/await this\.knowsContainerGone\(\)/);
-    expect(gate).toMatch(/return runtimeReplacedErr\(err\)/);
+    expect(gate).toMatch(/if \(err\.known\) return runtimeReplacedErr\(err\)/);
     expect(gate).toMatch(/error: errMsg\(err\.cause\)/);
     expect(gate).not.toMatch(/reason:/);
+    // One decision, made where the failure is classified; the gate re-judges nothing.
+    expect(gate).not.toMatch(/sdkVouchesRuntimeMoved|knowsContainerGone/);
+    expect(source).toMatch(
+      /class RuntimeReplacedError extends Error \{\s*constructor\(\s*readonly phase: "spawn" \| "collect",\s*readonly cause: unknown,(?:\s*\/\*\*[\s\S]*?\*\/)?\s*readonly known: boolean,/,
+    );
   });
 
-  it("what the resident knows: the container stop it saw and a restore under way — never the platform's `running` flag, which an asleep or starting container also answers false", () => {
+  it("what the resident knows: the container's exit as the platform's monitor recorded it (the Container base's `stopped_with_code`, the rollout signal's trace — never `stopped`, our own idle stop, nor `running`, a start under way) and a restore under way — never the platform's `running` flag, never a replayed `onStop`; a read that fails is no knowledge (the SDK's words, never an unhandled throw)", () => {
     const knows = methodOf(source, "knowsContainerGone");
     expect(knows, "knowsContainerGone is declared").not.toBeNull();
-    expect(knows).toMatch(/this\.containerStop !== undefined/);
-    expect(knows).toMatch(/state === "restoring"/);
+    expect(knows).toMatch(/\(await this\.getState\(\)\)\.status === "stopped_with_code"/);
+    expect(knows).toMatch(/\(await this\.getStatus\(\)\)\.state === "restoring"/);
     expect(knows).not.toMatch(/container\??\.running/);
+    expect(knows).not.toMatch(/containerStop|onStop/);
+    // Each read sits inside a try whose catch keeps going or answers false, so
+    // the 409 is always produced and a failed read never becomes the word.
+    expect(knows.match(/try \{/g)).toHaveLength(2);
+    expect(knows.match(/\} catch \{/g)).toHaveLength(2);
+    expect(knows).toMatch(/return false;\s*\}\s*\}\s*$/);
+    // The Container base replays onStop before a start (syncPendingStoppedEvents)
+    // and never delivers the rollout live, so the entry keeps no stop record and
+    // overrides no stop hook: an idle sleep's replayed stop cannot count.
+    expect(methodOf(source, "onStop")).toBeNull();
+    expect(source).not.toMatch(/containerStop\b/); // the teardown's `containerStopped` is another thing
   });
 
-  it("the rollout's signal is recorded where the platform delivers it: onStop records the stop with its exit code and reason, logs it, and still runs the SDK's own stop reconciliation; a command the container answers clears the record", () => {
-    const onStop = methodOf(source, "onStop");
-    expect(onStop, "onStop is declared").not.toBeNull();
-    expect(onStop).toMatch(/this\.containerStop = \{/);
-    expect(onStop).toMatch(/exitCode/);
-    expect(onStop).toMatch(/reason/);
-    expect(onStop).toMatch(/console\.log\(\s*`container: stopped/);
-    expect(onStop).toMatch(/await super\.onStop\(\)/);
+  it("the incarnation swap is gated as the word is: run() swaps memos and leases only for a replacement the SDK vouched or the resident knows, and the error carries that decision (`known`) for the exec gate to read", () => {
     const run = methodOf(source, "run");
     expect(run, "run is declared").not.toBeNull();
-    // The spawn is the proof the container answers: the stop seen before it is history.
-    expect(run).toMatch(/this\.containerStop = undefined/);
+    expect(run.match(/const known = await this\.replacementKnown\(err\);/g)).toHaveLength(2);
+    expect(run.match(/if \(known\) this\.swapIncarnation\(\);/g)).toHaveLength(2);
+    expect(run).toMatch(/new RuntimeReplacedError\("spawn", err, known\)/);
+    expect(run).toMatch(/new RuntimeReplacedError\("collect", err, known\)/);
+    expect(run).not.toMatch(
+      /^\s*this\.swapIncarnation\(\);\s*\/\/ the container this incarnation's memos described is gone$/m,
+    );
+    const replacementKnown = methodOf(source, "replacementKnown");
+    expect(replacementKnown, "replacementKnown is declared").not.toBeNull();
+    expect(replacementKnown).toMatch(/sdkVouchesRuntimeMoved\(err\) \|\| \(await this\.knowsContainerGone\(\)\)/);
+    expect(functionOf("sdkVouchesRuntimeMoved")).not.toMatch(/knowsContainerGone/);
   });
 
   it("the SDK's vouching is the typed classes and the words that say the runtime MOVED — never the words for a container that is merely down; the resident's own steps keep the union", () => {
@@ -91,11 +112,12 @@ describe("the /exec answer says runtime-replaced only when the resident knows th
     expect(replacement).toMatch(/RPC_TRANSPORT_LOSS_KINDS\.has/);
   });
 
-  it("the idempotent routes keep item 43's answer as it was: read and write say the word and the client re-attaches and retries", () => {
-    for (const name of ["readThreadFileImpl", "writeThreadFileImpl"]) {
+  it("the idempotent routes keep item 43's answer as it was: read, the bytes read and write say the word unconditionally — there it drives the client's re-attach-and-retry, never a verdict — and none of them consults the gate", () => {
+    for (const name of ["readThreadFileImpl", "readThreadBytes", "writeThreadFileImpl"]) {
       const impl = methodOf(source, name);
       expect(impl, `${name} is declared`).not.toBeNull();
       expect(impl).toMatch(/return runtimeReplacedErr\(err\)/);
+      expect(impl).not.toMatch(/replacedExecAnswer|knowsContainerGone|sdkVouchesRuntimeMoved/);
     }
   });
 });
