@@ -428,8 +428,10 @@ function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
   return (
     `Rebase ${branch} onto ${onto} before any other work — the parent unit has merged and the base has moved; ` +
     `the only writes are your own on that branch. A conflict ends the unit: report it as the handoff and stop. ` +
-    `Right before the push, fetch ${onto} again and rebase once more if it moved during verify, ` +
-    `so the pull request is not born conflicting.`
+    `Push the branch as soon as the change exists and its cheapest proving checks pass — before the project's ` +
+    `full verification, which runs after that push with any fix as a further commit; an unpushed tree does not ` +
+    `survive the run's end. Right before each push, fetch ${onto} again and rebase once more if it moved while ` +
+    `you worked, so the pull request is not born conflicting.`
   );
 }
 

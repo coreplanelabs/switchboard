@@ -13,6 +13,7 @@ import {
   FENCED_CONTENT_RULE,
   statusCardRule,
   type AgentDef,
+  CHECKS_BY_COST,
 } from "./registry.js";
 
 // Features: docs/reference/specs/agent-general.md, docs/reference/specs/agent-review.md,
@@ -401,6 +402,42 @@ describe("coding prompts: push then submit_pr_description (opening the PR is the
       expect(sys).toMatch(/NEVER approve one/i);
       expect(sys).toMatch(/never an approval or a merge/i);
     }
+  });
+});
+
+// Feature: docs/reference/specs/agent-coding.md item 13 — checks by cost. Three
+// plan children died at their budget in one evening with finished work unpushed
+// because each ran the project's most expensive checks before its first push.
+describe("coding prompts: checks by cost — push before the expensive ones (agent-coding item 13)", () => {
+  const codingPrompts = () => [AGENTS.coding.system, AGENTS.coding.residentSystem!, AGENTS.coding.seededSystem!];
+
+  it("every coding prompt carries the checks-by-cost rule verbatim: the two cost classes, the cheapest proving check, the push before the expensive ones, the budget test, the honest validation", () => {
+    expect(CHECKS_BY_COST).toMatch(/seconds \(/);
+    expect(CHECKS_BY_COST).toMatch(/minutes \(/);
+    expect(CHECKS_BY_COST).toMatch(/cheapest check that can prove it/);
+    expect(CHECKS_BY_COST).toMatch(/unpushed tree does not survive the run's end/);
+    expect(CHECKS_BY_COST).toMatch(/Never start an operation whose expected duration does not fit/);
+    expect(CHECKS_BY_COST).toMatch(/what did not run is CI's to gate/);
+    // stack-agnostic: no package manager, test runner or language named
+    expect(CHECKS_BY_COST).not.toMatch(/\b(npm|pnpm|yarn|bun|vitest|jest|pytest|cargo|go test|make)\b/);
+    for (const sys of codingPrompts()) expect(sys).toContain(CHECKS_BY_COST);
+  });
+
+  it("every coding prompt's workflow proves the change with the cheapest checks, pushes, and only then runs the expensive checks — the push step comes before the full-verification step", () => {
+    for (const sys of codingPrompts()) {
+      const cheap = sys.search(/Prove the change with the cheapest checks that can/);
+      const push = sys.search(/push the branch[^\n]*— before any full suite, build or full verification/);
+      const expensive = sys.search(/run the project's expensive checks once and fix forward/);
+      expect(cheap).toBeGreaterThan(0);
+      expect(push).toBeGreaterThan(cheap);
+      expect(expensive).toBeGreaterThan(push);
+      expect(sys).not.toMatch(/tests\/linters if they exist and are quick enough to run/);
+    }
+  });
+
+  it("the review prompts do not carry it — a review pushes nothing", () => {
+    for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!])
+      expect(sys).not.toContain("CHECKS BY COST");
   });
 });
 
