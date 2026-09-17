@@ -284,6 +284,28 @@ export interface FakeServeOptions {
    *  requested on the interrupt's request, answered a few ticks later, so the
    *  loop reads the stop before the interrupt's landing. */
   hardStopOnCutInterrupt?: boolean;
+  /** The interrupted execution's tail (`interruptSettlesLate`) is serialized
+   *  only AFTER the next execution's `session.execution.started` — an ordering
+   *  the binary does not pin (the measured tail lands before it): the one end
+   *  the loop-end cut owes then lands in the bridge's own mode, where a bridge
+   *  reading it as its own settle would end the loop on the previous answer. */
+  lateTailAfterNextStart?: boolean;
+  /** The cut tool's own outcome (`hangToolCall`) rides the interrupted
+   *  execution's tail itself — before the next execution starts, in the
+   *  bridge's `earlier` mode — instead of landing after that start
+   *  (`settleAfterStart`): the shape a tool the interrupt ended would most
+   *  plausibly report in. */
+  hungToolSettlesInTail?: boolean;
+  /** The tool call of this 1-based turn runs with no ask the bot answered — a
+   *  gate bypass — whichever play reaches it (the script's `bypassGate` is the
+   *  first turn's alone), so a bypass can follow a loop-end cut in the
+   *  write-up's execution. */
+  bypassGateAtTurn?: number;
+  /** The settle of this 1-based turn's allowed tool call never reaches the
+   *  feed: the tailer's stream drops as the tool completes — its `stream
+   *  closed` note and the reconnect refills do — so the call is a straggler
+   *  the loop never read a settle for, open at the execution's clean end. */
+  dropStreamAtSettle?: number;
   /** The tailer's stream drops as the tool call of this 1-based turn is made:
    *  the step's events — `session.step.started`, `session.tool.input.*`,
    *  `session.tool.called`, `permission.asked` — never reach the feed; the
@@ -484,6 +506,12 @@ class ScriptedServe {
   private readonly hangToolCall: number | undefined;
   private readonly hungToolSettlesDuringInterrupt: boolean;
   private readonly hardStopOnCutInterrupt: boolean;
+  private readonly lateTailAfterNextStart: boolean;
+  private readonly hungToolSettlesInTail: boolean;
+  private readonly bypassGateAtTurn: number | undefined;
+  private readonly dropStreamAtSettle: number | undefined;
+  /** The late tail is owed at the next play's start rather than at its prompt (`lateTailAfterNextStart`). */
+  private tailAfterStart = false;
   /** POSTs to `/interrupt` seen: the loop-end cut is 1, the hard-stop ending's own is 2. */
   private interruptCount = 0;
   /** The hung tool completed on its own (`hungToolSettlesDuringInterrupt`): the play runs on. */
@@ -574,17 +602,21 @@ class ScriptedServe {
     this.promptPostFails = options.promptPostFails;
     this.silentAfterPrompt = options.silentAfterPrompt;
     // A hung tool's interrupt owes the interrupted execution's tail at the next
-    // queue prompt, as measured: the row's script says the tool hangs, the
-    // measured shape follows unless a test names another late end.
+    // queue prompt, as measured: the row's script (or a test's option) says the
+    // tool hangs, the measured shape follows unless a test names another late end.
+    this.hangToolCall = options.hangToolCall ?? script.hangToolCall;
     this.interruptSettlesLate =
-      options.interruptSettlesLate ?? (script.hangToolCall !== undefined ? "interrupted" : undefined);
+      options.interruptSettlesLate ?? (this.hangToolCall !== undefined ? "interrupted" : undefined);
     this.lateTailNoise = options.lateTailNoise === true;
     this.controlResetOnPrompt = options.controlResetOnPrompt;
     this.controlResetOnReply = options.controlResetOnReply;
     this.hungToolSettlesOnPlay = options.hungToolSettlesOnPlay ?? 2;
-    this.hangToolCall = options.hangToolCall ?? script.hangToolCall;
     this.hungToolSettlesDuringInterrupt = options.hungToolSettlesDuringInterrupt === true;
     this.hardStopOnCutInterrupt = options.hardStopOnCutInterrupt === true;
+    this.lateTailAfterNextStart = options.lateTailAfterNextStart === true;
+    this.hungToolSettlesInTail = options.hungToolSettlesInTail === true;
+    this.bypassGateAtTurn = options.bypassGateAtTurn;
+    this.dropStreamAtSettle = options.dropStreamAtSettle;
     this.dropStreamAtStep = options.dropStreamAtStep;
     this.controlResetOnSteer = options.controlResetOnSteer;
     this.steerLandsAfterNextPrompt = options.steerLandsAfterNextPrompt === true;
@@ -1028,7 +1060,8 @@ class ScriptedServe {
         // serializes them.
         if (this.lateSettle) {
           this.lateSettle = false;
-          this.emitLateTail();
+          if (this.lateTailAfterNextStart) this.tailAfterStart = true;
+          else this.emitLateTail();
         }
         // An interrupt ends the execution it was sent to; a prompt admitted
         // after it starts a fresh one, as the real server does.
@@ -1122,27 +1155,33 @@ class ScriptedServe {
     }
     if (req.method === "POST" && req.path.endsWith("/interrupt")) {
       this.interruptCount++;
+      // The interrupt the server refuses: its own word, a 500 — and nothing
+      // interrupted: the execution runs on, a hung tool hangs on, the asks
+      // pending stay pending. Read before any state moves.
+      if (this.interruptPostFails) return j(500, { error: "interrupt refused" });
       // Measured against `@opencode/cli` at the pin: the interrupt answers 200
       // `{ interrupted: true }` when an execution runs and `{ interrupted: false }`
       // on an idle session; an ask pending at the interrupt is dropped — gone
       // from `GET …/permission`, no `permission.replied`, the tool failing
       // `aborted` — and a reply to it afterwards answers 404.
       const running = this.executing;
-      this.interrupted = true;
       // The interrupt owes the hung play its late tail (`interruptSettlesLate`),
       // decided here on the request itself, not on the play's next tick: the
       // post-turn's prompt may land before that tick and reads the debt first.
       if (this.hanging && this.hungToolSettlesDuringInterrupt) {
         // The tool completes on its own while the interrupt is in flight: the
-        // play runs on to its end, and the interrupt answers once it has — a
-        // window the harness must read as its own, not as an earlier
-        // execution's.
+        // play runs on to its end — nothing is interrupted, so the execution
+        // ends by its own script, `succeeded` — and the interrupt answers once
+        // it has, with `interrupted: false`: a window the harness must read as
+        // its own, not as an earlier execution's.
         this.hungSettled = true;
         return (async () => {
           for (let i = 0; i < 400 && this.executing; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
           return j(200, { interrupted: false });
         })();
       }
+      // From here the interrupt lands on the live execution: it ends where it is.
+      this.interrupted = true;
       // An operator's hard stop lands while the interrupt is in flight: requested
       // now, this loop-end interrupt's answer held until the loop has read the
       // stop and posted its OWN ending interrupt (a second request), so the loop
@@ -1173,8 +1212,6 @@ class ScriptedServe {
       // tool's failure.
       this.pendingAsks.clear();
       this.liveAsks.clear();
-      // The interrupt the server refuses: its own word, a 500.
-      if (this.interruptPostFails) return j(500, { error: "interrupt refused" });
       // The interrupt the kill cuts: its request answers only once the server
       // is killed, and then with the reset the kill caused.
       if (this.interruptAnswersAfterKill === "refused")
@@ -1266,7 +1303,7 @@ class ScriptedServe {
     if (this.hungTool !== undefined) {
       const { callId, assistantMessageID: hungMessageID } = this.hungTool;
       this.hungTool = undefined;
-      this.settleAfterStart = () =>
+      const settle = () =>
         this.emitEvent("session.tool.success", {
           sessionID,
           assistantMessageID: hungMessageID,
@@ -1274,6 +1311,10 @@ class ScriptedServe {
           content: [{ type: "text", text: "slept" }],
           executed: true,
         });
+      // In the tail itself (`hungToolSettlesInTail`), before the execution's
+      // end; else after the next execution's start.
+      if (this.hungToolSettlesInTail) settle();
+      else this.settleAfterStart = settle;
     }
     if (this.interruptSettlesLate === "failed") {
       this.failExecution("provider.error", LATE_FAILURE_ERROR);
@@ -1349,6 +1390,12 @@ class ScriptedServe {
     this.plays++;
     const play = this.plays;
     this.emitEvent("session.execution.started", { sessionID: this.sessionID });
+    // The interrupted execution's tail serialized only after this start
+    // (`lateTailAfterNextStart`): the end the cut owes lands in own mode.
+    if (this.tailAfterStart) {
+      this.tailAfterStart = false;
+      this.emitLateTail();
+    }
     // A hung tool call's late success (`hangToolCall` + `interruptSettlesLate`):
     // the earlier execution's tool settling after THIS execution has started —
     // the next one's, or a later one's (`hungToolSettlesOnPlay`).
@@ -1669,8 +1716,9 @@ class ScriptedServe {
       return this.toolContent(callId, ask.name, input, "error", message);
     }
 
-    // A bypass (AE2): the tool runs with no ask the bot answered.
-    if (firstTurn && this.script.bypassGate) {
+    // A bypass (AE2): the tool runs with no ask the bot answered — the script's
+    // first turn, or the turn an option names in whichever play reaches it.
+    if ((firstTurn && this.script.bypassGate) || this.bypassGateAtTurn === turnIndex + 1) {
       const content = [{ type: "text", text: ownToolResultText(part.name, input) }];
       this.emitEvent("session.tool.success", {
         sessionID: this.sessionID,
@@ -1848,7 +1896,14 @@ class ScriptedServe {
         this.relayNames.has(part.name) && this.mutate !== "relay"
           ? await this.runRelay(callId, part.name, input)
           : [{ type: "text", text: ownToolResultText(part.name, input) }];
-      if (!unrecorded)
+      if (this.dropStreamAtSettle === turnIndex + 1) {
+        // The stream drops as the tool completes (`dropStreamAtSettle`): no
+        // settle event reaches the feed — the tailer's note and its reconnect
+        // refills do — and the call stays open on the loop's record.
+        this.container.emit({ feed: "tailer", at: NOW, note: "stream closed" });
+        this.emitPermissions([]);
+        this.emitMessages();
+      } else if (!unrecorded)
         this.emitEvent("session.tool.success", {
           sessionID: this.sessionID,
           assistantMessageID,
