@@ -7,9 +7,34 @@ import { attachTarget, mirrorFetchReason, parseWantSha, wantShaForBinding } from
 // deleted branch, its head still under refs/pull/N/head); unknown-ref otherwise.
 describe("attachTarget", () => {
   const sha = "e".repeat(40);
-  it("the ref exists → clone its tip, whatever was expected (the ref always wins over a detached tree)", () => {
-    expect(attachTarget({ refExists: true, wantSha: sha, commitInMirror: true })).toEqual({ kind: "ref" });
+  const other = "f".repeat(40);
+  it("the ref exists and the caller named no commit, or its tip IS the commit → clone its tip", () => {
+    expect(attachTarget({ refExists: true, wantSha: sha, commitInMirror: true, tipSha: sha })).toEqual({ kind: "ref" });
+    expect(attachTarget({ refExists: true, wantSha: null, commitInMirror: false, tipSha: other })).toEqual({
+      kind: "ref",
+    });
     expect(attachTarget({ refExists: true, wantSha: null, commitInMirror: false })).toEqual({ kind: "ref" });
+  });
+  it("the ref exists but its tip is not the commit the caller named, even after the fetch → stale-tip, never the tip: a run executes at the sha it asked for or not on this resident", () => {
+    // Both directions refuse: an older tip (the fetch failed or was skipped, so
+    // the mirror is behind the commit the bot resolved) and a newer one (a push
+    // raced the attach). The caller falls back cold at the requested commit.
+    expect(attachTarget({ refExists: true, wantSha: sha, commitInMirror: true, tipSha: other })).toEqual({
+      kind: "stale-tip",
+      tip: other,
+      want: sha,
+    });
+    // An unreadable tip with a named commit is never assumed fresh.
+    expect(attachTarget({ refExists: true, wantSha: sha, commitInMirror: false, tipSha: null })).toEqual({
+      kind: "stale-tip",
+      tip: null,
+      want: sha,
+    });
+    expect(attachTarget({ refExists: true, wantSha: sha, commitInMirror: false })).toEqual({
+      kind: "stale-tip",
+      tip: null,
+      want: sha,
+    });
   });
   it("the ref is gone but the expected commit is in the mirror → check that commit out, detached", () => {
     expect(attachTarget({ refExists: false, wantSha: sha, commitInMirror: true })).toEqual({ kind: "sha", sha });

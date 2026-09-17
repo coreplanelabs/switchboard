@@ -38,6 +38,7 @@ export default defineConfig({
       "autoRebuild.test.ts",
       "awaitRestore.test.ts",
       "infraStreak.test.ts",
+      "staleTip.test.ts",
     ],
   },
 });
