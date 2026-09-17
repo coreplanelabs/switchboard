@@ -64,7 +64,9 @@ the human assignee.
     work. It exposes a fixed delivery/session vocabulary, never arbitrary
     GraphQL or token reads. Each session operation rechecks current access and
     app ownership. Bridge failures return stable errors without upstream text.
-12. The consumer durably records entry into dispatch before invoking it. It
+12. A Linear-only bot starts without Slack credentials or a Slack socket. Partial
+    Slack configuration still fails by the missing credential name. Combined
+    installations start both channels. The consumer durably records entry into dispatch before invoking it. It
     renews each delivery lease while work runs, consumes unrelated sessions
     concurrently, and stops intake during drain. A replay reconciles the
     recorded run or reports an interrupted request; it never blindly repeats
@@ -128,3 +130,5 @@ the human assignee.
 | 16: issue actions and delegated queue privacy | `[unit]` `src/channels/linear/workItems.test.ts::*` |
 | Work-item tool exposure and dispatcher binding | `[unit]` `src/tools/workItems.test.ts::*`, `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::binds work tracking to the resolved requester before a model can call an issue tool` |
 | Inbound files and deployed installation | `[gap]` Delivery plan acceptance ledger; not implemented by OAuth alone |
+
+| 12: independent channel startup | `[unit]` `src/channels/startup.test.ts::*` |

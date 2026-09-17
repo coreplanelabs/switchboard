@@ -46,7 +46,9 @@ Only the bridge bearer reaches the bot container; it permits fixed delivery
 and session operations, with current app ownership checked on every request.
 The bridge is disabled without that bearer.
 
-The bot starts its consumer when `LINEAR_BRIDGE_TOKEN` is configured. It requires
+The bot starts its consumer when `LINEAR_BRIDGE_TOKEN` is configured. Slack
+credentials are optional for a Linear-only process; if either Slack token is
+present, both are required and the Slack channel starts too. It requires
 the durable run-history Worker and run ledger, so a container replacement can
 rebuild the conversation and reconcile admitted work. It stops intake during
 drain; pending deliveries survive in the edge inbox. The edge acknowledges new sessions
