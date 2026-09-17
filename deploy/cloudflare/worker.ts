@@ -76,6 +76,7 @@ export interface Env {
   LINEAR_APPLICATION_ID?: string;
   LINEAR_WEBHOOK_SECRET?: string;
   LINEAR_ORGANIZATION_ID?: string;
+  LINEAR_BRIDGE_TOKEN?: string;
   SWITCHBOARD: DurableObjectNamespace<SwitchboardServer>;
   /** The ship coordinator (coordinator.ts): `POST /admin/coordinator/instances`
    *  creates its instances; the state Worker's finish sends them `run-finished-<runId>`. */
@@ -122,6 +123,7 @@ export interface Env {
 /** Every secret/var the Worker forwards into the container. Optional entries
  *  are forwarded only when set, so the bot sees "not configured" as absence. */
 const FORWARDED_OPTIONAL = [
+  "LINEAR_BRIDGE_TOKEN",
   "OPENAI_API_KEY",
   "OPENROUTER_API_KEY",
   "E2B_API_KEY",

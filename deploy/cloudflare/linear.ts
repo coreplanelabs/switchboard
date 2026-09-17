@@ -1,8 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
-import { LinearOAuth, LINEAR_AUTHORIZE_PATH, LINEAR_CALLBACK_PATH } from "../../src/channels/linear/oauth.js";
+import {
+  LinearOAuth,
+  LinearTokenProvider,
+  LINEAR_AUTHORIZE_PATH,
+  LINEAR_CALLBACK_PATH,
+} from "../../src/channels/linear/oauth.js";
+import { DirectLinearApi } from "../../src/channels/linear/api.js";
+import { handleLinearBridge, LINEAR_BRIDGE_PATH } from "../../src/channels/linear/bridge.js";
 import { StoredLinearStore, type LinearOAuthState } from "../../src/channels/linear/store.js";
 import { SqlLinearInbox } from "../../src/channels/linear/inbox.js";
-import { handleLinearWebhook, LINEAR_WEBHOOK_PATH } from "../../src/channels/linear/webhook.js";
+import { boundedBody, handleLinearWebhook, LINEAR_WEBHOOK_PATH } from "../../src/channels/linear/webhook.js";
 import { LINEAR_TIMING } from "../../src/core/budgets.js";
 import { systemClock } from "../../src/core/trace/clock.js";
 import type { Env } from "./worker";
@@ -15,13 +22,19 @@ export type LinearEnv = Pick<
   | "LINEAR_APPLICATION_ID"
   | "LINEAR_WEBHOOK_SECRET"
   | "LINEAR_ORGANIZATION_ID"
+  | "LINEAR_BRIDGE_TOKEN"
   | "PUBLIC_BASE_URL"
 >;
 
 /** Public OAuth and signed webhook routes never wake the bot's container.
  *  An installation without the optional credentials stays explicitly disabled. */
 export function linearRoute(pathname: string): boolean {
-  return pathname === LINEAR_AUTHORIZE_PATH || pathname === LINEAR_CALLBACK_PATH || pathname === LINEAR_WEBHOOK_PATH;
+  return (
+    pathname === LINEAR_AUTHORIZE_PATH ||
+    pathname === LINEAR_CALLBACK_PATH ||
+    pathname === LINEAR_WEBHOOK_PATH ||
+    pathname === LINEAR_BRIDGE_PATH
+  );
 }
 
 export async function handleLinearEdge(request: Request, env: LinearEnv): Promise<Response> {
@@ -34,6 +47,14 @@ export async function handleLinearEdge(request: Request, env: LinearEnv): Promis
   ) {
     return Response.json({ error: "linear_disabled" }, { status: 503, headers: { "cache-control": "no-store" } });
   }
+  // Buffer only bounded raw bytes before crossing the Durable Object boundary.
+  // An early rejection there must not leave a streaming subrequest pumping
+  // from the outer request after its response has already been sent.
+  if (request.body) {
+    const bytes = await boundedBody(request);
+    if (!bytes) return Response.json({ error: "too_large" }, { status: 413 });
+    request = new Request(request, { body: bytes as Uint8Array<ArrayBuffer> });
+  }
   return env.LINEAR_STATE.get(env.LINEAR_STATE.idFromName("installation")).fetch(request);
 }
 
@@ -43,11 +64,19 @@ export async function handleLinearEdge(request: Request, env: LinearEnv): Promis
 export class LinearState extends DurableObject<LinearEnv> {
   private readonly store: StoredLinearStore;
   private readonly inbox: SqlLinearInbox;
+  private readonly tokens: LinearTokenProvider;
 
   constructor(ctx: DurableObjectState, env: LinearEnv) {
     super(ctx, env);
     this.store = new StoredLinearStore(ctx.storage);
     this.inbox = new SqlLinearInbox(ctx.storage.sql);
+    this.tokens = new LinearTokenProvider({
+      clientId: env.LINEAR_CLIENT_ID ?? "",
+      clientSecret: env.LINEAR_CLIENT_SECRET ?? "",
+      store: this.store,
+      fetch: (input, init) => fetch(input, init),
+      clock: systemClock,
+    });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -65,8 +94,26 @@ export class LinearState extends DurableObject<LinearEnv> {
       if ((await this.ctx.storage.getAlarm()) === null)
         await this.ctx.storage.setAlarm(systemClock() + LINEAR_TIMING.oauthStateMs);
       const path = new URL(request.url).pathname;
+      if (path === LINEAR_BRIDGE_PATH)
+        return await handleLinearBridge(request, {
+          token: env.LINEAR_BRIDGE_TOKEN,
+          inbox: this.inbox,
+          clock: systemClock,
+          api: async (organizationId) => {
+            if (env.LINEAR_ORGANIZATION_ID && organizationId !== env.LINEAR_ORGANIZATION_ID)
+              throw new Error("linear_wrong_installation");
+            const installation = await this.store.getInstallation(organizationId);
+            if (!installation) throw new Error("linear_not_installed");
+            return new DirectLinearApi({
+              organizationId,
+              appUserId: installation.appUserId,
+              token: () => this.tokens.accessToken(organizationId),
+              fetch: (input, init) => fetch(input, init),
+            });
+          },
+        });
       if (path === LINEAR_WEBHOOK_PATH)
-        return handleLinearWebhook(request, {
+        return await handleLinearWebhook(request, {
           secret: env.LINEAR_WEBHOOK_SECRET,
           applicationId: env.LINEAR_APPLICATION_ID,
           organizationId: env.LINEAR_ORGANIZATION_ID,
@@ -87,7 +134,7 @@ export class LinearState extends DurableObject<LinearEnv> {
         fetch: (input, init) => fetch(input, init),
         clock: systemClock,
       });
-      return oauth.handle(request);
+      return await oauth.handle(request);
     } catch {
       return Response.json({ error: "linear_unavailable" }, { status: 503 });
     }

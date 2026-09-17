@@ -1,8 +1,8 @@
 # Connect Linear
 
-The Linear integration is being built in stages. OAuth installation and
-durable webhook intake exist; dispatch and native session replies are not yet
-wired. Do not install the app for end users until the channel delivery stage
+The Linear integration is being built in stages. OAuth, durable webhook intake
+and native session adapters exist; the dispatcher consumer is not yet wired.
+Do not install the app for end users until the channel delivery stage
 is deployed. See the [delivery plan](../plans/2026-09-17-001-linear-channel.md).
 
 ## Register the application
@@ -35,11 +35,22 @@ Store these values through the deployment's secret source and the existing
 | `LINEAR_APPLICATION_ID` | Application UUID from the settings URL |
 | `LINEAR_WEBHOOK_SECRET` | Webhook signing secret |
 | `LINEAR_ORGANIZATION_ID` | Optional workspace UUID to restrict installation and intake to one workspace |
+| `LINEAR_BRIDGE_TOKEN` | Random internal bearer shared by the bot container and its edge bridge |
 
 `PUBLIC_BASE_URL` already comes from the deployment profile. OAuth derives
 the callback from that trusted origin, so a caller cannot select a different
 callback through query parameters or a forged Host header. Credentials live
 in the Worker's durable storage and never appear in callback responses.
+Only the bridge bearer reaches the bot container; it permits fixed delivery
+and session operations, with current app ownership checked on every request.
+The bridge is disabled without that bearer.
+
+Linear people have actor ids `linear:<workspace-id>:<user-id>` and use the
+same open-chat baseline as Slack. Grant restricted agents and repositories
+through those ids or `linear:*`; do not copy a Slack administrator's privileges
+based on a matching display name. Linear team channel ids are
+`linear:<workspace-id>:<team-id>`, and session thread ids are
+`linear:<workspace-id>:<session-id>`.
 
 The edge's `LINEAR_STATE` binding is independent of the bot container. Deploy
 the Worker migration before using the OAuth endpoints. Once the full channel

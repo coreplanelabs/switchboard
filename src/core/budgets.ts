@@ -27,6 +27,8 @@ export const DAY_MS = 24 * 60 * MINUTE_MS;
 /** Linear transport lifetimes: browser authorization, token renewal, signed
  *  webhook freshness, consumer leases and completed-delivery deduplication. */
 export const LINEAR_TIMING = {
+  apiTimeoutMs: 10_000,
+  progressMs: 5_000,
   oauthStateMs: 10 * MINUTE_MS,
   refreshMarginMs: 5 * MINUTE_MS,
   webhookSkewMs: MINUTE_MS,

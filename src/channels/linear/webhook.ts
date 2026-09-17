@@ -29,7 +29,7 @@ const record = (value: unknown): Record<string, unknown> =>
 const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 
 /** Cap actual streamed bytes, regardless of whether Content-Length is present or truthful. */
-async function boundedBody(request: Request): Promise<Uint8Array | undefined> {
+export async function boundedBody(request: Request): Promise<Uint8Array | undefined> {
   const reader = request.body?.getReader();
   if (!reader) return new Uint8Array();
   const chunks: Uint8Array[] = [];

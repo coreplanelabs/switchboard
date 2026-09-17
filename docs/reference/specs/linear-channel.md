@@ -6,8 +6,8 @@ identity; the intended dispatch actor is the authenticated person initiating
 the session. Native delegation names the app in `Issue.delegate` and preserves
 the human assignee.
 
-- **Code**: `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
-- **Tests**: `src/channels/linear/oauth.test.ts`, `src/channels/linear/store.test.ts`, `src/channels/linear/webhook.test.ts`, `src/channels/linear/inbox.test.ts`.
+- **Code**: `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/channels/linear/api.ts`, `src/channels/linear/session.ts`, `src/channels/linear/io.ts`, `src/channels/linear/bridge.ts`, `src/core/authz/actor.ts`, `src/core/authz/grants.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
+- **Tests**: `src/channels/linear/oauth.test.ts`, `src/channels/linear/store.test.ts`, `src/channels/linear/webhook.test.ts`, `src/channels/linear/inbox.test.ts`, `src/channels/linear/api.test.ts`, `src/channels/linear/session.test.ts`, `src/channels/linear/io.test.ts`, `src/channels/linear/bridge.test.ts`, `src/core/authz/actor.test.ts`.
 - **Docs**: [Delivery plan](../../plans/2026-09-17-001-linear-channel.md).
 
 ## Behavior
@@ -44,6 +44,24 @@ the human assignee.
    503. Tokens have no HTTP read route and are not forwarded to the container.
    OAuth state expires after ten minutes and pending installations are bounded;
    an alarm prunes expired state and completed-delivery tombstones.
+8. Session context resolves the authenticated human from the signed creation
+   or prompt event, never from issue text or the assignee. Organization and app
+   ownership must agree with the installation and the freshly fetched session.
+   Follow-ups keep the same namespaced thread and carry their own message id;
+   a stop signal is a control input, never an agent prompt.
+9. Native session history uses immutable agent activities in chronological
+   order, excludes progress noise and the triggering turn, and never includes
+   a prompt that arrived after that turn. Progress is coalesced, replies use
+   response/error activities, and run links are added without replacing PR links.
+10. Linear human actors use `linear:<workspace>:<user>`. They inherit the same
+    open-chat baseline as Slack, plus explicit `linear:*` and personal grants.
+    A matching display name or bare user id on another platform or workspace
+    never lends the actor that identity's privileges. Team visibility remains
+    unknown until proven; it is never treated as public by inference.
+11. The internal edge bridge authenticates before parsing a body or claiming
+    work. It exposes a fixed delivery/session vocabulary, never arbitrary
+    GraphQL or token reads. Each session operation rechecks current access and
+    app ownership. Bridge failures return stable errors without upstream text.
 
 ## Proof
 
@@ -54,4 +72,8 @@ the human assignee.
 | 5: signature, replay, identity, size and durable-accept boundary | `[unit]` `src/channels/linear/webhook.test.ts::*` |
 | 6: real SQLite and in-memory delivery lifecycle, fencing, retry and recovery | `[unit]` `src/channels/linear/inbox.test.ts::*` |
 | 7: deployed edge routing | `[agent]` With Linear credentials absent, GET `/oauth/linear/authorize` and POST `/webhooks/linear` return 503. With credentials configured, installation redirects to Linear and callback persists the installation. Send a signed session event while the bot container is stopped; receive 202 and verify the queued delivery after restarting the consumer. The production callback is HTTPS; local testing uses the same path on `http://localhost:8080`. |
+| 8: session and human identity | `[unit]` `src/channels/linear/session.test.ts::*` |
+| 9: native conversation, progress and replies | `[unit]` `src/channels/linear/io.test.ts::*`, `src/channels/linear/api.test.ts::*` |
+| 10: resolved Linear actor grants | `[unit]` `src/core/authz/actor.test.ts::Linear actor authorization::*` |
+| 11: fixed authenticated bridge and durable delivery | `[unit]` `src/channels/linear/bridge.test.ts::*` |
 | Native dispatch, activities, recovery, issue actions and deployed installation | `[gap]` Delivery plan acceptance ledger; not implemented by OAuth alone |

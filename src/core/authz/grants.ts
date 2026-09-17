@@ -16,7 +16,7 @@ export const ALL_GRANTS: Grants = Object.freeze({ actions: "all", channels: "all
 /** The namespaces a native `grants` key may use (invariant 4). `cli:` is not
  *  configurable (the local CLI always holds everything) and `agent:` actors
  *  derive their grants from their principal, so neither is listed. */
-export const GRANT_ACTOR_PREFIXES = ["slack", "http", "mcp", "access", "schedule"] as const;
+export const GRANT_ACTOR_PREFIXES = ["slack", "linear", "http", "mcp", "access", "schedule"] as const;
 
 /** The surfaces whose every authenticated actor may be granted at once with one
  *  `<ns>:*` entry: who may authenticate there is decided elsewhere (Cloudflare
@@ -25,7 +25,7 @@ export const GRANT_ACTOR_PREFIXES = ["slack", "http", "mcp", "access", "schedule
  *  `schedule:` (a schedule is an individually named job the registry declares),
  *  `access:svc:` (a service token is a named credential, not a browser session —
  *  `access:*` never reaches one), and the unconfigurable `cli:` and `agent:`. */
-export const SURFACE_GRANT_PREFIXES = ["slack", "http", "mcp", "access"] as const;
+export const SURFACE_GRANT_PREFIXES = ["slack", "linear", "http", "mcp", "access"] as const;
 
 /** The `<ns>:*` key for the surface `actorId` authenticated on — `slack:*` for
  *  `slack:U…`, `access:*` for a browser `access:<sub>` — or undefined when its
@@ -45,7 +45,7 @@ export function agentRunAction(agent: string): string {
 }
 
 /** The actions of the commands the `open` chat gate admitted before they became
- *  policy rows: what EVERY Slack user holds. A command group not listed here
+ *  policy rows: what every authenticated Slack or Linear person holds. A command group not listed here
  *  is closed to chat users until config grants it (fail-closed).
  *  `config:write` is not here: `config set channel` is held where `grants` say
  *  so (admins through `actions: all`) and nowhere else. */
@@ -251,7 +251,7 @@ export interface GrantsTable {
    *  replacing an actor's own entry, never listed as an actor (a surface is not
    *  someone `adminsHint` can name). */
   surfaces: Map<string, Grants>;
-  /** What every `slack:` user holds, listed or not: the open chat commands and `agent:run:<name>` for every unrestricted agent. */
+  /** What every Slack or Linear person holds, listed or not: the open chat commands and `agent:run:<name>` for every unrestricted agent. */
   everyone: Grants;
   /** What every Access browser session (`access:<sub>`, never `access:svc:`) holds:
    *  each registered group's read and the two personal chat writes. */
@@ -259,13 +259,13 @@ export interface GrantsTable {
   restrict: Restriction;
 }
 
-/** The baseline an actor id inherits by its namespace, listed or not: a `slack:`
- *  user holds what `everyone` does; an Access browser session holds every
+/** The baseline an actor id inherits by its namespace, listed or not: a Slack
+ *  or Linear person holds what `everyone` does; an Access browser session holds every
  *  `<group>:read`. Every other namespace (`schedule:`, `access:svc:`, `http:`,
  *  `mcp:`) is a credential or a job that holds exactly what names it — an
  *  unlisted one is `NO_GRANTS` (fail-closed). */
 export function namespaceBaseline(actorId: string, table: Pick<GrantsTable, "everyone" | "browser">): Grants {
-  if (actorId.startsWith("slack:")) return table.everyone;
+  if (actorId.startsWith("slack:") || actorId.startsWith("linear:")) return table.everyone;
   if (actorId.startsWith("access:") && !actorId.startsWith("access:svc:")) return table.browser;
   return NO_GRANTS;
 }
