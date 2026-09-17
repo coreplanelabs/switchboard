@@ -23,7 +23,8 @@ export class LinearChannelIO implements ChannelIO {
     private readonly deps: {
       api: LinearApi;
       sessionId: string;
-      appUserId: string;
+      /** Reconstructed handles resolve the app user from the current installation. */
+      appUserId?: string;
       triggeringActivityId?: string;
       /** A new session's prompt already contains its issue and thread context. */
       initial?: boolean;
@@ -110,6 +111,7 @@ export class LinearChannelIO implements ChannelIO {
 
   async history(): Promise<HistoryItem[]> {
     if (this.deps.initial) return [];
+    const appUserId = this.deps.appUserId ?? (await this.deps.api.session(this.deps.sessionId)).appUserId;
     let activities = await this.deps.api.activities(this.deps.sessionId);
     if (this.deps.triggeringActivityId) {
       const at = activities.findIndex((activity) => activity.id === this.deps.triggeringActivityId);
@@ -121,9 +123,9 @@ export class LinearChannelIO implements ChannelIO {
     }
     return activities.flatMap((activity): HistoryItem[] => {
       if (!activity.body) return [];
-      if (activity.type === "prompt" && activity.userId !== this.deps.appUserId)
+      if (activity.type === "prompt" && activity.userId !== appUserId)
         return [{ role: "user", text: activity.body, at: activity.at }];
-      if (["response", "elicitation", "error"].includes(activity.type) && activity.userId === this.deps.appUserId)
+      if (["response", "elicitation", "error"].includes(activity.type) && activity.userId === appUserId)
         return [{ role: "assistant", text: activity.body, at: activity.at }];
       return [];
     });

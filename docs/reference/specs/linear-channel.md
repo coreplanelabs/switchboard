@@ -1,13 +1,12 @@
 # Linear channel
 
-The installation and intake foundation for a native Linear channel. The
-dispatcher adapter is still tracked as a gap below. Its OAuth app is the API
-identity; the intended dispatch actor is the authenticated person initiating
+The native Linear channel's installation, intake and dispatcher adapter.
+Its OAuth app is the API identity; the dispatch actor is the authenticated person initiating
 the session. Native delegation names the app in `Issue.delegate` and preserves
 the human assignee.
 
-- **Code**: `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/channels/linear/api.ts`, `src/channels/linear/session.ts`, `src/channels/linear/io.ts`, `src/channels/linear/bridge.ts`, `src/core/authz/actor.ts`, `src/core/authz/grants.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
-- **Tests**: `src/channels/linear/oauth.test.ts`, `src/channels/linear/store.test.ts`, `src/channels/linear/webhook.test.ts`, `src/channels/linear/inbox.test.ts`, `src/channels/linear/api.test.ts`, `src/channels/linear/session.test.ts`, `src/channels/linear/io.test.ts`, `src/channels/linear/bridge.test.ts`, `src/core/authz/actor.test.ts`.
+- **Code**: `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/channels/linear/api.ts`, `src/channels/linear/session.ts`, `src/channels/linear/io.ts`, `src/channels/linear/bridge.ts`, `src/channels/linear/consumer.ts`, `src/channels/linear/control.ts`, `src/channels/linear/recovery.ts`, `src/channels/linear/lifecycle.ts`, `src/index.ts`, `src/core/authz/actor.ts`, `src/core/authz/grants.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
+- **Tests**: `src/channels/linear/oauth.test.ts`, `src/channels/linear/store.test.ts`, `src/channels/linear/webhook.test.ts`, `src/channels/linear/inbox.test.ts`, `src/channels/linear/api.test.ts`, `src/channels/linear/session.test.ts`, `src/channels/linear/io.test.ts`, `src/channels/linear/bridge.test.ts`, `src/channels/linear/consumer.test.ts`, `src/channels/linear/control.test.ts`, `src/channels/linear/recovery.test.ts`, `src/channels/linear/lifecycle.test.ts`, `src/core/authz/actor.test.ts`.
 - **Docs**: [Delivery plan](../../plans/2026-09-17-001-linear-channel.md).
 
 ## Behavior
@@ -32,7 +31,8 @@ the human assignee.
    must match the signed payload. Session creation and prompts deduplicate by
    signed session/activity ids, never the unsigned delivery header or the
    subscription's webhook id. Persistence precedes acknowledgement; a storage
-   failure is retryable and never exposes the payload in the response.
+   failure is retryable and never exposes the payload in the response. Both
+   acceptance and duplicate acknowledgement use Linear's required HTTP 200.
 6. The event inbox is SQLite-backed in the Worker and in-memory in tests.
    Atomic claims return the oldest available event and a consumer lease.
    Expired claims are redelivered with their run binding intact. A stale
@@ -62,6 +62,24 @@ the human assignee.
     work. It exposes a fixed delivery/session vocabulary, never arbitrary
     GraphQL or token reads. Each session operation rechecks current access and
     app ownership. Bridge failures return stable errors without upstream text.
+12. The consumer durably records entry into dispatch before invoking it. It
+    renews each delivery lease while work runs, consumes unrelated sessions
+    concurrently, and stops intake during drain. A replay reconciles the
+    recorded run or reports an interrupted request; it never blindly repeats
+    a command whose effects may already have happened. Pre-dispatch transport
+    failures retain their event for retry.
+    Turns in one session wait for the prior turn's admission, not its full
+    execution. Stop resolves the human actor and uses the existing `runs:write`
+    policy; it never stops a later run created after the control event arrived.
+    A permanently invalid signed request closes with an honest native error.
+13. Signed revocation removes the matching installation before intake returns;
+    a delayed revocation cannot remove a newer installation. It cancels pending
+    session deliveries without discarding the control event that stops live work.
+    Lifecycle events
+    stop affected live work without invoking an agent: revocation is workspace
+    scoped, removed teams are team scoped, and removal from an issue checks
+    its current delegate. A permission contraction rechecks current session
+    access. Notification echoes never create a second dispatch.
 
 ## Proof
 
@@ -71,9 +89,11 @@ the human assignee.
 | 4: storage semantics | `[unit]` `src/channels/linear/store.test.ts::*` |
 | 5: signature, replay, identity, size and durable-accept boundary | `[unit]` `src/channels/linear/webhook.test.ts::*` |
 | 6: real SQLite and in-memory delivery lifecycle, fencing, retry and recovery | `[unit]` `src/channels/linear/inbox.test.ts::*` |
-| 7: deployed edge routing | `[agent]` With Linear credentials absent, GET `/oauth/linear/authorize` and POST `/webhooks/linear` return 503. With credentials configured, installation redirects to Linear and callback persists the installation. Send a signed session event while the bot container is stopped; receive 202 and verify the queued delivery after restarting the consumer. The production callback is HTTPS; local testing uses the same path on `http://localhost:8080`. |
+| 7: deployed edge routing | `[agent]` With Linear credentials absent, GET `/oauth/linear/authorize` and POST `/webhooks/linear` return 503. With credentials configured, installation redirects to Linear and callback persists the installation. Send a signed session event while the bot container is stopped; receive 200 and verify the queued delivery after restarting the consumer. The production callback is HTTPS; local testing uses the same path on `http://localhost:8080`. |
 | 8: session and human identity | `[unit]` `src/channels/linear/session.test.ts::*` |
 | 9: native conversation, progress and replies | `[unit]` `src/channels/linear/io.test.ts::*`, `src/channels/linear/api.test.ts::*` |
 | 10: resolved Linear actor grants | `[unit]` `src/core/authz/actor.test.ts::Linear actor authorization::*` |
 | 11: fixed authenticated bridge and durable delivery | `[unit]` `src/channels/linear/bridge.test.ts::*` |
-| Native dispatch, activities, recovery, issue actions and deployed installation | `[gap]` Delivery plan acceptance ledger; not implemented by OAuth alone |
+| 12: dispatch consumption, control and recovery | `[unit]` `src/channels/linear/consumer.test.ts::*`, `src/channels/linear/control.test.ts::*`, `src/channels/linear/recovery.test.ts::*` |
+| 13: revocation and lifecycle cancellation | `[unit]` `src/channels/linear/lifecycle.test.ts::*` |
+| Timely edge acknowledgement, issue actions, files and deployed installation | `[gap]` Delivery plan acceptance ledger; not implemented by OAuth alone |

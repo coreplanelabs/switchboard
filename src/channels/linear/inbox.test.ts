@@ -46,13 +46,15 @@ for (const kind of ["memory", "sqlite"] as const) {
       const inbox = make();
       await inbox.accept(event);
       await inbox.claim(200, 100, "a");
+      expect(await inbox.begin(event.key, "wrong")).toBe(false);
+      expect(await inbox.begin(event.key, "a")).toBe(true);
       expect(await inbox.bind(event.key, "wrong", "run")).toBe(false);
       expect(await inbox.bind(event.key, "a", "run")).toBe(true);
       expect(await inbox.renew(event.key, "a", 500)).toBe(true);
       expect(await inbox.claim(499, 100, "b")).toBeUndefined();
       expect(await inbox.retry(event.key, "a", 600)).toBe(true);
       expect(await inbox.claim(599, 100, "b")).toBeUndefined();
-      expect(await inbox.claim(600, 100, "b")).toMatchObject({ runId: "run", attempts: 2 });
+      expect(await inbox.claim(600, 100, "b")).toMatchObject({ runId: "run", begun: true, attempts: 2 });
       expect(await inbox.renew(event.key, "a", 900)).toBe(false);
     });
     it("prunes only completed delivery tombstones, keeping pending work", async () => {
@@ -64,6 +66,22 @@ for (const kind of ["memory", "sqlite"] as const) {
       await inbox.prune(251);
       expect(await inbox.accept(event)).toBe(true);
       expect((await inbox.claim(300, 100, "b"))?.event.key).toBe("pending");
+    });
+    it("cancels revoked workspace requests while preserving control events and other installations", async () => {
+      const inbox = make();
+      await inbox.accept(event);
+      await inbox.claim(200, 100, "a");
+      await inbox.accept({ ...event, key: "other", payload: { ...event.payload, organizationId: "other" } });
+      await inbox.accept({
+        ...event,
+        key: "revoke",
+        payload: { ...event.payload, type: "OAuthApp", action: "revoked" },
+      });
+      await inbox.cancelOrganization("org", 250);
+      expect(await inbox.renew(event.key, "a", 500)).toBe(false);
+      expect(await inbox.accept(event)).toBe(false);
+      expect((await inbox.claim(300, 100, "b"))?.event.key).toBe("other");
+      expect((await inbox.claim(300, 100, "c"))?.event.key).toBe("revoke");
     });
   });
 }

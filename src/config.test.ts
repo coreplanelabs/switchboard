@@ -619,7 +619,7 @@ describe("grants config — the one shape", () => {
     for (const id of ["slack:U*", "schedule:*", "access:svc:*", "agent:*"]) {
       expect(() => load(withGrants(`  "${id}":\n    actions: all\n`)), id).toThrow(
         new RegExp(
-          `config\\.yaml: grants\\["${id.replace(/\*/g, "\\*")}"\\].*slack:\\*, linear:\\*, http:\\*, mcp:\\*, access:\\*`,
+          `config\\.yaml: grants\\["${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\].*slack:\\*, linear:\\*, http:\\*, mcp:\\*, access:\\*`,
         ),
       );
     }

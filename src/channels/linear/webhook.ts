@@ -120,7 +120,8 @@ export async function handleLinearWebhook(request: Request, deps: LinearWebhookD
     const eventId = await eventKey(typed);
     if (!eventId) return answer(400, "invalid_payload");
     const created = await deps.accept({ key: eventId, receivedAt, payload: typed });
-    return answer(created ? 202 : 200, created ? "accepted" : "duplicate");
+    // Linear requires HTTP 200; another 2xx can still trigger redelivery.
+    return answer(200, created ? "accepted" : "duplicate");
   } catch {
     // A non-2xx asks Linear to redeliver. The signed event is never acknowledged
     // until durable storage accepted it, and errors cannot echo its contents.

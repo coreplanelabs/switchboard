@@ -1,8 +1,10 @@
 # Connect Linear
 
-The Linear integration is being built in stages. OAuth, durable webhook intake
-and native session adapters exist; the dispatcher consumer is not yet wired.
-Do not install the app for end users until the channel delivery stage
+The Linear integration is being built in stages. OAuth, durable webhook intake,
+native conversations, dispatcher consumption and lifecycle cancellation are
+wired. Timely edge acknowledgement, issue tools, files and live deployment
+verification remain in progress. Do not install the app for end users until
+the completed channel
 is deployed. See the [delivery plan](../plans/2026-09-17-001-linear-channel.md).
 
 ## Register the application
@@ -45,12 +47,24 @@ Only the bridge bearer reaches the bot container; it permits fixed delivery
 and session operations, with current app ownership checked on every request.
 The bridge is disabled without that bearer.
 
+The bot starts its consumer when `LINEAR_BRIDGE_TOKEN` is configured. It requires
+the durable run-history Worker and run ledger, so a container replacement can
+rebuild the conversation and reconcile admitted work. It stops intake during
+drain; pending deliveries survive in the edge inbox. If a request entered the
+dispatcher but its durable admission cannot be proven, Switchboard reports the
+interruption instead of repeating a possibly completed command.
+
 Linear people have actor ids `linear:<workspace-id>:<user-id>` and use the
 same open-chat baseline as Slack. Grant restricted agents and repositories
 through those ids or `linear:*`; do not copy a Slack administrator's privileges
 based on a matching display name. Linear team channel ids are
 `linear:<workspace-id>:<team-id>`, and session thread ids are
 `linear:<workspace-id>:<session-id>`.
+
+Native Stop uses the same `runs:write` grant and run-visibility policy as
+`runs stop`. A Linear session does not establish team-wide membership; configure
+the actor's channel grants explicitly. Revocation and access removal are
+infrastructure cancellations and require no new grant from the former requester.
 
 The edge's `LINEAR_STATE` binding is independent of the bot container. Deploy
 the Worker migration before using the OAuth endpoints. Once the full channel

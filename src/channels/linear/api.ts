@@ -6,7 +6,14 @@ export interface LinearSession {
   creatorId?: string;
   url?: string;
   dismissedAt?: string;
-  issue?: { id: string; identifier: string; title: string; description?: string; teamId: string };
+  issue?: {
+    id: string;
+    identifier: string;
+    title: string;
+    description?: string;
+    teamId: string;
+    delegateId?: string | null;
+  };
 }
 
 export type LinearContent =
@@ -41,7 +48,7 @@ export function required(value: unknown): string {
 const SESSION_QUERY = `query SwitchboardSession($id: String!) {
   organization { id }
   agentSession(id: $id) { id url dismissedAt appUser { id } creator { id }
-    issue { id identifier title description team { id } } }
+    issue { id identifier title description team { id } delegate { id } } }
 }`;
 const HISTORY_QUERY = `query SwitchboardHistory($id: String!, $before: String) {
   agentSession(id: $id) { activities(last: 100, before: $before, orderBy: createdAt) {
@@ -113,6 +120,7 @@ export class DirectLinearApi implements LinearApi {
               identifier: required(issue.identifier),
               title: required(issue.title),
               teamId: required(object(issue.team).id),
+              delegateId: string(object(issue.delegate).id) ?? null,
               ...(string(issue.description) ? { description: string(issue.description) } : {}),
             },
           }

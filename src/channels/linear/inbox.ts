@@ -4,18 +4,21 @@ export interface LinearDelivery {
   event: LinearWebhookEvent;
   lease: string;
   attempts: number;
-  /** Recorded once dispatch has durably admitted the request. A replacement
-   *  consumer checks this run before attempting another dispatch. */
+  /** Set before entering dispatch, including commands without a run record. */
+  begun?: boolean;
+  /** A reconciliation hint, not proof that ledger admission succeeded. */
   runId?: string;
 }
 
 export interface LinearInbox {
   accept(event: LinearWebhookEvent): Promise<boolean>;
   claim(now: number, leaseMs: number, lease: string): Promise<LinearDelivery | undefined>;
+  begin(key: string, lease: string): Promise<boolean>;
   bind(key: string, lease: string, runId: string): Promise<boolean>;
   renew(key: string, lease: string, until: number): Promise<boolean>;
   retry(key: string, lease: string, at: number): Promise<boolean>;
   complete(key: string, lease: string, at: number): Promise<boolean>;
+  cancelOrganization(organizationId: string, at: number): Promise<void>;
   prune(completedBefore: number): Promise<void>;
 }
 
@@ -34,6 +37,7 @@ type Row = {
   lease: string;
   attempts: number;
   run_id: string | null;
+  begun: number;
 };
 
 /** Each mutation is one atomic SQL statement. Payloads live in SQLite, not
@@ -50,8 +54,16 @@ export class SqlLinearInbox implements LinearInbox {
       lease TEXT,
       attempts INTEGER NOT NULL DEFAULT 0,
       run_id TEXT,
+      begun INTEGER NOT NULL DEFAULT 0,
       finished_at INTEGER
     )`);
+    if (
+      !sql
+        .exec("PRAGMA table_info(linear_deliveries)")
+        .toArray()
+        .some((column) => column.name === "begun")
+    )
+      sql.exec("ALTER TABLE linear_deliveries ADD COLUMN begun INTEGER NOT NULL DEFAULT 0");
     sql.exec(
       "CREATE INDEX IF NOT EXISTS linear_deliveries_pending ON linear_deliveries(phase, available_at, sequence)",
     );
@@ -76,7 +88,7 @@ export class SqlLinearInbox implements LinearInbox {
         `UPDATE linear_deliveries
       SET phase = 'processing', lease = ?, available_at = ?, attempts = attempts + 1
       WHERE sequence = (SELECT sequence FROM linear_deliveries WHERE phase != 'done' AND available_at <= ? ORDER BY sequence LIMIT 1)
-      RETURNING event_key, payload, received_at, lease, attempts, run_id`,
+      RETURNING event_key, payload, received_at, lease, attempts, run_id, begun`,
         lease,
         now + leaseMs,
         now,
@@ -91,8 +103,21 @@ export class SqlLinearInbox implements LinearInbox {
       },
       lease: row.lease,
       attempts: row.attempts,
+      ...(row.begun ? { begun: true } : {}),
       ...(row.run_id ? { runId: row.run_id } : {}),
     };
+  }
+
+  async begin(key: string, lease: string): Promise<boolean> {
+    return (
+      this.sql
+        .exec(
+          "UPDATE linear_deliveries SET begun = 1 WHERE event_key = ? AND lease = ? AND phase = 'processing' AND begun = 0 RETURNING event_key",
+          key,
+          lease,
+        )
+        .toArray().length === 1
+    );
   }
 
   async bind(key: string, lease: string, runId: string): Promise<boolean> {
@@ -147,6 +172,16 @@ export class SqlLinearInbox implements LinearInbox {
   async prune(completedBefore: number): Promise<void> {
     this.sql.exec("DELETE FROM linear_deliveries WHERE phase = 'done' AND finished_at < ?", completedBefore);
   }
+  async cancelOrganization(organizationId: string, at: number): Promise<void> {
+    this.sql.exec(
+      `UPDATE linear_deliveries SET phase = 'done', payload = NULL, lease = NULL, finished_at = ?
+       WHERE phase != 'done' AND received_at <= ? AND json_extract(payload, '$.organizationId') = ?
+       AND json_extract(payload, '$.type') = 'AgentSessionEvent'`,
+      at,
+      at,
+      organizationId,
+    );
+  }
 }
 
 type MemoryRow = {
@@ -155,6 +190,7 @@ type MemoryRow = {
   availableAt: number;
   lease?: string;
   attempts: number;
+  begun?: boolean;
   runId?: string;
   finishedAt?: number;
 };
@@ -178,6 +214,7 @@ export class InMemoryLinearInbox implements LinearInbox {
         event: structuredClone(row.event),
         lease,
         attempts: row.attempts,
+        ...(row.begun ? { begun: true } : {}),
         ...(row.runId ? { runId: row.runId } : {}),
       };
     }
@@ -186,6 +223,12 @@ export class InMemoryLinearInbox implements LinearInbox {
   private owned(key: string, lease: string): MemoryRow | undefined {
     const row = this.rows.get(key);
     return row?.phase === "processing" && row.lease === lease ? row : undefined;
+  }
+  async begin(key: string, lease: string): Promise<boolean> {
+    const row = this.owned(key, lease);
+    if (!row || row.begun) return false;
+    row.begun = true;
+    return true;
   }
   async bind(key: string, lease: string, runId: string): Promise<boolean> {
     const row = this.owned(key, lease);
@@ -220,5 +263,19 @@ export class InMemoryLinearInbox implements LinearInbox {
     for (const [key, row] of this.rows)
       if (row.phase === "done" && row.finishedAt !== undefined && row.finishedAt < completedBefore)
         this.rows.delete(key);
+  }
+  async cancelOrganization(organizationId: string, at: number): Promise<void> {
+    for (const row of this.rows.values()) {
+      if (
+        row.event?.payload.organizationId !== organizationId ||
+        row.event.payload.type !== "AgentSessionEvent" ||
+        row.event.receivedAt > at
+      )
+        continue;
+      row.phase = "done";
+      row.event = undefined;
+      row.lease = undefined;
+      row.finishedAt = at;
+    }
   }
 }

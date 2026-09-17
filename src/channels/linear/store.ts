@@ -5,6 +5,8 @@ export interface LinearInstallation {
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
+  /** Original installation time, preserved across refreshes. */
+  installedAt?: number;
   /** Changes on install and refresh, so an old refresh cannot undo revocation. */
   version: string;
 }

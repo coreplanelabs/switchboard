@@ -194,7 +194,13 @@ export class LinearOAuth {
         throw new Error("linear_identity_invalid");
       if (this.deps.organizationId && organizationId !== this.deps.organizationId)
         return this.answer(403, "This Linear workspace is not enabled for this deployment.", true);
-      await this.deps.store.putInstallation({ organizationId, appUserId, ...tokens, version: random() });
+      await this.deps.store.putInstallation({
+        organizationId,
+        appUserId,
+        ...tokens,
+        version: random(),
+        installedAt: this.deps.clock(),
+      });
       return this.answer(200, "Switchboard is connected to Linear. You can close this window.", true);
     } catch {
       return this.answer(502, "Linear installation failed. Start the installation again.", true);

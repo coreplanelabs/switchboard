@@ -39,6 +39,9 @@ describe("Linear edge bridge", () => {
     const remote = new RemoteLinearInbox(transport);
     const delivery = await remote.claim();
     expect(delivery?.event.key).toBe("k");
+    expect(await remote.begin("k", "wrong")).toBe(false);
+    expect(await remote.begin("k", delivery!.lease)).toBe(true);
+    expect(await remote.begin("k", delivery!.lease)).toBe(false);
     expect(await remote.bind("k", "wrong", "run")).toBe(false);
     expect(await remote.bind("k", delivery!.lease, "run")).toBe(true);
     expect(await remote.complete("k", delivery!.lease)).toBe(true);

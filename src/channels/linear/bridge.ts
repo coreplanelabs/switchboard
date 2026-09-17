@@ -68,6 +68,9 @@ export class RemoteLinearInbox {
   async claim(): Promise<LinearDelivery | undefined> {
     return (await call<LinearDelivery | null>(this.transport, { op: "claim" })) ?? undefined;
   }
+  begin(key: string, lease: string): Promise<boolean> {
+    return call(this.transport, { op: "begin", key, lease });
+  }
   bind(key: string, lease: string, runId: string): Promise<boolean> {
     return call(this.transport, { op: "bind", key, lease, runId });
   }
@@ -143,13 +146,16 @@ export async function handleLinearBridge(
   }
   const op = body.op;
   if (
-    !["claim", "bind", "renew", "retry", "complete", "session", "activities", "activity", "link"].includes(String(op))
+    !["claim", "begin", "bind", "renew", "retry", "complete", "session", "activities", "activity", "link"].includes(
+      String(op),
+    )
   )
     return answer(400, { error: "unknown_operation" });
   try {
     let result: unknown;
     const now = deps.clock();
     if (op === "claim") result = await deps.inbox.claim(now, LINEAR_TIMING.deliveryLeaseMs, crypto.randomUUID());
+    else if (op === "begin") result = await deps.inbox.begin(required(body.key), required(body.lease));
     else if (op === "bind")
       result = await deps.inbox.bind(required(body.key), required(body.lease), required(body.runId));
     else if (op === "renew")

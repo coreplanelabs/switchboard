@@ -13,7 +13,7 @@ export function linearThread(threadKey: string): { organizationId: string; sessi
 
 export type LinearInput =
   | { kind: "message"; msg: IncomingMessage; triggeringActivityId?: string }
-  | { kind: "stop"; userId: string; channelId: string; threadKey: string };
+  | { kind: "stop"; userId: string; channelId: string; threadKey: string; receivedAt: number };
 
 /** Signed identity plus fresh access/ownership. Prompt text is never identity
  *  or authority, and delegation never borrows the issue assignee's grants. */
@@ -59,7 +59,8 @@ export function linearMessage(event: LinearWebhookEvent, current: LinearSession,
     user = activity.userId;
     name = string(object(activity.user).name);
     if (!safeId(user) || user === appUserId) throw new Error("linear_human_required");
-    if (activity.signal === "stop") return { kind: "stop", userId: `linear:${org}:${user}`, channelId, threadKey };
+    if (activity.signal === "stop")
+      return { kind: "stop", userId: `linear:${org}:${user}`, channelId, threadKey, receivedAt: event.receivedAt };
     messageId = activity.id;
     triggeringActivityId = activity.id;
     text = string(content.body);

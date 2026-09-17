@@ -9,6 +9,7 @@ import { DirectLinearApi } from "../../src/channels/linear/api.js";
 import { handleLinearBridge, LINEAR_BRIDGE_PATH } from "../../src/channels/linear/bridge.js";
 import { StoredLinearStore, type LinearOAuthState } from "../../src/channels/linear/store.js";
 import { SqlLinearInbox } from "../../src/channels/linear/inbox.js";
+import { revokeLinearInstallation } from "../../src/channels/linear/lifecycle.js";
 import { boundedBody, handleLinearWebhook, LINEAR_WEBHOOK_PATH } from "../../src/channels/linear/webhook.js";
 import { LINEAR_TIMING } from "../../src/core/budgets.js";
 import { systemClock } from "../../src/core/trace/clock.js";
@@ -118,7 +119,13 @@ export class LinearState extends DurableObject<LinearEnv> {
           applicationId: env.LINEAR_APPLICATION_ID,
           organizationId: env.LINEAR_ORGANIZATION_ID,
           clock: systemClock,
-          accept: (event) => this.inbox.accept(event),
+          accept: async (event) => {
+            if (event.payload.type === "OAuthApp" && event.payload.action === "revoked") {
+              if (!(await revokeLinearInstallation(this.store, event))) return false;
+              await this.inbox.cancelOrganization(event.payload.organizationId, event.receivedAt);
+            }
+            return this.inbox.accept(event);
+          },
         });
       if (path === LINEAR_AUTHORIZE_PATH) {
         await this.pruneStates();

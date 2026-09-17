@@ -33,7 +33,7 @@ describe("Linear signed webhook intake", () => {
   it("persists a verified event before acknowledging and records adapter arrival time", async () => {
     const f = fixture();
     const res = await handleLinearWebhook(signed(), f.deps);
-    expect(res.status).toBe(202);
+    expect(res.status).toBe(200);
     expect(f.accept).toHaveBeenCalledWith(
       expect.objectContaining({ key: "org:session:created", receivedAt: now, payload: event }),
     );
@@ -41,7 +41,7 @@ describe("Linear signed webhook intake", () => {
   it("uses signed session and activity ids for deduplication, not an unsigned delivery header", async () => {
     const f = fixture();
     f.accept.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
-    expect((await handleLinearWebhook(signed(event, "one"), f.deps)).status).toBe(202);
+    expect((await handleLinearWebhook(signed(event, "one"), f.deps)).status).toBe(200);
     expect((await handleLinearWebhook(signed({ ...event, webhookTimestamp: now + 1 }, "two"), f.deps)).status).toBe(
       200,
     );
@@ -99,7 +99,7 @@ describe("Linear signed webhook intake", () => {
   it("retains lifecycle events and ignores event types the integration did not subscribe to", async () => {
     const f = fixture();
     for (const type of ["OAuthApp", "PermissionChange", "AppUserNotification"]) {
-      expect((await handleLinearWebhook(signed({ ...event, type, action: "revoked" }), f.deps)).status).toBe(202);
+      expect((await handleLinearWebhook(signed({ ...event, type, action: "revoked" }), f.deps)).status).toBe(200);
     }
     expect((await handleLinearWebhook(signed({ ...event, type: "Issue" }), f.deps)).status).toBe(200);
     expect(f.accept).toHaveBeenCalledTimes(3);

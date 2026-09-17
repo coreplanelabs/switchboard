@@ -7,6 +7,13 @@ import { openConfigStore } from "./config.js";
 import { capabilitiesFrom } from "./core/capabilities.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
 import { createSlackApp } from "./channels/slack.js";
+import { RemoteLinearApi, RemoteLinearInbox, type LinearTransport } from "./channels/linear/bridge.js";
+import { LinearConsumer } from "./channels/linear/consumer.js";
+import { LinearChannelIO } from "./channels/linear/io.js";
+import { linearThread } from "./channels/linear/session.js";
+import { recoverLinearDelivery } from "./channels/linear/recovery.js";
+import { stopLinearSession } from "./channels/linear/control.js";
+import { handleLinearLifecycle, type LinearLiveWork } from "./channels/linear/lifecycle.js";
 import { SlackChannelDirectory } from "./channels/slackChannelDirectory.js";
 import { SlackConversationReader } from "./channels/slack/references.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
@@ -566,12 +573,67 @@ export async function runBot(): Promise<void> {
   deps.commands = commands;
   // --- end command registry ---
   const { app, receiver, statusClient } = createSlackApp(deps);
+  const linearBearer = processSecrets.get("LINEAR_BRIDGE_TOKEN");
+  let linearTransport: LinearTransport | undefined;
+  let linearConsumer: LinearConsumer | undefined;
+  if (linearBearer) {
+    const baseUrl = process.env.PUBLIC_BASE_URL;
+    if (!baseUrl) throw new Error("LINEAR_BRIDGE_TOKEN requires PUBLIC_BASE_URL");
+    if (!ledgerClient) throw new Error("LINEAR_BRIDGE_TOKEN requires durable run history and its run ledger");
+    linearTransport = { baseUrl, token: linearBearer.reveal(), fetch };
+    const transport = linearTransport;
+    linearConsumer = new LinearConsumer({
+      inbox: new RemoteLinearInbox(transport),
+      api: (organizationId) => new RemoteLinearApi(transport, organizationId),
+      clock: systemClock,
+      warn: (message) => console.warn(message),
+      dispatch: (msg, io) => dispatch(deps, msg, io),
+      stop: (input, io) => stopLinearSession({ config, runs: runsService }, input, io),
+      recover: (delivery, msg) => recoverLinearDelivery({ ledger: ledgerClient, store: runStore }, delivery, msg),
+      other: (event) =>
+        handleLinearLifecycle(
+          {
+            api: (org) => new RemoteLinearApi(transport, org),
+            live: async () => {
+              const live = new Map<string, LinearLiveWork>(
+                defaultRunRegistry
+                  .listActive()
+                  .filter((run) => !run.finished)
+                  .map((run) => [run.id, run]),
+              );
+              for (const row of await ledgerClient.listLive())
+                if (!live.has(row.runId)) live.set(row.runId, { ...row.meta, id: row.runId, startedAt: row.startedAt });
+              return [...live.values()];
+            },
+            halt: async (id) => {
+              defaultRunRegistry.requestStopById(id, "hard", {
+                kind: "chat",
+                id: `linear:${event.payload.organizationId}:access-removed`,
+              });
+              await ledgerClient.requestStop(id, "hard");
+            },
+          },
+          event,
+        ),
+      leaseLost: (id) => {
+        defaultRunRegistry.requestStopById(id, "hard", { kind: "chat", id: "linear:lease-lost" });
+      },
+    });
+  }
   // A thread's channel handle rebuilt from a stored row's parts, with no
   // triggering event (run-history item 38): what a resumed run replies through
   // and what a coordinator's child is dispatched into. Slack from the key's
   // channel and ts (and the row's card, when it has one); HTTP and MCP have
   // no thread to speak into, so their handle logs; any other platform, none.
   const threadIoFor = (thread: { threadKey: string; userId: string; cardTs?: string }): ChannelIO | undefined => {
+    const linear = linearThread(thread.threadKey);
+    if (linear && linearTransport)
+      return new LinearChannelIO({
+        api: new RemoteLinearApi(linearTransport, linear.organizationId),
+        sessionId: linear.sessionId,
+        clock: systemClock,
+        warn: (message) => console.warn(message),
+      });
     const [platform, channel, threadTs] = thread.threadKey.split(":");
     if (platform === "slack" && channel && threadTs) {
       return resumeSlackIO(
@@ -1299,6 +1361,7 @@ export async function runBot(): Promise<void> {
     });
   }
 
+  linearConsumer?.start();
   console.log(
     `switchboard running (providers: ${completions.names().join(", ")}; default agent: ${config.config.defaults.agent})`,
   );
@@ -1324,6 +1387,7 @@ export async function runBot(): Promise<void> {
   const drain = async (signal: string) => {
     if (draining) return;
     draining = true;
+    linearConsumer?.stop();
     drainStartedAt = systemClock();
     // The drain is one `drain` root on the span log (docs/reference/specs/tracing.md item
     // 20): what signalled it, what it held, what it handed off and abandoned.
