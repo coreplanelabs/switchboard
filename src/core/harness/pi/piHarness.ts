@@ -19,7 +19,7 @@ import {
   type HarnessSession,
 } from "../contract.js";
 import { PI_EVENT_DISPOSITION } from "./bridge.js";
-import type { HarnessContainer } from "../container.js";
+import { identityOrNothing, type HarnessContainer } from "../container.js";
 import { locatePi, runPiHarnessOpen, type PiHarnessDeps } from "./harness.js";
 import { piBuiltinToolsFor, piRunPathsAt, piThinkingLevel } from "./process.js";
 
@@ -60,7 +60,7 @@ export class PiHarness implements Harness {
    *  without a command: nothing of that process is pi's to probe. */
   async find(facts: HarnessFacts, container: HarnessContainer): Promise<Finding> {
     if (!isPiFacts(facts)) return "another-harness";
-    return locatePi(facts, container, await container.identity());
+    return locatePi(facts, container, await identityOrNothing(container));
   }
 
   /** The leftover pi a previous generation left behind, ended at the pid and

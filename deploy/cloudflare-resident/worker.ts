@@ -685,6 +685,15 @@ class RuntimeReplacedError extends Error {
   constructor(
     readonly phase: "spawn" | "collect",
     readonly cause: unknown,
+    /** Whether the replacement was KNOWN where the failure was classified
+     *  (`replacementKnown`): the SDK vouched the runtime moved, or the resident
+     *  knew the container it held gone. One decision, made once at the exec
+     *  choke point: it gates the incarnation swap there and the word on
+     *  `/exec` (`replacedExecAnswer`). Unknown, the failure only says the
+     *  container is down or the transport was lost — a merely asleep or
+     *  starting container, or a network blip, say the same — so memos and
+     *  leases stay and the harness's one more command decides. */
+    readonly known: boolean,
   ) {
     super(
       `runtime-replaced: the resident runtime was replaced (a deploy) while this command was ${
@@ -793,8 +802,15 @@ function sdkVouchesRuntimeMoved(err: unknown): boolean {
 /** The named ThreadErr every thread route (exec/read/write) answers for a
  *  runtime replacement, so the client can classify it (409 like the other
  *  recoverable thread states; `reason` is the discriminator). On `/exec` the
- *  answer goes through `replacedExecAnswer` first: the word only when the SDK
- *  vouched the runtime moved or the resident knows the container is gone. */
+ *  answer goes through `replacedExecAnswer` first: the word only when the
+ *  replacement was known where `run()` classified the failure. On
+ *  `/read` and `/write` the word stays unconditional on purpose: those routes
+ *  reach the same `run()` and can meet the same down wordings, but there the
+ *  word drives the client's re-attach-and-retry (the attach is what wakes a
+ *  container that is asleep or starting), never a verdict — nothing relaunches
+ *  on it, and the harness never reads or writes through them (its seam runs
+ *  every operation as an `/exec` script). Gating them would trade a spare
+ *  re-attach for a read that fails outright while the container starts. */
 function runtimeReplacedErr(err: RuntimeReplacedError): ThreadErr {
   return { error: err.message, status: 409, reason: "runtime-replaced" };
 }
@@ -1618,49 +1634,60 @@ export class ResidentDO extends Sandbox<Env> {
    *  survives, so hydration state is always probed from disk. */
   private hydration: Promise<void> | null = null;
 
-  /** The container stop the platform delivered to `onStop` and no command has
-   *  answered since: the resident's own knowledge that the container it held
-   *  is gone (docs/reference/specs/resident-repos.md item 43). In memory on
-   *  purpose — a Durable Object that restarts learns the same fact from the
-   *  restore its next command's wake path starts (`restoring`), and a stop
-   *  recorded in storage would outlive the container that answers now. */
-  private containerStop: { at: number; exitCode: number; reason: string } | undefined;
-
-  /** The platform's signal that the container stopped — the rollout's
-   *  `runtime_signal`, or an exit of its own — recorded before the SDK's
-   *  reconciliation runs, so an `/exec` that meets the stopped container from
-   *  here on answers `runtime-replaced` (`replacedExecAnswer`) rather than the
-   *  binding's bare "The container is not running". The Sandbox base declares
-   *  the hook without parameters; the Container base beneath it passes them. */
-  async onStop(params?: { exitCode: number; reason: string }): Promise<void> {
-    this.containerStop = { at: systemClock(), exitCode: params?.exitCode ?? 0, reason: params?.reason ?? "unknown" };
-    console.log(
-      `container: stopped (exit ${this.containerStop.exitCode}, ${this.containerStop.reason}) — the container this resident held is gone; /exec answers runtime-replaced until a command answers again`,
-    );
-    await super.onStop();
+  /** Whether this resident knows the container it held is gone
+   *  (docs/reference/specs/resident-repos.md item 43): the container's exit
+   *  as the platform's monitor recorded it, or a restore under way.
+   *
+   *  The exit: the Container base's state record answers `stopped_with_code`
+   *  once the container's monitor settled with an exit — the rollout's
+   *  "Runtime signalled the container to exit due to a new version rollout:
+   *  0" is parsed into that code within seconds of the kill — and answers
+   *  something else for everything that is NOT the container gone: `running`
+   *  while a start is under way (the binding's "not running" refusal is a
+   *  start race then), `stopped` after our own idle stop, `healthy` while it
+   *  serves. That is the rollout signal's one programmatic trace: the monitor
+   *  handler records the code and returns before `onError`, and `onStop` is
+   *  only ever REPLAYED by `syncPendingStoppedEvents` at the next start — for
+   *  an idle sleep as much as for a roll — so neither hook is overridden here
+   *  and no stop record is kept: a replayed stop during the very start whose
+   *  race must not get the word would count as the container gone.
+   *
+   *  Never the platform's `running` flag — an asleep or starting container
+   *  answers false to it too, and an `/exec` that meets one must say what the
+   *  SDK said so the harness probes rather than relaunch into a container that
+   *  was never replaced. A read that fails (the storage under a reset or a
+   *  restore) is no knowledge: the answer falls back to the SDK's words and the
+   *  harness probes, never an unhandled throw where a 409 was due. */
+  private async knowsContainerGone(): Promise<boolean> {
+    try {
+      if ((await this.getState()).status === "stopped_with_code") return true;
+    } catch {
+      // the container's state unreadable: judged by the restore below
+    }
+    try {
+      return (await this.getStatus()).state === "restoring";
+    } catch {
+      return false;
+    }
   }
 
-  /** Whether this resident knows the container it held is gone: it saw the
-   *  container stop and no command has answered since, or a restore is under
-   *  way (`restoring`, persisted before any restore work). Never the
-   *  platform's `running` flag — an asleep or starting container answers
-   *  false to it too, and an `/exec` that meets one must say what the SDK
-   *  said so the harness probes rather than relaunch into a container that
-   *  was never replaced. */
-  private async knowsContainerGone(): Promise<boolean> {
-    if (this.containerStop !== undefined) return true;
-    return (await this.getStatus()).state === "restoring";
+  /** The one decision on a failure the SDK classified as a runtime
+   *  replacement, made where it is classified (`run()`): the SDK vouched the
+   *  runtime moved, or the resident knows the container it held is gone. It
+   *  gates the incarnation swap there and the word on `/exec`. */
+  private async replacementKnown(err: unknown): Promise<boolean> {
+    return sdkVouchesRuntimeMoved(err) || (await this.knowsContainerGone());
   }
 
   /** The `/exec` answer for a command the SDK failed with a runtime
    *  replacement (item 43; harness.md item 6): the word — `reason:
-   *  "runtime-replaced"`, the resident's sentence — when the SDK vouched the
-   *  runtime moved or the resident knows the container it held is gone;
-   *  otherwise what the SDK said, with no word and no `reason`, so the
-   *  harness's one more command decides. The command is never re-issued
-   *  either way: it may have started. */
-  private async replacedExecAnswer(err: RuntimeReplacedError): Promise<ThreadErr> {
-    if (sdkVouchesRuntimeMoved(err.cause) || (await this.knowsContainerGone())) return runtimeReplacedErr(err);
+   *  "runtime-replaced"`, the resident's sentence — when the replacement was
+   *  known at the choke point (`RuntimeReplacedError.known`); otherwise what
+   *  the SDK said, with no word and no `reason`, so the harness's one more
+   *  command decides. The command is never re-issued either way: it may have
+   *  started. */
+  private replacedExecAnswer(err: RuntimeReplacedError): ThreadErr {
+    if (err.known) return runtimeReplacedErr(err);
     return { error: errMsg(err.cause), status: 409 };
   }
 
@@ -2041,8 +2068,11 @@ export class ResidentDO extends Sandbox<Env> {
       // takes the throw below. It exists so that if a future SDK vouches "never
       // started" we retry then — and only then — without a change here.
       if (!(err instanceof OperationInterruptedError && err.retryable === true)) {
-        this.swapIncarnation(); // the container this incarnation's memos described is gone
-        throw new RuntimeReplacedError("spawn", err);
+        // The memos and leases go only with a container known to be gone; a
+        // failure that says merely "down" or "transport lost" keeps them.
+        const known = await this.replacementKnown(err);
+        if (known) this.swapIncarnation();
+        throw new RuntimeReplacedError("spawn", err, known);
       }
       console.log(
         `exec: runtime replaced before the process started (SDK says retryable) — retrying once: ${errMsg(err)}`,
@@ -2050,9 +2080,7 @@ export class ResidentDO extends Sandbox<Env> {
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     }
     // The spawn is the proof the control port answers: a persisted count of
-    // unanswered connects ends here, whatever the command goes on to do — and
-    // a container stop seen before it is history (`knowsContainerGone`).
-    this.containerStop = undefined;
+    // unanswered connects ends here, whatever the command goes on to do.
     await this.clearRuntimeUnreachable();
     try {
       const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
@@ -2067,8 +2095,9 @@ export class ResidentDO extends Sandbox<Env> {
       };
     } catch (err) {
       if (isRuntimeReplacement(err)) {
-        this.swapIncarnation(); // the container this incarnation's memos described is gone
-        throw new RuntimeReplacedError("collect", err);
+        const known = await this.replacementKnown(err);
+        if (known) this.swapIncarnation();
+        throw new RuntimeReplacedError("collect", err, known);
       }
       if (err instanceof ProcessWaitTimeoutError) {
         // The supervisor should have killed the process at `timeout`; 30 s
