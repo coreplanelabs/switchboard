@@ -862,6 +862,193 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     );
   });
 
+  // Decision 0046, Renewal: a round 0 that ends at its lease without a pull
+  // request is a segment over with the unit unfinished — the grant decides
+  // whether the next opens, off progress the row records.
+  it("a round 0 without a pull request whose child pushed a head under a grant with renewals ends `continued`: the next segment, the sha it continues from, the renewals left and the spend so far, the round noted `continued`, the report naming the renewal", () => {
+    const d = fresh(
+      input({ merge: "person", generated: true, grant: { renewals: 6, costCapUsd: 50 }, grantSource: "channel" }),
+    );
+    d.answer({ type: "branch", ok: true, at: T0 });
+    const branch = d.state.input.unit.branch;
+    runChild(
+      d,
+      "run-c0",
+      finished({
+        status: "completed",
+        finalReply: "Budget reached: pushed the parser, the tests are next.",
+        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 40 * MIN }],
+        leaseStartedAt: T0,
+        costUsd: 12.5,
+        handoffLists: { deviations: [], followUps: [{ what: "tests", where: "src" }], unproven: [] },
+      }),
+      T0 + 45 * MIN,
+    );
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "continued",
+        round: { index: 0, kind: "coding" },
+        runId: "run-c0",
+        segment: 2,
+        from: HEAD_A,
+        renewalsLeft: 5,
+        spendUsd: 12.5,
+        handoff: { followUps: [{ what: "tests", where: "src" }] },
+        finalReply: "Budget reached: pushed the parser, the tests are next.",
+        line: `renewal 1 of 6, continues ${HEAD_A.slice(0, 7)}`,
+      },
+    });
+    expect(d.rounds()).toEqual(["0 coding started", "0 coding continued"]);
+    const report = renderUnitReport(d.state);
+    expect(report).toContain(
+      `🔁 Segment 1 ended at its lease with the unit unfinished — renewal 1 of 6, continues ${HEAD_A.slice(0, 7)}. Segment 2 opens in this thread from \`${HEAD_A.slice(0, 7)}\` under a fresh 120-minute lease`,
+    );
+    expect(report).toContain("5 renewals remain, $12.50 spent so far.");
+  });
+
+  it("a later segment reads progress against the sha it continued from and the previous handoff, prefixes every step with the segment, and carries the session's spend into the decision", () => {
+    const branch = input().unit.branch;
+    const session = {
+      segment: 2,
+      renewalsSpent: 1,
+      spendUsd: 30,
+      continueFrom: HEAD_A,
+      previousHandoff: {
+        deviations: [],
+        followUps: [
+          { what: "tests", where: "src" },
+          { what: "docs", where: "spec" },
+        ],
+        unproven: [],
+      },
+    };
+    const d = new Driver(
+      openUnitPipeline(
+        input({ merge: "person", generated: true, grant: { renewals: 6, costCapUsd: 50 }, session }),
+        T0,
+      ),
+    );
+    expect(d.action).toEqual({ type: "pr-check", step: "U10/s2/pr-check" });
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 });
+    expect(d.action).toMatchObject({ type: "branch", step: "U10/s2/branch" });
+    d.answer({ type: "branch", ok: true, at: T0 });
+    expect(d.action).toMatchObject({ type: "spawn", step: "U10/s2/0/coding" });
+    // The same head pushed again is not progress; a shrunk handoff is.
+    runChild(
+      d,
+      "run-c1",
+      finished({
+        status: "completed",
+        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 10 * MIN }],
+        leaseStartedAt: T0,
+        costUsd: 15,
+        handoffLists: { deviations: [], followUps: [{ what: "docs", where: "spec" }], unproven: [] },
+      }),
+      T0 + 45 * MIN,
+    );
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
+    expect(d.action).toMatchObject({
+      type: "end",
+      step: "U10/s2/end",
+      ending: {
+        kind: "continued",
+        segment: 3,
+        renewalsLeft: 4,
+        spendUsd: 45,
+        line: "renewal 2 of 6, continues the branch's head",
+      },
+    });
+    expect((d.action as { ending: { from?: string } }).ending.from).toBeUndefined();
+  });
+
+  it("a refusal names its clause on the abort: no progress under a grant with renewals says how to spend one by hand; spend at the cap stops even with progress; a grant of zero with nothing pushed keeps the plain abort", () => {
+    const branch = input().unit.branch;
+    // No progress: the child pushed nothing and there is no previous handoff.
+    const stuck = fresh(input({ merge: "person", generated: true, grant: { renewals: 6 } }));
+    stuck.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      stuck,
+      "run-c0",
+      finished({ status: "completed", finalReply: "Budget reached, nothing pushed.", pushed: [] }),
+      T0 + 45 * MIN,
+    );
+    stuck.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
+    expect(stuck.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "aborted",
+        renewal: {
+          decision: { renew: false, why: "no_progress", renewalsLeft: 6 },
+          line: "no progress in the last lease; grant holds 6 renewals; reply continue to spend one",
+        },
+      },
+    });
+    expect(stuck.rounds()).toEqual(["0 coding started", "0 coding aborted"]);
+    expect(renderUnitReport(stuck.state)).toContain(
+      "🔁 Not renewed: no progress in the last lease; grant holds 6 renewals; reply continue to spend one.",
+    );
+
+    // The cap: progress, but the session's spend reached it.
+    const capped = fresh(input({ merge: "person", generated: true, grant: { renewals: 6, costCapUsd: 20 } }));
+    capped.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      capped,
+      "run-c0",
+      finished({ status: "completed", pushed: [{ ref: branch, sha: HEAD_A }], costUsd: 20 }),
+      T0 + 45 * MIN,
+    );
+    capped.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
+    expect(capped.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "aborted",
+        renewal: {
+          decision: { why: "cost_cap" },
+          line: "spend $20.00 reached the grant's cap of $20; grant holds 6 renewals unspent",
+        },
+      },
+    });
+
+    // A cost the record does not know is unknown spend, which a cap refuses.
+    const unknown = fresh(input({ merge: "person", generated: true, grant: { renewals: 6, costCapUsd: 20 } }));
+    unknown.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      unknown,
+      "run-c0",
+      finished({ status: "completed", pushed: [{ ref: branch, sha: HEAD_A }] }),
+      T0 + 45 * MIN,
+    );
+    unknown.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
+    expect(unknown.action).toMatchObject({
+      type: "end",
+      ending: { kind: "aborted", renewal: { decision: { why: "cost_cap" } } },
+    });
+    expect((unknown.state.ending as { spendUsd?: unknown }).spendUsd).toBeUndefined();
+
+    // Progress under the default grant of zero: judged, refused as exhausted, said so.
+    const zero = fresh(input({ merge: "person", generated: true }));
+    zero.answer({ type: "branch", ok: true, at: T0 });
+    runChild(zero, "run-c0", finished({ status: "completed", pushed: [{ ref: branch, sha: HEAD_A }] }), T0 + 45 * MIN);
+    zero.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
+    expect(zero.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "aborted",
+        renewal: { decision: { why: "grant_exhausted" }, line: "the grant holds no renewals" },
+      },
+    });
+
+    // Nothing pushed under a grant of zero: the plain abort, no renewal to explain.
+    const plain = fresh(input({ merge: "person", generated: true }));
+    plain.answer({ type: "branch", ok: true, at: T0 });
+    runChild(plain, "run-c0", finished({ status: "completed", finalReply: "Which login flow?" }), T0 + 5 * MIN);
+    plain.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 5 * MIN });
+    expect((plain.state.ending as { renewal?: unknown }).renewal).toBeUndefined();
+    expect(renderUnitReport(plain.state)).not.toContain("Not renewed");
+  });
+
   it("aborts: a round 0 that opened no pull request, a branch that could not be created, a coding child that failed, a findings step that repushed nothing (unless every finding was declined)", () => {
     const noPr = fresh(input({ merge: "person" }));
     noPr.answer({ type: "branch", ok: true, at: T0 });

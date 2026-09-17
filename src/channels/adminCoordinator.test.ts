@@ -26,6 +26,7 @@ import type {
 import { InMemoryGithubApi, type IssueSummary } from "../execution/githubApi.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
+import { parseModelPrices, type ModelPriceTable } from "../core/modelPricing.js";
 import {
   COORDINATOR_ADMIN_PREFIX,
   REVIEW_POSTED_CHECKS,
@@ -132,6 +133,8 @@ function harness(
     openPr?: { number: number; htmlUrl: string; created: boolean } | Error;
     /** The merge step's GitHub: the pull request's facts, the checks at the head, the squash's answer. */
     prFacts?: PullRequestFacts | Error;
+    /** The operator's model prices: the runs service prices each child, and `read-record` answers the dollars. */
+    prices?: ModelPriceTable;
     checks?: CommitChecks | Error;
     merge?: MergeResult | Error;
   } = {},
@@ -140,7 +143,13 @@ function harness(
   const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
   const store = new InMemoryRunStore({ now: () => NOW });
   const ledger = new InMemoryRunLedger(() => NOW);
-  const runs = createRunsService({ registry, store, ledger, clock: () => NOW + 1 });
+  const runs = createRunsService({
+    registry,
+    store,
+    ledger,
+    clock: () => NOW + 1,
+    ...(over.prices !== undefined ? { prices: over.prices } : {}),
+  });
   const instances = new InMemoryCoordinatorInstanceStore();
   const dispatched: Array<{ msg: IncomingMessage; opts: { coordinator: CoordinatorTag } }> = [];
   const replies: string[] = [];
@@ -560,6 +569,8 @@ describe("POST /admin/coordinator/read-record — a run of the instance, and no 
           parentInstanceId: INSTANCE.id,
           idempotencyKey: KEY,
           finalReply: "the handoff",
+          // No usage on the record: its cost is unknown, never $0 in silence.
+          costUsd: null,
         },
         at: NOW,
       },
@@ -575,6 +586,71 @@ describe("POST /admin/coordinator/read-record — a run of the instance, and no 
         )
       ).status,
     ).toBe(400);
+  });
+});
+
+describe("POST /admin/coordinator/read-record — the renewal's facts off the record (decision 0046)", () => {
+  it("answers the heads the run pushed, when its lease began, what it cost through the operator's prices (null when a model has no price) and the handoff's lists — progress is read off these, never asked of the model", async () => {
+    const h = harness({
+      prices: parseModelPrices({
+        "anthropic/claude-fable-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+      }),
+    });
+    const usage = {
+      turns: 2,
+      byModel: {
+        "anthropic/claude-fable-5": {
+          turns: 2,
+          inputTokens: 1_000_000,
+          outputTokens: 100_000,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      },
+    };
+    const handoff = { deviations: [], followUps: [{ what: "tests", where: "src" }], unproven: [] };
+    await h.store.put(
+      record("run-budget", {
+        ...TAG,
+        pushed: [{ ref: "plan/orchestration/u12", sha: "a".repeat(40) }],
+        lease: { startedAt: NOW - 40_000, endsAt: NOW + 20_000, loopEndsAt: NOW + 12_000 },
+        usage,
+        handoff,
+      }),
+    );
+    const body = (
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-budget" }),
+        h.deps,
+      )
+    ).body as { run: Record<string, unknown> };
+    expect(body.run).toMatchObject({
+      pushed: [{ ref: "plan/orchestration/u12", sha: "a".repeat(40) }],
+      leaseStartedAt: NOW - 40_000,
+      costUsd: 4.5,
+      handoff: true,
+      handoffLists: handoff,
+    });
+    // A model the table does not price: the cost is unknown, so a capped grant will not renew on it.
+    await h.store.put(
+      record("run-unpriced", {
+        ...TAG,
+        usage: {
+          turns: 1,
+          byModel: {
+            "openai/gpt-5": { turns: 1, inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          },
+        },
+      }),
+    );
+    const unpriced = (
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-unpriced" }),
+        h.deps,
+      )
+    ).body as { run: Record<string, unknown> };
+    expect(unpriced.run.costUsd).toBeNull();
+    expect(unpriced.run.pushed).toBeUndefined();
   });
 });
 
@@ -1953,6 +2029,51 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(rows[0].pr).toEqual({ number: 7, url: "https://github.com/acme/api/pull/7" });
     expect(
       (await call(h, "unit-end", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", ending: { kind: "x" } })).status,
+    ).toBe(400);
+
+    const segReplies: Array<{ threadKey: string; text: string }> = [];
+    // A continued ending is a segment's end, not the unit's (decision 0046):
+    // the renewal is written as a row keyed by the segment it opens, once —
+    // the same segment told again changes nothing — the unit keeps no ending,
+    // and a continued ending without its segment is refused.
+    const seg = await planHarness({
+      ioFor: (thread) => ({
+        reply: async (text) => void segReplies.push({ threadKey: thread.threadKey, text }),
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => [],
+      }),
+    });
+    await seg.instances.putUnits([unitRow("U11", { threadKey: "slack:C1:3.0" })]);
+    const continued = {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U11",
+      ending: { kind: "continued", report: "🔁 Segment 1 ended at its lease — renewal 1 of 6, continues aaaaaaa." },
+      segment: { index: 2, from: "A".repeat(40), runId: "run-c0" },
+    };
+    expect(await call(seg, "unit-end", continued)).toEqual({ status: 200, body: { ok: true, told: true, at: NOW } });
+    expect(await call(seg, "unit-end", continued)).toEqual({ status: 200, body: { ok: true, told: true, at: NOW } });
+    const u11 = (await seg.instances.listUnits(PLAN_INSTANCE.id)).find((u) => u.unit === "U11")!;
+    expect(u11.ending).toBeUndefined();
+    expect(u11.segments).toEqual([{ index: 2, from: "a".repeat(40), runId: "run-c0", at: NOW }]);
+    expect(segReplies.map((r) => r.text)).toEqual([continued.ending.report, continued.ending.report]);
+    expect(
+      (
+        await call(seg, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U11",
+          ending: { kind: "continued", report: "x" },
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await call(seg, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U11",
+          ending: { kind: "continued", report: "x" },
+          segment: { index: 1 },
+        })
+      ).status,
     ).toBe(400);
 
     // A review_pending ending's headSha — the coding child's own last push —

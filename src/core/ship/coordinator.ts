@@ -30,6 +30,8 @@
 // arrive in the input rather than from the agent registry.
 
 import type { ShipRoundOutcome } from "../runEvents.js";
+import type { Handoff } from "./handoff.js";
+import { progressOf, renderRenewal, renewalDecision, type PushedHeadFact, type RenewalDecision } from "./renewal.js";
 import type { RunStatus } from "../runRecord.js";
 import { normalizeHead, sameCommit } from "../reviewedHead.js";
 import { formatFinding, type Finding, type FindingDisposition, type ReviewVerdictKind } from "../reviewVerdict.js";
@@ -401,7 +403,14 @@ export function presetOf(kind: RoundKind): ChildPreset {
  *  turn: the unit's contract, or the review turn from the pull request and the
  *  prior rounds' records, or the findings message from the review run's verdict. */
 export type Brief =
-  | { kind: "contract"; unit: string; rebase: { branch: string; onto: string } }
+  | {
+      kind: "contract";
+      unit: string;
+      rebase: { branch: string; onto: string };
+      /** A renewal's segment (decision 0046): the child continues the previous
+       *  segment's work from `from`, briefed with that run's write-up and handoff. */
+      continue?: { segment: number; from?: string; previousRunId?: string };
+    }
   | {
       kind: "review";
       unit: string;
@@ -465,6 +474,13 @@ export type ChildFacts =
       /** The dispositions a coding run recorded, as it submitted them: the machine matches them to the round's findings. */
       dispositions?: FindingDisposition[];
       handoff?: boolean;
+      /** The renewal's facts (decision 0046): the heads the run pushed, when
+       *  its lease began, what it cost (null when a model had no price) and
+       *  the handoff's lists — progress is read off these, never asked. */
+      pushed?: PushedHeadFact[];
+      leaseStartedAt?: number;
+      costUsd?: number | null;
+      handoffLists?: Handoff;
     };
 
 /** What heads the unit's branch on GitHub: nothing, an open pull request, or —
@@ -534,7 +550,38 @@ export type UnitEnding =
       /** A changes-requested review posted this round before the stop. */
       postedReview?: boolean;
     }
-  | { kind: "aborted"; reason: string; round?: RoundRef; reviewRounds: number; finalReply?: string }
+  | {
+      kind: "aborted";
+      reason: string;
+      round?: RoundRef;
+      reviewRounds: number;
+      finalReply?: string;
+      /** A round-0 end without a pull request that was judged for renewal and
+       *  refused: the decision and the card's sentence (decision 0046). */
+      renewal?: { decision: Extract<RenewalDecision, { renew: false }>; line: string };
+    }
+  /** The coding round ended at its lease with the unit unfinished, the row
+   *  showed progress and the grant renewed: this segment is over and the next
+   *  opens in the same thread from `from` under a fresh lease, the coding
+   *  child's write-up as its request (decision 0046, Renewal). */
+  | {
+      kind: "continued";
+      round: RoundRef;
+      /** The coding child whose write-up and handoff the continuation is briefed with. */
+      runId: string;
+      /** The segment the renewal opens (the first segment is 1). */
+      segment: number;
+      from?: string;
+      renewalsLeft: number;
+      /** The session's spend so far, this segment's children included; null when a run's model had no price. */
+      spendUsd: number | null;
+      handoff?: Handoff;
+      /** The coding child's write-up: the checkpoint the continuation is briefed with. */
+      finalReply?: string;
+      line: string;
+      reviewRounds: number;
+      spent: ShipBudgetSpent;
+    }
   | { kind: "no_verdict"; round: RoundRef; reviewRounds: number; finalReply?: string }
   | { kind: "interrupted"; round: RoundRef; runId: string; reviewRounds: number }
   | { kind: "refused"; refusal: string; message?: string; round: RoundRef; reviewRounds: number };
@@ -572,6 +619,16 @@ export function findingsAtOrAbove(findings: readonly Finding[], level: AddressSe
   return findings.filter((f) => severityRank(f.severity) <= severityRank(level));
 }
 
+export interface UnitSession {
+  segment: number;
+  renewalsSpent: number;
+  spendUsd: number | null;
+  continueFrom?: string;
+  /** The previous segment's coding run: its write-up and handoff brief the continuation. */
+  previousRunId?: string;
+  previousHandoff?: Handoff;
+}
+
 export interface UnitPipelineInput {
   unit: { id: string; branch: string };
   repo: string;
@@ -594,6 +651,12 @@ export interface UnitPipelineInput {
    *  it yet: the renewal decision is the segment's end, not this unit's. */
   grant?: Grant;
   grantSource?: GrantSource;
+  /** The segment this pipeline runs (decision 0046, Renewal): absent for the
+   *  first; a renewal's carries its number, the renewals spent before it, the
+   *  session's spend so far, the sha it continues from and the previous
+   *  segment's handoff. Every step name of a later segment is prefixed with
+   *  it, so the Workflow's durable steps never collide across segments. */
+  session?: UnitSession;
   /** The instance's mark (agent-ship item 16): a generated one-unit plan — a
    *  `plan` with an id and no `path` — whose unit runs in the requesting
    *  thread and is re-issued with the request's own text, never a plan path. */
@@ -622,6 +685,10 @@ type Phase =
       runId: string;
       childHead?: string;
       finalReply?: string;
+      /** The renewal's facts off the child's record (decision 0046): its pushed heads, its lease's start, its handoff. */
+      childPushed?: PushedHeadFact[];
+      childLeaseStartedAt?: number;
+      childHandoff?: Handoff;
       /** The coding child died (`failed` or `interrupted`) after it may have
        *  pushed: the pr-check recovers a pushed branch by opening its pull
        *  request; with nothing pushed the unit ends with the child's own reason. */
@@ -655,6 +722,9 @@ export interface UnitPipelineState {
   readonly lastCodingRunId?: string;
   /** How the budget went so far, accrued as each answer moves the clock. */
   readonly spentMs: ShipBudgetSpent;
+  /** The session's dollars so far: the input's from earlier segments plus each
+   *  child's cost as its record is read; null once any run's cost is unknown. */
+  readonly spendUsd: number | null;
   readonly ending?: UnitEnding;
 }
 
@@ -690,6 +760,7 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
     phase: { at: "pre-check" },
     reviewRounds: 0,
     spentMs: { coding: 0, review: 0, waiting: 0 },
+    spendUsd: input.session?.spendUsd ?? 0,
     findingsByRound: {},
     dispositionsByRound: {},
     reviewRunByRound: {},
@@ -729,12 +800,33 @@ function roundCarve(s: UnitPipelineState, round: RoundRef): Carve {
   return carve(remainingMs(s), { kind, index: loopPosition(loopOf(s), kind, round.index) }, loopOf(s));
 }
 
-const roundStep = (s: UnitPipelineState, round: RoundRef) => `${s.input.unit.id}/${round.index}/${round.kind}`;
+/** The prefix every step of this pipeline is named under: the unit id, and for
+ *  a renewal's segment the segment too (`U10/s2/…`), so the Workflow's durable
+ *  step cache never hands segment two the answers of segment one. */
+export const stepPrefixOf = (unit: string, session: UnitSession | undefined): string =>
+  session !== undefined && session.segment > 1 ? `${unit}/s${session.segment}` : unit;
+const stepPrefix = (s: UnitPipelineState) => stepPrefixOf(s.input.unit.id, s.input.session);
+const roundStep = (s: UnitPipelineState, round: RoundRef) => `${stepPrefix(s)}/${round.index}/${round.kind}`;
 
 function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
   const unit = s.input.unit.id;
-  if (round.kind === "coding")
-    return { kind: "contract", unit, rebase: { branch: s.input.unit.branch, onto: s.input.base } };
+  if (round.kind === "coding") {
+    const session = s.input.session;
+    return {
+      kind: "contract",
+      unit,
+      rebase: { branch: s.input.unit.branch, onto: s.input.base },
+      ...(session !== undefined && session.segment > 1
+        ? {
+            continue: {
+              segment: session.segment,
+              ...(session.continueFrom !== undefined ? { from: session.continueFrom } : {}),
+              ...(session.previousRunId !== undefined ? { previousRunId: session.previousRunId } : {}),
+            },
+          }
+        : {}),
+    };
+  }
   const pr = s.pr!.number;
   if (round.kind === "findings") return { kind: "findings", unit, pr, reviewRunId: s.reviewRunByRound[round.index]! };
   const priorReview = s.reviewRunByRound[round.index - 1];
@@ -770,7 +862,7 @@ export function matchDispositions(
 /** The step the machine is at. Pure over the state: asked before every step
  *  and again after a replay, it names the same step for the same state. */
 export function nextAction(s: UnitPipelineState): CoordinatorAction {
-  const unit = s.input.unit.id;
+  const unit = stepPrefix(s);
   const p = s.phase;
   switch (p.at) {
     case "pre-check":
@@ -830,6 +922,14 @@ interface Transition {
 }
 
 const ENDED: Phase = { at: "ended" };
+
+/** The session's dollars after one more child: unknown (null) once any run's
+ *  cost is — a total that left a run out would understate the spend a cap
+ *  judges — and a record without the field counts as unknown too. */
+function addSpend(sum: number | null, cost: number | null | undefined): number | null {
+  if (sum === null || cost === null || cost === undefined) return null;
+  return sum + cost;
+}
 
 function end(s: UnitPipelineState, ending: UnitEnding, notes: CoordinatorNote[] = []): Transition {
   return { state: { ...s, phase: ENDED, ending }, notes: [...notes, { type: "ended", ending }] };
@@ -901,6 +1001,7 @@ function settleCoding(
   // round's findings enter the state (agent-ship item 6).
   let next: UnitPipelineState = {
     ...s,
+    spendUsd: addSpend(s.spendUsd, facts.costUsd),
     ...(facts.pr !== undefined ? { pr: { number: facts.pr.number, url: facts.pr.url } } : {}),
     ...(round.kind === "findings" && facts.dispositions !== undefined
       ? {
@@ -938,6 +1039,9 @@ function settleCoding(
       runId,
       ...(facts.headSha !== undefined ? { childHead: facts.headSha } : {}),
       ...(facts.finalReply !== undefined ? { finalReply: facts.finalReply } : {}),
+      ...(facts.pushed !== undefined ? { childPushed: facts.pushed } : {}),
+      ...(facts.leaseStartedAt !== undefined ? { childLeaseStartedAt: facts.leaseStartedAt } : {}),
+      ...(facts.handoffLists !== undefined ? { childHandoff: facts.handoffLists } : {}),
     },
   };
   return { state: next, notes: [] };
@@ -977,6 +1081,7 @@ function settleReview(
   const verdict = facts.verdict;
   const next: UnitPipelineState = {
     ...s,
+    spendUsd: addSpend(s.spendUsd, facts.costUsd),
     findingsByRound: { ...s.findingsByRound, [round.index]: verdict.findings },
     ...(facts.reviewHead !== undefined ? { lastReviewHead: facts.reviewHead } : {}),
     ...(verdict.summary !== undefined ? { lastVerdictSummary: verdict.summary } : {}),
@@ -1138,15 +1243,72 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
         [roundNote(round, "aborted")],
       );
     }
-    const reason =
-      round.index === 0
-        ? `⚠️ Ship ended at round 0: the coding round ended without opening a pull request (a clarifying question, a budget write-up, an unproven push or a description-less push ends the pipeline here). No review round ran.`
-        : `⚠️ Round ${round.index}'s findings step left no open pull request heading \`${s.input.unit.branch}\` — the pull request was closed out from under the pipeline and none was reopened, so there is nothing to re-review.`;
+    // Round 0 ended without a pull request: the segment is over with the unit
+    // unfinished, and the grant decides whether the next opens (decision
+    // 0046, Renewal). Progress is read off the child's record — a head pushed
+    // to the unit's branch since the segment started, or a handoff that moved —
+    // never off its words; the decision then asks the grant's count, the cap
+    // and the fit, in that order, and a refusal names the clause. A plain
+    // abort keeps its old shape when nothing was pushed under a grant of zero:
+    // a clarifying question is not a stop to explain.
+    if (round.index === 0) {
+      const grant = s.input.grant ?? DEFAULT_GRANT;
+      const session = s.input.session;
+      const progress = progressOf({
+        branch: s.input.unit.branch,
+        pushed: phase.childPushed ?? [],
+        ...(session?.continueFrom !== undefined ? { startHead: session.continueFrom } : {}),
+        ...(phase.childLeaseStartedAt !== undefined ? { leaseStartedAt: phase.childLeaseStartedAt } : {}),
+        ...(session?.previousHandoff !== undefined && phase.childHandoff !== undefined
+          ? { handoff: { previous: session.previousHandoff, current: phase.childHandoff } }
+          : {}),
+      });
+      const decision = renewalDecision({
+        grant,
+        renewalsSpent: session?.renewalsSpent ?? 0,
+        spendUsd: s.spendUsd,
+        progress,
+        pipeline: s.input.caps,
+      });
+      const line = renderRenewal(decision, grant);
+      if (decision.renew)
+        return end(
+          s,
+          {
+            kind: "continued",
+            round,
+            runId: phase.runId,
+            segment: decision.segment,
+            ...(decision.from !== undefined ? { from: decision.from } : {}),
+            renewalsLeft: decision.renewalsLeft,
+            spendUsd: s.spendUsd,
+            ...(phase.childHandoff !== undefined ? { handoff: phase.childHandoff } : {}),
+            ...(phase.finalReply !== undefined ? { finalReply: phase.finalReply } : {}),
+            line,
+            reviewRounds: s.reviewRounds,
+            spent: s.spentMs,
+          },
+          [roundNote(round, "continued")],
+        );
+      const judged = grant.renewals > 0 || progress.progressed;
+      return end(
+        s,
+        {
+          kind: "aborted",
+          reason: `⚠️ Ship ended at round 0: the coding round ended without opening a pull request (a clarifying question, a budget write-up, an unproven push or a description-less push ends the pipeline here). No review round ran.`,
+          round,
+          reviewRounds: s.reviewRounds,
+          ...(phase.finalReply !== undefined ? { finalReply: phase.finalReply } : {}),
+          ...(judged ? { renewal: { decision, line } } : {}),
+        },
+        [roundNote(round, "aborted")],
+      );
+    }
     return end(
       s,
       {
         kind: "aborted",
-        reason,
+        reason: `⚠️ Round ${round.index}'s findings step left no open pull request heading \`${s.input.unit.branch}\` — the pull request was closed out from under the pipeline and none was reopened, so there is nothing to re-review.`,
         round,
         reviewRounds: s.reviewRounds,
         ...(phase.finalReply !== undefined ? { finalReply: phase.finalReply } : {}),
@@ -1567,7 +1729,19 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
         reissue,
       ]);
     case "aborted":
-      return join([e.finalReply, e.reason, `⚠️ Ship aborted after ${rounds}.`, reissue]);
+      return join([
+        e.finalReply,
+        e.reason,
+        e.renewal !== undefined ? `🔁 Not renewed: ${e.renewal.line}.` : undefined,
+        `⚠️ Ship aborted after ${rounds}.`,
+        reissue,
+      ]);
+    case "continued":
+      return join([
+        e.finalReply,
+        `🔁 Segment ${e.segment - 1} ended at its lease with the unit unfinished — ${e.line}. Segment ${e.segment} opens in this thread${e.from !== undefined ? ` from \`${e.from.slice(0, 7)}\`` : ""} under a fresh ${s.input.caps.maxMinutes}-minute lease, with this segment's write-up as its request; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`,
+        budgetSplitLine(e.spent, s.input.caps.maxMinutes),
+      ]);
     case "no_verdict":
       return join([
         `⚠️ Review round ${e.round.index} ended without a submitted verdict (budget, refusal, or stop) — ship never converts that into a request for changes, so no findings step ran.`,

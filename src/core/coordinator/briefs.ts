@@ -28,12 +28,15 @@ import {
 import { shipTaskText } from "../ship/preflight.js";
 import { buildShipReviewTurn } from "../ship/reviewChild.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
+import type { Handoff } from "../ship/handoff.js";
 
 /** What a child run's record tells the next brief: the review's findings, the coding run's dispositions, the child's final words. */
 export interface ChildRunFacts {
   findings?: Finding[];
   dispositions?: FindingDisposition[];
   finalReply?: string;
+  /** The coding run's typed handoff, when it submitted one (decision 0046: a continuation is briefed with it). */
+  handoff?: Handoff;
 }
 
 export interface BriefReaders {
@@ -124,6 +127,33 @@ export async function contractFor(
 
 const prUrl = (repo: string, pr: number) => `https://github.com/${repo}/pull/${pr}`;
 
+/** What a continuation is told before the unit's own request: which segment
+ *  it is, the sha and branch it continues from, and the previous segment's
+ *  write-up and handoff as the checkpoint to pick up — the unit's request
+ *  follows unchanged, so the contract stays the contract. */
+async function continuationPreface(
+  cont: { segment: number; from?: string; previousRunId?: string },
+  unit: CoordinatorUnit,
+  readers: BriefReaders,
+): Promise<string> {
+  const previous = cont.previousRunId !== undefined ? await readers.readRunFacts(cont.previousRunId) : undefined;
+  const lines = [
+    `Segment ${cont.segment} of this unit: the previous segment ended at its lease with the unit unfinished. ` +
+      `Continue from \`${unit.branch}\`${cont.from !== undefined ? ` at \`${cont.from.slice(0, 7)}\`` : ""} as it stands — a clean checkout of what was pushed — and finish the unit: what is done stays done, so do not redo it.`,
+  ];
+  if (previous?.finalReply !== undefined) lines.push(`The previous segment's write-up:\n${previous.finalReply}`);
+  const h = previous?.handoff;
+  if (h !== undefined) {
+    const list = (items: string[]) => (items.length > 0 ? items.map((i) => `- ${i}`).join("\n") : "- none");
+    lines.push(
+      `Its handoff — follow-ups still open:\n${list(h.followUps.map((f) => `${f.what} (${f.where})`))}\n` +
+        `Deviations it recorded:\n${list(h.deviations.map((d) => `${d.from} → ${d.to}: ${d.why}`))}\n` +
+        `Unproven:\n${list(h.unproven.map((u) => `${u.criterion}: ${u.why}`))}`,
+    );
+  }
+  return lines.join("\n\n");
+}
+
 /** The findings step's message (agent-ship item 7): the review's findings as
  *  the requester would paste them into the unit thread, with the review's own
  *  words and the ask: every finding gets a disposition, the description is
@@ -156,9 +186,15 @@ export async function composeChild(
       const contract = await contractFor(instance, unit, readers);
       // A generated unit's prompt is the request text itself — the section
       // minus the one-unit heading the markdown rendering added.
-      const prompt = isGenerated(instance)
+      const task = isGenerated(instance)
         ? contract.unit.section.split("\n").slice(1).join("\n").trim()
         : `Implement unit ${contract.unit.id} — ${contract.unit.title} — of ${instance.plan?.path ?? "the plan"}: the contract below is the unit. Do its first instruction first, then add every test scenario it lists, update every spec row it names and weaken no guard.`;
+      // A renewal's segment (decision 0046): the continuation is a run, not a
+      // resume — it starts from the recorded sha in a clean tree, and its
+      // request is the previous segment's write-up and handoff, never the
+      // person's message again.
+      const prompt =
+        brief.continue !== undefined ? `${await continuationPreface(brief.continue, unit, readers)}\n\n${task}` : task;
       return { preset: "coding", prompt, ref: unit.branch, contract };
     }
     case "review": {

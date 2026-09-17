@@ -56,6 +56,8 @@ import {
   type StepReturn,
   type UnitEnding,
   type UnitPipelineState,
+  stepPrefixOf,
+  type UnitSession,
 } from "../ship/coordinator.js";
 import { checksSettledEventType, isCoordinatorUnit, runFinishedEventType, type CoordinatorUnit } from "./contract.js";
 
@@ -274,6 +276,10 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
     reviewHead,
     dispositions,
     handoff,
+    pushed,
+    leaseStartedAt,
+    costUsd,
+    handoffLists,
   } = facts;
   return {
     type: "read-record",
@@ -291,6 +297,11 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
       ...(reviewHead !== undefined ? { reviewHead } : {}),
       ...(dispositions !== undefined ? { dispositions } : {}),
       ...(handoff !== undefined ? { handoff } : {}),
+      // The renewal's facts (decision 0046), as the record carries them.
+      ...(Array.isArray(pushed) ? { pushed } : {}),
+      ...(typeof leaseStartedAt === "number" ? { leaseStartedAt } : {}),
+      ...(typeof costUsd === "number" || costUsd === null ? { costUsd } : {}),
+      ...(handoffLists !== undefined ? { handoffLists } : {}),
     },
     at: a.body.at,
   };
@@ -479,11 +490,16 @@ async function runUnit(
   instanceId: string,
   node: PlanUnitNode,
   plan: PlanFacts,
+  session?: UnitSession,
 ): Promise<UnitEnding> {
   const unit = node.id;
+  // A renewal's segment names its steps under the segment (`U10/s2/…`), so
+  // the Workflow's durable step cache never answers segment two with segment
+  // one's results (decision 0046).
+  const prefix = stepPrefixOf(unit, session);
   const tag = { parentInstanceId: instanceId, unit };
   const start = readUnitStart(
-    answerOf("unit-start", await step.do(`${unit}/start`, STEP_CONFIG, () => call(bot, "unit-start", tag))),
+    answerOf("unit-start", await step.do(`${prefix}/start`, STEP_CONFIG, () => call(bot, "unit-start", tag))),
   );
   // A resume at review (agent-ship item 10) rides the unit's row: the pull
   // request of ship's own the requester named opens the pipeline at its first
@@ -511,6 +527,7 @@ async function runUnit(
       generated: plan.generated,
       ...(resume !== undefined ? { resume } : {}),
       ...(lastPush !== undefined ? { lastPush } : {}),
+      ...(session !== undefined ? { session } : {}),
     },
     start.at,
   );
@@ -523,7 +540,7 @@ async function runUnit(
     for (const note of transition.notes) {
       if (note.type === "round") {
         const body = { ...tag, index: note.index, agent: note.agent, outcome: note.outcome };
-        await step.do(`${unit}/note/${++notes}`, STEP_CONFIG, () => call(bot, "round", body));
+        await step.do(`${prefix}/note/${++notes}`, STEP_CONFIG, () => call(bot, "round", body));
       } else {
         // A merge_ready ending names the pull request as it is at the APPROVED
         // head (agent-ship item 9): one more pr-check reads the facts fresh —
@@ -535,10 +552,10 @@ async function runUnit(
         if (note.ending.kind === "merge_ready") {
           try {
             const check = prCheckReturn(
-              `${unit}/end/pr-facts`,
+              `${prefix}/end/pr-facts`,
               answerOf(
                 "pr-check",
-                await step.do(`${unit}/end/pr-facts`, STEP_CONFIG, () => call(bot, "pr-check", tag)),
+                await step.do(`${prefix}/end/pr-facts`, STEP_CONFIG, () => call(bot, "pr-check", tag)),
               ),
             );
             if (check.type === "pr-check" && check.pr.state === "merged")
@@ -562,8 +579,20 @@ async function runUnit(
             ? { headSha: note.ending.headSha }
             : {}),
           ...(state.lastCodingRunId !== undefined ? { codingRunId: state.lastCodingRunId } : {}),
+          // A continued ending is a segment's end, not the unit's: the bot
+          // writes the renewal as a row keyed by the next segment's index
+          // (decision 0046), so a runner reclaimed here never renews twice.
+          ...(note.ending.kind === "continued"
+            ? {
+                segment: {
+                  index: note.ending.segment,
+                  ...(note.ending.from !== undefined ? { from: note.ending.from } : {}),
+                  runId: note.ending.runId,
+                },
+              }
+            : {}),
         };
-        await step.do(`${unit}/end`, STEP_CONFIG, () => call(bot, "unit-end", body));
+        await step.do(`${prefix}/end`, STEP_CONFIG, () => call(bot, "unit-end", body));
       }
     }
   }
@@ -597,13 +626,23 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
     const [next] = readyUnits(graph, cursor);
     if (next === undefined) break;
     cursor = startUnit(graph, cursor, next);
-    const ending = await runUnit(
-      step,
-      bot,
-      instanceId,
-      graph.units.find((u) => u.id === next)!,
-      plan,
-    );
+    const node = graph.units.find((u) => u.id === next)!;
+    let ending = await runUnit(step, bot, instanceId, node, plan);
+    // The lease continues while the grant renews (decision 0046): each
+    // `continued` ending opens the next segment of the same unit — a fresh
+    // pipeline under a fresh lease, from the recorded sha, briefed with the
+    // previous segment's write-up — until the unit ends some other way.
+    while (ending.kind === "continued") {
+      const c = ending;
+      ending = await runUnit(step, bot, instanceId, node, plan, {
+        segment: c.segment,
+        renewalsSpent: c.segment - 1,
+        spendUsd: c.spendUsd,
+        ...(c.from !== undefined ? { continueFrom: c.from } : {}),
+        previousRunId: c.runId,
+        ...(c.handoff !== undefined ? { previousHandoff: c.handoff } : {}),
+      });
+    }
     endings[next] = ending.kind;
     cursor = settleUnit(graph, cursor, next, ending.kind === "merged" ? "done" : "failed");
   }

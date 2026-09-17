@@ -203,6 +203,18 @@ describe("isCoordinatorUnit — one unit's row", () => {
     ).toBe(true);
   });
 
+  it("segments are the renewals the unit spent — an index from two up, an optional sha and run id, a time; a first-segment row, a non-array, a malformed index or sha is refused", () => {
+    expect(isCoordinatorUnit({ ...unit, segments: [] })).toBe(true);
+    expect(
+      isCoordinatorUnit({ ...unit, segments: [{ index: 2, from: "a".repeat(40), runId: "run-c0", at: 3_000 }] }),
+    ).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, segments: [{ index: 3, at: 3_000 }] })).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, segments: [{ index: 1, at: 3_000 }] })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, segments: [{ index: 2 }] })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, segments: [{ index: 2, from: 7, at: 3_000 }] })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, segments: { index: 2, at: 3_000 } })).toBe(false);
+  });
+
   it("a resume at review is the pull request number with an optional head and url; a resume without the number, or with a malformed head or url, is refused", () => {
     expect(isCoordinatorUnit({ ...unit, resume: { pr: 7 } })).toBe(true);
     expect(isCoordinatorUnit({ ...unit, resume: { pr: 7, headSha: "b".repeat(40) } })).toBe(true);

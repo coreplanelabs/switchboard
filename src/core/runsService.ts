@@ -150,6 +150,11 @@ export interface RunView {
    *  2), the fact a follow-up in the thread continues from
    *  (resident-repos item 29); as the artifacts above, from the store. */
   pr?: RunRecord["pr"];
+  /** The heads the run pushed and the lease it ran under (run-history item 2;
+   *  decision 0046) — what a renewal reads progress off; from the store as
+   *  the artifacts above. */
+  pushed?: RunRecord["pushed"];
+  lease?: RunRecord["lease"];
   /** What the run cost in tokens, per model (`RunRecord.usage`, run-history
    *  item 56), and what that is in dollars through the price table
    *  (`runCostOf`; costs.md item 4c) — on a finished run whose record the store
@@ -646,6 +651,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       ...(row.dispositions !== undefined ? { dispositions: row.dispositions } : {}),
       ...(row.handoff !== undefined ? { handoff: row.handoff } : {}),
       ...(row.pr !== undefined ? { pr: row.pr } : {}),
+      ...(row.pushed !== undefined ? { pushed: row.pushed } : {}),
+      ...(row.lease !== undefined ? { lease: row.lease } : {}),
       // The run's tokens and their price (costs.md item 4c): summed at finish, so only the record has them.
       ...(row.usage !== undefined ? { usage: row.usage } : {}),
       ...costOf(row, prices),
