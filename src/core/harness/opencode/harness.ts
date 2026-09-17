@@ -36,6 +36,7 @@ import {
   identityOrNothing,
   isContainerGone,
   LOG_READ_BYTES,
+  OP_TIMEOUT_MS,
   type HarnessContainer,
   type HarnessResponse,
 } from "../container.js";
@@ -64,9 +65,9 @@ import {
   OPENCODE_VERSION,
   openCodeSessionRoutes,
   parseHealth,
-  parseMessagesPage,
+  parseMessageId,
   parsePermissionList,
-  type OpenCodeMessage,
+  readSessionStore,
 } from "./client.js";
 import {
   launchOpenCode,
@@ -290,12 +291,27 @@ export async function openOpenCodeRun(
     facts = next;
     run.saveFacts?.(next);
   };
+  // The requests the loop posts and does not wait on (`OpenCodeConnection.posted`), joined by `end` after the kill that cuts the unanswered.
+  const posted = new Set<Promise<unknown>>();
+  // Every store message id this generation knows the server holds — the
+  // import's, a re-attach's store, each loop's refills — so a loop can tell a
+  // prompt of its own that landed from what was there before (the control
+  // reset's resolution, `OpenCodeConnection.knownMessageIds`).
+  const known = new Set<string>();
   const end = async (): Promise<void> => {
     forget();
     if (replaced || server === undefined) return;
     await deps.container.kill(server.pid).catch(() => {});
     await deps.container.kill(server.tailerPid).catch(() => {});
     await deps.container.remove(server.paths).catch(() => {});
+    // The requests the loop posted and did not wait on — an ending's
+    // interrupt, a steer — have settled by now: answered while the server
+    // lived (their word on the record, the run still open) or cut by the kill
+    // above (silent). The run finishes after this returns, so no answer can
+    // reach a finished record. Bounded by the executor's own command timeout
+    // — the longest any of them can still take when the executor itself is
+    // what stalled — never longer: past it the answer is one nobody waits on.
+    await Promise.race([Promise.allSettled([...posted]), deps.sleep(OP_TIMEOUT_MS)]);
   };
 
   try {
@@ -418,6 +434,7 @@ export async function openOpenCodeRun(
         opts: Parameters<typeof openCodeImportBody>[1],
       ) => {
         const body = openCodeImportBody(messages, opts);
+        for (const m of body.messages) if (typeof m.id === "string") known.add(m.id);
         const res = await request(deps.container, started, auth, OPENCODE_ROUTES["session.import"], body);
         if (res.status < 200 || res.status >= 300) throw refusedBy("session import", res);
       };
@@ -472,8 +489,11 @@ export async function openOpenCodeRun(
       );
     }
 
+    for (const m of server.reattach?.store ?? []) known.add(m.id);
     const conn: OpenCodeConnection = {
       container: deps.container,
+      posted,
+      knownMessageIds: known,
       paths: server.paths,
       port: server.port,
       password: server.password,
@@ -501,7 +521,9 @@ export async function openOpenCodeRun(
     let answer: string;
     let remainingMs: () => number;
     try {
-      ({ answer, remainingMs } = await driveOpenCode(deps, run, conn));
+      let storeIds: string[];
+      ({ answer, remainingMs, storeIds } = await driveOpenCode(deps, run, conn));
+      for (const id of storeIds) known.add(id);
     } finally {
       draining = false;
       await drainer.catch(() => {});
@@ -523,7 +545,7 @@ export async function openOpenCodeRun(
         // The turn's tools, marked for the proxy for the turn's duration (model-proxy item 6).
         deps.bearers?.markTurn(run.runId, input.tools);
         try {
-          const { answer: turnAnswer } = await driveOpenCode(
+          const turn = await driveOpenCode(
             deps,
             {
               ...run,
@@ -538,10 +560,11 @@ export async function openOpenCodeRun(
               // read the answer, so a discard stands in.
               onStep: async () => {},
             },
-            { ...conn, feedOffset: turnEnd, saveOffset: undefined, reattach: undefined },
+            { ...conn, feedOffset: turnEnd, saveOffset: undefined, reattach: undefined, knownMessageIds: known },
             "turn",
           );
-          return turnAnswer;
+          for (const id of turn.storeIds) known.add(id);
+          return turn.answer;
         } finally {
           deps.bearers?.clearTurn(run.runId);
           live.toolContext = previous;
@@ -586,8 +609,6 @@ async function probeRecordedServer(
 }
 
 /** How many store pages a re-attach reads back at most, and how many messages each carries (the route's cap). */
-const STORE_PAGE_LIMIT = 200;
-const STORE_PAGES = 10_000;
 
 type ReattachAttempt =
   | { ok: true; server: OpenCodeLive & { reattach: OpenCodeReattach }; tailerRestarted: boolean }
@@ -633,22 +654,9 @@ async function reattachOpenCode(
   const get = (path: string): Promise<HarnessResponse> =>
     deps.container.request(paths, { method: "GET", port: facts.port, path, secretHeaders: auth });
   const routes = openCodeSessionRoutes(facts.sessionID);
-  const store: OpenCodeMessage[] = [];
-  let cursor: string | undefined;
-  for (let page = 0; ; page++) {
-    if (page === STORE_PAGES)
-      return refuse(
-        `the session's store did not end within ${STORE_PAGES} pages; the run does not continue on a partial store`,
-      );
-    const query = `${cursor !== undefined ? `cursor=${encodeURIComponent(cursor)}` : "order=asc"}&limit=${STORE_PAGE_LIMIT}`;
-    const res = await get(`${routes["session.messages"].path}?${query}`);
-    if (res.status < 200 || res.status >= 300) return refuse(`the server refused the session (${res.status})`);
-    const listed = parseMessagesPage(res.body);
-    if (listed === undefined) return refuse("the session's messages answered something that is not the page shape");
-    store.push(...listed.data);
-    cursor = listed.next;
-    if (cursor === undefined) break;
-  }
+  const read = await readSessionStore(get, facts.sessionID);
+  if (!read.ok) return refuse(read.why);
+  const store = read.messages;
   const pending = await get(routes["session.permission.list"].path);
   if (pending.status < 200 || pending.status >= 300)
     return refuse(`the server refused the session's pending asks (${pending.status})`);
@@ -752,18 +760,35 @@ function drainFollowUps(
         // server that refuses a steer is one the loop itself is about to find
         // gone, and a retry every tick would only repeat the note.
         let failure: string | undefined;
+        // Posted through the connection's `posted` set while in flight, so a
+        // write the control plane's reset left unknown is resolved only once
+        // this steer has answered — and its answer names the user message it
+        // became (measured), known from here: a steer's row of the prompt's
+        // own text is never read as the prompt landed.
+        const sent = (async () => {
+          try {
+            const res = await conn.container.request(conn.paths, {
+              method: routes["session.prompt"].method,
+              port: conn.port,
+              path: routes["session.prompt"].path,
+              secretHeaders: auth,
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ text, delivery: "steer" }),
+            });
+            if (res.status < 200 || res.status >= 300) failure = `the server answered ${res.status}`;
+            else {
+              const id = parseMessageId(res.body);
+              if (id !== undefined) conn.knownMessageIds?.add(id);
+            }
+          } catch (err) {
+            failure = err instanceof Error ? err.message : String(err);
+          }
+        })();
+        conn.posted?.add(sent);
         try {
-          const res = await conn.container.request(conn.paths, {
-            method: routes["session.prompt"].method,
-            port: conn.port,
-            path: routes["session.prompt"].path,
-            secretHeaders: auth,
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ text, delivery: "steer" }),
-          });
-          if (res.status < 200 || res.status >= 300) failure = `the server answered ${res.status}`;
-        } catch (err) {
-          failure = err instanceof Error ? err.message : String(err);
+          await sent;
+        } finally {
+          conn.posted?.delete(sent);
         }
         if (failure !== undefined) {
           note(

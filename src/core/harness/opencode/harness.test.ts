@@ -13,6 +13,9 @@ import {
   type PiHarnessFacts,
 } from "../contract.js";
 import { HarnessRegistry, relayToolCall, type LiveHarness } from "../pi/relay.js";
+import { CONTROL_RESET_RESUMED_NOTE } from "../reattach.js";
+import { RunRegistry } from "../../runRegistry.js";
+import { followUpPrompt } from "../../threadAdmission.js";
 import { PROXY_PROVIDER } from "../pi/process.js";
 import { FakeHarnessContainer } from "../testing/fakeContainer.js";
 import type { DrivenRun, RunScript } from "../testing/scenarios.js";
@@ -852,7 +855,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
   /** A run opened through the seam over the scripted serve's bare-container
    *  door, its spans recorded, the session held open for a post-turn; the
    *  serve has the run's clock and its lease for a script that moves them. */
-  function openRun(options: FakeServeOptions, script: RunScript = oneTurn) {
+  function openRun(options: FakeServeOptions, script: RunScript = oneTurn, alsoTo?: (e: RunEvent) => void) {
     const container = new FakeHarnessContainer();
     const registry = new HarnessRegistry();
     const clock = { now: NOW };
@@ -890,7 +893,10 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       toolContext: { executor },
       rules: { checkout: "/workspace/threads/t/main", protectedBranches: ["main"] },
       span: root,
-      onEvent: (e) => void events.push(e),
+      onEvent: (e) => {
+        events.push(e);
+        alsoTo?.(e);
+      },
       onProgress: (n) => void progress.push(n),
       onStep: async () => {},
     };
@@ -939,11 +945,44 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     await session.end();
   });
 
-  it("after a hung turn: the loop ended at the finale and the aborted execution's tail lands only once the post-turn's prompt is posted — an ask pending at the interrupt failing aborted, the step failing, then the settle, as the pinned binary writes them — and the post-turn decides nothing of it: no reply posted, no bypass, no tool event on its record, the settle set aside; it waits for its own execution's start and answers the turn's own text; no second harness_error", async () => {
+  it("after a hung turn: the loop ended at the finale and the aborted execution's tail lands only once the post-turn's prompt is posted — the step failing aborted, the usage, then the settle and its refills, as the pinned binary ends an interrupted execution — and the post-turn decides nothing of it: no reply posted, no bypass, no tool event on its record, the settle set aside; it waits for its own execution's start and answers the turn's own text; no second harness_error", async () => {
     const o = openRun({ interruptSettlesLate: "interrupted" }, hung);
     const session = await o.opened;
     const reason = finaleAbortReason(o.lease.finaleMs);
     expect(session.answer).toBe(timeBudgetAnswer("", 10, reason));
+    expect(o.progress).toContain(finaleTimedOutNote());
+    const replyPosts = () => o.container.requests.filter((q) => /\/permission\/[^/]+\/reply$/.test(q.path)).length;
+    const repliesBefore = replyPosts();
+    expect(await session.followUp(postTurn)).toBe("never");
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary),
+    ).toEqual([windDownFailureNote(reason)]);
+    // Nothing of the earlier execution's tail was decided or recorded as this turn's: the one reply posted is the post-turn's own call's, and the record's tool events are the two loops' own calls.
+    expect(replyPosts()).toBe(repliesBefore + 1);
+    expect(
+      o.events.filter((e) => e.type === "tool_call" || e.type === "tool_result").map((e) => `${e.type}:${e.callId}`),
+    ).toEqual(["tool_call:c1", "tool_result:c1", "tool_call:c1", "tool_result:c1"]);
+    // The loop's span ended ok: the finale is the wind-down's ending, as on pi.
+    expect(o.sink.ended("run.agent")?.status).toBe("ok");
+    await session.end();
+  });
+
+  it("after a hung tool call: the tool the loop allowed never settled, the finale interrupted it, and its late success lands only after the post-turn's own execution has started — the post-turn sets it aside as the earlier execution's (no bypass, no result on its record, the loop before's call handed over) and answers its own text", async () => {
+    const hungTool: RunScript = {
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+      ],
+      hangToolCall: 1,
+    };
+    const o = openRun({ interruptSettlesLate: "interrupted" }, hungTool);
+    const session = await o.opened;
+    const reason = finaleAbortReason(o.lease.finaleMs);
     expect(o.progress).toContain(finaleTimedOutNote());
     expect(await session.followUp(postTurn)).toBe("never");
     expect(
@@ -951,14 +990,66 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         .filter((n) => n.kind === "harness_error")
         .map((n) => n.summary),
     ).toEqual([windDownFailureNote(reason)]);
-    // Nothing of the earlier execution's tail was decided or recorded as this turn's.
-    expect(o.container.requests.some((q) => q.path.includes("per_c-ask"))).toBe(false);
+    // The hung call is on the record once, as the loop's call, with no result: its late success is nobody's; the post-turn's own call (the fake replays the script under the same call id, under a step of its own) is judged as its own.
     expect(
-      o.events.some((e) => (e.type === "tool_call" || e.type === "tool_result") && /c-(slow|ask)/.test(e.callId ?? "")),
-    ).toBe(false);
-    // The loop's span ended ok: the finale is the wind-down's ending, as on pi.
-    expect(o.sink.ended("run.agent")?.status).toBe("ok");
+      o.events.filter((e) => e.type === "tool_call" || e.type === "tool_result").map((e) => `${e.type}:${e.callId}`),
+    ).toEqual(["tool_call:c1", "tool_call:c1", "tool_result:c1"]);
     await session.end();
+  });
+
+  it("after a hung tool call whose late success lands only during the SECOND post-turn: set aside there too — the settle names a step no loop of this session saw start, so nothing is handed turn to turn — and both post-turns answer their own text", async () => {
+    const hungTool: RunScript = {
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+      ],
+      hangToolCall: 1,
+    };
+    const o = openRun({ interruptSettlesLate: "interrupted", hungToolSettlesOnPlay: 3 }, hungTool);
+    const session = await o.opened;
+    const reason = finaleAbortReason(o.lease.finaleMs);
+    expect(await session.followUp(postTurn)).toBe("never");
+    expect(await session.followUp(postTurn)).toBe("never");
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary),
+    ).toEqual([windDownFailureNote(reason)]);
+    expect(
+      o.events.filter((e) => e.type === "tool_call" || e.type === "tool_result").map((e) => `${e.type}:${e.callId}`),
+    ).toEqual(["tool_call:c1", "tool_call:c1", "tool_result:c1", "tool_call:c1", "tool_result:c1"]);
+    await session.end();
+  });
+
+  it("a refused interrupt whose answer lands only as the process is ended is still the record's: end() returns once every request the loop posted has settled, the run finishes after end(), and the registry keeps the note — where a publish after the finish is dropped, so the order is what the claim rests on", async () => {
+    const registry = new RunRegistry();
+    const handle = registry.create("post-turn run");
+    const o = openRun({ interruptAnswersAfterKill: "refused" }, hung, (e) => registry.publish(handle.id, e));
+    const session = await o.opened;
+    const reason = finaleAbortReason(o.lease.finaleMs);
+    expect(session.answer).toBe(timeBudgetAnswer("", 10, reason));
+    const refusal = /the interrupt did not reach the server: it answered 500/;
+    // Not yet answered when the loop left; nothing on the card, ever.
+    expect(notes(o.events).some((n) => refusal.test(n.summary))).toBe(false);
+    await session.end();
+    registry.finish(handle.id, "completed");
+    const recorded = registry.snapshotById(handle.id)?.events ?? [];
+    expect(recorded.filter((e) => e.type === "run_note" && refusal.test(e.summary))).toHaveLength(1);
+    expect(o.progress.some((p) => refusal.test(p))).toBe(false);
+    registry.publish(handle.id, {
+      type: "run_note",
+      kind: "harness_error",
+      summary: "a note after the finish",
+      at: NOW,
+    });
+    expect(
+      (registry.snapshotById(handle.id)?.events ?? []).some(
+        (e) => e.type === "run_note" && e.summary === "a note after the finish",
+      ),
+    ).toBe(false);
   });
 
   it("after a hung turn whose aborted execution then fails on the proxy: the earlier execution's failure is noted as such and set aside, and the post-turn answers its own text", async () => {
@@ -993,7 +1084,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     await session.end();
   });
 
-  it("after a hung turn whose tail carries a dropped stream's note and an event kind no table names: both are surfaced before the post-turn's execution starts — the note on the card, the kind as a harness_error — and the post-turn still answers its own text", async () => {
+  it("after a hung turn whose tail carries a dropped stream's note, an event kind no table names and a compaction: all three are surfaced before the post-turn's execution starts — the note on the card, the kind as a harness_error, the compaction as its note — and the post-turn still answers its own text", async () => {
     const o = openRun({ interruptSettlesLate: "interrupted", lateTailNoise: true }, hung);
     const session = await o.opened;
     const reason = finaleAbortReason(o.lease.finaleMs);
@@ -1007,6 +1098,8 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       windDownFailureNote(reason),
       "OpenCode emitted an event kind this build does not know: made_up_late_kind",
     ]);
+    // The earlier execution's compaction is record state, landed in every mode.
+    expect(notes(o.events).some((n) => n.kind === "compacted")).toBe(true);
     await session.end();
   });
 
@@ -1021,8 +1114,8 @@ describe("the post-turn on the run's session — refused, answered by silence, o
 // the bridge's read-only feed re-attaches in place; a reset that keeps repeating
 // with no record read between the re-attaches is a stuck control plane the bound
 // closes by name, exactly as pi does (finding: never a silent throw past the
-// bound). The POST-side resolution (a control reset on the prompt POST) is owned
-// by the OpenCode request-path rework, out of this PR's scope.
+// bound). A control reset under one of the loop's writes is the describe after
+// this one: resolved from the server's own state, never re-sent blind.
 describe("OpenCodeHarness — the resident's control plane keeps resetting the feed", () => {
   const notes = (r: DrivenRun) =>
     r.events
@@ -1044,6 +1137,148 @@ describe("OpenCodeHarness — the resident's control plane keeps resetting the f
     ).toBe(true);
     // A control reset is never the replaced verdict.
     expect(notes(r).filter((n) => n.kind === "sandbox_restarted")).toHaveLength(0);
+  });
+});
+
+// Feature: docs/reference/specs/harness.md item 13 — a control reset under an
+// OpenCode write (the prompt POST, a gate reply) is resolved from the server's
+// own state, never re-sent blind: the store lists a queued prompt's message the
+// moment it is admitted (measured against the pinned binary), the pending-asks
+// listing says whether a reply landed; the feed is re-attached in place; a
+// state that cannot be read, or a re-issue that meets the reset again, fails
+// the run by name with a harness_error naming the request.
+describe("OpenCodeHarness — the resident's control plane resets under a write", () => {
+  const notes = (r: DrivenRun) =>
+    r.events.filter((e): e is Extract<RunEvent, { type: "run_note" }> => e.type === "run_note");
+  const posts = (r: DrivenRun, suffix: string) =>
+    r.requests.filter((q) => q.method === "POST" && q.path.endsWith(suffix));
+  const gets = (r: DrivenRun, suffix: string) =>
+    r.requests.filter((q) => q.method === "GET" && q.path.endsWith(suffix));
+  const replies = (r: DrivenRun) => r.requests.filter((q) => /\/permission\/per_c1\/reply$/.test(q.path));
+  const answered = (r: DrivenRun) =>
+    r.outcome.kind === "answered" ? r.outcome.answer : `failed: ${r.outcome.error.message}`;
+  const oneTurn: RunScript = { turns: [{ content: [{ type: "text", text: "done" }], stopReason: "end_turn" }] };
+  const toolTurn: RunScript = {
+    turns: [
+      {
+        content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo hi" } }],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "done" }], stopReason: "end_turn" },
+    ],
+  };
+
+  /** The store's listings: the resolution reads the store page by page (`order=asc&limit=200`, the cursor followed), never one unqueried page. */
+  const storeReads = (r: DrivenRun) => r.requests.filter((q) => q.method === "GET" && q.path.includes("/message?"));
+  /** A seed longer than one page of the store (`STORE_PAGE_LIMIT`, 200 rows): 125 exchanges, 250 messages. */
+  const longSeed: ChatMessage[] = [];
+  for (let i = 0; i < 125; i++) {
+    longSeed.push({ role: "user", content: [{ type: "text", text: `question ${i}` }] });
+    longSeed.push({ role: "assistant", content: [{ type: "text", text: `answer ${i}` }] });
+  }
+
+  it("a prompt the reset cut after the server took it is not re-issued: the store lists its message, the feed is re-attached in place under one resumed note, and the run answers on the one execution", async () => {
+    const r = await openCodeDriver({ controlResetOnPrompt: "landed" }).run(oneTurn);
+    expect(answered(r)).toBe("done");
+    expect(posts(r, "/prompt")).toHaveLength(1);
+    expect(storeReads(r)).toHaveLength(1);
+    expect(
+      notes(r)
+        .filter((n) => n.kind === "resumed")
+        .map((n) => n.summary),
+    ).toEqual([CONTROL_RESET_RESUMED_NOTE]);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a prompt the reset cut before the server took it is re-issued once: the store lists no message of it, the second POST is admitted, and the run answers", async () => {
+    const r = await openCodeDriver({ controlResetOnPrompt: "lost" }).run(oneTurn);
+    expect(answered(r)).toBe("done");
+    expect(posts(r, "/prompt")).toHaveLength(2);
+    expect(storeReads(r)).toHaveLength(1);
+    expect(notes(r).filter((n) => n.kind === "resumed")).toHaveLength(1);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("on a store longer than one page, a prompt that landed is found on the last page — the store read page by page, never one unqueried page — and is not re-issued", async () => {
+    const r = await openCodeDriver({ controlResetOnPrompt: "landed" }).run({ ...oneTurn, seed: longSeed });
+    expect(answered(r)).toBe("done");
+    expect(posts(r, "/prompt")).toHaveLength(1);
+    expect(storeReads(r).length).toBeGreaterThanOrEqual(2);
+    expect(storeReads(r).every((q) => /order=asc&limit=200|cursor=/.test(q.path))).toBe(true);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("on a store longer than one page, a prompt that was lost is told lost by every page and re-issued once", async () => {
+    const r = await openCodeDriver({ controlResetOnPrompt: "lost" }).run({ ...oneTurn, seed: longSeed });
+    expect(answered(r)).toBe("done");
+    expect(posts(r, "/prompt")).toHaveLength(2);
+    expect(storeReads(r).length).toBeGreaterThanOrEqual(2);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a steer this generation posted whose row carries the prompt's exact text is not the prompt landed: the steer's message id is known from its answer, so a lost prompt is still re-issued", async () => {
+    const NOW = 1_700_000_000_000;
+    const sameWords = followUpPrompt([{ text: "same words", userId: "user:conformance", at: NOW }]);
+    const r = await openCodeDriver({ controlResetOnPrompt: "lost" }).run({
+      ...oneTurn,
+      request: sameWords,
+      followUp: "same words",
+    });
+    expect(answered(r)).toBe("done");
+    // The drainer's steer, then the lost prompt and its re-issue.
+    expect(posts(r, "/prompt").map((q) => (JSON.parse(q.body ?? "{}") as { delivery?: string }).delivery)).toEqual([
+      "steer",
+      "queue",
+      "queue",
+    ]);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a re-issued prompt that meets the reset again fails the run by name — OpenCodeWriteUnresolvedError, a harness_error naming the prompt — never a third send", async () => {
+    const r = await openCodeDriver({ controlResetOnPrompt: "again" }).run(oneTurn);
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err?.name).toBe("OpenCodeWriteUnresolvedError");
+    expect(err?.message).toMatch(/^the prompt was in flight when the resident's control plane reset under the run/);
+    expect(posts(r, "/prompt")).toHaveLength(2);
+    expect(notes(r).some((n) => n.kind === "harness_error" && /^the prompt was in flight/.test(n.summary))).toBe(true);
+  });
+
+  it("a gate reply the reset cut after the server took it is not re-issued: the ask is no longer pending, the tool's result is on the record, and the run answers", async () => {
+    const r = await openCodeDriver({ controlResetOnReply: "landed" }).run(toolTurn);
+    expect(answered(r)).toBe("done");
+    expect(replies(r)).toHaveLength(1);
+    expect(gets(r, "/permission")).toHaveLength(1);
+    expect(r.events.some((e) => e.type === "tool_result" && e.callId === "c1" && e.ok)).toBe(true);
+    expect(
+      notes(r)
+        .filter((n) => n.kind === "resumed")
+        .map((n) => n.summary),
+    ).toEqual([CONTROL_RESET_RESUMED_NOTE]);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a gate reply the reset cut before the server took it is re-issued once: the ask is still pending, the second POST is taken, and the run answers", async () => {
+    const r = await openCodeDriver({ controlResetOnReply: "lost" }).run(toolTurn);
+    expect(answered(r)).toBe("done");
+    expect(replies(r)).toHaveLength(2);
+    expect(gets(r, "/permission")).toHaveLength(1);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a gate reply whose outcome the server cannot be asked about fails the run closed by name: OpenCodeReplyFailedError carrying the unresolved write, a harness_error naming the request, the interrupt posted", async () => {
+    const r = await openCodeDriver({ controlResetOnReply: "unlistable" }).run(toolTurn);
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err?.name).toBe("OpenCodeReplyFailedError");
+    expect(err?.message).toMatch(
+      /the gate's reply for request per_c1 was in flight when the resident's control plane reset under the run/,
+    );
+    expect(replies(r)).toHaveLength(1);
+    expect(
+      notes(r).some((n) => n.kind === "harness_error" && /the gate's reply for request per_c1/.test(n.summary)),
+    ).toBe(true);
+    expect(posts(r, "/interrupt")).toHaveLength(1);
   });
 });
 
