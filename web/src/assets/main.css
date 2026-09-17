@@ -335,14 +335,23 @@
 
 /*
  * The composer's ring sweep (web-chat.md rule 8): on focus, and once as the
- * page lands, a line of colour travels one turn around the box's hairline — a
- * rotating conic gradient masked to a 1px ring, 700 ms — and fades as it
- * arrives, leaving the ink border the focus already drew. The colour is the
- * mark's own (the ok green, the one accent the page carries), so the line is
- * seen to move and then settle to white. Nothing else moves; the ring is the
- * only thing that changes. The second and last exception to the 8px rule,
- * beside the mark's draw. Off under prefers-reduced-motion.
+ * page lands, a line of colour travels one turn around the box's border — a
+ * rotating conic gradient masked to a 2px ring with a soft glow, one second —
+ * and fades as it arrives, leaving the ink border the focus already drew. The
+ * line runs blue into the mark's green into white (the data blue and the ok
+ * green, the two accents the page already carries), so the eye has a colour to
+ * follow and sees it settle to white. Nothing else moves; the ring is the only
+ * thing that changes. The second and last exception to the 8px rule, beside the
+ * mark's draw. Off under prefers-reduced-motion.
+ *
+ * `.composer-text` is the ONE set of metrics the box and its ghost share (face,
+ * size, leading, padding), so the grey completion lands exactly after the caret.
  */
+.composer-text {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  padding-block: 0.25rem;
+}
 @property --sb-angle {
   syntax: "<angle>";
   inherits: false;
@@ -351,17 +360,19 @@
 .ring::before {
   content: "";
   position: absolute;
-  inset: -1px;
+  inset: -2px;
   border-radius: inherit;
-  padding: 1px;
+  padding: 2px;
   background: conic-gradient(
     from var(--sb-angle),
     transparent 0deg,
-    transparent 200deg,
-    var(--ui-success) 300deg,
-    var(--ui-primary) 340deg,
+    transparent 90deg,
+    var(--sb-info) 210deg,
+    var(--sb-ok) 300deg,
+    var(--ui-primary) 345deg,
     transparent 360deg
   );
+  filter: drop-shadow(0 0 6px var(--sb-ok));
   -webkit-mask:
     linear-gradient(black 0 0) content-box,
     linear-gradient(black 0 0);
@@ -374,17 +385,17 @@
   pointer-events: none;
 }
 .ring-sweep::before {
-  animation: sb-ring-sweep 700ms ease-out forwards;
+  animation: sb-ring-sweep 1000ms ease-out forwards;
 }
 @keyframes sb-ring-sweep {
   0% {
     --sb-angle: 0deg;
     opacity: 0;
   }
-  15% {
+  10% {
     opacity: 1;
   }
-  85% {
+  80% {
     opacity: 1;
   }
   100% {

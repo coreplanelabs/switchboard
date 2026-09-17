@@ -11,7 +11,7 @@
     "src/channels/webShell.ts": "5eab7aae4b16bad384c4863ddb8b3d644470cba2421e56d7649bd2fd95b26d92",
     "src/docs/screenshotManifest.ts": "12ae2476806a42b394da7d8698464df43afd94270b13ebd521c9f022e998c06c",
     "web/src/App.vue": "e95e58c24d31cd6de4b5d701b4c44ce9752c5278b7d6afd9c9e7028104ae2122",
-    "web/src/assets/main.css": "4395477163af0000521b98bbdc6ef4489fbc2dac63c75ba54001022e3475fd71",
+    "web/src/assets/main.css": "64d8dd8426df76b08c2b08cbe0098ae2e329a67e9c475a3ddb55f6fb292cdddd",
     "web/src/components/AppNav.vue": "6d40882ef54bbf19f3efed3075010d9bf99e60aaa312fbb1930e7d11923d753c",
     "web/src/components/AppShell.vue": "18854492cac372920a662dd775b612368df86cb9bd0ac4e2b64c8a905cee9270",
     "web/src/components/BrandMark.vue": "affc84525ad56464eb207dd178fc01643380818e677609f3e8b480bfe3ac5898",
