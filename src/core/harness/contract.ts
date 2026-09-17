@@ -337,6 +337,11 @@ export interface FollowUpTurnInput {
   maxTurns: number;
   /** The turn's ask, in minutes; the harness carves the lesser of it and the lease's remainder. */
   maxMinutes: number;
+  /** The tools this turn may call (model-proxy item 6): the harness marks
+   *  them on the run's bearer entry for the turn's duration and the proxy
+   *  trims each request's tool list to them, the choice left to the model.
+   *  Absent, the session's whole table stands (the re-review turn). */
+  tools?: readonly string[];
   toolContext: ToolContext;
   span?: Span;
 }

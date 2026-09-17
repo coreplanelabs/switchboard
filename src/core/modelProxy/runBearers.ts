@@ -93,6 +93,20 @@ interface Entry {
   hashes: Buffer[];
   turns: number;
   revoked: boolean;
+  /** The harness's marks for the proxy (docs/reference/specs/model-proxy.md
+   *  item 6; decision 0046's amendment): the loop has ended, so the next
+   *  request is the checkpoint turn and goes upstream with `tool_choice:
+   *  none`; and, while set, a follow-up turn on the session with the tools it
+   *  may call (`null`: the session's whole table), which lifts the none and
+   *  trims the upstream list. Same entry as the bearer, so a rotation or an
+   *  adopt keeps them. */
+  marks: RunMarks;
+}
+
+/** What the proxy reads before it shapes a request's tools (model-proxy item 6). */
+export interface RunMarks {
+  loopEnded: boolean;
+  turn?: { tools: readonly string[] | null };
 }
 
 export interface RunBearerStoreOptions {
@@ -110,8 +124,54 @@ export class RunBearerStore {
   mint(grant: RunBearerGrant): string {
     this.sweep();
     const secret = randomBytes(SECRET_BYTES);
-    this.entries.set(grant.runId, { grant, hashes: [hashOf(secret)], turns: 0, revoked: false });
+    this.entries.set(grant.runId, {
+      grant,
+      hashes: [hashOf(secret)],
+      turns: 0,
+      revoked: false,
+      marks: { loopEnded: false },
+    });
     return token(grant.runId, secret);
+  }
+
+  /** The loop has ended (the harness steers the write-up): the requests that
+   *  follow are the checkpoint turn and go upstream with `tool_choice: none`
+   *  until a turn is marked. False for a run this store never minted or one that ended. */
+  markLoopEnded(runId: string): boolean {
+    const entry = this.entries.get(runId);
+    if (!entry || entry.revoked) return false;
+    entry.marks = { ...entry.marks, loopEnded: true };
+    return true;
+  }
+
+  /** A follow-up turn on the session is under way (harness-pi item 14): with
+   *  `tools`, the upstream list is trimmed to them and the choice left to the
+   *  model; without, the session's whole table stands. Lifts the checkpoint's
+   *  none for the turn's duration. False for an unknown or ended run. */
+  markTurn(runId: string, tools?: readonly string[]): boolean {
+    const entry = this.entries.get(runId);
+    if (!entry || entry.revoked) return false;
+    entry.marks = { ...entry.marks, turn: { tools: tools === undefined ? null : [...tools] } };
+    return true;
+  }
+
+  /** The follow-up turn ended: back to the loop-ended state. False for an unknown or ended run. */
+  clearTurn(runId: string): boolean {
+    const entry = this.entries.get(runId);
+    if (!entry || entry.revoked) return false;
+    const { turn: _turn, ...rest } = entry.marks;
+    entry.marks = rest;
+    return true;
+  }
+
+  /** The marks the proxy shapes a request by; nothing for a run this store never minted. */
+  marksOf(runId: string): RunMarks | undefined {
+    const entry = this.entries.get(runId);
+    if (!entry) return undefined;
+    return {
+      loopEnded: entry.marks.loopEnded,
+      ...(entry.marks.turn ? { turn: { tools: entry.marks.turn.tools } } : {}),
+    };
   }
 
   /** The run's lease has started (the harness set its deadline): the bearer

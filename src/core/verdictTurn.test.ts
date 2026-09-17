@@ -6,7 +6,13 @@ import type { FollowUpTurnInput } from "./harness/contract.js";
 import type { ReviewVerdict } from "./reviewVerdict.js";
 import type { RunEvent } from "./runEvents.js";
 import type { Span } from "./trace/types.js";
-import { VERDICT_TURN_MAX_TURNS, runVerdictTurn, verdictFollowUp, type VerdictTurnTarget } from "./verdictTurn.js";
+import {
+  VERDICT_TURN_MAX_TURNS,
+  VERDICT_TURN_TOOLS,
+  runVerdictTurn,
+  verdictFollowUp,
+  type VerdictTurnTarget,
+} from "./verdictTurn.js";
 
 // Feature: docs/reference/specs/agent-review.md item 5 — the verdict turn. The
 // turn is driven here as a unit, the session's follow-up entry a spy, so its
@@ -105,6 +111,7 @@ describe("runVerdictTurn — one clipped prompt on the run's own pi session (har
     const input = followUp.mock.calls[0][0];
     expect(input.text).toBe(verdictFollowUp(PR));
     expect(input.maxTurns).toBe(VERDICT_TURN_MAX_TURNS);
+    expect(input.tools).toEqual(VERDICT_TURN_TOOLS); // read the head, submit, report — nothing that writes (model-proxy item 6)
     expect(input.maxMinutes).toBe(POST_STEP_MINUTES.review); // no lease remainder was handed: the allowance stands
     expect(AGENTS.review.maxTurns).toBeGreaterThan(VERDICT_TURN_MAX_TURNS); // the clip is a clip
     expect(AGENTS.review.maxMinutes).toBeGreaterThan(POST_STEP_MINUTES.review);
