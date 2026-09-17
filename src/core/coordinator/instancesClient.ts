@@ -9,12 +9,14 @@
 
 import type { Secret } from "../../secrets.js";
 import { parseIngressTokenMap, tokenForSubject } from "../ingressTokens.js";
-import { COORDINATOR_IDENTITY } from "./contract.js";
+import { COORDINATOR_IDENTITY, type WorkflowSender } from "./contract.js";
 import {
+  COORDINATOR_INSTANCE_EVENTS_SUFFIX,
   COORDINATOR_INSTANCE_STATUS_PREFIX,
   COORDINATOR_INSTANCES_PATH,
   readCreateInstanceAnswer,
   readInstanceStatusAnswer,
+  readSendEventAnswer,
   type CreateInstanceAnswer,
   type InstanceStatusAnswer,
 } from "./instancesRoute.js";
@@ -83,4 +85,35 @@ export async function fetchInstanceStatusViaShim(
   } catch (err) {
     return { kind: "unanswered", reason: unreachable(err) };
   }
+}
+
+/** The bot's `WorkflowSender` over the shim's event relay
+ *  (`POST /admin/coordinator/instances/<id>/events`, http-ingress.md item 12):
+ *  the bot holds no Workflow binding, so the check-run intake's
+ *  `checks-settled-<head>` send crosses to the shim, which delivers it through
+ *  its own `SHIP_COORDINATOR` binding. A refusal throws by reason —
+ *  `sendChecksSettled` answers it as `failed`, never propagates it. */
+export function shimWorkflowSender(opts: ShimInstancesOptions): WorkflowSender {
+  return {
+    get: (id: string) =>
+      Promise.resolve({
+        async sendEvent(event: { type: string; payload: unknown }): Promise<void> {
+          const at = shimAddress(opts);
+          if ("reason" in at) throw new Error(at.reason);
+          const fetchImpl = opts.fetch ?? fetch;
+          const res = await fetchImpl(
+            `${at.base}${COORDINATOR_INSTANCE_STATUS_PREFIX}${encodeURIComponent(id)}${COORDINATOR_INSTANCE_EVENTS_SUFFIX}`,
+            {
+              method: "POST",
+              headers: { authorization: `Bearer ${at.bearer}`, "content-type": "application/json" },
+              body: JSON.stringify(event),
+              signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+            },
+          );
+          const answer = readSendEventAnswer(res.status, await res.text().catch(() => ""));
+          if (answer.kind === "sent") return;
+          throw new Error(answer.kind === "absent" ? `no such instance: ${id}` : answer.reason);
+        },
+      }),
+  };
 }

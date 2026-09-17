@@ -80,6 +80,22 @@ export function runFinishedEventType(runId: string): string {
   return `${RUN_FINISHED_EVENT_PREFIX}${runId}`;
 }
 
+/** The event the bot's GitHub check-run intake sends a merge-waiting parent:
+ *  the type carries the head sha (hex — inside the platform's alphabet), so a
+ *  driver waiting at that head matches its own event and any other head's is
+ *  buffered harmlessly. */
+export const CHECKS_SETTLED_EVENT_PREFIX = "checks-settled-";
+export function checksSettledEventType(headSha: string): string {
+  return `${CHECKS_SETTLED_EVENT_PREFIX}${headSha}`;
+}
+
+/** What the checks-settled event carries — the head and a clock; the parent
+ *  re-asks the merge door before it acts, so nothing more rides here. */
+export interface ChecksSettledPayload {
+  headSha: string;
+  settledAt: number;
+}
+
 /** What the event carries — ids, a status and a clock; the parent confirms
  *  through `read-record` before it acts, so nothing more rides here. */
 export interface RunFinishedPayload {
@@ -309,6 +325,27 @@ export type RunFinishedSend =
   | { kind: "none" }
   | { kind: "no-binding"; instance: string }
   | { kind: "failed"; instance: string; type: string; reason: string };
+
+/** The one send per settled head (http-ingress.md item 12): best effort like
+ *  `sendRunFinished` — a refusal is answered, never thrown, and the parent's
+ *  bounded merge wait times out on its own. */
+export async function sendChecksSettled(
+  workflow: WorkflowSender | undefined,
+  instance: string,
+  headSha: string,
+  settledAt: number,
+): Promise<RunFinishedSend> {
+  if (!workflow) return { kind: "no-binding", instance };
+  const type = checksSettledEventType(headSha);
+  const payload: ChecksSettledPayload = { headSha, settledAt };
+  try {
+    const handle = await workflow.get(instance);
+    await handle.sendEvent({ type, payload });
+    return { kind: "sent", instance, type };
+  } catch (err) {
+    return { kind: "failed", instance, type, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
 
 /** The one send per committed terminal record (run-history item 47). */
 export async function sendRunFinished(

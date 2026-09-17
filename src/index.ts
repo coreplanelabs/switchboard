@@ -86,6 +86,9 @@ import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
 import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { createAdminCoordinatorHandler, isCoordinatorAdminPath } from "./channels/adminCoordinator.js";
+import { createGithubWebhookHandler, GITHUB_WEBHOOK_PATH } from "./channels/githubWebhook.js";
+import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
+import { shimWorkflowSender } from "./core/coordinator/instancesClient.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
 import {
   createBranchRef,
@@ -623,6 +626,27 @@ export async function runBot(): Promise<void> {
     // the `coordinator` bearer of the same token map, whose actor must hold
     // `coordinator:step`. A spawn is a `dispatch()` as the requester the parent
     // record names, into the unit's thread, tagged with the instance and key.
+    // The check-run intake (http-ingress.md item 12): GitHub's `check_run`
+    // webhook, verified against GITHUB_WEBHOOK_SECRET, wakes the merge steps
+    // waiting at the settled head through the shim's event relay. The waiters
+    // are noted by the merge step's `pending` answers below; the registry is
+    // in-memory on purpose — a restart loses it and the driver's bounded merge
+    // wait re-asks the door on its own cadence.
+    const mergeWaits = createMergeWaitRegistry();
+    const checksWorkflow = shimWorkflowSender({
+      baseUrl: process.env.PUBLIC_BASE_URL,
+      tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
+    });
+    const githubWebhook = createGithubWebhookHandler({
+      secret: processSecrets.get("GITHUB_WEBHOOK_SECRET")?.reveal(),
+      checksSettled: async (repo, headSha) => {
+        const checks = await fetchCommitChecks(repo, headSha);
+        return checks !== undefined && checks.total > 0 && checks.pending.length === 0;
+      },
+      instancesWaitingAt: (headSha) => Promise.resolve(mergeWaits.waitingAt(headSha, systemClock())),
+      workflow: checksWorkflow,
+      now: systemClock,
+    });
     const coordinatorAdmin = createAdminCoordinatorHandler({
       tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
       grantsFor: (id) => config.grantsFor(id),
@@ -648,6 +672,7 @@ export async function runBot(): Promise<void> {
       selfIdentity: resolveGithubIdentity,
       runHistoryWriter,
       channelVisibilityOf: (channelId) => channelVisibilityOf(deps, channelId),
+      noteMergeWait: (headSha, instanceId, at) => mergeWaits.note(headSha, instanceId, at),
     });
     // Scheduled jobs arrive through /ingress like any other caller: the
     // Worker shim (deploy/cloudflare/worker.ts) POSTs each `run` schedule's
@@ -845,6 +870,10 @@ export async function runBot(): Promise<void> {
       const path = (req.url ?? "/").split("?")[0];
       if (path === "/ingress") {
         ingress(req, res);
+        return;
+      }
+      if (path === GITHUB_WEBHOOK_PATH) {
+        void githubWebhook(req, res);
         return;
       }
       if (path === "/mcp") {

@@ -11,6 +11,10 @@ import {
   parseCreateInstanceRequest,
   parseSubjectAuthorization,
   readCreateInstanceAnswer,
+  parseInstanceEventPath,
+  parseSendEventRequest,
+  readSendEventAnswer,
+  sendEventResponse,
 } from "./instancesRoute.js";
 
 // Feature: docs/reference/specs/http-ingress.md item 9 — the pure halves of
@@ -189,5 +193,37 @@ describe("the instance status route — the pure halves both ways", () => {
     expect(readInstanceStatusAnswer(200, JSON.stringify({ ok: true, id: "plan-x", status: "" }))).toMatchObject({
       kind: "unanswered",
     });
+  });
+});
+
+describe("the event relay's pure halves (http-ingress item 12)", () => {
+  it("parses the event path: /admin/coordinator/instances/<id>/events names the id; a bad id, the status path and other paths do not", () => {
+    expect(parseInstanceEventPath("/admin/coordinator/instances/plan-x/events")).toBe("plan-x");
+    expect(parseInstanceEventPath("/admin/coordinator/instances/plan-x")).toBeUndefined();
+    expect(parseInstanceEventPath("/admin/coordinator/instances//events")).toBeUndefined();
+    expect(parseInstanceEventPath("/admin/coordinator/instances/bad id/events")).toBeUndefined();
+    expect(parseInstanceEventPath("/elsewhere")).toBeUndefined();
+  });
+
+  it("parses the body: a typed event passes, a malformed type, a non-object and invalid JSON are refused", () => {
+    expect(
+      parseSendEventRequest(JSON.stringify({ type: "checks-settled-abc123", payload: { headSha: "abc123" } })),
+    ).toEqual({ ok: true, type: "checks-settled-abc123", payload: { headSha: "abc123" } });
+    expect(parseSendEventRequest(JSON.stringify({ type: "not a type!" }))).toMatchObject({ ok: false });
+    expect(parseSendEventRequest(JSON.stringify([]))).toMatchObject({ ok: false });
+    expect(parseSendEventRequest("nope")).toMatchObject({ ok: false });
+  });
+
+  it("answers and reads back the three outcomes: sent 200, absent 404, failed 502; anything else is unanswered by reason", () => {
+    const sent = sendEventResponse({ kind: "sent", id: "plan-x" });
+    expect(sent).toMatchObject({ status: 200, body: { ok: true, sent: true } });
+    expect(readSendEventAnswer(sent.status, JSON.stringify(sent.body))).toEqual({ kind: "sent" });
+    const absent = sendEventResponse({ kind: "absent", id: "plan-x" });
+    expect(absent.status).toBe(404);
+    expect(readSendEventAnswer(absent.status, JSON.stringify(absent.body))).toEqual({ kind: "absent" });
+    const failed = sendEventResponse({ kind: "failed", id: "plan-x", reason: "instance ended" });
+    expect(failed.status).toBe(502);
+    expect(readSendEventAnswer(failed.status, JSON.stringify(failed.body))).toMatchObject({ kind: "unanswered" });
+    expect(readSendEventAnswer(503, "boom")).toMatchObject({ kind: "unanswered" });
   });
 });
