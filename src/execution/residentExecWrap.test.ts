@@ -93,11 +93,12 @@ describe("capWrappedCommand (run under real bash)", { timeout: REAL_BASH_BUDGET_
   it("cleans up BOTH temp files on normal exit (EXIT trap)", async () => {
     // Point every mktemp (the stdout AND the stderr file) at a directory of
     // this test's own, so each one's cleanup is proven by reading that
-    // directory. Never glob the shared temp dir for leftovers: a developer
-    // machine's accumulates the suite's leaked mkdtemp dirs by the hundreds
-    // of thousands, and one `ls $TMPDIR/<marker>.*` over it was the whole
-    // test budget. The trap runs before bash exits, so the wrapper exiting is
-    // the event awaited here.
+    // directory. Never glob the shared temp dir for leftovers: before the
+    // suite had a temp root of its own (src/core/testing/tempRoot.ts) a
+    // developer machine's held the suites' leaked mkdtemp dirs by the
+    // hundreds of thousands, and one `ls $TMPDIR/<marker>.*` over it was the
+    // whole test budget. The trap runs before bash exits, so the wrapper
+    // exiting is the event awaited here.
     const dir = mkdtempSync(join(cwd, "trap-"));
     const script = capWrappedCommand(cwd, `echo hi`, 100).replaceAll("$(mktemp)", `$(mktemp ${dir}/stream.XXXXXX)`);
     expect(script.split(`${dir}/stream.`).length - 1).toBe(2);
