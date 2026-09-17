@@ -7411,13 +7411,17 @@ export class ResidentDO extends Sandbox<Env> {
     return { infraStreak: { ...row, rung: infraStreakRung(count) } };
   }
 
-  /** Fault injection for item 67: corrupt the mirror on disk (its objects
-   *  removed), so the next cycle's `fetch` fails in a resident step. The
-   *  snapshots in R2 are untouched — the ladder's recreate restores them.
+  /** Fault injection for item 67: corrupt the mirror on disk so the next
+   *  cycle's `fetch` fails in a resident step. The mirror's `config` goes (its
+   *  `origin` remote with it: `'origin' does not appear to be a git
+   *  repository`, exit 128) — NOT its objects: the wake check (`readyStamp`)
+   *  tests `objects/`, and a missing directory is a disk to restore, which the
+   *  wake did before any step could fail the first time this was tried live.
+   *  The snapshots in R2 are untouched — the ladder's recreate restores them.
    *  Test-only semantics; admin scope. */
   async debugBreakMirror(): Promise<{ broken: boolean; error?: string }> {
     try {
-      await this.runOk(["rm", "-rf", `${MIRROR_DIR}/objects`], "break-mirror");
+      await this.runOk(["rm", "-f", `${MIRROR_DIR}/config`], "break-mirror");
       return { broken: true };
     } catch (err) {
       return { broken: false, error: errMsg(err) };

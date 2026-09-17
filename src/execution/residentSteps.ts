@@ -49,7 +49,7 @@ export const RESIDENT_STEP_LABELS = {
   "worktree-clean": "cleaning the worktree",
   "clean-workspace": "cleaning the workspace",
   "clean-before-restore": "cleaning before the restore",
-  "break-mirror": "removing the mirror's objects (fault injection)",
+  "break-mirror": "removing the mirror's config (fault injection)",
   "unmount-restores": "unmounting earlier restores",
   "mirror-restore-extract": "extracting the mirror snapshot",
   "checkout-restore-extract": "extracting the checkout snapshot",
