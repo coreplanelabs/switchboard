@@ -49,6 +49,8 @@ function harness(
     publicBaseUrl?: string;
     email?: Record<string, string>;
     names?: Record<string, string>;
+    /** Channel names the directory knows (`slack:C…` → name without the hash). */
+    channelNames?: Record<string, string>;
     rejectTokens?: string[];
     serverDown?: boolean;
     env?: Record<string, string>;
@@ -78,6 +80,7 @@ function harness(
     bearers: secretsFrom(opts.env ?? { MCP_GITHUB_TOKEN: "ghp_static" }),
     resolveEmail: opts.email ? async (id) => opts.email![id] : undefined,
     resolveName: opts.names ? async (id) => opts.names![id] : undefined,
+    resolveChannelName: opts.channelNames ? async (id) => opts.channelNames![id] : undefined,
     now: () => t,
     nonce: () => `nonce-${String(++n).padStart(20, "0")}`,
     factory: (spec) => {
@@ -842,7 +845,7 @@ describe("McpService — the connect follow-up (item 19)", () => {
 
 describe("McpService — record 0042: every tier for an admin, promotion by re-issue, the session's email on a ticket", () => {
   it("listAll walks the org, every channel and every user (static and runtime) for an admin, names addedBy when the lookup answers, and refuses everyone else", async () => {
-    const h = harness({ names: { "slack:UALICE": "Alice" } });
+    const h = harness({ names: { "slack:UALICE": "Alice" }, channelNames: { "slack:COTHER": "other" } });
     await h.service.add(alice, ME(alice), { name: "vanta", url: "https://mcp.vanta.com/mcp", auth: "none" });
     await h.service.add(bob, ME(bob), { name: "secretive", url: "https://s.example/mcp", auth: "none" });
     await h.service.add(alice, CH("slack:COTHER"), { name: "hub", url: "https://hub.example/mcp", auth: "none" });
@@ -858,6 +861,9 @@ describe("McpService — record 0042: every tier for an admin, promotion by re-i
     expect(all.find((s) => s.name === "vanta")).toMatchObject({ addedBy: "slack:UALICE", addedByName: "Alice" });
     expect(all.find((s) => s.name === "secretive")).toMatchObject({ addedBy: "slack:UBOB" });
     expect(all.find((s) => s.name === "secretive")?.addedByName).toBeUndefined(); // no name resolved → the id stands
+    // A channel tier's rows name their channel the same way (settings-page.md item 8); an unknown channel keeps its id.
+    expect(all.find((s) => s.name === "hub")).toMatchObject({ scopeKey: "channel:slack:COTHER", channelName: "other" });
+    expect(all.find((s) => s.name === "notion")).not.toHaveProperty("channelName");
     expect(await code(h.service.listAll(alice))).toBe("unauthorized");
     expect(await code(h.service.listAll(bob))).toBe("unauthorized");
     // The plain list is unchanged in shape and still never shows another user's tier.
@@ -928,6 +934,39 @@ describe("McpService — record 0042: every tier for an admin, promotion by re-i
       "org/github",
       "org/vanta",
     ]);
+  });
+
+  it("every view the service returns is named, not only a list row: an add names its channel and who added it, a promotion names the admin and the person it came from; an id the lookup cannot name stands", async () => {
+    const h = harness({
+      names: { "slack:UALICE": "Alice", "slack:UADMIN": "Admin" },
+      channelNames: { "slack:COTHER": "other" },
+    });
+    const added = await h.service.add(alice, CH("slack:COTHER"), {
+      name: "hub",
+      url: "https://hub.example/mcp",
+      auth: "none",
+    });
+    expect(added.server).toMatchObject({
+      scopeKey: "channel:slack:COTHER",
+      channelName: "other",
+      addedByName: "Alice",
+    });
+    const mine = await h.service.add(alice, ME(alice), {
+      name: "vanta",
+      url: "https://mcp.vanta.com/mcp",
+      auth: "none",
+    });
+    expect(mine.server).toMatchObject({ ownerName: "Alice", addedByName: "Alice" });
+    expect(mine.server).not.toHaveProperty("channelName");
+    const promoted = await h.service.promote(admin, "vanta", "slack:UALICE");
+    expect(promoted.server).toMatchObject({ scope: "org", addedByName: "Admin", promotedFromName: "Alice" });
+    const unnamed = await h.service.add(bob, ME(bob), {
+      name: "quiet",
+      url: "https://quiet.example/mcp",
+      auth: "none",
+    });
+    expect(unnamed.server).toMatchObject({ addedBy: "slack:UBOB" });
+    expect(unnamed.server).not.toHaveProperty("addedByName");
   });
 
   it("promote refusals: not an admin; no such personal server; the org already holds the name; a pinned personal entry; agents widened only when the admin asks, under the org's rule", async () => {

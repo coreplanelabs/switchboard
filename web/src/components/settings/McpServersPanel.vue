@@ -97,6 +97,12 @@ const isMine = (s: McpServerView) =>
   s.addedBy === props.viewer || (props.asUser !== undefined && s.addedBy === props.asUser.id);
 /** Whose a user-tier row is: the id after `user:` in its scope key. */
 const ownerOf = (s: McpServerView): string => (s.scope === "user" ? s.scopeKey.slice("user:".length) : "");
+/** Which channel a channel-tier row belongs to: the id after `channel:` in its scope key. */
+const channelOf = (s: McpServerView): string => (s.scope === "channel" ? s.scopeKey.slice("channel:".length) : "");
+/** The open channel as a person reads it: `#name` when the seed carries one, the id otherwise. */
+const openChannelLabel = computed(() =>
+  props.mcps.channel ? (props.mcps.channelName ? `#${props.mcps.channelName}` : props.mcps.channel) : "",
+);
 /** Who added it, as the service could name them; the id otherwise (record 0042). */
 const addedBy = (s: McpServerView): string => (isMine(s) ? "you" : (s.addedByName ?? s.addedBy ?? ""));
 /** Promote (record 0042): a person's runtime server re-issued in the org tier by an org admin. */
@@ -268,8 +274,8 @@ async function probe(s: McpServerView): Promise<void> {
         aria-label="channel whose MCP servers to list"
       />
       <UButton type="submit" size="xs" color="neutral" variant="outline">Open</UButton>
-      <span class="text-xs text-dimmed">{{
-        mcps.channel ? `Listing ${mcps.channel}'s tier beside the rest.` : "Blank: the org's and your own."
+      <span class="text-xs text-dimmed" :title="mcps.channel">{{
+        mcps.channel ? `Listing the ${openChannelLabel} tier beside the rest.` : "Blank: the org's and your own."
       }}</span>
     </form>
 
@@ -313,6 +319,9 @@ async function probe(s: McpServerView): Promise<void> {
               }}</span>
               <span v-if="ownerOf(s)" class="owner mt-1 block text-[0.6875rem] text-dimmed" :title="ownerOf(s)">{{
                 s.ownerName ?? ownerOf(s)
+              }}</span>
+              <span v-if="channelOf(s)" class="channel mt-1 block text-[0.6875rem] text-dimmed" :title="channelOf(s)">{{
+                s.channelName ? `#${s.channelName}` : channelOf(s)
               }}</span>
             </td>
             <td class="px-3 py-2.5">
@@ -454,7 +463,7 @@ async function probe(s: McpServerView): Promise<void> {
           </option>
           <option value="org">org — every run; may name coding, review, ship</option>
           <option value="channel" :disabled="!mcps.channel">
-            channel — {{ mcps.channel ?? "open a channel above first" }}
+            channel — {{ mcps.channel ? openChannelLabel : "open a channel above first" }}
           </option>
         </select>
         <span class="text-sm text-muted sm:pt-1">Agents</span>

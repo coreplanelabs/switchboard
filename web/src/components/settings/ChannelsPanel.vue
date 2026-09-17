@@ -40,6 +40,10 @@ const viewerScopeLines = computed((): string[] => {
   return lines;
 });
 const scope = computed(() => selected.value?.scope?.channel ?? null);
+/** A channel as a person reads it: `#name` when the directory knew it, the id otherwise (the id
+ *  stays in the tooltip and the data attribute either way). */
+const channelLabel = (c: { channelId: string; channelName?: string }): string =>
+  c.channelName ? `#${c.channelName}` : c.channelId;
 
 const openField = ref("");
 function open(): void {
@@ -193,7 +197,9 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
                 :href="`/settings/channels/${encodeURIComponent(row.channelId)}`"
                 :aria-current="selected?.channelId === row.channelId ? 'page' : undefined"
               >
-                <span class="font-mono text-xs font-medium text-highlighted">{{ row.channelId }}</span>
+                <span class="font-mono text-xs font-medium text-highlighted" :title="row.channelId">{{
+                  channelLabel(row)
+                }}</span>
                 <span class="text-xs text-muted">{{ row.settings.join(", ") }} · {{ SOURCE_LABEL[row.source] }}</span>
               </a>
             </li>
@@ -220,12 +226,18 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
       </div>
 
       <div v-else-if="selected.refused" class="refused rounded-lg border border-warn/30 bg-warn/10 px-5 py-4 text-sm">
-        <span class="font-mono text-xs">{{ selected.channelId }}</span> · {{ selected.refused }}
+        <span class="font-mono text-xs" :title="selected.channelId">{{ channelLabel(selected) }}</span> ·
+        {{ selected.refused }}
       </div>
 
       <div v-else-if="scope && selected.scope" class="scope grid gap-4">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 class="font-mono text-sm font-medium text-highlighted">{{ selected.channelId }}</h2>
+          <h2 class="font-mono text-sm font-medium text-highlighted" :title="selected.channelId">
+            {{ channelLabel(selected)
+            }}<span v-if="selected.channelName" class="ml-2 text-xs font-normal text-dimmed">{{
+              selected.channelId
+            }}</span>
+          </h2>
           <p class="effective text-xs text-muted">
             Runs here get agent <code>{{ selected.scope.effective.agent }}</code
             >, model <code>{{ selected.scope.effective.model }}</code

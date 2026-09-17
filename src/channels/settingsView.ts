@@ -4,6 +4,7 @@ import { authorize } from "../core/authz/authorize.js";
 import type { Capabilities } from "../core/capabilities.js";
 import type { Caller, CommandInvoker, InvokeResult } from "../core/commandRegistry.js";
 import type { InstallationView } from "../core/installationSettings.js";
+import { NO_NAMES, namesOf, type NameDirectory } from "../core/names.js";
 import type { McpServerView } from "../mcp/registry.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import type { ChannelScopeView, ViewerSettingsView, SettingsSeed, SettingsTab, SettingsVocabulary } from "./webSeed.js";
@@ -67,6 +68,8 @@ export function parseSettingsRoute(pathname: string, search = ""): SettingsRoute
 }
 
 export interface SettingsViewDeps {
+  /** Display names for the ids the tabs show (channels, people); absent → ids. */
+  names?: NameDirectory;
   /** The bound registry: the page reads through the same commands the CLI runs. */
   commands: CommandInvoker;
   /** The `/api` caller for the gate's identity (commandHttp's `callerFor`), linked to its person when the email names one. */
@@ -141,20 +144,31 @@ export function createSettingsViewHandler(
    *  the org's, the open channel's and their own, plus the channel tiers of every channel whose
    *  config they may read — the same per-channel question `config overrides` answers — the
    *  honest cut until membership exists. */
+  const names = deps.names ?? NO_NAMES;
+  /** One channel's name, when the directory knows it — never a throw, never a hash. */
+  const channelNameOf = (id: string): Promise<string | undefined> => names.channel(id).catch(() => undefined);
+
   async function mcpsSeed(caller: Caller, channel: string | undefined): Promise<NonNullable<SettingsSeed["mcps"]>> {
     const write = {
       org: canWrite(caller, "mcp:write", "org"),
       channel: channel !== undefined && canWrite(caller, "mcp:write", "channel", channel),
     };
-    const listed = await deps.commands.invoke(
-      "mcp.list",
-      write.org ? { options: { all: true } } : channel ? { options: { channel } } : {},
-      caller,
-    );
-    if (!listed.ok)
-      return { ...(channel ? { channel } : {}), servers: [], unavailable: failureText(listed), canWrite: write };
-    if (write.org)
-      return { ...(channel ? { channel } : {}), allTiers: true, servers: serversOf(listed), canWrite: write };
+    // The channel's name is asked beside the list, never before it: one round trip, not two.
+    const [channelName, listed] = await Promise.all([
+      channel ? channelNameOf(channel) : Promise.resolve(undefined),
+      deps.commands.invoke(
+        "mcp.list",
+        write.org ? { options: { all: true } } : channel ? { options: { channel } } : {},
+        caller,
+      ),
+    ]);
+    const named = (rest: Omit<NonNullable<SettingsSeed["mcps"]>, "channel" | "channelName">) => ({
+      ...(channel ? { channel } : {}),
+      ...(channelName ? { channelName } : {}),
+      ...rest,
+    });
+    if (!listed.ok) return named({ servers: [], unavailable: failureText(listed), canWrite: write });
+    if (write.org) return named({ allTiers: true, servers: serversOf(listed), canWrite: write });
     const servers = serversOf(listed);
     const readable = await deps.commands.invoke("config.overrides", {}, caller);
     const others = (readable.ok ? ((readable.value as { channels?: ChannelScopeIndexRow[] }).channels ?? []) : [])
@@ -164,7 +178,7 @@ export function createSettingsViewHandler(
       others.map((id) => deps.commands.invoke("mcp.list", { options: { channel: id } }, caller)),
     );
     for (const answer of tiers) for (const s of serversOf(answer)) if (s.scope === "channel") servers.push(s);
-    return { ...(channel ? { channel } : {}), servers, canWrite: write };
+    return named({ servers, canWrite: write });
   }
 
   async function channelsSeed(
@@ -177,16 +191,31 @@ export function createSettingsViewHandler(
       deps.commands.invoke("config.show", {}, caller),
       channel ? deps.commands.invoke("config.show", { options: { channel } }, caller) : Promise.resolve(undefined),
     ]);
+    const rows = indexed.ok
+      ? (((indexed.value as { channels?: ChannelScopeIndexRow[] }).channels ?? []) as ChannelScopeIndexRow[])
+      : [];
+    // Names beside ids (record 0042, the dashboard reads names): one directory ask per channel, concurrent.
+    const channelNames = await namesOf(channelNameOf, [...rows.map((r) => r.channelId), ...(channel ? [channel] : [])]);
+    const withName = <T extends { channelId: string }>(row: T): T & { channelName?: string } => {
+      const name = channelNames.get(row.channelId);
+      return name ? { ...row, channelName: name } : row;
+    };
     const out: NonNullable<SettingsSeed["channels"]> = indexed.ok
-      ? { index: ((indexed.value as { channels?: ChannelScopeIndexRow[] }).channels ?? []) as ChannelScopeIndexRow[] }
+      ? { index: rows.map(withName) }
       : { index: [], unavailable: failureText(indexed) };
     if (mine.ok) out.viewer = viewerSettingsView(mine.value as unknown as ConfigDescription);
     else out.viewerUnavailable = failureText(mine);
     if (channel && shown) {
       const write = canWrite(caller, "config:write", "channel", channel);
-      out.selected = shown.ok
-        ? { channelId: channel, scope: channelScopeView(shown.value as unknown as ConfigDescription), canWrite: write }
-        : { channelId: channel, refused: failureText(shown), canWrite: write };
+      out.selected = withName(
+        shown.ok
+          ? {
+              channelId: channel,
+              scope: channelScopeView(shown.value as unknown as ConfigDescription),
+              canWrite: write,
+            }
+          : { channelId: channel, refused: failureText(shown), canWrite: write },
+      );
     }
     return out;
   }

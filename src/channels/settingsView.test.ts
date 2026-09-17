@@ -116,13 +116,30 @@ const MEMBER: AccessIdentity = { sub: "member-sub" };
 
 function handler(
   answer: Invoke = happy,
-  opts: { capabilities?: typeof ALL_CAPABILITIES; grants?: (sub: string) => "all" | readonly string[] } = {},
+  opts: {
+    capabilities?: typeof ALL_CAPABILITIES;
+    grants?: (sub: string) => "all" | readonly string[];
+    /** Channel names the directory knows; a listed id answers, any other is undefined, `"!"` throws. */
+    channelNames?: Record<string, string>;
+  } = {},
 ) {
   const commands = fakeCommands(answer);
   const grants = opts.grants ?? ((sub) => (sub === ADMIN.sub ? "all" : ["config:read", "mcp:read"]));
   const view = createSettingsViewHandler(
     {
       commands,
+      ...(opts.channelNames
+        ? {
+            names: {
+              person: async () => undefined,
+              channel: async (id: string) => {
+                const name = opts.channelNames![id];
+                if (name === "!") throw new Error("slack down");
+                return name;
+              },
+            },
+          }
+        : {}),
       callerFor: async (identity) => callerWith("access", `access:${identity.sub}`, grants(identity.sub)),
       installation: () => INSTALLATION,
       vocabulary: VOCABULARY,
@@ -316,6 +333,26 @@ describe("the settings view", () => {
     const bare = seedOf((await get(view, "/settings/channels")).body);
     expect(bare.channels).toEqual({ index: INDEX, viewer: viewerSettingsView(DESCRIPTION) });
     expect(bare.channels?.viewer?.user).toEqual({ model: "anthropic/mine" }); // the viewer's scope, mcpServers stripped
+  });
+
+  it("Channels and MCPs name their channels: the index rows, the selected channel and the MCPs tab's channel carry channelName when the directory answers; an unknown or failing lookup leaves the id alone", async () => {
+    const { view } = handler(happy, { channelNames: { "slack:C1": "backend", "slack:C9": "!" } });
+    const seed = seedOf((await get(view, "/settings/channels/slack:C1")).body);
+    expect(seed.channels?.index).toEqual([{ ...INDEX[0], channelName: "backend" }]);
+    expect(seed.channels?.selected).toMatchObject({ channelId: "slack:C1", channelName: "backend" });
+    const unknown = seedOf((await get(view, "/settings/channels/slack:C2")).body);
+    expect(unknown.channels?.selected).not.toHaveProperty("channelName");
+    const failing = seedOf((await get(view, "/settings/channels/slack:C9")).body);
+    expect(failing.channels?.selected).toMatchObject({ channelId: "slack:C9" });
+    expect(failing.channels?.selected).not.toHaveProperty("channelName");
+    const mcps = seedOf((await get(view, "/settings/mcps?channel=slack:C1")).body);
+    expect(mcps.mcps).toMatchObject({ channel: "slack:C1", channelName: "backend" });
+    const bare = seedOf((await get(view, "/settings/mcps")).body);
+    expect(bare.mcps).not.toHaveProperty("channelName");
+    // No directory at all: exactly the old seed.
+    const plain = seedOf((await get(handler().view, "/settings/channels/slack:C1")).body);
+    expect(plain.channels?.index).toEqual(INDEX);
+    expect(plain.channels?.selected).not.toHaveProperty("channelName");
   });
 
   it("Channels: a refused config show for the viewer's own settings puts its sentence beside the index, never an empty tab", async () => {

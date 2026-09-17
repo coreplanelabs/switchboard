@@ -96,6 +96,8 @@ export interface McpServiceOptions {
   /** Resolve a user id to a display name for `addedBy` (record 0042: the cached lookup the runs
    *  index uses); undefined → the surfaces show the id. */
   resolveName?: (userId: string) => Promise<string | undefined>;
+  /** Resolve a channel id to its name (no hash) for a channel tier's rows; undefined → the id. */
+  resolveChannelName?: (channelId: string) => Promise<string | undefined>;
   now?: () => number;
   nonce?: () => string;
   cacheTtlMs?: number;
@@ -275,7 +277,7 @@ export class McpService {
       throw new McpServiceError("invalid_input", `this scope already has ${MCP_SERVERS_PER_SCOPE_MAX} servers`);
     const entry: McpServerEntry = { url: input.url, agents, auth, addedBy: actor.id, addedAt: this.now() };
     await this.writeServers(target, { ...runtime.mcpServers, [input.name]: entry });
-    const view = serverView(scopeKey, input.name, entry, { hasCredential: false, source: "runtime" });
+    const view = await this.named(serverView(scopeKey, input.name, entry, { hasCredential: false, source: "runtime" }));
     const detected = input.auth === undefined ? { detected: auth } : {};
     if (auth === "none") return { server: view, ...detected };
     const ticket = await this.mintTicket(mcpCredentialKey(scopeKey, input.name), actor);
@@ -316,7 +318,7 @@ export class McpService {
     const has =
       (await this.viaSecrets(() => this.opts.secrets.getCredential(mcpCredentialKey(scopeKey, name)))) !== null;
     return {
-      server: serverView(scopeKey, name, entry, { hasCredential: has, source }),
+      server: await this.named(serverView(scopeKey, name, entry, { hasCredential: has, source })),
       connectUrl: this.connectUrl(ticket),
       expiresAt: ticket.expiresAt,
       expiresInMinutes: TICKET_MINUTES,
@@ -419,7 +421,7 @@ export class McpService {
       promotedFrom: from,
     };
     await this.writeServers(org, { ...runtime.mcpServers, [name]: entry });
-    const view = serverView("org", name, entry, { hasCredential: false, source: "runtime" });
+    const view = await this.named(serverView("org", name, entry, { hasCredential: false, source: "runtime" }));
     if (entry.auth === "none") {
       await this.retirePromotedSource(mcpCredentialKey("org", name));
       return { server: view, promotedFrom: from, retired: true };
@@ -941,23 +943,33 @@ export class McpService {
       r.entry.auth !== "none" && !r.entry.tokenEnv
         ? (await this.viaSecrets(() => this.opts.secrets.getCredential(mcpCredentialKey(r.scopeKey, r.name)))) !== null
         : false;
-    const view = serverView(r.scopeKey, r.name, r.entry, { hasCredential, source: r.source });
-    // Names for the people a row names (record 0042): who added it, whose tier it is, who it was
-    // promoted from — the same cached lookup each time; the id stands when it has no answer.
+    const view = await this.named(serverView(r.scopeKey, r.name, r.entry, { hasCredential, source: r.source }));
+    return { ...view, ...(r.shadowedBy ? { shadowedBy: r.shadowedBy } : {}) };
+  }
+
+  /** Names for what a view names (record 0042): who added it, whose tier it is, who it was
+   *  promoted from, and for a channel tier which channel — the same cached lookups each time,
+   *  on EVERY view the service returns (a list row, an add, a connect, a promotion), so no
+   *  surface prints an id it could have named; the id stands where a lookup has no answer. */
+  private async named(view: McpServerView): Promise<McpServerView> {
     const nameOf = async (id: string | undefined): Promise<string | undefined> =>
       id && this.opts.resolveName ? this.opts.resolveName(id).catch(() => undefined) : undefined;
     const owner = view.scope === "user" ? view.scopeKey.slice("user:".length) : undefined;
-    const [addedByName, ownerName, promotedFromName] = await Promise.all([
+    const channel = view.scope === "channel" ? view.scopeKey.slice("channel:".length) : undefined;
+    const [addedByName, ownerName, promotedFromName, channelName] = await Promise.all([
       nameOf(view.addedBy),
       nameOf(owner),
       nameOf(view.promotedFrom),
+      channel && this.opts.resolveChannelName
+        ? this.opts.resolveChannelName(channel).catch(() => undefined)
+        : undefined,
     ]);
     return {
       ...view,
       ...(addedByName ? { addedByName } : {}),
       ...(ownerName ? { ownerName } : {}),
       ...(promotedFromName ? { promotedFromName } : {}),
-      ...(r.shadowedBy ? { shadowedBy: r.shadowedBy } : {}),
+      ...(channelName ? { channelName } : {}),
     };
   }
 

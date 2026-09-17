@@ -238,6 +238,9 @@ export interface McpServerView {
   promotedFromName?: string;
   /** A user row's owner (the id after `user:` in `scopeKey`) as a display name, when the lookup answered. */
   ownerName?: string;
+  /** A channel row's channel (the id after `channel:` in `scopeKey`) as its name without the hash,
+   *  when the lookup answered. */
+  channelName?: string;
   /** A higher tier holds this name, so runs use that entry and this one is idle (`mcpServersFor`'s
    *  `shadowedBy`, the winning scope key — `org`, or `channel:<id>`); absent when this entry serves. */
   shadowedBy?: string;

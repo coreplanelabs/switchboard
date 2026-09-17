@@ -7,7 +7,7 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "8d507868382af4fdd9ebbad5a93fbd47db331dd9d303aad0c6f1fc651f153b2f",
-    "scripts/web-preview.ts": "d3b23a535a1a5d2b99e7670b6ac1175ab409fc8183a38c4f9cafbe56ab77fafd",
+    "scripts/web-preview.ts": "612c89c3b80b2d54c50b12d7c5512f91dc523f0f8a9b3283cd80192a82aeeb67",
     "src/channels/webShell.ts": "5eab7aae4b16bad384c4863ddb8b3d644470cba2421e56d7649bd2fd95b26d92",
     "src/docs/screenshotManifest.ts": "06f7c876aded03455327868187620031c44844c322ec1a46b09462c8083344cc",
     "web/src/App.vue": "e95e58c24d31cd6de4b5d701b4c44ce9752c5278b7d6afd9c9e7028104ae2122",

@@ -89,6 +89,8 @@ export function buildMcp(
     secretsPath?: string;
     resolveEmail?: (userId: string) => Promise<string | undefined>;
     resolveName?: (userId: string) => Promise<string | undefined>;
+    /** A channel id to its name, for a channel tier's rows; undefined → the id. */
+    resolveChannelName?: (channelId: string) => Promise<string | undefined>;
     warn?: (m: string) => void;
     fetch?: typeof fetch;
   } = {},
@@ -127,6 +129,7 @@ export function buildMcp(
     bearers: secrets,
     resolveEmail: opts.resolveEmail,
     resolveName: opts.resolveName,
+    resolveChannelName: opts.resolveChannelName,
   });
   return { source: service.source, service };
 }
