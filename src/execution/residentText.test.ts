@@ -61,6 +61,37 @@ describe("sanitizeResidentBody", () => {
     expect(body.error).toBe(POISON); // pure: the input is untouched
   });
 
+  it("scrubs `stateReason` like `reason` (item 62): the lifecycle reason beside `state` on a thread route's 503 is remote text — a fetch URL carrying the installation token, an install's stderr — and rides every route through this one walk: the JSON routes' body, the /exec stream's document and the /residents listing's nested live view", () => {
+    const leak =
+      "github-unreachable: fetch https://x-access-token:ghs_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789@github.com/o/r failed";
+    const streamed = {
+      error: "mirror-busy: mutex not acquired within 30000ms",
+      state: "degraded",
+      stateReason: leak,
+      reason: "mirror-busy",
+      status: 503,
+      stdout: "",
+      stderr: "mirror-busy: mutex not acquired within 30000ms",
+      exitCode: 127,
+    };
+    const out = sanitizeResidentBody(streamed);
+    expect(out.stateReason).not.toContain("ghs_");
+    expect(out.stateReason).toContain("«redacted");
+    expect(out.stateReason.startsWith("github-unreachable: fetch ")).toBe(true);
+    expect(out.reason).toBe("mirror-busy"); // the answer's own word, the identity
+    expect(out.state).toBe("degraded");
+    expect(out.status).toBe(503);
+    const listing = {
+      residents: [{ resource: "repo:o/r", live: { state: "degraded", stateReason: POISON, reason: "" } }],
+    };
+    const live = sanitizeResidentBody(listing).residents[0].live;
+    expect(live.stateReason).not.toContain("ghp_");
+    expect(live.stateReason).not.toContain("\x1b");
+    expect(sanitizeResidentBody({ error: "x", state: "down", stateReason: "install-failed: exit 1" }).stateReason).toBe(
+      "install-failed: exit 1",
+    );
+  });
+
   it("leaves a stderr that is not a mirror of error untouched, and passes scalars through", () => {
     const out = sanitizeResidentBody({ error: "boom", stderr: "real stderr text" });
     expect(out.stderr).toBe("real stderr text");

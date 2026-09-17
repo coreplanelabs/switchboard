@@ -8923,7 +8923,15 @@ function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execTh
             // deploy-vs-dead-transport check reads it. Folding these two spreads
             // back into one silently drops it (no test covers this Worker).
             ...(result.state ? { state: result.state } : {}),
+            // The lifecycle reason beside the state, the answer's status and
+            // the catch-all's `transient`, forwarded as the JSON routes carry
+            // them: the client types a streamed refusal by these fields
+            // (execution.md item 9), and a stream that dropped them would make
+            // every /exec refusal a deterministic answer over HTTP 200.
+            ...(typeof result.stateReason === "string" ? { stateReason: result.stateReason } : {}),
             ...(result.reason ? { reason: result.reason } : {}),
+            ...(typeof result.status === "number" ? { status: result.status } : {}),
+            ...(typeof result.transient === "boolean" ? { transient: result.transient } : {}),
             stdout: "",
             stderr: result.error,
             exitCode: 127,

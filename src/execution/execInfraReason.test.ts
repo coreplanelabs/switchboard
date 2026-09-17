@@ -231,6 +231,15 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
       withState.map((literal) => /\breason: ("[a-z-]+"|DISK_PRESSURE_REASON|s\.reason)/.exec(literal)?.[1]),
     );
     expect(ownWords).toEqual(new Set(['"mirror-busy"', "DISK_PRESSURE_REASON", '"image-stale"', "s.reason"]));
+    // The /exec stream forwards the pair, the answer's status and the catch-all's transient beside state and reason.
+    for (const forwarded of [
+      "stateReason: result.stateReason",
+      "status: result.status",
+      "transient: result.transient",
+      "state: result.state",
+      "reason: result.reason",
+    ])
+      expect(WORKER_SOURCE, forwarded).toContain(forwarded);
     // The fetch handler's catch-all types its throw: transient or not, as a field.
     expect(WORKER_SOURCE.match(/catchAllErr\(err\)/g)).toHaveLength(3);
     expect(WORKER_SOURCE).toMatch(
@@ -304,13 +313,45 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
         want,
       );
     }
-    // A Worker predating `stateReason` gives the state alone: read as a state with no reason.
+    // A Worker predating `stateReason` put the lifecycle reason in `reason` on
+    // its not-serviceable answers: read as such, unless it is one of the
+    // answer's own words, which say nothing about the lifecycle.
+    expect(
+      residentAnswerReason(503, {
+        error: "not-serviceable: degraded",
+        status: 503,
+        state: "degraded",
+        reason: "github-unreachable: fetch failed",
+      }),
+    ).toBe("worker-unavailable");
+    expect(
+      residentAnswerReason(503, { error: "x", status: 503, state: "degraded", reason: "install-failed: exit 1" }),
+    ).toBe("refused");
     expect(residentAnswerReason(503, { error: "x", status: 503, state: "warm", reason: "mirror-busy" })).toBe(
       "worker-unavailable",
+    );
+    expect(residentAnswerReason(503, { error: "x", status: 503, state: "restoring", reason: "image-stale" })).toBe(
+      "worker-unavailable",
+    );
+    // That Worker's mirror-busy on a degraded resident carries no lifecycle reason at all: unreadable, refused.
+    expect(residentAnswerReason(503, { error: "x", status: 503, state: "degraded", reason: "mirror-busy" })).toBe(
+      "refused",
     );
     expect(residentAnswerReason(503, { error: "x", status: 503, state: "down", reason: "no-snapshot" })).toBe(
       "refused",
     );
+    // The /exec stream's document, as `streamThreadExec` writes it over HTTP 200: the answer's own status in the body decides.
+    const streamed = {
+      error: "mirror-busy: mutex not acquired within 30000ms",
+      state: "degraded",
+      stateReason: "github-unreachable: fetch failed",
+      reason: "mirror-busy",
+      status: 503,
+      stdout: "",
+      stderr: "mirror-busy: mutex not acquired within 30000ms",
+      exitCode: 127,
+    };
+    expect(residentAnswerReason(streamed.status, streamed)).toBe("worker-unavailable");
     // Judged at once: nothing a wait changes.
     expect(
       residentAnswerReason(503, notServiceable("down", "no-snapshot", "no-snapshot: nothing to rehydrate from")),
