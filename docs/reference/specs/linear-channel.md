@@ -53,6 +53,8 @@ the human assignee.
    order, excludes progress noise and the triggering turn, and never includes
    a prompt that arrived after that turn. Progress is coalesced, replies use
    response/error activities, and run links are added without replacing PR links.
+   A steered follow-up is acknowledged with a thought, so receipt does not
+   falsely mark the ongoing session complete.
 10. Linear human actors use `linear:<workspace>:<user>`. They inherit the same
     open-chat baseline as Slack, plus explicit `linear:*` and personal grants.
     A matching display name or bare user id on another platform or workspace
@@ -116,6 +118,7 @@ the human assignee.
 | 7: deployed edge routing | `[agent]` With Linear credentials absent, GET `/oauth/linear/authorize` and POST `/webhooks/linear` return 503. With credentials configured, installation redirects to Linear and callback persists the installation. Send a signed session event while the bot container is stopped; receive 200 and verify the queued delivery after restarting the consumer. The production callback is HTTPS; local testing uses the same path on `http://localhost:8080`. |
 | 8: session and human identity | `[unit]` `src/channels/linear/session.test.ts::*` |
 | 9: native conversation, progress and replies | `[unit]` `src/channels/linear/io.test.ts::*`, `src/channels/linear/api.test.ts::*` |
+| 9: ongoing-work acknowledgement survives a host-generation boundary | `[unit]` `src/core/dispatch/admission.test.ts::admit — the thread admission claim::uses a channel's nonterminal acknowledgement for a follow-up here or on another generation` |
 | 10: resolved Linear actor grants | `[unit]` `src/core/authz/actor.test.ts::Linear actor authorization::*` |
 | 11: fixed authenticated bridge and durable delivery | `[unit]` `src/channels/linear/bridge.test.ts::*` |
 | 12: dispatch consumption, control and recovery | `[unit]` `src/channels/linear/consumer.test.ts::*`, `src/channels/linear/control.test.ts::*`, `src/channels/linear/recovery.test.ts::*` |

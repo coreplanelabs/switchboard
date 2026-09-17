@@ -23,6 +23,15 @@ function fixture() {
 }
 
 describe("Linear channel output", () => {
+  it("acknowledges a steered follow-up without announcing that the active run has completed", async () => {
+    const { api, io } = fixture();
+    await io.acknowledge("Your follow-up reached the active run.");
+    expect(api.activity).toHaveBeenCalledWith(
+      "s",
+      { type: "thought", body: "Your follow-up reached the active run." },
+      undefined,
+    );
+  });
   it("binds work-item identity and intersected grants outside the tool's input", async () => {
     const { api, io } = fixture();
     const grants = {

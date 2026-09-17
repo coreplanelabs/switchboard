@@ -249,6 +249,9 @@ export interface ChannelIO {
   workItems?(actor: Actor): WorkItems;
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
   reply(text: string): Promise<void>;
+  /** Confirm a follow-up reached ongoing work, without completing its session.
+   * Channels without a separate activity type use an ordinary reply. */
+  acknowledge?(text: string): Promise<void>;
   /**
    * Present when this channel has nowhere to deliver a reply (the resumed-run
    * null channel, docs/reference/specs/run-history.md item 38): the reason, e.g.

@@ -64,6 +64,10 @@ export class LinearChannelIO implements ChannelIO {
     });
   }
 
+  async acknowledge(text: string): Promise<void> {
+    await this.enqueue(() => this.send({ type: "thought", body: text }));
+  }
+
   async attach(file: { name: string; text: string; lead: string }): Promise<void> {
     await this.reply(`${file.lead}\n\n**${file.name}**\n\n${file.text}`);
   }

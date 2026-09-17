@@ -240,6 +240,27 @@ async function resumeOf(
 }
 
 describe("admit — the thread admission claim", () => {
+  it("uses a channel's nonterminal acknowledgement for a follow-up here or on another generation", async () => {
+    for (const where of ["here", "elsewhere"]) {
+      const admission = new ThreadAdmission<DispatchFollowUp>();
+      const elsewhere = new ThreadsElsewhere();
+      if (where === "here") admission.claim(THREAD, { agent: "general", now: 4_000 }).live.runId = "run-1";
+      else elsewhere.replace([{ threadKey: THREAD, runId: "run-1", startedAt: 4_000, meta: { agent: "general" } }]);
+      const { deps, ctx, io, replies } = setup("and test the fix", {
+        admission,
+        elsewhere,
+        ledger: new RecordingLedger({ pushSeq: () => 1 }),
+      });
+      const acknowledgements: string[] = [];
+      io.acknowledge = async (text) => {
+        acknowledgements.push(text);
+      };
+      expect(await admit(deps, ctx)).toEqual({ kind: "steered", where });
+      expect(acknowledgements).toHaveLength(1);
+      expect(acknowledgements[0]).toMatch(/^↪ Folded into/);
+      expect(replies).toEqual([]);
+    }
+  });
   it("a free thread is claimed for the resolved agent: proceed, and the slot is the thread's live run", async () => {
     const { deps, ctx, admission, replies } = setup("write the report");
     const outcome = await admit(deps, ctx);

@@ -373,7 +373,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     console.log(
       `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
     );
-    await root.span("dispatch.admission", () => io.reply(steerAck(claim.live, at)), {
+    await root.span("dispatch.admission", () => (io.acknowledge ?? io.reply).call(io, steerAck(claim.live, at)), {
       attrs: { outcome: "steered" },
     });
     return { kind: "steered", where: "here" };
@@ -457,7 +457,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       console.log(
         `[dispatch] ${msg.threadKey} follow-up steered into run ${elsewhere.runId} live on another generation (durable seq ${seq}${nowLive ? ", now live here" : ""})`,
       );
-      await io.reply(steerAck(far, now));
+      await (io.acknowledge ?? io.reply).call(io, steerAck(far, now));
       return { kind: "steered", where: "elsewhere" };
     }
     deps.threadsElsewhere.forget(msg.threadKey);
