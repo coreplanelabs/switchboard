@@ -363,11 +363,17 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     // the first instruction names the branch and the parent
     expect(text).toContain("Rebase `plan/fixture/u10-warm-the-cache` onto `main`");
-    // the first instruction also carries the pre-push re-fetch, so the pull
-    // request is not born conflicting when main moved during verify
+    // the first instruction orders the push before the full verification (agent-coding item 13:
+    // an unpushed tree does not survive the run's end) and carries the pre-push re-fetch, so the
+    // pull request is not born conflicting when main moved while the child worked
     expect(text).toContain(
-      "Right before the push, fetch `main` again and rebase once more if it moved during verify, " +
-        "so the pull request is not born conflicting.",
+      "Push the branch as soon as the change exists and its cheapest proving checks pass — before the project's " +
+        "full verification, which runs after that push with any fix as a further commit; an unpushed tree does not " +
+        "survive the run's end. Right before each push, fetch `main` again and rebase once more if it moved while " +
+        "you worked, so the pull request is not born conflicting.",
+    );
+    expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(
+      text.indexOf("Right before each push"),
     );
     // the unit: its id and title on the fixed heading, its bullets verbatim
     expect(text).toContain(`${CONTRACT_SECTION_HEADINGS.unit} U10 — Warm the cache on wake`);
