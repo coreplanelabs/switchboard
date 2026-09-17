@@ -1017,6 +1017,36 @@ describe("the post-turn on the run's session — refused, answered by silence, o
   });
 });
 
+// Feature: docs/reference/specs/harness-pi.md item 16 — a control reset over
+// the bridge's read-only feed re-attaches in place; a reset that keeps repeating
+// with no record read between the re-attaches is a stuck control plane the bound
+// closes by name, exactly as pi does (finding: never a silent throw past the
+// bound). The POST-side resolution (a control reset on the prompt POST) is owned
+// by the OpenCode request-path rework, out of this PR's scope.
+describe("OpenCodeHarness — the resident's control plane keeps resetting the feed", () => {
+  const notes = (r: DrivenRun) =>
+    r.events
+      .filter((e): e is Extract<RunEvent, { type: "run_note" }> => e.type === "run_note")
+      .map((e) => ({ kind: e.kind, summary: e.summary }));
+
+  it("a control reset that repeats with no progress fails the run by name after the runaway bound — a harness_error note, never a silent throw and never the replaced verdict", async () => {
+    const driver = openCodeDriver();
+    const r = await driver.run({
+      turns: [{ content: [{ type: "text", text: "never reached" }], stopReason: "end_turn" }],
+      controlResetBoundOnFeed: 1,
+    });
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err?.message).toMatch(/reset under the run \d+ times with no progress; the run cannot continue safely/);
+    // Named at the bound, as pi does — never a silent throw.
+    expect(
+      notes(r).some((n) => n.kind === "harness_error" && /reset under the run .* with no progress/.test(n.summary)),
+    ).toBe(true);
+    // A control reset is never the replaced verdict.
+    expect(notes(r).filter((n) => n.kind === "sandbox_restarted")).toHaveLength(0);
+  });
+});
+
 describe("resumeOpenCodeFacts", () => {
   it("narrows a resume's facts to OpenCode's, and nothing for another harness's or no resume", () => {
     expect(resumeOpenCodeFacts(undefined)).toBeUndefined();

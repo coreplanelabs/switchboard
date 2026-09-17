@@ -36,7 +36,16 @@ export class PiRpcTransport implements PiTransport {
   consumedOffset: number;
   /** pi was found dead while the harness still listened. */
   exited = false;
+  /** The command a failed `send` last carried, kept beside `sendError` so a
+   *  re-attach can resolve a write whose outcome is unknown by pi's echo — a
+   *  control reset or a replaced word the row's pid refuted (harness-pi item
+   *  16). The first failure's command; cleared with a fresh transport. */
+  pendingSend: Record<string, unknown> | undefined;
   private closed = false;
+  /** Set by `abandon()` (a re-attach): every write still queued is skipped when
+   *  its turn comes, so none of this transport's writes land after the fresh one
+   *  re-sends. A plain `close()` leaves it false, so teardown still flushes. */
+  private dropQueued = false;
   private sending: Promise<void> = Promise.resolve();
   private sendError: Error | undefined;
   private buffer = Buffer.alloc(0);
@@ -53,9 +62,17 @@ export class PiRpcTransport implements PiTransport {
     if (this.closed) return;
     const line = JSON.stringify(command);
     this.sending = this.sending
-      .then(() => this.deps.container.writeLine(this.deps.paths, line))
+      // The drop check runs when this write's turn on the chain comes, not only
+      // when it was queued: an `abandon()` between the two (a re-attach)
+      // neutralises every write still queued behind the one in flight, so none
+      // of the old transport's writes land after the re-attach re-sends onto the
+      // fresh transport (harness-pi item 16). A plain `close()` (teardown) does
+      // not drop, so a write sent just before it — an abort on a gate bypass —
+      // still flushes.
+      .then(() => (this.dropQueued ? undefined : this.deps.container.writeLine(this.deps.paths, line)))
       .catch((err: unknown) => {
         this.sendError ??= err instanceof Error ? err : new Error(String(err));
+        this.pendingSend ??= command;
       });
   }
 
@@ -66,6 +83,15 @@ export class PiRpcTransport implements PiTransport {
 
   close(): void {
     this.closed = true;
+  }
+
+  /** Close AND drop every write still queued — the re-attach's close (harness-pi
+   *  item 16): no write of the old transport lands after the fresh one re-sends
+   *  the one the reset left unresolved. `close()` alone still flushes what was
+   *  queued, so teardown never loses a just-sent abort. */
+  abandon(): void {
+    this.closed = true;
+    this.dropQueued = true;
   }
 
   private async *read(): AsyncGenerator<string> {

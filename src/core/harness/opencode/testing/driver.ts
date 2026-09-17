@@ -52,6 +52,7 @@ import type { RunnableTool } from "../../../../tools/runnableTool.js";
 import { FollowUpInbox } from "../../../threadAdmission.js";
 import { openThroughSeam, type HarnessDeps, type HarnessFacts, type HarnessRun } from "../../contract.js";
 import {
+  HarnessContainerControlResetError,
   HarnessContainerError,
   HarnessContainerRuntimeReplacedError,
   type HarnessRequest,
@@ -999,6 +1000,17 @@ class ScriptedServe {
     this.playing = true;
     this.plays++;
     this.emitEvent("session.execution.started", { sessionID: this.sessionID });
+    // The resident's control plane keeps resetting the feed with no progress
+    // (harness-pi item 16): every drained feed read fails with a control reset,
+    // so the bridge re-attaches until the runaway bound closes the run by name.
+    // Nothing more is emitted; the bridge's loop hits the bound on its own.
+    if (this.script.controlResetBoundOnFeed !== undefined) {
+      this.container.resetOnDrain = new HarnessContainerControlResetError(
+        "read",
+        "control-reset: the resident's Durable Object was reset (a deploy); the container and its processes are as they were; the command's outcome is unknown",
+      );
+      return;
+    }
     // The model reference is resolved when the execution asks for the model —
     // the real server's moment — and a reference the configuration cannot
     // resolve fails the execution there, in the server's words.
@@ -1311,6 +1323,21 @@ class ScriptedServe {
       return this.toolContent(callId, ask.name, input, "error", "Tool execution interrupted", "aborted");
     }
     this.emitEvent("permission.replied", { sessionID: this.sessionID, requestID, reply: decision.reply });
+    // The executor says replaced once while this call is in flight, but the
+    // server still answers alive (ask 2): arm the next drained feed read
+    // to fail once with the word while the server keeps answering, and do NOT
+    // hold the call open — block here until the harness's feed poll has hit the
+    // word and re-attached (the fake clears the flag on the failing read), so
+    // the re-attach happens with this call in flight; then the tool completes
+    // and the run answers. A deterministic window, no race.
+    if (this.script.replacedWordWithPidAlive !== undefined && turnIndex === this.script.replacedWordWithPidAlive - 2) {
+      this.container.failReadOnceThenAlive = new HarnessContainerRuntimeReplacedError(
+        "read",
+        "runtime-replaced: the sandbox was replaced under the run",
+      );
+      for (let i = 0; this.container.failReadOnceThenAlive !== undefined && i < 2000; i++)
+        await this.deps.sleep(this.deps.tickMs ?? 1);
+    }
     // The container is replaced with this call in flight (survival's ceiling):
     // the bot decided, but the result never comes back — the server and the tool
     // die with the old container's disk. Leave the call open (a `running` tool
