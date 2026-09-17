@@ -14,9 +14,9 @@ extends: ../decisions/0046-a-budget-is-a-lease-carved-from-its-parent-and-one-mo
 
 ## Goal Capsule
 
-- **Objective**: Units one and two of [record 0046](../decisions/0046-a-budget-is-a-lease-carved-from-its-parent-and-one-module-proves-the-leases-fit.md): one module owns every wall-clock number as a lease carved from its parent, one fit is asserted at verify, at config load and at the fork, and a run's lease covers its loop, its write-up and its post-steps, enforced at the model proxy, with the pushed head recorded on the row. Unit three of the record (the grant and renewal) is out of scope and held as direction.
-- **Authority**: record 0046 (accepted for units one and two) over the specs it touches; the specs over this plan where they disagree on today's behavior; this plan over the executing agent on sequencing and file boundaries.
-- **Execution profile**: eight units in two phases, each one pull request through the review loop, in dependency order. Tests first in every unit. Every unit updates the spec rows it changes in the same pull request and binds them (`file::describe::it`). The maintainer chose the session, not the ship runner, as the executor.
+- **Objective**: Units one and two of [record 0046](../decisions/0046-a-budget-is-a-lease-carved-from-its-parent-and-one-module-proves-the-leases-fit.md): one module owns every wall-clock number as a lease carved from its parent, one fit is asserted at verify, at config load and at the fork, and a run's lease covers its loop, its write-up and its post-steps, enforced at the model proxy, with the pushed head recorded on the row; and, since the record's amendment accepted unit three, the grant on the request, the renewal decision and the continuation as the same runner instance's child (phase C).
+- **Authority**: record 0046 (accepted for units one and two; unit three through its dated amendment) over the specs it touches; the specs over this plan where they disagree on today's behavior; this plan over the executing agent on sequencing and file boundaries.
+- **Execution profile**: eleven units in three phases, each one pull request through the review loop, in dependency order. Tests first in every unit. Every unit updates the spec rows it changes in the same pull request and binds them (`file::describe::it`). The maintainer chose the session, not the ship runner, as the executor.
 - **Stop conditions**: a unit that cannot pass `npm run verify` within its listed files hands back a deviation. Nothing here adds a Worker, a binding, a credential or a config key beyond the fit's refusal. A unit that would change a preset's ask, or turn renewal on, stops and asks. The shell-kill unit does not start until the abort probe has an answer.
 
 ---
@@ -47,7 +47,7 @@ Production set the ship pipeline to 40 minutes while the coding preset asked 45 
 **The lease covers everything the run does (record unit two)**
 
 - R9. A run's loop ends at `deadline − (writeUp + postStep(preset))`, where a preset with no post-step turn has a post-step allowance of 0; the wind-down warning derives from that loop end; the write-up and the post-step turn run inside the lease; the bearer's grace past the deadline is one minute.
-- R10. After the loop's end the model proxy admits only a request whose tool table is empty or a subset of the run's post-step tools (the description and verdict submit tools the grant lists) and refuses a request offering a workspace tool with a typed `time_budget_exhausted` note, on both harnesses; the harness strips the tool table from the write-up turn so the rule holds for the real calls, not a synthetic body.
+- R10. After the loop's end the model proxy rewrites, never refuses, what a run's requests may do with their tools: the checkpoint turn goes upstream with `tool_choice: none`, and a post-step turn goes upstream with its tool list trimmed to the run's post-step tools (the description and verdict submit tools; OpenAI's `allowed_tools` where the dialect has it) and the choice left to the model, on both harnesses; the gate's refusal of a tool call the model attempts anyway stays as the belt; the mark that says the loop ended survives a bot generation change.
 - R11. At the loop's end a shell command in flight is ended without killing the harness process that must still write up; the pushed work from the wind-down note is not lost to the kill.
 - R12. A coding run's push is recorded on the row as a typed event with ref and sha, whether or not a pull request opens, and the record's pushed-branch reads use it.
 - R13. The floors for coding and the merge wait, the post-step allowance and today's `review pending` rate are read from the ledger before the numbers that depend on them ship.
@@ -72,7 +72,7 @@ Production set the ship pipeline to 40 minutes while the coding preset asked 45 
 - KTD5. The duration ratchet is a second predicate list, allowlist, scan and script beside the wall-clock-read ratchet, with its own ESLint block exempting `src/core/budgets.ts`; the existing `clockAllowlist.json` stays `{}` (chosen over widening the existing scanner: its scan collapses to one integer per file and its allowlist is asserted empty).
 - KTD6. The pushed head is a typed run event, `pushed_head { ref, sha }`, published from the post-step's push facts (chosen over a row field: the row's pushed-branch reads derive from events, and the event replays on the run page).
 - KTD7. Post-steps run inside the lease by carving from the remaining lease through `HarnessRun` and `FollowUpTurnInput`, not by lowering their caps (chosen over a smaller constant: a constant is the shape the record retires).
-- KTD8. The proxy learns the loop's end from the bearer store (`markLoopEnded(runId)`) set by the harness, and tests a request's tool table by reading its body beside `pinRequest`; after the loop's end a request offering any tool outside the grant's post-step tool list is 403 with a `time_budget_exhausted` note (chosen over a header from the harness: the store is the source of truth the door already consults). The mark rides the run's row so `adopt` on a bot generation change carries it forward like the bearer hash.
+- KTD8. The proxy learns the loop's end from the bearer store (`markLoopEnded(runId)`, `markPostStep(runId, tools)`) set by the harness, and rewrites the request body beside `pinRequest`: `tool_choice: none` on a checkpoint turn, the tool list trimmed to the marked tools on a post-step turn (chosen over refusing a request that carries tools — pi's tool table is per session and its control protocol has no per-turn table, so the write-up request carries the loop's tools and the refusal would refuse the checkpoint; over dropping the tool definitions — that invalidates the cached tool and system prefix where a `tool_choice` change invalidates only the conversation's blocks; over a harness-side change — neither pi nor OpenCode lets the bot change a turn's tools without a fork, and the proxy is the one point both pass through; record 0046's amendment). The mark rides the run's row so `adopt` on a bot generation change carries it forward like the bearer hash.
 - KTD9. Unit two sequences after the merged wind-down and checks-by-cost changes and builds on them (session-settled: user-directed — chosen over an independent landing).
 - KTD10. The floors are `review 5` (measured), `coding 10` and `merge 10` (guesses), the allowances `provision 3`, `writeUp 3`, `postStep 5` for coding, `3` for review and `0` for every preset that runs no post-step turn (general, research, explore, conductor), `commandWriteUp 1`, `execCall 0.5`, `bearerGrace 1`; the guesses ship in unit one behind the fit and are re-read in the measurement unit before the wind-down ships.
 
@@ -111,7 +111,7 @@ sequenceDiagram
 
 ### Sequencing
 
-Phase A (record unit one): U1 → U2 → U3, each a pull request; U3 may land after Phase B starts. Phase B (record unit two): U4 first (measurements and the abort probe; no product code; its ledger reads may start as soon as U1 merges, beside U2 and U3), then U5 → U6 → U7 → U8. U7's shape depends on U4's answer. Every unit rebases onto the merged wind-down and checks-by-cost changes.
+Phase A (record unit one): U1 → U2 → U3, each a pull request; U3 may land after Phase B starts. Phase B (record unit two): U4 first (measurements and the abort probe; no product code; its ledger reads may start as soon as U1 merges, beside U2 and U3), then U5 → U6 → U7 → U8. U7's shape depends on U4's answer. Phase C (record unit three, accepted by the record's amendment): U9 → U10 → U11, U9 after U8 so the renewal reads the pushed head; renewals stay at zero until U11's twenty segments are read. Every unit rebases onto the merged wind-down and checks-by-cost changes.
 
 ### Risks and Dependencies
 
@@ -226,23 +226,23 @@ Phase A (record unit one): U1 → U2 → U3, each a pull request; U3 may land af
   - `runBearers.test.ts`: a bearer expires at the lease's end plus one minute.
 - **Verification**: the test files green, red first; `npm run specs:check`; the harness conformance matrix in the pull request; `npm run verify`.
 
-### U6. The proxy admits only tool-less calls after the loop's end
+### U6. The proxy makes the checkpoint turn tool-less and a post-step turn tool-trimmed
 
-- **Goal**: the harness marks the loop's end in the bearer store and the model proxy refuses a call offering a workspace tool after it with a typed note, admitting the tool-less write-up turn and the post-step turns whose tools are the grant's submit tools; the mark survives a bot generation change.
-- **Requirements**: R10, KTD8 (model-proxy item 5).
+- **Goal**: the harness marks the loop's end and each post-step turn's allowed tools in the bearer store, and the model proxy rewrites the requests that follow — `tool_choice: none` on the checkpoint turn, the tool list trimmed to the marked tools on a post-step turn — so the checkpoint is a guaranteed text turn and a post-step can call only its submit tool; nothing is refused for the tools it carries; the marks survive a bot generation change.
+- **Requirements**: R10, KTD8 (model-proxy items 5 and 6; harness-pi items 6 and 14; record 0046's amendment, point 2).
 - **Dependencies**: U5.
-- **Files**: `src/core/modelProxy/runBearers.ts` (`markLoopEnded`, the grant's `loopEndedAt` and `postStepTools`; `adopt` carries the mark from the row), `src/core/runRecord.ts` (the mark on the row), `src/channels/modelProxy.ts` (`handleAdmitted`: the tool-table check beside `pinRequest`, the refusal), `src/core/harness/pi/harness.ts` and `src/core/harness/opencode/bridge.ts` (mark at `loopEnd`), `src/core/harness/contract.ts` (the mark reaches the store through `HarnessDeps`), `src/channels/modelProxy.test.ts`, `src/core/modelProxy/runBearers.test.ts`, `src/core/harness/testing/scenarios.ts` (a row), `docs/reference/specs/model-proxy.md` item 5.
+- **Files**: `src/core/modelProxy/runBearers.ts` (`markLoopEnded`, `markPostStep`, `clearPostStep`; the grant's `loopEndedAt` and `postStepTools`; `adopt` and `rotate` carry them), `src/core/runRecord.ts` and the harness facts (the marks on the row), `src/channels/modelProxy.ts` (`shapeTools` beside `pinRequest`: the `tool_choice` word per dialect, the trimmed list, OpenAI's `allowed_tools`), `src/core/harness/pi/harness.ts` and `src/core/harness/opencode/bridge.ts` (mark at `loopEnd`; mark and clear around a follow-up turn from `FollowUpTurnInput.tools`), `src/core/harness/contract.ts` (`FollowUpTurnInput.tools`), `src/core/descriptionTurn.ts` and `src/core/verdictTurn.ts` (name their submit tool), `src/channels/modelProxy.test.ts`, `src/core/modelProxy/runBearers.test.ts`, `src/core/harness/testing/scenarios.ts` (a row), `docs/reference/specs/model-proxy.md` items 5 and 6, `docs/reference/specs/harness-pi.md` items 6 and 14.
 - **Approach**:
-  1. Tests first, red against today: a call offering `bash` after `markLoopEnded` is 403 with a `time_budget_exhausted` note that names the loop's end, forwards nothing and opens no span; a tool-less call and a call offering only the grant's post-step tools are forwarded; before the mark all are forwarded; a real write-up request and a real description-turn request captured from the harness (U4 captures one of each) pass the gate.
-  2. `markLoopEnded(runId)` mirrors `revoke`; the grant carries `loopEndedAt`.
-  3. The harness calls the mark where it ends the loop; a conformance row proves both drivers do.
-  4. Spec rows: model-proxy item 5 gains the second refusal beside the turn guard.
-- **Patterns to follow**: the turn-guard refusal in `modelProxy.ts` and its test `the call past maxTurns is 403 turn_budget_exhausted …`; `revoke` in `runBearers.ts`.
+  1. Tests first, red against today: after `markLoopEnded` a request carrying `bash` goes upstream with `tool_choice: none` on both dialects and its tools untouched; after `markPostStep(["submit_pr_description"])` the same request goes upstream with only that tool in its list (OpenAI: `allowed_tools`) and no forced choice; before any mark the body passes as `pinRequest` leaves it; the span's `toolChoice` attr says what went upstream; a request on an unknown run is unchanged.
+  2. `markLoopEnded` and `markPostStep` mirror `revoke`; the grant carries the fields; `adopt` and `rotate` keep them.
+  3. The harnesses mark the loop's end where they steer the write-up and mark a post-step's tools around the follow-up turn; the description and verdict turns name their tool through `FollowUpTurnInput.tools`; a conformance row proves both drivers' write-up request carried `tool_choice: none`.
+  4. Spec rows: model-proxy item 5 loses the planned second refusal and item 6 gains the rewrite; harness-pi items 6 and 14 name the marks.
+- **Patterns to follow**: `pinRequest` and its tests; `revoke` and `adopt` in `runBearers.ts`; the offered-tools attrs (`toolsOffered`).
 - **Test scenarios**:
-  - `modelProxy.test.ts`: a tool-carrying call after the mark is 403 with the typed note and no upstream call; a tool-less call after the mark is forwarded; both are forwarded before the mark; the mark on an unknown run is a no-op.
-  - `runBearers.test.ts`: `markLoopEnded` sets the grant's field once and survives `rotate`; `adopt` onto a fresh generation's entry carries `loopEndedAt` forward from the row.
-  - `conformance.test.ts`: both drivers mark the loop's end before the write-up turn.
-- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`.
+  - `modelProxy.test.ts`: the three states (no mark, loop ended, post-step marked) on both dialects; the attr says the word that went upstream; unknown run unchanged.
+  - `runBearers.test.ts`: the marks set once, survive `rotate`, carry through `adopt`, and `clearPostStep` returns the grant to the loop-ended state.
+  - `conformance.test.ts`: both drivers' write-up request carried `tool_choice: none`; the description turn's request carried only its submit tool.
+- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`; live, the first budgeted run after the release shows `toolChoice: none` on its checkpoint turn and the turn's `inputTokens` against `cacheReadTokens` — the cost of the rewrite, recorded on the tracker issue.
 
 ### U7. The shell in flight ends at the loop's end
 
@@ -281,6 +281,36 @@ Phase A (record unit one): U1 → U2 → U3, each a pull request; U3 may land af
   - `contract.test.ts` and `registry.test.ts`: the first instruction and the rule carry the wind-down sentence, and the push step still precedes the expensive checks.
 - **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`.
 
+### U9. The grant rides the request, with zero renewals by default
+
+- **Goal**: a request carries a grant — a count of renewals and a cost cap — that the router, a directive and the channel's config can set, defaulting to zero renewals and no cap change; the pipeline record names it; nothing renews yet.
+- **Requirements**: record 0046's Renewal section and its amendment, point 1 (agent-ship `Budgets` bullet; routing-and-config item 2).
+- **Dependencies**: U8.
+- **Files**: `src/core/budgets.ts` (`Grant` type: `renewals`, `costCapUsd?`; `DEFAULT_GRANT`), `src/core/dispatch/directives.ts` (`renewals:N`), `src/config/validate.ts` (a channel's `grant` block), `src/core/dispatch/ship.ts` and `src/core/ship/coordinator.ts` (the grant on the instance), `src/core/runEvents.ts` (`run_meta.grant`), the tests beside each, `docs/reference/specs/agent-ship.md`, `docs/reference/specs/routing-and-config.md`.
+- **Approach**: tests first; the grant is a value the module types and the config validates; the coordinator stores it on the instance and the card names it (`renewals 0 of 0`); no behavior changes with the default.
+- **Test scenarios**: the directive and the channel block parse and are refused by name when malformed; the instance carries the grant; the card names it.
+- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`.
+
+### U10. The renewal row and decision: progress off the row, the continuation as a run
+
+- **Goal**: when a segment ends with its unit unfinished, the runner reads progress off the row (a `pushed_head` sha newer than the lease's start, or a handoff whose follow-ups shrank or deviations grew), checks the grant's renewals and the session's summed spend against the cap, and either opens the next segment — a new run in the same thread, the same instance's child, from the recorded sha in a clean tree, with the previous handoff as its request, under a fresh lease carved by the module — or stops with the reason named; the decision is a row keyed by session and segment index, so a runner reclaimed between a segment's end and its renewal never renews twice.
+- **Requirements**: record 0046's Renewal section and its amendment, points 1 and 3 (agent-ship item 8; run-history item 2).
+- **Dependencies**: U9.
+- **Files**: `src/core/ship/coordinator.ts` (the `continued` ending and the renewal decision), `src/core/coordinator/driver.ts` (the continuation spawn: same instance, the handoff as the request, `coordinator` tag carried), `src/core/ship/renewal.ts` (pure: `progressOf(row, leaseStartedAt)`, `renewalDecision(grant, spend, progress, fit)`), `src/core/runLedger` (the renewal row), `src/core/runRecord.ts` (spend summed at finish, `usage` already), the tests beside each, `docs/reference/specs/agent-ship.md`, `docs/reference/specs/run-history.md`.
+- **Approach**: tests first over the pure decision, then the coordinator's `continued` ending and the driver's continuation spawn; the fit is re-asserted before every segment.
+- **Test scenarios**: progress true on a newer sha, on a shrunk follow-up list, false otherwise; the decision renews only when progress, a renewal and the cap all hold, and names the failing clause; the continuation is the same instance's child with the handoff as its request; the renewal row refuses a second renewal for the same segment.
+- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`; the record's variant traces (steps 4, 9 and 10) as tests.
+
+### U11. The continuation card and the reply that spends a renewal by hand
+
+- **Goal**: a person sees one card per segment naming the segment and the sha it continued from, and one stop card when the grant or the progress test ends the session, with the reply that spends a renewal by hand as record 0044's confirmation surface; renewals are turned on for one channel and the first twenty segments are read before the default moves.
+- **Requirements**: record 0046's Renewal section and its amendment, point 5 (agent-ship item 8; record 0044).
+- **Dependencies**: U10.
+- **Files**: `src/core/ship/surface.ts` and the card renderers (`renewal 1 of 6, continues a1b2c3d`; `no progress in the last lease; grant holds 5 renewals; reply continue to spend one`), `src/core/dispatch/ship.ts` (the `continue` reply in the thread), the tests beside each, `docs/reference/specs/agent-ship.md`.
+- **Approach**: tests first over the card lines and the reply's routing; the channel flag; the reading of twenty segments is a tracker receipt, not code.
+- **Test scenarios**: the card lines for a renewal, a stop by progress, a stop by the grant; the reply spends exactly one renewal and refuses when none remain.
+- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`; live, the first twenty renewals read on the tracker issue before the default renewal count moves.
+
 ---
 
 ## Verification Contract
@@ -291,14 +321,16 @@ Phase A (record unit one): U1 → U2 → U3, each a pull request; U3 may land af
 - U5, U6, U7: the harness conformance matrix rendered in the pull request, green on both drivers.
 - U7: one live run on the resident with a command in flight at the loop's end, receipt on the tracker issue (human-gated).
 - U4: the measurements and the probe's answer posted on the tracker issue with sample sizes.
+- U6: the first budgeted run after the release shows `toolChoice: none` on its checkpoint turn, with the turn's `inputTokens` and `cacheReadTokens` recorded on the tracker issue as the rewrite's cost.
+- U11: twenty renewed segments read on the tracker issue before the default renewal count moves off zero (human-gated).
 
 ## Definition of Done
 
-- The eight units merged through the review loop, each with its spec rows bound and green.
+- The eleven units merged through the review loop, each with its spec rows bound and green.
 - No minutes literal outside `src/core/budgets.ts` except those the duration allowlist lists, and the allowlist only shrank after U3 landed.
 - A ship request clipped under its loop's fit is refused with the sum at config load and at the fork; a round under its floor is refused and the unit ends `review pending`.
 - A budget hit on the ledger after U5 to U8 shows the loop ending at `loopEnd`, the write-up inside the lease, a `pushed_head` event, and `finishedAt − leaseStartedAt ≤ lease + 1 min`; receipts recorded on the tracker issue.
-- The record's status is `accepted` for units one and two, with unit three marked as direction; abandoned experiments from the probe are not in any diff.
+- The record's status is `accepted` for all three of its units, unit three through its dated amendment; abandoned experiments from the probe are not in any diff.
 
 ## Open Questions
 
