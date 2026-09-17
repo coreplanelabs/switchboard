@@ -13,7 +13,7 @@ import {
 import { namedToInput } from "../core/commandSurface.js";
 import { CHANNEL_DIRECTORY_TIMEOUT_MS } from "../core/dispatch/record.js";
 import { isServiceToken, type AccessIdentity } from "./accessAuth.js";
-import { holdsAll, isViewablePerson } from "../core/authz/viewAs.js";
+import { holdsAll, isViewablePerson, viewingRefusal } from "../core/authz/viewAs.js";
 import { MAX_BODY_BYTES, readBody } from "./http.js";
 
 // Generic HTTP adapter for the command registry: `/api/<group>.<verb>` for
@@ -358,6 +358,13 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
     // (write safety). `invoke` re-checks in every case; this only spares an
     // unauthorized caller's body from being read.
     const caller = await callerFor(identity, opts);
+    // A session viewing as a person (record 0053) is told why in the one sentence every surface
+    // shows, whatever the person's own grants would have said about the write; the registry
+    // door would refuse the same way, this only spares the body.
+    if (caller.actor.viewingAs && cmd.effect !== "read") {
+      refuse(res, ERROR_STATUS.unauthorized, "unauthorized", viewingRefusal(caller.actor.viewingAs));
+      return;
+    }
     if (CommandRegistry.refuses(cmd, caller)) {
       refuse(res, ERROR_STATUS.unauthorized, "unauthorized", `${caller.id} is not allowed to run ${cmd.id}`);
       return;
