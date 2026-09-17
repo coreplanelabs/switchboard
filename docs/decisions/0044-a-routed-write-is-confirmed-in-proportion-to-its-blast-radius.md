@@ -1,0 +1,163 @@
+---
+title: A routed write is confirmed in proportion to its blast radius; the definition declares it, the org floors it, the channel asks with one click, and a test run never asks
+status: proposed
+date: 2026-09-17
+pattern: A decision derived from a field the definition carries and fenced by the conformance suite; a boundary axis that intersects toward caution; one core object every channel adapter renders
+---
+
+# A routed write is confirmed in proportion to its blast radius; the definition declares it, the org floors it, the channel asks with one click, and a test run never asks
+
+**The ask.** Decide (the maintainer, before the plan is written): adopt this graded rule in place of [record 0039](0039-the-front-door-writes-nothing-from-prose-and-never-routes-twice.md)'s "every routed `effect: write` command is handed back as a line to paste". Record 0039 stays accepted; this record supersedes that clause alone. Reader: an engineer who knows the dispatcher and the command registry and has not followed the front-door work. The maintainer's frame, 2026-09-17: delete the natural-form regexes and any logic like them; the paste-back "is just going to annoy people"; a per-command impact level declared where the command is defined, in a canonical vocabulary if one exists; a setting for when to ask, at org, channel and user scope, "from all the time to never"; org controls that lower scopes cannot loosen; a design that serves Discord as well as Slack.
+
+Success criteria: (1) a routed command changes state only when its blast-radius class sits below the effective confirm floor, or after the requester has seen the exact command and confirmed it; the floor is a value a scope chose, never the door's own judgement; (2) a routed read, test or build runs at once with the receipt line; (3) every command's blast radius is declared on its definition and fenced, so a write added tomorrow is classified the day it lands or fails `verify` by name; (4) the org sets a floor that channels and users can tighten and never loosen, and no scope can put `destructive` below the floor until the write misbind rate is measured; (5) nothing below the channel seam knows Slack.
+
+## TL;DR
+
+The bet: replace the paste-back with a confirmation graded by each command's declared blast radius, so a test runs from a sentence, a settings change costs one click, and a teardown never runs unconfirmed. Today the door runs a routed read at once and hands every write back as a line to paste, because the router misreads: on 2026-09-16 it bound the wrong command 5 times and the wrong arguments 6 times in 66 asks, once turning "use opus for coding in this channel" into `config set channel --agent coding`. Each command declares its **blast radius** (read, exec, reversible write, destructive) in MCP's tool-annotation vocabulary; a `confirm` axis on the existing boundary names the first class that asks, with the org's value as a floor; the door mints a **confirmation**, a one-time, requester-bound, ten-minute offer the channel renders as a button. The cost is one click on every routed state change under the default (`write`), one table in the state Worker's existing Durable Object, Slack interactivity, and eighteen labels. Decided: the classes and their vocabulary, the axis and its direction, the default, who may click, that test and build run at once, and that `never` is refused until the misbind rate is measured; open: three labels, the verifier call's worth, and when the default relaxes. Doing nothing keeps a door that runs no write from prose behind a paste nobody reads.
+
+## Today at `95885232`
+
+The delta from what a veteran expects, each with its proof.
+
+| You would expect | What is true | Proof |
+|---|---|---|
+| A command declares how dangerous it is | `effect` is one bit, `read` or `write`; `action` is `<group>:read`, `:write` or `:exec`. Of 34 chat-exposed commands, 16 are reads and 18 writes; 2 writes are exec-class (`repo test`, `repo build`) and 6 are irreversible. No definition says which. | [`src/core/commandRegistry.ts`](../../src/core/commandRegistry.ts) `CommandDef`; [command-registry.md](../reference/specs/command-registry.md) `## Catalogue` |
+| A routed write asks the person | It replies `To run this: <line>` and stops, test and build included; the line is the receipt, redacted and capped at 300 characters, so a long routed write is already unpasteable. | [`src/core/dispatch/route.ts`](../../src/core/dispatch/route.ts) `answerCommand`, `ROUTE_RECEIPT_CAP`; record 0039 |
+| The router misbinds writes often | Of 34 write asks, one bound with wrong arguments (the `config set` above) and five to a read or a preset, none to a different write; of 33 questions that merely mentioned a subject, 14 bound a read and none a write. One wrong write in 34 is a rate anywhere from 0.5% to 15% at 95% confidence; it is one day's replay. | the replay of 2026-09-16 23:02Z, receipt on the receipts tracker (#234) |
+| A confirmation needs pending state, which the bot avoids | The bot already mints one-time, ten-minute tickets for `mcp connect` links and consumes them with a compare-and-swap in the state Worker's config Durable Object, the same object that holds every runtime override off the host. | catalogue row `mcp.connect`; [`deploy/cloudflare-memory/worker.ts`](../../deploy/cloudflare-memory/worker.ts) `ConfigDO`, `transitionTicket`; [routing-and-config.md](../reference/specs/routing-and-config.md) item 2 |
+| A setting the org controls and a user cannot loosen | Every scope setting is replaced by the most specific scope, except `boundary`, which intersects: the strictest of defaults, channel and user wins, attributed to the scope that set it. | [`src/config/profile.ts`](../../src/config/profile.ts) `intersectBoundaries`; [`src/config.ts`](../../src/config.ts) `Scope.boundary` |
+| The Slack adapter can show a button | It runs Bolt over Socket Mode and handles mentions and messages; no interactive payload is handled. Slack is the only chat adapter; the browser is next ([record 0043](0043-the-home-page-is-a-chat-the-browser-is-a-channel-and-a-turn-is-a-run.md)). The MCP listing emits no tool annotations, though the bot's own MCP client already reads `readOnlyHint` and `destructiveHint` from remote servers. | [`src/channels/slack.ts`](../../src/channels/slack.ts); [`src/channels/mcp.ts`](../../src/channels/mcp.ts) `toMcpTool`; [`src/mcp/types.ts`](../../src/mcp/types.ts) |
+
+One router call costs about 2,200 input tokens, 1,900 from the prompt cache, and answers in about a second (455 calls in the replay). Two numbers are not counted: how many routed writes a day the door hands back, and how many hand-backs are followed by the paste. Both are countable from the run records (the `route` event and the next typed command in the thread), and the plan's first unit counts them before anything is built.
+
+## The shape
+
+Think of a sudo policy per command instead of one "ask for everything" switch: every command carries its blast radius, a floor says which radii need a confirmation, the door's reply is the prompt, and the click is the sudo. The closest known system is GitHub's organization branch-protection rules layered over a repository's own: the org rule is a floor, the repository may be stricter, never looser. The one difference is what is protected. Here it is a model's guess about what a sentence meant, so the confirmation shows the guess as the exact command line, the click certifies the guess, and permission is checked again at the click, as for a typed line.
+
+Four pieces, each a small change to something that exists:
+
+1. **Blast radius.** A pure function over the definition, `blastRadius(def)`: `effect: read` is `read`; an `action` ending in `:exec` is `exec`; a write whose `annotations.destructive` is true is `destructive`; every other write is `write`. `annotations` is the registry's field; `tools/list` emits it in MCP's own `ToolAnnotations` names (`readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`, false unless the definition says otherwise). MCP presumes a non-read-only tool destructive when the hint is absent; the conformance suite refuses the absence, so every write declares `destructive` true or false or fails `verify` by name.
+2. **The confirm axis.** The ladder runs from asking most to asking least: `exec`, `write`, `destructive`. `boundary.confirm` on any scope names the first class that asks; every class after it asks too and reads never ask. Like the other three axes it intersects: the most cautious layer wins, the effective value names the scope that set it, and a scope can only move the answer toward asking more. Unset everywhere, it is `write`, attributed to a `built-in` pseudo-scope. `never` is a fifth word the validator refuses, with the reason, until open question 2 is resolved.
+3. **The confirmation.** When `blastRadius(def)` is at or after the effective `confirm`, the door stores `{ id, message, command, input, receipt, risk, expiresAt }` in a `confirmations` table of the state Worker's config Durable Object, `input` being the parsed, validated input and `message` the incoming message the sentence arrived as, and replies the **offer**: the full chat form of that input, one **risk line** computed from the definition and the input, and the channel's affordance. `confirm(id, actor)` consumes the row with the compare-and-swap the connect tickets use, refuses an expired, used or foreign offer, and otherwise runs the stored input through the typed line's own path: authorize, invoke, audit with `source: confirm`; the offer message becomes the result. `cancel(id, actor)` deletes it.
+4. **The adapter contract.** `ChannelIO` gains an optional `offer(offer)`. Slack renders the line, the risk line and two buttons whose action value is the id; its action intake calls `confirm` or `cancel`. A channel without components (the CLI, an HTTP reply, the browser until it grows the control) renders the pasteable line, today's behavior. Nothing below the seam knows Slack.
+
+## One trace: the misbound `config set`
+
+The door is most likely to do harm on a wrong bind to a reversible write, because the class alone would let it run. This one happened on the replay of 2026-09-16.
+
+1. In a channel, a person writes "use anthropic/claude-opus-5 for coding in this channel". Routing is on, the channel pins no agent, and no live run holds the thread, so the message routes.
+2. The router, on the fast model, binds `config_set` with `{ scope: "channel", agent: "coding", model: "anthropic/claude-opus-5" }`. Plausible and wrong: it pins the channel's agent to coding and sets one model for every agent, where the person meant the coding agent's model alone (`--models.coding`).
+3. The door looks up `config.set`: `effect: write`, `annotations.destructive: false`, so `blastRadius` is `write`. The effective `confirm` is the built-in `write`, since no scope set one. `write` is the first class that asks: the door asks.
+4. The door stores confirmation `c-7f3…` with the message and the parsed input and replies the offer: `config set channel --agent coding --model anthropic/claude-opus-5`, the risk line `changes the agent and model for everyone in this channel until config clear`, the footer `confirmation required by the built-in default`, and the buttons.
+5. The person reads `--agent coding`, sees the misread, and clicks Cancel. The door deletes the confirmation and the message reads "Cancelled; nothing ran". They type `config set channel --models.coding anthropic/claude-opus-5`, which the typed grammar runs at once, as today.
+6. Had they clicked Run, the adapter would have acknowledged the click at once; the door would have consumed the row, re-authorized the actor for `config:write` on this channel (the grant may have gone in the ten minutes), invoked the stored input, written the audit line with `source: confirm`, and replaced the offer with the result. A second click, another person's click, or a click after ten minutes answers, in order: "this offer was already used", "only the requester can confirm this", "this offer expired; type the line to run it", the line still in the message. A bot restart between offer and click loses nothing, since the row is in the object.
+7. Had the person written "run the tests on main", the router would bind `repo_test` with the thread's repository, `blastRadius` would be `exec`, before the floor, and the tests would run at once with the receipt line and no button, as the regex path runs them today until the commands plan's last unit deletes it.
+
+The property: a misread sentence never runs a command that changes state without the requester seeing the exact command and clicking; a correct read costs one click; a test run costs nothing; and the same steps hold behind any adapter that can show two buttons, because the door and the store never see the channel.
+
+## The difficulty map
+
+Ranked by how likely the author is to be wrong, each pointing at its section.
+
+1. The bet itself: that a person reads a button with a risk line where they did not read a paste. The evidence is the maintainer's judgement and nothing measured; the cheap test is one week of minted, run, cancelled and expired counts on the run records, and a paste-through rate for today's hand-back before the button is built: [Over-binding, the prompt rule and the verifier](#over-binding-the-prompt-rule-and-the-verifier) and the first plan unit.
+2. The confirmation's identity, one-time and expiry rules across restarts and adapters; a hole here is a silent write: [The confirmation](#the-confirmation) (also the most work: a new Slack action intake, a message-update path, a human-gated app setting).
+3. The blast-radius label on each of the eighteen writes; a wrong `destructive: false` is a silent write on a misread, and the fence forces a declaration, not a correct one: [Classifying the eighteen writes](#classifying-the-eighteen-writes).
+4. The axis must intersect toward caution; an inverted ladder inverts the safety property: [The confirm axis](#the-confirm-axis).
+
+## The confirmation
+
+The constraint: a click is a credential presented later, possibly by someone else, possibly after a deploy, for a command a model chose. So the confirmation must be bound to the requester, because the channel's other members can click a button they did not ask for; one-time and expiring, because the offer message stays in the channel as long as the channel keeps history; and durable across a bot restart, because the bot rolls on most releases (at least seven times on 2026-09-16) and an offer that dies with the process teaches people not to trust the button.
+
+The design keeps the confirmation off the host and out of the channel. The door writes the row to a `confirmations` table in the state Worker's config Durable Object, beside the connect tickets; the object stamps `expiresAt`; the channel carries the id and nothing else. `confirm(id, actor)` is one function on the dispatcher, reached by every adapter's action intake. It asks the object to consume the row, one request that reads, checks expiry, checks the requester against the actor, and deletes, atomic because a Durable Object serves one request at a time over transactional storage, which is why two bot processes alive during a roll cannot both run it. The **requester** is the stored message's `userId`, the person the identity record names on every surface ([record 0042](0042-a-dashboard-session-is-the-person-its-email-names-identity-not-authority.md)); the check passes when that id is in the actor's `self` set, so the person who asked in Slack may confirm from the browser, a message relayed on someone's behalf is that person's, and the relaying credential never matches. On success the door hands the stored message and parsed input to the path a typed line takes after parsing, so authorization, the inline run record and the audit line are the typed grammar's, with `source: confirm`. The adapter acknowledges the click at once and updates the offer message when the command answers; a command with a deferred outcome (`repo onboard` answers `202` and settles minutes later) posts its settle follow-up as a typed one does.
+
+The offer shows the full chat form of the parsed input, not the receipt: the receipt is redacted and capped at 300 characters, and a line the person cannot read in full is not a confirmation. When redaction would alter the line, because an argument looks like a secret, the door mints nothing and answers "this command carries a value that cannot be shown; type the line yourself". The run record keeps the capped receipt as it does today. A thread holds one pending offer; a new offer replaces it. Expiry is checked on touch; nothing sweeps.
+
+Invariants, stated so a test can check them: a confirmation runs at most once; only for an actor whose `self` holds the requester; never after `expiresAt`; the input that runs is the stored parsed input, and the offer's line is its chat form; a run leaves exactly the records a typed line leaves, plus `source: confirm`; a `cancel` and a `confirm` on the same id cannot both succeed.
+
+Failure modes and what the person sees. The store is unreachable at mint time: the door falls back to the pasteable line and says so; nothing is lost but the button. Unreachable at click time: "the confirmation could not be read; type the line to run it". The Slack app has interactivity off: the buttons never post, the message still carries the line, and the deploy checklist names the app setting. A click races the expiry: the object's consume decides, never the bot's clock. Two adapters show the same offer (a thread mirrored to the browser): both carry the same id and the first consume wins. A crash between consume and invoke: nothing runs, the row is gone, and the next click reads "already used"; at-most-once holds and the person types the line.
+
+The alternative it beat is a stateless signed payload: sign the command line into the button's value, verify at the click, no store. It works on Slack, whose action values hold 2,000 characters, and fails at the seam: Discord's component id holds 100, so every adapter but Slack needs a store anyway, and a stateless payload cannot be one-time without a store of used ids. Record 0039 scoped out a stateful "reply yes" because the paste needed no pending state; one row with a TTL in a table the bot already writes to, where the channel never sees a secret, is the smallest state that buys a button.
+
+## Classifying the eighteen writes
+
+The constraint: the class decides whether a misread runs silently, and no test can check a label's truth, only its presence. The fence makes the declaration mandatory; the label is a judgement, made once here and revisited by the owner of each command group in the plan's first unit. The risk line is a function of the definition and the parsed input, so a `--dry-run` invocation keeps its class and says `plan only; changes nothing`.
+
+| Command | Class | Why | Risk line (the offer shows it) |
+|---|---|---|---|
+| `repo test`, `repo build` | exec | Runs the repository's own command; changes no state; a misread wastes one run | none; exec never asks |
+| `config set`, `config clear`, `config instructions` | write | One `config set` or `clear` reverses it; the receipt names the scope | changes the scope's settings for everyone in it until reset |
+| `repo onboard`, `repo reconfigure` | write | Reversible by `offboard` or a second `reconfigure`; onboard provisions billable compute, so the risk line says so | provisions a resident (billable) / changes the resident's branch or commands |
+| `mcp add`, `mcp connect`, `mcp promote` | write | `mcp remove` reverses each; a token entered through the link is never in chat | adds or moves a server every run in the scope can use |
+| `review abridge`, `costs snapshot` | write | Abridge is answered from the store unless forced; a snapshot is rewritten by the next one | spends one model call / rewrites the snapshot |
+| `repo offboard`, `repo rebuild` | destructive | Deletes the resident's record, schedules, container and snapshots; a rebuild discards the snapshot and reprovisions | tears down the resident and its snapshots / discards the snapshot and reprovisions |
+| `runs stop` | destructive | Ends someone's live run; `hard` aborts mid-step | stops a live run; hard aborts it now |
+| `memory forget` | destructive | Soft-deletes a record that influences every run | removes the record from every future run |
+| `mcp remove` | destructive | Deletes the server and its stored credential | deletes the server and its credential |
+| `friction propose` | destructive | Files issues others see; no command here undoes it | files issues on the tracker |
+
+Guessed, for their owners to confirm: `repo onboard` as reversible (it costs money the moment it runs), `mcp promote` as reversible (it changes what every run in the org can reach), `friction propose` as destructive (the issues can be closed by hand). A label the owner overturns is a one-line change.
+
+## The confirm axis
+
+The constraint: a per-scope setting a user can loosen is not an org control. The boundary already solves this for three axes, so `confirm` becomes the fourth rather than a new mechanism: `boundary.confirm` on `defaults`, `channels.<id>` or `users.<id>`, set in `config.yaml` or by `config set channel|me --boundary.confirm <class>`, validated at load and on write like the other axes. The axis rides an object typed as caps on a run's profile; the profile ignores it and a child run inherits it harmlessly, which is a naming stretch and not a mechanical one.
+
+The direction, once: the ladder `exec`, `write`, `destructive` runs from asking most to asking least. A scope's value is the most permissive answer it allows, so "tighter" means a class earlier on the ladder, and the org's value is a floor because no scope below it can name a later class and be heard. Three states follow. **On the day this lands:** no scope sets the axis, the effective value is the built-in `write`, every routed state change asks with one click, every read and every test or build runs. **What a scope may set:** `exec`, `write` or `destructive`. Intersection picks the most cautious value any of the three scopes named, and the effective value carries the scope that decided it (on a tie, the least specific, as today), which `config show` prints and the offer's footer names. A user under an org floor of `write` may set `destructive` and it changes nothing, which `config show` explains by naming the org's scope, as it does for `maxMinutes` today. **What no scope may set yet:** `never`. The validator refuses it with the reason: the door's write misbind rate has not been measured over a period. That refusal is the form the maintainer chose for "the button is unavoidable for offboard-class commands until the misbind rate is measured near zero"; open question 2 names the evidence that lifts it, and the same evidence moves the default from `write` to `destructive`.
+
+Invariants: the effective value never asks less than any layer's value; a scope that sets no value inherits the intersection above it; `never` does not validate, so a stored `never` stops the bot at load as a bad `maxMinutes` does; the offer's footer names the deciding scope or `built-in`; reads are never on the ladder.
+
+The general form the maintainer asked to keep in view, "an org may forbid lower scopes from setting a key at all", is a locked-keys list on the org scope that `config set` refuses at channel and user. It is not built here: the floor covers the one setting this record adds, and a list added later resolves through the same scope path, so nothing here is a one-way door.
+
+## Over-binding, the prompt rule and the verifier
+
+The constraint: 14 of 33 questions that named a subject bound its read command ("why did the last run fail" ran `runs list`), and 6 of 66 binds carried extra or reshaped options. A button touches neither; it only makes the state-changing subset visible before it runs. If over-binding stays, the door annoys with buttons where it annoyed with pastes, and if people click as reflexively as they paste, the button buys nothing; the first week's counts of minted, run, cancelled and expired offers decide that.
+
+Two levers, in cost order, both measured by the replay's command rows (`npm run load -- route`), which score exactly these two failures. First, one rule in the router's prompt: call a command only when the person asks for what the command does; a question about a subject is not a call. Target: 0 of 33 decoys bound. Second, a **verifier**: on a bind of class `write` or after, one more call shown the sentence and the bound command line and asked whether the line does what the person asked. A critique is a task models do better than the guess, and it costs one cached call of about a second on the small fraction of routed messages that bind a write. The verifier ships only if the replay shows it removing at least half of the write misbinds while rejecting fewer than one correct bind in twenty (guessed thresholds; the first replay with `--verify` sets them). The router emits no calibrated confidence of its own, so the verifier is the confidence signal; whether a verified write bind may skip the click is a question for after its false-accept rate is measured.
+
+## Why not X
+
+**Why not run everything the person is allowed to run?** Permission is checked after the guess and cannot catch a wrong guess; the misbound `config set channel --agent coding` was an allowed command with a different meaning. When the measured misbind rate is near zero, `never` stops being reserved and the setting answers this per scope.
+
+**Why not run reversible writes at once and offer Undo?** Undo needs the prior state captured per command (a `config set` over an existing value, a `reconfigure` of a branch), an inverse that exists for some rows and not others, and it leaves the wrong state live for everyone in the scope until someone notices: the misread in the trace would have sent every message in the channel to the coding agent meanwhile. It is the right shape for the `write` class once the misbind rate moves the default to `destructive` (open question 2); the receipt then grows an Undo where the offer had a Run, and the row this record adds is the row an undo needs.
+
+**Why not a stronger routing model instead of a button?** The router runs on every plain message, so a slower model taxes every question to protect the few writes; the verifier runs only on a write bind. And a better guess is still a guess: it lowers the misbind rate but does not show the person what will run, so it moves the default's timing, not the mechanism.
+
+**Why not majority voting?** A second sample of the same model under the same prompt mostly confirms the same error at double the latency (a guess; no repeated-sample replay exists). A verifier asks a different question of the same evidence.
+
+**Why not keep the paste?** People will not read it, it is truncated at 300 characters, and it treats a test run and a resident teardown as the same act.
+
+**Why not a stateless signed button?** It works on Slack and on no adapter with a short component id, and it cannot be one-time without a store; see [The confirmation](#the-confirmation).
+
+**Why not "reply yes" in the thread?** A reply is a fresh model read of prose that can itself be misread, and it carries no id, so it cannot name which offer it answers.
+
+**Why not a private `impact` field instead of MCP annotations?** The commands already are MCP tools, the bot's own MCP client already reads these hints from remote servers, and a private field says the same thing in a second language while leaving `tools/list` silent.
+
+## Boundaries
+
+Not here: the locked-keys list for org-only settings; any adapter beyond Slack, whose contract is defined and which the browser implements when record 0043's chat lands and a Discord adapter implements when one exists; a per-command opt-out for a person, which is the axis at `destructive` and nothing finer; the typed grammar, which runs a typed line at once as it always has. Routing to `ship` and the other presets confirms nothing here and stays under record 0036; a misread sentence that routes to `ship` remains the largest state change the door can start, and it is a preset's problem, not a command's. The commands plan's last unit, deleting the natural-form regexes, runs ahead of all of this under an interim amendment to record 0039 that lets exec-class commands run when routed. Compatibility: a Slack app with interactivity off, or a surface without components, sees today's pasteable line, so nothing breaks on day one; the MCP listing gains annotations, which every client ignores or reads. Every piece is additive and reversible: the annotations and the fence can stay while the confirmation is removed, the axis can stay while nothing asks, the rows expire on their own, and deleting one adapter method restores the paste.
+
+## Open questions
+
+| Question | Owner | Resolved by | Needed before |
+|---|---|---|---|
+| Does a button get read where a paste did not? | the maintainer | the first plan unit's paste-through rate for today's hand-back, then one week of minted, run, cancelled and expired counts after the button lands | the default relaxes |
+| Labels on `repo onboard`, `mcp promote`, `friction propose` | the owners of the repo, mcp and friction groups | their review of the table in the plan's first unit | the fence lands |
+| When `never` validates and the default relaxes to `destructive` | the maintainer | two consecutive weekly replays with the decoy row at 0 and fewer than 1 in 50 write binds wrong in command or arguments | the axis's second release |
+| Does the verifier earn its call? | the maintainer | the replay with `--verify`: at least half the write misbinds removed, under one rejected correct bind in twenty | the verifier ships |
+
+## Validation criteria
+
+Every row is `[gap]` today and names its unit; the rows for the axis's arithmetic, the adapter contract and the replay flags live in the plan.
+
+| Criterion | Proof |
+|---|---|
+| Every chat-exposed write declares `destructive`; a write without it fails the conformance suite naming the command; `tools/list` carries the hints; `blastRadius` is `read`, `exec`, `destructive` or `write` as the shape says | `[gap]` unit 1: `src/core/commandConformance.test.ts`, `src/channels/mcp.test.ts`, `src/core/dispatch/route.test.ts` |
+| A routed command at or after the effective class stores one confirmation and replies the offer with the full chat form; before it, it runs with the receipt; a secret-looking argument mints nothing and names the reason | `[gap]` unit 3: `src/core/dispatcher.test.ts` |
+| A confirmation runs once, for an actor whose `self` holds the requester, before expiry, with the stored input, through the typed path with `source: confirm`; expired, used and foreign clicks are refused with the named line; a store outage at mint falls back to the pasteable line | `[gap]` unit 3: `src/core/dispatch/confirm.test.ts` |
+| Live, human-gated: "use opus for coding here" replies the offer with buttons; Run changes the setting and the message shows the result; a second person's click is refused; "run the tests on main" in an onboarded repo runs with no button | `[gap]` unit 4, posted on the receipts tracker |
+
+## Sources
+
+- The maintainer's direction, 2026-09-17, quoted in the ask.
+- [0039](0039-the-front-door-writes-nothing-from-prose-and-never-routes-twice.md) (the clause this record replaces), [0036](0036-one-front-door-the-router-offers-every-command-and-ship.md) (the door), [0026](0026-capability-profiles-and-request-routing.md) (the boundary), [0008](0008-one-command-definition-every-surface.md) (`effect` on every definition), [0042](0042-a-dashboard-session-is-the-person-its-email-names-identity-not-authority.md) (the requester), [0043](0043-the-home-page-is-a-chat-the-browser-is-a-channel-and-a-turn-is-a-run.md) (the channel seam).
+- The route replay of 2026-09-16 23:02Z on the fast model, receipt on the receipts tracker (#234).
+- MCP tool annotations: the `ToolAnnotations` object of the Model Context Protocol specification.
