@@ -762,14 +762,20 @@ describe("routing block (routing.auto, routing.model)", () => {
   });
 });
 
-// Feature: docs/reference/specs/harness-pi.md item 1 — the `harness` block is
-// a retired key: it named a loop per preset while record 0032's series moved
-// the presets onto pi one at a time; there is one harness now. A config written
-// during the series still loads (every value `pi`), and `native` — the loop
-// that no longer exists — fails by name, so no setting reads as "this preset
-// runs the native loop" while nothing does.
-describe("harness block (a retired key: harness.<preset>: pi)", () => {
-  it("parses a mapping of presets to pi; an absent block leaves the field unset", () => {
+// Feature: docs/reference/specs/harness.md item 8; harness-pi.md item 1 — the
+// `harness` block puts a preset on a harness by the name the harness object
+// declares: `pi` or `opencode`, the roster's two words, read off the roster
+// (`HARNESS_NAMES`) so the validator spells no list of its own. A preset the
+// block does not name runs on pi; nothing defaults to OpenCode. Any other word
+// — `codex`, `native` (the deleted loop), a typo — fails the load naming the
+// words the roster has, so no setting reads as "this preset runs on X" while
+// nothing does.
+describe("harness block (harness.<preset>: pi or opencode)", () => {
+  it("parses a mapping of presets to the roster's words; an absent block leaves the field unset (every preset on pi)", () => {
+    expect(store(YAML_FIXTURE + "harness:\n  coding: opencode\n  review: pi\n").config.harness).toEqual({
+      coding: "opencode",
+      review: "pi",
+    });
     expect(store(YAML_FIXTURE + "harness:\n  coding: pi\n  review: pi\n").config.harness).toEqual({
       coding: "pi",
       review: "pi",
@@ -778,19 +784,31 @@ describe("harness block (a retired key: harness.<preset>: pi)", () => {
   });
 
   it("refuses a preset the registry does not know, naming it", () => {
-    expect(() => store(YAML_FIXTURE + "harness:\n  codng: pi\n")).toThrow(/harness\.codng is not a known agent/);
+    expect(() => store(YAML_FIXTURE + "harness:\n  codng: opencode\n")).toThrow(/harness\.codng is not a known agent/);
   });
 
-  it("refuses `native` — the deleted loop — and any other value, naming the one harness and the deletion", () => {
-    expect(() => store(YAML_FIXTURE + "harness:\n  coding: native\n")).toThrow(
-      /harness\.coding must be pi — the native loop is deleted and every preset runs on pi/,
+  it("refuses a word that is not a harness by name — codex, native, a case slip, a non-string — naming the two harnesses", () => {
+    expect(() => store(YAML_FIXTURE + "harness:\n  coding: codex\n")).toThrow(
+      /harness\.coding: codex is not a harness; the harnesses are pi and opencode/,
     );
-    expect(() => store(YAML_FIXTURE + "harness:\n  coding: claude\n")).toThrow(/harness\.coding must be pi/);
-    expect(() => store(YAML_FIXTURE + "harness:\n  coding: true\n")).toThrow(/harness\.coding must be pi/);
+    expect(() => store(YAML_FIXTURE + "harness:\n  coding: native\n")).toThrow(
+      /harness\.coding: native is not a harness; the harnesses are pi and opencode/,
+    );
+    expect(() => store(YAML_FIXTURE + "harness:\n  coding: OpenCode\n")).toThrow(
+      /harness\.coding: OpenCode is not a harness; the harnesses are pi and opencode/,
+    );
+    expect(() => store(YAML_FIXTURE + "harness:\n  coding: true\n")).toThrow(
+      /harness\.coding: true is not a harness; the harnesses are pi and opencode/,
+    );
   });
 
-  it("refuses a non-mapping at load", () => {
-    expect(() => store(YAML_FIXTURE + "harness: pi\n")).toThrow(/harness must be a mapping of preset to pi/);
+  it("refuses a non-mapping at load, naming the shape", () => {
+    expect(() => store(YAML_FIXTURE + "harness: opencode\n")).toThrow(
+      /harness must be a mapping of preset to a harness name \(pi or opencode\)/,
+    );
+    expect(() => store(YAML_FIXTURE + "harness:\n  - coding\n")).toThrow(
+      /harness must be a mapping of preset to a harness name \(pi or opencode\)/,
+    );
   });
 });
 
@@ -1816,6 +1834,46 @@ describe("pi block (pi.compaction.reserveTokens, pi.compaction.keepRecentTokens)
     expect(() => store(YAML_FIXTURE + "pi:\n  reserveTokens: 16384\n")).toThrow(/pi\.reserveTokens is not a known key/);
     expect(() => store(YAML_FIXTURE + "pi:\n  compaction:\n    enabled: false\n")).toThrow(
       /pi\.compaction\.enabled is not a known key/,
+    );
+  });
+});
+
+// Feature: docs/reference/specs/harness.md item 8 — the `opencode` block: the
+// compaction thresholds the harness writes into OpenCode's per-run
+// configuration for every run on OpenCode, under OpenCode's own words
+// (`buffer`, `keepTokens`), the way the `pi` block feeds pi; positive integers
+// in tokens, every other shape refused by name, and no block at all leaves
+// OpenCode on its own defaults.
+describe("opencode block (opencode.compaction.buffer, opencode.compaction.keepTokens)", () => {
+  it("parses both thresholds, either alone, and an empty compaction block; an absent block leaves the field unset", () => {
+    expect(
+      store(YAML_FIXTURE + "opencode:\n  compaction:\n    buffer: 20000\n    keepTokens: 8000\n").config.opencode,
+    ).toEqual({ compaction: { buffer: 20_000, keepTokens: 8_000 } });
+    expect(store(YAML_FIXTURE + "opencode:\n  compaction:\n    keepTokens: 8000\n").config.opencode).toEqual({
+      compaction: { keepTokens: 8_000 },
+    });
+    expect(store(YAML_FIXTURE + "opencode:\n  compaction: {}\n").config.opencode).toEqual({ compaction: {} });
+    expect(store().config.opencode).toBeUndefined();
+  });
+
+  it("refuses a threshold that is not a positive integer by name — a float, zero, a negative, a string", () => {
+    for (const value of ["1.5", "0", "-1", '"16384"', "true"])
+      expect(() => store(YAML_FIXTURE + `opencode:\n  compaction:\n    buffer: ${value}\n`)).toThrow(
+        /opencode\.compaction\.buffer must be a positive integer/,
+      );
+    expect(() => store(YAML_FIXTURE + "opencode:\n  compaction:\n    keepTokens: 2.5\n")).toThrow(
+      /opencode\.compaction\.keepTokens must be a positive integer/,
+    );
+  });
+
+  it("refuses a non-mapping and an unknown key at either level, naming the key — pi's words are not OpenCode's", () => {
+    expect(() => store(YAML_FIXTURE + "opencode: true\n")).toThrow(/opencode must be a mapping/);
+    expect(() => store(YAML_FIXTURE + "opencode:\n  compaction: 16384\n")).toThrow(
+      /opencode\.compaction must be a mapping/,
+    );
+    expect(() => store(YAML_FIXTURE + "opencode:\n  buffer: 16384\n")).toThrow(/opencode\.buffer is not a known key/);
+    expect(() => store(YAML_FIXTURE + "opencode:\n  compaction:\n    reserveTokens: 150000\n")).toThrow(
+      /opencode\.compaction\.reserveTokens is not a known key/,
     );
   });
 });

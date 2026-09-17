@@ -76,12 +76,27 @@ describe("one harness — the native loop, both provider adapters and the native
     expect(runLoop).not.toMatch(/\brunAgent\b/);
     expect(runLoop).not.toMatch(/\beffectiveHarness\b/);
     expect(runLoop).not.toMatch(/harness\s*===\s*"/);
+    // The roster is handed in (harness.md item 8): the loop imports no harness
+    // class and constructs none — it picks an object off `deps.harness.harnesses`.
+    expect(runLoop).not.toMatch(/\b(?:PiHarness|OpenCodeHarness)\b/);
+    expect(runLoop).not.toMatch(/harness\/pi\/piHarness\.js|harness\/opencode\/harness\.js/);
+  });
+
+  it("the roster lives in the process wiring — src/index.ts and src/cli.ts construct every harness by class — and the run stage reads it as data", () => {
+    for (const file of ["src/index.ts", "src/cli.ts"]) {
+      const text = readFileSync(join(REPO, file), "utf8");
+      expect(text, file).toMatch(/\bnew PiHarness\(/);
+      expect(text, file).toMatch(/\bnew OpenCodeHarness\(/);
+    }
   });
 
   it("no preset declares a harness, and the registry exports no table of harnesses", async () => {
     for (const agent of Object.values(AGENTS)) expect("harness" in agent, agent.name).toBe(false);
     const registry = (await import("../../agents/registry.js")) as Record<string, unknown>;
-    expect(registry.HARNESSES).toBeUndefined();
+    for (const name of ["HARNESSES", "HARNESS_NAMES", "DEFAULT_HARNESS", "harnessForPreset", "harnessFor"])
+      expect(registry[name], name).toBeUndefined();
+    const source = readFileSync(join(REPO, "src/agents/registry.ts"), "utf8");
+    expect(source).not.toMatch(/\b(?:PiHarness|OpenCodeHarness|HarnessRoster|HARNESS_NAMES)\b/);
   });
 
   it("the toolset table holds only tools the bot relays — none of the workspace tools pi has of its own", async () => {

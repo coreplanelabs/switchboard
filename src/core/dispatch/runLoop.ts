@@ -27,6 +27,7 @@ import {
   type HarnessSession,
 } from "../harness/contract.js";
 import { prepareRelaunch } from "./relaunch.js";
+import { harnessForPreset } from "../harness/roster.js";
 import { harnessContainerFor } from "../harness/botHostContainer.js";
 import { workspaceBindingFor } from "../../execution/factory.js";
 import { isContainerGone } from "../harness/container.js";
@@ -653,8 +654,33 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   if (postedBefore) reviewHead = postedBefore.head;
   // The row's harness facts (harness.md item 7; harness-pi item 8), read by
   // whichever harness wrote them: for the harness's re-attach or, on a finish,
-  // for ending the process the previous generation left behind.
+  // for ending the process the previous generation left behind. The row's
+  // word wins (item 8): the harness that judges, ends or resumes this run is
+  // the one the facts name, picked off the roster, whatever the preset's
+  // configuration word says now — a preset flipped between generations never
+  // mismatches a run in flight. A fresh run, or a row with no facts, opens on
+  // the preset's word.
   const facts = resume ? harnessFactsOf(resume.row.state.harness) : undefined;
+  const harnessOf = (roster: NonNullable<RunDeps["harness"]>) =>
+    facts
+      ? roster.harnesses[facts.harness]
+      : harnessForPreset(roster.harnesses, deps.config.config.harness, agent.name);
+  // A row that names a harness this build does not know (a rollback under a
+  // newer build's row, a harness removed) is no facts, so the run is rebuilt on
+  // the preset's harness — the survival clause working — but the process the
+  // row names is neither judged nor ended here, and item 7's rule for a
+  // process that is not this one's to judge is "named, not ended": one
+  // `resumed` note says so before the rebuild, or before a finish runs its
+  // post-steps with that process still up.
+  const unknownWord = facts === undefined ? unknownHarnessWordOf(resume?.row.state.harness) : undefined;
+  const noteUnknownWord = (ending: string) => {
+    if (unknownWord === undefined) return;
+    onEvent({
+      type: "run_note",
+      kind: "resumed",
+      summary: `the row names the ${unknownWord.word} harness, which this build does not know; its process (pid ${unknownWord.pid} in container ${unknownWord.container}) was neither judged nor ended here; ${ending}`,
+    });
+  };
   // The facts as this run last saved them: the relaunch count the ceiling is
   // read off (harness.md item 6), whichever generation wrote it; the harness's
   // every save goes through here and onto the row.
@@ -675,22 +701,23 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       });
       if (facts) {
         // The loop had ended too, but the process that would have ended the
-        // harness's process died first: the harness finds it (harness.md item
-        // 7) and ends it at the pid and root the row recorded, best-effort,
-        // only in the container the row names: in another container that pid
-        // is a stranger's, and another harness's process is not this one's to
-        // judge — either is named, not ended.
+        // harness's process died first: the harness the facts name finds it
+        // (harness.md items 7 and 8) and ends it at the pid and root the row
+        // recorded, best-effort, only in the container the row names: in
+        // another container that pid is a stranger's, and a row the judge
+        // disowns is not its to end — either is named, not ended.
         if (!deps.harness)
           throw new Error(
-            `the ${agent.name} preset's run left ${facts.harness} harness facts on its row, but this process has no harness deps to end that process with`,
+            `the ${agent.name} preset's run left ${facts.harness} harness facts on its row, but this process has no harness roster to end that process with`,
           );
+        const judge = harnessOf(deps.harness);
         const container =
           deps.harness.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine);
         // The container itself may be gone under the question (harness.md
         // item 9: the seam rethrows the executor's typed word instead of
         // answering no name): then nothing of the leftover is here to end, the
         // record says so, and the post-steps run with the answer as before.
-        const found = await deps.harness.harness.find(facts, container).catch((err: unknown) => {
+        const found = await judge.find(facts, container).catch((err: unknown) => {
           if (!isContainerGone(err)) throw err;
           return "gone" as const;
         });
@@ -714,48 +741,54 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             break;
           }
           case "another-harness":
+            // The roster's object was picked by the row's own word, so this
+            // is the judge disowning a row that names it — said, never ended.
             onEvent({
               type: "run_note",
               kind: "resumed",
-              summary: `the run's row carries ${facts.harness} harness facts (pid ${facts.pid}), and this run is driven by ${deps.harness.harness.name}: that process was neither judged nor ended here`,
+              summary: `the run's row carries ${facts.harness} harness facts (pid ${facts.pid}) that the ${judge.name} harness does not own: that process was neither judged nor ended here`,
             });
             break;
           default:
-            await deps.harness.harness.end(facts, container);
+            await judge.end(facts, container);
         }
-      }
+      } else noteUnknownWord("the run finished on the answer it already had");
       answer = answerUnderEnding(finish.answer, loopEnding, agent.maxMinutes);
     } else {
       // The harness (harness.md; pi's is harness-pi.md): the process in the
       // run's own container, the bearer as its key, its bridge putting its
       // events on this same stream, the relayed tools running here under this
-      // same tool context.
+      // same tool context. Which object: the row's word for a resume, the
+      // preset's configuration word for a fresh run (item 8, `harnessOf`).
       if (!deps.harness)
-        throw new Error(`the ${agent.name} preset runs on the pi harness, but this process has no harness deps`);
+        throw new Error(`the ${agent.name} preset runs on a harness, but this process has no harness roster`);
       const harnessDeps = deps.harness;
-      // Where pi runs and how it reaches the bot follow the run's machine class
-      // (harness-pi.md item 12): a class with a workspace has an executor to
-      // exec through, and pi reaches the bot at its public URL; `none` has no
-      // workspace, so pi is a child of the bot and reaches this process's own
-      // server over loopback.
+      const harness = harnessOf(harnessDeps);
+      noteUnknownWord(`the run was rebuilt on ${harness.name}`);
+      // Where the harness runs and how it reaches the bot follow the run's
+      // machine class (harness-pi.md item 12): a class with a workspace has an
+      // executor to exec through, and the process reaches the bot at its
+      // public URL; `none` has no workspace, so the process is a child of the
+      // bot and reaches this process's own server over loopback.
       const onBotHost = profile.machine === "none";
       const harnessUrl = onBotHost ? deps.harness.loopbackUrl : deps.harness.harnessUrl;
       if (!harnessUrl)
         throw new Error(
           onBotHost
-            ? "the pi harness needs PORT: a run without a workspace runs pi on the bot host, which reaches the model proxy over loopback"
-            : "the pi harness needs PUBLIC_BASE_URL: the run's container reaches the model proxy through it",
+            ? `the ${harness.name} harness needs PORT: a run without a workspace runs its process on the bot host, which reaches the model proxy over loopback`
+            : `the ${harness.name} harness needs PUBLIC_BASE_URL: the run's container reaches the model proxy through it`,
         );
       if (ctx.bearer === undefined)
-        throw new Error("the pi harness needs the run's model-proxy bearer, and this process minted none");
+        throw new Error(`the ${harness.name} harness needs the run's model-proxy bearer, and this process minted none`);
       // The row's facts are read by the harness that wrote them (harness.md
-      // item 7): a row another harness wrote is refused by the seam's door
-      // (`openThroughSeam`, below) before the harness is asked anything — said
-      // on the record first, then thrown for the finally and the dispatcher's
-      // restart — so no harness repeats the check.
+      // item 7): the object above was picked by the row's own word, and the
+      // seam's door (`openThroughSeam`, below) keeps the refusal of a foreign
+      // row as its defence for any caller that is not this loop — said on the
+      // record first, then thrown for the finally and the dispatcher's restart.
       const { provider: providerName, model: modelId } = parseModelRef(resolved.modelRef);
       const providerCfg = deps.config.config.providers[providerName];
-      if (!providerCfg) throw new Error(`the pi harness found no provider named ${providerName} in the config`);
+      if (!providerCfg)
+        throw new Error(`the ${harness.name} harness found no provider named ${providerName} in the config`);
       // The gate's push rules (harness-pi.md item 7) follow the thread the
       // way the post-step's PR target does (CodingPrTarget): when the thread
       // came from a pull request or a coordinator's spawn, the thread is bound
@@ -793,7 +826,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         : undefined;
       const openRun = () =>
         openThroughSeam(
-          harnessDeps.harness,
+          harness,
           {
             container:
               harnessDeps.containerFor?.(executor, profile.machine) ?? harnessContainerFor(executor, profile.machine),
@@ -864,7 +897,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               repoCtx,
               root,
               clock,
-              harness: harnessDeps.harness,
+              harness,
               replaced: err,
               facts: lastFacts,
               binding: workspaceBinding,
@@ -1395,4 +1428,19 @@ function answerUnderEnding(text: string, ending: LoopEnding, maxMinutes: number)
     default:
       return text ? `⚠️ _${ending.summary}_\n\n${text}` : `⚠️ ${ending.summary}`;
   }
+}
+
+/** The harness word a row names when `harnessFactsOf` reads it as no facts —
+ *  a word outside this build's roster — with the pid and container it recorded,
+ *  each `unknown` when the row lacks it; nothing for a row that names no
+ *  harness at all (a fresh run, a row from before the seam wrote one). */
+function unknownHarnessWordOf(state: unknown): { word: string; pid: string; container: string } | undefined {
+  if (typeof state !== "object" || state === null) return undefined;
+  const { harness, pid, container } = state as Record<string, unknown>;
+  if (typeof harness !== "string") return undefined;
+  return {
+    word: harness,
+    pid: typeof pid === "number" ? String(pid) : "unknown",
+    container: typeof container === "string" ? container : "unknown",
+  };
 }

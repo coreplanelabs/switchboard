@@ -278,6 +278,7 @@ Units U4 to U7 of this plan's first version were Codex-specific and are retired;
   - `harness: { coding: opencode }` selects `OpenCodeHarness` for coding runs and `PiHarness` for the rest; `harness: { coding: codex }` is refused by name.
   - The source scan still forbids a harness word in `agents/registry.ts`.
 - **Verification:** human-gated live receipt on staging: a coding run on OpenCode in a scratch repository on the resident, its record complete on the run page, one refused command visible as `tool_refused`; posted on the tracker.
+- **Amended 2026-09-17 (the unit's PR):** built; the precondition passes at the loop (the OpenCode counterpart of the pi relaunch test in `runLoop.test.ts`, over the conformance driver's fake `serve` bound to a bare container); a row naming a harness this build does not know is rebuilt on the preset's harness with one `resumed` note naming its word, pid and container (the record owner's review); the three live receipts owed on #1341; #1420 and the conformance matrix as a generated region of harness.md item 11 as follow-ups.
 
 ### U8. `RunBearerStore.rotate` and the mid-run `interrupted` path
 

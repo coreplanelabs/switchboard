@@ -18,6 +18,15 @@
 // The one declared cannot is the maintainer's decision (record 0038's fifth
 // amendment): OpenCode's gate cannot be unforgeable by construction — a forged
 // approval is caught by detection, one tool call late, not prevented.
+//
+// The same serve has a second door, `scriptOpenCodeServe`: bound to a bare
+// container before any run exists, for a run the RUN LOOP opens (the
+// configuration word's end-to-end tests in `src/core/dispatch/runLoop.test.ts`,
+// where `containerFor` hands the loop a container and nothing of the run). That
+// serve learns the run lazily — the run id from the launch's environment, the
+// relayed tools and the identity from the relay registration the harness makes
+// before it launches, the model and the system prompt from the configuration it
+// wrote — so one implementation answers both doors and no second serve exists.
 
 import type { AgentDef, Identity } from "../../../../agents/registry.js";
 import type { Executor } from "../../../../execution/executor.js";
@@ -27,6 +36,8 @@ import type { CompletionRequest, ProviderConfig, ToolDef } from "../../../provid
 import type { RunEvent } from "../../../runEvents.js";
 import type { StepReport } from "../../../runLedger/stepReport.js";
 import { RunControl } from "../../../runRegistry/runControl.js";
+import type { RunBearerStore } from "../../../modelProxy/runBearers.js";
+import type { RunnableTool } from "../../../../tools/runnableTool.js";
 import { FollowUpInbox } from "../../../threadAdmission.js";
 import { openThroughSeam, type HarnessDeps, type HarnessFacts, type HarnessRun } from "../../contract.js";
 import {
@@ -41,7 +52,7 @@ import type { DrivenRun, HarnessDriver, ModelTurn, RunScript } from "../../testi
 import { openCodeToolNameWord } from "../bridge.js";
 import { OpenCodeHarness } from "../harness.js";
 import { OPENCODE_VERSION } from "../client.js";
-import { openCodeProviderPackage, openCodeRunPaths } from "../process.js";
+import { OPENCODE_AGENT, openCodeProviderPackage, openCodeRunPaths, openCodeRunPathsAt } from "../process.js";
 
 const RUN_ID = "run-c";
 const SESSION_ID = "ses_run-c";
@@ -146,6 +157,42 @@ export interface FakeServeOptions {
   registry?: HarnessRegistry;
   /** One clause's behaviour removed, for the mutation rows. */
   mutate?: MutatedClause;
+  /** The word the container renames itself to when the script replaces it
+   *  (`containerReplacedBeforeModelCall`); the fake's own replaced word unless given. */
+  replacedWord?: string;
+}
+
+/** What the serve knows of the run it answers for, resolved once at the first
+ *  need: eagerly from the `HarnessRun` and `HarnessDeps` the conformance driver
+ *  built, or lazily from the container and the relay registry for a run the
+ *  run loop opened (`scriptOpenCodeServe`). */
+interface ServeRun {
+  runId: string;
+  /** The run's root, `openCodeRunPaths(runId).dir`: where the configuration the launch wrote is read from. */
+  root: string;
+  identity: Identity;
+  /** The relayed tools — Switchboard's, run in the bot through the registration. */
+  tools: readonly RunnableTool[];
+  model: { id: string };
+  system: string | undefined;
+  maxTokens: number;
+  /** The run's control, for `hardStopBeforeModelCall`; a serve bound to a bare container has none. */
+  control?: RunControl;
+}
+
+/** What the serve needs of the process: the relay registry the run is registered
+ *  on, the pacing for a scripted hard stop, and the bearer store to meter each
+ *  model call on (pi's scripted double does the same), when a test hands one. */
+interface ServeDeps {
+  registry: HarnessRegistry;
+  sleep: (ms: number) => Promise<void>;
+  tickMs?: number;
+  bearers?: RunBearerStore;
+}
+
+/** The serve as a test holds it: the model requests it recorded. */
+export interface ScriptedOpenCode {
+  readonly modelCalls: CompletionRequest[];
 }
 
 /** The scripted OpenCode: answers the harness's writes and plays the row's
@@ -163,30 +210,60 @@ class ScriptedServe {
   private readonly replyPostThrows: boolean;
   private readonly steerPostFails: boolean;
   private readonly mutate: MutatedClause | undefined;
-  private readonly offered: Set<string>;
-  private readonly relayNames: Set<string>;
-  private readonly toolDefs: ToolDef[];
+  private readonly replacedWord: string;
+  /** The run, resolved at the first need and kept (see `ServeRun`). */
+  private resolved: (ServeRun & { offered: Set<string>; relayNames: Set<string>; toolDefs: ToolDef[] }) | undefined;
   /** The model requests the driver records — the proxy's wire, from the store the model saw. */
   readonly modelCalls: CompletionRequest[] = [];
 
   constructor(
     private readonly container: FakeHarnessContainer,
-    private readonly run: HarnessRun,
+    private readonly source: () => ServeRun,
     private readonly script: RunScript,
-    private readonly deps: HarnessDeps,
+    private readonly deps: ServeDeps,
     options: FakeServeOptions = {},
   ) {
     this.replyFailuresLeft = options.failReplyPosts ?? 0;
     this.replyPostThrows = options.replyPostThrows === true;
     this.steerPostFails = options.steerPostFails === true;
     this.mutate = options.mutate;
-    const builtins = new OpenCodeHarness().builtinTools(run.agent.identity);
-    this.relayNames = new Set(run.tools.map((t) => t.name));
-    this.offered = new Set([...builtins, ...this.relayNames]);
-    this.toolDefs = [
-      ...builtins.map((name): ToolDef => ({ name, description: "", inputSchema: {} })),
-      ...run.tools.map((t): ToolDef => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
-    ];
+    this.replacedWord = options.replacedWord ?? REPLACED_WORD;
+  }
+
+  /** The run this serve answers for, with the tool tables derived from it once. */
+  private get run(): ServeRun & { offered: Set<string>; relayNames: Set<string>; toolDefs: ToolDef[] } {
+    if (this.resolved === undefined) {
+      const run = this.source();
+      const builtins = new OpenCodeHarness().builtinTools(run.identity);
+      const relayNames = new Set(run.tools.map((t) => t.name));
+      this.resolved = {
+        ...run,
+        relayNames,
+        offered: new Set([...builtins, ...relayNames]),
+        toolDefs: [
+          ...builtins.map((name): ToolDef => ({ name, description: "", inputSchema: {} })),
+          ...run.tools.map((t): ToolDef => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
+        ],
+      };
+    }
+    return this.resolved;
+  }
+  /** The session the fake mints for the run: one per run, named after it. */
+  private get sessionID(): string {
+    return `ses_${this.run.runId}`;
+  }
+  private get offered(): Set<string> {
+    return this.run.offered;
+  }
+  private get relayNames(): Set<string> {
+    return this.run.relayNames;
+  }
+  private get toolDefs(): ToolDef[] {
+    return this.run.toolDefs;
+  }
+  /** The configuration the launch wrote, under the run's root. */
+  private configPath(): string {
+    return openCodeRunPathsAt(this.run.root).config;
   }
 
   private emitEvent(type: string, data: Record<string, unknown>): void {
@@ -200,7 +277,7 @@ class ScriptedServe {
     this.container.emit({
       feed: "permissions",
       at: NOW,
-      sessionID: SESSION_ID,
+      sessionID: this.sessionID,
       reason: "session.step.ended",
       data: pending,
     });
@@ -209,7 +286,7 @@ class ScriptedServe {
     this.container.emit({
       feed: "messages",
       at: NOW,
-      sessionID: SESSION_ID,
+      sessionID: this.sessionID,
       reason: "session.step.ended",
       data: [...this.store],
     });
@@ -228,7 +305,7 @@ class ScriptedServe {
     // generation's launch: the row's server is still up there only when the
     // script says so; otherwise nothing listens and the connection is refused,
     // as the container answers for a port with no server.
-    if (req.port !== PORT) {
+    if (req.port !== this.container.freePort) {
       if (this.script.processAliveOnResume) return j(200, { healthy: true, version: OPENCODE_VERSION, pid: 77 });
       throw new HarnessContainerError(
         "request",
@@ -239,9 +316,9 @@ class ScriptedServe {
       return j(200, { healthy: true, version: OPENCODE_VERSION, pid: 77 });
     if (req.method === "GET" && req.path === "/api/config") {
       // The document the launch actually wrote, so readiness holds the run's own config.
-      const written = this.container.files.get(configPath());
+      const written = this.container.files.get(this.configPath());
       const info = written ? (JSON.parse(written) as Record<string, unknown>) : {};
-      return j(200, [{ type: "document", path: configPath(), info }]);
+      return j(200, [{ type: "document", path: this.configPath(), info }]);
     }
     if (req.method === "POST" && req.path === "/api/plugin/await-activation")
       return { status: 204, headers: {}, body: "" };
@@ -252,9 +329,9 @@ class ScriptedServe {
       if (this.mutate !== "conversation")
         for (const m of Array.isArray(body.messages) ? body.messages : [])
           this.store.push(m as Record<string, unknown>);
-      return j(200, { data: { id: (body.info as { id?: string })?.id ?? SESSION_ID } });
+      return j(200, { data: { id: (body.info as { id?: string })?.id ?? this.sessionID } });
     }
-    if (req.method === "POST" && req.path === "/api/session") return j(200, { data: { id: SESSION_ID } });
+    if (req.method === "POST" && req.path === "/api/session") return j(200, { data: { id: this.sessionID } });
     if (req.method === "POST" && req.path.endsWith("/wait")) return { status: 204, headers: {}, body: "" };
     if (req.method === "POST" && req.path.endsWith("/prompt")) {
       const body = parseBody(req.body);
@@ -316,24 +393,29 @@ class ScriptedServe {
 
   /** The store the model saw, as the completion request the proxy would carry. */
   private recordModelCall(): void {
+    this.deps.bearers?.consumeTurn(this.run.runId);
     this.modelCalls.push({
       model: this.run.model.id,
       system: this.run.system,
       messages: storeToMessages(this.store),
       tools: this.toolDefs,
-      maxTokens: this.run.agent.maxTokens,
+      maxTokens: this.run.maxTokens,
     });
   }
 
   private async play(): Promise<void> {
-    if (this.script.unknownEventKind) this.emitEvent(this.script.unknownEventKind, { sessionID: SESSION_ID });
+    if (this.script.unknownEventKind) this.emitEvent(this.script.unknownEventKind, { sessionID: this.sessionID });
     for (let t = 0; t < this.script.turns.length && !this.interrupted; t++) {
       // A hard stop before this model call (`hardStopBeforeModelCall`): request
       // it, then wait for the loop to see it and interrupt the session (the
       // interrupt route sets `interrupted`) before this turn plays — so the run
       // ends hard-stopped, never on this turn's answer.
       if (this.script.hardStopBeforeModelCall === t + 1) {
-        this.run.control?.requestStop("hard");
+        if (this.run.control === undefined)
+          throw new Error(
+            "hardStopBeforeModelCall needs the run's control: hand the serve a run, not a bare container",
+          );
+        this.run.control.requestStop("hard");
         for (let i = 0; i < 200 && !this.interrupted; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
       }
       if (this.interrupted) break;
@@ -346,7 +428,7 @@ class ScriptedServe {
         // feed read to fail with the executor's word once the records already
         // written — this turn among them — are read. No further turns; the call
         // stays open, its result never delivered.
-        this.container.vm = REPLACED_WORD;
+        this.container.vm = this.replacedWord;
         this.container.failOnceDrained = new HarnessContainerRuntimeReplacedError(
           "read",
           "runtime-replaced: the sandbox was replaced under the run",
@@ -355,19 +437,19 @@ class ScriptedServe {
       }
     }
     this.emitEvent(this.interrupted ? "session.execution.interrupted" : "session.execution.succeeded", {
-      sessionID: SESSION_ID,
+      sessionID: this.sessionID,
       ...(this.interrupted ? { reason: "user" } : {}),
     });
   }
 
   private async playTurn(turn: ModelTurn, index: number): Promise<void> {
     const assistantMessageID = `msg_a${index}`;
-    this.emitEvent("session.step.started", { sessionID: SESSION_ID, assistantMessageID, agent: "switchboard" });
+    this.emitEvent("session.step.started", { sessionID: this.sessionID, assistantMessageID, agent: "switchboard" });
     const content: Record<string, unknown>[] = [];
     for (const part of turn.content) {
       if (part.type === "text") {
-        this.emitEvent("session.text.started", { sessionID: SESSION_ID, assistantMessageID });
-        this.emitEvent("session.text.ended", { sessionID: SESSION_ID, assistantMessageID, text: part.text });
+        this.emitEvent("session.text.started", { sessionID: this.sessionID, assistantMessageID });
+        this.emitEvent("session.text.ended", { sessionID: this.sessionID, assistantMessageID, text: part.text });
         content.push({ type: "text", text: part.text });
       } else if (part.type === "tool_use") {
         content.push(await this.playToolCall(part, assistantMessageID, index));
@@ -375,7 +457,7 @@ class ScriptedServe {
       }
     }
     this.emitEvent("session.step.ended", {
-      sessionID: SESSION_ID,
+      sessionID: this.sessionID,
       assistantMessageID,
       finish: "stop",
       cost: 0,
@@ -430,13 +512,13 @@ class ScriptedServe {
     const input = (typeof part.input === "object" && part.input !== null ? part.input : {}) as Record<string, unknown>;
     const ask = toolAsk(part.name, input);
     this.emitEvent("session.tool.input.started", {
-      sessionID: SESSION_ID,
+      sessionID: this.sessionID,
       assistantMessageID,
       id: callId,
       name: ask.name,
     });
     this.emitEvent("session.tool.input.ended", {
-      sessionID: SESSION_ID,
+      sessionID: this.sessionID,
       assistantMessageID,
       id: callId,
       text: JSON.stringify(input),
@@ -445,7 +527,7 @@ class ScriptedServe {
     // the record loses its `tool_call` vocabulary.
     if (this.mutate !== "record")
       this.emitEvent("session.tool.called", {
-        sessionID: SESSION_ID,
+        sessionID: this.sessionID,
         assistantMessageID,
         id: callId,
         input,
@@ -457,7 +539,7 @@ class ScriptedServe {
     if (!this.offered.has(part.name)) {
       const message = `No tool named "${ask.name}" is currently available. Please use a tool from the available tool list.`;
       this.emitEvent("session.tool.failed", {
-        sessionID: SESSION_ID,
+        sessionID: this.sessionID,
         assistantMessageID,
         id: callId,
         executed: false,
@@ -470,7 +552,7 @@ class ScriptedServe {
     if (firstTurn && this.script.bypassGate) {
       const content = [{ type: "text", text: ownToolResultText(part.name, input) }];
       this.emitEvent("session.tool.success", {
-        sessionID: SESSION_ID,
+        sessionID: this.sessionID,
         assistantMessageID,
         id: callId,
         content,
@@ -482,7 +564,7 @@ class ScriptedServe {
     const requestID = `per_${callId}`;
     const request = {
       id: requestID,
-      sessionID: SESSION_ID,
+      sessionID: this.sessionID,
       action: ask.action,
       resources: ask.resources,
       source: { type: "tool", messageID: assistantMessageID, id: callId },
@@ -492,10 +574,10 @@ class ScriptedServe {
     // request id before the bot's reply lands; the server runs the tool against
     // the bot's decision.
     if (firstTurn && this.script.forgeApproval) {
-      this.emitEvent("permission.replied", { sessionID: SESSION_ID, requestID, reply: "once" });
+      this.emitEvent("permission.replied", { sessionID: this.sessionID, requestID, reply: "once" });
       const content = [{ type: "text", text: ownToolResultText(part.name, input) }];
       this.emitEvent("session.tool.success", {
-        sessionID: SESSION_ID,
+        sessionID: this.sessionID,
         assistantMessageID,
         id: callId,
         content,
@@ -506,7 +588,7 @@ class ScriptedServe {
     this.emitPermissions([request]);
     const decision = await this.waitReply(requestID);
     this.emitPermissions([]);
-    this.emitEvent("permission.replied", { sessionID: SESSION_ID, requestID, reply: decision.reply });
+    this.emitEvent("permission.replied", { sessionID: this.sessionID, requestID, reply: decision.reply });
     // The container is replaced with this call in flight (survival's ceiling):
     // the bot decided, but the result never comes back — the server and the tool
     // die with the old container's disk. Leave the call open (a `running` tool
@@ -533,7 +615,7 @@ class ScriptedServe {
           ? await this.runRelay(callId, part.name, input)
           : [{ type: "text", text: ownToolResultText(part.name, input) }];
       this.emitEvent("session.tool.success", {
-        sessionID: SESSION_ID,
+        sessionID: this.sessionID,
         assistantMessageID,
         id: callId,
         content,
@@ -543,7 +625,7 @@ class ScriptedServe {
     }
     const message = decision.message ?? "The user rejected permission to use this specific tool call.";
     this.emitEvent("session.tool.failed", {
-      sessionID: SESSION_ID,
+      sessionID: this.sessionID,
       assistantMessageID,
       id: callId,
       executed: false,
@@ -571,10 +653,6 @@ class ScriptedServe {
     const text = answer.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n");
     return [{ type: "text", text: text || "(no output)" }];
   }
-}
-
-function configPath(): string {
-  return openCodeRunPaths(RUN_ID).config;
 }
 
 /** The store as the conversation the model saw (`ChatMessage[]`): a user
@@ -739,7 +817,22 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
   };
 
   const harness = new OpenCodeHarness();
-  const serve = new ScriptedServe(container, run, script, deps, options);
+  const serve = new ScriptedServe(
+    container,
+    () => ({
+      runId: run.runId,
+      root: openCodeRunPaths(run.runId).dir,
+      identity: run.agent.identity,
+      tools: run.tools,
+      model: run.model,
+      system: run.system,
+      maxTokens: run.agent.maxTokens,
+      control: run.control,
+    }),
+    script,
+    { registry, sleep: deps.sleep, ...(deps.tickMs !== undefined ? { tickMs: deps.tickMs } : {}) },
+    options,
+  );
   container.onRequest = (req) => serve.onRequest(req);
   // The tailer's readiness note, as a subscribed tailer would have written it.
   container.emit({ feed: "tailer", at: 0, note: "started" });
@@ -771,4 +864,77 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     modelCalls: serve.modelCalls,
     statusReports,
   };
+}
+
+/** What `scriptOpenCodeServe` is handed: the row's script, the relay registry
+ *  the run loop registers the run on, and the bearer store to meter each model
+ *  call on (so the loop's rotation can be read off the meter, as pi's scripted
+ *  double lets it); `options` are the serve's faults. */
+export interface ScriptOpenCodeServeOptions {
+  script: RunScript;
+  registry: HarnessRegistry;
+  bearers?: RunBearerStore;
+  options?: FakeServeOptions;
+}
+
+/** The scripted serve bound to a bare container, for a run the RUN LOOP opens
+ *  through `containerFor`: nothing of the run exists when the container is
+ *  handed over, so the serve learns it at its first request — the run id from
+ *  the `opencode` start's environment (the launch sets `SWITCHBOARD_RUN_ID`),
+ *  the relayed tools and the identity from the relay registration the harness
+ *  makes before it launches (`registry.get(runId)`), the model, the system
+ *  prompt and the token cap from the configuration the launch wrote under the
+ *  run's root. The tailer's readiness notes are written at bind, as a
+ *  subscribed tailer would have written them. The same `ScriptedServe` as the
+ *  conformance driver's, through a second door. */
+export function scriptOpenCodeServe(
+  container: FakeHarnessContainer,
+  opts: ScriptOpenCodeServeOptions,
+): ScriptedOpenCode {
+  const source = (): ServeRun => {
+    const start = container.starts.find((st) => st.command === "opencode");
+    if (start === undefined)
+      throw new Error("the scripted serve was asked before the launch: no opencode start on the container");
+    const runId = start.env.SWITCHBOARD_RUN_ID;
+    if (runId === undefined)
+      throw new Error("the opencode start names no run: SWITCHBOARD_RUN_ID is missing from its environment");
+    const live = opts.registry.get(runId);
+    if (live === undefined)
+      throw new Error(`the run ${runId} is not registered on the relay: the harness registers before it launches`);
+    const root = openCodeRunPaths(runId).dir;
+    const config = JSON.parse(container.files.get(openCodeRunPathsAt(root).config) ?? "{}") as {
+      model?: string;
+      providers?: Record<string, { models?: Record<string, { limit?: { output?: number } }> }>;
+      agents?: Record<string, { system?: string }>;
+    };
+    const modelRef = config.model ?? "";
+    const id = modelRef.slice(modelRef.indexOf("/") + 1);
+    const provider = Object.values(config.providers ?? {})[0];
+    return {
+      runId,
+      root,
+      identity: live.rules.identity,
+      tools: live.tools,
+      model: { id },
+      system: config.agents?.[OPENCODE_AGENT]?.system,
+      maxTokens: provider?.models?.[id]?.limit?.output ?? 0,
+    };
+  };
+  const serve = new ScriptedServe(
+    container,
+    source,
+    opts.script,
+    {
+      registry: opts.registry,
+      sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 2))),
+      tickMs: 5,
+      ...(opts.bearers ? { bearers: opts.bearers } : {}),
+    },
+    opts.options,
+  );
+  container.onRequest = (req) => serve.onRequest(req);
+  // The tailer's readiness note, as a subscribed tailer would have written it.
+  container.emit({ feed: "tailer", at: 0, note: "started" });
+  container.emit({ feed: "tailer", at: 1, note: "connected", connections: 1 });
+  return serve;
 }

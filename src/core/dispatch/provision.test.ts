@@ -17,6 +17,7 @@ import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { RepoContext } from "../repoContext.js";
 import { RunRegistry } from "../runRegistry.js";
 import { PiHarness } from "../harness/pi/piHarness.js";
+import { OpenCodeHarness } from "../harness/opencode/harness.js";
 import { HarnessRegistry } from "../harness/pi/relay.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { durableInboxMessage } from "../runLedger/inboxMessage.js";
@@ -103,11 +104,11 @@ grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
 `;
 
-function configStore(dir: string): ConfigStore {
+function configStore(dir: string, extraYaml = ""): ConfigStore {
   const path = join(dir, "config.yaml");
   writeFileSync(
     path,
-    YAML.replace("organization: acme", `organization: acme\nworkspaceDir: ${join(dir, "workspaces")}`),
+    YAML.replace("organization: acme", `organization: acme\nworkspaceDir: ${join(dir, "workspaces")}`) + extraYaml,
   );
   return new ConfigStore(path, join(dir, "overrides.json"));
 }
@@ -124,11 +125,11 @@ class RecordingLedger extends NullLedgerWriteThrough {
   }
 }
 
-function deps(): ProvisionDeps & { ledger: RecordingLedger } {
+function deps(extraYaml = ""): ProvisionDeps & { ledger: RecordingLedger } {
   const dir = mkdtempSync(join(tmpdir(), "swb-provision-"));
   const ledger = new RecordingLedger();
   return {
-    config: configStore(dir),
+    config: configStore(dir, extraYaml),
     memory: new NullMemoryStore(),
     mcp: new NullMcpToolSource(),
     capabilities: NO_CAPABILITIES,
@@ -441,9 +442,10 @@ describe("registerRun — the run's row on every surface before the attach", () 
     expect(metas.map((e) => (e as { headSha?: string }).headSha)).toEqual(["a".repeat(40), "b".repeat(40)]);
   });
 
-  // docs/reference/specs/harness.md item 8: the run's meta names the harness
-  // the process drives runs with, so a record can be told from another
-  // harness's; a process without one names none.
+  // docs/reference/specs/harness.md items 8 and 10: the run's meta names the
+  // harness the preset's runs open on — the roster's object for the preset's
+  // configuration word, pi without one — so a record can be told from another
+  // harness's; a process without a roster names none.
   it("run_meta carries the harness object's name when the process has one, and no harness field without", async () => {
     const d = deps();
     const r = request(d, "fix the login bug", "coding");
@@ -467,9 +469,32 @@ describe("registerRun — the run's row on every surface before the attach", () 
       shell: r.shell,
       admitted: r.admitted,
     };
-    await registerRun({ ...d, harness: { harness: new PiHarness(), registry: new HarnessRegistry() } }, ctx);
+    const roster = { pi: new PiHarness(), opencode: new OpenCodeHarness() };
+    await registerRun({ ...d, harness: { harnesses: roster, registry: new HarnessRegistry() } }, ctx);
     const meta = ctx.registry.snapshotById("run-p")!.events.find((e) => e.type === "run_meta");
     expect(meta).toMatchObject({ type: "run_meta", agent: "coding", harness: "pi" });
+    // The configuration word picks the name: `harness: { coding: opencode }` names OpenCode on a coding run and pi on the rest.
+    const worded = deps("harness:\n  coding: opencode\n");
+    const w = request(worded, "fix the login bug", "coding");
+    const onOpenCode = new RunRegistry({ genId: () => "run-w", genToken: () => "tok" });
+    await registerRun(
+      { ...worded, harness: { harnesses: roster, registry: new HarnessRegistry() } },
+      { ...ctx, msg: w.message, agent: w.agent, resolved: w.resolved, directives: w.directives, registry: onOpenCode },
+    );
+    expect(onOpenCode.snapshotById("run-w")!.events.find((e) => e.type === "run_meta")).toMatchObject({
+      agent: "coding",
+      harness: "opencode",
+    });
+    const g = request(worded, "what is the weather", "general");
+    const onPi = new RunRegistry({ genId: () => "run-g", genToken: () => "tok" });
+    await registerRun(
+      { ...worded, harness: { harnesses: roster, registry: new HarnessRegistry() } },
+      { ...ctx, msg: g.message, agent: g.agent, resolved: g.resolved, directives: g.directives, registry: onPi },
+    );
+    expect(onPi.snapshotById("run-g")!.events.find((e) => e.type === "run_meta")).toMatchObject({
+      agent: "general",
+      harness: "pi",
+    });
     const bare = new RunRegistry({ genId: () => "run-q", genToken: () => "tok" });
     await registerRun(d, { ...ctx, registry: bare });
     expect(bare.snapshotById("run-q")!.events.find((e) => e.type === "run_meta")).not.toHaveProperty("harness");

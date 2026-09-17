@@ -71,6 +71,7 @@ import { textTurnsOf } from "./dispatch/textTurns.js";
 import type { HarnessSession } from "./harness/contract.js";
 import { runPiHarnessOpen } from "./harness/pi/harness.js";
 import { PiHarness } from "./harness/pi/piHarness.js";
+import { OpenCodeHarness } from "./harness/opencode/harness.js";
 import { HarnessRegistry, authorizeToolCall, relayToolCall, type ToolCallAsk } from "./harness/pi/relay.js";
 import { FakeHarnessContainer } from "./harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "./harness/pi/testing/providerPi.js";
@@ -163,6 +164,7 @@ const piAnswered = (answer: string): HarnessSession => ({ answer, followUp: asyn
 
 /** The harness every test process drives runs with (harness.md item 7): pi, with no deployment settings behind it. */
 const piHarness = new PiHarness();
+const openCodeHarness = new OpenCodeHarness();
 
 /** The process's own timer, taken before any test fakes them: the harness polls
  *  a scripted pi on it, so a test that advances fake timers around a model turn
@@ -190,7 +192,7 @@ function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
     completions: { get: () => provider },
     runBearers,
     harness: {
-      harness: piHarness,
+      harnesses: { pi: piHarness, opencode: openCodeHarness },
       registry: harnesses,
       harnessUrl: "https://bot.test",
       loopbackUrl: "http://127.0.0.1:8080",
@@ -10417,7 +10419,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     /** The first run's pi opens one bash call and dies with its container, which names itself anew; the restarted run's pi is scripted from the provider. */
     const containers: FakeHarnessContainer[] = [];
     deps.harness = {
-      harness: piHarness,
+      harnesses: { pi: piHarness, opencode: openCodeHarness },
       registry: harnesses,
       harnessUrl: "https://bot.test",
       loopbackUrl: "http://127.0.0.1:8080",
@@ -10822,7 +10824,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     let elsewhereAtAttach: ThreadElsewhere | undefined | "never attached" = "never attached";
     const containers: FakeHarnessContainer[] = [];
     deps.harness = {
-      harness: piHarness,
+      harnesses: { pi: piHarness, opencode: openCodeHarness },
       registry: harnesses,
       harnessUrl: "https://bot.test",
       loopbackUrl: "http://127.0.0.1:8080",
@@ -12462,7 +12464,7 @@ workspaceDir: __WORKDIR__
     const bearers = new RunBearerStore({ clock: Date.now });
     let starts = 0;
     t.deps.harness = {
-      harness: piHarness,
+      harnesses: { pi: piHarness, opencode: openCodeHarness },
       registry: harnesses,
       harnessUrl: "https://bot.test",
       loopbackUrl: "http://127.0.0.1:8080",
@@ -13797,7 +13799,11 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       fallback: { put: async () => {} },
       warn: (m) => warnings.push(m),
     });
-    deps.harness = { harness: piHarness, registry: new HarnessRegistry(), harnessUrl: "https://bot.test" };
+    deps.harness = {
+      harnesses: { pi: piHarness, opencode: openCodeHarness },
+      registry: new HarnessRegistry(),
+      harnessUrl: "https://bot.test",
+    };
     deps.runBearers = new RunBearerStore({ clock: () => NOW });
     deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "main" });
     await ledger.claimSession(KEY, "run-prev", "gen-R");
@@ -13974,10 +13980,13 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
   });
 
   // docs/reference/specs/harness-pi.md item 4: the config's `pi.compaction` reaches the harness deps for a run on pi —
-  // through the harness object the process is wired with (harness.md item 7), as src/index.ts builds it from the config.
+  // through the roster the process is wired with (harness.md item 8), as src/index.ts builds it from the config.
   const wiredFromConfig = (deps: TestDeps) => {
     const compaction = deps.config.config.pi?.compaction;
-    deps.harness = { ...deps.harness!, harness: new PiHarness(compaction ? { compaction } : {}) };
+    deps.harness = {
+      ...deps.harness!,
+      harnesses: { pi: new PiHarness(compaction ? { compaction } : {}), opencode: openCodeHarness },
+    };
   };
   it("the deployment's compaction thresholds ride from the config into the pi harness's deps; a config without the block hands none", async () => {
     const t = await threadWithSession(PI_YAML + "pi:\n  compaction:\n    reserveTokens: 150000\n");

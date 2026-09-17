@@ -37,23 +37,26 @@ import type { AuthorizeDeps } from "./authorize.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { RecordDeps } from "./record.js";
 import { processSecrets } from "../../secrets.js";
-import type { Harness } from "../harness/contract.js";
+import type { HarnessRoster } from "../harness/roster.js";
 import type { HarnessContainer } from "../harness/container.js";
 import type { HarnessRegistry } from "../harness/pi/relay.js";
 import type { Executor } from "../../execution/executor.js";
 import type { MachineClass } from "../../agents/registry.js";
 
-/** What a run on the harness needs from the process (docs/reference/specs/
- *  harness.md; harness-pi.md): the harness object every run is driven by, the
- *  registry the harness routes answer from, the bot's URL as the process
- *  reaches it (the public one from a run's container, the bot's own loopback
- *  from the bot host, harness-pi item 12) and, for a test, the container to
- *  drive in place of the run's own. */
+/** What a run on a harness needs from the process (docs/reference/specs/
+ *  harness.md; harness-pi.md): the roster of harness objects runs are driven
+ *  by, the registry the harness routes answer from, the bot's URL as the
+ *  process reaches it (the public one from a run's container, the bot's own
+ *  loopback from the bot host, harness-pi item 12) and, for a test, the
+ *  container to drive in place of the run's own. */
 export interface HarnessProcessDeps {
-  /** The harness every run here is driven by (harness.md item 7): `PiHarness`
-   *  in production. The loop calls it — `open`, `find`, `end` — and compares
-   *  no word: which harness this is, its object says. */
-  harness: Harness;
+  /** The roster (harness.md item 8): every harness this process can drive a
+   *  run on, by the name its object declares — `PiHarness` and
+   *  `OpenCodeHarness` in production. A fresh run opens on the one the
+   *  preset's configuration word names (`harnessForPreset`), a resumed row on
+   *  the one its facts name; the loop calls that object — `open`, `find`,
+   *  `end` — and compares no word. */
+  harnesses: HarnessRoster;
   registry: HarnessRegistry;
   /** `PUBLIC_BASE_URL`, where a run's container reaches the proxy and the
    *  routes; without it no preset with a workspace can go on pi and the run says so. */
