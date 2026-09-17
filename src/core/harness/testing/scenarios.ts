@@ -30,7 +30,15 @@ import {
   type HarnessResume,
 } from "../contract.js";
 import { ALLOWANCES, MINUTE_MS } from "../../budgets.js";
-import { HARD_STOP_MESSAGE, MODEL_CALL_IN_FLIGHT, timeBudgetAnswer, timeBudgetNote } from "../windDown.js";
+import {
+  finaleTimedOutNote,
+  HARD_STOP_MESSAGE,
+  MODEL_CALL_IN_FLIGHT,
+  softStopAnswer,
+  softStopNote,
+  timeBudgetAnswer,
+  timeBudgetNote,
+} from "../windDown.js";
 import { TRANSPORT_LOST_TEXT } from "./fakeContainer.js";
 
 /** The wall clock every conformance run is given: the drivers' preset budget. */
@@ -72,6 +80,18 @@ export interface RunScript {
   followUp?: string;
   /** A hard stop requested before the model call of this 1-based number. */
   hardStopBeforeModelCall?: number;
+  /** A soft stop requested before the model call of this 1-based number: the
+   *  harness steers the write-up and that call answers it (or never answers,
+   *  with `hangModelCall` of the same number). */
+  softStopBeforeModelCall?: number;
+  /** The model call of this 1-based number never answers: the process opens
+   *  the step and nothing follows — not the answer, not a reaction to the
+   *  write-up's steer. The driver moves the run's clock as the silence would:
+   *  past the loop's end once the step is open (unless a soft stop of the same
+   *  number is the wind-down instead), then past the finale bound once the
+   *  write-up's steer has landed, so the harness's wind-down, its finale bound
+   *  and the process's end are exercised without a real wait. */
+  hangModelCall?: number;
   /** The run's wall clock runs out before the model call of this 1-based
    *  number: the clock passes the deadline with that call under way, so the
    *  harness winds the run down — the budget note, the write-up steered — and
@@ -366,6 +386,28 @@ function checkTransportLostStands(run: DrivenRun, waited: boolean): void {
   assert.ok(run.removed.length > 0, "the process's root was not removed after the failure");
 }
 
+/** The two hung-turn rows read the record the same way: the wind-down's note
+ *  (the budget's, or the stop's) exactly once, the finale's card line, the
+ *  answer the wind-down's reason-alone line — a harness whose abort surfaces
+ *  the call's failure appends the `writeUpFailed` clause to it, one whose abort
+ *  is silent does not, so the two halves the clause sits between are held —
+ *  every `harness_error` the wind-down's own, nothing killed as a replacement
+ *  (no `sandbox_restarted`), the process ended. */
+function checkHungTurn(run: DrivenRun, reasonAlone: string, windDownNote: string): void {
+  const answer = answered(run);
+  const [head, tail] = reasonAlone.split(/(?<=finishing|written)\./);
+  assert.ok(head && tail, `the reason-alone line has no clause seam: ${reasonAlone}`);
+  assert.ok(answer.startsWith(head), `the answer does not open with the wind-down's words: ${answer}`);
+  assert.ok(answer.endsWith(tail), `the answer does not close with the wind-down's words: ${answer}`);
+  const windDown = notes(run).filter((n) => n.summary === windDownNote);
+  assert.equal(windDown.length, 1, `the wind-down's note is on the record ${windDown.length} times, not once`);
+  for (const n of notes(run).filter((n) => n.kind === "harness_error"))
+    assert.match(n.summary, /during the wind-down/, `a harness_error that is not the wind-down's: ${n.summary}`);
+  assert.ok(!notes(run).some((n) => n.kind === "sandbox_restarted"), "a hung turn was judged a replaced container");
+  assert.ok(run.progress.includes(finaleTimedOutNote()), "the finale's line is not on the card");
+  assert.ok(run.killed.length > 0, "the process was not ended");
+}
+
 const resumeOf = (facts: HarnessFacts): HarnessResume => ({
   messages: [{ role: "user", content: [{ type: "text", text: "carry on" }] }],
   settlements: [],
@@ -594,6 +636,46 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       assert.equal(stopped.mode, "hard");
       assert.ok(run.killed.length > 0, "the process was not ended");
     },
+  },
+  {
+    id: "conversation-soft-stop",
+    clause: "conversation",
+    title:
+      "an operator's soft stop steers the write-up: a stopped note in mode soft, the model's next answer under the ⏹ label, the process ended",
+    script: {
+      turns: [call("c1", "bash", { command: "echo hi" }), text("findings so far")],
+      softStopBeforeModelCall: 2,
+    },
+    check: (run) => {
+      assert.equal(answered(run), softStopAnswer("findings so far"));
+      const stopped = notes(run).filter((n) => n.kind === "stopped");
+      assert.equal(stopped.length, 1, "not exactly one stopped note");
+      assert.equal(stopped[0].mode, "soft");
+      assert.equal(stopped[0].summary, softStopNote());
+      assert.ok(!notes(run).some((n) => n.kind === "harness_error"), "a harness_error on a clean soft stop");
+      assert.ok(run.killed.length > 0, "the process was not ended");
+    },
+  },
+  {
+    id: "conversation-hung-turn-budget",
+    clause: "conversation",
+    title:
+      "a model call that never answers ends by the wind-down within the finale bound: the budget note says a model call was in flight, the write-up is steered and never comes, the finale times out, the process is ended, and the run answers under the budget's label — never a failed run, never a replaced verdict",
+    script: { turns: [call("c1", "bash", { command: "echo hi" }), text("never")], hangModelCall: 2 },
+    check: (run) =>
+      checkHungTurn(run, timeBudgetAnswer("", CONFORMANCE_MAX_MINUTES), timeBudgetNote(MODEL_CALL_IN_FLIGHT)),
+  },
+  {
+    id: "conversation-hung-turn-soft-stop",
+    clause: "conversation",
+    title:
+      "a soft stop on a model call that never answers ends the same way: the stopped note in mode soft, the write-up steered and never answered, the finale times out, the process is ended, and the run answers under the ⏹ label",
+    script: {
+      turns: [call("c1", "bash", { command: "echo hi" }), text("never")],
+      softStopBeforeModelCall: 2,
+      hangModelCall: 2,
+    },
+    check: (run) => checkHungTurn(run, softStopAnswer(""), softStopNote()),
   },
   {
     id: "conversation-write-up-call-fails",

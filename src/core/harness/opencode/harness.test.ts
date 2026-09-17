@@ -4,7 +4,14 @@ import { updateStatusTool } from "../../../tools/status.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import type { RunEvent } from "../../runEvents.js";
 import { HarnessContainerError } from "../container.js";
-import type { HarnessResume, OpenCodeHarnessFacts, PiHarnessFacts } from "../contract.js";
+import {
+  openThroughSeam,
+  type HarnessDeps,
+  type HarnessResume,
+  type HarnessRun,
+  type OpenCodeHarnessFacts,
+  type PiHarnessFacts,
+} from "../contract.js";
 import { HarnessRegistry, relayToolCall, type LiveHarness } from "../pi/relay.js";
 import { PROXY_PROVIDER } from "../pi/process.js";
 import { FakeHarnessContainer } from "../testing/fakeContainer.js";
@@ -17,7 +24,13 @@ import { OpenCodeHarness, resumeOpenCodeFacts } from "./harness.js";
 import { OPENCODE_PASSWORD_ENV, openCodeRunPaths, TAILER_BIN } from "./process.js";
 import { openCodeReplacedCallNote } from "./session.js";
 import { OPENCODE_SERVE_PID_ENV } from "./tailerSource.js";
-import { feedByteLength, openCodeDriver, TAILER_READY_NOTES, type FakeServeOptions } from "./testing/driver.js";
+import {
+  feedByteLength,
+  openCodeDriver,
+  scriptOpenCodeServe,
+  TAILER_READY_NOTES,
+  type FakeServeOptions,
+} from "./testing/driver.js";
 
 // Feature: docs/reference/specs/harness.md item 7 (U12) — OpenCode as the
 // contract's object: the tables the loop reads, the identity's own tools in the
@@ -806,6 +819,93 @@ describe("the model reference on every request that carries one names the config
     await new Promise((r) => setTimeout(r, 20));
     const second = (await feedFrom(mid)).find((r) => r.event?.type === "session.execution.failed");
     expect(second?.event?.data?.error?.message).toBe(`Model unavailable: ${PROXY_PROVIDER}/gpt-x`);
+  });
+});
+
+// Feature: docs/reference/specs/harness.md items 5 and 13 — a post-turn is one
+// more prompt on the run's session through the same loop, so its refusal and
+// its silence fail by the same names, the phase saying which prompt it was.
+describe("the post-turn's prompt — refused, or answered by silence — fails by its own name", () => {
+  const NOW = 1_700_000_000_000;
+  const executor = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+  const notes = (events: RunEvent[]) =>
+    events.filter((e): e is Extract<RunEvent, { type: "run_note" }> => e.type === "run_note");
+
+  /** A run opened through the seam over the scripted serve's bare-container door, its loop answered, the session held open for a post-turn. */
+  async function openRun(options: FakeServeOptions) {
+    const container = new FakeHarnessContainer();
+    const registry = new HarnessRegistry();
+    const clock = { now: NOW };
+    scriptOpenCodeServe(container, {
+      script: { turns: [{ content: [{ type: "text", text: "done" }], stopReason: "end_turn" }] },
+      registry,
+      options,
+      advanceClock: (ms) => void (clock.now += ms),
+    });
+    const events: RunEvent[] = [];
+    const run: HarnessRun = {
+      runId: "run-p",
+      agent: {
+        name: "post",
+        description: "",
+        system: "You are the post-turn run.",
+        toolset: "full",
+        machine: "repo-resident",
+        identity: "write",
+        maxTurns: 50,
+        maxTokens: 4096,
+        maxMinutes: 10,
+      },
+      model: { id: "claude-fable-5", provider: "anthropic", providerType: "anthropic" },
+      system: "You are the post-turn run.",
+      messages: [{ role: "user", content: [{ type: "text", text: "do the thing" }] }],
+      tools: [updateStatusTool],
+      toolContext: { executor },
+      rules: { checkout: "/workspace/threads/t/main", protectedBranches: ["main"] },
+      onEvent: (e) => void events.push(e),
+      onStep: async () => {},
+    };
+    const deps: HarnessDeps = {
+      container,
+      bearer: "sbr_run-p.post-turn-secret",
+      harnessUrl: "https://bot.example.com",
+      registry,
+      clock: () => clock.now,
+      sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 2))),
+      pollMs: 1,
+      tickMs: 5,
+    };
+    const session = await openThroughSeam(new OpenCodeHarness(), deps, run);
+    expect(session.answer).toBe("done");
+    return { session, events, container };
+  }
+  const postTurn = { text: "describe the change", maxTurns: 5, maxMinutes: 5, toolContext: { executor } };
+
+  it("refused: the turn throws OpenCodeRequestRefusedError naming the follow-up turn's prompt and the answer, the note is on the record, and the session still ends", async () => {
+    const { session, events, container } = await openRun({ promptPostFails: 2 });
+    await expect(session.followUp(postTurn)).rejects.toMatchObject({
+      name: "OpenCodeRequestRefusedError",
+      message: 'OpenCode refused the follow-up turn\'s prompt (500): {"error":"the store hiccuped"}',
+    });
+    expect(
+      notes(events).some(
+        (n) => n.kind === "harness_error" && /refused the follow-up turn's prompt \(500\)/.test(n.summary),
+      ),
+    ).toBe(true);
+    await session.end();
+    expect(container.killed.length).toBeGreaterThan(0);
+  });
+
+  it("answered by silence: the turn throws OpenCodeSilentError naming the follow-up turn's prompt, with the diagnostics", async () => {
+    const { session, events } = await openRun({ silentAfterPrompt: 2 });
+    await expect(session.followUp(postTurn)).rejects.toMatchObject({
+      name: "OpenCodeSilentError",
+      phase: "the follow-up turn's prompt",
+    });
+    const silent = notes(events).find((n) => n.kind === "harness_error" && /no event for session/.test(n.summary));
+    expect(silent?.summary).toMatch(/ of the follow-up turn's prompt — /);
+    expect(silent?.summary).toMatch(/serve\.err: provider: connect ETIMEDOUT/);
+    await session.end();
   });
 });
 

@@ -45,7 +45,13 @@ import {
 } from "../contract.js";
 import type { RunBearerStore } from "../../modelProxy/runBearers.js";
 import { OPENCODE_EVENT_DISPOSITION } from "./dispositions.js";
-import { driveOpenCode, openCodeToolNameWord, type OpenCodeConnection, type OpenCodeReattach } from "./bridge.js";
+import {
+  driveOpenCode,
+  OpenCodeRequestRefusedError,
+  openCodeToolNameWord,
+  type OpenCodeConnection,
+  type OpenCodeReattach,
+} from "./bridge.js";
 import {
   openCodeAuthHeader,
   OPENCODE_ROUTES,
@@ -392,15 +398,22 @@ export async function openOpenCodeRun(
       const cwd = deps.container.cwd(started.paths, run.rules.checkout);
 
       // The session: a resume imports the record; a fresh run with a seed imports
-      // the earlier turns; a fresh run of one turn is created with none.
+      // the earlier turns; a fresh run of one turn is created with none. An
+      // answer outside 2xx to either is the run's failure by name, said on the
+      // record first: the prime is the request that would carry a model
+      // reference OpenCode cannot resolve.
+      const refusedBy = (what: string, res: HarnessResponse): OpenCodeRequestRefusedError => {
+        const refused = new OpenCodeRequestRefusedError(what, res.status, res.body);
+        note("harness_error", `${refused.message} — the run is stopped`);
+        return refused;
+      };
       const importInto = async (
         messages: Parameters<typeof openCodeImportBody>[0],
         opts: Parameters<typeof openCodeImportBody>[1],
       ) => {
         const body = openCodeImportBody(messages, opts);
         const res = await request(deps.container, started, auth, OPENCODE_ROUTES["session.import"], body);
-        if (res.status < 200 || res.status >= 300)
-          throw new Error(`OpenCode refused the session import (${res.status}): ${redactAndCap(res.body, 200)}`);
+        if (res.status < 200 || res.status >= 300) throw refusedBy("session import", res);
       };
       if (run.resume !== undefined && run.resume.messages.length > 0) {
         const settlements = new Map(run.resume.settlements.map((s) => [s.toolUse.id, openCodeSettlementNote(s)]));
@@ -430,8 +443,7 @@ export async function openOpenCodeRun(
             location: { directory: cwd },
             model: modelRef(run, undefined),
           });
-          if (res.status < 200 || res.status >= 300)
-            throw new Error(`OpenCode refused the session create (${res.status}): ${redactAndCap(res.body, 200)}`);
+          if (res.status < 200 || res.status >= 300) throw refusedBy("session create", res);
           const created = parseSessionId(res.body);
           if (created !== undefined) server.sessionID = created;
         }
