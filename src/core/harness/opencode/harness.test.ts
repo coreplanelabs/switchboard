@@ -29,6 +29,7 @@ import { openCodeReplacedCallNote } from "./session.js";
 import { OPENCODE_SERVE_PID_ENV } from "./tailerSource.js";
 import {
   feedByteLength,
+  LATE_BUDGET_REFUSAL,
   LATE_FAILURE_ERROR,
   openCodeDriver,
   scriptOpenCodeServe,
@@ -938,7 +939,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     await session.end();
   });
 
-  it("after a hung turn: the loop ended at the finale and the aborted execution's tail lands only once the post-turn's prompt is posted — a slow own tool settling, an ask the interrupt rejected with its echo, then the settle — and the post-turn decides nothing of it: no reply posted, no bypass, the settle set aside; it waits for its own execution's start and answers the turn's own text; no second harness_error", async () => {
+  it("after a hung turn: the loop ended at the finale and the aborted execution's tail lands only once the post-turn's prompt is posted — an ask pending at the interrupt failing aborted, the step failing, then the settle, as the pinned binary writes them — and the post-turn decides nothing of it: no reply posted, no bypass, no tool event on its record, the settle set aside; it waits for its own execution's start and answers the turn's own text; no second harness_error", async () => {
     const o = openRun({ interruptSettlesLate: "interrupted" }, hung);
     const session = await o.opened;
     const reason = finaleAbortReason(o.lease.finaleMs);
@@ -972,6 +973,39 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     ).toEqual([
       windDownFailureNote(reason),
       `a model call of an earlier execution failed (${LATE_FAILURE_ERROR}); continuing`,
+    ]);
+    await session.end();
+  });
+
+  it("after a hung turn whose aborted execution ends on the proxy's turn-budget refusal: the refusal is named for what it is — an earlier execution reaching its budget — never a failed model call, and the post-turn answers its own text", async () => {
+    const o = openRun({ interruptSettlesLate: "budget" }, hung);
+    const session = await o.opened;
+    const reason = finaleAbortReason(o.lease.finaleMs);
+    expect(await session.followUp(postTurn)).toBe("never");
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary),
+    ).toEqual([
+      windDownFailureNote(reason),
+      `an earlier execution reached the proxy's turn budget (${LATE_BUDGET_REFUSAL}); continuing`,
+    ]);
+    await session.end();
+  });
+
+  it("after a hung turn whose tail carries a dropped stream's note and an event kind no table names: both are surfaced before the post-turn's execution starts — the note on the card, the kind as a harness_error — and the post-turn still answers its own text", async () => {
+    const o = openRun({ interruptSettlesLate: "interrupted", lateTailNoise: true }, hung);
+    const session = await o.opened;
+    const reason = finaleAbortReason(o.lease.finaleMs);
+    expect(await session.followUp(postTurn)).toBe("never");
+    expect(o.progress).toContain("opencode feed: stream closed");
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary),
+    ).toEqual([
+      windDownFailureNote(reason),
+      "OpenCode emitted an event kind this build does not know: made_up_late_kind",
     ]);
     await session.end();
   });

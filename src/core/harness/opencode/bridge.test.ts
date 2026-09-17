@@ -74,6 +74,15 @@ const ev = (type: string, data: Record<string, unknown> = {}): OpenCodeFeedRecor
 });
 const notes = (events: RunEvent[]) =>
   events.filter((e): e is Extract<RunEvent, { type: "run_note" }> => e.type === "run_note");
+/** A `permission.asked` event for one call, as the server raises it. */
+const asked_ = (requestID: string, callId: string, action: string, resource: string): OpenCodeFeedRecord =>
+  ev("permission.asked", {
+    id: requestID,
+    sessionID: "ses_c",
+    action,
+    resources: [resource],
+    source: { type: "tool", messageID: "msg_a0", id: callId },
+  });
 
 describe("OPENCODE_EVENT_DISPOSITION — every event the server streams is decided", () => {
   it("names every type in the pinned protocol's server manifest (plus server.connected) and nothing else", async () => {
@@ -825,7 +834,7 @@ describe("the loop — a refused request, a silent server, and a hung turn", () 
     expect(harnessErrors(r)).toEqual([]);
   });
 
-  it("the interrupt an ending posts that the server refuses is a harness_error whenever the answer comes — after the loop has left included — beside the wind-down's note", async () => {
+  it("the interrupt an ending posts that the server refuses is a harness_error whenever the answer comes — after the loop has left included — beside the wind-down's note, on the record alone and never on the closed card", async () => {
     const r = await openCodeDriver({ interruptPostFails: true }).run(hung);
     expect(answered(r)).toBe(timeBudgetAnswer("", CONFORMANCE_MAX_MINUTES, finaleAbortReason(FINALE_MS)));
     expect(harnessErrors(r)).toEqual([
@@ -833,6 +842,8 @@ describe("the loop — a refused request, a silent server, and a hung turn", () 
       'the interrupt did not reach the server: it answered 500 ({"error":"interrupt refused"})',
     ]);
     expect(posts(r, "/interrupt")).toHaveLength(1);
+    // The answer came after the loop left: the record has it, the card's progress line does not.
+    expect(r.progress.some((p) => /the interrupt did not reach the server/.test(p))).toBe(false);
   });
 
   it("a soft stop then a hard stop write two stopped notes, soft then hard, and the hard stop's abort line is the answer", async () => {
@@ -865,6 +876,91 @@ describe("the loop — a refused request, a silent server, and a hung turn", () 
       windDownFailureNote(finaleAbortReason(FINALE_MS)),
     ]);
     expect(r.killed.length).toBeGreaterThan(0);
+  });
+});
+
+// Feature: docs/reference/specs/harness.md item 13 — the bridge's `observing`
+// mode: before the loop's own execution has started, the feed is an earlier
+// execution's tail, and the bridge in `earlier` mode decides nothing of it —
+// no reply, no bypass, no settle, no tool event on the record — while the
+// store's refills still feed the mirror, a failure is noted as the earlier
+// execution's (the proxy's turn-budget refusal by its own name), and the
+// records that carry no decision — a tailer note, an event kind no table
+// names — are surfaced as in every mode.
+describe("the bridge in earlier mode — an earlier execution's tail is not this loop's to decide", () => {
+  const earlier = () => {
+    const h = harness();
+    h.bridge.observing = "earlier";
+    return h;
+  };
+
+  it("an ask is not replied to and a tool that settles with no decision is no bypass; neither reaches the record as a tool event", () => {
+    const { bridge, events } = earlier();
+    const asked = bridge.observe(asked_("per_old", "c-old", "shell", "echo late"));
+    expect(asked.replies).toEqual([]);
+    bridge.observe(ev("session.tool.input.started", { sessionID: "ses_c", id: "c-old", name: "shell" }));
+    bridge.observe(ev("session.tool.called", { sessionID: "ses_c", id: "c-old", input: { command: "echo late" } }));
+    const settled = bridge.observe(
+      ev("session.tool.success", { sessionID: "ses_c", id: "c-old", content: [], executed: true }),
+    );
+    expect(settled.bypass).toBeUndefined();
+    expect(events.filter((e) => e.type === "tool_call" || e.type === "tool_result")).toEqual([]);
+    expect(notes(events).filter((n) => n.kind === "tool_refused" || n.kind === "harness_error")).toEqual([]);
+  });
+
+  it("a settle, an interrupt and a permissions refill decide nothing; a failure is noted as an earlier execution's, the proxy's turn-budget refusal by its own name", () => {
+    const { bridge, events } = earlier();
+    expect(bridge.observe(ev("session.execution.interrupted", { sessionID: "ses_c", reason: "user" })).settled).toBe(
+      false,
+    );
+    expect(bridge.observe(ev("session.execution.succeeded", { sessionID: "ses_c" })).settled).toBe(false);
+    expect(
+      bridge.observe({ feed: "permissions", at: NOW, sessionID: "ses_c", reason: "reconnect", data: [] }).replies,
+    ).toEqual([]);
+    const failed = bridge.observe(
+      ev("session.execution.failed", { sessionID: "ses_c", error: { message: "the proxy answered 400" } }),
+    );
+    expect(failed.settled).toBe(false);
+    expect(failed.providerError).toBeUndefined();
+    const budget = bridge.observe(
+      ev("session.execution.failed", {
+        sessionID: "ses_c",
+        error: { status: 403, message: "403 turn_budget_exhausted: the run is past its 60-turn guard" },
+      }),
+    );
+    expect(budget.budgetStop).toBeUndefined();
+    expect(notes(events).map((n) => n.summary)).toEqual([
+      "a model call of an earlier execution failed (the proxy answered 400); continuing",
+      "an earlier execution reached the proxy's turn budget (403 turn_budget_exhausted: the run is past its 60-turn guard); continuing",
+    ]);
+  });
+
+  it("what carries no decision is surfaced as in every mode: a tailer note on the card, an unknown event kind as a harness_error; a messages refill still feeds the mirror", async () => {
+    const { bridge, events, progress, steps } = earlier();
+    bridge.observe({ feed: "tailer", at: NOW, note: "stream closed" });
+    expect(progress).toContain("opencode feed: stream closed");
+    bridge.observe(ev("made_up_kind", { sessionID: "ses_c" }));
+    expect(notes(events).some((n) => n.kind === "harness_error" && /made_up_kind/.test(n.summary))).toBe(true);
+    bridge.observe({
+      feed: "messages",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "reconnect",
+      data: [
+        { id: "u0", type: "user", text: "do the thing", time: { created: NOW } },
+        {
+          id: "a0",
+          type: "assistant",
+          agent: "switchboard",
+          model: { providerID: "switchboard", id: "m" },
+          content: [{ type: "text", text: "earlier answer" }],
+          time: { created: NOW, completed: NOW },
+        },
+      ],
+    });
+    await bridge.flush();
+    expect(steps).toHaveLength(1);
+    expect(bridge.answer()).toBe("earlier answer");
   });
 });
 

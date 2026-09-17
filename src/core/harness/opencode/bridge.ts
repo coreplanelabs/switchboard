@@ -425,6 +425,22 @@ export class OpenCodeBridge {
    *  and its execution's end or failure is history, not this generation's
    *  settle. The loop sets this before each record it hands over. */
   catchingUp = false;
+  /** Whose execution the feed's records belong to. `own`: the execution the
+   *  loop prompted — every record decides as it always has. `earlier`: the
+   *  loop's own execution has not started yet and the feed carries an earlier
+   *  one's tail — the write-up a previous loop interrupted at its finale,
+   *  which the pinned binary ends with the pending ask's tool failing
+   *  `aborted`, the step failing, the execution's end and the refills, landing
+   *  after a post-turn's prompt was posted. That exchange was this bot's own
+   *  previous loop's, decided then and on its record, so nothing of it is
+   *  this loop's to decide or narrate: no reply, no bypass, no settle, no tool
+   *  event; the store's refills still feed the mirror, a failure is noted as
+   *  the earlier execution's, and the records that carry no decision — a
+   *  tailer note, an event kind no table names — are surfaced as in every
+   *  mode. `catchingUp` (a dead generation's records on a re-attach) takes
+   *  precedence: its asks and echoes have rules of their own. The loop sets
+   *  both before each record it hands over. */
+  observing: "own" | "earlier" = "own";
   /** The asks pending on the server at the re-attach (by request id): the
    *  ones this generation decides even while catching up — every other ask met
    *  there was the dead generation's. */
@@ -593,6 +609,9 @@ export class OpenCodeBridge {
       case "event":
         return this.onEvent(record.event);
       case "permissions":
+        // An earlier execution's pending asks are not this loop's to answer —
+        // and the pinned binary drops them at the interrupt anyway.
+        if (this.observing === "earlier" && !this.catchingUp) return { replies: [], settled: false };
         return this.onPermissionsRefill(record.data);
       case "messages":
         return this.onMessagesRefill(record.data);
@@ -619,6 +638,7 @@ export class OpenCodeBridge {
       return out;
     }
     const data = isRecord(event.data) ? event.data : {};
+    if (this.observing === "earlier" && !this.catchingUp) return this.onEarlierEvent(event.type, data, out);
     switch (event.type) {
       case "session.tool.input.started":
         if (typeof data.id === "string" && typeof data.name === "string") this.toolNames.set(data.id, data.name);
@@ -690,6 +710,32 @@ export class OpenCodeBridge {
         break;
       default:
         break;
+    }
+    return out;
+  }
+
+  /** An earlier execution's event (`observing: "earlier"`): nothing decides —
+   *  no reply, no bypass, no settle, no tool event — and nothing of the
+   *  loop's own state moves (a step of that execution is not this loop's
+   *  `doingNow`). A tool's name is learned, since a settle of it is still
+   *  read; its failure is said for what it is, an earlier execution's, with
+   *  the proxy's turn-budget refusal by its own name — the wind-down's trigger
+   *  of the loop before, never a failed model call. */
+  private onEarlierEvent(
+    type: string,
+    data: Record<string, unknown>,
+    out: OpenCodeBridgeObservation,
+  ): OpenCodeBridgeObservation {
+    if (type === "session.tool.input.started" && typeof data.id === "string" && typeof data.name === "string")
+      this.toolNames.set(data.id, data.name);
+    if (type === "session.execution.failed") {
+      const error = { status: statusOf(data.error), message: errorMessage(data.error) };
+      this.note(
+        "harness_error",
+        isBudgetRefusal(error)
+          ? `an earlier execution reached the proxy's turn budget (${redactAndCap(error.message, 400)}); continuing`
+          : `a model call of an earlier execution failed (${redactAndCap(error.message, 400)}); continuing`,
+      );
     }
     return out;
   }
@@ -1212,17 +1258,15 @@ export async function driveOpenCode(
   let softNoted = false;
   /** The loop has left: a request that fails on its transport now was cut by
    *  the caller's end of the process — that end's own effect, not the record's.
-   *  An answer the server gives is its word whenever it comes. */
+   *  An answer the server gives is its word whenever it comes, noted to the
+   *  record alone — the card is closed. */
   let left = false;
   /** The execution the loop drives has begun: set by the server's own
    *  `session.execution.started` for the session after the prompt (the record
    *  that also lifts the first-event bound), or from the start on a re-attach
-   *  steered into an execution under way. Every record before it belongs to
-   *  an earlier execution — the tail of the write-up the loop before this
-   *  post-turn interrupted at its finale, which the server sends late — and
-   *  is not this loop's to decide: nothing of it is judged, posted or read as
-   *  a bypass; the store's refills feed the mirror and a failure is noted as
-   *  the earlier execution's. */
+   *  steered into an execution under way. Until then the bridge observes in
+   *  `earlier` mode (`OpenCodeBridge.observing`): the feed is an earlier
+   *  execution's tail and decides nothing of this loop's. */
   let executionOwned = conn.reattach?.delivery === "steer";
   /** The request whose first event the feed still owes (`FIRST_EVENT_BOUND_MS`):
    *  set when a `queue` prompt is admitted, cleared by the session's
@@ -1272,19 +1316,23 @@ export async function driveOpenCode(
    *  interrupt: its failure is never swallowed. An answer outside 2xx is the
    *  server's own word and is a `harness_error` naming the request and the
    *  answer whenever it comes, the loop left or not — an interrupt the server
-   *  refused was not sent as far as the record says. A request that failed on
+   *  refused was not sent as far as the record says; once the loop has left
+   *  it goes to the record alone, never to the card the ending closed (the
+   *  registry drops it once the run is finished). A request that failed on
    *  its transport after the loop left is the caller's end of the process
    *  cutting it — the interrupt an ending posted, reset by the kill that
    *  follows — and says nothing the record does not already hold; the same
-   *  failure while the loop runs is noted. */
+   *  failure while the loop runs is noted. Measured against the pinned
+   *  binary: the interrupt answers 200 on an idle session too
+   *  (`{ interrupted: false }`), so an ending's interrupt after the execution
+   *  ended by itself is no refusal. */
   const post = (what: string, route: { method: string; path: string }, body?: unknown) => {
     void request(route, body).then(
       (res) => {
         if (res.status >= 200 && res.status < 300) return;
-        note(
-          "harness_error",
-          `${what} did not reach the server: it answered ${res.status}${res.body.trim() ? ` (${redactAndCap(res.body, 200)})` : ""}`,
-        );
+        const summary = `${what} did not reach the server: it answered ${res.status}${res.body.trim() ? ` (${redactAndCap(res.body, 200)})` : ""}`;
+        if (left) emit({ type: "run_note", kind: "harness_error", summary });
+        else note("harness_error", summary);
       },
       (err: unknown) => {
         if (left) return;
@@ -1508,35 +1556,11 @@ export async function driveOpenCode(
         executionOwned = true;
         awaiting = undefined;
       }
-      if (!executionOwned && !reattachCatchUp) {
-        // Before the loop's own execution has started, the feed is an earlier
-        // execution's tail — the write-up the loop before this post-turn
-        // interrupted at its finale: a slow tool of that execution settling,
-        // an ask the interrupt rejected and its echo, its settle or failure.
-        // That exchange was this bot's own loop's, decided then; a fresh
-        // bridge holding none of its decisions would read the settle as a
-        // bypass and post a reply the interrupt already rejected, so none of
-        // it is observed. The store's refills still feed the mirror — the
-        // store is one whole the answer is read from — and a failure is said
-        // for what it is, an earlier execution's, as the catch-up branch says
-        // the dead generation's.
-        if (record.feed === "messages") {
-          bridge.observe(record);
-          if (conn.saveOffset !== undefined) {
-            const save = conn.saveOffset;
-            void bridge.flush().then(() => save(after));
-          }
-        } else if (record.feed === "event" && record.event.type === "session.execution.failed") {
-          const data = isRecord(record.event.data) ? record.event.data : {};
-          note(
-            "harness_error",
-            `a model call of an earlier execution failed (${redactAndCap(errorMessage(data.error), 400)}); continuing`,
-          );
-        }
-        check();
-        continue;
-      }
+      // Whose records these are, told to the bridge before it reads them: the
+      // dead generation's (catching up on a re-attach), an earlier execution's
+      // (before the loop's own has started), or the loop's own.
       bridge.catchingUp = reattachCatchUp;
+      bridge.observing = executionOwned || reattachCatchUp ? "own" : "earlier";
       const obs = bridge.observe(record);
       if (record.feed === "messages" && conn.saveOffset !== undefined) {
         const save = conn.saveOffset;

@@ -132,6 +132,8 @@ export function silentPromptRecords(sessionID: string, store: readonly unknown[]
 
 /** The proxy's words when a hung turn's late end is a failure rather than an interrupt (`interruptSettlesLate: "failed"`). */
 export const LATE_FAILURE_ERROR = "the proxy answered 400 after the interrupt";
+/** The proxy's turn-budget refusal as the server hands it on, when a hung turn's late end is that refusal (`interruptSettlesLate: "budget"`). */
+export const LATE_BUDGET_REFUSAL = "403 turn_budget_exhausted: the run is past its 60-turn guard (60 turns used)";
 
 /** How many feed bytes these records take as the fake writes them (one JSON line each): what a row's `logOffset` is computed from. */
 export function feedByteLength(records: readonly unknown[]): number {
@@ -231,15 +233,18 @@ export interface FakeServeOptions {
    *  moves the run's clock past the first-event bound, so the harness's next
    *  tick finds the silence. */
   silentAfterPrompt?: number;
-  /** A hung turn's interrupt is honoured late: what the aborted execution
-   *  still writes after the interrupt — a slow own tool settling with its
-   *  result, an ask the interrupt rejected with its echo and the tool's
-   *  failure — then its end (`interrupted`, or `failed` with the proxy's
-   *  words, `LATE_FAILURE_ERROR`) and the refills, all land only when the NEXT
-   *  `queue` prompt is posted (a post-turn's), before that prompt's execution
-   *  starts — as a slow turn's tail lands after the run loop has moved on to
-   *  the post-turn. Without it the hung turn is deaf: nothing ever comes. */
-  interruptSettlesLate?: "interrupted" | "failed";
+  /** A hung turn's interrupt is honoured late: what the pinned binary writes
+   *  when an interrupt lands on a running execution — an ask pending at the
+   *  interrupt failing `aborted` (`Tool execution interrupted`, no
+   *  `permission.replied`), the step failing `aborted`, the usage — then its
+   *  end (`interrupted`; or `failed` with the proxy's words, `LATE_FAILURE_ERROR`;
+   *  or `budget`, the proxy's turn-budget refusal) and the refills, all land
+   *  only when the NEXT `queue` prompt is posted (a post-turn's), before that
+   *  prompt's execution starts — as a slow turn's tail lands after the run
+   *  loop has moved on to the post-turn. Without it the hung turn is deaf. */
+  interruptSettlesLate?: "interrupted" | "failed" | "budget";
+  /** The late tail also carries a tailer note (`stream closed`) and an event kind no table names, as a feed under a dropped stream would. */
+  lateTailNoise?: boolean;
   /** The interrupt POST answers 500: the server refused it — its word, whenever it comes. */
   interruptPostFails?: boolean;
   /** The interrupt POST answers only when the container kills the server —
@@ -363,9 +368,14 @@ class ScriptedServe {
   private readonly primePostFails: boolean;
   private readonly promptPostFails: number | undefined;
   private readonly silentAfterPrompt: number | undefined;
-  private readonly interruptSettlesLate: "interrupted" | "failed" | undefined;
+  private readonly interruptSettlesLate: "interrupted" | "failed" | "budget" | undefined;
+  private readonly lateTailNoise: boolean;
   private readonly interruptAnswersAfterKill: boolean;
   private readonly interruptPostFails: boolean;
+  /** An execution is under way — a play has started and not returned: what the interrupt route answers `interrupted` for. */
+  private executing = false;
+  /** The asks an interrupt dropped while their reply was awaited: the tool fails `aborted`, no `permission.replied` — the binary's shape. */
+  private readonly interruptedAsks = new Set<string>();
   /** The run's first play is in its scripted hang: an interrupt now is one it owes a late settle for. */
   private hanging = false;
   /** How many `queue` prompts the serve has been posted. */
@@ -415,6 +425,7 @@ class ScriptedServe {
     this.promptPostFails = options.promptPostFails;
     this.silentAfterPrompt = options.silentAfterPrompt;
     this.interruptSettlesLate = options.interruptSettlesLate;
+    this.lateTailNoise = options.lateTailNoise === true;
     this.interruptAnswersAfterKill = options.interruptAnswersAfterKill === true;
     this.interruptPostFails = options.interruptPostFails === true;
     this.mutate = options.mutate;
@@ -817,13 +828,26 @@ class ScriptedServe {
       return j(404, { error: "permission not found" });
     }
     if (req.method === "POST" && req.path.endsWith("/interrupt")) {
+      // Measured against `@opencode/cli` at the pin: the interrupt answers 200
+      // `{ interrupted: true }` when an execution runs and `{ interrupted: false }`
+      // on an idle session; an ask pending at the interrupt is dropped — gone
+      // from `GET …/permission`, no `permission.replied`, the tool failing
+      // `aborted` — and a reply to it afterwards answers 404.
+      const running = this.executing;
       this.interrupted = true;
       // The interrupt owes the hung play its late tail (`interruptSettlesLate`),
       // decided here on the request itself, not on the play's next tick: the
       // post-turn's prompt may land before that tick and reads the debt first.
       if (this.hanging && this.interruptSettlesLate !== undefined) this.lateSettle = true;
-      for (const resolve of this.replies.values()) resolve({ reply: "reject" });
+      for (const [requestID, resolve] of this.replies) {
+        this.interruptedAsks.add(requestID);
+        resolve({ reply: "reject" });
+      }
       this.replies.clear();
+      if (this.pendingAsks.size > 0) {
+        this.pendingAsks.clear();
+        this.emitPermissions([]);
+      }
       // The interrupt the server refuses: its own word, a 500.
       if (this.interruptPostFails) return j(500, { error: "interrupt refused" });
       // The interrupt the kill cuts: its request answers only once the server
@@ -833,7 +857,7 @@ class ScriptedServe {
           this.container.onKill = () =>
             reject(new HarnessContainerError("request", "curl: (56) Recv failure: Connection reset by peer"));
         });
-      return j(200, { interrupted: true });
+      return j(200, { interrupted: running });
     }
     return j(404, { error: "no such route" });
   }
@@ -869,30 +893,19 @@ class ScriptedServe {
   }
 
   /** The aborted execution's tail, landing once the next prompt is posted
-   *  (`interruptSettlesLate`): what a slow execution still writes after the
-   *  interrupt — an own tool the previous loop had allowed settling with its
-   *  result (`c-slow`, `executed: true`), an ask the interrupt rejected with
-   *  its echo and the tool's failure (`per_c-ask`) — then the execution's end
-   *  by the option's kind and the two refills its terminal transition causes.
-   *  Every record names the session; none is the next prompt's execution. */
+   *  (`interruptSettlesLate`) — what the pinned binary writes when an interrupt
+   *  lands on a running execution: an ask pending at the interrupt fails
+   *  `aborted` (`Tool execution interrupted`, `executed: false`, and no
+   *  `permission.replied`: the ask is dropped, not answered), the step fails
+   *  `aborted` (`Step interrupted`), the usage lands, then the execution's end
+   *  by the option's kind — interrupted, or failed with the proxy's words, or
+   *  the proxy's turn-budget refusal — and the two refills its terminal
+   *  transition causes. With `lateTailNoise`, a tailer note and an event kind
+   *  no table names ride the tail too. Every record names the session; none is
+   *  the next prompt's execution. */
   private emitLateTail(): void {
     const sessionID = this.sessionID;
     const assistantMessageID = "msg_a_late";
-    this.emitEvent("session.tool.input.started", { sessionID, assistantMessageID, id: "c-slow", name: "shell" });
-    this.emitEvent("session.tool.called", {
-      sessionID,
-      assistantMessageID,
-      id: "c-slow",
-      input: { command: "sleep 30" },
-      executed: false,
-    });
-    this.emitEvent("session.tool.success", {
-      sessionID,
-      assistantMessageID,
-      id: "c-slow",
-      content: [{ type: "text", text: "slept" }],
-      executed: true,
-    });
     this.emitEvent("session.tool.input.started", { sessionID, assistantMessageID, id: "c-ask", name: "shell" });
     this.emitEvent("session.tool.called", {
       sessionID,
@@ -901,24 +914,36 @@ class ScriptedServe {
       input: { command: "echo late" },
       executed: false,
     });
-    this.emitEvent("permission.asked", {
-      id: "per_c-ask",
-      sessionID,
-      action: "shell",
-      resources: ["echo late"],
-      source: { type: "tool", messageID: assistantMessageID, id: "c-ask" },
-    });
-    this.emitEvent("permission.replied", { sessionID, requestID: "per_c-ask", reply: "reject" });
     this.emitEvent("session.tool.failed", {
       sessionID,
       assistantMessageID,
       id: "c-ask",
       executed: false,
-      error: { type: "permission.rejected", message: "interrupted" },
-      content: [{ type: "text", text: "interrupted" }],
+      error: { type: "aborted", message: "Tool execution interrupted" },
     });
+    this.emitEvent("session.step.failed", {
+      sessionID,
+      assistantMessageID,
+      error: { type: "aborted", message: "Step interrupted" },
+      rawFinish: "tool_calls",
+      cost: 0,
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+    });
+    this.emitEvent("session.usage.updated", {
+      sessionID,
+      cost: 0,
+      tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+    });
+    if (this.lateTailNoise) {
+      this.container.emit({ feed: "tailer", at: NOW, note: "stream closed" });
+      this.emitEvent("made_up_late_kind", { sessionID });
+    }
     if (this.interruptSettlesLate === "failed") {
       this.failExecution("provider.error", LATE_FAILURE_ERROR);
+      return;
+    }
+    if (this.interruptSettlesLate === "budget") {
+      this.failExecution("provider.error", LATE_BUDGET_REFUSAL);
       return;
     }
     this.emitEvent("session.execution.interrupted", { sessionID, reason: "user" });
@@ -962,6 +987,15 @@ class ScriptedServe {
   }
 
   private async play(): Promise<void> {
+    this.executing = true;
+    try {
+      await this.playBody();
+    } finally {
+      this.executing = false;
+    }
+  }
+
+  private async playBody(): Promise<void> {
     this.playing = true;
     this.plays++;
     this.emitEvent("session.execution.started", { sessionID: this.sessionID });
@@ -1154,6 +1188,7 @@ class ScriptedServe {
     input: Record<string, unknown>,
     status: "completed" | "error" | "running",
     body: unknown,
+    errorType = "permission.rejected",
   ): Record<string, unknown> {
     return {
       type: "tool",
@@ -1170,7 +1205,7 @@ class ScriptedServe {
             : {
                 status,
                 input,
-                error: { type: "permission.rejected", message: String(body) },
+                error: { type: errorType, message: String(body) },
                 content: [{ type: "text", text: String(body) }],
               },
     };
@@ -1262,6 +1297,19 @@ class ScriptedServe {
     this.emitPermissions([request]);
     const decision = await this.waitReply(requestID);
     this.emitPermissions([]);
+    if (this.interruptedAsks.has(requestID)) {
+      // The interrupt dropped the ask while it was pending: the binary emits no
+      // `permission.replied` and fails the tool `aborted`.
+      this.interruptedAsks.delete(requestID);
+      this.emitEvent("session.tool.failed", {
+        sessionID: this.sessionID,
+        assistantMessageID,
+        id: callId,
+        executed: false,
+        error: { type: "aborted", message: "Tool execution interrupted" },
+      });
+      return this.toolContent(callId, ask.name, input, "error", "Tool execution interrupted", "aborted");
+    }
     this.emitEvent("permission.replied", { sessionID: this.sessionID, requestID, reply: decision.reply });
     // The container is replaced with this call in flight (survival's ceiling):
     // the bot decided, but the result never comes back — the server and the tool
