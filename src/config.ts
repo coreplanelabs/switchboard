@@ -1,3 +1,4 @@
+import type { Grant } from "./core/budgets.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { TracingLogLevel } from "./core/trace/sinks.js";
 import { dirname, resolve } from "node:path";
@@ -30,6 +31,7 @@ import { AGENTS } from "./agents/registry.js";
 import type { McpServerEntry } from "./mcp/registry.js";
 import {
   validateBoundaries,
+  validateShipScopes,
   validateConfig,
   validateGrants,
   validateHarnessWords,
@@ -99,8 +101,12 @@ export interface Scope {
    * scope: overrides the org's `ship.addressSeverity` — user over
    * channel over org; a `severity:<level>` directive on the request wins.
    * Set with `config set channel|me --ship.addressSeverity <level>`.
+   * `grant`: the renewals and cost cap a ship request in this scope carries
+   * (decision 0046, the renewable lease): user over channel over the org's
+   * `ship.grant`; a `renewals:<count>` directive sets the count for one
+   * request. Validated at load (`validateShipScopes`).
    */
-  ship?: { addressSeverity?: AddressSeverity };
+  ship?: { addressSeverity?: AddressSeverity; grant?: Grant };
   /**
    * Free-text custom instructions folded into the system prompt as ADVISORY
    * content only. Channel text applies to every run in the
@@ -769,6 +775,8 @@ export class ConfigStore {
     validateInstructions(doc, `overrides (${this.backing.describe()})`);
     validateScopeEfforts(doc, `overrides (${this.backing.describe()})`);
     validateBoundaries(doc, `overrides (${this.backing.describe()})`);
+    // A stored grant is held to the same rule as a static one (decision 0046).
+    validateShipScopes(doc, `overrides (${this.backing.describe()})`);
     validateHarnessWords(doc, `overrides (${this.backing.describe()})`);
     validateMcpServers(
       { channels: doc.channels, users: doc.users, defaults: doc.org },

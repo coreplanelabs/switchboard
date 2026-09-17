@@ -565,6 +565,10 @@ export type RunEvent =
        *  the instance's units. A child's instance rides the record's
        *  `parentInstanceId`, never here. */
       instanceId?: string;
+      /** The grant the ship request carried (decision 0046, the renewable
+       *  lease): renewals and a cost cap — what a renewal could spend. Written
+       *  on the pipeline's own record beside `instanceId`; absent elsewhere. */
+      grant?: { renewals: number; costCapUsd?: number };
       seq?: number;
       at?: number;
     }

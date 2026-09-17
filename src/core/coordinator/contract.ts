@@ -8,6 +8,7 @@
 // parent record the spawn route reads the requester from, and the names the
 // routes decide on.
 //
+import type { Grant, GrantSource } from "../budgets.js";
 import type { AddressSeverity, AddressSeveritySource } from "../ship/coordinator.js";
 
 // A coordinator is a Workflow instance in the shim Worker whose children are
@@ -181,6 +182,13 @@ export interface CoordinatorInstance {
    *  the machine reads one value; absent reads as the default (`minor`, org). */
   addressSeverity?: AddressSeverity;
   addressSeveritySource?: AddressSeveritySource;
+  /** The grant (decision 0046, the renewable lease): the renewals and cost cap
+   *  the request carries, resolved once by the ship fork (directive count >
+   *  user > channel > org) and written here beside `merge`; absent reads as
+   *  zero renewals and no cap, the org's. Nothing renews until the renewal
+   *  decision reads it. */
+  grant?: Grant;
+  grantSource?: GrantSource;
   /** The pipeline's caps as the profile gate clipped them: the rounds cap and the wall clock per unit. */
   caps?: { maxRounds: number; maxMinutes: number };
   /** The status card in the requesting thread, when the channel has one — what

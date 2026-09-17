@@ -30,6 +30,7 @@ import { ALL_GRANTS } from "./core/authz/grants.js";
 import { NO_GRANTS } from "./core/authz/types.js";
 import {
   resolveAddressSeverity,
+  resolveGrant,
   resolveShipCaps,
   SHIP_DEFAULT_MAX_MINUTES,
   shipPresetFor,
@@ -1070,6 +1071,78 @@ describe("ship caps block (agent:ship pipeline)", () => {
       source: "user",
     });
     expect(resolveAddressSeverity({ user: "blocking", run: "nit" })).toEqual({ level: "nit", source: "run" });
+  });
+
+  it("ship.grant: parsed at load on the org block and the scopes, refused by name when malformed; resolveGrant layers a directive's count > user > channel > org with zero renewals and no cap as the org's default", async () => {
+    expect(store(YAML_FIXTURE + "ship:\n  grant:\n    renewals: 3\n    costCapUsd: 40\n").config.ship).toEqual({
+      grant: { renewals: 3, costCapUsd: 40 },
+    });
+    expect(store(YAML_FIXTURE + "ship:\n  grant:\n    renewals: 0\n").config.ship).toEqual({ grant: { renewals: 0 } });
+    expect(() => store(YAML_FIXTURE + "ship:\n  grant:\n    renewals: 13\n")).toThrow(
+      /ship\.grant\.renewals must be an integer from 0 to 12/,
+    );
+    expect(() => store(YAML_FIXTURE + "ship:\n  grant:\n    renewals: 1.5\n")).toThrow(
+      /ship\.grant\.renewals must be an integer from 0 to 12/,
+    );
+    expect(() => store(YAML_FIXTURE + "ship:\n  grant:\n    costCapUsd: 0\n")).toThrow(
+      /ship\.grant\.costCapUsd must be a positive number of dollars/,
+    );
+    expect(() => store(YAML_FIXTURE + "ship:\n  grant:\n    costCapUsd: 5\n    segments: 2\n")).toThrow(
+      /ship\.grant: unknown field segments/,
+    );
+    expect(() => store(YAML_FIXTURE + "ship:\n  grant: 3\n")).toThrow(/ship\.grant must be a mapping/);
+    expect(
+      store(
+        YAML_FIXTURE.replace(
+          "channels:\n",
+          'channels:\n  "slack:CGRANT":\n    ship:\n      grant:\n        renewals: 6\n',
+        ),
+      ).config.channels?.["slack:CGRANT"]?.ship,
+    ).toEqual({ grant: { renewals: 6 } });
+    expect(() =>
+      store(
+        YAML_FIXTURE.replace("users:\n", 'users:\n  "slack:UGRANT":\n    ship:\n      grant:\n        renewals: -1\n'),
+      ),
+    ).toThrow(/users\.slack:UGRANT\.ship\.grant\.renewals must be an integer from 0 to 12/);
+    expect(resolveGrant({})).toEqual({ grant: { renewals: 0 }, source: "org" });
+    expect(resolveGrant({ org: { renewals: 2, costCapUsd: 20 } })).toEqual({
+      grant: { renewals: 2, costCapUsd: 20 },
+      source: "org",
+    });
+    expect(resolveGrant({ org: { renewals: 2 }, channel: { renewals: 6, costCapUsd: 50 } })).toEqual({
+      grant: { renewals: 6, costCapUsd: 50 },
+      source: "channel",
+    });
+    expect(resolveGrant({ channel: { renewals: 6, costCapUsd: 50 }, user: { renewals: 1 } })).toEqual({
+      grant: { renewals: 1 },
+      source: "user",
+    });
+    // A directive sets the count and keeps the cap the scopes set: a person
+    // may spend renewals by hand, never widen the dollars.
+    expect(resolveGrant({ channel: { renewals: 6, costCapUsd: 50 }, run: 2 })).toEqual({
+      grant: { renewals: 2, costCapUsd: 50 },
+      source: "run",
+    });
+    expect(resolveGrant({ run: 0 })).toEqual({ grant: { renewals: 0 }, source: "run" });
+  });
+
+  it("a stored overrides document's `ship.grant` is held to the same rule at load, naming the backing — the one way around the chat command's validation is refused too", () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, YAML_FIXTURE);
+    const overrides = join(dir, "overrides.json");
+    writeFileSync(overrides, JSON.stringify({ channels: { "slack:CGRANT": { ship: { grant: { renewals: 999 } } } } }));
+    expect(() => new ConfigStore(cfg, overrides)).toThrow(
+      /overrides.*channels\.slack:CGRANT\.ship\.grant\.renewals must be an integer from 0 to 12/,
+    );
+    writeFileSync(overrides, JSON.stringify({ users: { "slack:UGRANT": { ship: { grant: { costCapUsd: 0 } } } } }));
+    expect(() => new ConfigStore(cfg, overrides)).toThrow(
+      /overrides.*users\.slack:UGRANT\.ship\.grant\.costCapUsd must be a positive number of dollars/,
+    );
+    writeFileSync(overrides, JSON.stringify({ users: { "slack:UGRANT": { ship: { grant: { renewals: 2 } } } } }));
+    expect(new ConfigStore(cfg, overrides).scopes("slack:CX", "slack:UGRANT").user.ship).toEqual({
+      grant: { renewals: 2 },
+    });
   });
 
   it("shipPresetFor: the ship preset as this deployment declares it — the registry's def with `ship.maxMinutes` as its budget, the default being the def's own; always a copy", () => {

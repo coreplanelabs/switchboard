@@ -33,6 +33,7 @@
 // plan's re-issue. A task string's ship branch waits for a person. Node-free:
 // the shim Worker imports this by relative path.
 
+import { DEFAULT_GRANT, GRANT_RENEWALS_MAX, type Grant, type GrantSource } from "../budgets.js";
 import {
   applyReturn,
   cursorFinished,
@@ -164,6 +165,9 @@ interface PlanFacts {
   /** The severity to address, beside `merge`: the level an approve's findings are held to, and which layer set it. */
   addressSeverity: AddressSeverity;
   addressSeveritySource: AddressSeveritySource;
+  /** The grant beside them (decision 0046): what a renewal could spend, and which layer granted it. */
+  grant: Grant;
+  grantSource: GrantSource;
   /** The instance's mark as the plan route answers it: a generated one-unit plan (a `plan` with no `path`). */
   generated: boolean;
   repo: string;
@@ -175,6 +179,21 @@ interface PlanFacts {
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isMinutes = (v: unknown): v is Record<string, number> =>
   isRecord(v) && Object.values(v).every((n) => typeof n === "number" && Number.isFinite(n));
+
+/** The grant as the plan route answers it; anything unreadable — a count
+ *  outside the module's ceiling included — is the default: nothing renews on a guess. */
+function readGrant(raw: unknown): Grant {
+  if (
+    !isRecord(raw) ||
+    typeof raw.renewals !== "number" ||
+    !Number.isInteger(raw.renewals) ||
+    raw.renewals < 0 ||
+    raw.renewals > GRANT_RENEWALS_MAX
+  )
+    return DEFAULT_GRANT;
+  const cap = raw.costCapUsd;
+  return { renewals: raw.renewals, ...(typeof cap === "number" && cap > 0 ? { costCapUsd: cap } : {}) };
+}
 
 function readPlan(a: BotAnswer): PlanFacts {
   const b = a.body;
@@ -192,6 +211,9 @@ function readPlan(a: BotAnswer): PlanFacts {
       b.addressSeveritySource === "run" || b.addressSeveritySource === "user" || b.addressSeveritySource === "channel"
         ? b.addressSeveritySource
         : "org",
+    grant: readGrant(b.grant),
+    grantSource:
+      b.grantSource === "run" || b.grantSource === "user" || b.grantSource === "channel" ? b.grantSource : "org",
     generated: b.generated === true,
     repo: b.repo,
     base: b.base,
@@ -484,6 +506,8 @@ async function runUnit(
       merge: plan.merge,
       addressSeverity: plan.addressSeverity,
       addressSeveritySource: plan.addressSeveritySource,
+      grant: plan.grant,
+      grantSource: plan.grantSource,
       generated: plan.generated,
       ...(resume !== undefined ? { resume } : {}),
       ...(lastPush !== undefined ? { lastPush } : {}),

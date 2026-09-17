@@ -119,6 +119,8 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       merge: "runner",
       addressSeverity: "minor",
       addressSeveritySource: "org",
+      grant: { renewals: 0 },
+      grantSource: "org",
       caps: { maxRounds: 3, maxMinutes: 45 },
       card: { channel: "C1", ts: "1.5" },
       runId: "run-s",
@@ -584,5 +586,19 @@ describe("the severity to address — resolved once, written on the instance bes
       addressSeverity: "minor",
       addressSeveritySource: "org",
     });
+  });
+});
+
+describe("the grant — resolved once, written on the instance beside `merge` (decision 0046, the renewable lease)", () => {
+  it("the hand-off writes the resolved grant and its source on the instance; absent, zero renewals and no cap are written as the org's, so nothing renews by default", async () => {
+    const h = harness();
+    await handOffToCoordinator(h.deps, input({ grant: { grant: { renewals: 4, costCapUsd: 30 }, source: "channel" } }));
+    expect(await h.instances.get("plan-fixture")).toMatchObject({
+      grant: { renewals: 4, costCapUsd: 30 },
+      grantSource: "channel",
+    });
+    const d = harness();
+    await handOffToCoordinator(d.deps, input());
+    expect(await d.instances.get("plan-fixture")).toMatchObject({ grant: { renewals: 0 }, grantSource: "org" });
   });
 });

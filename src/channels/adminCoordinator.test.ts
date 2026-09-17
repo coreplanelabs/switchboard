@@ -954,6 +954,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         // Absent on the record: the machine reads the default, named as the org's.
         addressSeverity: "minor",
         addressSeveritySource: "org",
+        // Absent on the record too: zero renewals, no cap, the org's — nothing renews.
+        grant: { renewals: 0 },
+        grantSource: "org",
         generated: false,
         repo: "acme/api",
         base: "main",

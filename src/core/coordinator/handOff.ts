@@ -15,6 +15,7 @@
 // plan runs; every refusal is a reply, and nothing is created on one. Pure over
 // its seams: the file read, the instance store, the create and the status read.
 
+import { DEFAULT_GRANT, type Grant, type GrantSource } from "../budgets.js";
 import { unitTitleOf } from "../ship/contract.js";
 import type { ShipEntry } from "../ship/preflight.js";
 import { shipTaskText } from "../ship/preflight.js";
@@ -63,6 +64,10 @@ export interface HandOffInput {
    *  (directive > user > channel > org) — written on the instance beside `merge`;
    *  absent (a caller without the config layers) is the default: `minor`, the org's. */
   addressSeverity?: { level: AddressSeverity; source: AddressSeveritySource };
+  /** The grant, resolved by the ship branch (directive count > user > channel >
+   *  org) — written on the instance beside `merge`; absent (a caller without the
+   *  config layers) is the default: zero renewals, no cap, the org's. */
+  grant?: { grant: Grant; source: GrantSource };
   /** The status card in the requesting thread, when the channel has one. */
   card?: { channel: string; ts: string };
   now: number;
@@ -147,6 +152,9 @@ async function plan(
     // Absent, the default is the org's `minor` (agent-ship item 9).
     addressSeverity: input.addressSeverity?.level ?? "minor",
     addressSeveritySource: input.addressSeverity?.source ?? "org",
+    // Absent, nothing renews: zero renewals and no cap, the org's (decision 0046).
+    grant: input.grant?.grant ?? DEFAULT_GRANT,
+    grantSource: input.grant?.source ?? "org",
     ...(input.card !== undefined ? { card: input.card } : {}),
     runId: input.runId,
     label: input.label,

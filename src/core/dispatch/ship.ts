@@ -25,7 +25,7 @@ import { ALLOWANCES, ASKS, fit } from "../budgets.js";
 import { createInstanceViaShim, fetchInstanceStatusViaShim } from "../coordinator/instancesClient.js";
 import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../coordinator/instancesRoute.js";
-import { resolveAddressSeverity, resolveShipCaps } from "../shipPipeline.js";
+import { resolveAddressSeverity, resolveGrant, resolveShipCaps } from "../shipPipeline.js";
 import { shipPreflight } from "../ship/preflight.js";
 import { redactSecrets, type AgentSource } from "../runEvents.js";
 import type { LiveThread } from "../threadAdmission.js";
@@ -351,6 +351,16 @@ export async function runShipBranch(
     user: scopes.user.ship?.addressSeverity,
     run: directives.severity,
   });
+  // The grant (decision 0046, the renewable lease), resolved once here the
+  // same way — the request's `renewals:` count over the user's scope over the
+  // channel's over the org's `ship.grant` — and written on the instance beside
+  // `merge`. Zero renewals by default: nothing renews until someone says so.
+  const grant = resolveGrant({
+    org: deps.config.config.ship?.grant,
+    channel: scopes.channel.ship?.grant,
+    user: scopes.user.ship?.grant,
+    run: directives.renewals,
+  });
   const shim = () => ({
     baseUrl: process.env.PUBLIC_BASE_URL,
     tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
@@ -380,6 +390,7 @@ export async function runShipBranch(
           label,
           caps,
           addressSeverity,
+          grant,
           ...(card.handle !== undefined ? { card: card.handle } : {}),
           now: clock(),
         },

@@ -1,11 +1,12 @@
 import { AGENTS } from "./agents/registry.js";
 import { MIN_BOUNDARY_MINUTES } from "./config/validate.js";
+import { GRANT_RENEWALS_MAX } from "./core/budgets.js";
 import { EFFORT_LEVELS_HINT, isEffort, type Effort } from "./effort.js";
 import { ADDRESS_SEVERITIES, isAddressSeverity, type AddressSeverity } from "./core/shipPipeline.js";
 
 // Per-request directives are inline tokens at the start (or anywhere) in the
 // message:  "@switchboard agent:review model:openai/gpt-5 effort:low budget:30 look at the failing test"
-// Recognized keys: agent, model, effort, budget. Unknown keys are left in the text untouched.
+// Recognized keys: agent, model, effort, budget, severity, renewals. Unknown keys are left in the text untouched.
 
 export interface RequestDirectives {
   agent?: string;
@@ -21,6 +22,11 @@ export interface RequestDirectives {
    *  approve stands. One request's, like `budget:`; resolved by
    *  the ship hand-off over the channel/user scopes and the org default. */
   severity?: AddressSeverity;
+  /** `renewals:<count>` — the renewals this ship request may spend (decision
+   *  0046, the renewable lease): a whole number from 0 to `GRANT_RENEWALS_MAX`.
+   *  One request's, like `budget:`; it sets the grant's count and keeps the
+   *  cost cap the scopes set. Never sticky. */
+  renewals?: number;
   /** message text with directive tokens removed */
   text: string;
 }
@@ -37,7 +43,7 @@ export interface ThreadDirectives {
   effort?: Effort;
 }
 
-const DIRECTIVE_RE = /(?:^|\s)(agent|model|effort|budget|severity)[:=](\S+)/g;
+const DIRECTIVE_RE = /(?:^|\s)(agent|model|effort|budget|severity|renewals)[:=](\S+)/g;
 
 /** `budget:<minutes>` takes a whole number of minutes, at least the boundary
  *  minimum (the bash tool keeps a 60-second reserve, so a shorter run could
@@ -120,6 +126,14 @@ export function parseDirectives(input: string): RequestDirectives {
         );
       }
       out.severity = f.value;
+    } else if (f.key === "renewals") {
+      const count = /^\d+$/.test(f.value) ? Number(f.value) : undefined;
+      if (count === undefined || count > GRANT_RENEWALS_MAX) {
+        throw new Error(
+          `Invalid renewals "${f.value}": renewals:<count> takes a whole number from 0 to ${GRANT_RENEWALS_MAX} — the segments agent:ship may add after its first lease.`,
+        );
+      }
+      out.renewals = count;
     }
     text = text.replace(f.match, " ");
   }
