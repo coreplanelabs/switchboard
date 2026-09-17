@@ -223,7 +223,7 @@ defineExpose({ focus });
         <div class="relative min-w-0 flex-1">
           <div
             v-if="ghost"
-            class="ghost pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words py-1 text-[0.875rem] leading-normal"
+            class="ghost composer-text pointer-events-none absolute inset-0 overflow-hidden whitespace-pre-wrap break-words"
             aria-hidden="true"
             data-testid="ghost"
             :data-acceptable="ghost.acceptable ? '1' : '0'"
@@ -233,7 +233,7 @@ defineExpose({ focus });
           </div>
           <textarea
             ref="box"
-            class="box relative min-h-6 w-full resize-none bg-transparent py-1 text-[0.875rem] leading-normal text-highlighted outline-none placeholder:text-dimmed"
+            class="box composer-text relative block min-h-6 w-full resize-none bg-transparent text-highlighted outline-none placeholder:text-dimmed"
             :rows="rows"
             :value="modelValue"
             :placeholder="placeholder"

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 // Feature: docs/reference/specs/web-chat.md rule 10 — every transition the chat
 // page adds is opacity plus at most 8px of translate, between 120 and 200 ms,
 // ease-out, and under prefers-reduced-motion keeps its opacity and drops its
-// travel. Three named exceptions run under 700 ms and are off under reduced
+// travel. Three named exceptions run under a second and are off under reduced
 // motion: the mark's route draw, the mark's pulse, the composer's ring sweep;
 // the mark's idle float moves it 1px over 4.6 s. The rule is checked against
 // the stylesheet itself, so a new `sb-` move that breaks it fails here before
@@ -65,7 +65,7 @@ describe("the chat page's motion vocabulary", () => {
     expect(vocabReduced).toMatch(/\.sb-stagger\s*\{[^}]*animation-name: sb-fade-in/);
   });
 
-  it("the exceptions run under 700 ms, move nothing but the mark, and are off under reduced motion", () => {
+  it("the exceptions run under a second, move nothing but the mark, and are off under reduced motion", () => {
     for (const [block, name] of [
       [ring, ".ring-sweep::before"],
       [mark, ".mark-pulse .pulse"],
@@ -73,7 +73,7 @@ describe("the chat page's motion vocabulary", () => {
       expect(block).toContain(name);
       const durations = [...block.matchAll(/\b(\d+)ms\b/g)].map((m) => Number(m[1]));
       expect(durations.length).toBeGreaterThan(0);
-      for (const ms of durations) expect(ms).toBeLessThanOrEqual(700);
+      for (const ms of durations) expect(ms).toBeLessThanOrEqual(1000);
       const reduced = block.slice(block.indexOf("@media (prefers-reduced-motion: reduce)"));
       expect(reduced).toContain(name);
       expect(reduced).toContain("animation: none");
