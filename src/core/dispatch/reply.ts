@@ -4,6 +4,7 @@
 // its close lines, the live-run link, the one shape a failure is reported in,
 // and a command reply that outgrows one chat message. Pure string and shape
 // work over the core's own types — no channel SDK (AGENTS.md invariant 1).
+import { visibilityOf } from "../authz/channelDirectory.js";
 import type { ChannelIO, DocumentAttachment, ImageAttachment } from "../types.js";
 import type { ParsedChatCommand } from "../commandChat.js";
 import { cliWords } from "../commandSurface.js";
@@ -322,7 +323,8 @@ export function attachmentSuffix(
  * - always lead with the agent name;
  * - a repo run is repo-identified (`coding · owner/repo · "…"`);
  * - a chat run shows channel + user (`review · #<channel> · <user> · "…"`),
- *   preferring display names and falling back to the prefix-stripped ids;
+ *   preferring display names and falling back to the prefix-stripped ids — and
+ *   a direct message, which has no name and never a hash, reads `DM`;
  * - a short quoted snippet of the request is appended when the text is non-empty;
  * - the whole thing is capped to RUN_LABEL_MAX chars.
  * Pure and channel-agnostic (HTTP/MCP have no names → the id fallback applies).
@@ -332,13 +334,22 @@ export function composeRunLabel(input: RunLabelInput): string {
   if (input.repo) {
     segments.push(input.repo);
   } else {
-    segments.push(`#${input.channelName ?? stripPlatformPrefix(input.channelId)}`);
+    segments.push(channelSegment(input.channelId, input.channelName));
     segments.push(input.userName ?? stripPlatformPrefix(input.userId));
   }
   const snippet = textSnippet(input.text);
   if (snippet) segments.push(snippet);
   const label = segments.join(" · ");
   return label.length > RUN_LABEL_MAX ? `${label.slice(0, RUN_LABEL_MAX - 1).trimEnd()}…` : label;
+}
+
+/** The label's channel segment: `#<name>`, or `#<id>` with the platform prefix
+ *  stripped when no name resolved — except a direct message. A `slack:D…` id or
+ *  the web chat's own lane (`visibilityOf` → `dm`) has no name Slack would give
+ *  it and is not a channel a hash could point at, so it reads `DM`. */
+function channelSegment(channelId: string, channelName: string | undefined): string {
+  if (channelName === undefined && visibilityOf(channelId) === "dm") return "DM";
+  return `#${channelName ?? stripPlatformPrefix(channelId)}`;
 }
 
 /** Prefixes the core stamps on status text — adapters use this to filter their

@@ -209,6 +209,18 @@ describe("composeRunLabel", () => {
     expect(composeRunLabel({ ...base, channelName: "general", text: "hi" })).toBe('review · #general · U123 · "hi"');
   });
 
+  it("a direct message reads DM, never a hashed id: a slack:D… id and the web chat's own lane, with the user's name or stripped id beside it; a private channel or group keeps its hash", () => {
+    expect(composeRunLabel({ ...base, channelId: "slack:D0DM1", userName: "ivy", text: "what time is it" })).toBe(
+      'review · DM · ivy · "what time is it"',
+    );
+    expect(composeRunLabel({ ...base, channelId: "web:a1b2", text: "hi" })).toBe('review · DM · U123 · "hi"');
+    expect(composeRunLabel({ ...base, channelId: "slack:G0PRIV", text: "hi" })).toBe('review · #G0PRIV · U123 · "hi"');
+    // A name the adapter did resolve always wins, hash and all.
+    expect(composeRunLabel({ ...base, channelId: "slack:D0DM1", channelName: "ivy-dm", text: "" })).toBe(
+      "review · #ivy-dm · U123",
+    );
+  });
+
   it("is channel-agnostic: http/mcp ids (no names) strip their platform prefix", () => {
     expect(composeRunLabel({ agent: "review", channelId: "http:svc", userId: "http:alice", text: "go" })).toBe(
       'review · #svc · alice · "go"',
