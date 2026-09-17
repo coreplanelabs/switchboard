@@ -588,9 +588,20 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     await Promise.race([settled, new Promise<void>((r) => setTimeout(r, maxMs))]);
   }
 
-  /** `du -sk` over the paths, summed, in KiB; null when nothing could be measured. */
+  /** `du -sk` over the paths, summed, in KiB; null when nothing could be
+   *  measured — including a `du` that did not answer inside its own limit
+   *  (a mount mid-restore under load): the judge treats a sample the
+   *  container could not take as no evidence either way, never as the
+   *  restore's failure. The restore's own promise still reports a runtime
+   *  that went away. */
   private async duKiB(paths: string[]): Promise<number | null> {
-    const r = await this.runRoot(["du", "-sk", ...paths], 30_000);
+    let r: { stdout: string; exitCode: number };
+    try {
+      r = await this.runRoot(["du", "-sk", ...paths], 30_000);
+    } catch {
+      return null;
+    }
+    if (r.exitCode === 124) return null;
     let total = 0;
     let seen = false;
     for (const line of r.stdout.split("\n")) {

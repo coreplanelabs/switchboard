@@ -200,6 +200,14 @@ describe("the seeded sandbox wiring (static)", () => {
     expect(streamSeed).toContain('reason: "seed-failed"');
   });
 
+  it("a restore-progress sample the container could not take is no evidence — never the seed's failure", () => {
+    const du = worker.slice(worker.indexOf("private async duKiB("), worker.indexOf("private async runRoot("));
+    expect(du).toMatch(
+      /try \{\s*r = await this\.runRoot\(\["du", "-sk", \.\.\.paths\], 30_000\);\s*\} catch \{\s*return null;/,
+    );
+    expect(du).toContain("if (r.exitCode === 124) return null;");
+  });
+
   it("/healthz says which transfer mode is live, so a receipt can tell a seedable Worker from one that is not", () => {
     expect(worker).toMatch(/\/healthz[\s\S]*?backupTransfer: backupTransferMode\(/);
   });
