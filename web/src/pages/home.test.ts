@@ -45,7 +45,7 @@ const seed = (over: Partial<HomeSeed> = {}): HomeSeed => ({
     { id: "conv-3", title: "bump the SDK", lastAt: NOW - 30 * 86_400_000, runs: 1, live: false },
   ],
   viewer: { name: "alice" },
-  sendUrl: "/chats/conv-1/send",
+  sendUrl: "/threads/conv-1/send",
   now: NOW,
   retentionDays: 30,
   suggestions: ["review the open PR on acme/api", "investigate why the acme/web deploy rolled back", "help"],
@@ -114,7 +114,7 @@ describe("HomePage — the empty state (rules 6, 7)", () => {
     await wrapper.findAll("ul.chips button")[1].trigger("click");
     await flush();
     expect(calls).toEqual([
-      { url: "/chats/conv-1/send", body: { text: "investigate why the acme/web deploy rolled back" } },
+      { url: "/threads/conv-1/send", body: { text: "investigate why the acme/web deploy rolled back" } },
     ]);
     expect(wrapper.find(".turn.person .bubble").text()).toBe("investigate why the acme/web deploy rolled back");
   });
@@ -133,14 +133,14 @@ describe("HomePage — the empty state (rules 6, 7)", () => {
     expect(wrapper.find("p.hint").attributes("data-shown")).toBe("0");
   });
 
-  it("the rail: the new-chat control with its shortcut, the recent rows newest first with the live dot and the ink bar, All runs, the retention sentence", () => {
+  it("the rail: the new-thread control with its shortcut, the recent rows newest first with the live dot and the ink bar, All runs, the retention sentence", () => {
     const wrapper = mountApp(HomePage, { seed: seed() });
-    const cta = wrapper.find("aside [data-testid=new-chat]");
-    expect(cta.attributes("href")).toBe("/chats");
-    expect(cta.text()).toContain("New chat");
+    const cta = wrapper.find("aside [data-testid=new-thread]");
+    expect(cta.attributes("href")).toBe("/threads");
+    expect(cta.text()).toContain("New thread");
     expect(cta.findAll("kbd").map((k) => k.text())).toEqual(["⇧", "⌘", "O"]);
     const rows = wrapper.findAll("aside nav.rail a.row");
-    expect(rows.map((r) => r.attributes("href"))).toEqual(["/chats/conv-1", "/chats/conv-2", "/chats/conv-3"]);
+    expect(rows.map((r) => r.attributes("href"))).toEqual(["/threads/conv-1", "/threads/conv-2", "/threads/conv-3"]);
     expect(rows[0].attributes("aria-current")).toBe("page");
     expect(rows[0].find(".bar").exists()).toBe(true);
     expect(rows[1].find(".dot").exists()).toBe(true);
@@ -165,7 +165,7 @@ describe("HomePage — the rail's filter and the shortcuts (item 7)", () => {
     expect(wrapper.findAll("aside nav.rail a.row")).toHaveLength(3);
   });
 
-  it("⌘K focuses the filter; ⇧⌘O opens a new chat", async () => {
+  it("⌘K focuses the filter; ⇧⌘O opens a new thread", async () => {
     const navigate = vi.spyOn(browser, "navigate").mockImplementation(() => {});
     const wrapper = mountApp(HomePage, { seed: seed() });
     await flush();
@@ -173,7 +173,7 @@ describe("HomePage — the rail's filter and the shortcuts (item 7)", () => {
     await nextTick();
     expect(document.activeElement).toBe(wrapper.find("aside label.filter input").element);
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "O", metaKey: true, shiftKey: true, bubbles: true }));
-    expect(navigate).toHaveBeenCalledWith("/chats");
+    expect(navigate).toHaveBeenCalledWith("/threads");
   });
 });
 
@@ -244,7 +244,7 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     await nextTick();
     expect(wrapper.find("header svg.mark").classes()).toContain("mark-pulse");
     await flush();
-    expect(calls).toEqual([{ url: "/chats/conv-1/send", body: { text: "review PR 1391" } }]);
+    expect(calls).toEqual([{ url: "/threads/conv-1/send", body: { text: "review PR 1391" } }]);
     expect(wrapper.find(".turn.person").attributes("data-pending")).toBeUndefined();
     const turn = wrapper.find(".turn.assistant");
     expect(turn.attributes("data-live")).toBe("1");
@@ -390,7 +390,7 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     await send(wrapper, "review PR 1391");
     await wrapper.find("form.composer button.control").trigger("click");
     await flush();
-    expect(calls.map((c) => c.url)).toEqual(["/chats/conv-1/send", "/runs/r-9/stop?t=tok9&mode=soft"]);
+    expect(calls.map((c) => c.url)).toEqual(["/threads/conv-1/send", "/runs/r-9/stop?t=tok9&mode=soft"]);
   });
 
   it("a failed send keeps the turn and says why under it", async () => {
@@ -427,9 +427,9 @@ describe("HomePage — a live turn from the seed", () => {
 });
 
 describe("AppShell — the mark is the way home (item 1)", () => {
-  it("wraps the brand mark in a link to /chats", () => {
+  it("wraps the brand mark in a link to /threads", () => {
     const wrapper = mountApp(AppShell, { props: { title: "Runs", nav: "runs" }, seed: seed() });
-    expect(wrapper.find("header h1 a.home").attributes("href")).toBe("/chats");
+    expect(wrapper.find("header h1 a.home").attributes("href")).toBe("/threads");
     expect(wrapper.find("header h1 a.home svg.mark").exists()).toBe(true);
   });
 });
@@ -496,7 +496,7 @@ describe("HomePage — the / palette and the placeholder (item 8)", () => {
     const wrapper = mountApp(HomePage, { seed: seed({ suggestions: ["What can Switchboard do?"] }) });
     await wrapper.find("ul.chips button").trigger("click");
     await flush();
-    expect(calls).toEqual([{ url: "/chats/conv-1/send", body: { text: "What can Switchboard do?" } }]);
+    expect(calls).toEqual([{ url: "/threads/conv-1/send", body: { text: "What can Switchboard do?" } }]);
     expect(wrapper.find("[data-testid=inline]").text()).toContain("Commands");
   });
 });

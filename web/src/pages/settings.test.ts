@@ -93,7 +93,7 @@ describe("SettingsPage", () => {
     const wrapper = mountApp(SettingsPage, {
       seed: island(base({ tab: "installation", installation: { settings: [], capabilities: [] } })),
     });
-    expect(wrapper.find("h1").text()).toBe("Settings");
+    expect(wrapper.find("h1 .title").text()).toBe("Settings");
     expect(wrapper.find('nav.tabs a[aria-current="page"]').text()).toBe("Installation");
     // Settings is chrome, not a section: no nav entry is current, the header's cog is.
     expect(wrapper.find('nav.site a[aria-current="page"]').exists()).toBe(false);

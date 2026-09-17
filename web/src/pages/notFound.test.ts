@@ -36,7 +36,7 @@ describe("RunRoutePage (the /runs/:id dispatch)", () => {
     const w = mountApp(RunRoutePage, {
       seed: { page: "run", mode: "history", id: "r1", events: [], eventCount: 0, startedAt: 1 },
     });
-    expect(w.find("h1").text()).toBe("Run");
+    expect(w.find("h1 .title").text()).toBe("Run");
     expect(w.text()).not.toContain("That run isn't here.");
   });
 });

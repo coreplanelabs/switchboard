@@ -9,8 +9,8 @@ import type { RouteRecordRaw } from "vue-router";
 export const routes: RouteRecordRaw[] = [
   // The home page: the chat (docs/reference/specs/web-chat.md, record 0043) — under
   // one prefix so the Access application covers it in one rule; `/` redirects here.
-  { path: "/chats", component: () => import("./pages/HomePage.vue") },
-  { path: "/chats/:id", component: () => import("./pages/HomePage.vue") },
+  { path: "/threads", component: () => import("./pages/HomePage.vue") },
+  { path: "/threads/:id", component: () => import("./pages/HomePage.vue") },
   { path: "/runs", component: () => import("./pages/RunsIndexPage.vue") },
   { path: "/runs/scheduled", component: () => import("./pages/ScheduledPage.vue") },
   // A ship unit's page (or the run 404 — the seed decides, see UnitRoutePage).

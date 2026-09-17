@@ -72,11 +72,20 @@ const menuItems = computed(() => [
       class="sticky top-0 z-20 -mx-3 mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-default bg-default/75 px-3 pb-3 pt-4 backdrop-blur sm:-mx-5 sm:px-5"
     >
       <slot name="leading" />
-      <h1 class="flex items-center gap-2 text-base font-medium tracking-tight text-highlighted">
-        <!-- The mark is the way home (docs/reference/specs/web-chat.md item 1): a
-             full page load to the chat, like every section. -->
-        <a class="home flex items-center text-highlighted no-underline" href="/chats" aria-label="Home"><BrandMark /></a
-        >{{ title }}
+      <!-- The constant part of every header (docs/reference/specs/web-chat.md item 1):
+           the mark and the name as one link to the threads page, then the page's
+           own title beside them, subordinate — the product is always named, the
+           page is what changes. -->
+      <h1 class="flex min-w-0 items-center gap-2 text-base tracking-tight">
+        <a
+          class="home brand flex shrink-0 items-center gap-2 font-medium text-highlighted no-underline"
+          href="/threads"
+          aria-label="Switchboard home"
+        >
+          <BrandMark /><span class="wordmark">Switchboard</span>
+        </a>
+        <span class="sep select-none text-dimmed" aria-hidden="true">/</span>
+        <span class="title min-w-0 truncate font-normal text-toned">{{ title }}</span>
       </h1>
       <slot name="status" />
       <span class="ml-auto flex items-center gap-4">

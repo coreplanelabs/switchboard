@@ -143,9 +143,9 @@ describe("fuzzyScore / filterRows — the rail's filter (rule 7)", () => {
 });
 
 describe("shortcutFor — the page's two shortcuts (rule 7)", () => {
-  it("⇧⌘O (or ⌃⇧O) is a new chat; ⌘K (or ⌃K) is the filter; anything else is nothing", () => {
-    expect(shortcutFor({ key: "O", metaKey: true, ctrlKey: false, shiftKey: true })).toBe("newChat");
-    expect(shortcutFor({ key: "o", metaKey: false, ctrlKey: true, shiftKey: true })).toBe("newChat");
+  it("⇧⌘O (or ⌃⇧O) is a new thread; ⌘K (or ⌃K) is the filter; anything else is nothing", () => {
+    expect(shortcutFor({ key: "O", metaKey: true, ctrlKey: false, shiftKey: true })).toBe("newThread");
+    expect(shortcutFor({ key: "o", metaKey: false, ctrlKey: true, shiftKey: true })).toBe("newThread");
     expect(shortcutFor({ key: "k", metaKey: true, ctrlKey: false, shiftKey: false })).toBe("search");
     expect(shortcutFor({ key: "k", metaKey: true, ctrlKey: false, shiftKey: true })).toBeNull();
     expect(shortcutFor({ key: "o", metaKey: true, ctrlKey: false, shiftKey: false })).toBeNull();

@@ -195,8 +195,8 @@ function onKey(ev: KeyboardEvent): void {
   const shortcut = shortcutFor(ev);
   if (!shortcut) return;
   ev.preventDefault();
-  if (shortcut === "newChat") {
-    browser.navigate("/chats");
+  if (shortcut === "newThread") {
+    browser.navigate("/threads");
     return;
   }
   // ⌘K: the filter — in the column, or in the sheet once it has opened.
@@ -259,7 +259,7 @@ const empty = computed(() => items.length === 0);
 </script>
 
 <template>
-  <AppShell title="Chats" nav="home">
+  <AppShell title="Threads" nav="home">
     <template #leading>
       <!-- The phone's way to the rail: a sheet from the left. -->
       <UButton
@@ -268,7 +268,7 @@ const empty = computed(() => items.length === 0);
         color="neutral"
         variant="ghost"
         icon="i-lucide-panel-left"
-        aria-label="Recent conversations"
+        aria-label="Recent threads"
         @click="railOpen = true"
       />
     </template>
@@ -284,7 +284,7 @@ const empty = computed(() => items.length === 0);
           :retention="retention"
         />
       </aside>
-      <USlideover v-model:open="railOpen" side="left" title="Recent conversations" :ui="{ content: 'max-w-xs' }">
+      <USlideover v-model:open="railOpen" side="left" title="Recent threads" :ui="{ content: 'max-w-xs' }">
         <template #body>
           <ConversationRail
             ref="sheetRail"

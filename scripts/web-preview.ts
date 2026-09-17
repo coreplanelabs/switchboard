@@ -46,10 +46,10 @@ import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web
 //   /runs/unit/plan-acme-3:U14   a unit whose review thread does not exist yet — the coding thread alone
 //   /runs/cond-1                a finished conductor listing the runs it spawned
 //   /runs/ship-1                the pipeline's own record listing its instance's units
-//   /chats                      the home page's empty state (docs/reference/specs/web-chat.md); `/` redirects here
-//   /chats/conv-1               a finished conversation of three runs, each folding open to its work
-//   /chats/conv-live            a conversation whose newest run is live (the scripted stream)
-//   POST /chats/<id>/send       202 → the live stream; "use …" → a hand-back; "help" → the inline catalogue;
+//   /threads                      the home page's empty state (docs/reference/specs/web-chat.md); `/` redirects here
+//   /threads/conv-1               a finished conversation of three runs, each folding open to its work
+//   /threads/conv-live            a conversation whose newest run is live (the scripted stream)
+//   POST /threads/<id>/send       202 → the live stream; "use …" → a hand-back; "help" → the inline catalogue;
 //                               a conversation with a run in flight → a steer ack
 //
 // SWITCHBOARD_PREVIEW_CAPABILITIES=minimal serves the same fixtures with every
@@ -1979,7 +1979,7 @@ const homeSeed = (conversation: string, turns: HomeTurnSeed[]): HomeSeed => ({
   turns,
   conversations: HOME_CONVERSATIONS,
   viewer: { name: "alice" },
-  sendUrl: `/chats/${conversation}/send`,
+  sendUrl: `/threads/${conversation}/send`,
   now: NOW,
   retentionDays: 30,
   suggestions: HOME_SUGGESTIONS,
@@ -2058,9 +2058,9 @@ function page(
         units: SHIP_UNITS,
       },
     };
-  if (pathname === "/chats") return { title: "Switchboard", seed: homeSeed("conv-new", []) };
-  if (pathname === "/chats/conv-1") return { title: "Chats", seed: homeSeed("conv-1", HOME_TURNS) };
-  if (pathname === "/chats/conv-live") return { title: "(1) Chats", seed: homeSeed("conv-live", HOME_LIVE_TURNS) };
+  if (pathname === "/threads") return { title: "Switchboard", seed: homeSeed("conv-new", []) };
+  if (pathname === "/threads/conv-1") return { title: "Threads", seed: homeSeed("conv-1", HOME_TURNS) };
+  if (pathname === "/threads/conv-live") return { title: "(1) Threads", seed: homeSeed("conv-live", HOME_LIVE_TURNS) };
   if (pathname === "/runs")
     return {
       title: all ? "All runs" : "(2) Live runs",
@@ -2277,11 +2277,11 @@ createServer((req, res) => {
   // while conv-live's run is in flight → the steer acknowledgement, no run.
   if (url.pathname === "/") {
     // The bot's `/` redirects to the chat (record 0043, amended): one prefix for the Access rule.
-    res.writeHead(302, { location: "/chats" });
+    res.writeHead(302, { location: "/threads" });
     res.end();
     return;
   }
-  const send = /^\/chats\/([^/]+)\/send$/.exec(url.pathname);
+  const send = /^\/threads\/([^/]+)\/send$/.exec(url.pathname);
   if (send && req.method === "POST") {
     const conversation = decodeURIComponent(send[1]);
     let raw = "";

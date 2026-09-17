@@ -123,8 +123,8 @@ export function filterRows<T extends { title: string }>(rows: readonly T[], quer
 }
 
 /** The page's two shortcuts, shown beside the controls they fire (rule 7):
- *  ⇧⌘O (Ctrl on other platforms) opens a new chat, ⌘K focuses the filter. */
-export type Shortcut = "newChat" | "search";
+ *  ⇧⌘O (Ctrl on other platforms) opens a new thread, ⌘K focuses the filter. */
+export type Shortcut = "newThread" | "search";
 
 export function shortcutFor(ev: {
   key: string;
@@ -135,7 +135,7 @@ export function shortcutFor(ev: {
   const mod = ev.metaKey || ev.ctrlKey;
   if (!mod) return null;
   const key = ev.key.toLowerCase();
-  if (key === "o" && ev.shiftKey) return "newChat";
+  if (key === "o" && ev.shiftKey) return "newThread";
   if (key === "k" && !ev.shiftKey) return "search";
   return null;
 }

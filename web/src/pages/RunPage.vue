@@ -17,16 +17,16 @@ import { runOwnerOf } from "@core/core/runOwner.js";
 import { useSeed } from "../lib/seed";
 import { useWallClock } from "../lib/wallClock";
 import { browser } from "../lib/browser";
-import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
+import { useEventSourceFactory } from "../lib/eventSource";
+import { attachRunStream, type StreamPhase } from "../lib/runStream";
+import { thinkingVerb } from "../lib/thinkingVerbs";
+import PendingTurnRow from "../components/run/PendingTurnRow.vue";
 import {
   createRunClock,
   createRunPageModel,
   liveWait,
   modelName,
   deliveryCaption,
-  parseEndFrame,
-  parseFinishedFrame,
-  parseReplayElided,
   phaseHeadText,
   replyCaption,
   runnerNow,
@@ -81,7 +81,7 @@ const state = model.state;
 // ---- header state ----------------------------------------------------------
 /** `finished`: the agent stopped (the `finished` frame); the reply is on its way
  *  and the stream stays open until `end` (docs/reference/specs/tracing.md). */
-type Phase = "connecting" | "running" | "stopping" | "finished" | "disconnected" | "ended";
+type Phase = StreamPhase;
 const phase = ref<Phase>(isHistory ? "ended" : "connecting");
 const stopError = ref("");
 const nowWall = useWallClock();
@@ -286,23 +286,9 @@ const waiting = computed(() => (live.value ? liveWait(state, model.pendingCall()
 // the row is visibly alive without a spinner. The word is DERIVED from how
 // long this silence has lasted, so every silence starts at "Thinking" and
 // nothing rotates while no one is waiting.
-const THINKING = [
-  "Thinking",
-  "Pondering",
-  "Mulling it over",
-  "Reasoning",
-  "Cogitating",
-  "Weighing options",
-  "Puzzling",
-  "Deliberating",
-  "Noodling",
-  "Chewing on it",
-  "Ruminating",
-  "Reticulating splines",
-];
 const verb = computed(() => {
   if (waiting.value?.kind !== "thinking") return "";
-  return timeline.value?.openStep || THINKING[Math.floor(waiting.value.elapsedMs / 6000) % THINKING.length];
+  return timeline.value?.openStep || thinkingVerb(waiting.value.elapsedMs);
 });
 
 // ---- fold toggle ---------------------------------------------------------------
@@ -351,7 +337,7 @@ function handle(e: unknown): void {
 
 // ---- the stream / the seed -----------------------------------------------------
 const makeEventSource = useEventSourceFactory();
-let es: EventSourceLike | null = null;
+let stream: ReturnType<typeof attachRunStream> | null = null;
 
 // History seeds synchronously: the seed IS the stream, and feeding it before
 // the first render keeps the paint complete (no flash of an empty page).
@@ -363,65 +349,45 @@ if (seed?.mode === "history") {
   model.closePhases(); // a record is over: nothing is in progress under a phase head
 }
 
+// The stream attach is the ONE shared with a thread's assistant turn
+// (web/src/lib/runStream.ts): the dedupe, the named frames and the phases live
+// there; what this page does with each is here. A stop in flight keeps its word:
+// the composable moves to `running` only while no stop is asked, and this
+// page's `stopping` is mirrored from the stream's phase for every other move.
 onMounted(() => {
   if (seed?.mode !== "live") return;
-  es = makeEventSource(seed.eventsUrl);
-  es.onopen = () => {
-    if (!state.stopMode) phase.value = "running";
-  };
-  let lastSeq = 0;
-  es.onmessage = (m) => {
-    let e: { type?: string };
-    try {
-      e = JSON.parse(m.data) as typeof e;
-    } catch {
-      return;
-    }
-    // Run-event frames carry their stream position as the SSE id; anything at
-    // or before the last applied position is dropped (a proxy that strips
-    // Last-Event-ID would make the server replay from the start). A transport
-    // notice (replay_note) has no id of its own — exempt.
-    if (e.type !== "replay_note") {
-      const sid = Number(m.lastEventId);
-      if (sid > 0) {
-        if (sid <= lastSeq) return;
-        lastSeq = sid;
-      }
-    }
-    handle(e);
-  };
-  es.addEventListener("replay_elided", (data) => {
-    const range = parseReplayElided(data);
-    if (range) model.noteElided(range);
+  stream = attachRunStream({
+    url: seed.eventsUrl,
+    factory: makeEventSource,
+    model,
+    handle,
+    // The agent stopped: the header's duration freezes at the server's finish
+    // stamp (docs/reference/specs/tracing.md), the stream stays open for the span
+    // records until `end`; nothing runs, the actions go, the reply is on its way.
+    onFinished: (frame) => {
+      if (runClock) frozenMs.value = runClock.elapsedAt(frame.finishedAt);
+      liveStamps.value = { ...liveStamps.value, finishedAt: frame.finishedAt };
+      actionsHidden.value = true;
+    },
+    onEnd: (frame) => {
+      actionsHidden.value = true;
+      frozenMs.value ??= runClock?.elapsedMs(nowWall.value); // an `end` with no `finished` before it (a stored stream) freezes here
+      liveStamps.value = { ...liveStamps.value, ...frame };
+    },
   });
-  // The agent stopped: the header's duration freezes at the server's finish
-  // stamp (docs/reference/specs/tracing.md), the stream stays open for the span records
-  // until `end`.
-  es.addEventListener("finished", (data) => {
-    const frame = parseFinishedFrame(data);
-    if (frame && runClock) frozenMs.value = runClock.elapsedAt(frame.finishedAt);
-    if (frame) liveStamps.value = { ...liveStamps.value, finishedAt: frame.finishedAt };
-    // The agent stopped: nothing runs, the actions go, the reply is on its way.
-    // A stop in flight keeps its word (like `markStopping`).
-    actionsHidden.value = true;
-    if (phase.value === "connecting" || phase.value === "running") phase.value = "finished";
-  });
-  es.addEventListener("end", (data) => {
-    model.flushPendingTurn("the run ended here"); // a run that ended without a reply still shows its last turn
-    model.closePhases();
-    actionsHidden.value = true;
-    frozenMs.value ??= runClock?.elapsedMs(nowWall.value); // an `end` with no `finished` before it (a stored stream) freezes here
-    liveStamps.value = { ...liveStamps.value, ...parseEndFrame(data) };
-    phase.value = "ended";
-    es?.close();
-  });
-  es.onerror = () => {
-    if (es && es.readyState === EVENT_SOURCE_CLOSED) phase.value = "disconnected";
-  };
+  watch(
+    stream.phase,
+    (p) => {
+      // The viewer's own stop keeps `stopping` until the stream says finished or ended.
+      if (phase.value === "stopping" && (p === "running" || p === "connecting")) return;
+      phase.value = p;
+    },
+    { immediate: true },
+  );
 });
 
 onUnmounted(() => {
-  es?.close();
+  stream?.close();
 });
 
 // ---- request source / meta -------------------------------------------------------
@@ -933,26 +899,14 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
              is: the ∿ pulse, a `model` badge, a rotating verb, and the time
              since the last stamped event on the runner clock. A running
              command needs nothing here: its card ticks. -->
-        <li
+        <PendingTurnRow
           v-if="waiting?.kind === 'thinking'"
-          id="thinking"
-          class="pending ml-3.5 mt-5 flex items-center gap-3 rounded-md border border-dashed border-accented pl-3 pr-[calc(var(--sb-gutter)-1px)] py-2 text-sm first:mt-0"
-          aria-live="off"
-          title="the model is working on its next turn — nothing back yet (since the last event, runner clock)"
-        >
-          <span class="pulse text-[1.1em] leading-none text-info motion-safe:animate-pulse">∿</span>
-          <span
-            class="badge shrink-0 rounded bg-accented px-1.5 font-mono text-[0.68rem] font-medium leading-normal tracking-wider text-muted"
-            :title="state.model ?? undefined"
-            >{{ modelName(state.model) }}</span
-          >
-          <span class="verb min-w-0 truncate text-toned">{{ verb }}…</span>
-          <span
-            class="since ml-auto shrink-0 font-mono text-xs tabular-nums"
-            :class="waiting.slow ? 'text-warn' : 'text-dimmed'"
-            >{{ formatDuration(waiting.elapsedMs, "clock") }}</span
-          >
-        </li>
+          class="ml-3.5 mt-5 first:mt-0"
+          :verb="verb"
+          :elapsed-ms="waiting.elapsedMs"
+          :slow="waiting.slow"
+          :model="state.model"
+        />
         <li ref="logEnd" aria-hidden="true" />
       </ol>
 
