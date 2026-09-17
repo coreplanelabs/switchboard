@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ExecInfraError, ExecSandboxRestartedError } from "./executor.js";
+import { ExecControlResetError, ExecInfraError, ExecSandboxRestartedError } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError, ResidentOperations, ResidentReuseRefusedError } from "./resident.js";
 import { residentTraceOf } from "./residentTrace.js";
 import { createTracer } from "../core/trace/tracer.js";
@@ -301,6 +301,33 @@ describe("ResidentExecutor.exec", () => {
     expect(calls.map(route)).toEqual(["/exec"]);
   });
 
+  it("control-reset (a DO reset mid-command) on /exec is the typed ExecControlResetError at once — no re-attach, NOT a restart, NOT infra: the container is unchanged and the outcome is unknown", async () => {
+    // A `wrangler deploy` of the Worker code (no image change) reset this DO's
+    // isolate under the command: the container and its processes are as they
+    // were. The client must not read this as a replaced container (that would
+    // orphan a live pi), nor as a dead sandbox (fail-fast). It is its own word,
+    // resolved by the harness seam (re-send an idempotent op; a write by echo).
+    const { fn, calls } = stubFetch({
+      body: {
+        error:
+          "control-reset: the resident's Durable Object was reset (a deploy) while this command was running; the container and its processes are as they were; the command's outcome is unknown",
+        reason: "control-reset",
+        stdout: "",
+        stderr: "control-reset",
+        exitCode: 127,
+      },
+    });
+    const ex = new ResidentExecutor(OPTS);
+    const err = await ex.exec("git status").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecControlResetError);
+    expect(err).not.toBeInstanceOf(ExecSandboxRestartedError);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/^control-reset: the resident's Durable Object was reset/);
+    expect((err as Error).message).toMatch(/the command's outcome is unknown/);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(calls.map(route)).toEqual(["/exec"]); // nothing recovered first: the word is the answer
+  });
+
   it("two runtime-replaced /exec answers in a row are two typed restarts — the streak's infra error is for the idempotent routes, never for the word the harness keys on", async () => {
     const replaced = {
       error: "runtime-replaced: the resident runtime was replaced (a deploy) while this command ran",
@@ -502,6 +529,41 @@ describe("ResidentExecutor.readFile / writeFile", () => {
     const err = await new ResidentExecutor(OPTS).readFile("f.txt").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toMatch(/2 times in a row/);
+  });
+
+  it("a 409 control-reset on read (idempotent) re-attaches once and re-issues; a second one is the unknown outcome, ExecControlResetError — never infra", async () => {
+    const reset = {
+      status: 409,
+      body: {
+        error: "control-reset: the resident's Durable Object was reset (a deploy); the command's outcome is unknown",
+        reason: "control-reset",
+      },
+    };
+    const { calls } = stubFetch(reset, { body: ATTACH_OK }, { body: { content: "back", truncated: false } });
+    const ex = new ResidentExecutor(OPTS);
+    await expect(ex.readFile("f.txt")).resolves.toBe("back");
+    expect(calls.map(route)).toEqual(["/read", "/attach", "/read"]);
+
+    stubFetch(reset, { body: ATTACH_OK }, reset);
+    const err = await new ResidentExecutor(OPTS).readFile("f.txt").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecControlResetError);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/^control-reset:/);
+  });
+
+  it('control-reset then needs:"attach" on the re-issued read (a reset that also left the worktree evicted) is the precise worktree-unavailable infra error — the op\'s one re-attach is spent, never a generic status error', async () => {
+    const { calls } = stubFetch(
+      {
+        status: 409,
+        body: { error: "control-reset: the resident's Durable Object was reset", reason: "control-reset" },
+      },
+      { body: ATTACH_OK },
+      { status: 409, body: { error: "worktree-missing: still gone", needs: "attach" } },
+    );
+    const err = await new ResidentExecutor(OPTS).readFile("f.txt").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toMatch(/worktree still unavailable after a re-attach/);
+    expect(calls.map(route)).toEqual(["/read", "/attach", "/read"]); // exactly one re-attach, no second
   });
 
   it('runtime-replaced then needs:"attach" on the retried read (deploy + evicted worktree) is the precise worktree-unavailable infra error', async () => {

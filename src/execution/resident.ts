@@ -14,6 +14,7 @@ import {
   isContainerRolling,
   sandboxRestartedMessage,
   saysContainerGone,
+  saysControlReset,
   wakeDecision,
   wakeWaitBudget,
 } from "./residentWake.js";
@@ -23,6 +24,7 @@ import { repoResourceId } from "../core/residentAdmin.js";
 import { EXEC_CALL_MARGIN_MS, clampBashTimeout } from "./bashTimeout.js";
 import {
   BASH_TIMEOUT_MS,
+  ExecControlResetError,
   ExecInfraError,
   ExecSandboxRestartedError,
   decodeBase64Read,
@@ -746,6 +748,16 @@ export class ResidentExecutor implements Executor {
       if (route === "/exec" && saysContainerGone(data))
         throw new ExecSandboxRestartedError(containerGoneMessage(String(data.error)), 0);
     };
+    // The resident's own DO reset under the command while the container kept
+    // running (a Worker deploy, item 43): on /exec the typed control reset at
+    // once — the container is unchanged and the command's outcome is unknown, so
+    // the harness seam re-sends an idempotent op or resolves a write by pi's
+    // echo (harness-pi item 16), never the replaced verdict. NOT a
+    // replacement, so `swapIncarnation`/relaunch never fire off it. The
+    // idempotent routes below re-attach once and re-issue, a re-read being safe.
+    const controlResetUnderThread = (data: Record<string, unknown>): void => {
+      if (route === "/exec" && saysControlReset(data)) throw new ExecControlResetError(String(data.error).trim());
+    };
     let r = await this.call(route, body, callTimeoutMs, signal, span);
     if (isContainerRolling(r.data.error)) {
       const woke = await this.awaitWake(route, String(r.data.error), { signal, budgetMs: opts.waitBudgetMs, span });
@@ -761,10 +773,25 @@ export class ResidentExecutor implements Executor {
       }
     }
     goneUnderThread(r.data);
+    controlResetUnderThread(r.data);
     if (r.data.needs === "attach") {
       await this.attach(span); // the recovery rides the same trace as the op it rescues
       r = await this.call(route, body, callTimeoutMs, signal, span);
       goneUnderThread(r.data);
+      controlResetUnderThread(r.data);
+      if (r.data.needs === "attach") throw stillGone(r.data);
+    }
+    if (saysControlReset(r.data)) {
+      // An idempotent route (/exec threw above): the DO is fresh after its
+      // reset, so re-attach once and re-issue — a re-read is safe. Still reset
+      // → the outcome is unknown; never re-run blindly, never infra.
+      await this.attach(span); // the recovery rides the same trace as the op it rescues
+      r = await this.call(route, body, callTimeoutMs, signal, span);
+      if (saysControlReset(r.data)) throw new ExecControlResetError(String(r.data.error).trim());
+      // Compound fault: the reset also left the worktree evicted. The re-attach
+      // above was this op's one re-attach, so name it precisely, as the
+      // runtime-replaced path below does, instead of falling through to the
+      // generic status error.
       if (r.data.needs === "attach") throw stillGone(r.data);
     }
     if (r.data.reason === "runtime-replaced") {

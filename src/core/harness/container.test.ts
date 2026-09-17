@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { shellQuote } from "../../execution/shellQuote.js";
 import {
+  ExecControlResetError,
   ExecInfraError,
   ExecSandboxRestartedError,
   type ExecOptions,
@@ -15,10 +16,12 @@ import {
   CURL_MAX_TIME_S,
   ExecHarnessContainer,
   HARNESS_PORT_ENV,
+  HarnessContainerControlResetError,
   HarnessContainerDownError,
   HarnessContainerError,
   HarnessContainerRuntimeReplacedError,
   INLINE_LINE_CHARS,
+  isControlReset,
   OP_TIMEOUT_MS,
   PROBE_WAIT_BACKOFF_MS,
   PROBE_WAIT_MAX_MS,
@@ -575,6 +578,54 @@ describe("replacedVerdict — the one more command waits through a container tha
     await expect(replacedVerdict(down.container, "vm-a")).resolves.toBeUndefined();
     expect(down.asked()).toBe(1);
   });
+
+  /** An `identity` that answers with a control reset `reset` times (the
+   *  container unchanged) before it answers `then`. */
+  function resetThen(reset: number, then: () => Promise<string | undefined>) {
+    let asked = 0;
+    const identity = async () => {
+      asked++;
+      if (asked <= reset)
+        throw new HarnessContainerControlResetError(
+          "identity",
+          "control-reset: the resident's Durable Object was reset (a deploy); the container and its processes are as they were; the command's outcome is unknown",
+        );
+      return then();
+    };
+    return { container: { identity }, asked: () => asked };
+  }
+
+  it("a control reset over the one more command is a re-send, never a judgement: the probe is re-sent after the backoff until the container answers, and the note names the reset (a same-kernel reset keeps the container)", async () => {
+    const seam = new HarnessContainerRuntimeReplacedError("identity", "runtime-replaced: the runtime was replaced");
+    // Reset twice (the container unchanged), then the executor's word.
+    const reset = resetThen(2, async () => {
+      throw seam;
+    });
+    const p = probe();
+    await expect(replacedVerdict(reset.container, "vm-a", p.wait)).resolves.toEqual({ condition: "word", said: seam });
+    expect(reset.asked()).toBe(3);
+    expect(p.slept).toEqual([5_000, 10_000]);
+    expect(p.noted[0]).toMatch(
+      /^the one more command met the resident's control plane reset \(the container is unchanged\); re-sending it, up to 300s$/,
+    );
+    expect(p.noted.at(-1)).toBe("the container answered after 15s of waiting");
+  });
+
+  it("a control plane that keeps resetting past the wait runs out and decides nothing, never a judgement from the reset", async () => {
+    const reset = resetThen(Number.POSITIVE_INFINITY, async () => "unreachable");
+    const p = probe();
+    await expect(replacedVerdict(reset.container, "vm-a", p.wait)).resolves.toBeUndefined();
+    // The start note named the reset; the wait runs out on the executor's own
+    // five-minute bound, shared with the down-wait (never a verdict from a reset).
+    expect(p.noted[0]).toMatch(/met the resident's control plane reset .*re-sending it, up to 300s/);
+    expect(p.noted.at(-1)).toMatch(/the container did not answer within 300s; the wait ran out/);
+  });
+
+  it("without a probe, a control reset over the one more command judges nothing, as any other failure (no infinite re-send)", async () => {
+    const reset = resetThen(1, async () => "vm-b");
+    await expect(replacedVerdict(reset.container, "vm-a")).resolves.toBeUndefined();
+    expect(reset.asked()).toBe(1);
+  });
 });
 
 describe("saysTransportLost — the third failure shape: a container command failed on its transport with no word", () => {
@@ -873,6 +924,88 @@ describe("ExecHarnessContainer — each operation is one command over the execut
     await expect(new ExecHarnessContainer(executor).start(piStart([]))).rejects.toThrow(
       /start failed — exit 1:\nmkfifo/,
     );
+  });
+});
+
+// Feature: docs/reference/specs/harness-pi.md item 16 — a Durable Object reset
+// over a live container (the executor's `ExecControlResetError`) is
+// resolved at the seam: an idempotent op is re-sent once (the container is
+// unchanged, a re-read is safe); a write is never blindly re-sent (its outcome
+// is unknown). Neither is ever the replaced verdict — `isContainerGone` never
+// matches a control reset and its message never carries the runtime word.
+describe("ExecHarnessContainer — a Durable Object control reset over a live container", () => {
+  const controlReset = () =>
+    new ExecControlResetError(
+      "control-reset: the resident's Durable Object was reset (a deploy); the container and its processes are as they were; the command's outcome is unknown",
+    );
+
+  it("an idempotent op (readLog) re-sends the command ONCE on a control reset and returns its bytes; the executor is called twice", async () => {
+    const bytes = Buffer.from("hello").toString("base64");
+    const { executor, calls } = recordingExecutor([controlReset(), bytes]);
+    const c = new ExecHarnessContainer(executor);
+    await expect(c.readLog(paths.log, 0, 1024)).resolves.toEqual(new Uint8Array(Buffer.from("hello")));
+    expect(calls).toHaveLength(2);
+    expect(calls[0].command).toBe(readLogScript(paths.log, 0, 1024));
+    expect(calls[1].command).toBe(calls[0].command); // the same command, re-sent once
+  });
+
+  it("an idempotent op that meets a control reset TWICE is the seam's HarnessContainerControlResetError naming the op — never a container-gone, never the runtime word", async () => {
+    const { executor, calls } = recordingExecutor([controlReset(), controlReset()]);
+    const c = new ExecHarnessContainer(executor);
+    const err = await c.alive(4242).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessContainerControlResetError);
+    expect((err as Error).message).toMatch(/^harness container: alive failed — control-reset:/);
+    expect((err as Error).message).not.toMatch(/runtime-replaced|runtime-unreachable/);
+    expect(calls).toHaveLength(2); // re-sent once, then given up
+    // A control reset is judged as outcome-unknown-container-unchanged, never a replacement.
+    expect(isControlReset(err)).toBe(true);
+    expect(isContainerGone(err)).toBe(false);
+  });
+
+  it("a write (writeLine into the FIFO) is NEVER re-sent on a control reset — its outcome is unknown, raised as the seam's control reset at once", async () => {
+    const { executor, calls } = recordingExecutor([controlReset()]);
+    const c = new ExecHarnessContainer(executor);
+    const err = await c.writeLine(paths, '{"type":"steer","message":"go"}').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessContainerControlResetError);
+    expect((err as Error).message).toMatch(/^harness container: send failed — control-reset:/);
+    expect(calls).toHaveLength(1); // never re-sent
+    expect(isControlReset(err)).toBe(true);
+    expect(isContainerGone(err)).toBe(false);
+  });
+
+  it("a GET request re-sends once on a control reset; a POST request is raised at once, never re-sent", async () => {
+    const ok = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{}";
+    const get: HarnessRequest = { method: "GET", port: 41000, path: "/api/health" };
+    const post: HarnessRequest = { method: "POST", port: 41000, path: "/api/session/prompt", body: '{"text":"hi"}' };
+
+    const read = recordingExecutor([controlReset(), ok]);
+    await expect(new ExecHarnessContainer(read.executor).request(paths, get)).resolves.toMatchObject({ status: 200 });
+    expect(read.calls).toHaveLength(2); // re-sent once
+
+    const write = recordingExecutor([controlReset()]);
+    const err = await new ExecHarnessContainer(write.executor).request(paths, post).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessContainerControlResetError);
+    expect(write.calls).toHaveLength(1); // never re-sent
+  });
+
+  // identity() is the one more command a dead process's judgement rests on
+  // (`replacedVerdict`). A control reset over it is the container unchanged, so
+  // it is thrown — a re-send for the caller — never returned as `undefined`,
+  // which reads as a container with no name (a judgement).
+  it("identity() re-sends once on a single control reset and answers the word — a control reset over the probe is a re-send", async () => {
+    const { executor, calls } = recordingExecutor([controlReset(), "3f1c2a6e-9b0d-4d2e-8a1f-0c9e7b6a5d43\n"]);
+    const c = new ExecHarnessContainer(executor);
+    expect(await c.identity()).toBe("3f1c2a6e-9b0d-4d2e-8a1f-0c9e7b6a5d43");
+    expect(calls).toHaveLength(2); // re-sent once
+  });
+
+  it("identity() rethrows a control reset it meets twice — never `undefined` — so the caller re-attaches instead of judging a container with no name", async () => {
+    const { executor } = recordingExecutor([controlReset(), controlReset()]);
+    const c = new ExecHarnessContainer(executor);
+    const err = await c.identity().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarnessContainerControlResetError);
+    expect(isControlReset(err)).toBe(true);
+    expect(isContainerGone(err)).toBe(false);
   });
 });
 

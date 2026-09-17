@@ -175,6 +175,22 @@ export class ExecSandboxRestartedError extends Error {
   }
 }
 
+/** The resident's own Durable Object reset under a command in flight (a Worker
+ *  deploy) while the container kept running (docs/reference/specs/resident-repos.md
+ *  item 43; the resident's `reason:"control-reset"`): the command's outcome is
+ *  unknown but the container and every process the run holds in it are
+ *  unchanged. Deliberately NOT an `ExecInfraError` (not a dead sandbox) and NOT
+ *  an `ExecSandboxRestartedError` (not a replacement, so never the replaced
+ *  verdict): the harness re-sends an idempotent op and resolves a write by
+ *  pi's echo (harness-pi.md item 16), and never orphans a live pi. */
+export class ExecControlResetError extends Error {
+  readonly controlReset = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "ExecControlResetError";
+  }
+}
+
 const MAX_OUTPUT = 120_000;
 
 export function truncate(s: string): string {
