@@ -14,7 +14,7 @@
 // conformance table runs both against it.
 
 import { isControlReset, saysContainerReplaced, type HarnessContainer } from "./container.js";
-import { PiRpcTransport, type PiRpcTransportDeps } from "./pi/transport.js";
+import { PiRpcTransport, type Landing, type PiRpcTransportDeps } from "./pi/transport.js";
 
 /** How many times a live run re-attaches in place with no record read between
  *  them before it gives up: a real reset or blip converges in one (the next
@@ -111,7 +111,8 @@ export function reattachTransport(
  *  ignores a duplicate response for an id it has already settled. A `prompt`
  *  is not here (it awaits its echo), neither is a `steer` (its echo and the
  *  loop's requeue resolve it), and neither is an `abort` — never in doubt,
- *  since the transport writes it directly and never records its failure. */
+ *  since the transport writes it as its own step, past any spent chain, and
+ *  never records its failure. */
 const RESEND_AS_IS = new Set(["set_auto_retry", "get_state", "extension_ui_response"]);
 
 /** How to resolve the write a reset left unknown, by pi's echo — one rule for
@@ -123,8 +124,8 @@ const RESEND_AS_IS = new Set(["set_auto_retry", "get_state", "extension_ui_respo
  *    the very chunk read before the transport surfaced its send error.
  *  - `resend`: an id-carrying control command or the gate reply — safe to
  *    re-send as it was (its id dedups). An abort is never in doubt: the
- *    transport writes it directly and never records its failure, so one here
- *    needs nothing.
+ *    transport writes it as its own step past any spent chain and never
+ *    records its failure, so one here needs nothing.
  *  - `await-echo`: a `prompt` with an id, re-sent only if pi does not echo that
  *    id within the bound — a blind re-send would deliver the whole request
  *    twice into one turn (`streamingBehavior: "steer"` on the re-send, which pi
@@ -174,14 +175,21 @@ interface HeldSend {
   state: "send" | "await" | "landed";
 }
 
-/** What a write handed to the transport came to: `landed` (written to pi's
- *  FIFO), `failed` (its write rejected — the reset's; it is `pendingSend`
- *  for the re-attach to resolve), or `held` (queued on a chain a failure
- *  already spent, or on a transport abandoned to a re-attach: the fresh
- *  transport re-sends it, the same object, through the gate again). */
-export type Landing = "landed" | "failed" | "held";
-/** A landing the write's sender hears about: the write is over, one way or the other. */
+/** A landing the write's sender hears about: the write is over, one way or the
+ *  other — `landed`, `failed`, or `dropped` (nothing kept it and no re-send
+ *  will come, so a clock or a label waiting on it must give up now). Only a
+ *  `held` write is not over: it comes back through `send` as the same object
+ *  (`PiRpcTransport.Landing`). */
 export type Settled = Exclude<Landing, "held">;
+
+/** The commands the gate never holds, by type — the two exits (harness-pi item
+ *  16), enforced here so no caller can get them wrong. A gate reply answers an
+ *  ask pi already made, so no order is owed it and holding it would only block
+ *  pi's tool. An abort — a stop's, the finale's, a gate bypass's — is written
+ *  by the transport as its own step behind whatever is in flight; held here it
+ *  would wait out a bound the stop itself ends (the loop breaks on the flag),
+ *  and the drop at the loop's end would discard it: pi never aborted. */
+const PASSES_HOLD = new Set(["extension_ui_response", "abort"]);
 
 /** The one gate every write to pi takes after a re-attach (harness-pi item 16).
  *  While a prompt a failure left in doubt awaits its echo, every later write of
@@ -198,12 +206,11 @@ export type Settled = Exclude<Landing, "held">;
  *  being handed out: the records pi wrote during the reset, read in one chunk
  *  and consumed one ledger write at a time, are no time, and the echo late in
  *  that burst lands the prompt before any judgement. The two answers to what pi
- *  already did never wait, each enforced where the write is made rather than
- *  at its call sites: an abort never reaches the gate (`PiRpcTransport.send`
- *  diverts it to `sendAbort`), and a gate reply (`extension_ui_response`)
- *  passes the hold here in `send` — it answers an ask pi already made, so pi
- *  has consumed whatever prompt produced that call and keys the ask by id;
- *  holding it would only block pi's tool. `deliver` writes to the transport as
+ *  already did never wait, each enforced by type where the write is made rather
+ *  than at its call sites: `send` here holds neither an abort nor a gate reply
+ *  (`PASSES_HOLD`), and the transport writes an abort as its own step behind
+ *  whatever is in flight (the abort step of `PiRpcTransport.write`, never
+ *  queued, never stopped by a spent chain). `deliver` writes to the transport as
  *  it is at that moment, so a re-attach's fresh transport is what a held write
  *  reaches, and answers with the write's landing. */
 export class HeldSends {
@@ -226,13 +233,14 @@ export class HeldSends {
   }
 
   /** Send now — or, while a prompt in doubt holds the gate, hold behind it in
-   *  order. A gate reply never holds: the rule lives here, by the command's
-   *  type, so no caller can get it wrong. `onLanded` runs when the write has
-   *  settled at the transport — told `landed`, or `failed` with the reset —
-   *  never at the hand-off to a chain that only holds it. */
+   *  order. A gate reply and an abort never hold (`PASSES_HOLD`): the rule
+   *  lives here, by the command's type, so no caller can get it wrong.
+   *  `onLanded` runs when the write has settled at the transport — told
+   *  `landed`, or `failed` with the reset — never at the hand-off to a chain
+   *  that only holds it, and never for a write nothing kept. */
   send(command: Record<string, unknown>, onLanded?: (landing: Settled) => void): void {
     if (onLanded) this.onLanded.set(command, onLanded);
-    if (this.holding && command.type !== "extension_ui_response") {
+    if (this.holding && !PASSES_HOLD.has(String(command.type))) {
       this.queue.push({ command, state: "send" });
       return;
     }
@@ -274,6 +282,10 @@ export class HeldSends {
     if (now - this.headSince < PROMPT_ECHO_WAIT_MS) return;
     this.queue.shift();
     this.headSince = undefined;
+    // The re-send is a steer-delivered copy. No callback follows it: a prompt
+    // is never sent with one (only the wrap-up steer carries `onLanded`), and
+    // an awaited head is a write the transport already answered `failed`,
+    // whose callback `dispatch` ran and forgot.
     this.dispatch({ ...head.command, streamingBehavior: "steer" });
     this.release();
     if (this.queue[0]?.state === "await") this.headSince = now;
@@ -298,7 +310,11 @@ export class HeldSends {
 
   /** Hand a write to the transport; its `onLanded`, if any, runs once the write
    *  settled there. A `held` landing leaves the callback in place: the fresh
-   *  transport's re-send of the same object (through `send`) runs it. */
+   *  transport's re-send of the same object (through `send`) runs it. Every
+   *  other landing is the write's end and the callback is told which —
+   *  `dropped` included: a closed transport kept nothing, no re-send will come,
+   *  and a clock or a label waiting on the write must give up now rather than
+   *  wait for ever. */
   private dispatch(command: Record<string, unknown>): void {
     void this.deliver(command).then((landing) => {
       if (landing === "held") return;

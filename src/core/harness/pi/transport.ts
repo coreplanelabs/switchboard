@@ -10,8 +10,19 @@
 // bridge and the driver's accumulator never know which.
 
 import { LOG_READ_BYTES, type HarnessContainer, type HarnessPaths } from "../container.js";
-import type { Landing } from "../reattach.js";
 import type { PiTransport } from "./protocol.js";
+
+/** How a write handed to `PiRpcTransport.write` came out — the transport's
+ *  answer, which the gate (`HeldSends`) acts on: `landed`, on pi's FIFO;
+ *  `failed`, its write rejected (the reset's), the command kept as
+ *  `pendingSend` for the re-attach to resolve; `held`, never attempted here
+ *  and kept for `takeUnsent` — a write already queued whose turn on the chain
+ *  came after a failure spent it or after the transport was abandoned to a
+ *  re-attach — so the fresh transport re-sends the same object through the
+ *  gate; `dropped`, nothing kept it — a write handed to a closed or abandoned
+ *  transport, or an abort's step that found the transport abandoned by the
+ *  time it ran — so no re-send will ever come (harness-pi item 16). */
+export type Landing = "landed" | "failed" | "held" | "dropped";
 
 export interface PiRpcTransportDeps {
   container: HarnessContainer;
@@ -82,70 +93,60 @@ export class PiRpcTransport implements PiTransport {
     void this.write(command);
   }
 
-  /** Send, and say how the write came out once the chain reaches it (harness-pi
-   *  item 16): `landed` on pi's FIFO; `failed` — the reset's, the command kept
-   *  as `pendingSend` for the re-attach to resolve; `held` — never attempted
-   *  here, kept for `takeUnsent` and the fresh transport. What the gate's
-   *  `onLanded` waits on: a clock stamped at the landing (the finale's) starts
-   *  when pi has the steer, not when a chain that only held it was handed it. */
+  /** Send, and say how the write came out once the chain reaches it (`Landing`,
+   *  harness-pi item 16). What the gate's `onLanded` waits on: a clock stamped
+   *  at the landing (the finale's) starts when pi has the steer, not when a
+   *  chain that only held it was handed it. A write to a closed transport is
+   *  `dropped`: nothing keeps it, so nothing will re-send it.
+   *
+   *  An abort takes the same step with three differences (the one way in: the
+   *  gate passes it by type, `HeldSends.send`). It is never queued, so no
+   *  re-attach can replay it from `takeUnsent`; a spent chain does not stop it
+   *  — the reset that failed a prompt a moment after the abort was asked for
+   *  must not swallow the stop, and a teardown's abort still reaches pi past
+   *  an earlier failure; and its own failure is nobody's — the transport is
+   *  being left and the process ended by `kill`. Behind whatever is in flight,
+   *  never a second writer: a line is a separate exec into the FIFO and a line
+   *  over PIPE_BUF is several `write(2)`s. On a transport abandoned to a
+   *  re-attach by the time its step runs it is `dropped`, not held: never
+   *  queued, nothing re-sends it, and its sender is told — the pi harness
+   *  notes a dropped abort as its own error, so a stop swallowed there is
+   *  seen, never assumed. Nothing chains one there today: every abort's
+   *  sender in the pi harness is the loop or the turn, both suspended in the
+   *  recovery that abandons, and the OpenCode bridge never writes on its
+   *  transport. */
   write(command: Record<string, unknown>): Promise<Landing> {
-    if (this.closed) return Promise.resolve("held");
-    // An abort never queues (`sendAbort`): one step on the chain that a spent
-    // chain does not stop, so a write in flight that fails after it was asked
-    // for cannot swallow it, and no re-attach can ever replay it from `takeUnsent`.
-    if (command.type === "abort") {
-      this.sendAbort();
-      return this.sending.then(() => "landed" as const);
-    }
+    if (this.closed) return Promise.resolve("dropped");
+    const abort = command.type === "abort";
     const line = JSON.stringify(command);
-    this.queued.push(command);
+    if (!abort) this.queued.push(command);
     const step: Promise<Landing> = this.sending
       .then((): Landing | Promise<Landing> => {
         // Decided when this write's turn on the chain comes, not when it was
-        // queued. Once a write has FAILED the chain is spent (a steer queued
-        // behind the failed prompt must not land ahead of the prompt's re-send
-        // on the fresh transport — order inverted), and once `abandon()`ed the
-        // fresh transport owns every write not yet started: either way this one
-        // stays queued for `takeUnsent`, never landed here, never lost. A plain
-        // `close()` (teardown) does neither, so a write sent just before it
-        // still flushes — unless an earlier write failed, when it is held like
-        // the rest (see `close`). Otherwise it is in flight.
-        if (this.sendError !== undefined || this.heldForReattach) return "held";
-        this.queued.shift();
+        // queued. Once `abandon()`ed the fresh transport owns every write not
+        // yet started: a queued write stays queued for `takeUnsent`, never
+        // landed here, never lost; an abort, never queued, is dropped. Once a
+        // write has FAILED the chain is spent (a steer queued behind the failed
+        // prompt must not land ahead of the prompt's re-send on the fresh
+        // transport — order inverted), so a queued write stays queued — the
+        // abort alone goes on. A plain `close()` (teardown) does neither, so a
+        // write sent just before it still flushes — unless an earlier write
+        // failed, when it is held like the rest (see `close`). Otherwise it is
+        // in flight.
+        if (this.heldForReattach) return abort ? "dropped" : "held";
+        if (!abort && this.sendError !== undefined) return "held";
+        if (!abort) this.queued.shift();
         return this.deps.container.writeLine(this.deps.paths, line).then(() => "landed" as const);
       })
       .catch((err: unknown): Landing => {
-        this.sendError ??= err instanceof Error ? err : new Error(String(err));
-        this.pendingSend ??= command;
+        if (!abort) {
+          this.sendError ??= err instanceof Error ? err : new Error(String(err));
+          this.pendingSend ??= command;
+        }
         return "failed";
       });
     this.sending = step.then(() => undefined);
     return step;
-  }
-
-  /** The abort — a hard stop's, the finale's, a gate bypass's — the one write
-   *  that never waits for the gate and never waits for a re-attach (harness-pi
-   *  item 16): ONE step on the transport's chain that a spent chain does not
-   *  stop. Nothing in flight — an idle chain, or one a failure already spent —
-   *  and the step runs at once: that is the direct write. A write in flight or
-   *  queued on a live chain, and the abort follows it: whichever prompt the
-   *  stop was asked for during, pi has the prompt first and the abort after,
-   *  never an idle session aborted and then handed the prompt to run unwatched.
-   *  Never two writers: a line is a separate exec into the FIFO and a line over
-   *  PIPE_BUF is several `write(2)`s, so a direct write beside an in-flight one
-   *  could land inside pi's line and cost both. The step writes even when the
-   *  write before it spent the chain (the reset that failed a prompt a moment
-   *  after the abort was asked for must not swallow the stop), and skips only
-   *  on a transport abandoned to a re-attach — its fresh transport is the one
-   *  writer then; never queued for `takeUnsent`, so no re-attach replays it; a
-   *  failed write is nobody's — the transport is being left, the process
-   *  ended by `kill`. */
-  sendAbort(): void {
-    if (this.closed) return;
-    const line = JSON.stringify({ type: "abort" });
-    this.sending = this.sending
-      .then(() => (this.heldForReattach ? undefined : this.deps.container.writeLine(this.deps.paths, line)))
-      .catch(() => undefined);
   }
 
   /** Whether the reader is at the log's end as far as it knows: every record
@@ -182,7 +183,7 @@ export class PiRpcTransport implements PiTransport {
   /** Close for teardown: a write already queued still lands — unless an
    *  earlier write failed, when it is held (`takeUnsent`) and this transport
    *  delivers nothing more of the chain. An abort is the one exception: its
-   *  step ignores the spent chain (`sendAbort`), so a teardown's abort still
+   *  step ignores the spent chain (`write`'s abort step), so a teardown's abort still
    *  reaches pi even then; the process is ended by `kill` regardless, so
    *  teardown owes nothing to a held write. */
   close(): void {

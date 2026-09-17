@@ -2460,7 +2460,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(w.events.find((e) => e.type === "run_note" && e.kind === "stopped")).toMatchObject({ mode: "hard" });
   });
 
-  it("the abort reaches pi even when the turn's own failed write spent the transport's chain: a follow-up turn whose prompt write failed on the FIFO with the container's transport words (the failure surfacing on the read), whose one more command found the container down once, and whose wait a hard stop ended — the abort is written directly, since a write queued behind the failure would never land", async () => {
+  it("the abort reaches pi even when the turn's own failed write spent the transport's chain: a follow-up turn whose prompt write failed on the FIFO with the container's transport words (the failure surfacing on the read), whose one more command found the container down once, and whose wait a hard stop ended — the abort's step ignores the spent chain, where a write queued behind the failure would never land", async () => {
     const w = world();
     scriptedPi(w.container, (n, c) => {
       if (n === 0) {
@@ -3294,6 +3294,131 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(w.inbox.drain().map((i) => i.text)).toEqual(["S1 first"]); // back to the inbox for the fresh turn
   });
 
+  it("a follow-up turn's own wrap-up steer still held when the turn ends is dropped and the turn's answer wears no label: the turn's prompt in doubt holds the gate, the turn guard's steer waits behind it, pi settles inside the hold — the answer is pi's own and the note closes the TURN", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) finalTurn(c, "All green.");
+    });
+    const session = await w.open();
+    const scripted = w.container.onStdin!;
+    let turnPromptId: string | undefined;
+    // The turn's prompt reaches pi, its write rejecting with the reset after: in doubt, holding the gate.
+    w.container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt" && cmd.message === "one more" && turnPromptId === undefined) {
+        turnPromptId = String(cmd.id);
+        throw controlReset();
+      }
+      scripted(line, c);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let polls = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0 || turnPromptId === undefined || resumedSummaries(w).length === 0) return chunk;
+      // A few polls in — the turn guard (`maxTurns: 0`) has steered the wrap-up
+      // behind the prompt in doubt — pi settles, long before the bound and
+      // without ever echoing the prompt: the steer is still held.
+      if (++polls < 6) return chunk;
+      finalTurn(w.container, "done");
+      return realRead(path, offset, max);
+    };
+    const answer = await session.followUp({ text: "one more", maxTurns: 0, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toBe("done"); // pi's own, unlabelled: the turn-guard wrap-up never reached it
+    expect(w.notes).toContain(wrapUpUndeliveredNote("turns", "turn"));
+    expect(w.notes).not.toContain(wrapUpUndeliveredNote("turns", "run"));
+    expect(w.container.commands().filter((c) => c.type === "steer")).toEqual([]); // the held steer was dropped, never sent
+  });
+
+  it("a wrap-up steer's landing belongs to the write-up it was issued for: the loop's time-budget steer still in flight when the loop ends, failing with a reset inside a follow-up turn that has its own turn-guard write-up, is nobody's — never re-asked into the turn, never the turn's clock, no note", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 1 } }); // the loop's time is up on its first check: its wrap-up steer goes at once
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) finalTurn(c, "All green."); // pi settles while the loop's wrap-up write is still in flight
+    });
+    const realWrite = w.container.writeLine.bind(w.container);
+    let failLoopSteer: ((err: Error) => void) | undefined;
+    w.container.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "steer" && cmd.message === timeBudgetInstruction() && failLoopSteer === undefined) {
+        await new Promise<void>((_, reject) => (failLoopSteer = reject)); // the loop's steer hangs in flight, then fails
+      }
+      return realWrite(p, line);
+    };
+    const session = await w.open();
+    expect(failLoopSteer).toBeDefined(); // the loop ended with its wrap-up write in flight — dispatched, so nothing to drop
+    const realRead = w.container.readLog.bind(w.container);
+    let phase = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === 0 && w.container.commands().length >= 3) {
+        // The turn's prompt and its own turn-guard steer are queued behind the
+        // hung write; now the loop's steer fails with the reset, inside the turn.
+        phase = 1;
+        failLoopSteer!(controlReset());
+        return chunk;
+      }
+      if (
+        phase === 1 &&
+        resumedSummaries(w).length > 0 &&
+        w.container.commands().some((c) => c.message === "one more")
+      ) {
+        phase = 2;
+        finalTurn(w.container, "done");
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const sentBefore = w.container.stdin.length;
+    const answer = await session.followUp({ text: "one more", maxTurns: 0, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toMatch(/done/);
+    const inTurn = w.container.commands().slice(sentBefore);
+    const steers = inTurn.filter((c) => c.type === "steer").map((c) => String(c.message));
+    expect(steers.some((m) => m.includes("turn guard"))).toBe(true); // the turn's own wrap-up, landed
+    expect(steers).not.toContain(timeBudgetInstruction()); // the loop's instruction was never re-asked into the turn
+    expect(w.notes.some((n) => n.includes("time-budget wrap-up instruction's write failed"))).toBe(false);
+    expect(w.notes).not.toContain(finaleTimedOutNote("turn"));
+  });
+
+  it("a wrap-up steer's landing after its loop ended is nobody's before the next turn too: the loop's time-budget steer still in flight when the loop ends, failing with a reset before a follow-up turn is prompted, notes no failure after the answer and is never re-asked onto the spent chain — the turn's re-attach carries only the turn's own writes to pi", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 1 } }); // the loop's time is up on its first check: its wrap-up steer goes at once
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) finalTurn(c, "All green."); // pi settles while the loop's wrap-up write is still in flight
+      if (n === 1) finalTurn(c, "done"); // the turn's prompt, landed on the fresh transport
+    });
+    const realWrite = w.container.writeLine.bind(w.container);
+    let failLoopSteer: ((err: Error) => void) | undefined;
+    w.container.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "steer" && cmd.message === timeBudgetInstruction() && failLoopSteer === undefined) {
+        await new Promise<void>((_, reject) => (failLoopSteer = reject)); // the loop's steer hangs in flight, then fails
+      }
+      return realWrite(p, line);
+    };
+    const session = await w.open();
+    expect(failLoopSteer).toBeDefined(); // the loop ended with its wrap-up write in flight — dispatched, so nothing to drop
+    const sentBefore = w.container.stdin.length;
+    // The window: the loop is over, no turn has begun, and the loop's steer
+    // fails with the reset. Nobody's: no failure noted after the answer, no
+    // re-ask of the loop's instruction onto the spent chain.
+    failLoopSteer!(controlReset());
+    await new Promise<void>((r) => setImmediate(r));
+    await new Promise<void>((r) => setImmediate(r));
+    expect(w.notes.some((n) => n.includes("time-budget wrap-up instruction's write failed"))).toBe(false);
+    // The turn: its prompt is held on the spent chain, its first read throws
+    // the reset, and the re-attach carries the turn's writes — never the
+    // loop's instruction — to pi on the fresh transport.
+    const answer = await session.followUp({ text: "one more", maxTurns: 0, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toMatch(/done/);
+    expect(resumedSummaries(w).length).toBeGreaterThan(0);
+    const inTurn = w.container.commands().slice(sentBefore);
+    const steers = inTurn.filter((c) => c.type === "steer").map((c) => String(c.message));
+    expect(steers.some((m) => m.includes("turn guard"))).toBe(true); // the turn's own wrap-up, landed
+    expect(steers).not.toContain(timeBudgetInstruction()); // the loop's instruction was never re-asked
+    expect(w.notes.some((n) => n.includes("time-budget wrap-up instruction's write failed"))).toBe(false);
+    expect(w.notes).not.toContain(finaleTimedOutNote("turn"));
+  });
+
   it("a second reset while the gate holds keeps holding: nothing new is in doubt, one resumed note per reset, and P1 then S1 is the order once the bound elapses", async () => {
     const w = tickingWorld();
     scriptedPi(w.container, (_n, c) => finalTurn(c, "ok"));
@@ -3460,7 +3585,7 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
 });
 
 describe("the control-reset write-resolution rules (harness-pi item 16)", () => {
-  it("resolveControlResetWrite: a read reset, a landed steer and an abort need nothing (an abort is never in doubt: written directly, never pendingSend); a prompt awaits its echo; the id-carrying control commands and the gate reply re-send as they were; an unknown write has no echo and fails the run by name", () => {
+  it("resolveControlResetWrite: a read reset, a landed steer and an abort need nothing (an abort is never in doubt: its own step past any spent chain, never pendingSend); a prompt awaits its echo; the id-carrying control commands and the gate reply re-send as they were; an unknown write has no echo and fails the run by name", () => {
     // A read reset (nothing in flight) and a steer (its landed copy pi echoes,
     // its unlanded copy the loop requeues) are never re-sent — a landed steer
     // must not double.
@@ -3482,7 +3607,7 @@ describe("the control-reset write-resolution rules (harness-pi item 16)", () => 
       kind: "resend",
       command: { id: "d1", type: "extension_ui_response", response: {} },
     });
-    // An abort is never the write in doubt — `sendAbort` writes it directly and
+    // An abort is never the write in doubt — the transport writes it as its own step and
     // records no failure — so the rule says one thing of it: nothing to resolve.
     expect(resolveControlResetWrite({ type: "abort" })).toEqual({ kind: "none" });
     // A prompt with no id has no echo to key on, so it cannot be awaited: fail by name (finding 6).

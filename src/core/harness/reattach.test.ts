@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { HeldSends, PROMPT_ECHO_WAIT_MS, reattachBoundMessage, type Landing } from "./reattach.js";
+import type { Landing } from "./pi/transport.js";
+import { HeldSends, PROMPT_ECHO_WAIT_MS, reattachBoundMessage } from "./reattach.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 16 — the one gate every write
 // to pi takes after a re-attach left a prompt in doubt: while that prompt awaits
@@ -16,6 +17,7 @@ const P2 = { id: "p2", type: "prompt", message: "second" };
 const S1 = { type: "steer", message: "S1" };
 const S2 = { type: "steer", message: "S2" };
 const REPLY = { id: "d1", type: "extension_ui_response", response: { confirmed: true } };
+const ABORT = { type: "abort" };
 
 /** The gate over a transport whose every write lands, unless the test says otherwise per command. */
 function gate(landing: (command: Record<string, unknown>) => Landing = () => "landed") {
@@ -136,17 +138,19 @@ describe("HeldSends — the one gate every write to pi takes (harness-pi item 16
     expect(held.holding).toBe(false);
   });
 
-  it("a gate reply passes the hold inside send itself, by its type — it answers an ask pi already made — while the turn content behind the prompt still waits; with nothing held it is delivered in its turn", () => {
+  it("a gate reply and an abort pass the hold inside send itself, by their types — the reply answers an ask pi already made, the abort is a stop the bound must not outwait — while the turn content behind the prompt still waits; with nothing held they are delivered in their turn", () => {
     const { sent, held } = gate();
     held.await(P1);
     held.send(S1);
     held.send(REPLY);
-    expect(sent).toEqual([REPLY]); // out at once, past the hold — through the same deliver as every other write
+    held.send(ABORT);
+    expect(sent).toEqual([REPLY, ABORT]); // out at once, past the hold — through the same deliver as every other write
     expect(held.holding).toBe(true); // the prompt still awaits its echo; S1 still waits behind it
     held.echoed("p1");
-    expect(sent).toEqual([REPLY, S1]);
+    expect(sent).toEqual([REPLY, ABORT, S1]);
     held.send(REPLY);
-    expect(sent).toEqual([REPLY, S1, REPLY]);
+    held.send(ABORT);
+    expect(sent).toEqual([REPLY, ABORT, S1, REPLY, ABORT]);
     expect(held.holding).toBe(false);
   });
 
@@ -236,6 +240,20 @@ describe("HeldSends — the one gate every write to pi takes (harness-pi item 16
     held.send(lost, (landing) => landedOnes.push(`lost:${landing}`));
     await landed();
     expect(landedOnes).toEqual(["S1", "S2", "wrapUp:landed", "lost:failed"]);
+
+    // A write nothing kept (`dropped`: a closed transport) is over too, and the
+    // callback is told so — a clock or a label waiting on it gives up now
+    // rather than for ever; the callback is not kept, so a later send of the
+    // same object runs nothing.
+    const gone = { type: "steer", message: "gone" };
+    landings.set(gone, "dropped");
+    held.send(gone, (landing) => landedOnes.push(`gone:${landing}`));
+    await landed();
+    expect(landedOnes).toEqual(["S1", "S2", "wrapUp:landed", "lost:failed", "gone:dropped"]);
+    landings.set(gone, "landed");
+    held.send(gone);
+    await landed();
+    expect(landedOnes).toEqual(["S1", "S2", "wrapUp:landed", "lost:failed", "gone:dropped"]);
   });
 });
 
