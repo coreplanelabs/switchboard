@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { FIRST_ATTACH_WAIT_MS } from "../core/budgets.js";
-import { attachBoundWithinRun } from "./bashTimeout.js";
+import { RUN_DEADLINE_RESERVE_MS, attachBoundWithinRun } from "./bashTimeout.js";
 import { oneLine } from "../core/redact.js";
 import type { Backend } from "../core/trace/attrs.js";
 import type { Span } from "../core/trace/types.js";
@@ -24,6 +24,7 @@ import {
 } from "./seedPlan.js";
 import {
   ResidentExecutor,
+  ResidentLeaseSpentError,
   ResidentNeedsRefError,
   waitOnStatus,
   wakeStopped,
@@ -193,22 +194,49 @@ export class WorkspaceReattachRefusedError extends Error {
   }
 }
 
-/** A resumed run's re-attach not opened at all: the run's lease is inside its
- *  write-up reserve (`attachBoundWithinRun` says `exhausted`; execution.md
- *  item 9), so no request was made — the resident would run the attach to its
- *  end for a run that is ending. Not a refusal: the workspace was never asked
- *  for, and the caller ends the run on its budget instead of restarting it
- *  from its request. Thrown only where the lease has started (a relaunch's
- *  re-attach carries the run's clock); a dispatch-time resume, before the
- *  lease, never meets it. */
+/** A resumed run's re-attach not opened, or not finished: the run's lease is
+ *  inside its write-up reserve, or under what an attach needs past it
+ *  (`attachBoundWithinRun` says `exhausted`; execution.md item 9) — read at the
+ *  entry, again after the probe's wait, and off the executor's own
+ *  `ResidentLeaseSpentError` when the lease ran out under the attach's wake
+ *  wait — so no request was made or none more will be: the resident would run
+ *  an attach to its end for a run that is ending. Not a refusal: the caller
+ *  ends the run on its budget instead of restarting it from its request.
+ *  `leftMs` is the run's wall clock when it was decided. Thrown only where the
+ *  lease has started (a relaunch's re-attach carries the run's clock); a
+ *  dispatch-time resume, before the lease, never meets it. */
 export class WorkspaceReattachLeaseSpentError extends Error {
+  readonly why: string;
   constructor(
     readonly recorded: WorkspaceBinding,
-    readonly why: string,
+    readonly leftMs: number,
   ) {
+    const why =
+      `the run has ${Math.max(0, Math.round(leftMs / 1000))}s of its lease left, inside the ` +
+      `${Math.round(RUN_DEADLINE_RESERVE_MS / 1000)}s write-up reserve or under what an attach needs; no re-attach was opened`;
     super(`the run's workspace on the ${recorded.backend} backend was not re-attached: ${why}`);
     this.name = "WorkspaceReattachLeaseSpentError";
+    this.why = why;
   }
+}
+
+/** The card's and the note's word for a wait the selection spent — the probe's
+ *  through a blip, the attach's through a wake — one wording on the fresh
+ *  selection, the attach-failed and the re-attach paths alike; nothing when
+ *  nothing was waited. */
+function waitedNote(waitedMs: number): string {
+  return waitedMs > 0 ? ` after waiting ${Math.round(waitedMs / 1000)}s` : "";
+}
+
+/** How long a resumed run's re-attach may PROBE — the first attach's budget,
+ *  clipped to what the run's lease has left past its write-up reserve where
+ *  the executor carries the run's clock (execution.md item 9), so the probe's
+ *  wait and the attach's wake wait cannot spend the run into the reserve and
+ *  hand the lease's end to a refusal. A fresh run's first attach, before the
+ *  lease starts, keeps the whole budget. */
+function leaseClippedBudget(remainingMs: number | undefined): number {
+  if (remainingMs === undefined) return FIRST_ATTACH_WAIT_MS;
+  return Math.max(0, Math.min(FIRST_ATTACH_WAIT_MS, Math.trunc(remainingMs - RUN_DEADLINE_RESERVE_MS)));
 }
 
 /** Executor selection result. `note` is present when resident selection fell
@@ -433,16 +461,14 @@ export async function makeExecutor(
         // Item 27: an attach that fails after a wait names the wait too — the
         // probe's through a typed blip (item 9) and the restore's alike, so a
         // run that started late says why even when it then fell cold.
-        const probeWait = probeWaitMs > 0 ? ` after waiting ${Math.round(probeWaitMs / 1000)}s` : "";
         const restoreWait = waitedForRestore ? " after waiting for the resident's restore" : "";
         reason = oneLine(
-          `resident attach failed (${err instanceof Error ? err.message : String(err)})${probeWait}${restoreWait}`,
+          `resident attach failed (${err instanceof Error ? err.message : String(err)})${waitedNote(probeWaitMs)}${restoreWait}`,
         );
       }
     } else if (probe.kind === "unreachable") {
       // A probe waited through a typed blip that never cleared names the wait.
-      const waited = probeWaitMs > 0 ? ` after waiting ${Math.round(probeWaitMs / 1000)}s` : "";
-      reason = oneLine(`resident unreachable (${probe.error})${waited}`);
+      reason = oneLine(`resident unreachable (${probe.error})${waitedNote(probeWaitMs)}`);
     } else if (probe.state !== "not-onboarded") {
       // Item 27: a restore that landed on a non-serviceable state still names the wait.
       const wait = waitedForRestore ? " after waiting for the resident's restore" : "";
@@ -563,14 +589,20 @@ async function reattachWorkspace(
   span?: Span,
 ): Promise<ExecutorSelection> {
   const refuse = (why: string) => new WorkspaceReattachRefusedError(recorded, oneLine(why));
-  // The run's lease first: inside the write-up reserve nothing is probed or
-  // asked for, whatever the backend — the run ends on its budget, and its
-  // caller reads this apart from a refusal (execution.md item 9).
-  const left = ctx.remainingMs?.();
-  if (left !== undefined) {
-    const bound = attachBoundWithinRun(left);
-    if (bound.kind === "exhausted") throw new WorkspaceReattachLeaseSpentError(recorded, bound.note);
-  }
+  // The run's lease first, and again after every wait below: inside the
+  // write-up reserve, or under what an attach needs past it, nothing is probed
+  // or asked for, whatever the backend — the run ends on its budget, and its
+  // caller reads this apart from a refusal (execution.md item 9). The clock is
+  // read each time, since the probe's wait and the attach's wake wait spend it.
+  const leaseSpent = (): WorkspaceReattachLeaseSpentError | undefined => {
+    const left = ctx.remainingMs?.();
+    if (left === undefined) return undefined;
+    return attachBoundWithinRun(left).kind === "exhausted"
+      ? new WorkspaceReattachLeaseSpentError(recorded, left)
+      : undefined;
+  };
+  const spentAtEntry = leaseSpent();
+  if (spentAtEntry) throw spentAtEntry;
   if (recorded.backend !== "resident") {
     const input =
       ctx.profile.machine === "blank"
@@ -586,14 +618,24 @@ async function reattachWorkspace(
   if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
   const resource = repoResourceId(ctx.repo);
   // The selection probe waited through a blip the Worker typed transient, as a
-  // fresh run's is (execution.md item 9): drawn from the first attach's budget,
-  // the run's stop riding in, named on the note. A refusal at once here would
-  // close the run and dispatch its request again for a blip a re-probe clears.
-  const { probe, waitedMs: probeWaitMs } = await probeThroughBlip(resident, token, resource, span, ctx.stopSignal);
-  const waitedNote = probeWaitMs > 0 ? ` after waiting ${Math.round(probeWaitMs / 1000)}s` : "";
-  if (probe.kind === "unreachable") throw refuse(`resident unreachable (${probe.error})${waitedNote}`);
+  // fresh run's is (execution.md item 9): drawn from the first attach's budget
+  // clipped to the run's lease, the run's stop riding in, named on the note. A
+  // refusal at once here would close the run and dispatch its request again for
+  // a blip a re-probe clears; a wait that spent the lease is the lease's end.
+  const budgetMs = leaseClippedBudget(ctx.remainingMs?.());
+  const { probe, waitedMs: probeWaitMs } = await probeThroughBlip(
+    resident,
+    token,
+    resource,
+    span,
+    ctx.stopSignal,
+    budgetMs,
+  );
+  const spentProbing = leaseSpent();
+  if (spentProbing) throw spentProbing;
+  if (probe.kind === "unreachable") throw refuse(`resident unreachable (${probe.error})${waitedNote(probeWaitMs)}`);
   if (!isServiceable(probe.state, probe.reason))
-    throw refuse(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""}${waitedNote}`);
+    throw refuse(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""}${waitedNote(probeWaitMs)}`);
   const nonWarm =
     probe.state === "warm" ? undefined : oneLine(`${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
   const executor = new ResidentExecutor({
@@ -611,17 +653,20 @@ async function reattachWorkspace(
   try {
     // This dispatch's first attach, like a fresh run's: a refusal the Worker
     // typed transient is waited through under what the probe's wait left of
-    // the same budget, and the run's stop ends the wait at once.
+    // the same lease-clipped budget, and the run's stop ends the wait at once.
     binding = await executor.attach(span, {
       signal: ctx.stopSignal,
-      budgetMs: Math.max(0, FIRST_ATTACH_WAIT_MS - probeWaitMs),
+      budgetMs: Math.max(0, budgetMs - probeWaitMs),
     });
   } catch (err) {
     // The run's own stop ended the attach: the executor's typed `aborted` error
     // is that stop, never a re-attach refusal — which would close this run and
-    // dispatch its request again. Any other failure beside a pending stop is
-    // the refusal it is.
+    // dispatch its request again. The lease's end under the attach's wake wait
+    // (`ResidentLeaseSpentError`: the re-attach was not opened because the run
+    // is inside its reserve) is the run's end on its budget, never a refusal
+    // either. Any other failure beside a pending stop is the refusal it is.
     if (isRunStopError(err)) throw err;
+    if (err instanceof ResidentLeaseSpentError) throw new WorkspaceReattachLeaseSpentError(recorded, err.leftMs);
     throw refuse(err instanceof Error ? err.message : String(err));
   }
   // The tree the resident answered must be the run's: the same worktree, the
@@ -888,6 +933,8 @@ async function probeThroughBlip(
   resource: string,
   span?: Span,
   stopSignal?: AbortSignal,
+  /** How long the wait may probe: the first attach's budget, or what a resumed run's lease leaves of it (`leaseClippedBudget`). */
+  budgetMs: number = FIRST_ATTACH_WAIT_MS,
 ): Promise<{ probe: ResidentStatusProbe; waitedMs: number }> {
   const since = systemClock();
   const first = await probeResident(cfg, token, resource, span, stopSignal);
@@ -919,7 +966,7 @@ async function probeThroughBlip(
     first,
     since,
     probe: (signal) => probeResident(cfg, token, resource, span, signal),
-    budgetMs: FIRST_ATTACH_WAIT_MS,
+    budgetMs,
     signal: stopSignal,
     route: "/status",
     judge: async (view, spent) => {

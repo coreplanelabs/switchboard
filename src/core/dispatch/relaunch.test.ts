@@ -254,7 +254,7 @@ describe("prepareRelaunch — the relaunch decided and prepared", () => {
     const decision = await prepareRelaunch(d, ctx);
     expect(decision).toEqual({
       kind: "lease_spent",
-      why: "the container was replaced under the run with its lease inside the write-up reserve (the run has 30s of wall clock left, inside the 60s write-up reserve, so no attach was opened); its workspace was not re-attached and pi was not relaunched — the run ends on its budget",
+      why: "the container was replaced with 30s of the run's lease left, inside the write-up reserve; no re-attach was opened and no write-up ran",
     });
     expect(saves).toEqual([]);
     expect(d.runBearers.verify(old).ok).toBe(true);

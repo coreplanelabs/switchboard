@@ -3713,29 +3713,45 @@ describe("the run control's lease clock — started by the run loop on the harne
         record,
       );
     });
-    // A coding run: its round has a workspace to re-attach (the machine class
-    // of `general` has none, and a run without one never reaches the re-attach).
+    // A coding PR run: its round has a workspace to re-attach (the machine class
+    // of `general` has none, and a run without one never reaches the re-attach),
+    // and its tail would observe the workspace and salvage — both against the
+    // replaced container's executor, whose worktree was never re-attached.
+    const execs: string[] = [];
     const s = setup("unused", {
       agent: "coding",
+      coding: true,
       yaml: YAML + "harness:\n  coding: pi\n",
       harness: harnessDeps(replaced),
       binding: { ref: "main", sha: "abc", workspace: "/workspace/threads/t/main", user: "worker2" },
+      executor: {
+        exec: async (command) => {
+          execs.push(command);
+          return "";
+        },
+      },
     });
     const { ledgerRun, record: recorded } = recordingLedgerRun();
     const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun }));
     expect(opens).toBe(1);
     expect(seen).toEqual([undefined, 30_000]);
-    expect(out.answer).toContain(`Stopped at the ${s.ctx.agent.maxMinutes}-minute budget without finishing`);
+    // The budget's plain answer — the "without finishing" form, no label around empty text.
+    expect(out.answer).toMatch(/^Stopped at the \d+-minute budget without finishing\./);
+    expect(out.answer).not.toContain("the container was replaced");
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    // Nothing drove the replaced container's executor after the end: no workspace observation, no salvage.
+    expect(execs).toEqual([]);
     s.ending.drain(undefined);
     await s.writer.settled();
     const notes = (recorded().events as Array<{ type: string; kind?: string; summary?: string }>).filter(
       (e) => e.type === "run_note",
     );
     expect(notes.filter((n) => n.kind === "time_budget_exhausted").map((n) => n.summary)).toEqual([
-      "the container was replaced under the run with its lease inside the write-up reserve (the run has 30s of wall clock left, inside the 60s write-up reserve, so no attach was opened); its workspace was not re-attached and pi was not relaunched — the run ends on its budget",
+      "the container was replaced with 30s of the run's lease left, inside the write-up reserve; no re-attach was opened and no write-up ran",
     ]);
-    expect(notes.some((n) => n.kind === "resumed" || n.kind === "sandbox_restarted")).toBe(false);
+    expect(
+      notes.some((n) => n.kind === "resumed" || n.kind === "sandbox_restarted" || n.kind === "budget_salvage"),
+    ).toBe(false);
   });
 });
 
