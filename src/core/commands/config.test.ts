@@ -715,6 +715,62 @@ describe("config set --boundary.<axis> and config show's effective boundary", ()
       effective: { boundary: { maxMinutes: { value: 20, scope: "user" } } },
     });
   });
+
+  // record 0044, the confirm axis: the class rides the same dotted option as
+  // the run axes and is held to the validator's rule on write, so `never` and
+  // `exec` get the reasons the load-time check gives, never a schema message.
+  it("config set me --boundary.confirm never and exec are refused as invalid_input with the validator's own reasons; an unknown class with the two classes", async () => {
+    const config = store();
+    const commands = bind(config);
+    const me = chat(config, "slack:UX");
+    expect(
+      await commands.invoke("config.set", { args: ["me"], options: { boundary: { confirm: "never" } } }, me),
+    ).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      message:
+        'boundary.confirm is "never" — not allowed until the door\'s write misbind rate has been measured over a period (record 0044, open question 2)',
+    });
+    expect(
+      await commands.invoke("config.set", { args: ["me"], options: { boundary: { confirm: "exec" } } }, me),
+    ).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      message: 'boundary.confirm is "exec" — a test or build never asks (record 0044)',
+    });
+    expect(
+      await commands.invoke("config.set", { args: ["me"], options: { boundary: { confirm: "read" } } }, me),
+    ).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      message: 'boundary.confirm is "read" — valid classes: write, destructive',
+    });
+    const { text } = await say(commands, "config set me --boundary.confirm never", me);
+    expect(text).toContain("not allowed until the door's write misbind rate has been measured over a period");
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
+  });
+
+  it("config set me --boundary.confirm destructive lands on the scope as one boundary field, caps no run (resolve() carries no boundary), and config show prints the effective confirm with its scope — nothing, in text or value, under the built-in default", async () => {
+    const config = store();
+    const commands = bind(config);
+    const me = chat(config, "slack:UX");
+    const before = await say(commands, "config show", me);
+    expect(before.text).not.toMatch(/confirm/i);
+    expect(before.res.ok && before.res.value).not.toHaveProperty("effective.confirm");
+    const { text } = await say(commands, "config set me --boundary.confirm destructive", me);
+    expect(text).toBe('Updated your scope. Now: {"boundary":{"confirm":"destructive"}}');
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({ boundary: { confirm: "destructive" } });
+    expect(config.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).boundary).toBeUndefined();
+    const shown = await say(commands, "config show", me);
+    expect(shown.text).toContain("*Effective confirm:* `destructive` (user)");
+    expect(shown.text).not.toContain("*Effective boundary:*");
+    expect(shown.text).toMatch(/\*Your scope:\* boundary confirm=destructive/);
+    expect(shown.text).not.toContain("(caps nothing)");
+    expect(shown.text).toBe(config.describe("slack:CX", "slack:UX"));
+    expect(shown.res.ok && shown.res.value).toMatchObject({
+      effective: { confirm: { value: "destructive", scope: "user" } },
+    });
+  });
 });
 
 // Feature: docs/decisions/0042 — a dashboard session linked to its person writes and

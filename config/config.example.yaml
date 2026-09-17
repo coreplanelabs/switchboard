@@ -69,10 +69,19 @@ defaults:
   # clipped (the card and the run record say so); a preset whose identity or
   # class is above a cap is refused by name before any executor exists. Absent →
   # nothing is capped and every preset runs exactly its declared profile.
+  # A fourth field, `confirm`, is the front door's and caps no run: the first
+  # blast-radius class a command the router bound from prose is handed back at
+  # (`To run this: …`) instead of run — `write` (every write is handed back; a
+  # read or a repository's own test or build runs) or `destructive` (a write
+  # runs at once; only a destructive one is handed back). It intersects toward
+  # caution like the run axes — a channel or a user can only ask MORE than what
+  # is set here — and unset everywhere it is the built-in `write`. `exec` and
+  # `never` are refused by name.
   # boundary:
   #   maxMinutes: 120
   #   maxIdentity: write
   #   machines: [none, blank, repo-cold, repo-resident]
+  #   confirm: write
 
 # PR reviews and the reading diff (docs/reference/specs/reading-diff.md). Every
 # review records its full `git diff`; the ABRIDGED version (meat.dev, run on

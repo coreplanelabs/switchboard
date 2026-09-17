@@ -44,6 +44,8 @@ Intersection is what makes a user boundary safe to leave open to everyone: it ca
 
 A boundary never grants. Who may run a preset stays the policy table's question ([Authorization](../reference/authorization.md)); how much a run in a scope may have is the boundary's. The two never read each other's fields.
 
+The boundary carries one field that is not a run's cap: `confirm`, the front door's. It names the first blast-radius class a command the router bound from a plain sentence is handed back at instead of run — `write`, the built-in, or `destructive` — and it intersects the same way, toward caution, so the installation's value is a floor. A run never sees it: a scope that sets only `confirm` caps nothing, and the model's configuration block is the same with or without it.
+
 ## The gate checks the resolved agent
 
 The ladder picks a default; it is not a security boundary. `restrict.agents` is checked after all six layers produce a final agent, against that agent, on every message.
