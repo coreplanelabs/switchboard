@@ -11,7 +11,11 @@ providers:
   anthropic:
     type: anthropic
     apiKeyEnv: ANTHROPIC_API_KEY
-  # Any OpenAI-compatible endpoint works with the same adapter:
+  # OpenAI itself runs on the same compatible adapter: any preset's model may
+  # be openai/<model-id> anywhere a model is accepted. The adapter speaks Chat
+  # Completions, not the Responses API, sends no reasoning control (our effort
+  # tiers do not reach these models), and meters tokens without pricing them.
+  # A first-class OpenAI block is a plan's business, not this file's.
   openai:
     type: openai-compatible
     baseUrl: https://api.openai.com/v1
