@@ -27,8 +27,12 @@ The header lists only the surfaces this installation has: **Residents** appears 
 | `GET /settings/mcps` | Every MCP server your runs can reach, by tier, with an add form; `?channel=<id>` lists that channel's tier beside org | Add and Connect hand back the one-time link below; a credential never passes through the page |
 | `GET /settings/channels` | The channels that carry a scope, with the setting names each one has | The dashboard twin of `config overrides` |
 | `GET /settings/channels/<channel id>` | One channel's scope as a form: agent, models, effort, the boundary, instructions | Save is `config set channel --channel <id>`; Clear is `config clear`; the instructions box is `config instructions` |
+| `GET /threads` | The chat ([web-chat.md](specs/web-chat.md)): a new conversation of your own — the mark, a greeting, the composer, chips grounded in your runs, the rail of your recent threads across channels | Channel adapter #5 over `dispatch()` (record 0043): what you type here is a run like a Slack message; the palette (`/`) lists the chat commands you may run |
+| `GET /threads/<id>` | One thread: your turns and the runs they started, each with its route, its work folded and its reply; a live run draws from its own stream | `<id>` is a conversation of your lane, or another channel's thread by its whole key — read-only there; one you may see nothing of is the same 404 an unknown run gives |
+| `POST /threads/<id>/send` | — | `{ text }` into the pipeline as you: `202 { runId, viewPath }` when a run started, `200 { reply }` when it answered inline (a hand-back, `help`, a steer); same-origin JSON only; another channel's thread is refused |
 | `GET /settings/installation` | The running `config.yaml`'s behaviour knobs with the value in force, and the capabilities that are on | Read-only by construction: a projection by allow-list, no env var name or URL ever on the page |
 | `GET /mcp/connect/<nonce>` | The one-time MCP credential-paste form | Bound to whoever mints it or first opens it; single use, expires in 10 minutes |
+| `GET /` | — | **Not** gated: a `302` to `/threads`, and nothing else — the Access application lists path prefixes, and `/` would cover the bearer routes |
 | `GET /healthz` | `{ok, inFlight, draining, catchUp}` | **Not** gated — this is the process health probe, meant to be hit by the deploy tooling and the container platform |
 
 ## Command routes (`/api/<group>.<verb>`)

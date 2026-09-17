@@ -190,7 +190,7 @@ function header(req: IncomingMessage, name: string): string | undefined {
  *  host and port — a same-host deployment on another port is foreign), or the
  *  Host header's host when no base URL is configured (the scheme is unknown
  *  there). No `Origin` at all (curl, service tokens) is fine. */
-function originAllowed(req: IncomingMessage, opts: CommandHttpOptions): boolean {
+export function originAllowed(req: IncomingMessage, opts: Pick<CommandHttpOptions, "publicBaseUrl">): boolean {
   const site = header(req, "sec-fetch-site");
   if (site !== undefined && site !== "same-origin" && site !== "none") return false;
   const origin = header(req, "origin");

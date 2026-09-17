@@ -539,11 +539,11 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
       id: "access:op-1",
       grants: ALL_GRANTS,
     });
-    // An unlisted browser session: the reads its translation gives, nothing the adapter added.
+    // An unlisted browser session: its baseline (the reads, the two personal chat writes), nothing the adapter added.
     expect((await callerFor(browser, opts)).actor).toEqual({
       kind: "user",
       id: "access:user-1",
-      grants: { actions: new Set(["runs:read"]), channels: new Set(), repos: new Set() },
+      grants: { actions: new Set(["runs:read", "memory:write", "mcp:write"]), channels: new Set(), repos: new Set() },
     });
     expect((await callerFor(readerBot, opts)).actor).toEqual({
       kind: "service",

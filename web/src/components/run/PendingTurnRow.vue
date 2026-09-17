@@ -21,13 +21,16 @@ defineProps<{
   model?: string | null;
   /** The row's element: `li` in the run page's log, `div` in a turn. */
   tag?: "li" | "div";
+  /** The element id the run page's log anchors on (`thinking`); a turn's row, of which
+   *  a page may hold several, has none. */
+  id?: string;
 }>();
 </script>
 
 <template>
   <component
     :is="tag ?? 'li'"
-    id="thinking"
+    :id="id"
     class="pending flex items-center gap-3 rounded-md border border-dashed border-accented pl-3 pr-[calc(var(--sb-gutter)-1px)] py-2 text-sm"
     aria-live="off"
     title="the model is working on its next turn — nothing back yet (since the last event, runner clock)"

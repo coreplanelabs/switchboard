@@ -374,11 +374,14 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
     [A.chatUser, A.dispatchOnly, A.token],
   ),
   ...commandRow("mcp:read", "mcp.list", [A.chatUser, A.browser, A.operator], [A.dispatchOnly, A.noGrants, A.token]),
-  ...commandRow("mcp:write", "mcp.add", [A.chatUser, A.mcpWriter, A.operator], [A.browser, A.dispatchOnly, A.token]),
+  // A browser session holds `mcp:write` in its baseline since the web chat (record 0043); the tier rows below still decide where.
+  ...commandRow("mcp:write", "mcp.add", [A.chatUser, A.mcpWriter, A.operator, A.browser], [A.dispatchOnly, A.token]),
   // A person's own MCP tier is theirs to write (record 0042): the row admits an
   // actor whose `self` names a chat identity — a Slack person with no grants at
-  // all, a dashboard session linked to its person — and never an unlinked
-  // browser session or a credential, whatever it holds.
+  // all, a dashboard session linked to its person — and never a credential,
+  // whatever it holds. An unlinked browser session is admitted by the has-grant
+  // row above instead (its baseline holds `mcp:write` since the web chat,
+  // record 0043), so it is neither an allow nor a deny case of THIS row.
   "mcp:write command [acts-as-person] kinds=user": {
     allow: [
       [A.noGrants, command("mcp.add")],
@@ -386,7 +389,6 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.linkedBrowser, command("mcp.add")],
     ],
     deny: [
-      [A.browser, command("mcp.add")],
       [A.dispatchOnly, command("mcp.add")],
       [A.token, command("mcp.add")],
     ],
@@ -444,8 +446,8 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
   ...commandRow(
     "memory:write",
     "memory.forget",
-    [A.chatUser, A.operator, A.admin],
-    [A.browser, A.dispatchOnly, A.noGrants],
+    [A.chatUser, A.operator, A.admin, A.browser],
+    [A.dispatchOnly, A.noGrants],
   ),
   "memory:read memory-scope/org []": {
     allow: [[A.noGrants, scope("org", "org:acme")]],

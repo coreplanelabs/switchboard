@@ -350,7 +350,7 @@ describe("repo management gate (canManageRepos)", () => {
 
 // Feature: docs/reference/specs/authorization.md item 9 — `grantsFor` is the ONE lookup the
 // command registry's policy table decides on: a namespace baseline (the open
-// chat commands for slack: users, every group's read for browser sessions,
+// chat commands for slack: users, every group's read plus the two personal chat writes for browser sessions,
 // nothing for credentials) plus the actor's `grants` entry. FAIL-CLOSED: only
 // `all` holds everything, and no such entry means nobody does.
 describe("grantsFor — the grants the policy table decides on", () => {
@@ -408,7 +408,7 @@ describe("grantsFor — the grants the policy table decides on", () => {
     expect(holds(unrestricted, "slack:URANDOM", "agent:run:coding")).toBe(true); // nothing restricted → the agent is open
   });
 
-  it("an Access browser entry adds to the browser baseline (every registered group's read); an unlisted session holds the reads alone; a service token exactly its entry", async () => {
+  it("an Access browser entry adds to the browser baseline (every registered group's read, the two personal chat writes); an unlisted session holds the baseline alone; a service token exactly its entry", async () => {
     const s = storeWith(
       withGrants(
         `  "access:alice@example.com": { actions: [runs:write, friction:write], channels: all }\n  "access:svc:reader-bot": { actions: [runs:read], channels: all }\n`,
@@ -416,12 +416,12 @@ describe("grantsFor — the grants the policy table decides on", () => {
       { commandGroups: ["runs", "friction"] },
     );
     expect(s.grantsFor("access:alice@example.com")).toEqual({
-      actions: new Set(["runs:read", "friction:read", "runs:write", "friction:write"]),
+      actions: new Set(["runs:read", "friction:read", "memory:write", "mcp:write", "runs:write", "friction:write"]),
       channels: "all",
       repos: new Set(),
     });
     expect(s.grantsFor("access:stranger")).toEqual({
-      actions: new Set(["runs:read", "friction:read"]),
+      actions: new Set(["runs:read", "friction:read", "memory:write", "mcp:write"]),
       channels: new Set(),
       repos: new Set(),
     });

@@ -18,7 +18,10 @@ import type { ChannelDirectory, ChannelVisibility } from "./types.js";
 /** The visibility a channel id alone establishes. Pure; the one mapping. */
 export function visibilityOf(channelId: string): ChannelVisibility {
   if (channelId.startsWith("http:") || channelId.startsWith("mcp:")) return "machine";
-  if (channelId.startsWith("slack:D")) return "dm";
+  // A person's own lane on the web chat (`web:<sub>`, record 0043): one
+  // person, one channel — a DM by construction, so `is-self` and an
+  // all-channels holder read it and nobody else does.
+  if (channelId.startsWith("slack:D") || channelId.startsWith("web:")) return "dm";
   if (channelId.startsWith("slack:G")) return "private";
   return "unknown";
 }

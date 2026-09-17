@@ -14,8 +14,8 @@ export interface PurgeableBinding {
 export type PurgeDecision = { ok: true; purge: string[]; keptLive: string[] } | { ok: false; error: string };
 
 /** Thread-key namespaces real channels mint (docs/reference/specs/http-ingress.md item 1,
- *  slack, mcp, the CLI). A purge is for synthetic keys only. */
-const PRODUCTION_NAMESPACES = new Set(["slack", "http", "mcp", "cli"]);
+ *  slack, mcp, the CLI, the web chat). A purge is for synthetic keys only. */
+const PRODUCTION_NAMESPACES = new Set(["slack", "http", "mcp", "cli", "web"]);
 
 /** A prefix must be a whole namespace (`load:`) or longer (`load:r1:`), never
  *  empty, never a bare partial namespace, never a production namespace. */

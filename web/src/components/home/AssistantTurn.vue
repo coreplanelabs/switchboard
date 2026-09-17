@@ -151,7 +151,7 @@ onMounted(() => {
     // The agent stopped: the clock freezes at the server's stamp, or where it
     // stands for a turn a `202` mounted without a server clock.
     onFinished: (frame) => {
-      frozenMs.value = runClock ? runClock.elapsedAt(frame.finishedAt) : elapsedMs.value;
+      frozenMs.value = runClock && frame ? runClock.elapsedAt(frame.finishedAt) : elapsedMs.value;
     },
     onEnd: () => {
       frozenMs.value ??= elapsedMs.value;

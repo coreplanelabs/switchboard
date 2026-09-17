@@ -1954,10 +1954,19 @@ const HOME_CONVERSATIONS = [
     lastAt: NOW - 6 * 60_000 + 21_000,
     runs: 3,
     live: false,
+    surface: "web",
   },
-  { id: "conv-live", title: "re-review after the repush", lastAt: NOW - 252_000, runs: 2, live: true },
-  { id: "conv-2", title: "why did the deploy roll back?", lastAt: NOW - 26 * 3_600_000, runs: 1, live: false },
-  { id: "conv-3", title: "bump the SDK", lastAt: NOW - 29.5 * 86_400_000, runs: 1, live: false },
+  { id: "conv-live", title: "re-review after the repush", lastAt: NOW - 252_000, runs: 2, live: true, surface: "web" },
+  // A thread from another channel the person requested runs in (record 0043, amended): the rail lists it by its whole key, with its glyph.
+  {
+    id: "slack:CHANNEL:1758040000.000100",
+    title: "why did the deploy roll back?",
+    lastAt: NOW - 26 * 3_600_000,
+    runs: 1,
+    live: false,
+    surface: "slack",
+  },
+  { id: "conv-3", title: "bump the SDK", lastAt: NOW - 29.5 * 86_400_000, runs: 1, live: false, surface: "web" },
 ];
 // What Switchboard does well, one chip each, and one that asks what it can do.
 const HOME_SUGGESTIONS = [

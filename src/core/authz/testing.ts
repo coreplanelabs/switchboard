@@ -2,7 +2,7 @@
 // and a run corpus spanning every channel visibility and several users.
 // Test-only; not re-exported by index.ts.
 
-import { browserReadActions, CHAT_OPEN_ACTIONS } from "./grants.js";
+import { browserActions, CHAT_OPEN_ACTIONS } from "./grants.js";
 import type { Actor, ActorKind, ChannelVisibility, Grants, Resource } from "./types.js";
 
 /** The command groups the fixture's operator and browser translate over (a subset of the catalogue's). */
@@ -132,13 +132,13 @@ export const ACTORS = {
   chatUser: actor("user", "slack:UFAY", { actions: new Set([...CHAT_OPEN_ACTIONS, "config:write"]) }),
   /** A plain Slack user: the `open` chat commands alone (`config:write` is never a baseline). */
   chatUserGated: actor("user", "slack:UGUS", { actions: new Set(CHAT_OPEN_ACTIONS) }),
-  /** An unlisted Access browser session: every group's read, nothing else. */
-  browser: actor("user", "access:viewer", { actions: browserReadActions(COMMAND_GROUPS) }),
+  /** An unlisted Access browser session: every group's read and the two personal chat writes, nothing else. */
+  browser: actor("user", "access:viewer", { actions: browserActions(COMMAND_GROUPS) }),
   /** The same session linked to its person (record 0042): the same grants, a second self id. */
   linkedBrowser: actor(
     "user",
     "access:linked",
-    { actions: browserReadActions(COMMAND_GROUPS) },
+    { actions: browserActions(COMMAND_GROUPS) },
     { self: ["access:linked", "slack:UHANK"], asUser: { id: "slack:UHANK", name: "hank" } },
   ),
   /** An Access operator (granted every read + write with `channels: all`): fleet-wide, never exec. */

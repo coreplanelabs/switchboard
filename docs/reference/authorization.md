@@ -37,7 +37,7 @@ Keyed by platform-namespaced actor id. Three axes, each a list of names or the e
 | Actor id | Baseline | A `grants` entry … |
 |---|---|---|
 | `slack:U…` (a Slack user) | the open chat commands (`help`/`config`/`repo`/`friction`/`memory`/`mcp`/`schedule` reads, `memory:write`, `mcp:write`) plus `agent:run:<name>` for every agent not under `restrict.agents` | **adds** to the baseline |
-| `access:<sub>` (an Access browser session) | every group's `read` | **adds** to the baseline |
+| `access:<sub>` (an Access browser session) | every group's `read`, plus `memory:write` and `mcp:write` for its own tier (the web chat makes a session a chat user) | **adds** to the baseline |
 | `access:svc:<common_name>` (an Access service token) | nothing | is **exactly** what it holds |
 | `http:<subject>` / `mcp:<subject>` (an ingress token) | nothing | is **exactly** what it holds |
 | `schedule:<name>` (a cron firing) | what the schedule registry declares for it | **replaces** the declaration |

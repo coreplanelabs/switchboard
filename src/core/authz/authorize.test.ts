@@ -467,23 +467,20 @@ describe("record 0042 — the self set is identity, not authority", () => {
     expect(authorize(unlinked, "memory:read", scope("user", "user:slack:UHANK")).allow).toBe(false);
   });
 
-  it("acts-as-person: the MCP self-serve command row admits the linked session and a Slack person, never the unlinked session or a credential", () => {
+  it("acts-as-person: the MCP self-serve command row admits a Slack person with no grants at all; a browser session — linked or not — holds the write in its baseline since the web chat (record 0043); a credential never", () => {
     const add = { type: "command", id: "mcp.add" } as const;
     expect(authorize(linked, "mcp:write", add).allow).toBe(true);
     expect(authorize(A.noGrants, "mcp:write", add).allow).toBe(true);
-    expect(authorize(unlinked, "mcp:write", add).allow).toBe(false);
+    expect(authorize(unlinked, "mcp:write", add).allow).toBe(true);
+    // A browser session whose baseline was built with no catalogue holds nothing: the row alone does not admit it.
+    expect(authorize(actor("user", "access:bare"), "mcp:write", add).allow).toBe(false);
     expect(authorize(actor("service", "mcp:nothing"), "mcp:write", add).allow).toBe(false);
   });
 
-  it("the link grants nothing: every command action answers the same for the linked and the unlinked session, except the MCP self-serve writes", () => {
+  it("the link grants nothing: every command action answers the same for the linked and the unlinked session", () => {
     const actions = new Set(POLICY.filter((r) => r.resource === "command").map((r) => r.action));
     for (const action of actions) {
       const decision = (a: Actor) => authorize(a, action, { type: "command", id: "x" }).allow;
-      if (action === "mcp:write") {
-        expect(decision(linked)).toBe(true);
-        expect(decision(unlinked)).toBe(false);
-        continue;
-      }
       expect(decision(linked), action).toBe(decision(unlinked));
     }
     expect(effectiveGrants(linked)).toEqual(effectiveGrants(unlinked));

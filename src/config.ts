@@ -203,7 +203,8 @@ export interface AppConfig {
    * repos }`, each a list of names or the explicit word `all`; an absent axis is
    * the empty set. A `slack:` entry adds to the baseline every Slack user holds
    * (the open chat commands, every unrestricted agent); a browser entry adds to
-   * every group's read; every other entry is exactly what it declares; a
+   * its baseline (every group's read, the two personal chat writes); every
+   * other entry is exactly what it declares; a
    * surface entry is unioned into every actor of that surface on top of its own.
    * `ConfigStore.grantsFor` is the one lookup.
    */
@@ -650,9 +651,9 @@ export async function loadAppConfigFrom(
 }
 
 /** What the grants table needs beyond config.yaml: the registered command
- *  groups (an Access browser session holds every group's read). Absent = none:
- *  a store built without them gives a browser session no actions — fail-closed,
- *  never widened. The CLI never resolves a browser actor; the bot passes the
+ *  groups (an Access browser session holds every group's read beside the two
+ *  personal chat writes). Absent = none: a store built without them gives a
+ *  browser session no reads — fail-closed, never widened. The CLI never resolves a browser actor; the bot passes the
  *  groups at startup. */
 export interface ConfigStoreOptions {
   commandGroups?: readonly string[];
@@ -985,8 +986,9 @@ export class ConfigStore {
 
   /** The one grants lookup: what `grants[<actorId>]` declares
    *  on top of its namespace's baseline (the chat `open` commands and every
-   *  unrestricted agent for a Slack user, every group's read for a browser
-   *  session), else that baseline alone, else nothing — unioned with the
+   *  unrestricted agent for a Slack user, every group's read and the two
+   *  personal chat writes for a browser session), else that baseline alone,
+   *  else nothing — unioned with the
    *  surface's `<ns>:*` entry when config has one. Attached to every
    *  `Caller.actor`: the ONLY thing `authorize` reads about a caller. */
   grantsFor(actorId: string): Grants {

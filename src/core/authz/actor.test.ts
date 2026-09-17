@@ -136,16 +136,19 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     });
   });
 
-  it("Access browser sub → user; granted every group's read + write everywhere → holds them; unlisted → every group's read, no channel", () => {
+  it("Access browser sub → user; granted every group's read + write everywhere → holds them; unlisted → the browser baseline (every group's read, the two personal chat writes), no channel", () => {
     expect(resolveActor({ surface: "access-browser", subjectId: "op-1" }, lookup)).toEqual({
       kind: "user",
       id: "access:op-1",
-      grants: grants({ actions: set("runs:read", "runs:write", "friction:read", "friction:write"), channels: "all" }),
+      grants: grants({
+        actions: set("runs:read", "runs:write", "friction:read", "friction:write", "memory:write", "mcp:write"),
+        channels: "all",
+      }),
     });
     expect(resolveActor({ surface: "access-browser", subjectId: "viewer" }, lookup)).toEqual({
       kind: "user",
       id: "access:viewer",
-      grants: grants({ actions: set("runs:read", "friction:read") }),
+      grants: grants({ actions: set("runs:read", "friction:read", "memory:write", "mcp:write") }),
     });
   });
 
@@ -214,6 +217,11 @@ describe("resolveChatActor — a chat message's namespaced user id chooses the s
       id: "schedule:self-improvement",
       grants: { channels: "all" },
     });
+    // The web chat (record 0043): a browser session's `access:<sub>` is the
+    // browser actor exactly as the dashboard resolves it — same kind, same grants.
+    const browser = resolveChatActor(msg("access:a1", "web:a1"), lookup);
+    expect(browser).toMatchObject({ kind: "user", id: "access:a1", origin: { channelId: "web:a1" } });
+    expect(browser.grants).toEqual(resolveActor({ surface: "access-browser", subjectId: "a1" }, lookup).grants);
   });
 
   // authorization.md item 14 / slack-channel.md item 13: a request an app posted

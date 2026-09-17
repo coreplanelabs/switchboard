@@ -125,7 +125,7 @@ const cli: Caller = callerWith("cli", "cli:local", "all");
 /** A default ingress token: `dispatch` alone. */
 const mcpDispatchOnly: Caller = callerWith("mcp", "mcp:agent", ["dispatch"]);
 const mcpRunsRead: Caller = callerWith("mcp", "mcp:agent", ["runs:read"]);
-/** An unlisted Access browser session: every group's read, the browser baseline. */
+/** A browser session holding one group's read — the shape of the browser baseline's reads. */
 const browser: Caller = callerWith("access", "access:alice@example.com", ["runs:read"]);
 /** Granted the writes natively on top of the reads. */
 const browserOperator: Caller = callerWith("access", "access:alice@example.com", ["runs:read", "runs:write"]);

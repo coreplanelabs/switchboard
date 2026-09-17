@@ -3,9 +3,11 @@ import { computed, ref } from "vue";
 import type { HomeConversationRowSeed } from "@core/channels/webSeed.js";
 import { formatRelative } from "../../lib/format";
 import { filterRows } from "../../lib/homeModel";
+import { SURFACE_NAME } from "../../lib/indexRow";
 
 // The rail (docs/reference/specs/web-chat.md item 7): the person's RECENT
-// conversations, each the runs of one `web:` thread, newest first, titled by
+// threads across every channel — a `web:` conversation, a Slack thread they
+// requested runs in (its surface's word label beside it) — newest first, titled by
 // its first request. Bounded by the seed (the bot caps it), so there is nothing
 // to page: the way to everything is the `All runs` link at the foot. A filter
 // (⌘K) narrows the rows by a fuzzy match; the new-thread CTA carries its
@@ -98,6 +100,16 @@ defineExpose({ focusFilter });
           class="dot mt-px size-1.5 shrink-0 self-center rounded-full bg-ok motion-safe:animate-pulse"
           aria-label="a run is in flight"
         />
+        <!-- A thread from another channel wears its surface's word label (record 0043, amended): the
+             channel id's own prefix, as the runs index labels a requester — never a glyph a reader
+             would need a legend for. -->
+        <span
+          v-if="row.surface && row.surface !== 'web'"
+          class="surface shrink-0 self-center rounded border border-accented px-1 font-mono text-[0.6rem] text-dimmed"
+          :data-surface="row.surface"
+          :aria-label="`a ${SURFACE_NAME[row.surface] ?? row.surface} thread`"
+          >{{ row.surface }}</span
+        >
         <span
           class="title min-w-0 flex-1 truncate text-toned group-hover:text-highlighted group-aria-[current=page]:text-highlighted"
           >{{ row.title }}</span
