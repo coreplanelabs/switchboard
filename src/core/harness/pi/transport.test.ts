@@ -240,12 +240,9 @@ describe("PiRpcTransport", () => {
     expect(t.takeUnsent()).toEqual([{ type: "steer", message: "behind the failure" }]);
   });
 
-  it("sendAbort writes the abort directly whatever the chain's state — never queued for a re-attach to replay, so a write that fails after the abort was asked for cannot swallow it — AND once more behind a write pending on a live chain, so the direct write overtaking a prompt still in flight never leaves pi running the prompt unwatched; an idle chain gets the one abort", async () => {
-    // A live chain with a prompt pending: the abort is written at once, ahead
-    // of the prompt whose turn on the chain has not come — and once more behind
-    // it, in the prompt's wake, so whichever order the FIFO takes an abort
-    // follows the prompt. An abort is idempotent and the duplicate harmless;
-    // nothing of it is queued.
+  it("sendAbort is one step on the chain that a spent chain does not stop — never queued for a re-attach to replay: at once when nothing is in flight, behind a write in flight or queued on a live chain (pi has the prompt first, the abort after), still written when the write before it failed with the reset, and skipped only on an abandoned transport", async () => {
+    // A live chain with a prompt pending: the abort follows the prompt — never
+    // an idle session aborted and then handed the prompt to run unwatched.
     const live = new FakeHarnessContainer();
     await live.start({ paths, command: "pi", args: [], env: {} });
     const { t: onLive } = transport(live);
@@ -253,22 +250,20 @@ describe("PiRpcTransport", () => {
     onLive.sendAbort();
     await onLive.flushed();
     expect(live.stdin.map((l) => JSON.parse(l) as unknown)).toEqual([
-      { type: "abort" },
       { id: "p", type: "prompt", message: "first" },
       { type: "abort" },
     ]);
     expect(onLive.takeUnsent()).toEqual([]);
-    // The chain now idle: nothing to overtake, so the direct write is the one abort — never a blind duplicate.
+    // The chain idle: the step runs at once, the one abort.
     onLive.sendAbort();
     await onLive.flushed();
-    expect(live.stdin).toHaveLength(4);
-    expect(live.stdin.slice(3).map((l) => JSON.parse(l) as unknown)).toEqual([{ type: "abort" }]);
+    expect(live.stdin).toHaveLength(3);
+    expect(live.stdin.slice(2).map((l) => JSON.parse(l) as unknown)).toEqual([{ type: "abort" }]);
 
-    // A write in flight that fails only AFTER the abort was asked for: an abort
-    // queued behind it would never be written (the chain is then spent) and a
-    // re-attach would replay it. Written directly, it reaches pi while the
-    // write is still in flight; the chained copy finds the chain spent and is
-    // dropped, and nothing of it is left for `takeUnsent`.
+    // A write in flight that fails only AFTER the abort was asked for: the
+    // chain is spent by the time the abort's step runs, and the step writes
+    // anyway — the reset must not swallow the stop — with nothing of it left
+    // for `takeUnsent`.
     const late = new FakeHarnessContainer();
     await late.start({ paths, command: "pi", args: [], env: {} });
     let fail!: (err: Error) => void;
@@ -282,17 +277,19 @@ describe("PiRpcTransport", () => {
     onLate.send({ id: "p", type: "prompt", message: "go" });
     await new Promise((r) => setImmediate(r)); // the prompt is in flight
     onLate.sendAbort();
-    expect(late.stdin.map((l) => JSON.parse(l) as unknown)).toEqual([{ type: "abort" }]);
+    expect(late.stdin).toEqual([]); // behind the in-flight write: not a second writer
     fail(new Error("control-reset: the resident's Durable Object was reset"));
     await onLate.flushed();
+    expect(late.stdin.map((l) => JSON.parse(l) as unknown)).toEqual([{ type: "abort" }]);
     expect(onLate.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
     expect(onLate.takeUnsent()).toEqual([]);
-    // Even an abort handed to `send` never queues: it goes the direct way.
+    // Even an abort handed to `send` never queues: it takes the same step.
     onLate.send({ type: "abort" });
     await onLate.flushed();
     expect(late.stdin.map((l) => JSON.parse(l) as unknown)).toEqual([{ type: "abort" }, { type: "abort" }]);
     expect(onLate.takeUnsent()).toEqual([]);
 
+    // A spent chain: a plain send is held (the chain is spent); the abort's step runs at once.
     const spent = new FakeHarnessContainer();
     await spent.start({ paths, command: "pi", args: [], env: {} });
     const { t: onSpent } = transport(spent);
@@ -300,7 +297,6 @@ describe("PiRpcTransport", () => {
     onSpent.send({ id: "p", type: "prompt", message: "go" });
     await onSpent.flushed();
     expect(spent.stdin).toEqual([]);
-    // A plain send after the failure is held (the chain is spent); the abort is written directly.
     onSpent.send({ type: "steer", message: "held" });
     onSpent.sendAbort();
     await onSpent.flushed();
@@ -312,6 +308,85 @@ describe("PiRpcTransport", () => {
     onSpent.sendAbort();
     await onSpent.flushed();
     expect(spent.stdin).toHaveLength(1);
+
+    // An abandoned transport skips the step: the fresh transport is the one writer now.
+    const left = new FakeHarnessContainer();
+    await left.start({ paths, command: "pi", args: [], env: {} });
+    const { t: onLeft } = transport(left);
+    onLeft.sendAbort();
+    onLeft.abandon();
+    await onLeft.flushed();
+    expect(left.stdin).toEqual([]);
+  });
+
+  it("no two writes to the FIFO are ever in flight at once: with a two-phase (slow) writeLine, a prompt, an abort asked for while it is in flight and a steer sent after land one after another — each begun only once the one before it ended — in the order pi must see them", async () => {
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    c.slowWrites = true;
+    const { t } = transport(c);
+    t.send({ id: "p", type: "prompt", message: "a prompt longer than PIPE_BUF would be" });
+    await new Promise((r) => setImmediate(r)); // the prompt is mid-write
+    expect(c.writeSpans).toEqual([{ phase: "begin", line: c.writeSpans[0]?.line ?? "" }]);
+    t.sendAbort();
+    t.send({ type: "steer", message: "after" });
+    await t.flushed();
+    // Never a second writer: every begin follows the previous end.
+    let inFlight = 0;
+    for (const span of c.writeSpans) {
+      inFlight += span.phase === "begin" ? 1 : -1;
+      expect(inFlight).toBeLessThanOrEqual(1);
+      expect(inFlight).toBeGreaterThanOrEqual(0);
+    }
+    expect(c.writeSpans).toHaveLength(6);
+    expect(c.commands().map((cmd) => cmd.type)).toEqual(["prompt", "abort", "steer"]);
+  });
+
+  it("write answers with the landing: `landed` once the line is on pi's FIFO, `failed` when its write rejected (the command kept as pendingSend), `held` on a spent chain or an abandoned or closed transport — what the gate's onLanded waits on", async () => {
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    const { t } = transport(c);
+    await expect(t.write({ id: "s", type: "get_state" })).resolves.toBe("landed");
+    c.failNext = { operation: "send", error: new Error("control-reset: the resident's Durable Object was reset") };
+    await expect(t.write({ id: "p", type: "prompt", message: "go" })).resolves.toBe("failed");
+    expect(t.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
+    await expect(t.write({ type: "steer", message: "behind the failure" })).resolves.toBe("held");
+    expect(t.takeUnsent()).toEqual([{ type: "steer", message: "behind the failure" }]);
+    const gone = new FakeHarnessContainer();
+    await gone.start({ paths, command: "pi", args: [], env: {} });
+    const { t: onGone } = transport(gone);
+    onGone.abandon();
+    await expect(onGone.write({ type: "steer", message: "late" })).resolves.toBe("held");
+    expect(onGone.takeUnsent()).toEqual([]); // closed before it was sent: never queued either
+  });
+
+  it("caughtUp says whether every record read has been handed out and the last read was short — false before the first read, false while a chunk's earlier lines are still being consumed, true on its last line, false again while a full-size read means more follows", async () => {
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    const { t } = transport(c);
+    expect(t.caughtUp).toBe(false);
+    c.emit({ type: "agent_start" }, { type: "turn_start" }, { type: "turn_end" });
+    const seen: boolean[] = [];
+    for await (const _line of t.lines) {
+      seen.push(t.caughtUp);
+      if (seen.length === 3) t.close();
+    }
+    expect(seen).toEqual([false, false, true]); // one chunk of three: caught up only on the last
+
+    // A read that fills the whole chunk: more follows at once, so not caught up
+    // even on its last line; the short read after it is.
+    const big = new FakeHarnessContainer();
+    await big.start({ paths, command: "pi", args: [], env: {} });
+    const { t: onBig } = transport(big);
+    const filler = JSON.stringify({ type: "x", pad: "y".repeat(LOG_READ_BYTES / 2 - 32) });
+    big.emitRaw(`${filler}\n${filler}\n`.slice(0, LOG_READ_BYTES)); // exactly one full chunk, its tail a partial line
+    big.emitRaw(`${filler}\n`.slice(LOG_READ_BYTES - `${filler}\n`.length)); // the rest of that line
+    const caught: boolean[] = [];
+    for await (const _line of onBig.lines) {
+      caught.push(onBig.caughtUp);
+      if (caught.length === 2) onBig.close();
+    }
+    expect(caught[0]).toBe(false); // the first line of a full chunk
+    expect(caught[1]).toBe(true); // the second, completed by the short read after
   });
 
   it("a gate reply rides the chain like every other write (only the abort is direct): on a spent chain it is held for the re-attach in its turn, and its own failed write is recorded for the re-attach to re-send as it was — where an abort's failed write is nobody's", async () => {

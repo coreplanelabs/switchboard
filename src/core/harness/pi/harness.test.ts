@@ -9,6 +9,8 @@ import {
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
   timeBudgetInstruction,
+  wrapUpUndeliveredNote,
+  wrapUpWriteFailedNote,
   turnGuardInstruction,
   wrapUpInstruction,
 } from "../windDown.js";
@@ -43,7 +45,6 @@ import {
   saysContainerReplaced,
   type HarnessContainer,
 } from "../container.js";
-import { readFileSync } from "node:fs";
 import {
   CONTROL_RESET_RESUMED_NOTE,
   MAX_INPLACE_REATTACHES,
@@ -231,6 +232,8 @@ function world(
     compaction?: { reserveTokens?: number; keepRecentTokens?: number };
     /** The harness's sleep; a test that kills the bot mid-run hands one that stops answering. */
     sleep?: (ms: number) => Promise<void>;
+    /** The loop's tick, in ms; under `tickingWorld` also how much clock one loop iteration costs (a slow mirror). */
+    tickMs?: number;
     /** The ledger run's `logIndexOf` (run-history item 53): where the run's rows sit in its session log. */
     logIndexOf?: (localIndex: number) => number | undefined;
   } = {},
@@ -296,7 +299,7 @@ function world(
     clock: () => clock.now,
     sleep: opts.sleep ?? (() => new Promise((r) => setImmediate(r))),
     pollMs: 10,
-    tickMs: 10,
+    tickMs: opts.tickMs ?? 10,
   };
   const start = () => runPiHarness(harnessDeps, run);
   /** The open form (harness-pi item 14): the loop's answer with pi still alive for a follow-up turn. */
@@ -3027,7 +3030,7 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(w.inbox.drain().map((i) => i.text)).toEqual(["S1 first"]);
   });
 
-  it("the loop's wind-down steer still held when the loop ends is dropped with the rest: a follow-up turn's prompt goes out at once, nothing of the dead loop's — its prompt in doubt, its wind-down steer — reaches pi inside the turn, and the turn's finale clock is its own even past the allowance", async () => {
+  it("the loop's wind-down steer still held when the loop ends is dropped with the rest: the loop's answer wears no turn-guard label for a wrap-up pi never saw (a note says so), a follow-up turn's prompt goes out at once, nothing of the dead loop's — its prompt in doubt, its wind-down steer — reaches pi inside the turn, and the turn's finale clock is its own even past the allowance", async () => {
     // The turn guard fires on the loop's first check (`maxTurns: 0`): the
     // wind-down steer is sent while P1's write is failing, comes back unsent
     // on the re-attach and is held behind P1 — the shape of a loop that ends
@@ -3060,6 +3063,9 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(noteKinds(w)).toContain("turn_budget_exhausted");
     expect(w.clock.now - NOW).toBeLessThan(PROMPT_ECHO_WAIT_MS); // the loop ended inside the hold
     expect(w.container.commands().some((c) => c.type === "steer")).toBe(false); // its wind-down steer never reached pi
+    // pi finished on its own: the answer is pi's, unlabelled, and the record says why.
+    expect(session.answer).toBe("ok");
+    expect(w.notes).toContain(wrapUpUndeliveredNote("turns"));
     const sentBefore = w.container.stdin.length;
     const turnStartedAt = w.clock.now;
     phase = 2;
@@ -3071,6 +3077,159 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(inTurn.some((c) => c.type === "prompt" && c.streamingBehavior === "steer")).toBe(false); // nor its P1
     expect(turnPromptSeenAt! - turnStartedAt).toBeLessThan(PROMPT_ECHO_WAIT_MS); // at once, not at P1's bound
     expect(w.notes).not.toContain(finaleTimedOutNote("turn"));
+  });
+
+  it("a catch-up burst is no time under a ticking clock: the records pi wrote during the reset come back in one chunk and are consumed one slow ledger write at a time for longer than the bound, the prompt's echo last among them — the prompt in doubt is never re-sent, since the gate reads its clock only once the reader has caught up", async () => {
+    const w = tickingWorld({ tickMs: 150 }); // every loop iteration costs 150 ms of clock: a slow mirror
+    scriptedPi(w.container, () => {});
+    const scripted = w.container.onStdin!;
+    let landedPromptId: string | undefined;
+    // The prompt's bytes reach pi, the write rejecting with the reset after: pi WILL echo it — late.
+    w.container.onStdin = (line, c) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt" && cmd.streamingBehavior === undefined && landedPromptId === undefined) {
+        landedPromptId = String(cmd.id);
+        throw controlReset();
+      }
+      scripted(line, c);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let burst = false;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length === 0 && landedPromptId !== undefined && resumedSummaries(w).length > 0 && !burst) {
+        burst = true;
+        // What pi wrote while the control plane was resetting: thirty records in
+        // one read, the echo of the prompt the loop holds in doubt last of all —
+        // thirty iterations at 150 ms is 4.5 s of clock, past the 3 s bound.
+        const records: unknown[] = [];
+        for (let i = 0; i < 29; i++) records.push({ type: "agent_start" });
+        records.push({ id: landedPromptId, type: "response", command: "prompt", success: true });
+        w.container.emit(...records);
+        finalTurn(w.container, "ok");
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toBe("ok");
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE]);
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(1); // the original only: the burst was no time, the echo landed it
+    expect(prompts[0].streamingBehavior).toBeUndefined();
+  });
+
+  it("a chunk of lines that parse to nothing cannot starve the stop: the clock and the checks run on those iterations too (a buffered line wins the race against the tick every time), so a hard stop requested under it ends the run within a line or two, never after the whole chunk", async () => {
+    const w = tickingWorld({ tickMs: 150 }); // every loop iteration costs 150 ms of clock
+    scriptedPi(w.container, () => {}); // pi works on
+    const realRead = w.container.readLog.bind(w.container);
+    let stoppedAt: number | undefined;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0 || stoppedAt !== undefined || !w.container.commands().some((c) => c.type === "prompt"))
+        return chunk;
+      // pi writes fifty lines the harness cannot parse, read in one chunk, and
+      // the person stops the run as they arrive.
+      w.container.emitRaw("this is not a record\n".repeat(50));
+      stoppedAt = w.clock.now;
+      w.control.requestStop("hard");
+      return realRead(path, offset, max);
+    };
+    const answer = await w.start();
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    expect(w.clock.now - stoppedAt!).toBeLessThan(1_000); // read within a couple of lines, not fifty iterations later
+    expect(w.container.commands().some((c) => c.type === "abort")).toBe(true);
+  });
+
+  it("the finale's clock starts when the wrap-up steer has LANDED, not when it was handed to the transport: a steer whose write is slow to land for longer than the finale's allowance does not time the finale out on landing", async () => {
+    const w = tickingWorld({ agent: { maxTurns: 0 } }); // the turn guard fires on the first check
+    scriptedPi(w.container, () => {});
+    const realWrite = w.container.writeLine.bind(w.container);
+    const realRead = w.container.readLog.bind(w.container);
+    let releaseSteer: (() => void) | undefined;
+    let released = false;
+    w.container.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "steer" && String(cmd.message).includes("turn guard")) {
+        await new Promise<void>((r) => (releaseSteer = r)); // the wrap-up's write is slow to land
+      }
+      return realWrite(p, line);
+    };
+    let phase = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === 0 && releaseSteer !== undefined && !released) {
+        phase = 1;
+        released = true;
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1; // a whole allowance passes while the write is in flight
+        releaseSteer(); // now it lands
+        return chunk;
+      }
+      if (phase === 1 && w.container.commands().some((c) => c.type === "steer")) {
+        phase = 2;
+        finalTurn(w.container, "ok"); // pi writes up on the landed instruction
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toMatch(/ok/);
+    expect(w.notes).not.toContain(finaleTimedOutNote()); // the clock started at the landing, not the hand-off
+    expect(w.container.commands().some((c) => c.type === "abort")).toBe(false);
+  });
+
+  it("a wrap-up steer whose write FAILED with the reset starts no finale clock and is asked again: the loop re-asks through the gate, the fresh transport carries the new instruction once re-attached, the record says the write failed, and the answer wears the label only because pi then got the wrap-up", async () => {
+    const w = tickingWorld({ agent: { maxTurns: 0 } }); // the turn guard fires on the first check
+    scriptedPi(w.container, () => {}); // pi works on
+    w.container.failSendType = { type: "steer", error: controlReset() }; // the wrap-up's write fails with the reset
+    const realRead = w.container.readLog.bind(w.container);
+    let polls = 0;
+    let settledPi = false;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0 || resumedSummaries(w).length === 0 || settledPi) return chunk;
+      // Once re-attached: pi writes up as soon as it has an instruction — or,
+      // if none ever comes, finishes on its own after a while.
+      const asked = w.container.commands().some((c) => c.type === "steer");
+      if (!asked && ++polls < 20) return chunk;
+      settledPi = true;
+      finalTurn(w.container, "ok");
+      return realRead(path, offset, max);
+    };
+    const answer = await w.start();
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE]);
+    expect(w.notes).toContain(wrapUpWriteFailedNote("turns"));
+    const steers = w.container.commands().filter((c) => c.type === "steer");
+    expect(steers).toHaveLength(1); // the re-ask, on the fresh transport; the failed write never reached pi
+    expect(String(steers[0].message)).toContain("turn guard");
+    expect(answer).toMatch(/Stopped after .* — that pace looks like a loop; findings so far:/); // labelled: pi got the wrap-up
+    expect(answer).toMatch(/ok/);
+    expect(w.notes).not.toContain(finaleTimedOutNote());
+  });
+
+  it("a follow-up whose staging is still in flight when the loop ends is requeued for the run stage, never sent through the emptied gate after the loop — its inputs are not lost", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, () => {}); // pi works on
+    let releaseStaging: ((line: string) => void) | undefined;
+    w.run.stageFollowUps = () => new Promise<string>((r) => (releaseStaging = r)); // a store slow to answer
+    w.inbox.push({ text: "S1 first", userId: "user:test", at: NOW });
+    const realRead = w.container.readLog.bind(w.container);
+    let stopped = false;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length === 0 && releaseStaging !== undefined && !stopped) {
+        stopped = true;
+        w.control.requestStop("hard"); // the run is stopped while S1's files are still staging
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    releaseStaging!(""); // the staging completes after the loop ended
+    for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+    expect(w.container.commands().some((c) => c.type === "steer")).toBe(false); // never sent into a pi being ended
+    expect(w.inbox.drain().map((i) => i.text)).toEqual(["S1 first"]); // back to the inbox for the fresh turn
   });
 
   it("a second reset while the gate holds keeps holding: nothing new is in doubt, one resumed note per reset, and P1 then S1 is the order once the bound elapses", async () => {
@@ -3173,24 +3332,6 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(answer).toBe("ok");
     expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE, CONTROL_RESET_RESUMED_NOTE]);
     expect(promptsWhenRepliesLanded).toBe(0); // both replies with pi one poll after the re-attach, before any prompt
-  });
-
-  it("every write to pi takes the gate, with exactly two exits: the abort, the one write that leaves the loop only through sendAbort() (never the gate, never the chain's queue), and the gate reply, which passes the hold through sendNow but rides the chain — the loop has one direct transport.send (the gate's deliver)", () => {
-    const src = readFileSync(new URL("./harness.ts", import.meta.url), "utf8");
-    expect(src.match(/transport!?\.send\(/g) ?? []).toHaveLength(1);
-    expect(src).toMatch(/new HeldSends\(\(command\) => transport!\.send\(command\)\)/);
-    // The abort never enters the gate — not as a send, not as a sendNow.
-    expect(src).not.toMatch(/sends\.send(?:Now)?\(\{ type: "abort" \}\)/);
-    expect((src.match(/transport!?\.sendAbort\(\)/g) ?? []).length).toBeGreaterThanOrEqual(1);
-    // The gate reply passes the hold at both sites (the loop's and a turn's) and nowhere is it a held send.
-    expect(src.match(/for \(const reply of obs\.replies\) sends\.sendNow\(reply\);/g) ?? []).toHaveLength(2);
-    expect(src).not.toMatch(/sends\.send\(reply\)/);
-    // The transport redirects an abort handed to `send` to the direct path, so no caller can queue one.
-    const transportSrc = readFileSync(new URL("./transport.ts", import.meta.url), "utf8");
-    expect(transportSrc).toMatch(/if \(command\.type === "abort"\) return this\.sendAbort\(\);/);
-    // And the gate's pass-the-hold exit is the one method, delivering through the same deliver.
-    const gateSrc = readFileSync(new URL("../reattach.ts", import.meta.url), "utf8");
-    expect(gateSrc).toMatch(/sendNow\(command: Record<string, unknown>\): void \{\s*this\.deliver\(command\);\s*\}/);
   });
 
   it("a control reset on a control command (get_state) re-attaches and re-sends it as it was — the run answers, one resumed note, never the verdict", async () => {

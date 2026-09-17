@@ -34,6 +34,8 @@ import {
 import {
   CONTINUE_PROMPT,
   finaleTimedOutNote,
+  wrapUpUndeliveredNote,
+  wrapUpWriteFailedNote,
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
   hardStopNote,
@@ -447,6 +449,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   let paths: PiRunPaths | undefined;
   /** Hands the follow-ups pi was sent and never echoed back to the inbox; bound once the loop's drain exists. */
   let requeueUnechoed: () => void = () => {};
+  /** The loop is over, however it ended: a follow-up whose staging is still
+   *  in flight goes back to the inbox instead of through the emptied gate. */
+  let loopEnded = false;
   // The lease's clocks (harness-pi item 15; decision 0046): the lease ends at
   // `deadline`; the loop ends at `loopEnd`, the write-up and the post-step
   // held back so both run inside the lease; the warning lands at `warnAt`.
@@ -507,6 +512,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
 
   let writeUp: WriteUp | undefined;
   let writeUpAt: number | undefined;
+  /** The wrap-up steer the write-up sent — the very object the gate holds or
+   *  the transport re-sends — so a loop's end can tell whether pi ever got it. */
+  let writeUpSteer: Record<string, unknown> | undefined;
+  /** Whose write-up it is — the loop's, or a follow-up turn's — for the notes a wrap-up that never went leaves. */
+  let windingDown: "run" | "turn" = "run";
   let hardStopped = false;
   let bypass: GateBypassed | undefined;
   /** The container was replaced under the run (item 16): the loop's verdict once pi was found gone before the run settled. */
@@ -622,6 +632,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   const clearWriteUp = () => {
     writeUp = undefined;
     writeUpAt = undefined;
+    writeUpSteer = undefined;
   };
   /** How many follow-up turns were prompted on the session, for their command ids. */
   let followUps = 0;
@@ -912,15 +923,24 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  write of turn content — a follow-up's steer, the wrap-up, a turn's
      *  prompt — is held behind it in the order it was sent, and a second prompt
      *  in doubt is appended, never overwriting the first, so pi sees the order
-     *  the loop sent. Its two exits answer what pi already did: an abort never
-     *  reaches it (`sendAbort`, direct), a gate reply passes the hold at once
-     *  (`sendNow`, still through the chain). The clock is read on every
-     *  iteration AFTER the event just read is observed, so an echo in hand
-     *  lands its prompt before the bound is judged. The gate writes to
-     *  `transport` as it is at that moment, so a re-attach's fresh transport
-     *  is what a held write reaches; the source scan holds this as the file's
-     *  one direct `transport.send` and names the two exits. */
-    const sends = new HeldSends((command) => transport!.send(command));
+     *  the loop sent. Its two exits answer what pi already did, each enforced
+     *  where the write is made: an abort never reaches it (the transport's
+     *  `send` diverts it to `sendAbort`), a gate reply passes the hold inside
+     *  the gate's own `send`, by type. The gate writes to `transport` as it is
+     *  at that moment, so a re-attach's fresh transport is what a held write
+     *  reaches, and learns each write's landing from it. */
+    const sends = new HeldSends((command) => transport!.write(command));
+    /** The gate's clock read, on every iteration after the event just read is
+     *  observed (an echo in hand lands its prompt before the bound is judged)
+     *  — but only while the feed is QUIET: the transport has handed out every
+     *  record it read and its last read was short. A catch-up burst still
+     *  being handed out — the records pi wrote during the reset, read in one
+     *  chunk and consumed one ledger write at a time — is no time, while a
+     *  streaming pi's records each leave the reader caught up, so a held
+     *  prompt's clock runs under it and the stop is never stalled. */
+    const quietClock = (): void => {
+      if (transport!.caughtUp) sends.quiet(now());
+    };
     sends.send({ id: ids.retry, type: "set_auto_retry", enabled: false });
     sends.send({ id: ids.state, type: "get_state" });
     if (reattached)
@@ -972,12 +992,39 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // upstream with `tool_choice: none` (model-proxy item 6; decision 0046's
       // amendment) — the model is shown its tools and may call none.
       deps.bearers?.markLoopEnded(run.runId);
-      // A steer still held when its loop ends is dropped with the rest
-      // (`sends.dropHeld()` at the loop's and a turn's end), so this delivery
-      // is always this write-up's own.
-      sends.send({ type: "steer", message: instruction }, () => {
-        writeUpAt = now();
-      });
+      // The clock starts when the steer has LANDED — the transport's write
+      // settled, not the hand-off to a chain that only holds it for the
+      // re-attach — and the callback rides the very object through a re-send.
+      // A write that FAILED with the reset starts no clock: a steer is never
+      // resolved by a re-send (item 16), so pi may never have got the
+      // instruction, and the loop asks again — through the gate, so the fresh
+      // transport carries it once re-attached — the clock starting when that
+      // one lands. A steer still held when its loop ends is dropped with the
+      // rest (`dropHeld` at the loop's and a turn's end) and the label with it.
+      const ask = (): void => {
+        const steer = { type: "steer", message: instruction };
+        writeUpSteer = steer;
+        sends.send(steer, (landing) => {
+          if (landing === "landed") {
+            writeUpAt = now();
+            return;
+          }
+          note("wrap_up", wrapUpWriteFailedNote(kind.kind, windingDown));
+          ask();
+        });
+      };
+      ask();
+    };
+    /** The loop or turn is over: what the gate still holds is dropped,
+     *  delivering nothing — and if the wrap-up steer was among it, pi never
+     *  saw the instruction and finished on its own, so the write-up is cleared
+     *  (the answer wears no time/turn/soft label for a wrap-up that never went)
+     *  and the record says so. */
+    const dropHeld = (closes: "run" | "turn"): void => {
+      const dropped = sends.dropHeld();
+      if (writeUp === undefined || writeUpSteer === undefined || !dropped.includes(writeUpSteer)) return;
+      note("wrap_up", wrapUpUndeliveredNote(writeUp.kind, closes));
+      clearWriteUp();
     };
     // Steers go out in the order their follow-ups were drained: the staging of one
     // batch (a copy into the store, a pull over the container) is awaited before
@@ -1034,9 +1081,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             note("follow_up", `staging the follow-up's files failed: ${redactSecrets(stagedLine)}`);
           }
         }
-        if (settled) {
-          // pi settled before the steer could go: the follow-ups are the run
-          // stage's to run as a fresh turn, exactly as ones the loop never drained.
+        if (settled || loopEnded) {
+          // pi settled, or the loop ended some other way, before the steer
+          // could go: the follow-ups are the run stage's to run as a fresh
+          // turn, exactly as ones the loop never drained — never sent through
+          // the emptied gate into a pi being ended or a later turn.
           run.inbox?.requeue(inputs);
           return;
         }
@@ -1147,7 +1196,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       echoedIds.add(id);
       // A prompt in doubt that pi echoed landed: the gate never re-sends it, and
       // the writes held behind it go out now, in their order.
-      sends.echoed(id, now());
+      sends.echoed(id);
     };
     /** The loop's and every follow-up turn's one answer to a read that failed
      *  under them (item 16). A control reset (the container unchanged) or the
@@ -1191,11 +1240,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // write takes.
       const settled = transport!.flushed().then(() => "settled" as const);
       const pause: ProbeWait = { sleep: deps.sleep, now, ...(run.control ? { signal: run.control.hardSignal } : {}) };
+      if (run.control?.requested === "hard") {
+        hardStop();
+        return { kind: "run-ended" };
+      }
       for (;;) {
-        if (run.control?.requested === "hard") {
-          hardStop();
-          return { kind: "run-ended" };
-        }
         const waited = await Promise.race([
           settled,
           sleepUnlessStopped(pause, deps.tickMs ?? 1000).then((ranOut) =>
@@ -1203,7 +1252,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           ),
         ]);
         if (waited === "settled") break;
-        if (waited === "stopped") continue; // read at the top: the run ends as the stop
+        if (waited === "stopped") {
+          hardStop();
+          return { kind: "run-ended" };
+        }
         if (now() >= until) {
           const msg =
             "the write in flight when the resident's control plane reset did not settle before the deadline; the run cannot continue";
@@ -1223,15 +1275,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // Through the one gate (`sends`): the resolved write first — re-sent as it
       // was, or a prompt awaiting its echo — then the writes whose turn never
       // came on the old transport, in the loop's order, held behind any prompt
-      // still in doubt, so pi sees the order the loop sent. A gate reply among
-      // them takes the exit it always takes (`sendNow`): the ask it answers is
-      // pi's already, and held behind a prompt in doubt it would stall the very
-      // tool call pi waits on — the stall the exit exists to prevent.
-      const resend = (command: Record<string, unknown>): void =>
-        command.type === "extension_ui_response" ? sends.sendNow(command) : sends.send(command);
-      if (res.kind === "resend") resend(res.command);
-      if (res.kind === "await-echo") sends.await(res.command, now());
-      for (const command of unsent) resend(command);
+      // still in doubt, so pi sees the order the loop sent — a gate reply among
+      // them passing the hold as the gate's `send` always lets one (the ask it
+      // answers is pi's already; held, it would stall the very tool call pi
+      // waits on), and a wrap-up steer among them carrying the finale clock's
+      // callback to its landing.
+      if (res.kind === "resend") sends.send(res.command);
+      if (res.kind === "await-echo") sends.await(res.command);
+      for (const command of unsent) sends.send(command);
       return outcome;
     };
     let providerError: string | undefined;
@@ -1304,7 +1355,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         throw err;
       }
       if (next === "tick") {
-        sends.tick(now());
+        quietClock();
         check();
         if (hardStopped) break;
         continue;
@@ -1312,14 +1363,22 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       pending = undefined;
       if (next.done) break;
       const event = parsePiLine(next.value);
-      if (!event) continue;
+      if (!event) {
+        // A line that parses to nothing is still an iteration: the clock and
+        // the stops are read as on every other, so a pi that yields one such
+        // line per poll cannot starve a stop, a held prompt or the inbox.
+        quietClock();
+        check();
+        if (hardStopped) break;
+        continue;
+      }
       // A record the loop can act on: the transport made progress, so a
       // re-attach is not spinning. A line that parses to nothing is not it.
       reattaches = 0;
       // A call that starts while catching up was vetted by the generation that died.
       bridge.judgeGate = !catchingUp;
       const obs = bridge.observe(event);
-      for (const reply of obs.replies) sends.sendNow(reply);
+      for (const reply of obs.replies) sends.send(reply);
       if (obs.gateBypassed) {
         // Fail closed: a tool ran that the gate never saw. Stop pi now; the
         // run fails naming the call once the loop is left.
@@ -1426,16 +1485,19 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         settled = true;
         break;
       }
-      // The gate reads the clock on every iteration — an event's as much as a
-      // tick's — so a streaming pi that starves the tick cannot stall a prompt
-      // in doubt past its bound; AFTER the event just read is observed, so an
-      // echo it carries lands the prompt before the bound is judged, never a
-      // re-send of a prompt whose echo is already in hand.
-      sends.tick(now());
+      // The gate's clock, read on every iteration — an event's as much as a
+      // tick's, so a streaming pi that starves the tick cannot stall a prompt
+      // in doubt past its bound — AFTER the event just read is observed, so an
+      // echo it carries lands the prompt before the bound is judged, and only
+      // while the feed is quiet (`quietClock`), so a catch-up burst is no time.
+      quietClock();
       check();
       if (hardStopped) break;
     }
 
+    // The loop is over: a follow-up still staging goes back to the inbox
+    // (`drainFollowUps`), never through the gate emptied below.
+    loopEnded = true;
     // A steer pi never echoed was never read: pi reads a queued steer at its
     // next turn boundary and had none. Back to the inbox, for the fresh turn.
     requeueUnechoed();
@@ -1443,8 +1505,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // requeued, the wind-down's steer, a prompt in doubt the loop settled
     // without — delivered later they would run the follow-up twice, steer this
     // loop's finale into a follow-up turn, or hold the turn's first prompt
-    // behind a bound this loop was waiting out. Dropped, delivering nothing.
-    sends.dropHeld();
+    // behind a bound this loop was waiting out. Dropped, delivering nothing;
+    // a wrap-up among them clears the label the answer would have worn.
+    dropHeld("run");
     /** What the one more command waits with: the harness's sleep and clock,
      *  the notes on the record, and the run itself — its hard-stop signal and
      *  its deadline end the wait as they end the run. */
@@ -1583,6 +1646,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const turnsBefore = bridge.turns;
       // The loop's write-up, when it took one, is spent: the turn has its own budget.
       clearWriteUp();
+      windingDown = "turn";
       finaleAborted = false;
       writeUpFailed = undefined;
       const id = `${ids.prompt}:follow-up:${++followUps}`;
@@ -1662,7 +1726,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             throw err;
           }
           if (next === "tick") {
-            sends.tick(now());
+            quietClock();
             turnCheck();
             if (hardStopped) break;
             continue;
@@ -1670,10 +1734,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           pending = undefined;
           if (next.done) break;
           const event = parsePiLine(next.value);
-          if (!event) continue;
+          if (!event) {
+            // A line that parses to nothing is still an iteration (the loop's rule).
+            quietClock();
+            turnCheck();
+            if (hardStopped) break;
+            continue;
+          }
           reattaches = 0; // a record read: a re-attach made progress
           const obs = bridge.observe(event);
-          for (const reply of obs.replies) sends.sendNow(reply);
+          for (const reply of obs.replies) sends.send(reply);
           if (obs.gateBypassed) {
             bypass = new GateBypassed(obs.gateBypassed.tool, obs.gateBypassed.callId);
             note("harness_error", `${bypass.message} — the turn is stopped`);
@@ -1698,10 +1768,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             turnSettled = true;
             break;
           }
-          sends.tick(now()); // the clock on every iteration, after the event is observed (the loop's rule)
+          quietClock(); // the clock on every quiet iteration, after the event is observed (the loop's rule)
           turnCheck();
           if (hardStopped) break;
         }
+        // The turn is over: what the gate still holds is this turn's — its
+        // wrap-up steer, a prompt in doubt it settled without — never the next
+        // turn's to receive; a wrap-up among it clears the label below.
+        dropHeld("turn");
         if (hardStopped) {
           note("stopped", hardStopNote(), "hard");
           return HARD_STOP_MESSAGE;
@@ -1773,9 +1847,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         deps.bearers?.clearTurn(run.runId);
         live.toolContext = runContext;
         bridge.under(undefined);
-        // What the gate still holds is this turn's — its write-up's steer, a
-        // prompt in doubt it settled without — never the next turn's to receive.
-        sends.dropHeld();
+        // A turn that threw before its loop's end dropped nothing yet: nothing
+        // of it may reach the next turn either.
+        dropHeld("turn");
         turnSpan?.end(hardStopped || bypass || turnFailed ? "error" : "ok");
       }
     };
@@ -1783,7 +1857,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   } catch (err) {
     // A loop that throws — a refused prompt, a dead pi, a failed model call, a
     // gate bypass — is a failed loop, and its span says so. The follow-ups it
-    // was sent and never read go back to the inbox for the fresh turn.
+    // was sent and never read go back to the inbox for the fresh turn — one
+    // still staging too, once its staging completes.
+    loopEnded = true;
     requeueUnechoed();
     agentSpan?.end("error");
     await end();

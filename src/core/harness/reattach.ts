@@ -172,33 +172,53 @@ export function resolveControlResetWrite(
 interface HeldSend {
   command: Record<string, unknown>;
   state: "send" | "await" | "landed";
-  onDelivered?: () => void;
 }
 
+/** What a write handed to the transport came to: `landed` (written to pi's
+ *  FIFO), `failed` (its write rejected — the reset's; it is `pendingSend`
+ *  for the re-attach to resolve), or `held` (queued on a chain a failure
+ *  already spent, or on a transport abandoned to a re-attach: the fresh
+ *  transport re-sends it, the same object, through the gate again). */
+export type Landing = "landed" | "failed" | "held";
+/** A landing the write's sender hears about: the write is over, one way or the other. */
+export type Settled = Exclude<Landing, "held">;
+
 /** The one gate every write to pi takes after a re-attach (harness-pi item 16).
- *  While a prompt a failure left in doubt awaits its echo, every later write —
- *  a follow-up's steer, the wrap-up, a gate reply, a turn's prompt — is held
+ *  While a prompt a failure left in doubt awaits its echo, every later write of
+ *  turn content — a follow-up's steer, the wrap-up, a turn's prompt — is held
  *  behind it in the order it was sent, and a second prompt in doubt is appended
  *  behind the first, never overwriting it. The gate moves on by the echo (the
  *  prompt landed: nothing to send, the writes behind it go out) or by the bound
  *  on the harness's clock (`PROMPT_ECHO_WAIT_MS`: the prompt is re-sent
  *  steer-delivered once, then the writes behind it go out) — so pi sees the
  *  order the loop sent, and no request is delivered twice or lost. The clock
- *  is read on every iteration of the loop, never counted in ticks a streaming pi
- *  starves. Only turn content waits — a prompt, a steer, whose order is what
- *  pi's transcript becomes. The two answers to what pi already did never do: an
- *  abort never reaches the gate (`PiRpcTransport.sendAbort`, written directly;
- *  idempotent, a duplicate harmless), and a gate reply passes it at once
- *  (`sendNow`) — it answers an ask pi already made, so pi has consumed whatever
- *  prompt produced that call and keys the ask by id; holding it would only
- *  block pi's tool. `deliver` writes to the transport as it is at that moment,
- *  so a re-attach's fresh transport is what a held write reaches. */
+ *  is read (`quiet`) on every iteration of the loop on which the feed is quiet
+ *  — the transport has handed out every record it read — never counted in
+ *  ticks a streaming pi starves, and never while a catch-up burst is still
+ *  being handed out: the records pi wrote during the reset, read in one chunk
+ *  and consumed one ledger write at a time, are no time, and the echo late in
+ *  that burst lands the prompt before any judgement. The two answers to what pi
+ *  already did never wait, each enforced where the write is made rather than
+ *  at its call sites: an abort never reaches the gate (`PiRpcTransport.send`
+ *  diverts it to `sendAbort`), and a gate reply (`extension_ui_response`)
+ *  passes the hold here in `send` — it answers an ask pi already made, so pi
+ *  has consumed whatever prompt produced that call and keys the ask by id;
+ *  holding it would only block pi's tool. `deliver` writes to the transport as
+ *  it is at that moment, so a re-attach's fresh transport is what a held write
+ *  reaches, and answers with the write's landing. */
 export class HeldSends {
   private readonly queue: HeldSend[] = [];
-  /** When the head became a prompt awaiting its echo; undefined while none is. */
+  /** The awaited head's clock: when the feed first went quiet with it at the
+   *  front. Undefined until then, and again whenever the head changes. */
   private headSince: number | undefined;
+  /** What runs once a write has actually settled at the transport, by the
+   *  command object — kept across a `held` landing, so the re-send of the same
+   *  object after a re-attach still runs it — told whether the write landed or
+   *  failed (the finale's clock, harness-pi item 15, starts when pi has the
+   *  wrap-up, not when the loop asked, and not at all on a write that failed). */
+  private readonly onLanded = new Map<Record<string, unknown>, (landing: Settled) => void>();
 
-  constructor(private readonly deliver: (command: Record<string, unknown>) => void) {}
+  constructor(private readonly deliver: (command: Record<string, unknown>) => Promise<Landing>) {}
 
   /** Whether a prompt in doubt is holding the gate. */
   get holding(): boolean {
@@ -206,93 +226,103 @@ export class HeldSends {
   }
 
   /** Send now — or, while a prompt in doubt holds the gate, hold behind it in
-   *  order. `onDelivered` runs when the write actually leaves the gate. */
-  send(command: Record<string, unknown>, onDelivered?: () => void): void {
-    if (this.holding) {
-      this.queue.push({ command, state: "send", ...(onDelivered ? { onDelivered } : {}) });
+   *  order. A gate reply never holds: the rule lives here, by the command's
+   *  type, so no caller can get it wrong. `onLanded` runs when the write has
+   *  settled at the transport — told `landed`, or `failed` with the reset —
+   *  never at the hand-off to a chain that only holds it. */
+  send(command: Record<string, unknown>, onLanded?: (landing: Settled) => void): void {
+    if (onLanded) this.onLanded.set(command, onLanded);
+    if (this.holding && command.type !== "extension_ui_response") {
+      this.queue.push({ command, state: "send" });
       return;
     }
-    this.deliver(command);
-    onDelivered?.();
-  }
-
-  /** Send past the hold, at once — the gate reply's exit: it answers an ask pi
-   *  already made (`extension_ui_response`, resolved by id; it can never precede
-   *  the echo of the prompt that produced it), so no order is owed it and
-   *  holding it would only block pi's extension for the wait. Through the
-   *  transport's chain, not around it: a reply lost to a failing write is
-   *  `pendingSend`, and the re-attach re-sends it as it was. */
-  sendNow(command: Record<string, unknown>): void {
-    this.deliver(command);
-  }
-
-  /** The loop or turn that sent what is still held has ended: drop it all,
-   *  delivering nothing. A held follow-up steer went back to the inbox with the
-   *  other unechoed steers (the loop's `requeueUnechoed`), a held wind-down
-   *  steer belongs to the loop that ended, and a prompt still in doubt when the
-   *  loop settled is nothing a later turn should start — delivered later they
-   *  would run a follow-up twice, steer a dead loop's finale into a turn, or
-   *  hold the turn's first prompt behind a bound the dead loop was waiting out. */
-  dropHeld(): void {
-    this.queue.length = 0;
-    this.headSince = undefined;
+    this.dispatch(command);
   }
 
   /** A prompt whose landing a failure left in doubt: awaited until its echo or
-   *  the bound. Appended behind an earlier one, never overwriting it; its own
-   *  wait starts (`now`) once it is the head. */
-  await(command: Record<string, unknown>, now: number): void {
+   *  the bound. Appended behind an earlier one, never overwriting it; its clock
+   *  starts at the first quiet moment once it is the head. */
+  await(command: Record<string, unknown>): void {
     this.queue.push({ command, state: "await" });
-    if (this.queue.length === 1) this.headSince = now;
   }
 
   /** pi echoed `id`: a prompt in doubt under that id landed — never re-sent,
    *  and if it held the gate, the writes behind it go out now. */
-  echoed(id: string, now: number): void {
+  echoed(id: string): void {
     let landed = false;
     for (const held of this.queue) {
       if (held.state !== "await" || held.command.id !== id) continue;
       held.state = "landed";
       landed = true;
     }
-    if (landed) this.release(now);
+    if (landed) this.release();
   }
 
-  /** The clock, read on every iteration of the loop — an event's or a tick's,
-   *  so a streaming pi cannot stall it: once the awaited prompt has waited
-   *  `PROMPT_ECHO_WAIT_MS` it is re-sent steer-delivered once (pi takes it
-   *  mid-turn) and the gate moves on. */
-  tick(now: number): void {
+  /** The feed is quiet at `now`: the transport has handed out every record it
+   *  read. The awaited head's clock starts on the first such read after it
+   *  became the head; once the head has waited `PROMPT_ECHO_WAIT_MS` of quiet
+   *  clock it is re-sent steer-delivered once (pi takes it mid-turn) and the
+   *  gate moves on, the next awaited head's clock starting here. Never called
+   *  while records are still arriving, so a catch-up burst is no time. */
+  quiet(now: number): void {
     const head = this.queue[0];
     if (head === undefined || head.state !== "await") return;
-    // `headSince` is set wherever an awaited prompt becomes the head — `await`
-    // on an empty gate, `release` on reaching one — so it is never unset here.
-    if (now - this.headSince! < PROMPT_ECHO_WAIT_MS) return;
+    if (this.headSince === undefined) {
+      this.headSince = now;
+      return;
+    }
+    if (now - this.headSince < PROMPT_ECHO_WAIT_MS) return;
     this.queue.shift();
-    this.headSince = undefined; // the re-sent prompt's wait is over; the next head's starts in `release`
-    this.deliver({ ...head.command, streamingBehavior: "steer" });
-    this.release(now);
+    this.headSince = undefined;
+    this.dispatch({ ...head.command, streamingBehavior: "steer" });
+    this.release();
+    if (this.queue[0]?.state === "await") this.headSince = now;
   }
 
-  /** Deliver from the head until the next prompt still awaiting its echo; a
-   *  prompt that BECOMES the head starts its wait now — whether the gate
-   *  advanced to it here or the re-sent prompt directly ahead of it just left —
-   *  while one that already was the head keeps the wait it has (an echo of a
-   *  later prompt is no reason to wait longer for the first). */
-  private release(now: number): void {
+  /** The loop or turn that sent what is still held has ended: drop it all,
+   *  delivering nothing, and answer what was dropped so the caller can say so.
+   *  A held follow-up steer went back to the inbox with the other unechoed
+   *  steers (the loop's `requeueUnechoed`), a held wind-down steer belongs to
+   *  the loop that ended (its answer then wears no label for a wrap-up pi never
+   *  saw), and a prompt still in doubt when the loop settled is nothing a later
+   *  turn should start — delivered later they would run a follow-up twice,
+   *  steer a dead loop's finale into a turn, or hold the turn's first prompt
+   *  behind a bound the dead loop was waiting out. */
+  dropHeld(): Record<string, unknown>[] {
+    const dropped = this.queue.map((held) => held.command);
+    this.queue.length = 0;
+    this.headSince = undefined;
+    for (const command of dropped) this.onLanded.delete(command);
+    return dropped;
+  }
+
+  /** Hand a write to the transport; its `onLanded`, if any, runs once the write
+   *  settled there. A `held` landing leaves the callback in place: the fresh
+   *  transport's re-send of the same object (through `send`) runs it. */
+  private dispatch(command: Record<string, unknown>): void {
+    void this.deliver(command).then((landing) => {
+      if (landing === "held") return;
+      const onLanded = this.onLanded.get(command);
+      this.onLanded.delete(command);
+      onLanded?.(landing);
+    });
+  }
+
+  /** Deliver from the head until the next prompt still awaiting its echo. A
+   *  prompt that BECOMES the head has no clock until the feed is next quiet;
+   *  one that already was the head keeps the clock it has (an echo of a later
+   *  prompt is no reason to wait longer for the first). */
+  private release(): void {
     let advanced = false;
     while (this.queue.length > 0) {
       const head = this.queue[0];
       if (head.state === "await") {
-        if (advanced || this.headSince === undefined) this.headSince = now;
+        if (advanced) this.headSince = undefined;
         return;
       }
       this.queue.shift();
       advanced = true;
-      if (head.state === "send") {
-        this.deliver(head.command);
-        head.onDelivered?.();
-      }
+      if (head.state === "send") this.dispatch(head.command);
     }
     this.headSince = undefined;
   }
