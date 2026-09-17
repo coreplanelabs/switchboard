@@ -5,6 +5,7 @@ import {
   decodeBase64Read,
   execDeadline,
   infraReasonOfRequestFailure,
+  requestFailedMessage,
   infraReasonOfStatus,
   truncate,
   type ExecOptions,
@@ -92,9 +93,10 @@ function sendDeadlineMs(budgetMs: number): number {
 /** The infra error for a send the Worker never answered inside its deadline:
  *  names both numbers, so the reader sees which budget the wait was sized
  *  from, and says what may still be true inside the sandbox. Exported, with
- *  the two builders below, so the tests that assert the harness waits on
- *  these failures build their fixtures from the words the executor throws —
- *  never a retyped copy. */
+ *  the empty-failure builder below (the request-failed sentence is
+ *  `requestFailedMessage`, shared with the resident client), so the tests that
+ *  assert the harness waits on these failures build their fixtures from the
+ *  words the executor throws — never a retyped copy. */
 export function sandboxNoAnswerMessage(route: string, budgetMs: number): string {
   const secs = (ms: number) => Math.round(ms / 1000);
   const exec = route === "/exec";
@@ -102,15 +104,6 @@ export function sandboxNoAnswerMessage(route: string, budgetMs: number): string 
     `sandbox worker ${route} gave no answer within ${secs(sendDeadlineMs(budgetMs))}s ` +
     `(${exec ? "command budget" : "budget"} ${secs(budgetMs)}s + ${secs(EXEC_CALL_MARGIN_MS)}s margin) — ` +
     `the sandbox may be gone; ${exec ? "the command may still be running in it" : "the operation may still have run in it"}`
-  );
-}
-
-/** The infra error for a request that failed on its transport ("fetch failed"): the command may still be running in the sandbox. */
-export function sandboxRequestFailedMessage(route: string, err: unknown): string {
-  return (
-    `sandbox worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
-    "The command may still be running or have been killed mid-flight in the sandbox; " +
-    "re-check its effects before re-running it."
   );
 }
 
@@ -246,8 +239,8 @@ export class CloudflareSandboxExecutor implements Executor {
         // The Worker gave no answer inside the deadline (and the run was not
         // stopped): the sandbox may be gone, or its Durable Object hung —
         // either way an infra failure that fail-fast counts, never an
-        // indefinite wait. A hard stop takes the generic path below: the
-        // runner has already moved on and does not read the message.
+        // indefinite wait. A hard stop takes the generic path below, typed
+        // `aborted`: the runner has already moved on and does not read the message.
         if (deadline.aborted && !signal?.aborted)
           throw new ExecInfraError(sandboxNoAnswerMessage(route, budgetMs), "deadline-passed");
         // Network-level failure ("fetch failed"): undici drops the connection
@@ -256,7 +249,7 @@ export class CloudflareSandboxExecutor implements Executor {
         // Don't retry — the command may have side effects and may still be
         // running in the sandbox; give the agent a legible error instead. Infra
         // (not a command exit): the runner counts these toward fail-fast.
-        throw new ExecInfraError(sandboxRequestFailedMessage(route, err), infraReasonOfRequestFailure(err));
+        throw new ExecInfraError(requestFailedMessage("sandbox", route, err), infraReasonOfRequestFailure(err, signal));
       }
       // Heartbeat whitespace around one JSON document parses unchanged; a
       // non-JSON body (an edge error page) is {} and the status speaks below.

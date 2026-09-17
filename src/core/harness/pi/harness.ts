@@ -1649,9 +1649,15 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // the stop, not as the transport failure the wait was judging. Only
           // the hard stop: the full `turnCheck()` would note a soft stop or the
           // turn's deadline and steer a write-up into a transport already known
-          // lost, then the turn would fail anyway.
+          // lost, then the turn would fail anyway. The abort still goes to pi,
+          // as `turnCheck`'s hard branch sends it: the one more command may
+          // have found the container alive with pi mid-turn (the same identity,
+          // no word), and left alone pi would go on generating and calling
+          // tools until `end()`; a write into a transport that IS lost costs
+          // nothing — a failed write surfaces only on a read nobody makes.
           if (run.control?.requested === "hard") {
             hardStopped = true;
+            transport!.send({ type: "abort" });
             note("stopped", hardStopNote(), "hard");
             return HARD_STOP_MESSAGE;
           }

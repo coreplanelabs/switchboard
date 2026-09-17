@@ -149,15 +149,20 @@ export class ExecInfraError extends Error {
  *  the call's or the send's deadline passed with no answer. `empty-failure`:
  *  the Worker's failure shape with its text missing (the rollout's
  *  previous-image answer, execution.md item 3). `worker-unavailable`: an HTTP
- *  5xx from the Worker (the isolate rolling under a deploy). Those four a wait
+ *  5xx from the Worker — the isolate rolling under a deploy, the resident
+ *  mid-restore or its mirror mutex held by a refresh — unless the body names a
+ *  refusal (the resident client's `residentAnswerReason`). Those four a wait
  *  can clear (`EXEC_INFRA_WAITABLE`). `answered`: the Worker answered a
- *  failure by name in its body — the resident forwarding the SDK's words
- *  ("The container is not running", "Peer closed WebSocket"), its
- *  `not-serviceable` refusals, the sandbox's "Command execution failed" — whose
- *  meaning is in the words, so the seam reads the container-down ones and
- *  waits on nothing else. `refused`: a refusal no wait clears — an HTTP 4xx,
- *  a worktree still gone after the one re-attach, the deploy-storm streak
- *  guard, a strike after the wake wait — judged at once. */
+ *  failure by name in its body on a status that is not a 5xx — the resident
+ *  forwarding the SDK's words ("The container is not running", "Peer closed
+ *  WebSocket"), the sandbox's "Command execution failed" — whose meaning is in
+ *  the words, so the seam reads the container-down ones and waits on nothing
+ *  else. `refused`: a refusal no wait clears — an HTTP 4xx, a worktree still
+ *  gone after the one re-attach, the deploy-storm streak guard, a strike after
+ *  the wake wait, the resident `down` or the resource unregistered behind a
+ *  5xx — judged at once by the type, whatever its words. `aborted`: the run's
+ *  own stop aborted the request; nothing is wrong with the Worker and nothing
+ *  waits. */
 export const EXEC_INFRA_REASONS = [
   "transport-lost",
   "deadline-passed",
@@ -165,6 +170,7 @@ export const EXEC_INFRA_REASONS = [
   "worker-unavailable",
   "answered",
   "refused",
+  "aborted",
 ] as const;
 export type ExecInfraReason = (typeof EXEC_INFRA_REASONS)[number];
 
@@ -188,9 +194,27 @@ export function infraReasonOfStatus(status: number): ExecInfraReason {
 }
 
 /** The reason for a request that failed before or while the Worker answered:
- *  the deadline's own abort (`execDeadline`'s `TimeoutError`) or the transport. */
-export function infraReasonOfRequestFailure(err: unknown): ExecInfraReason {
+ *  the run's own stop when its signal has fired (`aborted` — the fetch rejects
+ *  with the stop's reason, whatever its name, so the signal decides before the
+ *  error does), else the deadline's own abort (`execDeadline`'s `TimeoutError`)
+ *  or the transport. */
+export function infraReasonOfRequestFailure(err: unknown, signal?: AbortSignal): ExecInfraReason {
+  if (signal?.aborted) return "aborted";
   return err instanceof Error && err.name === "TimeoutError" ? "deadline-passed" : "transport-lost";
+}
+
+/** The infra failure's words for a request to a remote executor's Worker that
+ *  failed on its transport, hit its deadline or was aborted, before or while
+ *  the Worker answered: one sentence for both Workers, the Worker's name the
+ *  only difference, so the tests that assert the harness waits on this failure
+ *  build their fixtures from the words the executors throw — never a retyped
+ *  copy, never two wordings drifting apart. The operation may have run, or
+ *  still be running, in the Worker: the caller never re-runs it blind. */
+export function requestFailedMessage(worker: "resident" | "sandbox", route: string, err: unknown): string {
+  return (
+    `${worker} worker ${route} request failed (${err instanceof Error ? err.message : String(err)}). ` +
+    `The operation may still have run, or still be running, in the ${worker}; re-check its effects before re-running it.`
+  );
 }
 
 /** An exec-CAPACITY failure: the sandbox fleet had no free instance for this
