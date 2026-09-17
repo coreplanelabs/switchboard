@@ -6,6 +6,9 @@
 // waits at that head, and the driver's `waitForEvent` wakes at once instead of
 // timing out its bounded fallback. Node-free — the signature check is Web
 // Crypto — so the bot and a Worker verify the same way.
+// One event kind is read here on purpose. The general door, every outside
+// fact filed into the thread that owns the work, is docs/decisions/0047-an-outside-fact-finds-the-thread-that-owns-the-work.md;
+// no second event-specific intake is added before it lands.
 import { sendChecksSettled, type RunFinishedSend, type WorkflowSender } from "./contract.js";
 
 /** The webhook header GitHub signs the raw body into: `sha256=<hex hmac>`. */
