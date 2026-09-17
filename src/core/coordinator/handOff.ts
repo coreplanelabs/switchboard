@@ -142,8 +142,9 @@ async function plan(
     base,
     createdAt: input.now,
     caps: input.caps,
-    addressSeverity: (input.addressSeverity ?? { level: "minor" as const }).level,
-    addressSeveritySource: (input.addressSeverity ?? { source: "org" as const }).source ?? "org",
+    // Absent, the default is the org's `minor` (agent-ship item 9).
+    addressSeverity: input.addressSeverity?.level ?? "minor",
+    addressSeveritySource: input.addressSeverity?.source ?? "org",
     ...(input.card !== undefined ? { card: input.card } : {}),
     runId: input.runId,
     label: input.label,
