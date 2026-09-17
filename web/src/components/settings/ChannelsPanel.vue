@@ -45,9 +45,15 @@ const scope = computed(() => selected.value?.scope?.channel ?? null);
 const channelLabel = (c: { channelId: string; channelName?: string }): string =>
   c.channelName ? `#${c.channelName}` : c.channelId;
 
+/** The channels the viewer may open, by name (`config channels`); the picker's options. */
+const pickable = computed(() => props.channels.pickable?.channels ?? []);
+const pickerLabel = (c: { channelId: string; channelName?: string; visibility: string }): string =>
+  `${c.channelName ? `#${c.channelName}` : c.channelId}${c.visibility === "private" ? " · private" : ""}`;
+/** Picked from the list, or typed as an id when the list cannot carry it (a machine channel, an unlisted one). */
+const picked = ref("");
 const openField = ref("");
 function open(): void {
-  const id = openField.value.trim();
+  const id = (picked.value || openField.value).trim();
   if (id) browser.navigate(`/settings/channels/${encodeURIComponent(id)}`);
 }
 
@@ -205,16 +211,46 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
             </li>
           </ul>
         </div>
-        <form class="flex items-center gap-2" @submit.prevent="open">
-          <input
-            id="channel-open"
-            v-model="openField"
-            :class="INPUT_CLASS"
-            class="flex-1 font-mono text-xs"
-            placeholder="slack:C0123… — a channel with no scope yet"
-            aria-label="channel id to open"
-          />
-          <UButton type="submit" size="xs" color="neutral" variant="outline">Open</UButton>
+        <form class="picker grid gap-2" @submit.prevent="open">
+          <div class="flex items-center gap-2">
+            <select
+              v-if="pickable.length > 0"
+              id="channel-pick"
+              v-model="picked"
+              :class="SELECT_CLASS"
+              class="flex-1 text-xs"
+              aria-label="channel to open"
+            >
+              <option value="">Pick a channel…</option>
+              <option v-for="c in pickable" :key="c.channelId" :value="c.channelId" :title="c.channelId">
+                {{ pickerLabel(c) }}
+              </option>
+            </select>
+            <input
+              v-else
+              id="channel-open"
+              v-model="openField"
+              :class="INPUT_CLASS"
+              class="flex-1 font-mono text-xs"
+              placeholder="slack:C0123… — a channel id"
+              aria-label="channel id to open"
+            />
+            <UButton type="submit" size="xs" color="neutral" variant="outline">Open</UButton>
+          </div>
+          <p v-if="pickable.length > 0 && channels.pickable?.listed === false" class="text-xs text-dimmed">
+            The bot could not list its channels; only the channels that already carry settings are offered.
+          </p>
+          <details v-if="pickable.length > 0" class="text-xs text-dimmed">
+            <summary class="cursor-pointer">Not listed? Open a channel by its id</summary>
+            <input
+              id="channel-open"
+              v-model="openField"
+              :class="INPUT_CLASS"
+              class="mt-1 w-full font-mono text-xs"
+              placeholder="slack:C0123… or http:ops"
+              aria-label="channel id to open"
+            />
+          </details>
         </form>
       </aside>
 

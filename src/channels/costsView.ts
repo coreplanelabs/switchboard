@@ -38,7 +38,11 @@ import { WEB_HTML_HEADERS } from "./webShell.js";
  *  the dashboard reads names). Every other dimension passes through untouched. */
 export async function labelled(report: CostsByReport, names: NameDirectory): Promise<CostsByReport> {
   const lookup =
-    report.dimension === "user" ? names.person : report.dimension === "channel" ? names.channel : undefined;
+    report.dimension === "user"
+      ? (id: string) => names.person(id)
+      : report.dimension === "channel"
+        ? (id: string) => names.channel(id)
+        : undefined;
   if (!lookup) return report;
   const unnamed = report.rows.filter((r) => !r.label).map((r) => r.key);
   if (unnamed.length === 0) return report;

@@ -5407,6 +5407,7 @@ const PUBLIC_CHANNEL: ChannelDirectory = {
   info: async () => ({ visibility: "public" }),
   isMember: async () => "unknown",
   channelsOf: async () => "unknown",
+  channels: async () => "unknown",
 };
 
 /** Provider that answers the run (optionally after one tool call) and then the
@@ -7094,6 +7095,7 @@ describe("run history write path", () => {
       info: async (id) => (asked.push(id), { visibility: "public" }),
       isMember: async () => "unknown",
       channelsOf: async () => "unknown",
+      channels: async () => "unknown",
     };
     await dispatch(injected.deps, msg("hello there"), fakeIO().io);
     await injected.writer.settled();
@@ -7110,6 +7112,7 @@ describe("run history write path", () => {
       },
       isMember: async () => "unknown",
       channelsOf: async () => "unknown",
+      channels: async () => "unknown",
     };
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await dispatch(failing.deps, msg("hello there"), fakeIO().io);
@@ -7163,6 +7166,7 @@ describe("run history write path", () => {
       info: () => new Promise(() => {}),
       isMember: async () => "unknown",
       channelsOf: async () => "unknown",
+      channels: async () => "unknown",
     }; // never answers
     deps.channelDirectoryTimeoutMs = 20;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -7192,6 +7196,7 @@ describe("run history write path", () => {
       info: () => new Promise((_, reject) => setTimeout(() => reject(new Error("slack down, late")), 60)),
       isMember: async () => "unknown",
       channelsOf: async () => "unknown",
+      channels: async () => "unknown",
     };
     deps.channelDirectoryTimeoutMs = 20;
     const unhandled = vi.fn();
@@ -7222,6 +7227,7 @@ describe("run history write path", () => {
       info: () => new Promise((_, reject) => setTimeout(() => reject(new Error("slack down, early")), 5)),
       isMember: async () => "unknown",
       channelsOf: async () => "unknown",
+      channels: async () => "unknown",
     };
     deps.channelDirectoryTimeoutMs = 500;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

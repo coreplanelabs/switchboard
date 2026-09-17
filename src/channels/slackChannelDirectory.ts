@@ -1,5 +1,5 @@
 import { STATIC_CHANNEL_DIRECTORY } from "../core/authz/channelDirectory.js";
-import type { ChannelDirectory, ChannelVisibility } from "../core/authz/types.js";
+import type { ChannelDirectory, ChannelVisibility, ListedChannel } from "../core/authz/types.js";
 
 // The Slack `ChannelDirectory`: the two adapter
 // facts the static id mapping cannot supply. Visibility — whether a `slack:C…`
@@ -61,13 +61,17 @@ export interface SlackDirectoryClient {
     }): Promise<{ channel?: { is_im?: boolean; is_mpim?: boolean; is_private?: boolean } }>;
   };
   users: {
+    /** A person's channels when `user` is given; the bot's own channels without it. */
     conversations(args: {
-      user: string;
+      user?: string;
       types: string;
       exclude_archived: boolean;
       limit: number;
       cursor?: string;
-    }): Promise<{ channels?: { id?: string }[]; response_metadata?: { next_cursor?: string } }>;
+    }): Promise<{
+      channels?: { id?: string; is_private?: boolean }[];
+      response_metadata?: { next_cursor?: string };
+    }>;
   };
 }
 
@@ -99,6 +103,12 @@ export class SlackChannelDirectory implements ChannelDirectory {
   /** A person's channels (`slack:U…` → the set), remembered for the TTL, FIFO-bounded like `cache`. */
   private readonly members = new Map<string, { channels: Channels; expiresAt: number }>();
   private readonly membersInFlight = new Map<string, Promise<Channels>>();
+  /** The bot's own channels with their visibility, remembered for the TTL; one list, one flight. */
+  private own: { channels: readonly ListedChannel[] | "unknown"; expiresAt: number } | undefined;
+  private ownInFlight: Promise<readonly ListedChannel[] | "unknown"> | undefined;
+  /** Bumped by every forget: a lookup that started before it answers its caller but caches nothing,
+   *  so a stale answer never outlives the event that made it stale. */
+  private generation = 0;
   private readonly ttlMs: number;
   private readonly maxEntries: number;
   private readonly now: () => number;
@@ -156,6 +166,7 @@ export class SlackChannelDirectory implements ChannelDirectory {
    *  next ask goes to Slack. Nothing to forget is a no-op. */
   forgetMember(actorId: string): void {
     this.members.delete(actorId);
+    this.generation += 1;
   }
 
   /** Every cached channel set is stale: the bot's own reach moved (it left, or a
@@ -163,6 +174,20 @@ export class SlackChannelDirectory implements ChannelDirectory {
    *  have been missed. Visibility stays: a channel's kind did not move with it. */
   forgetAll(): void {
     this.members.clear();
+    this.own = undefined;
+    this.generation += 1;
+  }
+
+  /** The channels the bot is in, public and private, each with its visibility from the
+   *  same listing (`is_private`), paged like a person's; cached for the TTL, one flight at
+   *  a time, forgotten with everything else when the bot's reach moves; `unknown` on any
+   *  failure or past the page cap, remembered for the window with one `[authz]` line. */
+  async channels(): Promise<readonly ListedChannel[] | "unknown"> {
+    if (this.own && this.own.expiresAt > this.now()) return this.own.channels;
+    if (this.ownInFlight) return this.ownInFlight;
+    const lookup = this.lookupOwn().finally(() => (this.ownInFlight = undefined));
+    this.ownInFlight = lookup;
+    return lookup;
   }
 
   private async lookup(channelId: string): Promise<{ visibility: ChannelVisibility }> {
@@ -191,7 +216,45 @@ export class SlackChannelDirectory implements ChannelDirectory {
     }
   }
 
+  private async lookupOwn(): Promise<readonly ListedChannel[] | "unknown"> {
+    const started = this.generation;
+    let channels: readonly ListedChannel[] | "unknown" = "unknown";
+    try {
+      const found: ListedChannel[] = [];
+      let cursor: string | undefined;
+      let pages = 0;
+      let capped = false;
+      do {
+        if (pages === MEMBERSHIP_MAX_PAGES) {
+          this.warn(
+            `[authz] users.conversations for the bot ran past ${MEMBERSHIP_MAX_PAGES} pages — treating its channel list as unknown for ${this.ttlMs} ms`,
+          );
+          capped = true;
+          break;
+        }
+        const res = await this.client.users.conversations({
+          types: "public_channel,private_channel",
+          exclude_archived: true,
+          limit: MEMBERSHIP_PAGE_SIZE,
+          ...(cursor ? { cursor } : {}),
+        });
+        for (const c of res.channels ?? [])
+          if (c.id) found.push({ id: `${SLACK_PREFIX}${c.id}`, visibility: c.is_private ? "private" : "public" });
+        cursor = res.response_metadata?.next_cursor || undefined;
+        pages += 1;
+      } while (cursor);
+      if (!capped) channels = found;
+    } catch (err) {
+      this.warn(
+        `[authz] users.conversations failed for the bot — treating its channel list as unknown for ${this.ttlMs} ms: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (started === this.generation) this.own = { channels, expiresAt: this.now() + this.ttlMs };
+    return channels;
+  }
+
   private async lookupChannels(actorId: string): Promise<Channels> {
+    const started = this.generation;
     const user = actorId.slice(SLACK_PREFIX.length);
     let channels: Channels = "unknown";
     try {
@@ -224,6 +287,7 @@ export class SlackChannelDirectory implements ChannelDirectory {
         `[authz] users.conversations failed for ${actorId} — treating their membership as unknown (grants-only) for ${this.ttlMs} ms: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    if (started !== this.generation) return channels; // forgotten mid-flight: served once, never cached
     this.members.set(actorId, { channels, expiresAt: this.now() + this.ttlMs });
     if (this.members.size > this.maxEntries) {
       const oldest = this.members.keys().next().value;

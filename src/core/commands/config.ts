@@ -13,8 +13,9 @@ import type { HarnessName } from "../harness/contract.js";
 import { HARNESS_NAMES } from "../harness/roster.js";
 import { ADDRESS_SEVERITIES } from "../shipPipeline.js";
 import { authorize } from "../authz/authorize.js";
+import { namesOf, type NameDirectory } from "../names.js";
 import { pointingActor } from "../authz/pointingActor.js";
-import type { ChannelVisibility } from "../authz/types.js";
+import type { ChannelVisibility, ListedChannel } from "../authz/types.js";
 import {
   CommandError,
   commandDefiner,
@@ -65,6 +66,12 @@ export interface ConfigCommandDeps {
     /** The agent names a scope may pin (`AGENTS` keys). */
     agentNames(): string[];
   };
+  /** The channels the bot is in, with their visibility (`ChannelDirectory.channels`): what
+   *  `config channels` offers a person to pick from. Absent, or `unknown` → only the channels
+   *  that already carry a scope are offered. */
+  channels?: () => Promise<readonly ListedChannel[] | "unknown">;
+  /** Display names for the channels `config channels` lists (src/core/names.ts); absent → ids. */
+  names?: NameDirectory;
   /** The visibility of a channel a caller names with `--channel` — the channel
    *  directory behind the run stamp, bounded the same way (`channelVisibilityOf`).
    *  Read only when the target is not the caller's own channel. Absent →
@@ -185,16 +192,26 @@ function meIdOrRefuse(caller: Caller): string {
  *  — no directory, a failed or slow lookup — reads as private: fail-closed. One
  *  refusal text for private, DM, unknown and nonexistent alike: the reply says
  *  nothing about the channel a workspace member could not already learn. */
-async function mayReadChannel(caller: Caller, channel: string, deps: ConfigCommandDeps): Promise<boolean> {
+async function mayReadChannel(
+  caller: Caller,
+  channel: string,
+  deps: ConfigCommandDeps,
+  known?: ChannelVisibility,
+): Promise<boolean> {
   const origin = caller.origin?.channelId;
   const scopeAt = (visibility: ChannelVisibility) =>
     ({ type: "config-scope", kind: "channel", id: channel, visibility }) as const;
   // A grant (or the caller's own membership) admits the read whatever the
   // channel's visibility, so the directory is asked only when it could change
-  // the answer — an admin listing every configured channel asks it never.
+  // the answer — an admin listing every configured channel asks it never. A
+  // visibility the caller already knows (the bot's own channel list) is not asked again.
   if (authorize(caller.actor, "config:read", scopeAt("unknown")).allow) return true;
   const visibility: ChannelVisibility =
-    origin === channel || !deps.channelVisibility ? "unknown" : await deps.channelVisibility(channel);
+    known !== undefined && known !== "unknown"
+      ? known
+      : origin === channel || !deps.channelVisibility
+        ? "unknown"
+        : await deps.channelVisibility(channel);
   const scope = scopeAt(visibility);
   return (
     authorize(caller.actor, "config:read", scope).allow ||
@@ -274,6 +291,61 @@ export const configOverrides = defineCommand({
     const rows = await deps.config.channelsWithScope();
     const readable = await Promise.all(rows.map((r) => mayReadChannel(caller, r.channelId, deps)));
     return { channels: rows.filter((_, i) => readable[i]) } as unknown as JsonValue;
+  },
+});
+
+// ---- config channels ---------------------------------------------------------------
+
+/** One channel a person may pick a scope or an MCP tier for. */
+export interface PickableChannel {
+  channelId: string;
+  /** The channel's name without its hash, when the name directory knew it. */
+  channelName?: string;
+  visibility: ChannelVisibility;
+}
+
+export const configChannels = defineCommand({
+  id: "config.channels",
+  options: z.object({}),
+  action: "config:read",
+  effect: "read",
+  describe:
+    "The channels you may pick settings or MCP servers for, by name: the channels the bot is in that you may read, plus any that already carry a scope; `listed: false` says the bot could not list its channels and only the scoped ones are here.",
+  render: (output) => {
+    const o = output as unknown as { channels: PickableChannel[]; listed: boolean };
+    if (o.channels.length === 0)
+      return o.listed
+        ? "No channel you may read."
+        : "The bot's channels could not be listed, and no channel carries a scope.";
+    const lines = o.channels.map(
+      (c) => `${c.channelName ? `#${c.channelName} (${c.channelId})` : c.channelId} · ${c.visibility}`,
+    );
+    if (!o.listed)
+      lines.push("(the bot's channels could not be listed: only the channels that carry a scope are here)");
+    return lines.join("\n");
+  },
+  handler: async ({ caller, deps }) => {
+    // The bot's own channels, when the directory can list them, plus every channel that
+    // carries a scope (a machine channel is never in Slack's list) — each admitted by the
+    // same read question `config overrides` asks, with the listed visibility where the
+    // directory gave one, so a private channel is offered exactly to those who may read it.
+    const listed = deps.channels ? await deps.channels().catch((): "unknown" => "unknown") : "unknown";
+    const known = new Map<string, ChannelVisibility>();
+    if (listed !== "unknown") for (const c of listed) known.set(c.id, c.visibility);
+    for (const r of await deps.config.channelsWithScope())
+      if (!known.has(r.channelId)) known.set(r.channelId, "unknown");
+    const ids = [...known.keys()];
+    const readable = await Promise.all(ids.map((id) => mayReadChannel(caller, id, deps, known.get(id))));
+    const offered = ids.filter((_, i) => readable[i]);
+    const names = deps.names ? await namesOf((id) => deps.names!.channel(id), offered) : new Map<string, string>();
+    const channels: PickableChannel[] = offered
+      .map((id) => ({
+        channelId: id,
+        ...(names.has(id) ? { channelName: names.get(id)! } : {}),
+        visibility: known.get(id) ?? "unknown",
+      }))
+      .sort((a, b) => (a.channelName ?? a.channelId).localeCompare(b.channelName ?? b.channelId));
+    return { channels, listed: listed !== "unknown" } as unknown as JsonValue;
   },
 });
 
@@ -484,6 +556,7 @@ export const configInstructions = defineCommand({
 export const configCommands: readonly CommandDef<ConfigCommandDeps>[] = [
   configShow,
   configOverrides,
+  configChannels,
   configSet,
   configClear,
   configInstructions,

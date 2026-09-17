@@ -10,6 +10,7 @@ import type { DeliveryReport } from "../core/delivery.js";
 import type { ScheduledRow } from "./scheduledPanel.js";
 import type { LiveFrame } from "./liveView/sse.js";
 import type { Capabilities } from "../core/capabilities.js";
+import type { PickableChannel } from "../core/commands/config.js";
 import type { ChannelScopeIndexRow, ConfigDescription, Scope } from "../config.js";
 import type { InstallationView } from "../core/installationSettings.js";
 import type { McpServerView } from "../mcp/registry.js";
@@ -367,6 +368,9 @@ export interface SettingsSeed {
     channel?: string;
     /** That channel's name without the hash, when the directory knew it (the id shows otherwise). */
     channelName?: string;
+    /** The channels the viewer may pick a tier for (`config channels`), by name; `listed` false
+     *  when the bot could not list its channels and only the scoped ones are here. */
+    pickable?: { channels: PickableChannel[]; listed: boolean };
     /** `mcp list --all` answered: every tier there is (an admin). Otherwise the rows are the
      *  org's, the open channel's, the viewer's own, and the tiers of the channels whose config
      *  the viewer may read (record 0042). */
@@ -385,6 +389,9 @@ export interface SettingsSeed {
     index: (ChannelScopeIndexRow & { channelName?: string })[];
     /** `config overrides` could not be read: the reason. */
     unavailable?: string;
+    /** The channels the viewer may open (`config channels`), by name; `listed` false when the
+     *  bot could not list its channels and only the scoped ones are here. */
+    pickable?: { channels: PickableChannel[]; listed: boolean };
     /** `/settings/channels/<id>`: that channel's scope, or why it could not be read. */
     selected?: {
       channelId: string;

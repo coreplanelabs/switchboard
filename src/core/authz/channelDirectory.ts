@@ -1,4 +1,4 @@
-import type { ChannelDirectory, ChannelVisibility } from "./types.js";
+import type { ChannelDirectory, ChannelVisibility, ListedChannel } from "./types.js";
 
 // The channel-facts seam: where dispatch learns a channel's visibility before
 // stamping it on the run, and where membership facts will come from once an
@@ -37,6 +37,10 @@ export class StaticChannelDirectory implements ChannelDirectory {
   }
 
   async channelsOf(_actorId: string): Promise<ReadonlySet<string> | "unknown"> {
+    return "unknown";
+  }
+
+  async channels(): Promise<readonly ListedChannel[] | "unknown"> {
     return "unknown";
   }
 }

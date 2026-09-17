@@ -252,7 +252,10 @@ describe("the settings view", () => {
       mcps: { channel: "slack:C1", servers: [SERVER], canWrite: { org: true, channel: true } },
     });
     // An admin's list is every tier (record 0042): `mcp list --all`, one call.
-    expect(commands.calls).toEqual([{ id: "mcp.list", input: { options: { all: true } }, caller: "access:admin-sub" }]);
+    expect(commands.calls).toEqual([
+      { id: "mcp.list", input: { options: { all: true } }, caller: "access:admin-sub" },
+      { id: "config.channels", input: {}, caller: "access:admin-sub" },
+    ]);
     expect(seed.mcps?.allTiers).toBe(true);
     expect(seed.channels).toBeUndefined();
     expect(seed.installation).toBeUndefined();
@@ -295,6 +298,7 @@ describe("the settings view", () => {
     });
     expect(commands.calls.map((c) => [c.id, c.input])).toEqual([
       ["mcp.list", { options: { channel: "slack:C1" } }],
+      ["config.channels", {}],
       ["config.overrides", {}],
       ["mcp.list", { options: { channel: "slack:C2" } }],
     ]);
@@ -325,7 +329,12 @@ describe("the settings view", () => {
       selected: { channelId: "slack:C1", scope: channelScopeView(DESCRIPTION), canWrite: true },
     });
     // The viewer's own settings are read without a channel, every time (record 0041: never "no data").
-    expect(commands.calls.map((c) => c.id).sort()).toEqual(["config.overrides", "config.show", "config.show"]);
+    expect(commands.calls.map((c) => c.id).sort()).toEqual([
+      "config.channels",
+      "config.overrides",
+      "config.show",
+      "config.show",
+    ]);
     expect(commands.calls.filter((c) => c.id === "config.show").map((c) => c.input)).toEqual([
       {},
       { options: { channel: "slack:C1" } },
@@ -333,6 +342,27 @@ describe("the settings view", () => {
     const bare = seedOf((await get(view, "/settings/channels")).body);
     expect(bare.channels).toEqual({ index: INDEX, viewer: viewerSettingsView(DESCRIPTION) });
     expect(bare.channels?.viewer?.user).toEqual({ model: "anthropic/mine" }); // the viewer's scope, mcpServers stripped
+  });
+
+  it("Channels and MCPs carry the channels the viewer may pick (config channels) as pickable, on both tabs; a refused or failing config channels offers nothing and fails no tab", async () => {
+    const PICK = {
+      listed: true,
+      channels: [
+        { channelId: "slack:C1", channelName: "backend", visibility: "public" },
+        { channelId: "slack:C7", visibility: "private" },
+      ],
+    };
+    const withPick: Invoke = (id, input, caller) => (id === "config.channels" ? ok(PICK) : happy(id, input, caller));
+    const { view, commands } = handler(withPick);
+    const channels = seedOf((await get(view, "/settings/channels")).body);
+    expect(channels.channels?.pickable).toEqual(PICK);
+    const mcps = seedOf((await get(view, "/settings/mcps")).body);
+    expect(mcps.mcps?.pickable).toEqual(PICK);
+    expect(commands.calls.filter((c) => c.id === "config.channels")).toHaveLength(2);
+    // Refused (the default fake refuses an unknown id): the tabs render as before, with no pickable.
+    const plain = seedOf((await get(handler().view, "/settings/channels")).body);
+    expect(plain.channels).not.toHaveProperty("pickable");
+    expect(seedOf((await get(handler().view, "/settings/mcps")).body).mcps).not.toHaveProperty("pickable");
   });
 
   it("Channels and MCPs name their channels: the index rows, the selected channel and the MCPs tab's channel carry channelName when the directory answers; an unknown or failing lookup leaves the id alone", async () => {

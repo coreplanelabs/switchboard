@@ -50,12 +50,17 @@ function store(yaml = YAML): ConfigStore {
   return new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"));
 }
 
-function bind(config: ConfigStore, channelVisibility?: ConfigCommandDeps["channelVisibility"]): CommandInvoker {
+function bind(
+  config: ConfigStore,
+  channelVisibility?: ConfigCommandDeps["channelVisibility"],
+  more: Pick<ConfigCommandDeps, "channels" | "names"> = {},
+): CommandInvoker {
   const registry = new CommandRegistry<ConfigCommandDeps>({ audit: () => {} });
   registerConfigCommands(registry);
   return bindCommands(registry, {
     config: { ...configDeps(config), agentNames: () => ["general", "review", "coding"] },
     ...(channelVisibility ? { channelVisibility } : {}),
+    ...more,
   });
 }
 
@@ -227,6 +232,79 @@ describe("config overrides — the index of configured channels", () => {
 // `config:read` rows on `config-scope { channel }` admit a public channel from
 // anywhere, a private one from inside it (the pointing actor's one membership)
 // or by grant, and `unknown` (no directory, a failed lookup) like a private one.
+describe("config channels — the channels a person may pick, by name", () => {
+  const listed = async () =>
+    [
+      { id: "slack:CPUB", visibility: "public" as const },
+      { id: "slack:CPRIV", visibility: "private" as const },
+      { id: "slack:CX", visibility: "public" as const },
+    ] as const;
+  const names = {
+    person: async () => undefined,
+    channel: async (id: string) => ({ "slack:CPUB": "general", "slack:CPRIV": "leads", "slack:CX": "x" })[id],
+  };
+
+  it("an admin is offered every channel the bot is in plus every channel that carries a scope, named, sorted by name, with the listing's visibility — and the directory is asked for none of them", async () => {
+    const config = store();
+    await config.setChannelOverride("http:ops", { agent: "review" }); // a machine channel Slack never lists
+    const calls: string[] = [];
+    const commands = bind(config, async (id) => (calls.push(id), "unknown" as const), { channels: listed, names });
+    const { res, text } = await say(commands, "config channels", chat(config, "slack:UADMIN"));
+    expect(res).toMatchObject({
+      ok: true,
+      value: {
+        listed: true,
+        channels: [
+          { channelId: "slack:CPUB", channelName: "general", visibility: "public" },
+          { channelId: "http:ops", visibility: "unknown" },
+          { channelId: "slack:CPRIV", channelName: "leads", visibility: "private" },
+          { channelId: "slack:CX", channelName: "x", visibility: "public" },
+        ],
+      },
+    });
+    expect(text).toBe(
+      "#general (slack:CPUB) · public\nhttp:ops · unknown\n#leads (slack:CPRIV) · private\n#x (slack:CX) · public",
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it("a chat user without the grant is offered the public channels and the one they speak from, never a private one; the listing's visibility is trusted, so the directory is not asked again", async () => {
+    const config = store();
+    const calls: string[] = [];
+    const commands = bind(config, async (id) => (calls.push(id), "unknown" as const), { channels: listed, names });
+    const { res } = await say(commands, "config channels", chat(config, "slack:UX"));
+    expect(
+      (res as unknown as { value: { channels: { channelId: string }[] } }).value.channels.map((c) => c.channelId),
+    ).toEqual(["slack:CPUB", "slack:CX"]);
+    expect(calls).toEqual([]);
+  });
+
+  it("when the bot cannot list its channels, only the channels that carry a scope are offered and listed is false; without a name directory the rows carry ids alone", async () => {
+    const config = store();
+    await config.setChannelOverride("slack:CPUB", { agent: "review" });
+    const commands = bind(config, async () => "public" as const, { channels: async () => "unknown" as const });
+    const { res, text } = await say(commands, "config channels", chat(config, "slack:UX"));
+    expect(res).toMatchObject({
+      ok: true,
+      value: { listed: false, channels: [{ channelId: "slack:CPUB", visibility: "unknown" }] },
+    });
+    expect(text).toContain("slack:CPUB · unknown");
+    expect(text).toContain("could not be listed");
+    expect((res as unknown as { value: { channels: object[] } }).value.channels[0]).not.toHaveProperty("channelName");
+  });
+
+  it("a failing listing is unknown, never an error; a caller without config:read is refused before any listing", async () => {
+    const config = store();
+    const commands = bind(config, undefined, {
+      channels: async () => {
+        throw new Error("slack down");
+      },
+    });
+    const { res } = await say(commands, "config channels", chat(config, "slack:UX"));
+    expect(res).toMatchObject({ ok: true, value: { listed: false, channels: [] } });
+  });
+});
+
 describe("config show --channel is bound by the target channel's visibility", () => {
   const RESTRICTED = "That channel's config is restricted.";
   const visibilityOf =

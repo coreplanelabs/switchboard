@@ -61,7 +61,9 @@ import { createRunsService, type RunsService } from "./runsService.js";
 import { SCHEDULES } from "./schedules.js";
 import { githubRepoInspector, type RepoInspector } from "../execution/githubRepoInspect.js";
 import type { ScheduleStore } from "./scheduleStore.js";
+import { STATIC_CHANNEL_DIRECTORY } from "./authz/channelDirectory.js";
 import type { ChannelDirectory } from "./authz/types.js";
+import type { NameDirectory } from "./names.js";
 import { channelVisibilityOf } from "./dispatch/record.js";
 
 // THE one catalogue every in-process binding shares — src/index.ts (bot) and
@@ -139,6 +141,8 @@ export interface CoreCommandWiring {
    *  bot wires the Slack directory after the catalogue is built; absent → the
    *  static directory, which answers `unknown` for a Slack channel. */
   channelDirectory?: () => ChannelDirectory | undefined;
+  /** Display names for `config channels` (src/core/names.ts); a getter for the same reason. */
+  names?: () => NameDirectory | undefined;
 }
 
 /** The snapshot of a process nobody stamped: a checkout's CLI, a test. */
@@ -306,6 +310,9 @@ export function buildCoreCommands(
       const channelDirectory = wiring.channelDirectory?.();
       return channelVisibilityOf(channelDirectory ? { channelDirectory } : {}, channelId);
     },
+    // `config channels`: the bot's own channels through the same directory, named through the same names.
+    channels: () => (wiring.channelDirectory?.() ?? STATIC_CHANNEL_DIRECTORY).channels(),
+    ...(wiring.names?.() ? { names: wiring.names() } : {}),
     runs,
     review: { abridger, runs },
     friction: {
