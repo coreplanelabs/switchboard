@@ -209,6 +209,10 @@ export interface RunRecord {
    *  (docs/reference/specs/resident-repos.md item 29) — read off the record,
    *  never off the reply's text. */
   pr?: RunPullRequest;
+  /** The run's lease as the harness started it (item 2; decision 0046): the
+   *  `lease` event, folded at the assembly. Present only on a run whose
+   *  harness started a loop; a record written before the event lacks it. */
+  lease?: RunLease;
   /** What the run cost in tokens, per model, summed from its `model.turn`
    *  spans at finish (`usageOfEvents`; docs/reference/specs/costs.md, cost by user).
    *  Every record written since carries it (zero turns included); one written
@@ -223,6 +227,24 @@ export interface RunPullRequest {
   number: number;
   url: string;
   head?: string;
+}
+
+/** A run's lease as the record names it (item 2): when the wall clock
+ *  began, when the lease ends, and where the loop was cut so the write-up
+ *  and the post-step run inside it. */
+export interface RunLease {
+  startedAt: number;
+  endsAt: number;
+  loopEndsAt: number;
+}
+
+/** The lease a run's events say its harness started — the first `lease`
+ *  event; a resumed run's later generations publish none — or nothing. */
+export function leaseOfEvents(events: readonly RunEvent[]): RunLease | undefined {
+  for (const e of events) {
+    if (e.type === "lease") return { startedAt: e.startedAt, endsAt: e.endsAt, loopEndsAt: e.loopEndsAt };
+  }
+  return undefined;
 }
 
 /** The pull request a run's events say it opened or edited — the last

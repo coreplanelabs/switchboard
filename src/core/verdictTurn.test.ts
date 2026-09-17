@@ -1,17 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { MINUTE_MS, POST_STEP_MINUTES } from "./budgets.js";
 import { AGENTS } from "../agents/registry.js";
 import type { Executor } from "../execution/executor.js";
 import type { FollowUpTurnInput } from "./harness/contract.js";
 import type { ReviewVerdict } from "./reviewVerdict.js";
 import type { RunEvent } from "./runEvents.js";
 import type { Span } from "./trace/types.js";
-import {
-  VERDICT_TURN_MAX_MINUTES,
-  VERDICT_TURN_MAX_TURNS,
-  runVerdictTurn,
-  verdictFollowUp,
-  type VerdictTurnTarget,
-} from "./verdictTurn.js";
+import { VERDICT_TURN_MAX_TURNS, runVerdictTurn, verdictFollowUp, type VerdictTurnTarget } from "./verdictTurn.js";
 
 // Feature: docs/reference/specs/agent-review.md item 5 — the verdict turn. The
 // turn is driven here as a unit, the session's follow-up entry a spy, so its
@@ -74,6 +69,21 @@ describe("runVerdictTurn — one clipped prompt on the run's own pi session (har
     return { turn, events, progress, forwarded };
   }
 
+  it("the turn's minutes are carved from the lease's remainder: twenty minutes left give the review post-step's three, one minute left gives one", async () => {
+    for (const [remainingMs, minutes] of [
+      [20 * MINUTE_MS, POST_STEP_MINUTES.review],
+      [MINUTE_MS, 1],
+    ] as const) {
+      const followUp = vi.fn(async (input: FollowUpTurnInput) => {
+        input.toolContext.onVerdict?.(VERDICT);
+        return "ok";
+      });
+      const { turn } = turnSpec({ followUp, remainingMs: () => remainingMs });
+      await runVerdictTurn({ target: PR, turn, logKey: "t" });
+      expect(followUp.mock.calls[0][0].maxMinutes).toBe(minutes);
+    }
+  });
+
   it("publishes the verdict_turn note and prompts the session once: the follow-up text, the clipped budget (never the shared def's), the turn's tool context with the hook under the caller's span; the verdict reaches the hook and the return value", async () => {
     const followUp = vi.fn(async (input: FollowUpTurnInput) => {
       input.toolContext.onVerdict?.(VERDICT); // the relayed submit_verdict, run in the bot under THIS turn's context
@@ -95,9 +105,9 @@ describe("runVerdictTurn — one clipped prompt on the run's own pi session (har
     const input = followUp.mock.calls[0][0];
     expect(input.text).toBe(verdictFollowUp(PR));
     expect(input.maxTurns).toBe(VERDICT_TURN_MAX_TURNS);
-    expect(input.maxMinutes).toBe(VERDICT_TURN_MAX_MINUTES);
+    expect(input.maxMinutes).toBe(POST_STEP_MINUTES.review); // no lease remainder was handed: the allowance stands
     expect(AGENTS.review.maxTurns).toBeGreaterThan(VERDICT_TURN_MAX_TURNS); // the clip is a clip
-    expect(AGENTS.review.maxMinutes).toBeGreaterThan(VERDICT_TURN_MAX_MINUTES);
+    expect(AGENTS.review.maxMinutes).toBeGreaterThan(POST_STEP_MINUTES.review);
     expect(input.span).toBe(span); // the turn's `run.agent` hangs under `run.verdict_turn` (tracing.md item 17)
     expect(input.toolContext.executor).toBe(executor);
     // the verdict reached BOTH the caller's hook and the return value

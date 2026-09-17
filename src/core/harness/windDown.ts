@@ -42,13 +42,14 @@ export const turnGuardPace = (turns: number, elapsedMs: number): string =>
 /** What a bridge says the run was at when no tool call is open and the model
  *  has a turn under way (`doingNow`): the same words on every harness. */
 export const MODEL_CALL_IN_FLIGHT = "a model call was in flight";
-/** The budget's note; `doing` is what the run was at when the clock ran out
- *  (the open tool calls by name, or `MODEL_CALL_IN_FLIGHT`), when the bridge
- *  can say. */
+/** The budget's note, at the loop's end — the lease's end less the write-up
+ *  and the post-step it holds back (decision 0046); `doing` is what the run
+ *  was at (the open tool calls by name, or `MODEL_CALL_IN_FLIGHT`), when the
+ *  bridge can say. */
 export const timeBudgetNote = (doing?: string): string =>
   doing
-    ? `time budget exhausted while ${doing} — writing up findings so far`
-    : "time budget exhausted — writing up findings so far";
+    ? `the loop's time is up while ${doing} — writing up findings so far inside the lease`
+    : "the loop's time is up — writing up findings so far inside the lease";
 export const turnGuardNote = (pace: string): string =>
   `turn guard fired: ${pace}, a pace that looks like a loop — writing up findings so far`;
 export const softStopNote = (): string => "soft stop — no further steps, writing up findings so far";

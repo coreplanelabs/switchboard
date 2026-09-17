@@ -1,3 +1,4 @@
+import { provisionalBearerExpiresAt } from "../budgets.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,7 +49,7 @@ import {
   startMemoryRead,
   type ProvisionDeps,
 } from "./provision.js";
-import { BEARER_MARGIN_MS, RunBearerStore } from "../modelProxy/runBearers.js";
+import { RunBearerStore } from "../modelProxy/runBearers.js";
 
 // The attach itself is the executor factory's (src/execution/factory.ts); the
 // one refusal the stage decides — ask-once, when the resident has no ref
@@ -1082,7 +1083,7 @@ describe("mintRunBearer — the run's model-proxy bearer", () => {
       model: "coding-model",
       maxTokens: agent.maxTokens,
       maxTurns: agent.maxTurns,
-      expiresAt: NOW + 30 * 60_000 + BEARER_MARGIN_MS,
+      expiresAt: provisionalBearerExpiresAt(NOW, 30),
     });
     expect(verdict.grant.span).toBe(root);
     verdict.grant.publish({ type: "run_note", kind: "turn_budget_exhausted", summary: "refused", at: NOW });

@@ -133,7 +133,12 @@ function watched(base: Harness, opts: { find?: Finding; answer?: string } = {}) 
     builtinTools: (identity) => base.builtinTools(identity),
     open: async (_deps, run) => {
       calls.open.push(run.resume?.facts);
-      return { answer: opts.answer ?? "Done.", followUp: async () => "", end: async () => {} };
+      return {
+        answer: opts.answer ?? "Done.",
+        followUp: async () => "",
+        remainingMs: () => 20 * 60_000,
+        end: async () => {},
+      };
     },
     find: async (facts) => {
       calls.find.push(facts);

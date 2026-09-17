@@ -4,7 +4,8 @@
 import { describe, expect, it } from "vitest";
 import { createTracer } from "../trace/tracer.js";
 import type { RunEvent } from "../runEvents.js";
-import { BEARER_MARGIN_MS, BEARER_PREFIX, bearerHashOf, RunBearerStore, type RunBearerGrant } from "./runBearers.js";
+import { bearerExpiresAt, MINUTE_MS, provisionalBearerExpiresAt } from "../budgets.js";
+import { BEARER_PREFIX, bearerHashOf, RunBearerStore, type RunBearerGrant } from "./runBearers.js";
 
 const START = 1_700_000_000_000;
 
@@ -21,7 +22,7 @@ function harness(now = START) {
     model: "claude-opus-5",
     maxTokens: 64000,
     maxTurns: 3,
-    expiresAt: now + 45 * 60_000 + BEARER_MARGIN_MS,
+    expiresAt: provisionalBearerExpiresAt(now, 45),
     span,
     publish: (e) => void published.push(e),
     ...over,
@@ -83,9 +84,24 @@ describe("RunBearerStore — mint and verify", () => {
 });
 
 describe("RunBearerStore — expiry and revocation", () => {
+  it("the lease's start resets the expiry to the lease's end plus the grace: the mint's provisional expiry is replaced, `issue` and `rotate` hand out the new one, and a run this store never minted or one that ended takes no lease", () => {
+    const h = harness();
+    const token = h.store.mint(h.grant("run-1"));
+    const leaseEndsAt = START + 30 * MINUTE_MS;
+    expect(h.store.leaseStarted("run-1", leaseEndsAt)).toBe(true);
+    expect(h.store.grantOf("run-1")?.expiresAt).toBe(bearerExpiresAt(leaseEndsAt));
+    expect(h.store.issue("run-1")?.expiresAt).toBe(bearerExpiresAt(leaseEndsAt));
+    h.clock.now = bearerExpiresAt(leaseEndsAt) - 1;
+    expect(h.store.verify(token).ok).toBe(true);
+    h.clock.now = bearerExpiresAt(leaseEndsAt);
+    expect(h.store.verify(token)).toEqual({ ok: false, reason: "expired", runId: "run-1" });
+    expect(h.store.leaseStarted("run-9", leaseEndsAt)).toBe(false);
+    h.store.revoke("run-1");
+    expect(h.store.leaseStarted("run-1", leaseEndsAt + MINUTE_MS)).toBe(false);
+  });
   it("verifies up to the instant before expiry and refuses `expired` from the expiry on", () => {
     const h = harness();
-    const expiresAt = START + 10 * 60_000 + BEARER_MARGIN_MS;
+    const expiresAt = provisionalBearerExpiresAt(START, 10);
     const token = h.store.mint(h.grant("run-1", { expiresAt }));
     h.clock.now = expiresAt - 1;
     expect(h.store.verify(token).ok).toBe(true);
@@ -231,7 +247,7 @@ describe("RunBearerStore — a bearer across generations (docs/reference/specs/h
     expect(next.store.adopt("run-1", hash.slice(0, 63))).toBe(false);
     expect(next.store.verify(theirs)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-1" });
     // Past the grant's expiry nothing is adopted (as `issue` mints nothing); back before it, the same hash would be.
-    next.clock.now = START + 45 * 60_000 + BEARER_MARGIN_MS;
+    next.clock.now = provisionalBearerExpiresAt(START, 45);
     expect(next.store.adopt("run-1", hash)).toBe(false);
     next.clock.now = START;
     expect(next.store.verify(theirs)).toEqual({ ok: false, reason: "unknown_bearer", runId: "run-1" });
@@ -285,7 +301,7 @@ describe("RunBearerStore — rotate: a relaunch's new bearer on the run's own me
     const record = (secretHash: string) => void recorded.push(secretHash);
     expect(h.store.rotate("run-1", record)).toEqual({ ok: false, reason: "unknown_run" });
     const token = h.store.mint(h.grant("run-1"));
-    h.clock.now = START + 45 * 60_000 + BEARER_MARGIN_MS;
+    h.clock.now = provisionalBearerExpiresAt(START, 45);
     expect(h.store.rotate("run-1", record)).toEqual({ ok: false, reason: "expired" });
     h.clock.now = START;
     expect(h.store.verify(token).ok).toBe(true);

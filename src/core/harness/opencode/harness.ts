@@ -27,6 +27,7 @@
 // OpenCode half of the survival clause the run loop drives; this module builds
 // the rebuild path `open` takes with a resume, so that loop can call it.
 
+import { MINUTE_MS, turnLeaseMs } from "../../budgets.js";
 import type { Identity } from "../../../agents/registry.js";
 import type { Effort } from "../../../effort.js";
 import { followUpMessageId, followUpPrompt, followUpSnippet } from "../../threadAdmission.js";
@@ -472,8 +473,9 @@ export async function openOpenCodeRun(
     const drainer = drainFollowUps(deps, run, conn, () => draining, emit, note);
 
     let answer: string;
+    let remainingMs: () => number;
     try {
-      ({ answer } = await driveOpenCode(deps, run, conn));
+      ({ answer, remainingMs } = await driveOpenCode(deps, run, conn));
     } finally {
       draining = false;
       await drainer.catch(() => {});
@@ -489,13 +491,16 @@ export async function openOpenCodeRun(
         const turnEnd = await feedEndFrom(deps.container, conn.paths.feed, conn.feedOffset);
         const previous = live.toolContext;
         live.toolContext = input.toolContext;
+        // The turn's lease is carved from the run's: the lesser of its ask and
+        // what the lease still holds, never under a minute (decision 0046).
+        const turnMinutes = turnLeaseMs(input.maxMinutes, remainingMs()) / MINUTE_MS;
         try {
           const { answer: turnAnswer } = await driveOpenCode(
             deps,
             {
               ...run,
               messages: [{ role: "user", content: [{ type: "text", text: input.text }] }],
-              agent: { ...run.agent, maxTurns: input.maxTurns, maxMinutes: input.maxMinutes },
+              agent: { ...run.agent, maxTurns: input.maxTurns, maxMinutes: turnMinutes },
               toolContext: input.toolContext,
               ...(input.span ? { span: input.span } : {}),
               resume: undefined,
@@ -506,12 +511,14 @@ export async function openOpenCodeRun(
               onStep: async () => {},
             },
             { ...conn, feedOffset: turnEnd, saveOffset: undefined, reattach: undefined },
+            "turn",
           );
           return turnAnswer;
         } finally {
           live.toolContext = previous;
         }
       },
+      remainingMs,
       end,
     };
   } catch (err) {

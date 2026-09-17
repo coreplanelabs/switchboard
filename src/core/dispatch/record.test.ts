@@ -338,6 +338,23 @@ describe("assembleRunRecord — the handoff on the record", () => {
 
   // docs/reference/specs/run-history.md item 46: a spawned child's record names
   // the run that started it; every other record carries no key.
+  // docs/reference/specs/run-history.md item 2: the lease the harness started rides
+  // the record off its `lease` event (decision 0046).
+  it("carries the run's lease off its lease event, and the record still validates; no lease event → no key", () => {
+    const events = [
+      { type: "input" as const, text: "go", seq: 1 },
+      { type: "lease" as const, startedAt: 5, endsAt: 65, loopEndsAt: 45, seq: 2, at: 5 },
+    ];
+    const record = assembleRunRecord({
+      ...base(),
+      snap: { events, startedAt: 1, eventCount: 2, stepCount: 0 } as never,
+    });
+    expect(record.lease).toEqual({ startedAt: 5, endsAt: 65, loopEndsAt: 45 });
+    expect(isRunRecord(record)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
+    expect("lease" in assembleRunRecord(base())).toBe(false);
+  });
+
   it("carries parentRunId for a spawned child, and the record still validates; no parent → no key", () => {
     const child = assembleRunRecord({ ...base(), parentRunId: "run-parent" });
     expect(child.parentRunId).toBe("run-parent");

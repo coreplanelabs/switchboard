@@ -25,14 +25,16 @@ import type { AgentDef } from "../agents/registry.js";
 import type { ToolContext } from "../tools/runnableTool.js";
 import type { FollowUpTurn } from "./harness/contract.js";
 import type { ReviewVerdict } from "./reviewVerdict.js";
+import { postStepLease } from "./budgets.js";
 import type { RunEvent } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
 import type { Span } from "./trace/types.js";
 
-/** The turn's budget, well under the review agent's own wall clock and turn
- *  guard: one `git rev-parse HEAD`, one submit, one line back. */
+/** The turn's turn guard, well under the review agent's own: one
+ *  `git rev-parse HEAD`, one submit, one line back. Its minutes are the review
+ *  post-step's allowance carved from the lease's remainder (`postStepLease`,
+ *  decision 0046). */
 export const VERDICT_TURN_MAX_TURNS = 4;
-export const VERDICT_TURN_MAX_MINUTES = 3;
 
 /** The pull request the review was of — what the turn names. */
 export interface VerdictTurnTarget {
@@ -62,13 +64,16 @@ export interface ReviewVerdictTurnSpec {
    *  a `finish` plan, whose session ended with the previous generation — the
    *  turn is not run and nothing is submitted. */
   followUp?: FollowUpTurn;
+  /** What the run's lease still holds, read at the call (`HarnessSession.remainingMs`):
+   *  the turn's minutes are carved from it. Absent, the allowance stands. */
+  remainingMs?: () => number;
 }
 
 /**
  * Run the verdict turn: publish the `verdict_turn` run note and prompt the
  * run's pi session once more with the follow-up (`followUp`), under a clip
- * below the agent's own budgets (`VERDICT_TURN_MAX_TURNS`,
- * `VERDICT_TURN_MAX_MINUTES`). The verdict arrives through the tool context's
+ * below the agent's own budgets (`VERDICT_TURN_MAX_TURNS`; the review
+ * post-step's minutes, carved from the lease's remainder). The verdict arrives through the tool context's
  * `onVerdict` hook — the same one the loop fed — and is ALSO returned, so the
  * caller can tell "submitted" from "the turn ran and still submitted nothing"
  * without reaching into its own state. Never throws past a turn failure: a
@@ -110,7 +115,7 @@ export async function runVerdictTurn(input: {
     await turn.followUp({
       text: verdictFollowUp(t),
       maxTurns: Math.min(turn.agent.maxTurns, VERDICT_TURN_MAX_TURNS),
-      maxMinutes: Math.min(turn.agent.maxMinutes, VERDICT_TURN_MAX_MINUTES),
+      maxMinutes: Math.min(turn.agent.maxMinutes, postStepLease("review", turn.remainingMs?.())),
       toolContext,
       ...(input.span ? { span: input.span } : {}),
     });

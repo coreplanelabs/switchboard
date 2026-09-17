@@ -95,6 +95,81 @@ export const POST_STEP_MINUTES: Readonly<Record<Preset, number>> = {
   ship: 0,
 };
 
+/** The post-step allowance of a preset named by its def's `name`: a name
+ *  outside the table (a test's, a command run's) runs no post-step. */
+export function postStepMinutes(preset: string): number {
+  return (POST_STEP_MINUTES as Readonly<Record<string, number>>)[preset] ?? 0;
+}
+
+/** The post-step turn's lease, in minutes (fractional when the remainder is:
+ *  the harness turns it back into ms): the preset's allowance, or the lease's
+ *  remainder when that is less — never under a minute, so a turn the loop's
+ *  write-up crowded still gets its one chance. The bearer's grace covers that
+ *  floor for a turn that starts at or before the lease's end; a turn that
+ *  starts later runs on a bearer that may expire under it, and its refused
+ *  call fails soft — the run's answer already stands. Without a remainder
+ *  (no harness session says) the allowance stands. */
+export function postStepLease(preset: string, remainingMs: number | undefined): number {
+  const allowance = postStepMinutes(preset);
+  if (remainingMs === undefined) return allowance;
+  return Math.min(allowance, Math.max(1, remainingMs / MINUTE_MS));
+}
+
+/** A follow-up turn's lease, in ms: the lesser of what it asks and what the
+ *  run's lease still holds, never under a minute — the grace covers that floor
+ *  when the turn starts by the lease's end; later, the bearer may expire under
+ *  the turn and its call is refused, failing soft. */
+export function turnLeaseMs(askMinutes: number, remainingMs: number): number {
+  return Math.min(askMinutes * MINUTE_MS, Math.max(MINUTE_MS, remainingMs));
+}
+
+/** The wrap-up warning's place before the loop's end: three minutes, or a
+ *  quarter of the loop when the loop is shorter than twelve. */
+export const WRAP_UP_WARNING = { minutes: 3, fraction: 0.25 } as const;
+
+/** The clocks a harness keeps for one lease (docs/reference/specs/harness-pi.md
+ *  items 6 and 15). The lease ENDS at `deadline`; the LOOP ENDS at `loopEnd`,
+ *  the write-up allowance and the preset's post-step earlier, so both run
+ *  inside the lease; the WARNING is steered at `warnAt`; the write-up is
+ *  BOUNDED by `finaleMs`. A follow-up turn on the session (`kind: "turn"`)
+ *  holds nothing back — its deliverable is a tool call, not a write-up — and
+ *  its loop ends at its deadline. A lease shorter than its hold-back has no
+ *  loop time: the loop ends at its start, never before it. */
+export interface LoopClock {
+  startedAt: number;
+  deadline: number;
+  loopEnd: number;
+  warnAt: number;
+  finaleMs: number;
+}
+
+export function loopClock(
+  startedAt: number,
+  remainingMs: number,
+  preset: string,
+  kind: "loop" | "turn" = "loop",
+): LoopClock {
+  const deadline = startedAt + remainingMs;
+  const holdBackMs = kind === "loop" ? (ALLOWANCES.writeUp + postStepMinutes(preset)) * MINUTE_MS : 0;
+  const loopEnd = Math.max(startedAt, deadline - holdBackMs);
+  const warnAt =
+    loopEnd - Math.min(WRAP_UP_WARNING.minutes * MINUTE_MS, (loopEnd - startedAt) * WRAP_UP_WARNING.fraction);
+  return { startedAt, deadline, loopEnd, warnAt, finaleMs: ALLOWANCES.writeUp * MINUTE_MS };
+}
+
+/** When a run's model-proxy bearer expires: the lease's end plus the grace
+ *  (docs/reference/specs/model-proxy.md item 2). */
+export function bearerExpiresAt(leaseEndsAt: number): number {
+  return leaseEndsAt + ALLOWANCES.bearerGrace * MINUTE_MS;
+}
+
+/** The bearer's expiry as the mint at provisioning sets it, before the lease
+ *  has started: the provisioning allowance, the lease and the grace — replaced
+ *  by `bearerExpiresAt` the moment the harness starts the lease. */
+export function provisionalBearerExpiresAt(now: number, leaseMinutes: number): number {
+  return now + (ALLOWANCES.provision + leaseMinutes + ALLOWANCES.bearerGrace) * MINUTE_MS;
+}
+
 /** The per-command bash budget's rows: the default when a call names none, the
  *  ceiling a call may raise it to, and the floor under which a number is a
  *  typo (docs/reference/specs/execution.md item 11). */

@@ -54,6 +54,7 @@ import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
 import type { Settlement, ToolUsePart } from "../../runLedger/resume.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
+import { loopClock, MINUTE_MS, turnLeaseMs } from "../../budgets.js";
 import { followUpMessageId, followUpPrompt, followUpSnippet, type FollowUpInput } from "../../threadAdmission.js";
 import { PiBridge } from "./bridge.js";
 import {
@@ -106,7 +107,6 @@ export async function locatePi(
   return (await container.alive(facts.pid)) ? "alive-here" : "dead";
 }
 
-const FINALE_TIMEOUT_MS = 3 * 60_000;
 /** How long a relayed request waits for the bridge to read its call's start off
  *  the log (`LiveHarness.callSeen`): a few polls of the transport, counted in
  *  ticks of the harness's own sleep so a fixed clock cannot stall it. */
@@ -452,10 +452,20 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   let paths: PiRunPaths | undefined;
   /** Hands the follow-ups pi was sent and never echoed back to the inbox; bound once the loop's drain exists. */
   let requeueUnechoed: () => void = () => {};
-  const remainingMs = run.resume?.remainingMs ?? run.agent.maxMinutes * 60_000;
-  const deadline = now() + remainingMs;
-  const warnAt = deadline - Math.min(3 * 60_000, run.agent.maxMinutes * 15_000);
+  // The lease's clocks (harness-pi item 15; decision 0046): the lease ends at
+  // `deadline`; the loop ends at `loopEnd`, the write-up and the post-step
+  // held back so both run inside the lease; the warning lands at `warnAt`.
+  // A resume continues the lease the record holds — the remainder at the
+  // death — and publishes no second `lease` event.
+  const remainingMs = run.resume?.remainingMs ?? run.agent.maxMinutes * MINUTE_MS;
+  const lease = loopClock(now(), remainingMs, run.agent.name);
+  const { deadline, loopEnd, warnAt } = lease;
   run.toolContext.remainingMs = () => deadline - now();
+  // The bearer outlives the lease by its grace, measured from here — not from
+  // the mint at provisioning (model-proxy item 2).
+  deps.bearers?.leaseStarted(run.runId, deadline);
+  if (!run.resume)
+    emit({ type: "lease", startedAt: lease.startedAt, endsAt: deadline, loopEndsAt: loopEnd, at: lease.startedAt });
   // The conversation the run's tools read (agent-conductor item 3): the native
   // loop hands its own array; here it is the session log's rows, so a read the
   // ledger cannot answer costs the child its seed, never the spawn: the tool
@@ -715,7 +725,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const inFlight = run.resume?.settlements.length ?? 0;
       note(
         "resumed",
-        `resumed after a restart: pi still runs in the container (pid ${pid}); continuing its session with ${Math.round(remainingMs / 60_000)} min of budget left` +
+        `resumed after a restart: pi still runs in the container (pid ${pid}); continuing its session with ${Math.round(remainingMs / MINUTE_MS)} min of budget left` +
           (inFlight > 0
             ? ` — ${inFlight} call(s) were in flight, each answered with a restart note if pi asks for it again`
             : ""),
@@ -843,7 +853,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           "resumed",
           `relaunched after the container was replaced (${relaunch.from ?? "unknown"} → ${relaunch.to ?? "unknown"}): ` +
             `the row's pi (pid ${recorded?.pid ?? "unknown"}) went with the old container and was neither probed nor ended here; ` +
-            `pi restarted in the container the run holds on the mirrored transcript — ${settledHow}; ${Math.round(remainingMs / 60_000)} min of budget left`,
+            `pi restarted in the container the run holds on the mirrored transcript — ${settledHow}; ${Math.round(remainingMs / MINUTE_MS)} min of budget left`,
         );
       } else if (run.resume) {
         const lost = run.resume.settlements.length;
@@ -855,7 +865,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               : "pi restarted";
         note(
           "resumed",
-          `resumed after a restart: ${how} on the mirrored transcript — ${lost} call(s) were in flight, each answered with a restart note; ${Math.round(remainingMs / 60_000)} min of budget left`,
+          `resumed after a restart: ${how} on the mirrored transcript — ${lost} call(s) were in flight, each answered with a restart note; ${Math.round(remainingMs / MINUTE_MS)} min of budget left`,
         );
       }
       const launch = sessionPath ? { ...spec, sessionPath } : spec;
@@ -1016,8 +1026,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         return;
       }
       if (writeUp) {
-        if (writeUpAt !== undefined && now() - writeUpAt >= (deps.finaleTimeoutMs ?? FINALE_TIMEOUT_MS)) {
-          // The write-up itself is bounded, like the native finale: past it the
+        if (writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) {
+          // The write-up itself is bounded by its allowance: past it the
           // run closes without one — by the wind-down's own answer, never as a
           // failed model call: the abort below kills whatever call is in
           // flight, and `finaleAborted` keeps that abort the run's own.
@@ -1034,20 +1044,20 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         startWriteUp({ kind: "soft" }, SOFT_STOP_INSTRUCTION);
         return;
       }
-      if (now() >= deadline) {
+      if (now() >= loopEnd) {
         note("time_budget_exhausted", timeBudgetNote(bridge.doingNow()));
         startWriteUp({ kind: "time" }, timeBudgetInstruction());
         return;
       }
       if (bridge.turns >= run.agent.maxTurns) {
-        const pace = turnGuardPace(bridge.turns, run.agent.maxMinutes * 60_000 - (deadline - now()));
+        const pace = turnGuardPace(bridge.turns, now() - lease.startedAt);
         note("turn_budget_exhausted", turnGuardNote(pace));
         startWriteUp({ kind: "turns", pace }, turnGuardInstruction(pace));
         return;
       }
       if (!warned && now() >= warnAt) {
         warned = true;
-        const minutesLeft = Math.max(1, Math.round((deadline - now()) / 60_000));
+        const minutesLeft = Math.max(1, Math.round((loopEnd - now()) / MINUTE_MS));
         note("wrap_up", wrapUpNote(minutesLeft));
         transport!.send({ type: "steer", message: wrapUpInstruction(minutesLeft) });
       }
@@ -1303,7 +1313,17 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       bridge.newPrompt();
       const runContext = live.toolContext;
       live.toolContext = input.toolContext;
-      const turnDeadline = now() + input.maxMinutes * 60_000;
+      // The turn's lease is carved from the run's: the lesser of its ask and
+      // what the lease still holds, never under a minute (decision 0046); a
+      // turn holds nothing back for a write-up, its deliverable being a tool call.
+      const turnStartedAt = now();
+      const turnLease = loopClock(
+        turnStartedAt,
+        turnLeaseMs(input.maxMinutes, deadline - turnStartedAt),
+        run.agent.name,
+        "turn",
+      );
+      const turnDeadline = turnLease.deadline;
       input.toolContext.remainingMs = () => turnDeadline - now();
       const turnsBefore = bridge.turns;
       // The loop's write-up, when it took one, is spent: the turn has its own budget.
@@ -1327,7 +1347,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           return;
         }
         if (writeUp) {
-          if (writeUpAt !== undefined && now() - writeUpAt >= (deps.finaleTimeoutMs ?? FINALE_TIMEOUT_MS)) {
+          if (writeUpAt !== undefined && now() - writeUpAt >= turnLease.finaleMs) {
             writeUpAt = undefined;
             finaleAborted = true;
             run.onProgress?.("finale timed out — closing the turn without a write-up");
@@ -1347,7 +1367,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         }
         const turns = bridge.turns - turnsBefore;
         if (turns >= input.maxTurns) {
-          const pace = turnGuardPace(turns, input.maxMinutes * 60_000 - (turnDeadline - now()));
+          const pace = turnGuardPace(turns, now() - turnStartedAt);
           note("turn_budget_exhausted", turnGuardNote(pace));
           startWriteUp({ kind: "turns", pace }, turnGuardInstruction(pace));
         }
@@ -1428,7 +1448,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         turnSpan?.end(hardStopped || bypass || turnFailed ? "error" : "ok");
       }
     };
-    return { answer, followUp, end };
+    return { answer, followUp, remainingMs: () => deadline - now(), end };
   } catch (err) {
     // A loop that throws — a refused prompt, a dead pi, a failed model call, a
     // gate bypass — is a failed loop, and its span says so. The follow-ups it

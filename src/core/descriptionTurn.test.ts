@@ -3,8 +3,8 @@ import { AGENTS } from "../agents/registry.js";
 import type { Executor } from "../execution/executor.js";
 import type { OpenPrRef } from "../execution/githubPulls.js";
 import type { CodingPrTarget, WorkspaceObservation } from "./codingPrPostStep.js";
+import { MINUTE_MS, POST_STEP_MINUTES } from "./budgets.js";
 import {
-  DESCRIPTION_TURN_MAX_MINUTES,
   DESCRIPTION_TURN_MAX_TURNS,
   descriptionFollowUp,
   descriptionTurnTarget,
@@ -203,6 +203,22 @@ describe("runDescriptionTurn — one clipped prompt on the run's own pi session 
     return { turn, events, progress, forwarded };
   }
 
+  it("the turn's minutes are carved from the lease's remainder: twenty minutes left give the coding post-step's five, one minute left gives one, none left still gives one", async () => {
+    for (const [remainingMs, minutes] of [
+      [20 * MINUTE_MS, POST_STEP_MINUTES.coding],
+      [MINUTE_MS, 1],
+      [0, 1],
+    ] as const) {
+      const followUp = vi.fn(async (input: FollowUpTurnInput) => {
+        input.toolContext.onPrDescription?.(DESCRIPTION);
+        return "ok";
+      });
+      const { turn } = turnSpec({ followUp, remainingMs: () => remainingMs });
+      await runDescriptionTurn({ target: t, turn, logKey: "t" });
+      expect(followUp.mock.calls[0][0].maxMinutes).toBe(minutes);
+    }
+  });
+
   it("publishes the description_turn note and prompts the session once: the follow-up text, the clipped budget (never the shared def's), the turn's tool context with the hook under the caller's span; the description the relayed tool submits reaches the hook AND the return value", async () => {
     const followUp = vi.fn(async (input: FollowUpTurnInput) => {
       input.toolContext.onPrDescription?.(DESCRIPTION); // the relayed submit_pr_description, run in the bot under THIS turn's context
@@ -225,9 +241,9 @@ describe("runDescriptionTurn — one clipped prompt on the run's own pi session 
     expect(input.text).toBe(descriptionFollowUp(t));
     expect(JSON.stringify(input.text)).toContain("submit_pr_description");
     expect(input.maxTurns).toBe(DESCRIPTION_TURN_MAX_TURNS);
-    expect(input.maxMinutes).toBe(DESCRIPTION_TURN_MAX_MINUTES);
+    expect(input.maxMinutes).toBe(POST_STEP_MINUTES.coding); // no lease remainder was handed: the allowance stands
     expect(AGENTS.coding.maxTurns).toBeGreaterThan(DESCRIPTION_TURN_MAX_TURNS); // the clip is a clip
-    expect(AGENTS.coding.maxMinutes).toBeGreaterThan(DESCRIPTION_TURN_MAX_MINUTES);
+    expect(AGENTS.coding.maxMinutes).toBeGreaterThan(POST_STEP_MINUTES.coding);
     expect(input.span).toBe(span); // the turn's `run.agent` hangs under `run.description_turn` (tracing.md item 17)
     expect(input.toolContext.executor).toBe(executor);
     // the description reached BOTH the caller's hook and the return value

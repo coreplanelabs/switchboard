@@ -5,6 +5,7 @@
 // record would hold. Nothing here is the row's business: the row reads the
 // `DrivenRun` and the driver is what changes for another harness.
 
+import { loopClock, MINUTE_MS } from "../../../budgets.js";
 import type { AgentDef, Identity } from "../../../../agents/registry.js";
 import type { Executor } from "../../../../execution/executor.js";
 import { updateStatusTool } from "../../../../tools/status.js";
@@ -154,7 +155,9 @@ export function piDriver(): HarnessDriver {
             // tick notes the budget and steers the write-up before the call
             // answers — waited for, as the hard stop waits for its abort.
             await new Promise((r) => setTimeout(r, 15));
-            clock.now = NOW + agent.maxMinutes * 60_000 + 1;
+            // The clock lands past the LOOP's end, inside the lease: the
+            // write-up that follows runs within the lease, as the row asserts.
+            clock.now = loopClock(NOW, agent.maxMinutes * MINUTE_MS, agent.name).loopEnd + 1;
             const steersBefore = pi.steers.length;
             for (let i = 0; i < 200 && pi.steers.length === steersBefore; i++)
               await new Promise((r) => setTimeout(r, 5));
@@ -221,7 +224,6 @@ export function piDriver(): HarnessDriver {
         sleep: (ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))),
         pollMs: 1,
         tickMs: 5,
-        finaleTimeoutMs: 60_000,
       };
       let outcome: DrivenRun["outcome"];
       const restore = plantProviderKeys();
