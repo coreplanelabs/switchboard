@@ -4,10 +4,70 @@ import { RunRegistry } from "../../core/runRegistry.js";
 import { createRunsService } from "../../core/runsService.js";
 import { ALL_GRANTS, grantsFor } from "../../core/authz/grants.js";
 import { NO_GRANTS } from "../../core/authz/types.js";
-import { NullRunStore } from "../../core/runStore.js";
+import { assembleRunRecord } from "../../core/dispatch/record.js";
+import { analyzeRunFriction } from "../../core/runFriction.js";
+import { InMemoryRunStore, NullRunStore } from "../../core/runStore.js";
 import { nullChannelIO } from "../../core/nullChannelIo.js";
 
 describe("Linear stop authorization", () => {
+  it("cancels only the authorized current question and never closes a newer or another person's session", async () => {
+    const registry = new RunRegistry({ now: () => 150 });
+    const store = new InMemoryRunStore({ now: () => 150 });
+    await store.put(
+      assembleRunRecord({
+        run: { id: "question" },
+        snap: null,
+        msg: { channelId: "linear:org:team", userId: "linear:org:alice", threadKey: "linear:org:s" },
+        channelVisibility: "private",
+        finishedAt: 100,
+        status: "completed",
+        awaitingInput: true,
+        diagnosis: analyzeRunFriction([]),
+      }),
+    );
+    const runs = createRunsService({ registry, store });
+    const deps = { runs, config: { grantsFor: (id: string) => grantsFor(id, {}) } };
+    const input = {
+      kind: "stop" as const,
+      threadKey: "linear:org:s",
+      channelId: "linear:org:team",
+      userId: "linear:org:alice",
+      receivedAt: 101,
+    };
+    const io = { ...nullChannelIO("test"), reply: vi.fn(async () => {}), status: vi.fn() };
+    await stopLinearSession(deps, { ...input, userId: "linear:org:bob" }, io);
+    await stopLinearSession(deps, { ...input, receivedAt: 99 }, io);
+    expect(io.reply).not.toHaveBeenCalled();
+    expect(io.status).not.toHaveBeenCalled();
+    await stopLinearSession(deps, input, io);
+    expect(io.reply).toHaveBeenCalledExactlyOnceWith(
+      "Stopped waiting for input. Send a new prompt when you want to continue.",
+    );
+    io.reply.mockClear();
+    registry.create(undefined, { threadKey: input.threadKey, channelId: input.channelId, userId: "linear:org:bob" });
+    await stopLinearSession(deps, { ...input, receivedAt: 151 }, io);
+    expect(io.reply).not.toHaveBeenCalled();
+    expect(io.status).not.toHaveBeenCalled();
+  });
+  it("does not emit a lifecycle-changing reply for denied or empty stops, and retries unavailable history", async () => {
+    const store = new InMemoryRunStore({ now: () => 150 });
+    const runs = createRunsService({ registry: new RunRegistry(), store, warn: () => {} });
+    const deps = { runs, config: { grantsFor: (id: string) => grantsFor(id, {}) } };
+    const input = {
+      kind: "stop" as const,
+      threadKey: "linear:org:s",
+      channelId: "linear:org:team",
+      userId: "linear:org:alice",
+      receivedAt: 100,
+    };
+    const io = { ...nullChannelIO("test"), reply: vi.fn(async () => {}), status: vi.fn() };
+    await stopLinearSession(deps, input, io);
+    expect(io.reply).not.toHaveBeenCalled();
+    expect(io.status).not.toHaveBeenCalled();
+    vi.spyOn(store, "list").mockRejectedValueOnce(new Error("offline"));
+    await expect(stopLinearSession(deps, input, io)).rejects.toThrow("linear_stop_unavailable");
+    expect(io.reply).not.toHaveBeenCalled();
+  });
   it("lets a person stop their own session without operator or team-wide grants, but not another person's work", async () => {
     const registry = new RunRegistry({ now: () => 100 });
     const own = registry.create(undefined, {

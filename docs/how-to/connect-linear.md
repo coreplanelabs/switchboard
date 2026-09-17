@@ -93,7 +93,8 @@ publish an automatic PR or review verdict. Questions survive a bot restart.
 
 Native Stop lets a person cancel their own active work through the shared
 `runs:stop` policy. Stopping another person's work requires `runs:write` and
-visibility of that run. A Linear session does not establish team-wide membership;
+visibility of that run. Stop can also end your current waiting question. A denied
+or stale Stop leaves the session unchanged. A Linear session does not establish team-wide membership;
 configure an operator's channel grants explicitly. Revocation and access removal are
 infrastructure cancellations and require no new grant from the former requester.
 

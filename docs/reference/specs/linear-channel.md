@@ -130,6 +130,12 @@ the human assignee.
     earlier question. The next native reply sees the question in its history,
     including when delegation created no opening user activity.
 
+20. A Stop with no authorized active run does not post a completion or progress
+    activity that could change another person's session. It can close the newest
+    waiting question only through the shared stop policy and only if the question
+    predates the Stop. An older question cannot hide a newer invisible run. A
+    missing history snapshot retries rather than guessing whether a question waits.
+
 ## Proof
 
 | Criterion | Proof |
@@ -159,3 +165,4 @@ the human assignee.
 | 19: typed question and native delivery | `[unit]` `src/tools/question.test.ts::*`, `src/core/dispatcher.test.ts::clarification through dispatch::*`, `src/channels/linear/io.test.ts::*` |
 | 19: question outcome and cleanup | `[unit]` `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::keeps a typed question in the turn outcome, receipt and durable run record`, `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::ends the model process when a question skips the publishing steps`, `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::clears a pending question when a follow-up arrives before the turn finishes` |
 | 19: restored questions and stop precedence | `[unit]` `src/core/dispatch/runLoop.test.ts::a resume with the answer in hand (the \`finish\` plan)::restores a pending question without more model calls or automatic PR or review publication`, `src/core/dispatch/runLoop.test.ts::a resume with the answer in hand (the \`finish\` plan)::an operator stop takes precedence over a restored question` |
+| 20: stop while awaiting input | `[unit]` `src/channels/linear/control.test.ts::*` |

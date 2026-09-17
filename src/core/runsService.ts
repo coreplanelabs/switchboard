@@ -69,6 +69,8 @@ export type Result<T> = { ok: true; value: T } | { ok: false; error: "not_found"
  * expresses the outcome as `status`).
  */
 export interface RunView {
+  /** The most recent turn asked for input; this is a turn outcome, not live session state. */
+  awaitingInput?: true;
   id: string;
   label?: string;
   agent?: string;
