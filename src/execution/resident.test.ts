@@ -570,9 +570,15 @@ describe("ResidentExecutor.readFile / writeFile", () => {
 
   it("the control-reset re-issue names its routes: /read (idempotent by shape) and /write (a full-content put, so the same bytes twice are the file once) and nothing else — the invariant a future delta write must break loudly", () => {
     const src = readFileSync(new URL("./resident.ts", import.meta.url), "utf8");
-    // The set is explicit, and the re-issue is gated on it.
+    // The set is explicit, and ONE rule reads it: a control reset on a route
+    // outside the set is the typed unknown outcome at once (`controlResetUnderThread`);
+    // the re-issue block below it never states the fact again.
     expect(src).toMatch(/const CONTROL_RESET_REISSUE_ROUTES = new Set\(\["\/read", "\/write"\]\);/);
-    expect(src).toMatch(/if \(!CONTROL_RESET_REISSUE_ROUTES\.has\(route\)\) throw new ExecControlResetError/);
+    expect(src).toMatch(
+      /if \(!CONTROL_RESET_REISSUE_ROUTES\.has\(route\) && saysControlReset\(data\)\)\s*throw new ExecControlResetError/,
+    );
+    expect(src).not.toMatch(/if \(!CONTROL_RESET_REISSUE_ROUTES\.has\(route\)\) throw/);
+    expect(src).not.toMatch(/route === "\/exec" && saysControlReset\(data\)/);
     // The invariant is stated where the set is: /write is a full-content put.
     expect(src).toMatch(/full-content put/);
     // And the put IS full-content: the body is the path and the whole content, no offset, mode or append.

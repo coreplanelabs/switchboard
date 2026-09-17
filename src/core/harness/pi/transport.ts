@@ -42,10 +42,10 @@ export class PiRpcTransport implements PiTransport {
    *  16). The first failure's command; cleared with a fresh transport. */
   pendingSend: Record<string, unknown> | undefined;
   private closed = false;
-  /** Set by `abandon()` (a re-attach): a write whose turn comes after it stays
-   *  queued for the fresh transport instead of landing here. A plain `close()`
-   *  leaves it false, so teardown still flushes. */
-  private dropQueued = false;
+  /** Set by `abandon()` (a re-attach): a write whose turn comes after it is
+   *  held for the fresh transport (`takeUnsent`) instead of landing here. A
+   *  plain `close()` leaves it false. */
+  private heldForReattach = false;
   /** The writes handed to `send` whose turn on the chain has not come, in
    *  order. One queued behind a write that failed, or still queued when the
    *  transport was abandoned, never reached pi: the re-attach re-sends it as it
@@ -79,9 +79,10 @@ export class PiRpcTransport implements PiTransport {
         // on the fresh transport — order inverted), and once `abandon()`ed the
         // fresh transport owns every write not yet started: either way this one
         // stays queued for `takeUnsent`, never landed here, never lost. A plain
-        // `close()` (teardown) does neither, so a write sent just before it —
-        // an abort on a gate bypass — still flushes. Otherwise it is in flight.
-        if (this.sendError !== undefined || this.dropQueued) return;
+        // `close()` (teardown) does neither, so a write sent just before it
+        // still flushes — unless an earlier write failed, when it is held like
+        // the rest (see `close`). Otherwise it is in flight.
+        if (this.sendError !== undefined || this.heldForReattach) return;
         this.queued.shift();
         return this.deps.container.writeLine(this.deps.paths, line);
       })
@@ -101,24 +102,33 @@ export class PiRpcTransport implements PiTransport {
     return unsent;
   }
 
-  /** Every write so far landed (or failed): what a caller awaits before it reads for the answer. */
+  /** Every write so far settled: landed, failed (`pendingSend`), or — after a
+   *  failure or an `abandon()` — held for the fresh transport (`takeUnsent`),
+   *  the chain running on without touching the FIFO. What the re-attach awaits
+   *  BEFORE it reads `pendingSend`: a write in flight when the read failed
+   *  fails with the same reset a moment later, and until it does it is neither
+   *  `pendingSend` nor queued. Bounded by the write's own command timeout. */
   flushed(): Promise<void> {
     return this.sending;
   }
 
+  /** Close for teardown: a write already queued still lands — unless an
+   *  earlier write failed, when it is held (`takeUnsent`) and this transport
+   *  delivers nothing more. Teardown owes nothing to such a write: the process
+   *  is ended by `kill`, never by the abort the loop sent it. */
   close(): void {
     this.closed = true;
   }
 
-  /** Close AND hold back every write whose turn has not come — the re-attach's
-   *  close (harness-pi item 16): they go to the fresh transport (`takeUnsent`)
-   *  behind the write the failure left unresolved, so none lands here out of
-   *  turn. A write already in flight lands on its own — the FIFO is the same
-   *  pi's, the container unchanged. `close()` alone still flushes what was
-   *  queued, so teardown never loses a just-sent abort. */
+  /** Close AND hold every write whose turn has not come for the fresh
+   *  transport — the re-attach's close (harness-pi item 16): the fresh one sends
+   *  them (`takeUnsent`) behind the write the failure left unresolved, so none
+   *  lands here out of turn. A write still in flight may fail with the very
+   *  reset that failed the read, so the re-attach awaits `flushed()` before it
+   *  resolves — nothing in flight is abandoned unresolved. */
   abandon(): void {
     this.closed = true;
-    this.dropQueued = true;
+    this.heldForReattach = true;
   }
 
   private async *read(): AsyncGenerator<string> {
