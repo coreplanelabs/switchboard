@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { loadWebAssets } from "../src/channels/webAssets.js";
 import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js";
 import type {
+  HomeCommandSeed,
   HomeSeed,
   HomeTurnSeed,
   PageSeed,
@@ -1979,19 +1980,54 @@ const HOME_SUGGESTIONS = [
 ];
 // The `/` palette's rows: the chat commands as the registry exposes them, in
 // chat form with each command's own `describe` (the bot derives this list).
-const HOME_COMMANDS = [
-  { chat: "help", describe: "What Switchboard can do, and how to ask" },
+const HOME_COMMANDS: HomeCommandSeed[] = [
+  { chat: "help", describe: "What Switchboard can do, and how to ask", args: ["[topic]"] },
   { chat: "help commands", describe: "Every command, with its arguments" },
-  { chat: "config show", describe: "The agent, model, effort and boundary a run here gets" },
-  { chat: "config set", describe: "Set a scope's agent, model, effort or boundary (channel, me)" },
+  {
+    chat: "config show",
+    describe: "The agent, model, effort and boundary a run here gets",
+    options: [{ form: "--channel <id>", describe: "Another channel's scope" }],
+  },
+  {
+    chat: "config set",
+    describe: "Set a scope's agent, model, effort or boundary (channel, me)",
+    args: ["<scope>"],
+    options: [
+      { form: "--agent <name>", describe: "The preset a plain message runs on" },
+      { form: "--effort <level>", describe: "low, medium or high" },
+      { form: "--models.general <ref>", describe: "The general preset's model" },
+      { form: "--models.coding <ref>", describe: "The coding preset's model" },
+      { form: "--channel <id>", describe: "Another channel's scope (channel only)" },
+    ],
+  },
   { chat: "repo list", describe: "The repositories with a resident environment" },
-  { chat: "repo test", describe: "Run a repository's tests in its resident" },
-  { chat: "runs list", describe: "The runs you can see, live first" },
-  { chat: "runs stop", describe: "Stop a live run, softly or hard" },
+  { chat: "repo test", describe: "Run a repository's tests in its resident", args: ["<repo>"] },
+  {
+    chat: "runs list",
+    describe: "The runs you can see, live first",
+    options: [
+      { form: "--all", describe: "Finished runs too" },
+      { form: "--mine", describe: "Only the runs you requested" },
+    ],
+  },
+  {
+    chat: "runs stop",
+    describe: "Stop a live run, softly or hard",
+    args: ["<id>"],
+    options: [{ form: "--mode <soft|hard>", describe: "How" }],
+  },
   { chat: "mcp list", describe: "The MCP servers your runs can reach, by tier" },
-  { chat: "mcp add", describe: "Add an MCP server to a tier" },
-  { chat: "memory recall", describe: "Search what Switchboard remembers" },
-  { chat: "memory remember", describe: "Save a fact for later runs" },
+  {
+    chat: "mcp add",
+    describe: "Add an MCP server to a tier",
+    args: ["<name>"],
+    options: [
+      { form: "--url <url>", describe: "The server's URL" },
+      { form: "--scope <me|channel|org>", describe: "The tier it joins" },
+    ],
+  },
+  { chat: "memory recall", describe: "Search what Switchboard remembers", args: ["<words…>"] },
+  { chat: "memory remember", describe: "Save a fact for later runs", args: ["<fact…>"] },
 ];
 /** The conversations this preview answered a `202` to: their next message is a steer (the fixture's one live run never ends). */
 const LIVE_CONVERSATIONS = new Set<string>();

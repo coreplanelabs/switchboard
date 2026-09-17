@@ -25,6 +25,7 @@ import {
 } from "../lib/homeModel";
 import { formatDuration } from "../lib/format";
 import { SURFACE_NAME } from "../lib/indexRow";
+import { stripSlash } from "../lib/slashCompleter";
 
 // The home page (docs/reference/specs/web-chat.md; record 0043): a conversation
 // is the runs of one thread, drawn as the person's turns and the runs they
@@ -97,7 +98,9 @@ function pick(s: string): void {
 
 async function submit(): Promise<void> {
   if (!seed || sending.value) return;
-  const body = text.value.trim();
+  // A command typed through the palette keeps its slash while it is being
+  // completed; the bot reads `<group> <verb>` at the start of a message.
+  const body = stripSlash(text.value.trim(), seed.commands);
   if (body === "") return;
   // The reactive proxy, not the raw object: the turn is mutated after the POST answers.
   const person = reactive<Item & { kind: "person" }>({
