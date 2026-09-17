@@ -14,6 +14,7 @@ import {
 } from "./executor.js";
 import { sandboxEmptyFailureMessage, sandboxNoAnswerMessage } from "./cloudflareSandbox.js";
 import {
+  answeredStatus,
   residentAnswerReason,
   residentWakeBudgetStrike,
   residentWakeStrike,
@@ -211,40 +212,20 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
     expect(infraMayClear(new ExecInfraError("x", "aborted"))).toBe(false);
   });
 
-  /** The resident Worker's own answer shapes, as its source writes them — the fixtures below mirror these. */
-  const WORKER_SOURCE = here("../../deploy/cloudflare-resident/worker.ts");
-  /** Every 503 object literal in the Worker that carries the lifecycle `state`, as the text of its keys. */
-  function worker503sWithState(): string[] {
-    // A `${…}` inside a template literal is allowed within the object literal.
-    const literals = WORKER_SOURCE.match(/\{(?:[^{}]|\$\{[^{}]*\})*status: 503(?:[^{}]|\$\{[^{}]*\})*\}/g) ?? [];
-    return literals.filter((literal) => /\bstate: /.test(literal));
-  }
+  // The Worker's answer shapes the fixtures below mirror are held by the scan
+  // in deploy/cloudflare-resident/notServiceable.test.ts — one home for the
+  // Worker's side, this file for the client's reading of it.
 
-  it("the Worker's 503 answer shapes: every one that carries the lifecycle `state` carries the lifecycle `stateReason` beside it, and keeps `reason` for the answer's own word (mirror-busy, disk-pressure, image-stale, the not-serviceable detail) — so the client can read the lifecycle pair and never mistake the answer's word for a repo failure", () => {
-    const withState = worker503sWithState();
-    expect(withState.length).toBeGreaterThanOrEqual(9);
-    for (const literal of withState) {
-      expect(literal, literal).toMatch(/\bstateReason: /);
-      expect(literal, literal).toMatch(/\breason: /);
-    }
-    const ownWords = new Set(
-      withState.map((literal) => /\breason: ("[a-z-]+"|DISK_PRESSURE_REASON|s\.reason)/.exec(literal)?.[1]),
-    );
-    expect(ownWords).toEqual(new Set(['"mirror-busy"', "DISK_PRESSURE_REASON", '"image-stale"', "s.reason"]));
-    // The /exec stream forwards the pair, the answer's status and the catch-all's transient beside state and reason.
-    for (const forwarded of [
-      "stateReason: result.stateReason",
-      "status: result.status",
-      "transient: result.transient",
-      "state: result.state",
-      "reason: result.reason",
-    ])
-      expect(WORKER_SOURCE, forwarded).toContain(forwarded);
-    // The fetch handler's catch-all types its throw: transient or not, as a field.
-    expect(WORKER_SOURCE.match(/catchAllErr\(err\)/g)).toHaveLength(3);
-    expect(WORKER_SOURCE).toMatch(
-      /return \{ error: errMsg\(err\), status: 500, transient: isTransientPlatformThrow\(err\) \};/,
-    );
+  it("the status a resident answer says (`answeredStatus`): a refusal streamed over HTTP 200 — /exec, /attach and /await-restore write heartbeat whitespace then one document — carries its own status IN the body beside its `error`, and that is the status the answer is typed by; any other answer's status is the HTTP status, so a body's `status` on a real 5xx or on a success document is never read", () => {
+    expect(answeredStatus(200, { error: "mirror-busy: mutex not acquired within 30000ms", status: 503 })).toBe(503);
+    expect(answeredStatus(200, { error: "Network connection lost.", status: 500, transient: true })).toBe(500);
+    // A streamed failure a Worker predating the field wrote: the words alone, the status the HTTP one.
+    expect(answeredStatus(200, { error: "Command execution failed" })).toBe(200);
+    // A success document never carries an `error`; a stray `status` on one is not a refusal.
+    expect(answeredStatus(200, { stdout: "ok", status: 503 })).toBe(200);
+    // A real 5xx is what it is, whatever its body says.
+    expect(answeredStatus(503, { error: "x", status: 200 })).toBe(503);
+    expect(answeredStatus(502, {})).toBe(502);
   });
 
   it("a resident answer is typed by the fields the resident puts on it: a 5xx carrying the lifecycle pair (`state`, `stateReason`) is unavailable when that pair says the resident is coming back (restoring, serviceable, a degraded reason the engine retries — the wake path's own decision) and refused when it does not (down, onboarding, a repo failure); the answer's own `reason` (mirror-busy, disk-pressure, image-stale) never decides, so a busy mirror on a degraded-but-serviceable resident waits; `unregistered` refuses; a stateless 5xx with a body is deterministic and answered unless the catch-all typed it transient; a bare 5xx is unavailable; a body on any other status is the words; a bare 4xx is refused", () => {
@@ -372,9 +353,32 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
     expect(residentAnswerReason(500, { error: "op-failed at fetch: exit 128" })).toBe("answered");
     expect(residentAnswerReason(500, { error: "attach-failed at clone: exit 128" })).toBe("answered");
     expect(residentAnswerReason(500, { error: 'read-failed: stat answered ""' })).toBe("answered");
-    // The fetch handler's catch-all, typed by the Worker: the platform's transient re-probes, a route's own throw stands.
+    // The 500 for a throw no route named, typed by the Worker wherever it caught
+    // it — the fetch handler, a streamed route's rejection, a route's own catch
+    // (`attach-failed`, `op-failed`): the platform's transient re-probes, a
+    // route's own throw stands.
     expect(residentAnswerReason(500, { error: "Network connection lost.", status: 500, transient: true })).toBe(
       "worker-unavailable",
+    );
+    expect(
+      residentAnswerReason(500, { error: "attach-failed: Network connection lost.", status: 500, transient: true }),
+    ).toBe("worker-unavailable");
+    expect(residentAnswerReason(500, { error: "op-failed: Network connection lost.", transient: true })).toBe(
+      "worker-unavailable",
+    );
+    // The /exec stream's document for a pending result that rejected, as `execFailureDocument(catchAllErr(err))` writes it.
+    expect(
+      residentAnswerReason(500, {
+        error: "Network connection lost.",
+        status: 500,
+        transient: true,
+        stdout: "",
+        stderr: "Network connection lost.",
+        exitCode: 127,
+      }),
+    ).toBe("worker-unavailable");
+    expect(residentAnswerReason(500, { error: "attach-failed: exit 128", status: 500, transient: false })).toBe(
+      "answered",
     );
     expect(
       residentAnswerReason(500, {

@@ -69,6 +69,7 @@
 //      (docs/decisions/0009-residents-second-credential-domain.md).
 import {
   isDurableObjectCodeUpdateReset,
+  isPlatformTransientError,
   OperationInterruptedError,
   ProcessWaitTimeoutError,
   RPCTransportError,
@@ -684,7 +685,10 @@ export function validateEnvNames(vars: Record<string, string>): void {
  *  decides (idempotent read/write retry; exec is handed to the model). */
 class RuntimeReplacedError extends Error {
   constructor(
-    readonly phase: "spawn" | "collect",
+    /** Where the replacement was met: the command's spawn, its collect, or
+     *  the Worker's call into the Durable Object itself (`threadRejectionErr`),
+     *  before the method could answer. */
+    readonly phase: "spawn" | "collect" | "call",
     readonly cause: unknown,
     /** Whether the replacement was KNOWN where the failure was classified
      *  (`replacementKnown`): the SDK vouched the runtime moved, or a restore is
@@ -693,12 +697,13 @@ class RuntimeReplacedError extends Error {
      *  the incarnation swap is unconditional there. Unknown, the failure only
      *  says the container is down or the transport was lost — a merely asleep
      *  or starting container, or a network blip, say the same — so the answer
-     *  is the SDK's words and the harness's one more command decides. */
+     *  is the SDK's words and the harness's one more command decides. At the
+     *  Worker's call nothing vouched, so it is `false` there. */
     readonly known: boolean,
   ) {
     super(
       `runtime-replaced: the resident runtime was replaced (a deploy) while this command was ${
-        phase === "spawn" ? "starting" : "running"
+        phase === "spawn" ? "starting" : phase === "collect" ? "running" : "pending at the Worker"
       }; its output is lost (${errMsg(cause)})`,
     );
     this.name = "RuntimeReplacedError";
@@ -719,12 +724,15 @@ class RuntimeReplacedError extends Error {
  *  reset over a live pi for a replaced container and orphans that pi. */
 class ControlResetError extends Error {
   constructor(
-    readonly phase: "spawn" | "collect",
+    /** Where the reset was met: the command's spawn, its collect, or the
+     *  Worker's call into the Durable Object itself (`threadRejectionErr`),
+     *  before the method could answer. */
+    readonly phase: "spawn" | "collect" | "call",
     readonly cause: unknown,
   ) {
     super(
       `control-reset: the resident's Durable Object was reset (a deploy) while this command was ${
-        phase === "spawn" ? "starting" : "running"
+        phase === "spawn" ? "starting" : phase === "collect" ? "running" : "pending at the Worker"
       }; the container and its processes are as they were; the command's outcome is unknown (${errMsg(cause)})`,
     );
     this.name = "ControlResetError";
@@ -840,43 +848,114 @@ function sdkVouchesRuntimeMoved(err: unknown): boolean {
   return false;
 }
 
+/** The platform's transient sentences the pinned SDK's own predicate does not
+ *  name — `isPlatformTransientError` covers the code-update reset, a lost
+ *  connection, the storage-startup reset and the typed `retryable` flag, so
+ *  those are read from the SDK, never from a string table of ours. Two remain:
+ *  the Durable Object reset by a storage operation that did not complete (the
+ *  platform's `Durable Object storage operation exceeded timeout which caused
+ *  object to be reset.` — an assumption about the platform's text, carried
+ *  from the first typing of the catch-all, not in the SDK's source), and the
+ *  Durable Object overloaded. The SDK's retry predicate EXCLUDES the overloaded
+ *  sentence (`isErrorRetryable`: an in-process retry only adds to a queue that
+ *  is full); it is typed transient here because the client's
+ *  `worker-unavailable` is a re-probe after the harness's bounded wait
+ *  (`replacedVerdict`, `PROBE_WAIT_MAX_MS`), never a tight retry, and a full
+ *  queue drains. The platform's sentences alone — a bare `internal error` or
+ *  `overloaded` is a word a git or GitHub failure carries too, and a throw
+ *  typed transient by it would be re-probed for a restore window that never
+ *  clears it. */
+const TRANSIENT_PLATFORM_WORDING = /storage operation|durable object is overloaded/i;
+
+/** The platform's own transient that no route word names — what is left once
+ *  `threadRejectionErr` has answered a reset and a replacement by their words:
+ *  the container's runtime unreachable (`isRuntimeUnreachable`: the SDK's
+ *  connect abort by its `AbortError` name or its exact sentence —
+ *  `RUNTIME_UNREACHABLE_WORDING` is anchored to the whole message, so a
+ *  `TimeoutError`'s `The operation was aborted due to timeout`, the text a
+ *  route's own `AbortSignal.timeout` on a slow GitHub raises, never matches),
+ *  the pinned SDK's own platform-transient predicate (`isPlatformTransientError`:
+ *  the code-update reset, a lost connection, the storage-startup reset, the
+ *  typed `retryable` flag — the SDK's signal, read as it reads it), and the
+ *  remainder sentences above, anywhere in the cause chain. */
+function isUnnamedPlatformTransient(err: unknown): boolean {
+  if (isRuntimeUnreachable(err) || isPlatformTransientError(err)) return true;
+  for (const link of selfAndCauses(err)) {
+    if (link instanceof Error && TRANSIENT_PLATFORM_WORDING.test(link.message)) return true;
+  }
+  return false;
+}
+
+/** Whether a throw no route named is the platform's own transient — the
+ *  Durable Object reset by a deploy (`isControlReset`), the runtime replaced
+ *  under the call (`isRuntimeReplacement`), or the transient no word names
+ *  (`isUnnamedPlatformTransient`) — against a deterministic throw in the route
+ *  itself (a bug, a bad argument). The client reads the answer's `transient`
+ *  field to re-probe the first and judge the second at once (execution.md item
+ *  9), never the words. */
+function isTransientPlatformThrow(err: unknown): boolean {
+  return isControlReset(err) || isRuntimeReplacement(err) || isUnnamedPlatformTransient(err);
+}
+
+/** The 500 for a throw no route named, at whichever catch met it — the fetch
+ *  handler's catch-all, a streamed route's rejection mapper, a route's own
+ *  catch around its body (`prefix`: `attach-failed`, `op-failed`): the words,
+ *  and whether the throw was the platform's transient (`transient`), typed
+ *  here so the client decides by a field and never by which catch met the
+ *  throw. A failure a route DID name — a step that failed, a mirror held — is
+ *  that route's own answer and never comes here. */
+function catchAllErr(err: unknown, prefix?: string): ThreadErr {
+  return unnamedThrowErr(err, isTransientPlatformThrow(err), prefix);
+}
+
+/** The one shape of that 500: the words, behind `prefix` where the route names
+ *  itself, and the verdict `transient`, decided once by the caller — so a
+ *  caller that has already settled the typed predicates (`threadRejectionErr`)
+ *  hands its verdict in instead of walking the cause chain again. */
+function unnamedThrowErr(err: unknown, transient: boolean, prefix?: string): ThreadErr {
+  const words = errMsg(err);
+  return { error: prefix ? `${prefix}: ${words}` : words, status: 500, transient };
+}
+
+type ThreadDataRoute = "/exec" | "/read" | "/write";
+
+/** A thread data-plane route's pending Durable Object call that REJECTED —
+ *  the stub, not the method: the DO reset by a code update before or while the
+ *  method ran, a storage operation that did not complete, the runtime
+ *  unreachable — answered as the DO answers the same fact when it catches it
+ *  inside (`execThreadImpl`, the file methods). A control reset is the DO's
+ *  own word, `control-reset` on a 409: the container and its processes are as
+ *  they were and the command's outcome is unknown, so the client resolves it by
+ *  its own rule and never waits on it as the resident unavailable. A runtime
+ *  replacement is answered by route, as the methods answer it, with the DO's
+ *  own gate (`replacementKnown`) applied as far as it reaches: its first half,
+ *  the SDK vouching the runtime moved (`sdkVouchesRuntimeMoved`), judges the
+ *  moved sentences that survive the stub boundary as text, so it is made here
+ *  by the same rule; its other half, a restore under way (`knowsContainerGone`),
+ *  is the DO's alone and out of reach. So on `/exec` the word is said where
+ *  the SDK vouched and WITHHELD where only the DO could have — that gate's
+ *  unknown branch, the SDK's words on a 409 with no word, for the harness's one
+ *  more command to judge; on `/read` and `/write` the word is said either way
+ *  (`runtimeReplacedErr`, unconditional there on purpose), since it drives the
+ *  client's one re-attach-and-retry and never a verdict. Anything else is the
+ *  typed 500, its `transient` decided here once the typed predicates are
+ *  settled. */
+function threadRejectionErr(err: unknown, route: ThreadDataRoute): ThreadErr {
+  if (isControlReset(err)) return controlResetErr(new ControlResetError("call", err));
+  if (isRuntimeReplacement(err)) {
+    const known = sdkVouchesRuntimeMoved(err);
+    if (route === "/exec" && !known) return { error: errMsg(err), status: 409 };
+    return runtimeReplacedErr(new RuntimeReplacedError("call", err, known));
+  }
+  return unnamedThrowErr(err, isUnnamedPlatformTransient(err));
+}
+
 /** Whether a command's failure is the resident's own Durable Object resetting
  *  under it (a Worker-code deploy) rather than the container runtime being
  *  replaced. Checked BEFORE `isRuntimeReplacement` on the thread `run()` path,
  *  so a DO reset over a still-running container answers `control-reset`, never
  *  the replaced word. The SDK's predicate already walks the cause
  *  chain (`selfAndCauses`), so it is called directly on the caught error. */
-/** The platform's own transient wording, seen on an unnamed throw in a route: a
- *  lost network connection to a Durable Object, a storage operation that did
- *  not complete, the platform's internal error. Kept short and read only where
- *  no typed class names the throw. */
-const TRANSIENT_PLATFORM_WORDING =
-  /network connection lost|durable object reset|storage operation|internal error|overloaded/i;
-
-/** Whether an unnamed throw the fetch handler caught is the platform's own
- *  transient — the Durable Object reset by a deploy (`isControlReset`), the
- *  runtime replaced under the call (`isRuntimeReplacement`), the container's
- *  runtime unreachable (`isRuntimeUnreachableSignal`), or the platform's
- *  transient wording anywhere in the cause chain — against a deterministic
- *  throw in the route itself (a bug, a bad argument). The client reads the
- *  answer's `transient` field to re-probe the first and judge the second at
- *  once (execution.md item 9), never the words. */
-function isTransientPlatformThrow(err: unknown): boolean {
-  if (isControlReset(err) || isRuntimeReplacement(err)) return true;
-  for (const link of selfAndCauses(err)) {
-    if (isRuntimeUnreachableSignal(link)) return true;
-    if (link instanceof Error && TRANSIENT_PLATFORM_WORDING.test(link.message)) return true;
-  }
-  return false;
-}
-
-/** The fetch handler's catch-all answer for a throw no route named: the words,
- *  and whether the throw was the platform's transient (`transient`), typed here
- *  so the client decides by a field. */
-function catchAllErr(err: unknown): ThreadErr {
-  return { error: errMsg(err), status: 500, transient: isTransientPlatformThrow(err) };
-}
-
 function isControlReset(err: unknown): boolean {
   return isDurableObjectCodeUpdateReset(err);
 }
@@ -1242,9 +1321,12 @@ interface ThreadErr {
    *  (execution.md item 9); reading `reason` there would take a busy mirror on
    *  a degraded-but-serviceable resident for a repo failure. */
   stateReason?: string;
-  /** On the fetch handler's catch-all 500: whether the throw it wrapped was the
-   *  platform's own transient (`isTransientPlatformThrow`) — a re-probe clears
-   *  it — or a deterministic throw in the route, judged at once. */
+  /** On the 500 for a throw no route named (`unnamedThrowErr`, through
+   *  `catchAllErr` or `threadRejectionErr`: the fetch handler's catch-all, a
+   *  streamed route's rejection, a route's own catch around its body): whether
+   *  the throw it wrapped was the platform's own transient
+   *  (`isTransientPlatformThrow`) — a re-probe clears it — or a deterministic
+   *  throw in the route, judged at once. */
   transient?: boolean;
   /** The steps the request ran before it failed (docs/reference/specs/tracing.md item 19):
    *  a failed attach's trace is the one that says which step blew the budget. */
@@ -5017,7 +5099,7 @@ export class ResidentDO extends Sandbox<Env> {
         this.attachesInFlight--;
       }
     } catch (err) {
-      return { error: `attach-failed: ${errMsg(err)}`, status: 500 };
+      return catchAllErr(err, "attach-failed");
     }
   }
 
@@ -5029,7 +5111,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  instance's entry gate (the cron's, within one bucket) — an attach never
    *  stops the container itself: it is in flight. */
   private async attachFailed(err: unknown): Promise<ThreadErr> {
-    if (!(err instanceof StepError)) return { error: `attach-failed: ${errMsg(err)}`, status: 500 };
+    if (!(err instanceof StepError)) return catchAllErr(err, "attach-failed");
     const failure = await this.classifyFailure(err.step, err.message);
     if (!failure.diskFull) return { error: `attach-failed at ${err.step}: ${err.message}`, status: 500 };
     console.log(`attach: ${failure.reason}`);
@@ -5226,7 +5308,7 @@ export class ResidentDO extends Sandbox<Env> {
         const s = await this.getStatus();
         return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
       }
-      return { error: `attach-failed: ${errMsg(err)}`, status: 500 };
+      return catchAllErr(err, "attach-failed");
     }
     if (outcome.kind === "none") return { binding: outcome.binding };
     if (outcome.kind === "refuse") {
@@ -7162,8 +7244,10 @@ export class ResidentDO extends Sandbox<Env> {
       if (err instanceof StepError && err.step === "unknown-ref") {
         return { error: `unknown-ref: ${err.message}`, status: 400 };
       }
-      const step = err instanceof StepError ? ` at ${err.step}` : "";
-      return { error: `op-failed${step}: ${errMsg(err)}`, status: 500 };
+      // A step that failed is named and deterministic; a throw no step named is
+      // typed by the one builder every such 500 goes through.
+      if (err instanceof StepError) return { error: `op-failed at ${err.step}: ${errMsg(err)}`, status: 500 };
+      return catchAllErr(err, "op-failed");
     } finally {
       // Disposable means disposable: the checkout dies with the op, pass or
       // fail (best effort — a slept container already destroyed it anyway).
@@ -8906,41 +8990,50 @@ function streamHeartbeatJson<T>(
   return new Response(stream, { headers: { "content-type": "application/json" } });
 }
 
-/** /exec's payload mapping: a result as {stdout, stderr, exitCode, truncated},
- *  a named failure as {error, needs?, reason?, stdout:"", stderr:error, exitCode:127}
- *  (`reason:"runtime-replaced"` is how the client tells a deploy from a dead
- *  exec transport). */
+/** /exec's failure document, in the item-3 dual shape (`error` beside
+ *  `stdout: ""`, `stderr`, `exitCode: 127`) so old and new executors both
+ *  render it. The ThreadErr's fields ride beside the words, as the JSON routes
+ *  carry them: `needs`; the lifecycle pair (`state`, `stateReason`); the
+ *  answer's own word (`reason`, kept independent of `state` — `runtimeReplacedErr()`
+ *  sets `reason: "runtime-replaced"` with NO state, and the client's
+ *  deploy-vs-dead-transport check reads it); the answer's `status`; the
+ *  catch-all's `transient`. The client types a streamed failure by these fields
+ *  (execution.md item 9), and a document that dropped them would make every
+ *  /exec failure a deterministic answer over HTTP 200. One builder for both of
+ *  the stream's paths: a failure the Durable Object named, and a pending
+ *  result that rejected. */
+function execFailureDocument(failure: ThreadErr): object {
+  return {
+    error: failure.error,
+    ...(failure.needs ? { needs: failure.needs } : {}),
+    ...(failure.state ? { state: failure.state } : {}),
+    ...(typeof failure.stateReason === "string" ? { stateReason: failure.stateReason } : {}),
+    ...(failure.reason ? { reason: failure.reason } : {}),
+    status: failure.status,
+    ...(typeof failure.transient === "boolean" ? { transient: failure.transient } : {}),
+    stdout: "",
+    stderr: failure.error,
+    exitCode: 127,
+  };
+}
+
+/** /exec's payload mapping: a result as {stdout, stderr, exitCode, truncated};
+ *  a failure as `execFailureDocument` — the one the Durable Object named, or
+ *  the pending result's rejection answered as the DO would have
+ *  (`threadRejectionErr`: a code-update reset the DO's own `control-reset`
+ *  word, a replacement the SDK's words on a bare 409 — the word withheld on
+ *  /exec alone —, anything else the typed 500), so a rejection streams its
+ *  `status`, its word and its `transient`,
+ *  and the client reads it like the JSON routes' answer, never as a
+ *  deterministic answer over HTTP 200. */
 function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execThread"]>>>): Response {
   return streamHeartbeatJson(
     pending,
     (result) =>
       "error" in result
-        ? {
-            error: result.error,
-            ...(result.needs ? { needs: result.needs } : {}),
-            // `reason` must stay independent of `state`: runtimeReplacedErr()
-            // sets reason:"runtime-replaced" with NO state, and the client's
-            // deploy-vs-dead-transport check reads it. Folding these two spreads
-            // back into one silently drops it (no test covers this Worker).
-            ...(result.state ? { state: result.state } : {}),
-            // The lifecycle reason beside the state, the answer's status and
-            // the catch-all's `transient`, forwarded as the JSON routes carry
-            // them: the client types a streamed refusal by these fields
-            // (execution.md item 9), and a stream that dropped them would make
-            // every /exec refusal a deterministic answer over HTTP 200.
-            ...(typeof result.stateReason === "string" ? { stateReason: result.stateReason } : {}),
-            ...(result.reason ? { reason: result.reason } : {}),
-            ...(typeof result.status === "number" ? { status: result.status } : {}),
-            ...(typeof result.transient === "boolean" ? { transient: result.transient } : {}),
-            stdout: "",
-            stderr: result.error,
-            exitCode: 127,
-          }
+        ? execFailureDocument(result)
         : { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, truncated: result.truncated },
-    (err) => {
-      const msg = errMsg(err);
-      return { error: msg, stdout: "", stderr: msg, exitCode: 127 };
-    },
+    (err) => execFailureDocument(threadRejectionErr(err, "/exec")),
   );
 }
 
@@ -8951,7 +9044,12 @@ async function handleRead(env: Env, body: Record<string, unknown>): Promise<Resp
     return json({ error: "path must be a string relative to the thread worktree" }, 400);
   const encoding = readEncodingOf(body);
   if (typeof encoding !== "string") return json({ error: encoding.error }, 400);
-  const result = await ctx.stub.readThreadFile(ctx.threadKey, body.path, encoding);
+  // A stub that rejects (the DO reset under the call, a storage operation that
+  // did not complete) is answered as the DO answers the same fact inside, never
+  // left to the fetch handler's catch-all.
+  const result = await ctx.stub
+    .readThreadFile(ctx.threadKey, body.path, encoding)
+    .catch((err: unknown) => threadRejectionErr(err, "/read"));
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }
@@ -8964,7 +9062,9 @@ async function handleWrite(env: Env, body: Record<string, unknown>): Promise<Res
   if (typeof body.content !== "string" || body.content.length > MAX_WRITE_CONTENT) {
     return json({ error: `content must be a string of at most ${MAX_WRITE_CONTENT} chars` }, 400);
   }
-  const result = await ctx.stub.writeThreadFile(ctx.threadKey, body.path, body.content);
+  const result = await ctx.stub
+    .writeThreadFile(ctx.threadKey, body.path, body.content)
+    .catch((err: unknown) => threadRejectionErr(err, "/write"));
   if ("error" in result) return threadErrResponse(result);
   return json(result);
 }
@@ -9038,18 +9138,18 @@ async function handleOp(env: Env, body: Record<string, unknown>, traceparent?: s
 }
 
 /** /op's payload mapping: results pass through; a named error sheds its
- *  transport-only `status` field (the body is the contract, never the code). */
+ *  transport-only `status` field (the body is the contract, never the code); a
+ *  pending op that rejected is the typed 500 (`catchAllErr`, so `transient`
+ *  rides beside the words), its status shed the same way. */
 function streamOp(pending: Promise<Awaited<ReturnType<ResidentDO["runOp"]>>>): Response {
+  const shedStatus = (failure: ThreadErr): object => {
+    const { status: _status, ...rest } = failure;
+    return rest;
+  };
   return streamHeartbeatJson(
     pending,
-    (result) => {
-      if ("error" in result) {
-        const { status: _status, ...rest } = result;
-        return rest;
-      }
-      return result;
-    },
-    (err) => ({ error: errMsg(err) }),
+    (result) => ("error" in result ? shedStatus(result) : result),
+    (err) => shedStatus(catchAllErr(err, "op-failed")),
   );
 }
 

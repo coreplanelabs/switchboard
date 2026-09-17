@@ -355,10 +355,14 @@ export const WAKE_PORT_READY_MS = 3 * 60_000;
  *  SDK by a test. */
 export const SDK_RUNTIME_RECORD_KEY = "currentRuntimeIdentity";
 
-/** The DOMException the SDK's connect abort raises: `AbortError`, message
- *  `The operation was aborted`. Anchored on the whole sentence so a command's
- *  own `Aborted (core dumped)` never matches. */
-export const RUNTIME_UNREACHABLE_WORDING = /\bThe operation was aborted\b/;
+/** The DOMException the SDK's connect abort raises — `fetchUpgradeAttempt`
+ *  calls `controller.abort()` with no reason when `DEFAULT_CONNECT_TIMEOUT_MS`
+ *  passes, so the runtime's own `AbortError` with the message exactly `The
+ *  operation was aborted`. Anchored on the WHOLE message, so a command's own
+ *  `Aborted (core dumped)` never matches and neither does a `TimeoutError`'s
+ *  `The operation was aborted due to timeout` — the text `AbortSignal.timeout`
+ *  raises, a route's own bound on a slow GitHub, not a silent runtime. */
+export const RUNTIME_UNREACHABLE_WORDING = /^The operation was aborted\.?$/;
 
 /** Is this one link of an error's cause chain the SDK's connect abort? By
  *  name first (the DOMException's `AbortError`), by the DOMException's message

@@ -115,17 +115,19 @@ export function residentAnswerReason(status: number, data: Record<string, unknow
   if (status >= 500 && status <= 599) {
     if (data.reason === "unregistered") return "refused";
     // The lifecycle pair the resident puts on the answer: `state` and
-    // `stateReason` — never `reason`, which is the answer's OWN word
-    // (`mirror-busy`, `disk-pressure`, `image-stale`, `not-serviceable`'s
-    // detail) and would read a busy mirror on a degraded-but-serviceable
-    // resident as a repo failure (`lifecycleReasonOf` holds the one reading,
-    // and the fallback for a Worker predating the field).
+    // `stateReason`. Never the answer's OWN word in `reason` (`mirror-busy`,
+    // `disk-pressure`, `image-stale`), which would read a busy mirror on a
+    // degraded-but-serviceable resident as a repo failure. `lifecycleReasonOf`
+    // holds the one reading, and the fallback for a Worker predating
+    // `stateReason`, whose not-serviceable answers carried the lifecycle
+    // reason in `reason`.
     if (typeof data.state === "string")
       return isWakeable(data.state, lifecycleReasonOf(data)) ? "worker-unavailable" : "refused";
-    // The fetch handler's catch-all 500 says whether the throw it wrapped was
-    // the platform's own transient (a Durable Object reset by a deploy, a lost
-    // connection, a storage operation that did not complete): a re-probe
-    // clears those; every other stateless 5xx with a body is deterministic.
+    // The 500 for a throw no route named says whether the throw was the
+    // platform's own transient (a Durable Object reset by a deploy, a lost
+    // connection, a storage operation that did not complete), at whichever
+    // catch met it: a re-probe clears those; every other stateless 5xx with a
+    // body is deterministic.
     if (data.transient === true) return "worker-unavailable";
     if (typeof data.error === "string" && data.error) return "answered";
     return infraReasonOfStatus(status);
@@ -134,18 +136,27 @@ export function residentAnswerReason(status: number, data: Record<string, unknow
   return infraReasonOfStatus(status);
 }
 
-/** The words a resident answer uses for ITSELF in `reason` — never a lifecycle
- *  reason: the mirror held (`mirror-busy`), the disk full (`disk-pressure`),
- *  the container restarting (`image-stale`), the resource unregistered, the
- *  runtime replaced or the DO reset under the command. */
-const ANSWER_OWN_WORDS: ReadonlySet<string> = new Set([
-  "mirror-busy",
-  DISK_PRESSURE_REASON,
-  "image-stale",
-  "unregistered",
-  "runtime-replaced",
-  "control-reset",
-]);
+/** The status a resident answer says. The streamed routes — `/exec`, `/attach`
+ *  and `/await-restore` write heartbeat whitespace then ONE JSON document, so
+ *  a long command, a deps install or a restore cannot lose the connection —
+ *  put a refusal's own status IN the body over HTTP 200, and that is the
+ *  status the answer is typed by (`residentAnswerReason`). Any other answer's
+ *  status is the HTTP status: a body's `status` on a real 4xx/5xx, or on a
+ *  success document (which carries no `error`), is never read. One rule for
+ *  the three routes. */
+export function answeredStatus(httpStatus: number, data: Record<string, unknown>): number {
+  return httpStatus === 200 && typeof data.error === "string" && typeof data.status === "number"
+    ? data.status
+    : httpStatus;
+}
+
+/** The words a resident answer uses for ITSELF in `reason` on a 5xx that
+ *  carries `state` — never a lifecycle reason: the mirror held
+ *  (`mirror-busy`), the disk full (`disk-pressure`), the container restarting
+ *  (`image-stale`). The answer's other own words never reach this reading:
+ *  `unregistered` is refused before it (`residentAnswerReason`), and
+ *  `runtime-replaced` and `control-reset` are 409s carrying no state. */
+const ANSWER_OWN_WORDS: ReadonlySet<string> = new Set(["mirror-busy", DISK_PRESSURE_REASON, "image-stale"]);
 
 /** The lifecycle reason on a resident answer: `stateReason` where the Worker
  *  names it (every 503 that carries `state`); on a Worker that predates the
@@ -215,16 +226,19 @@ export function residentWakeStrike(
   });
 }
 
+/** The wake wait's end by the run's own stop — during a pause or a probe: a
+ *  plain error (not infra: nothing is wrong with the sandbox) that the runner's
+ *  hard-stop path unwinds. */
+const wakeStopped = (): Error => new Error("stopped waiting for the resident to wake: the run was stopped");
+
 /** Resolve after `ms`; reject the moment `signal` fires. A hard stop never
- *  sits out a wake, and the rejection is a plain error (not infra: nothing is
- *  wrong with the sandbox) that the runner's hard-stop path unwinds. */
+ *  sits out a wake, and the rejection is `wakeStopped`. */
 function wakePause(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const stopped = () => new Error("stopped waiting for the resident to wake: the run was stopped");
-    if (signal?.aborted) return reject(stopped());
+    if (signal?.aborted) return reject(wakeStopped());
     const onAbort = () => {
       clearTimeout(timer);
-      reject(stopped());
+      reject(wakeStopped());
     };
     const timer = setTimeout(() => {
       signal?.removeEventListener("abort", onAbort);
@@ -585,6 +599,9 @@ export class ResidentExecutor implements Executor {
     resource: string,
     timeoutMs: number,
     span?: Span,
+    /** The run's stop, where the caller has one (the wake wait's probes): it
+     *  drops the request at once, as it does every other send. */
+    signal?: AbortSignal,
   ): Promise<ResidentStatusProbe> {
     const url = `${baseUrl.replace(/\/$/, "")}/status?resource=${encodeURIComponent(resource)}`;
     let res: Response;
@@ -592,7 +609,7 @@ export class ResidentExecutor implements Executor {
       res = await tracedFetch(
         span,
         url,
-        { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(timeoutMs) },
+        { headers: { authorization: `Bearer ${token}` }, signal: execDeadline(timeoutMs, signal) },
         { route: "/status" },
       );
     } catch (err) {
@@ -646,11 +663,7 @@ export class ResidentExecutor implements Executor {
       );
       if (res.status === 404) return { kind: "unsupported" };
       const data = await parseResidentBody(res);
-      // A streamed refusal carries its status in the body (like /attach).
-      const status =
-        res.status === 200 && typeof data.error === "string" && typeof data.status === "number"
-          ? data.status
-          : res.status;
+      const status = answeredStatus(res.status, data);
       if (status !== 200 || typeof data.error === "string") {
         return { kind: "unreachable", error: `await-restore HTTP ${status}: ${String(data.error ?? "")}` };
       }
@@ -732,8 +745,10 @@ export class ResidentExecutor implements Executor {
    *  the refusal's status and body, so the wake wait (item 65) can read the
    *  refusal's own words and keep waiting through a container still rolling.
    *  `timeoutMs` bounds the call; the default is the exec ceiling, since an
-   *  attach may wait on a restore or a deps install. */
-  private async attachOnce(span?: Span, timeoutMs?: number): Promise<AttachAnswer> {
+   *  attach may wait on a restore or a deps install. `signal` is the run's
+   *  stop where the caller has one (the wake wait's re-attach): it drops the
+   *  request at once, and the failure is `aborted`, never the transport lost. */
+  private async attachOnce(span?: Span, timeoutMs?: number, signal?: AbortSignal): Promise<AttachAnswer> {
     const body: Record<string, unknown> = {};
     if (this.opts.refHint) body.refHint = this.opts.refHint;
     if (this.opts.readonly) body.readonly = true;
@@ -741,16 +756,13 @@ export class ResidentExecutor implements Executor {
     if (this.opts.reuse) body.reuse = true;
     if (this.opts.ownPr) body.ownPr = this.opts.ownPr;
     if (this.opts.refByDefault) body.refByDefault = true;
-    const answered = await this.call("/attach", body, timeoutMs, undefined, span);
+    const answered = await this.call("/attach", body, timeoutMs, signal, span);
     const data = answered.data;
     // Post-validation answers stream like /exec (heartbeat whitespace then one
     // JSON document over HTTP 200, item 59) so an attach that waits on a deps
     // install cannot lose the connection; a streamed refusal carries its
     // status IN the body. Pre-validation refusals (400/404) keep real statuses.
-    const status =
-      answered.status === 200 && typeof data.error === "string" && typeof data.status === "number"
-        ? data.status
-        : answered.status;
+    const status = answeredStatus(answered.status, data);
     if (status !== 200) return { ok: false, status, data };
     if (typeof data.ref !== "string" || typeof data.sha !== "string") {
       throw new Error(`resident attach: malformed answer for ${this.opts.resource} (missing ref/sha)`);
@@ -792,6 +804,20 @@ export class ResidentExecutor implements Executor {
     if (status === 409 && data.needs === "recreate")
       return traced(new ResidentReuseRefusedError(this.opts.resource, err));
     if (status === 404) return traced(new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`));
+    // A 500 for a throw no route named, typed by the Worker: the platform's
+    // transient (the Durable Object reset or lost under the attach) is the
+    // resident unavailable for a moment — infra a wait clears, so the harness's
+    // one more command waits on it (execution.md item 9); a deterministic 500
+    // (`attach-failed at <step>`, a throw in the route) stays the attach's own
+    // legible error, judged at once.
+    if (status >= 500 && status <= 599 && data.transient === true) {
+      return traced(
+        classifyError(
+          new ExecInfraError(`resident attach failed for ${this.opts.resource}: ${err}`, "worker-unavailable"),
+          { kind: "infra", code: "attach" },
+        ),
+      );
+    }
     return traced(new Error(`resident attach failed for ${this.opts.resource}: ${err}`));
   }
 
@@ -990,14 +1016,21 @@ export class ResidentExecutor implements Executor {
     const waited = () => systemClock() - t0;
     /** A definite engine view — no wake recovers from it — or a Worker that did not answer: refused. */
     const definite = (why: string): ExecInfraError => residentWakeStrike(route, refusal, why, "refused");
-    const probe = () =>
-      ResidentExecutor.probeStatus(
+    const probe = async (): Promise<ResidentStatusProbe> => {
+      const seen = await ResidentExecutor.probeStatus(
         this.opts.baseUrl,
         this.opts.token,
         this.opts.resource,
         WAKE_PROBE_TIMEOUT_MS,
         opts.span,
+        opts.signal,
       );
+      // The run's stop rides into the probe as into every send: a stop during
+      // one is the plain error the runner unwinds, as the pause throws it —
+      // never a strike on an "unreachable" view the stop itself produced.
+      if (opts.signal?.aborted) throw wakeStopped();
+      return seen;
+    };
     let seen = await probe();
     const decision = wakeDecision(seen);
     if (!decision.wait) throw definite(decision.why);
@@ -1012,22 +1045,30 @@ export class ResidentExecutor implements Executor {
       if (seen.kind !== "status" || !isServiceable(seen.state, seen.reason)) continue;
       let answer: AttachAnswer;
       try {
-        answer = await this.attachOnce(opts.span, Math.max(budget - waited(), 1_000));
+        answer = await this.attachOnce(opts.span, Math.max(budget - waited(), 1_000), opts.signal);
       } catch (err) {
         if (!(err instanceof ExecInfraError)) throw err;
+        // The run's own stop: its signal rides into the re-attach as into every
+        // send, and the failure is the call's own — the stop as its request
+        // site classified it — never a strike counted as a container exit.
+        if (err.reason === "aborted") throw err;
         // The re-attach ran under this client's clipped timeout (the budget's
         // remainder, a second at least), so its own verdict — a deadline
         // passed, the transport lost — says nothing about the resident: the
-        // strike reads the last engine view, as the budget strike does; only
-        // the run's own stop keeps its word.
+        // strike reads the last engine view, as the budget strike does.
         throw residentWakeStrike(
           route,
           refusal,
           `the re-attach after ${Math.round(waited() / 1000)}s did not answer (${err.message})`,
-          err.reason === "aborted" ? "aborted" : wakeStrikeReason(seen),
+          wakeStrikeReason(seen),
         );
       }
       if (answer.ok) return { waitedMs: waited(), ref: answer.binding.ref, sha: answer.binding.sha };
+      // A 500 the Worker typed transient (the Durable Object reset or lost under
+      // the re-attach): the resident is coming back as far as anyone can tell,
+      // so the wait goes on — the next probe and re-attach follow — instead of
+      // ending in the attach's own error.
+      if (answer.data.transient === true) continue;
       if (!isContainerRolling(answer.data.error)) throw this.attachRefusal(answer);
     }
   }
@@ -1069,13 +1110,15 @@ export class ResidentExecutor implements Executor {
       // post-validation failure (exitCode 127 shape) — legible, never retried.
       // Infra (the exec transport failed), not a command exit: counts toward
       // fail-fast. Typed by the fields the resident put on the answer
-      // (`residentAnswerReason`): /exec streams its refusals over HTTP 200 with
-      // the answer's own status IN the body (as /attach does), so a streamed
-      // 503 is read as the 503 it is — the resident unavailable for a moment
-      // unless it names a refusal; the resident's words on any other status —
-      // the SDK's text forwarded, a named refusal — mean what they say, and the
+      // (`residentAnswerReason`): /exec streams its failures over HTTP 200 with
+      // the answer's own status IN the body (`answeredStatus`, the rule /attach
+      // and /await-restore read by too), so a streamed 503 is read as the 503
+      // it is — the resident unavailable for a moment unless it names a
+      // refusal — and a streamed rejection as the catch-all's 500 it is, typed
+      // by its `transient`; the resident's words on any other status — the
+      // SDK's text forwarded, a named refusal — mean what they say, and the
       // harness's seam reads the container-down ones.
-      const said = typeof data.status === "number" ? data.status : status;
+      const said = answeredStatus(status, data);
       throw classifyError(new ExecInfraError(`resident /exec: ${data.error}`, residentAnswerReason(said, data)), {
         kind: "infra",
       });
