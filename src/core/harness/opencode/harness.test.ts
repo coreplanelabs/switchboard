@@ -1023,7 +1023,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     await session.end();
   });
 
-  it("a tool that completes on its own while the loop-end interrupt is in flight: the interrupt answers `interrupted: false`, so no write-up prompt is posted; the tool's own success is read as the loop's own and lands unmarked — nothing cut, nothing in flight — and the run closes under the budget's no-write-up label", async () => {
+  it("a tool that completes on its own while the loop-end interrupt is in flight: the interrupt answers `interrupted: false`, so nothing was cut — no tool_cut note, no write-up prompt posted; the tool's own success is read as the loop's own and lands unmarked — nothing in flight — and the run closes under the budget's no-write-up label", async () => {
     const hungTool: RunScript = {
       turns: [
         {
@@ -1038,12 +1038,13 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       hungTool,
     );
     const session = await o.opened;
-    expect(session.answer).toBe(timeBudgetAnswer("", 10));
-    expect(
-      notes(o.events)
-        .filter((n) => n.kind === "tool_cut")
-        .map((n) => n.summary),
-    ).toEqual([toolCutNote("running bash")]);
+    // Nothing was interrupted: the execution ran on to its own end, and its last text is the answer under the
+    // budget's label.
+    expect(session.answer).toBe(timeBudgetAnswer("never", 10));
+    // The budget note names the tool in flight; the cut note is written only once an interrupt has landed on a live
+    // execution, and this one landed on an idle session.
+    expect(notes(o.events).filter((n) => n.kind === "time_budget_exhausted")).toHaveLength(1);
+    expect(notes(o.events).filter((n) => n.kind === "tool_cut")).toEqual([]);
     // The tool settled before the interrupt landed: its own success, unmarked — nothing was cut, nothing is in flight.
     expect(
       o.events
@@ -1145,6 +1146,128 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       "tool_result:c1:true:false",
     ]);
     expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
+    await session.end();
+  });
+
+  /** The record's tool events as one line each: `tool_call:<id>` and `tool_result:<id>:<ok>:<cut>`. */
+  const toolEventsOf = (events: RunEvent[]) =>
+    events
+      .filter((e) => e.type === "tool_call" || e.type === "tool_result")
+      .map((e) => `${e.type}:${e.callId}${e.type === "tool_result" ? `:${e.ok}:${e.cut === true}` : ""}`);
+  const sleepThenNever: RunScript = {
+    turns: [
+      {
+        content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+    ],
+  };
+  const sleepThenLsThenNever: RunScript = {
+    turns: [
+      {
+        content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+        stopReason: "tool_use",
+      },
+      {
+        content: [{ type: "tool_use", id: "c2", name: "bash", input: { command: "echo hi" } }],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+    ],
+  };
+
+  it("a tool call cut at the loop's end whose interrupt the server refuses: nothing was interrupted, so the run fails by name at once — OpenCodeRequestRefusedError naming the interrupt and the answer, the post's harness_error on the record, no tool_cut note, the open call closed marked cut for the release — never a steer that waits the command out, never a finale run out", async () => {
+    const o = openRun({ hangToolCall: 1, interruptPostFails: true }, sleepThenNever);
+    await expect(o.opened).rejects.toMatchObject({
+      name: "OpenCodeRequestRefusedError",
+      message: 'OpenCode refused the interrupt (500): {"error":"interrupt refused"}',
+    });
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    // No write-up was posted or steered: one prompt on the session (the request's); the cut's interrupt, then the
+    // failure's own ending interrupt — refused too, its note landing whenever its answer does.
+    expect(o.container.requests.filter((q) => q.method === "POST" && /\/prompt$/.test(q.path))).toHaveLength(1);
+    expect(o.container.requests.filter((q) => q.method === "POST" && /\/interrupt$/.test(q.path))).toHaveLength(2);
+    expect(notes(o.events).filter((n) => n.kind === "tool_cut")).toEqual([]);
+    const errors = notes(o.events)
+      .filter((n) => n.kind === "harness_error")
+      .map((n) => n.summary);
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(errors)).toEqual(
+      new Set(['the interrupt did not reach the server: it answered 500 ({"error":"interrupt refused"})']),
+    );
+    // The call the loop left open is closed marked cut and worded for the path it left on; the release reads a
+    // command that may run on.
+    expect(o.events.find((e) => e.type === "tool_result" && e.callId === "c1")).toMatchObject({
+      ok: false,
+      cut: true,
+      summary:
+        "bash was still running when the loop left on its interrupt (a failure by name); its outcome never reached the record",
+    });
+    expect(callsInFlight(o.events, "failed").map((c) => c.callId)).toEqual(["c1"]);
+  });
+
+  it("a tool call cut at the loop's end whose interrupted execution's end the server serializes only after the write-up's execution has started: that end is the one the cut owed — set aside under a settle_set_aside note whatever the mode, its aborted step no failure — and the write-up's own end settles the run: the write-up answered, no finale, no harness_error", async () => {
+    const o = openRun({ hangToolCall: 1, lateTailAfterNextStart: true }, sleepThenNever);
+    const session = await o.opened;
+    expect(session.answer).toBe(timeBudgetAnswer("never", 10));
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    expect(notes(o.events).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "settle_set_aside")
+        .map((n) => n.summary),
+    ).toEqual([
+      "the interrupted execution ended (session.execution.interrupted) after the write-up's execution started; set aside — the end the loop-end cut owed, not the write-up's settle",
+    ]);
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:true"]);
+    expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
+    await session.end();
+  });
+
+  it("a gate bypass in the write-up's execution after a loop-end cut, the cut call still open: the loop leaves on the bypass's interrupt, and the cut call's exit result names that path — the cut, then the bypass — never a write-up that settled", async () => {
+    const o = openRun({ hangToolCall: 1, hungToolSettlesOnPlay: 3, bypassGateAtTurn: 2 }, sleepThenLsThenNever);
+    await expect(o.opened).rejects.toMatchObject({ name: "OpenCodeGateBypassedError" });
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "tool_cut")
+        .map((n) => n.summary),
+    ).toEqual([toolCutNote("running bash")]);
+    expect(o.events.find((e) => e.type === "tool_result" && e.callId === "c1")).toMatchObject({
+      ok: false,
+      cut: true,
+      summary:
+        "bash was cut at the loop's end; the loop then left on its interrupt (a gate bypass) before the call's outcome reached the record",
+    });
+  });
+
+  it("a tool call cut at the loop's end whose own outcome rides the interrupted execution's tail — before the write-up's execution starts, in the bridge's earlier mode: the settle is the loop's own by construction (the call was opened in its own mode) and lands as the call's real result marked cut, not dropped and replaced by a synthetic failure at the exit", async () => {
+    const o = openRun({ hangToolCall: 1, hungToolSettlesInTail: true }, sleepThenNever);
+    const session = await o.opened;
+    expect(session.answer).toBe(timeBudgetAnswer("never", 10));
+    expect(o.events.find((e) => e.type === "tool_result" && e.callId === "c1")).toMatchObject({
+      ok: true,
+      cut: true,
+      output: "slept",
+    });
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:true"]);
+    expect(notes(o.events).filter((n) => n.kind === "settle_set_aside")).toEqual([]);
+    expect(notes(o.events).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
+    await session.end();
+  });
+
+  it("a loop-end interrupt that cut nothing (`interrupted: false`, the tool completed during the round-trip) leaves a straggler at the clean settle unmarked: a later call whose settle the stream dropped is no command in flight, and the release pairs the workspace for it", async () => {
+    const o = openRun(
+      { hangToolCall: 1, hungToolSettlesDuringInterrupt: true, dropStreamAtSettle: 2 },
+      sleepThenLsThenNever,
+    );
+    const session = await o.opened;
+    expect(o.progress).toContain("opencode feed: stream closed");
+    expect(notes(o.events).filter((n) => n.kind === "tool_cut")).toEqual([]);
+    // The cut tool's own success, unmarked; the straggler's call with no result — never closed `cut`.
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:false", "tool_call:c2"]);
+    expect(callsInFlight(o.events, "completed")).toEqual([]);
     await session.end();
   });
 

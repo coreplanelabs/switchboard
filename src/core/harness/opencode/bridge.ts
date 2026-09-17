@@ -505,6 +505,21 @@ export class OpenCodeBridge {
    *  is unmeasured (the fake's recorded shape is a late success), so the rule
    *  waits for the live probe. */
   private readonly cutCalls = new Set<string>();
+  /** One execution end is owed (`oweExecutionEnd`): the loop-end interrupt
+   *  landed on a live execution, whose end — `session.execution.interrupted`,
+   *  or `failed`, or the idle — the server serializes with its tail. Measured,
+   *  that tail lands with the next queued prompt, before the write-up's own
+   *  `session.execution.started`, and is read in `earlier` mode; but nothing
+   *  pins that order, and an end landing after the write-up's start would be
+   *  read in `own` mode as the write-up's settle — the loop ending on the
+   *  previous answer with no write-up, the aborted step a failure of the
+   *  harness. So the first execution end after the cut pays the debt whatever
+   *  the mode (`payOwedEnd`), set aside — noted when it lands in own mode, the
+   *  ordering worth a line on the record — and the write-up's own end settles
+   *  the loop. An end the server never serializes leaves the debt unpaid and
+   *  the write-up's own end pays it; the finale bounds the run then, as it
+   *  bounded every hung write-up before the cut existed. */
+  private executionEndOwed = false;
   /** Resource permissions answered for a call the store has not named yet, by
    *  call id, each call's asks in the order they came — two can name one call
    *  (`external_directory`, then `doom_loop`) and each is kept: the call is
@@ -650,6 +665,21 @@ export class OpenCodeBridge {
    *  (harness.md item 13). */
   markOpenCallsCut(): void {
     for (const callId of this.openTools.keys()) this.cutCalls.add(callId);
+  }
+
+  /** The loop-end interrupt has landed on a live execution: that execution's
+   *  end is owed to the feed and is the cut's, whenever and in whatever mode it
+   *  lands — never the write-up's settle (`executionEndOwed`). */
+  oweExecutionEnd(): void {
+    this.executionEndOwed = true;
+  }
+
+  /** An execution end has landed: the cut's owed end, if one is — paid now, the
+   *  record's settle it is not — else the loop's own. */
+  private payOwedEnd(): boolean {
+    if (!this.executionEndOwed) return false;
+    this.executionEndOwed = false;
+    return true;
   }
 
   /** Settle every call still open when the loop is done with the session: each
@@ -843,6 +873,11 @@ export class OpenCodeBridge {
         // wind-down the loop before wrote is on the record; said again it would
         // be a second `harness_error` for one ending.
         if (earlier) break;
+        // The cut execution's step aborting — its end still owed, its tail
+        // landing after the write-up's start (`executionEndOwed`) — is the
+        // loop-end interrupt's doing, on the record as the cut: no failure of
+        // this loop's step, and the write-up's own open step stays open.
+        if (this.executionEndOwed && errorTypeOf(data.error) === "aborted") break;
         this.note("harness_error", `an OpenCode step failed: ${redactAndCap(errorMessage(data.error), 200)}`);
         break;
       case "session.execution.failed": {
@@ -860,11 +895,22 @@ export class OpenCodeBridge {
         // dead generation's — failing is history, said for what it was and by
         // whose it was, never this loop's settle.
         const error = failureOf(data.error);
+        // The cut execution's end, owed since the loop-end interrupt landed
+        // (`executionEndOwed`): paid here whatever the mode, never this loop's
+        // settle or budget stop — an earlier execution's failure by the notes
+        // below when it lands early, the owed end's own note when it lands
+        // after the write-up's start.
+        const owed = this.payOwedEnd();
         // The step is closed in every mode that opened one: the dead generation's
-        // failed step is no model call in flight for `doingNow`.
-        if (!earlier) this.stepOpen = false;
+        // failed step is no model call in flight for `doingNow`. The owed end's
+        // step is not this loop's open step (the write-up's may be).
+        if (!earlier && !owed) this.stepOpen = false;
         if (this.observing !== "own") {
           this.note("harness_error", foreignFailureNote(this.observing, error));
+          break;
+        }
+        if (owed) {
+          this.note("settle_set_aside", owedEndNote(`failed (${redactAndCap(error.message, 200)})`));
           break;
         }
         if (isBudgetRefusal(error)) out.budgetStop = true;
@@ -878,6 +924,14 @@ export class OpenCodeBridge {
       case "session.execution.interrupted":
       case "session.idle":
         out.boundary = true;
+        // The cut execution's end, owed since the loop-end interrupt landed
+        // (`executionEndOwed`): paid whatever the mode, never this loop's
+        // settle — noted when it lands after the write-up's own start, the
+        // ordering the binary does not pin.
+        if (this.payOwedEnd()) {
+          if (!earlier) this.note("settle_set_aside", owedEndNote(event.type));
+          break;
+        }
         if (earlier) break;
         this.stepOpen = false;
         out.settled = true;
@@ -946,8 +1000,14 @@ export class OpenCodeBridge {
     // this loop lost with the stream (whose ask, had there been one, the refill
     // would have taught); it is information, not a failure of the harness. A
     // settle that names no step — none of the pinned binary's do — is judged as
-    // this loop's, the fail-closed side.
-    if (this.observing === "earlier") return;
+    // this loop's, the fail-closed side. One exception to the earlier-mode
+    // silence: a call the loop-end interrupt cut (`cutCalls`) is this loop's by
+    // construction — opened in its own mode — and its outcome most plausibly
+    // rides the interrupted execution's tail, which lands in `earlier` mode
+    // before the write-up's start; that settle is let through and lands as the
+    // call's real result, marked `cut`, rather than dropped and replaced by a
+    // synthetic failure when the loop leaves.
+    if (this.observing === "earlier" && !this.cutCalls.has(callId)) return;
     const step = typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined;
     if (this.observing === "own" && step !== undefined && !this.ownSteps.has(step)) {
       const named = openCodeToolNameWord(this.toolNames.get(callId) ?? "tool");
@@ -1398,6 +1458,8 @@ function describeOpenCodeToolCall(tool: string, input: Record<string, unknown> |
 export type DoingNow = { tools: string[] } | "model";
 
 /** The words a note gives what the run is at: the open tools by name, or the model call — the same words on every harness. */
+export function doingWords(doing: DoingNow): string;
+export function doingWords(doing: DoingNow | undefined): string | undefined;
 export function doingWords(doing: DoingNow | undefined): string | undefined {
   if (doing === undefined) return undefined;
   return doing === "model" ? MODEL_CALL_IN_FLIGHT : `running ${doing.tools.join(", ")}`;
@@ -1522,6 +1584,17 @@ function errorMessage(error: unknown): string {
 }
 function statusOf(error: unknown): number | undefined {
   return isRecord(error) && typeof error.status === "number" ? error.status : undefined;
+}
+/** An event's error kind as the pinned binary names it (`aborted` for an interrupt's doing). */
+function errorTypeOf(error: unknown): string | undefined {
+  return isRecord(error) && typeof error.type === "string" ? error.type : undefined;
+}
+/** The note for the cut execution's end landing after the write-up's own
+ *  execution started (`OpenCodeBridge.executionEndOwed`): set aside as the
+ *  loop-end cut's, never the write-up's settle. `how` is the end's event kind,
+ *  or the failure with its words. */
+function owedEndNote(how: string): string {
+  return `the interrupted execution ended (${how}) after the write-up's execution started; set aside — the end the loop-end cut owed, not the write-up's settle`;
 }
 /** A `session.execution.failed`'s error as the budget test reads it: the status the proxy answered, when the server hands it on, and the words. */
 function failureOf(error: unknown): { status?: number; message: string } {
@@ -1794,16 +1867,29 @@ export async function driveOpenCode(
   let bypass: OpenCodeGateBypassedError | undefined;
   let replyFailed: OpenCodeReplyFailedError | undefined;
   let refused: OpenCodeRequestRefusedError | undefined;
-  /** The write-up's queued prompt the server refused (`startWriteUp`): the run
-   *  fails by that name at its next check, as any refused prompt does. */
-  let writeUpRefused: OpenCodeRequestRefusedError | undefined;
+  /** A request the wind-down's cut needed — the session's interrupt, or the
+   *  write-up's queued prompt — that the server refused, or that never
+   *  answered as one (`startWriteUp`): the run fails by that name at its next
+   *  check, as any refused request does, never a wait on the feed for an
+   *  execution the request did not start or a cut it did not make. */
+  let windDownFailed: Error | undefined;
   let providerError: string | undefined;
   /** The model call the wind-down waited on failed: a note, never the ending —
    *  the write-up's answer names it where the findings would have been. */
   let writeUpFailed: string | undefined;
   let settled = false;
-  /** The loop posted the session's interrupt: the calls still open when it leaves were cut by it, not settled. */
+  /** The loop's interrupt was posted at, or landed on, a live execution — an
+   *  ending's, posted as the loop leaves, or the loop-end cut's once it has
+   *  answered `interrupted`: the calls still open when the loop leaves were cut
+   *  by it, not settled. A loop-end interrupt that cut nothing — answered
+   *  `idle`, or refused — sets it not, so a straggler at a clean settle stays
+   *  unmarked. */
   let interruptPosted = false;
+  /** The loop-end cut happened: the interrupt landed on the live execution
+   *  with a tool call open and the write-up was queued (`startWriteUp`). Read
+   *  at the exit to word the open calls' results for the path the loop left
+   *  on — the write-up's settle, or an ending after the cut. */
+  let loopEndCut = false;
   /** The container was replaced under the run (the survival clause's ceiling):
    *  the executor's word on the feed read, or — OpenCode found dead with no
    *  read having failed with the word — what the one more container command
@@ -1885,31 +1971,55 @@ export async function driveOpenCode(
   /** The wind-down's write-up, whatever wound the run down — the time budget,
    *  the turn guard, the proxy's turn-budget refusal, an operator's soft stop:
    *  steered into the running execution, as pi's is — or, with a tool call
-   *  open at the loop's end (decision 0046, unit seven, OpenCode's half; a
-   *  `tool_cut` note names it), posted as a `queue` prompt after the session's
-   *  interrupt: a steer is delivered at the running execution's next step
-   *  boundary (measured against the pinned binary: `session.inbox.delivered`
-   *  right after `session.step.ended`), which a hung step never reaches, so the
-   *  steer would wait the command out to the finale. The interrupt is posted
-   *  first; once it has landed — and only if the loop still runs and this is
-   *  still its write-up — the calls still open are marked `cut` (a tool that
-   *  completed during the round-trip settled on its own, read as the loop's),
-   *  the interrupted execution is disowned so its tail — landing only with the
-   *  next queued prompt (measured, the fake's `interruptSettlesLate`) — is read
-   *  in the bridge's `earlier` mode as a late settle at a step boundary, never
-   *  as the loop's end, and the write-up goes as a `queue` prompt, registered
-   *  as the loop's own write (`ownPrompts`) so a follow-up steer's resolution
-   *  sets its row aside as it does the opening prompt's. The finale clock starts
-   *  at the queued prompt's landing — its 2xx; a prompt the server refuses fails
-   *  the run by name at once (`OpenCodeRequestRefusedError`, item 13's rule for
-   *  any refused prompt), never a finale run out for an execution the server
-   *  never started; a post that never answers is bounded by the post's own
-   *  moment. No first-event bound is armed for the queued prompt: the finale
-   *  bound alone applies while the run writes up. A model call in flight is
-   *  left to answer: the steer lands at its turn boundary. Whether the
-   *  interrupt ends the command's own process is the live probe's to say: the
-   *  record marks the call cut, and the workspace's release reads the command
-   *  as one that may run on. */
+   *  open at a time-pressured loop's end (decision 0046, unit seven, OpenCode's
+   *  half), posted as a `queue` prompt after the session's interrupt: a steer
+   *  is delivered at the running execution's next step boundary (measured
+   *  against the pinned binary: `session.inbox.delivered` right after
+   *  `session.step.ended`), which a hung step never reaches, so the steer would
+   *  wait the command out to the finale. The interrupt is posted first and its
+   *  answer read three ways (`interrupt`), once it has come and only if the
+   *  loop still runs — a stop, a failure or the finale landing while the
+   *  interrupt is in flight leaves the write-up unposted, an execution nobody
+   *  would read, billed all the same:
+   *  - `interrupted`: it landed on the live execution. A `tool_cut` note names
+   *    the cut (written here, the cut a fact only now); the calls still open
+   *    are marked `cut` (a tool that completed during the round-trip settled on
+   *    its own, read as the loop's and unmarked); the interrupted execution's
+   *    end is owed (`oweExecutionEnd`) and the execution disowned, so its tail
+   *    — landing only with the next queued prompt (measured, the fake's
+   *    `interruptSettlesLate`) — is read in the bridge's `earlier` mode as a
+   *    late settle at a step boundary, and its end, landing before or after the
+   *    write-up's own start, pays the debt and never settles the loop; the
+   *    write-up goes as a `queue` prompt, registered as the loop's own write
+   *    (`ownPrompts`) so a follow-up steer's resolution sets its row aside as
+   *    it does the opening prompt's. The finale clock starts at the queued
+   *    prompt's landing — its 2xx; a prompt the server refuses fails the run by
+   *    name at once (`OpenCodeRequestRefusedError`, item 13's rule for any
+   *    refused request), never a finale run out for an execution the server
+   *    never started; a post that never answers is bounded by the post's own
+   *    moment. No first-event bound is armed for the queued prompt: the finale
+   *    bound alone applies while the run writes up.
+   *  - `idle` (`{ interrupted: false }`, measured on an idle session): the tool
+   *    completed during the round-trip and its execution ran on to its own
+   *    end. Nothing was cut and no write-up is posted: the loop reads that
+   *    execution's own settle, its last text the answer under the wind-down's
+   *    label — a prompt posted now would start a second execution racing the
+   *    settle the loop is about to read.
+   *  - the failure: an answer outside 2xx (the post's own `harness_error`
+   *    names it), none, or a 2xx whose body says neither. The server refused
+   *    the one request the cut needs and nothing was interrupted — the command
+   *    runs on. The run fails by that name at once (`windDownFailed`), as a
+   *    refused prompt does: a steer into the hung step is no delivery but a
+   *    wait, and the wind-down's allowance would be spent proving nothing; the
+   *    open call is closed marked `cut` when the loop leaves on the failure's
+   *    interrupt, so the release tears the workspace down under a command that
+   *    may run on. Whether the interrupt did abort the execution before the
+   *    server answered is unknowable here; the failure by name is the
+   *    conservative reading, and a retry a design of its own.
+   *  A model call in flight is left to answer: the steer lands at its turn
+   *  boundary. Whether the interrupt ends the command's own process is the
+   *  live probe's to say: the record marks the call cut, and the workspace's
+   *  release reads the command as one that may run on. */
   const startWriteUp = (w: WriteUp, instruction: string) => {
     const doing = bridge.doingNow();
     // A tool call open at a time-pressured wind-down (the time budget, the turn
@@ -1920,8 +2030,7 @@ export async function driveOpenCode(
     // lands at the running step's next boundary, the tool finishing first — the
     // same as a soft stop on a model call. A model call in flight is steered
     // whatever the kind (the steer lands at its turn boundary).
-    const delivery = w.kind !== "soft" && doing !== undefined && doing !== "model" ? "queue" : "steer";
-    if (delivery === "queue") note("tool_cut", toolCutNote(doingWords(doing) ?? ""));
+    const cut = w.kind !== "soft" && doing !== undefined && doing !== "model" ? doing : undefined;
     writeUp = w;
     writeUpAt = now();
     // The checkpoint turn: the proxy sends what follows with `tool_choice: none` (model-proxy item 6).
@@ -1935,56 +2044,85 @@ export async function driveOpenCode(
           : w.kind === "turns"
             ? "the run has hit its turn guard: no more tool calls — the run is writing its final answer"
             : "an operator asked this run to stop: no more tool calls — the run is writing its final answer";
-    if (delivery === "steer") {
+    if (cut === undefined) {
       post("the write-up steer", sessionRoutes["session.prompt"], { text: instruction, delivery: "steer" });
       return;
     }
-    void interrupt().then((interrupted) => {
-      // The loop may have left, or ended, or wound down again, while the
-      // interrupt was in flight: then the write-up is not posted — an execution
-      // nobody would read, billed all the same. Nor is it posted when the
-      // interrupt stopped nothing (`interrupted: false`): the tool completed on
-      // its own during the round-trip and its execution answered, the loop's own.
-      if (!interrupted || ended !== undefined || left || writeUp !== w) return;
-      // The interrupt has landed on a live execution: what is still open is its
-      // cut, and the interrupted execution's records — its tail — are an earlier
-      // execution's from here; the write-up's own start makes the loop's records
-      // its own again (`executionStartedFor`).
+    void interrupt("cut").then((answer) => {
+      // The loop may have left, or ended, while the interrupt was in flight:
+      // then the write-up is not posted — an execution nobody would read,
+      // billed all the same.
+      if (ended !== undefined || left) return;
+      // Nothing to interrupt: the tool completed on its own during the
+      // round-trip and its execution ran on to its end — the loop's own settle.
+      if (answer === "idle") return;
+      // The server refused the interrupt, or answered as no interrupt does:
+      // nothing was cut, and the run fails by that name at its next check
+      // rather than wait the command out.
+      if (answer !== "interrupted") {
+        windDownFailed ??= answer.failed;
+        return;
+      }
+      // The interrupt has landed on a live execution: the cut is a fact — noted
+      // — and what is still open is its cut; the interrupted execution's end is
+      // owed, and its records — its tail — are an earlier execution's from
+      // here; the write-up's own start makes the loop's records its own again
+      // (`executionStartedFor`).
+      note("tool_cut", toolCutNote(doingWords(cut)));
+      loopEndCut = true;
+      interruptPosted = true;
       bridge.markOpenCallsCut();
+      bridge.oweExecutionEnd();
       executionOwned = false;
       const promptSeq = conn.writes ? ++conn.writes.seq : 0;
       return post("the write-up prompt", sessionRoutes["session.prompt"], {
         text: instruction,
         delivery: "queue",
-      }).then((answer) => {
-        if (answer === undefined || writeUp !== w) return;
-        if (answer.status >= 200 && answer.status < 300) {
-          const id = parseAnswerId(answer.body);
+      }).then((posted) => {
+        // An answer landing once the loop has left or ended re-stamps nothing
+        // and registers nothing on a session the next turn owns.
+        if (posted === undefined || ended !== undefined || left) return;
+        if (posted.status >= 200 && posted.status < 300) {
+          const id = parseAnswerId(posted.body);
           if (id !== undefined) conn.writes?.ownPrompts.set(id, promptSeq);
           if (writeUpAt !== undefined) writeUpAt = now();
-        } else writeUpRefused ??= new OpenCodeRequestRefusedError("write-up prompt", answer.status, answer.body);
+        } else windDownFailed ??= new OpenCodeRequestRefusedError("write-up prompt", posted.status, posted.body);
       });
     });
   };
   const turnCount = () => deps.bearers?.grantOf(run.runId)?.turns ?? bridge.turns;
-  /** The session's interrupt, at an ending or at the loop's end over a tool
-   *  call: what is still open when the loop leaves is closed marked `cut`
-   *  (`interruptPosted`); the loop-end cut marks the calls still open once the
-   *  interrupt has landed (`startWriteUp`). Answers the interrupt's landing. */
-  const interrupt = (): Promise<boolean> => {
-    interruptPosted = true;
-    // Measured against the pinned binary: the interrupt answers
-    // `{ interrupted: true }` when an execution was running, `{ interrupted:
-    // false }` on an idle session — a tool that completed on its own during the
-    // interrupt's round-trip leaves nothing to interrupt, and no write-up
-    // execution to post into.
-    return post("the interrupt", sessionRoutes["session.interrupt"]).then((answer) => {
-      if (answer === undefined || answer.status < 200 || answer.status >= 300) return false;
+  /** The session's interrupt, read three ways. At an `ending` — the finale, a
+   *  failure by name, a hard stop, a bypass, a reply left unresolved — the loop
+   *  leaves as it is posted, and the calls still open are closed marked `cut`
+   *  (`interruptPosted`, set at once; the answer decides nothing). At the
+   *  loop-end `cut` over a tool call the answer decides (`startWriteUp`):
+   *  `interrupted` (measured `{ interrupted: true }`: an execution was
+   *  running), `idle` (`{ interrupted: false }`, measured on an idle session:
+   *  a tool that completed during the round-trip left nothing to interrupt),
+   *  or the failure by name — an answer outside 2xx
+   *  (`OpenCodeRequestRefusedError`; the post's own `harness_error` names it
+   *  too), none (the post's transport failed, noted by the post), or a 2xx
+   *  whose body says neither. */
+  const interrupt = (at: "ending" | "cut"): Promise<InterruptAnswer> => {
+    if (at === "ending") interruptPosted = true;
+    return post("the interrupt", sessionRoutes["session.interrupt"]).then((answer): InterruptAnswer => {
+      if (answer === undefined)
+        return { failed: new Error("the interrupt did not reach the server, so the command in flight was not cut") };
+      if (answer.status < 200 || answer.status >= 300)
+        return { failed: new OpenCodeRequestRefusedError("interrupt", answer.status, answer.body) };
+      let interrupted: unknown;
       try {
-        return (JSON.parse(answer.body) as { interrupted?: unknown }).interrupted === true;
+        interrupted = (JSON.parse(answer.body) as { interrupted?: unknown }).interrupted;
       } catch {
-        return false;
+        interrupted = undefined;
       }
+      if (interrupted === true) return "interrupted";
+      if (interrupted === false) return "idle";
+      return {
+        failed: new Error(
+          `the interrupt's answer (${answer.status}) says neither interrupted nor idle: ${redactAndCap(answer.body, 200)}`,
+        ),
+      };
     });
   };
   /** The budgets, the stops, the finale and the silence bound — on every event and every tick. */
@@ -2003,7 +2141,7 @@ export async function driveOpenCode(
       if (ended === undefined) {
         ended = "hard";
         note("stopped", hardStopNote(), "hard");
-        void interrupt();
+        void interrupt("ending");
       }
       return;
     }
@@ -2013,16 +2151,17 @@ export async function driveOpenCode(
       // ends the session, no stop is asked of the control, no `stopped` note.
       if (ended === undefined) {
         ended = "failed";
-        void interrupt();
+        void interrupt("ending");
       }
       return;
     }
-    if (writeUpRefused !== undefined) {
-      // The write-up's queued prompt was refused (the post's `harness_error`
-      // names the answer): the run fails by name now, not at the finale.
+    if (windDownFailed !== undefined) {
+      // A request the wind-down's cut needed — the interrupt, the write-up's
+      // queued prompt — was refused or never answered as one (the post's
+      // `harness_error` names it): the run fails by name now, not at the finale.
       if (ended === undefined) {
         ended = "failed";
-        void interrupt();
+        void interrupt("ending");
       }
       return;
     }
@@ -2049,7 +2188,7 @@ export async function driveOpenCode(
         writeUpFailed ??= reason;
         run.onProgress?.(finaleTimedOutNote());
         note("harness_error", windDownFailureNote(reason));
-        void interrupt();
+        void interrupt("ending");
       }
       return;
     }
@@ -2216,7 +2355,7 @@ export async function driveOpenCode(
       if (failure !== undefined) {
         replyFailed = new OpenCodeReplyFailedError(reply.requestID, reply.callId, reply.reply, failure);
         note("harness_error", `${replyFailed.message} — the run is stopped`);
-        void interrupt();
+        void interrupt("ending");
         return replyFailed;
       }
     }
@@ -2410,7 +2549,7 @@ export async function driveOpenCode(
       if ((await postReplies(obs)) !== undefined) break;
       if (obs.bypass) {
         bypass = obs.bypass;
-        void interrupt();
+        void interrupt("ending");
         break;
       }
       if (bridge.observing === "catching-up") {
@@ -2459,7 +2598,7 @@ export async function driveOpenCode(
         replacedBy ||
         transportLost ||
         refused ||
-        writeUpRefused ||
+        windDownFailed ||
         providerError !== undefined
         ? "error"
         : "ok",
@@ -2489,25 +2628,48 @@ export async function driveOpenCode(
     note("sandbox_restarted", replaced.message);
     throw replaced;
   }
-  // The loop posted an interrupt and left with calls still open on the record
-  // — at an ending (the finale, a failure by name, a hard stop, a bypass: the
-  // loop leaves the moment the interrupt is posted, the aborted settle never
-  // read), or on the write-up's settle after the loop-end cut, the cut tool's
-  // outcome never having landed — and each goes on the record as a failed
-  // result marked `cut`, a call ended and not settled, which the workspace's
-  // release reads as a command that may still be running (harness.md item 13);
-  // the reason says which. A clean settle with no interrupt posted leaves a
-  // straggler — a relayed tool whose settle the loop never read, a part not yet
-  // refilled — unmarked, nothing running, and the release pairs the workspace
-  // for it; the replaced verdict above settled its own, unmarked.
-  if (interruptPosted)
+  // The loop's interrupt was posted at, or landed on, a live execution and the
+  // loop left with calls still open on the record — at an ending (the finale, a
+  // failure by name, a hard stop, a bypass, a reply left unresolved: the loop
+  // leaves the moment the interrupt is posted, the aborted settle never read),
+  // or on the write-up's settle after the loop-end cut, the cut tool's outcome
+  // never having landed — and each goes on the record as a failed result
+  // marked `cut`, a call ended and not settled, which the workspace's release
+  // reads as a command that may still be running (harness.md item 13); the
+  // reason says which path, keyed on what each path set (`loopEndCut`, `ended`,
+  // the bypass, the reply), never on what `ended` happens to be — a bypass and
+  // a reply left unresolved leave it undefined too. A clean settle with no such
+  // interrupt — none posted, or the loop-end one landing on an idle session —
+  // leaves a straggler (a relayed tool whose settle the loop never read, a part
+  // not yet refilled) unmarked, nothing running, and the release pairs the
+  // workspace for it; the replaced verdict above settled its own, unmarked.
+  if (interruptPosted) {
+    const leftOn =
+      ended === "hard"
+        ? "an operator's hard stop"
+        : ended === "failed"
+          ? "a failure by name"
+          : ended === "finale"
+            ? "the write-up's finale"
+            : ended === "silent"
+              ? "the server's silence"
+              : bypass
+                ? "a gate bypass"
+                : replyFailed
+                  ? "a gate reply left unresolved"
+                  : undefined;
     bridge.closeOpenSpans(
       (open) =>
-        ended === undefined
-          ? `${open.tool} was cut at the loop's end and its outcome never reached the record before the write-up settled`
-          : `${open.tool} was still running when the loop left on its interrupt; its outcome never reached the record`,
+        leftOn !== undefined && loopEndCut
+          ? `${open.tool} was cut at the loop's end; the loop then left on its interrupt (${leftOn}) before the call's outcome reached the record`
+          : leftOn !== undefined
+            ? `${open.tool} was still running when the loop left on its interrupt (${leftOn}); its outcome never reached the record`
+            : loopEndCut
+              ? `${open.tool} was cut at the loop's end and its outcome never reached the record before the write-up settled`
+              : `${open.tool} was still running when the loop left on its interrupt; its outcome never reached the record`,
       { cut: true },
     );
+  }
   // The read failed on its transport and the one more command named no
   // replacement: the failure stands, named as the transport error it was —
   // never a crash judgement of the harness's own — and the caller ends the
@@ -2541,14 +2703,14 @@ export async function driveOpenCode(
       boundMs: FIRST_EVENT_BOUND_MS,
     });
     note("harness_error", `${silent.message} — the run is stopped`);
-    void interrupt();
+    void interrupt("ending");
     throw silent;
   }
   const remaining = () => deadline - now();
   // What the next turn on this session inherits: the store as this loop knew it.
   const handOver = () => ({ storeIds: bridge.storeIds() });
   if (ended === "failed" && conn.failure.error !== undefined) throw conn.failure.error;
-  if (ended === "failed" && writeUpRefused !== undefined) throw writeUpRefused;
+  if (ended === "failed" && windDownFailed !== undefined) throw windDownFailed;
   if (ended === "hard") return { answer: HARD_STOP_MESSAGE, remainingMs: remaining, hardStopped: true, ...handOver() };
   if (providerError !== undefined) throw new Error(`the model call failed: ${providerError}`);
   if (!settled && ended !== "finale") throw new Error("the OpenCode run ended before its execution settled");
@@ -2562,6 +2724,9 @@ export async function driveOpenCode(
 
 /** The wind-downs that steer a write-up, and what each labels the answer with. */
 type WriteUp = { kind: "time" } | { kind: "turns"; pace: string } | { kind: "soft" };
+/** The session's interrupt as the loop reads its answer (`interrupt`): landed on a live execution, landed on an
+ *  idle one, or failed — refused, unanswered, or answered as no interrupt does — with the failure the run is named by. */
+type InterruptAnswer = "interrupted" | "idle" | { failed: Error };
 
 function writeUpAnswer(
   writeUp: WriteUp | undefined,
