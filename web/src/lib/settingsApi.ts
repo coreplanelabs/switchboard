@@ -74,5 +74,3 @@ export async function getCommand(
 /** The house classes for a native control: the search form's (SessionSearch.vue). */
 export const INPUT_CLASS =
   "min-w-0 rounded border border-accented bg-default px-2 py-1 text-sm text-highlighted placeholder:text-dimmed disabled:opacity-60";
-export const SELECT_CLASS =
-  "rounded border border-accented bg-default px-2 py-1 font-mono text-xs text-toned disabled:opacity-60";

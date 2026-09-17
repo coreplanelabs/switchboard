@@ -4,7 +4,9 @@ import type { SettingsSeed, SettingsVocabulary } from "@core/channels/webSeed.js
 import type { McpServerView } from "@core/mcp/registry.js";
 import { browser } from "../../lib/browser";
 import { AGENT_HUE, agentHue } from "../../lib/indexRow";
-import { getCommand, INPUT_CLASS, postCommand, SELECT_CLASS, type FetchLike } from "../../lib/settingsApi";
+import ChannelPicker from "../ChannelPicker.vue";
+import SettingSelect from "../SettingSelect.vue";
+import { getCommand, INPUT_CLASS, postCommand, type FetchLike } from "../../lib/settingsApi";
 
 // The MCPs tab: `mcp list` as a table, an add form, a connect link and a
 // remove button — every action one `POST /api/mcp.*` (record 0041). Every
@@ -42,8 +44,25 @@ const form = reactive({
 const channelField = ref(props.mcps.channel ?? "");
 /** The channels the viewer may pick a tier for, by name (`config channels`). */
 const pickable = computed(() => props.mcps.pickable?.channels ?? []);
-const pickerLabel = (c: { channelId: string; channelName?: string; visibility: string }): string =>
-  `${c.channelName ? `#${c.channelName}` : c.channelId}${c.visibility === "private" ? " · private" : ""}`;
+/** The add form's selects as data (Nuxt UI `USelect`). */
+const tierItems = computed(() => [
+  {
+    label: `me — ${linked.value ? `your own runs, as ${props.asUser!.name ?? props.asUser!.id}` : "your own runs from this dashboard"}`,
+    value: "me",
+  },
+  { label: "org — every run; may name coding, review, ship", value: "org" },
+  {
+    label: `channel — ${props.mcps.channel ? openChannelLabel.value : "one channel's runs; pick it below"}`,
+    value: "channel",
+    disabled: !props.mcps.channel && pickable.value.length === 0,
+  },
+]);
+const authItems = [
+  { label: "detect from the server", value: "" },
+  { label: "oauth — sign in on a one-time link", value: "oauth" },
+  { label: "bearer — paste a token on a one-time link", value: "bearer" },
+  { label: "none", value: "none" },
+];
 const busy = ref(false);
 /** The last action's outcome, shown under the form: a connect link, or the handler's refusal as is. */
 const notice = ref<{ kind: "ok" | "error"; text: string; connectUrl?: string } | null>(null);
@@ -128,9 +147,12 @@ const STATE_LABEL: Record<McpServerView["state"], string> = {
 };
 
 /** `?channel=` is part of the page's URL: another channel is another page load. */
-function openChannel(): void {
-  const id = channelField.value.trim();
+function openPicked(id: string): void {
+  if (id === (props.mcps.channel ?? "")) return;
   browser.navigate(id ? `/settings/mcps?channel=${encodeURIComponent(id)}` : "/settings/mcps");
+}
+function openChannel(): void {
+  openPicked(channelField.value.trim());
 }
 
 function toggleAgent(agent: string, on: boolean): void {
@@ -277,46 +299,40 @@ async function probe(s: McpServerView): Promise<void> {
 
     <form class="flex flex-wrap items-center gap-2 text-sm" @submit.prevent="openChannel">
       <label class="text-muted" for="mcp-channel">Channel</label>
-      <select
+      <ChannelPicker
         v-if="pickable.length > 0"
         id="mcp-channel"
-        v-model="channelField"
-        :class="SELECT_CLASS"
-        class="w-64 text-xs"
+        :channels="pickable"
+        :model-value="mcps.channel ?? ''"
+        :extra="mcps.channel"
+        placeholder="Search channels…"
         aria-label="channel whose MCP servers to list"
-      >
-        <option value="">— the org's and your own —</option>
-        <option v-for="c in pickable" :key="c.channelId" :value="c.channelId" :title="c.channelId">
-          {{ pickerLabel(c) }}
-        </option>
-        <option v-if="mcps.channel && !pickable.some((c) => c.channelId === mcps.channel)" :value="mcps.channel">
-          {{ openChannelLabel }} · not in the list
-        </option>
-      </select>
-      <input
-        v-else
-        id="mcp-channel"
-        v-model="channelField"
-        :class="INPUT_CLASS"
-        class="w-56 font-mono text-xs"
-        placeholder="slack:C0123…"
-        aria-label="channel whose MCP servers to list"
+        class="w-72"
+        @update:model-value="openPicked"
       />
-      <UButton type="submit" size="xs" color="neutral" variant="outline">Open</UButton>
+      <template v-else>
+        <input
+          id="mcp-channel"
+          v-model="channelField"
+          :class="INPUT_CLASS"
+          class="w-56 font-mono text-xs"
+          placeholder="slack:C0123…"
+          aria-label="channel whose MCP servers to list"
+        />
+        <UButton type="submit" size="xs" color="neutral" variant="outline">Open</UButton>
+      </template>
+      <UButton
+        v-if="mcps.channel"
+        size="xs"
+        color="neutral"
+        variant="ghost"
+        title="back to the org's and your own"
+        @click="openPicked('')"
+        >Clear</UButton
+      >
       <span class="text-xs text-dimmed" :title="mcps.channel">{{
         mcps.channel ? `Listing the ${openChannelLabel} tier beside the rest.` : "Blank: the org's and your own."
       }}</span>
-      <details v-if="pickable.length > 0" class="basis-full text-xs text-dimmed">
-        <summary class="cursor-pointer">Not listed? Open a channel by its id</summary>
-        <input
-          id="mcp-channel-id"
-          v-model="channelField"
-          :class="INPUT_CLASS"
-          class="mt-1 w-64 font-mono text-xs"
-          placeholder="slack:C0123… or http:ops"
-          aria-label="channel id whose MCP servers to list"
-        />
-      </details>
     </form>
 
     <p v-if="mcps.unavailable" class="unavailable rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-sm">
@@ -497,29 +513,17 @@ async function probe(s: McpServerView): Promise<void> {
           <span class="text-xs text-dimmed">The server's Streamable-HTTP endpoint.</span>
         </div>
         <label class="text-sm text-muted sm:pt-1" for="mcp-scope">Tier</label>
-        <select id="mcp-scope" v-model="form.scope" :class="SELECT_CLASS" class="sm:max-w-md">
-          <option value="me">
-            me — {{ linked ? `your own runs, as ${asUser!.name ?? asUser!.id}` : "your own runs from this dashboard" }}
-          </option>
-          <option value="org">org — every run; may name coding, review, ship</option>
-          <option value="channel" :disabled="!mcps.channel && pickable.length === 0">
-            channel — {{ mcps.channel ? openChannelLabel : "one channel's runs; pick it below" }}
-          </option>
-        </select>
+        <SettingSelect id="mcp-scope" v-model="form.scope" :items="tierItems" class="sm:max-w-md" />
         <template v-if="form.scope === 'channel' && !mcps.channel">
           <span class="text-sm text-muted sm:pt-1">Channel</span>
-          <select
+          <ChannelPicker
             id="mcp-add-channel"
             v-model="form.channel"
-            :class="SELECT_CLASS"
-            class="sm:max-w-md"
+            :channels="pickable"
+            placeholder="Search channels…"
             aria-label="channel the server belongs to"
-          >
-            <option value="" disabled>Pick a channel…</option>
-            <option v-for="c in pickable" :key="c.channelId" :value="c.channelId" :title="c.channelId">
-              {{ pickerLabel(c) }}
-            </option>
-          </select>
+            class="sm:max-w-md"
+          />
         </template>
         <span class="text-sm text-muted sm:pt-1">Agents</span>
         <div class="flex flex-wrap gap-x-4 gap-y-1.5 pt-1 text-sm">
@@ -535,12 +539,7 @@ async function probe(s: McpServerView): Promise<void> {
           </label>
         </div>
         <label class="text-sm text-muted sm:pt-1" for="mcp-auth">Auth</label>
-        <select id="mcp-auth" v-model="form.auth" :class="SELECT_CLASS" class="sm:max-w-md" :disabled="!canAdd">
-          <option value="">detect from the server</option>
-          <option value="oauth">oauth — sign in on a one-time link</option>
-          <option value="bearer">bearer — paste a token on a one-time link</option>
-          <option value="none">none</option>
-        </select>
+        <SettingSelect id="mcp-auth" v-model="form.auth" :items="authItems" class="sm:max-w-md" :disabled="!canAdd" />
         <span class="hidden sm:block"></span>
         <div class="flex flex-wrap items-center gap-3">
           <UButton type="submit" size="sm" color="neutral" :disabled="!canAdd || busy">Add</UButton>

@@ -6,7 +6,7 @@ import McpServersPanel from "../components/settings/McpServersPanel.vue";
 import { settingsTabs } from "../lib/settingsTabs";
 import { browser } from "../lib/browser";
 import SettingsPage from "./SettingsPage.vue";
-import { ALL_ON, mountApp } from "../testing/mount";
+import { ALL_ON, mountApp, pickSelect, selectDisabled, selectItem, selectValue } from "../testing/mount";
 
 // Feature: docs/reference/specs/settings-page.md items 5–8 — the settings page
 // paints one tab per seed, offers MCPs only where the capability is on, and
@@ -167,7 +167,7 @@ describe("McpServersPanel", () => {
     const wrapper = mountApp(McpServersPanel, {
       props: { mcps: mcps({ channel: undefined }), vocabulary: VOCABULARY, viewer: "access:me", fetch: fetchFn },
     });
-    await wrapper.find("#mcp-scope").setValue("org");
+    await pickSelect(wrapper, "#mcp-scope", "org");
     await wrapper.find("#mcp-name").setValue("vanta");
     await wrapper.find("#mcp-url").setValue("https://mcp.vanta.example/mcp");
     await wrapper.find('input[name="agent-coding"]').setValue(true);
@@ -197,7 +197,7 @@ describe("McpServersPanel", () => {
     });
     await wrapper.find("#mcp-name").setValue("notion2");
     await wrapper.find("#mcp-url").setValue("https://mcp.notion.example/mcp");
-    await wrapper.find("#mcp-scope").setValue("channel");
+    await pickSelect(wrapper, "#mcp-scope", "channel");
     await wrapper.find("form.add").trigger("submit");
     await flush();
     expect(calls[0].body).toMatchObject({ scope: "channel", channel: "slack:C1" });
@@ -214,9 +214,9 @@ describe("McpServersPanel", () => {
     });
     expect(wrapper.findAll("tr.server")).toHaveLength(2);
     // `me` is every session's own to write: the form opens on it, enabled.
-    expect((wrapper.find("#mcp-scope").element as HTMLSelectElement).value).toBe("me");
+    expect(selectValue(wrapper, "#mcp-scope")).toBe("me");
     expect((wrapper.find("#mcp-name").element as HTMLInputElement).disabled).toBe(false);
-    await wrapper.find("#mcp-scope").setValue("org");
+    await pickSelect(wrapper, "#mcp-scope", "org");
     expect((wrapper.find("#mcp-name").element as HTMLInputElement).disabled).toBe(true);
     expect(wrapper.find("span.restricted").text()).toContain("admins");
     expect(wrapper.findAll("tr.server button").filter((b) => (b.element as HTMLButtonElement).disabled)).toHaveLength(
@@ -504,11 +504,11 @@ describe("ChannelsPanel", () => {
       },
     });
     expect(wrapper.find(".effective").text()).toContain("review");
-    expect((wrapper.find("#ch-agent").element as HTMLSelectElement).value).toBe("review");
+    expect(selectValue(wrapper, "#ch-agent")).toBe("review");
     expect((wrapper.find("#ch-minutes").element as HTMLInputElement).value).toBe("45");
     expect((wrapper.find("#ch-instructions").element as HTMLTextAreaElement).value).toBe("Be brief.");
     await wrapper.find('input[name="models.coding"]').setValue("anthropic/claude-opus-5");
-    await wrapper.find("#ch-identity").setValue("read");
+    await pickSelect(wrapper, "#ch-identity", "read");
     await wrapper.find("form.agent-form").trigger("submit");
     await flush();
     expect(calls[0].url).toBe("/api/config.set");
@@ -558,8 +558,10 @@ describe("ChannelsPanel", () => {
       },
     });
     expect(readOnly.find("p.restricted").text()).toContain("Ask an admin.");
-    for (const el of readOnly.findAll("form.agent-form input, form.agent-form select, form.agent-form button"))
+    for (const el of readOnly.findAll("form.agent-form input, form.agent-form button"))
       expect((el.element as HTMLInputElement).disabled).toBe(true);
+    // The styled selects are buttons too, disabled through their prop: every one of them.
+    for (const id of ["#ch-agent", "#ch-effort", "#ch-identity"]) expect(selectDisabled(readOnly, id), id).toBe(true);
     const refused = mountApp(ChannelsPanel, {
       props: {
         channels: channels({
@@ -626,7 +628,7 @@ describe("McpServersPanel for a linked session (record 0042)", () => {
         fetch: fetchFn,
       },
     });
-    expect((wrapper.find("#mcp-scope").element as HTMLSelectElement).value).toBe("me");
+    expect(selectValue(wrapper, "#mcp-scope")).toBe("me");
     const mine = wrapper.findAll("tr.server")[1];
     expect(mine.find("td.addedby").text()).toBe("you");
     expect(mine.findAll("button").filter((b) => (b.element as HTMLButtonElement).disabled)).toHaveLength(0);
@@ -653,10 +655,10 @@ describe("McpServersPanel for a linked session (record 0042)", () => {
         fetch: fetchFn,
       },
     });
-    expect((wrapper.find("#mcp-scope").element as HTMLSelectElement).value).toBe("me");
-    const option = wrapper.find('#mcp-scope option[value="me"]');
-    expect((option.element as HTMLOptionElement).disabled).toBe(false);
-    expect(option.text()).toContain("your own runs from this dashboard");
+    expect(selectValue(wrapper, "#mcp-scope")).toBe("me");
+    const option = selectItem(wrapper, "#mcp-scope", "me");
+    expect(option.disabled ?? false).toBe(false);
+    expect(option.label).toContain("your own runs from this dashboard");
     const [, theirs, own] = wrapper.findAll("tr.server");
     expect(theirs.find("td.addedby").text()).not.toBe("you");
     expect(theirs.findAll("button").filter((b) => (b.element as HTMLButtonElement).disabled).length).toBeGreaterThan(0);
