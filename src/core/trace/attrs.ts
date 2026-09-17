@@ -8,7 +8,7 @@
  *  field. */
 
 export type Backend = "local" | "resident" | "sandbox" | "e2b";
-export type Channel = "slack" | "http" | "mcp" | "cli";
+export type Channel = "slack" | "http" | "mcp" | "cli" | "web";
 
 /** Every attribute key any span may carry, with its value domain. */
 export interface AttrDomain {

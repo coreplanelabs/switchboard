@@ -365,9 +365,11 @@ onMounted(() => {
     // stamp (docs/reference/specs/tracing.md), the stream stays open for the span
     // records until `end`; nothing runs, the actions go, the reply is on its way.
     onFinished: (frame) => {
+      // The actions go whether or not the frame parsed: the run is over either way.
+      actionsHidden.value = true;
+      if (!frame) return;
       if (runClock) frozenMs.value = runClock.elapsedAt(frame.finishedAt);
       liveStamps.value = { ...liveStamps.value, finishedAt: frame.finishedAt };
-      actionsHidden.value = true;
     },
     onEnd: (frame) => {
       actionsHidden.value = true;
@@ -901,6 +903,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
              command needs nothing here: its card ticks. -->
         <PendingTurnRow
           v-if="waiting?.kind === 'thinking'"
+          id="thinking"
           class="ml-3.5 mt-5 first:mt-0"
           :verb="verb"
           :elapsed-ms="waiting.elapsedMs"

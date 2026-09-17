@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ALL_GRANTS,
-  browserReadActions,
+  browserActions,
   CHAT_OPEN_ACTIONS,
   covers,
   grantsFor,
@@ -23,7 +23,7 @@ import { NO_GRANTS, type Grants } from "./types.js";
 // native `grants` block (what an actor holds) and `restrict` (which agents and
 // repos are closed unless granted). Baselines are what a namespace holds
 // unlisted: a Slack user the open chat commands and every unrestricted agent, a
-// browser session every group's read; a credential holds exactly its entry.
+// browser session every group's read plus the two personal chat writes; a credential holds exactly its entry.
 
 const set = (...names: string[]) => new Set(names);
 const grants = (g: Partial<Grants>): Grants => ({ actions: set(), channels: set(), repos: set(), ...g });
@@ -143,19 +143,19 @@ describe("parseRestrictConfig — what is closed unless granted", () => {
 describe("the baselines — what an id holds by its namespace, listed or not", () => {
   const table = {
     everyone: grants({ actions: set(...CHAT_OPEN_ACTIONS) }),
-    browserReads: grants({ actions: browserReadActions(["runs", "friction"]) }),
+    browser: grants({ actions: browserActions(["runs", "friction"]) }),
   };
 
-  it("slack: → everyone; access:<sub> → every group's read; access:svc:, http:, mcp:, schedule:, cli: → nothing", () => {
+  it("slack: → everyone; access:<sub> → the browser baseline; access:svc:, http:, mcp:, schedule:, cli: → nothing", () => {
     expect(namespaceBaseline("slack:UALICE", table)).toBe(table.everyone);
-    expect(namespaceBaseline("access:alice", table)).toBe(table.browserReads);
+    expect(namespaceBaseline("access:alice", table)).toBe(table.browser);
     for (const id of ["access:svc:ci", "http:ci", "mcp:ci", "schedule:x", "cli:local"])
       expect(namespaceBaseline(id, table), id).toBe(NO_GRANTS);
   });
 
-  it("browserReadActions is every `<group>:read`, never a write or an exec; no groups → nothing", () => {
-    expect(browserReadActions(["runs", "repo"])).toEqual(set("runs:read", "repo:read"));
-    expect(browserReadActions([])).toEqual(set());
+  it("browserActions is every `<group>:read` plus the two personal chat writes (record 0043), never another write or an exec; no groups → nothing (fail-closed)", () => {
+    expect(browserActions(["runs", "repo"])).toEqual(set("runs:read", "repo:read", "memory:write", "mcp:write"));
+    expect(browserActions([])).toEqual(set());
   });
 
   it("everyone = the open chat commands + agent:run for every UNRESTRICTED agent; config:write is never a baseline", () => {
@@ -173,7 +173,7 @@ describe("the baselines — what an id holds by its namespace, listed or not", (
 });
 
 describe("grantsTable / grantsIn / grantsFor — the lookup", () => {
-  it("a slack: entry ADDS to the everyone baseline (a grant never takes the open commands away); a browser entry adds to its reads; a credential holds exactly its entry; an unlisted credential NO_GRANTS", () => {
+  it("a slack: entry ADDS to the everyone baseline (a grant never takes the open commands away); a browser entry adds to its baseline; a credential holds exactly its entry; an unlisted credential NO_GRANTS", () => {
     const source = {
       grants: parsed({
         "slack:UMGR": { actions: ["repo:write"] },
@@ -191,9 +191,14 @@ describe("grantsTable / grantsIn / grantsFor — the lookup", () => {
       grants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general") }),
     );
     expect(grantsFor("access:bob", source)).toEqual(
-      grants({ actions: set("runs:write", "runs:read", "repo:read"), channels: set("slack:G1") }),
+      grants({
+        actions: set("runs:write", "runs:read", "repo:read", "memory:write", "mcp:write"),
+        channels: set("slack:G1"),
+      }),
     );
-    expect(grantsFor("access:stranger", source)).toEqual(grants({ actions: set("runs:read", "repo:read") }));
+    expect(grantsFor("access:stranger", source)).toEqual(
+      grants({ actions: set("runs:read", "repo:read", "memory:write", "mcp:write") }),
+    );
     expect(grantsFor("access:svc:ops", source)).toEqual(grants({ actions: set("runs:read"), channels: "all" }));
     expect(grantsFor("http:ci", source)).toEqual(grants({ actions: set("dispatch") }));
     for (const id of ["http:stranger", "mcp:ci", "access:svc:stranger", "schedule:x"])
@@ -250,7 +255,7 @@ describe("surface entries — what every actor authenticated on a surface holds"
       grants({ actions: set(...CHAT_OPEN_ACTIONS, "agent:run:general", "runs:read"), channels: set("slack:C1") }),
     );
     expect(grantsFor("access:anyone", source)).toEqual(
-      grants({ actions: set("runs:read", "runs:write"), channels: "all" }),
+      grants({ actions: set("runs:read", "memory:write", "mcp:write", "runs:write"), channels: "all" }),
     );
     expect(grantsFor("http:anyone", source)).toEqual(grants({ actions: set("dispatch") }));
     // A service token is a named credential: `access:*` is browser sessions only.

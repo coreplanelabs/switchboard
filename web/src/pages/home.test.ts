@@ -40,9 +40,23 @@ const seed = (over: Partial<HomeSeed> = {}): HomeSeed => ({
   conversation: "conv-1",
   turns: [],
   conversations: [
-    { id: "conv-1", title: "review PR 1391", lastAt: NOW - 466_000, runs: 1, live: false },
-    { id: "conv-2", title: "what changed in the last deploy?", lastAt: NOW - 86_400_000, runs: 2, live: true },
-    { id: "conv-3", title: "bump the SDK", lastAt: NOW - 30 * 86_400_000, runs: 1, live: false },
+    { id: "conv-1", title: "review PR 1391", lastAt: NOW - 466_000, runs: 1, live: false, surface: "web" },
+    {
+      id: "conv-2",
+      title: "what changed in the last deploy?",
+      lastAt: NOW - 86_400_000,
+      runs: 2,
+      live: true,
+      surface: "web",
+    },
+    {
+      id: "slack:C1:1712.34",
+      title: "bump the SDK",
+      lastAt: NOW - 30 * 86_400_000,
+      runs: 1,
+      live: false,
+      surface: "slack",
+    },
   ],
   viewer: { name: "alice" },
   sendUrl: "/threads/conv-1/send",
@@ -140,10 +154,17 @@ describe("HomePage — the empty state (rules 6, 7)", () => {
     expect(cta.text()).toContain("New thread");
     expect(cta.findAll("kbd").map((k) => k.text())).toEqual(["⇧", "⌘", "O"]);
     const rows = wrapper.findAll("aside nav.rail a.row");
-    expect(rows.map((r) => r.attributes("href"))).toEqual(["/threads/conv-1", "/threads/conv-2", "/threads/conv-3"]);
+    expect(rows.map((r) => r.attributes("href"))).toEqual([
+      "/threads/conv-1",
+      "/threads/conv-2",
+      "/threads/slack%3AC1%3A1712.34",
+    ]);
     expect(rows[0].attributes("aria-current")).toBe("page");
     expect(rows[0].find(".bar").exists()).toBe(true);
     expect(rows[1].find(".dot").exists()).toBe(true);
+    // A thread from another channel wears its surface's word label; a web conversation wears none.
+    expect(rows.map((r) => r.find(".surface").exists())).toEqual([false, false, true]);
+    expect(rows[2].find(".surface").text()).toBe("slack");
     expect(wrapper.find("aside [data-testid=all-runs]").attributes("href")).toBe("/runs");
     expect(wrapper.find("aside p.retention").text()).toMatch(/30 days/);
     expect(wrapper.find("aside p.label").text()).toBe("Recent");
@@ -252,6 +273,21 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     expect(created.map((es) => es.url)).toEqual(["/runs/r-9/events?t=tok9"]);
     // One control, two states: the box is empty and a run is live → stop.
     expect(wrapper.find("form.composer").attributes("data-mode")).toBe("stop");
+  });
+
+  it("the first send from /threads rewrites the address to the conversation's own URL, without a load; from /threads/<id> nothing moves", async () => {
+    fakeFetch({ status: 202, body: { runId: "r-9", viewPath: "/runs/r-9?t=tok9" } });
+    const { factory } = fakeEventSourceFactory();
+    vi.spyOn(browser, "pathname").mockReturnValue("/threads");
+    const replaceUrl = vi.spyOn(browser, "replaceUrl").mockImplementation(() => {});
+    const wrapper = mountApp(HomePage, { seed: seed({ conversation: "fresh-1" }), eventSource: factory });
+    await send(wrapper, "review PR 1391");
+    expect(replaceUrl).toHaveBeenCalledWith("/threads/fresh-1");
+    replaceUrl.mockClear();
+    vi.spyOn(browser, "pathname").mockReturnValue("/threads/fresh-1");
+    const again = mountApp(HomePage, { seed: seed({ conversation: "fresh-1" }), eventSource: factory });
+    await send(again, "and the tests?");
+    expect(replaceUrl).not.toHaveBeenCalled();
   });
 
   it("Shift+Enter breaks a line and sends nothing", async () => {
@@ -399,6 +435,38 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     await send(wrapper, "hello");
     expect(wrapper.find(".turn.person .failed").text()).toBe("not sent: boom");
     expect(wrapper.find("form.composer").attributes("data-mode")).toBe("send");
+  });
+});
+
+describe("HomePage — a thread from another channel (item 7)", () => {
+  it("opens read-only: the turns draw, no composer, a line names the channel and links to the thread", () => {
+    const wrapper = mountApp(HomePage, {
+      seed: seed({
+        conversation: "slack:C1:1712.34",
+        turns: [finished()],
+        elsewhere: { surface: "slack", url: "https://slack.example/archives/C1/p171234" },
+      }),
+    });
+    expect(wrapper.findAll(".turn.assistant")).toHaveLength(1);
+    expect(wrapper.find("form.composer").exists()).toBe(false);
+    const note = wrapper.find("[data-testid=elsewhere]");
+    expect(note.text()).toContain("This thread lives in Slack.");
+    expect(note.find("a").attributes("href")).toBe("https://slack.example/archives/C1/p171234");
+  });
+
+  it("without a link the line still says where to reply; another person's web lane is named as theirs, with nowhere to reply", () => {
+    const wrapper = mountApp(HomePage, {
+      seed: seed({ conversation: "http:ops:default", turns: [finished()], elsewhere: { surface: "http" } }),
+    });
+    const note = wrapper.find("[data-testid=elsewhere]");
+    expect(note.text()).toBe("This thread lives in HTTP ingress. Reply there.");
+    expect(note.find("a").exists()).toBe(false);
+    const theirs = mountApp(HomePage, {
+      seed: seed({ conversation: "web:b2:conv-9", turns: [finished()], elsewhere: { surface: "web" } }),
+    });
+    expect(theirs.find("[data-testid=elsewhere]").text()).toBe(
+      "This thread is another person's conversation. You can read it here.",
+    );
   });
 });
 

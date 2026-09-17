@@ -12,6 +12,8 @@ describe("visibilityOf — the static id mapping", () => {
     expect(visibilityOf("http:cron")).toBe("machine");
     expect(visibilityOf("mcp:alice")).toBe("machine");
     expect(visibilityOf("slack:D0123ABC")).toBe("dm");
+    // The web chat's lane is one person's (record 0043): a DM by construction.
+    expect(visibilityOf("web:a1")).toBe("dm");
     expect(visibilityOf("slack:G0123ABC")).toBe("private");
   });
 

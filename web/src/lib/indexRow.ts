@@ -130,7 +130,13 @@ export function surfaceOf(run: IndexRow): { kind: string; identity: string } {
 /** The surface's name in words, for tooltips and menu labels. The row itself
  *  labels a surface with the channel id's own prefix word (`slack`, `http`,
  *  `mcp`, `cli`) — a text label, never a glyph a reader would need a legend for. */
-export const SURFACE_NAME: Record<string, string> = { slack: "Slack", http: "HTTP ingress", mcp: "MCP", cli: "CLI" };
+export const SURFACE_NAME: Record<string, string> = {
+  slack: "Slack",
+  http: "HTTP ingress",
+  mcp: "MCP",
+  cli: "CLI",
+  web: "Web",
+};
 
 /** The dot's tooltip: a live run's latest activity (or "starting…"); a
  *  finished run's outcome, duration, and — when it did not complete — what it

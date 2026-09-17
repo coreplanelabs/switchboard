@@ -172,28 +172,38 @@ export type HomeTurnSeed = Omit<RunView, "route"> & {
   route?: { preset: string; reason: string };
 };
 
-/** One row of the rail: a conversation is the runs of one `web:` thread. */
+/** One row of the rail: a thread of the viewer's, on any channel (record 0043,
+ *  amended): a `web:` conversation by its id, any other thread by its full key. */
 export interface HomeConversationRowSeed {
+  /** What `/threads/<id>` takes: the conversation id of the viewer's own `web:`
+   *  thread, else the thread key itself (`slack:C…:1712.34`). */
   id: string;
   /** The first request's first line, cut to 60 characters. */
   title: string;
   lastAt: number;
   runs: number;
   live: boolean;
+  /** The channel's platform (`web`, `slack`, `http`, …): the rail marks a thread
+   *  from another surface with its glyph; absent on the fixtures' plain rows. */
+  surface?: string;
 }
 
-/** The home page (`/`, `/c/<conversation>`): the open conversation's turns,
- *  the viewer's other conversations, and what the empty state and the composer
+/** The home page (`/threads`, `/threads/<conversation>`): the open thread's turns,
+ *  the viewer's other threads, and what the empty state and the composer
  *  are grounded in — every list derived from data the bot already holds. */
 export interface HomeSeed {
   page: "home";
-  /** The open conversation's id (a fresh one on `/`). */
+  /** The open conversation's id (a fresh one on `/threads`). */
   conversation: string;
   turns: HomeTurnSeed[];
   conversations: HomeConversationRowSeed[];
   viewer: { name: string };
-  /** Where the composer POSTs (`/c/<conversation>/send`). */
+  /** Where the composer POSTs (`/threads/<conversation>/send`). */
   sendUrl: string;
+  /** Set when the open thread lives on another channel (a Slack thread the
+   *  viewer requested runs in): the page offers no composer — a reply belongs
+   *  where the thread is. `url` is the thread's own link when a run recorded one. */
+  elsewhere?: { surface: string; url?: string };
   /** The server clock when the seed was built (relative times, the greeting). */
   now: number;
   retentionDays: number | null;

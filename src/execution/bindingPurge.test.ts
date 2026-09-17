@@ -32,7 +32,7 @@ describe("selectBindingsToPurge", () => {
   });
 
   it("refuses the production namespaces outright — a purge is for synthetic keys only", () => {
-    for (const prefix of ["slack:", "slack:C1:", "http:", "mcp:", "cli:"]) {
+    for (const prefix of ["slack:", "slack:C1:", "http:", "mcp:", "cli:", "web:"]) {
       const d = selectBindingsToPurge([b(`${prefix}x`, true)], prefix);
       expect(d.ok).toBe(false);
       expect(!d.ok && d.error).toMatch(/production namespace/);

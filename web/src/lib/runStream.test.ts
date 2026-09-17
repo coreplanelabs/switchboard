@@ -51,6 +51,9 @@ describe("attachRunStream", () => {
     es.emitNamed("finished", JSON.stringify({ finishedAt: 1_700_000_000_000 }));
     expect(stream.phase.value).toBe("finished");
     expect(onFinished).toHaveBeenCalledWith({ finishedAt: 1_700_000_000_000 });
+    // A finished frame that does not parse still finished the run: the hook fires with null.
+    es.emitNamed("finished", "not json");
+    expect(onFinished).toHaveBeenLastCalledWith(null);
     es.emitNamed("end", JSON.stringify({ sealedAt: 1_700_000_001_000, replyOk: true }));
     expect(stream.phase.value).toBe("ended");
     expect(m.flushPendingTurn).toHaveBeenCalledWith("the run ended here");

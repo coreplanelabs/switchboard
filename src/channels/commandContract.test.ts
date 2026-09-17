@@ -202,7 +202,7 @@ function fakeReqRes(method: string, url: string, headers: IncomingHttpHeaders = 
   };
 }
 
-/** An unlisted Access browser session holds every group's read (its baseline). */
+/** An unlisted Access browser session holds its baseline: every group's read and the two personal chat writes. */
 const BROWSER_GRANTS = { commandGroups: coreCommandGroups() };
 
 const httpRow: AdapterRow = {

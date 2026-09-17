@@ -100,6 +100,11 @@ const CHAT_SURFACES: Readonly<Record<string, ActorSurface>> = {
   mcp: "mcp",
   cli: "cli",
   schedule: "schedule",
+  // The web chat (record 0043): a browser session speaks as text, so its
+  // `access:<sub>` is a chat credential too — the browser actor, its baseline
+  // and its entry. A service token never reaches the chat (the dashboard gate
+  // serves it `/api/*` only), so `access:svc:` is no chat surface.
+  access: "access-browser",
 };
 
 /** A chat message's `userId` is already namespaced by its adapter (`slack:U…`,

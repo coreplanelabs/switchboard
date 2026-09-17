@@ -62,10 +62,20 @@ export const CHAT_OPEN_ACTIONS: readonly string[] = [
   "mcp:write",
 ];
 
-/** What an Access browser session holds implicitly: every registered
- *  group's read — never a write, never an exec. */
-export function browserReadActions(commandGroups: readonly string[]): Set<string> {
-  return new Set(commandGroups.map((g) => `${g}:read`));
+/** The two writes a browser session holds beside its reads (record 0043): the
+ *  same personal writes every Slack user holds (`CHAT_OPEN_ACTIONS`), because
+ *  the web chat makes a browser session a chat user — `memory remember` and
+ *  `mcp add` for its own tier. The tier rows still decide the target: a shared
+ *  tier needs the grant it always needed. */
+export const BROWSER_WRITE_ACTIONS: readonly string[] = ["memory:write", "mcp:write"];
+
+/** What an Access browser session holds implicitly: every registered group's
+ *  read plus the two personal chat writes — never another write, never an exec.
+ *  No groups known (a process that registered no commands) → nothing at all,
+ *  fail-closed: the writes ride with the catalogue they belong to. */
+export function browserActions(commandGroups: readonly string[]): Set<string> {
+  if (commandGroups.length === 0) return new Set();
+  return new Set([...commandGroups.map((g) => `${g}:read`), ...BROWSER_WRITE_ACTIONS]);
 }
 
 // ---- the native `grants` block ----------------------------------------------
@@ -243,8 +253,9 @@ export interface GrantsTable {
   surfaces: Map<string, Grants>;
   /** What every `slack:` user holds, listed or not: the open chat commands and `agent:run:<name>` for every unrestricted agent. */
   everyone: Grants;
-  /** What every Access browser session (`access:<sub>`, never `access:svc:`) holds: each registered group's read. */
-  browserReads: Grants;
+  /** What every Access browser session (`access:<sub>`, never `access:svc:`) holds:
+   *  each registered group's read and the two personal chat writes. */
+  browser: Grants;
   restrict: Restriction;
 }
 
@@ -253,9 +264,9 @@ export interface GrantsTable {
  *  `<group>:read`. Every other namespace (`schedule:`, `access:svc:`, `http:`,
  *  `mcp:`) is a credential or a job that holds exactly what names it — an
  *  unlisted one is `NO_GRANTS` (fail-closed). */
-export function namespaceBaseline(actorId: string, table: Pick<GrantsTable, "everyone" | "browserReads">): Grants {
+export function namespaceBaseline(actorId: string, table: Pick<GrantsTable, "everyone" | "browser">): Grants {
   if (actorId.startsWith("slack:")) return table.everyone;
-  if (actorId.startsWith("access:") && !actorId.startsWith("access:svc:")) return table.browserReads;
+  if (actorId.startsWith("access:") && !actorId.startsWith("access:svc:")) return table.browser;
   return NO_GRANTS;
 }
 
@@ -271,7 +282,7 @@ export function grantsTable(source: GrantsSource): GrantsTable {
   const openAgents = (source.agentNames ?? []).filter((a) => !restrict.agents.has(a)).map(agentRunAction);
   const baselines = {
     everyone: { ...NO_GRANTS, actions: new Set([...CHAT_OPEN_ACTIONS, ...openAgents]) },
-    browserReads: { ...NO_GRANTS, actions: browserReadActions(source.commandGroups ?? []) },
+    browser: { ...NO_GRANTS, actions: browserActions(source.commandGroups ?? []) },
   };
   const grants = new Map<string, Grants>();
   const surfaces = new Map<string, Grants>();

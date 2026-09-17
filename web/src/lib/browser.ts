@@ -8,6 +8,15 @@ export const browser = {
   reload(): void {
     window.location.reload();
   },
+  /** The current address, path only (what a page compares its seed against). */
+  pathname(): string {
+    return window.location.pathname;
+  },
+  /** Rewrite the address without a load or a history entry: a fresh
+   *  conversation takes its own URL once it exists on the server. */
+  replaceUrl(href: string): void {
+    window.history.replaceState(window.history.state, "", href);
+  },
   confirm(message: string): boolean {
     return window.confirm(message);
   },

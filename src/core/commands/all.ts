@@ -64,7 +64,7 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
 }
 
 /** The `<group>` of every registered command's action, once each, sorted — the
- *  vocabulary an Access browser session's baseline reads (every `<group>:read`)
+ *  vocabulary an Access browser session's baseline reads (every `<group>:read`, beside its two chat writes)
  *  are spelled in (`src/core/authz/grants.ts`). Derived from the catalogue so a
  *  new group is covered automatically; handed to `ConfigStore` at startup
  *  because `config.ts` cannot import the catalogue (the config commands import it). */

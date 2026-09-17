@@ -16,6 +16,7 @@ import { loadWebAssets, webDistDir } from "./channels/webAssets.js";
 import { PACKAGE_ROOT, packageVersion } from "./packageRoot.js";
 import { makeShellRenderer } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
+import { createWebChatHandler } from "./channels/web.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
 import { createDeliveryViewHandler } from "./channels/deliveryView.js";
 import { createSettingsViewHandler } from "./channels/settingsView.js";
@@ -164,7 +165,7 @@ export async function runBot(): Promise<void> {
   // Runtime overrides (`config set …`) live where `runtimeOverrides.worker`
   // says — the state Worker's ConfigDO in prod, so a container restart keeps
   // them (docs/reference/specs/routing-and-config.md item 12); the JSON file otherwise.
-  // The command groups are what an Access browser session's implicit reads span.
+  // The command groups are what an Access browser session's baseline reads span.
   const config = await openConfigStore(CONFIG_PATH, {
     overridesPath: OVERRIDES_PATH,
     env: publicEnv(),
@@ -719,6 +720,25 @@ export async function runBot(): Promise<void> {
       },
       shell,
     );
+    // The web chat (record 0043, docs/reference/specs/web-chat.md): channel
+    // adapter #5 at `/threads`. `POST /threads/<id>/send` dispatches the body as
+    // the gate's actor into the same `dispatch()` every channel calls; the
+    // pages seed from the runs service under the viewer's predicate; the
+    // palette is the chat catalogue the viewer may run. Access-gated below with
+    // every other section — the send route starts runs as the session.
+    const webChat = createWebChatHandler({
+      core: deps,
+      service: runsService,
+      registry: defaultRunRegistry,
+      commands,
+      shell,
+      capabilities,
+      retention:
+        capabilities.runHistory && runHistoryCfg
+          ? { retentionDays: retentionPolicyOf(runHistoryCfg).retentionDays }
+          : null,
+      publicBaseUrl: process.env.PUBLIC_BASE_URL,
+    });
     const deliveryState = !capabilities.github
       ? "GET /delivery (503 — no GitHub credential)"
       : deliveryService.repos().length === 0
@@ -730,7 +750,8 @@ export async function runBot(): Promise<void> {
       : "GET /runs (index) + live view (no PUBLIC_BASE_URL — per-run links omitted)";
 
     // Everything the dashboard serves — /runs*, /residents*, /costs*,
-    // /mcp/connect/* and /api/* — sits behind ONE identity gate, the dashboard
+    // /delivery*, /settings*, /threads*, /mcp/connect/* and /api/* — sits
+    // behind ONE identity gate, the dashboard
     // auth strategy composed below (`dashboardAuth`). Under `access` the edge
     // rule injects a signed RS256 JWT in `Cf-Access-Jwt-Assertion` and we
     // re-verify it here, fail-closed — even if the edge rule is ever
@@ -912,7 +933,9 @@ export async function runBot(): Promise<void> {
         path === "/delivery.json" ||
         path.startsWith("/delivery/") ||
         path === "/settings" ||
-        path.startsWith("/settings/")
+        path.startsWith("/settings/") ||
+        path === "/threads" ||
+        path.startsWith("/threads/")
       ) {
         dashboardAuth
           .verify(req)
@@ -941,6 +964,8 @@ export async function runBot(): Promise<void> {
               personByEmail,
             });
             if (liveView(req, res, { actor })) return;
+            // --- /threads*: the web chat, the actor's own runs and lane (record 0043). ---
+            if (webChat(req, res, { actor, identity: gate.identity })) return;
             // --- /mcp/connect/<nonce>: the credential page, identity-bound. ---
             if (mcpConnectView(req, res, gate.identity)) return;
             if (residentsView(req, res, { actor })) return;
@@ -957,13 +982,14 @@ export async function runBot(): Promise<void> {
           });
         return;
       }
-      // Root → dashboard. `/` is NOT Access-gated (only /runs* is), so this 302
-      // is public — but it leaks nothing (just "go to /runs"), and /runs itself
-      // stays behind Cloudflare Access. This fixes the bare-domain landing (was
-      // a plain "ok"). It is an EXACT-path match, so /healthz and everything
-      // else still fall through to the probes below.
+      // Root → the chat (record 0043, amended). `/` is NOT Access-gated — the
+      // Access application lists path prefixes, and `/` would cover the bearer
+      // routes (`POST /mcp`, `/ingress`) — so this 302 is public; it leaks
+      // nothing (just "go to /threads"), and /threads itself stays behind the
+      // gate. An EXACT-path match, so /healthz and everything else still fall
+      // through to the probes below.
       if (path === "/") {
-        res.writeHead(302, { location: "/runs" });
+        res.writeHead(302, { location: "/threads" });
         res.end();
         return;
       }
@@ -1023,7 +1049,7 @@ export async function runBot(): Promise<void> {
       // (~seconds) for an external prober to land inside the window itself.
       httpListeningAt = systemClock();
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + model proxy (POST ${ANTHROPIC_MESSAGES_PATH}, POST ${OPENAI_CHAT_COMPLETIONS_PATH}) + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${deliveryState} + GET /settings + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + model proxy (POST ${ANTHROPIC_MESSAGES_PATH}, POST ${OPENAI_CHAT_COMPLETIONS_PATH}) + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${deliveryState} + GET /settings + GET /threads (+ POST /threads/<id>/send) + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       );
     });

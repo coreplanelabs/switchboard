@@ -1,0 +1,537 @@
+import { randomBytes } from "node:crypto";
+import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import { allOf, authorize, ownedBy, type Actor } from "../core/authz/index.js";
+import type { Capabilities } from "../core/capabilities.js";
+import type { CommandDef, CommandInvoker } from "../core/commandRegistry.js";
+import { chatForm } from "../core/commandSurface.js";
+import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
+import { startRequestRoot } from "../core/requestTrace.js";
+import type { RunRegistry } from "../core/runRegistry.js";
+import type { RunRecordView, RunsService, RunView } from "../core/runsService.js";
+import { systemClock } from "../core/trace/clock.js";
+import type { HistoryItem, IncomingMessage } from "../core/types.js";
+import type { AccessIdentity } from "./accessAuth.js";
+import { originAllowed } from "./commandHttp.js";
+import { HttpIO, MAX_BODY_BYTES, readBody, type DispatchFn } from "./http.js";
+import { readableRuns } from "./liveView/viewer.js";
+import type { HomeCommandSeed, HomeConversationRowSeed, HomeSeed, HomeTurnSeed } from "./webSeed.js";
+import { WEB_HTML_HEADERS, type ShellRenderer } from "./webShell.js";
+
+// The web channel — adapter #5 (docs/decisions/0043, docs/reference/specs/web-chat.md
+// item 11): the chat at `/threads`. Like the HTTP ingress it is pure transport:
+// `POST /threads/<conversation>/send` turns the body into an `IncomingMessage`
+// and calls the same `dispatch()` every channel calls; the pipeline routes,
+// gates, admits and records exactly as it would for a Slack DM. The identity is
+// the dashboard gate's, never the request's: the browser session is the
+// CREDENTIAL (`access:<sub>`, authorization.md item 15), and when record 0042
+// linked it to its person the person is the requester and the credential rides
+// as `authenticatedAs` — the same shape a bound ingress token sends. The lane is
+// the session's own channel `web:<sub>` (a DM by prefix) and the thread key
+// `web:<sub>:<conversation>`, so the workspace, the session log and the thread's
+// one live slot are keyed as on every channel.
+//
+// The page seeds (`GET /threads`, `GET /threads/<id>`) are reads over the same
+// runs service the runs page reads: a conversation is the runs of one thread,
+// the rail is the viewer's own threads across every channel (a thread from
+// another channel opens read-only), and the composer's palette is the chat
+// catalogue the viewer's actor may run. The adapter writes nothing of its own:
+// an exchange the pipeline answered without a run (a hand-back, a `help`
+// answer, a steer acknowledgement) is shown once and never seeded again.
+
+const PLATFORM = "web";
+/** A fresh conversation id: 20 hex characters, unguessable enough for a key the viewer's own lane scopes. */
+const CONVERSATION_ID_BYTES = 10;
+/** A conversation id of the viewer's own lane, as the page mints and links them. */
+const CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** A full thread key from another channel, as the rail links it (`slack:C…:1712.34`). */
+const THREAD_KEY_RE = /^[a-z]+:[A-Za-z0-9_.:@+-]{1,200}$/;
+/** Threads in the rail, and runs read for one conversation (record 0043: bounded by the bot, nothing pages). */
+export const RAIL_THREADS = 20;
+export const CONVERSATION_RUNS = 20;
+/** Own runs read to find the viewer's recent threads (a thread may hold several). */
+const RAIL_RUNS = 100;
+const TITLE_MAX = 60;
+const UPSTREAM_REASON_MAX = 400;
+
+export type ThreadsRoute = { kind: "new" } | { kind: "thread"; id: string } | { kind: "send"; id: string };
+
+/** `/threads`, `/threads/<id>` and `/threads/<id>/send`, the id decoded: a
+ *  conversation id (the viewer's own lane) or a whole thread key from another
+ *  channel. Anything else under the prefix is not a route here. */
+export function parseThreadsRoute(pathname: string): ThreadsRoute | null {
+  if (pathname === "/threads" || pathname === "/threads/") return { kind: "new" };
+  const m = /^\/threads\/([^/]+)(\/send)?\/?$/.exec(pathname);
+  if (!m) return null;
+  let id: string;
+  try {
+    id = decodeURIComponent(m[1]);
+  } catch {
+    return null;
+  }
+  if (!CONVERSATION_ID_RE.test(id) && !THREAD_KEY_RE.test(id)) return null;
+  return m[2] ? { kind: "send", id } : { kind: "thread", id };
+}
+
+export function mintConversationId(): string {
+  return randomBytes(CONVERSATION_ID_BYTES).toString("hex");
+}
+
+/** The thread key `/threads/<id>` names for this session: its own lane's
+ *  conversation, or the whole key another channel's thread carries. */
+export function threadKeyFor(sub: string, id: string): string {
+  return id.includes(":") ? id : `${PLATFORM}:${sub}:${id}`;
+}
+
+/** True when `threadKey` is a conversation of this session's own lane — the only threads it may send into. */
+export function ownLane(sub: string, threadKey: string): boolean {
+  return threadKey.startsWith(`${PLATFORM}:${sub}:`);
+}
+
+/** The `<id>` the rail links a thread by: the conversation for the viewer's own lane, else the key itself. */
+export function conversationIdOf(sub: string, threadKey: string): string {
+  return ownLane(sub, threadKey) ? threadKey.slice(`${PLATFORM}:${sub}:`.length) : threadKey;
+}
+
+/** The identity fields of the message a browser session sends (authorization.md
+ *  item 15, as a bound ingress token does): the linked person as `userId` with
+ *  the session as `authenticatedAs`, else the session itself, named by its email. */
+export function requesterOf(
+  actor: Pick<Actor, "id" | "asUser">,
+  identity: Pick<AccessIdentity, "email">,
+): Pick<IncomingMessage, "userId" | "userName" | "authenticatedAs"> {
+  if (actor.asUser)
+    return {
+      userId: actor.asUser.id,
+      ...(actor.asUser.name ? { userName: actor.asUser.name } : {}),
+      authenticatedAs: actor.id,
+    };
+  return { userId: actor.id, ...(identity.email ? { userName: identity.email } : {}) };
+}
+
+/** The first non-empty line of a request, cut to `max` characters — the title
+ *  of a thread in the rail (the page cuts the tab title the same way). */
+export function threadTitle(firstRequest: string, max = TITLE_MAX): string {
+  const line =
+    firstRequest
+      .split(/\r?\n/)
+      .find((l) => l.trim() !== "")
+      ?.trim() ?? "";
+  if (line.length <= max) return line || "New conversation";
+  return `${line.slice(0, max - 1).trimEnd()}…`;
+}
+
+/** One run as a turn (web-chat.md item 2): the view as every listing has it,
+ *  the request (the first `input` event), the reply (the last `answer`) and the
+ *  front door's decision (the `route` event). `token` only for a live run the
+ *  viewer may read — what the page's stream attaches with. */
+export function turnOf(view: RunRecordView, token?: string): HomeTurnSeed {
+  const { events, route: _route, ...rest } = view;
+  let request = "";
+  let answer: string | undefined;
+  let route: HomeTurnSeed["route"];
+  for (const e of events ?? []) {
+    if (e.type === "input") {
+      if (request === "") request = e.text;
+    } else if (e.type === "answer") answer = e.text;
+    else if (e.type === "route" && route === undefined) route = { preset: e.preset, reason: e.reason };
+  }
+  return {
+    ...rest,
+    ...(token !== undefined ? { token } : {}),
+    request,
+    ...(answer !== undefined ? { answer } : {}),
+    ...(route !== undefined ? { route } : {}),
+  };
+}
+
+/** The thread's turns as the history a run reads (`ChannelIO.history`): the
+ *  request as the person's line, the reply as the agent's, each stamped. */
+export function historyOf(turns: readonly HomeTurnSeed[]): HistoryItem[] {
+  const items: HistoryItem[] = [];
+  for (const t of turns) {
+    if (t.request) items.push({ role: "user", text: t.request, at: t.receivedAt ?? t.startedAt });
+    if (t.answer !== undefined && t.finishedAt !== undefined)
+      items.push({ role: "assistant", text: t.answer, at: t.finishedAt });
+  }
+  return items;
+}
+
+/** One thread of the viewer's, grouped from their runs: the key, its channel's
+ *  platform, its runs (oldest first), when it last moved, whether one is live. */
+export interface ThreadGroup {
+  threadKey: string;
+  surface: string;
+  runs: RunView[];
+  lastAt: number;
+  live: boolean;
+}
+
+/** The viewer's runs grouped by thread, newest thread first, the newest
+ *  `limit` kept (web-chat.md item 7: the rail is bounded, the runs page holds
+ *  the rest). A run without a thread key is nobody's thread and is left out. */
+export function threadsOf(runs: readonly RunView[], limit = RAIL_THREADS): ThreadGroup[] {
+  const groups = new Map<string, ThreadGroup>();
+  for (const run of runs) {
+    if (!run.threadKey) continue;
+    const at = run.finishedAt ?? run.startedAt;
+    const g = groups.get(run.threadKey);
+    if (g) {
+      g.runs.push(run);
+      g.lastAt = Math.max(g.lastAt, at);
+      g.live ||= !run.finished;
+    } else {
+      groups.set(run.threadKey, {
+        threadKey: run.threadKey,
+        surface: platformOf(run.channelId ?? run.threadKey),
+        runs: [run],
+        lastAt: at,
+        live: !run.finished,
+      });
+    }
+  }
+  const out = [...groups.values()].sort((a, b) => b.lastAt - a.lastAt).slice(0, limit);
+  for (const g of out) g.runs.sort((a, b) => a.startedAt - b.startedAt);
+  return out;
+}
+
+function platformOf(id: string): string {
+  const colon = id.indexOf(":");
+  return colon > 0 ? id.slice(0, colon) : "unknown";
+}
+
+/** The `/` palette's rows (web-chat.md item 8): every command the registry
+ *  exposes to chat that the viewer's actor may run — the same `authorize` the
+ *  registry asks first — in chat form, by name. */
+export function paletteCommands(list: readonly CommandDef<unknown>[], actor: Actor): HomeCommandSeed[] {
+  return list
+    .filter((cmd) => cmd.surfaces?.chat !== false)
+    .filter((cmd) => authorize(actor, cmd.action, { type: "command", id: cmd.id }).allow)
+    .map((cmd) => ({ chat: chatForm(cmd.id), describe: cmd.describe }))
+    .sort((a, b) => a.chat.localeCompare(b.chat));
+}
+
+/** What the empty state offers (web-chat.md item 2): what Switchboard does well,
+ *  grounded in the viewer's own runs — the repository they last worked in, a
+ *  run of theirs that failed — and what is on in this process. Every chip
+ *  sends on click, so each is a read or a request the front door hands back
+ *  (a write becomes `To run this: …` in the composer), never a change started
+ *  blind. The last chip asks what it can do. */
+export function suggestionsFor(input: {
+  repos: readonly string[];
+  failed: boolean;
+  any: boolean;
+  capabilities: Pick<Capabilities, "mcp" | "github">;
+}): string[] {
+  const repo = input.repos[0];
+  const chips: string[] = [];
+  if (repo) chips.push(`review the open PR on ${repo}`);
+  else if (input.capabilities.github) chips.push("review a pull request — paste its link");
+  if (input.failed) chips.push("why did my last run fail?");
+  else if (input.any) chips.push("what did my last run do?");
+  chips.push("what agent and model do I get here?");
+  if (input.capabilities.mcp) chips.push("connect an MCP server");
+  chips.push("What can Switchboard do?");
+  return chips;
+}
+
+/** The web channel's `ChannelIO`: the ingress IO's single-shot shape (replies
+ *  collected, `runStarted` raced against completion, the receipt kept) with
+ *  the thread's history read from the run store when a run asks for it. The
+ *  run this request became is registered — its `input` published — before the
+ *  core reads history, so it is in the thread's runs; history excludes the
+ *  triggering message on every channel (`ChannelIO.history`), so the asking
+ *  run's own turn is left out here. */
+export class WebIO extends HttpIO {
+  private runId: string | undefined;
+  constructor(private readonly turns: (exceptRunId: string | undefined) => Promise<HistoryItem[]>) {
+    super();
+  }
+  override runStarted(started: { id: string }): void {
+    this.runId = started.id;
+    super.runStarted(started);
+  }
+  override history(): Promise<HistoryItem[]> {
+    return this.turns(this.runId);
+  }
+}
+
+export interface WebChatDeps {
+  /** The core the adapter dispatches into. */
+  core: CoreDeps;
+  /** Every run read: the thread's runs, their messages, the viewer's own threads. */
+  service: RunsService;
+  /** The live rows' capability tokens (the `202`'s view path, a live turn's stream). */
+  registry: Pick<RunRegistry, "getById">;
+  /** The catalogue the palette lists from. */
+  commands: Pick<CommandInvoker, "list">;
+  shell: ShellRenderer;
+  capabilities: Capabilities;
+  /** null when run history is off (store: null). */
+  retention: { retentionDays: number } | null;
+  /** `PUBLIC_BASE_URL`, when set: the origin a send must come from. */
+  publicBaseUrl?: string;
+  /** Defaults to the real core dispatch(); overridden in tests. */
+  dispatch?: DispatchFn;
+  maxBodyBytes?: number;
+  now?: () => number;
+  mintId?: () => string;
+  warn?: (message: string) => void;
+}
+
+export interface WebChatContext {
+  /** The gate's actor, linked to its person when the session's email named one (record 0042). */
+  actor: Actor;
+  identity: AccessIdentity;
+}
+
+type Json = (status: number, body: unknown) => void;
+
+export function createWebChatHandler(
+  deps: WebChatDeps,
+): (req: HttpRequest, res: ServerResponse, ctx: WebChatContext) => boolean {
+  const now = deps.now ?? systemClock;
+  const mintId = deps.mintId ?? mintConversationId;
+  const warn = deps.warn ?? ((m: string) => console.warn(`[web] ${m}`));
+  const dispatchFn = deps.dispatch ?? realDispatch;
+  const maxBytes = deps.maxBodyBytes ?? MAX_BODY_BYTES;
+  const retentionDays = deps.retention ? deps.retention.retentionDays : null;
+
+  const subOf = (actor: Actor): string => actor.id.replace(/^access:/, "");
+  const liveToken = (run: RunView): string | undefined =>
+    run.finished ? undefined : deps.registry.getById(run.id)?.token;
+
+  /** The thread's runs the viewer may read, oldest first, with their messages — one read per run, in parallel. */
+  async function turnsOf(threadKey: string, actor: Actor): Promise<{ turns: HomeTurnSeed[]; runs: RunView[] }> {
+    const listed = await deps.service.listRuns({
+      status: "all",
+      visibleTo: readableRuns(actor),
+      threadKey,
+      limit: CONVERSATION_RUNS,
+    });
+    if (listed.storeUnavailable) warn(`the run store is unavailable: ${threadKey} seeds its live runs only`);
+    const runs = [...listed.runs].sort((a, b) => a.startedAt - b.startedAt);
+    const turns = await Promise.all(
+      runs.map(async (run) => {
+        const read = await deps.service.getRun(run.id, { include: "messages" });
+        return turnOf(read.ok ? read.value : { ...run }, liveToken(run));
+      }),
+    );
+    return { turns, runs };
+  }
+
+  /** The rail: the viewer's own threads across every channel, titled by each first request. */
+  async function railOf(actor: Actor, sub: string): Promise<{ rows: HomeConversationRowSeed[]; runs: RunView[] }> {
+    const listed = await deps.service.listRuns({
+      status: "all",
+      visibleTo: allOf([readableRuns(actor), ownedBy(actor)]),
+      limit: RAIL_RUNS,
+    });
+    const groups = threadsOf(listed.runs);
+    const rows = await Promise.all(
+      groups.map(async (g): Promise<HomeConversationRowSeed> => {
+        const first = g.runs[0];
+        const read = await deps.service.getRun(first.id, { include: "messages" });
+        const request = read.ok ? turnOf(read.value).request : "";
+        return {
+          id: conversationIdOf(sub, g.threadKey),
+          title: threadTitle(request || first.label || first.id),
+          lastAt: g.lastAt,
+          runs: g.runs.length,
+          live: g.live,
+          surface: g.surface,
+        };
+      }),
+    );
+    return { rows, runs: listed.runs };
+  }
+
+  async function seedFor(
+    ctx: WebChatContext,
+    conversation: string,
+    threadKey: string,
+    open: { turns: HomeTurnSeed[]; runs: RunView[] },
+  ): Promise<HomeSeed> {
+    const sub = subOf(ctx.actor);
+    const rail = await railOf(ctx.actor, sub);
+    const mine = rail.runs;
+    const repos = [...new Set(mine.map((r) => r.repo).filter((r): r is string => r !== undefined))];
+    const foreign = !ownLane(sub, threadKey);
+    return {
+      page: "home",
+      conversation,
+      turns: open.turns,
+      conversations: rail.rows,
+      viewer: { name: ctx.actor.asUser?.name ?? ctx.identity.email ?? sub },
+      sendUrl: `/threads/${encodeURIComponent(conversation)}/send`,
+      ...(foreign
+        ? {
+            elsewhere: {
+              surface: platformOf(threadKey),
+              ...(() => {
+                const url = open.runs.find((r) => r.sourceUrl)?.sourceUrl;
+                return url ? { url } : {};
+              })(),
+            },
+          }
+        : {}),
+      now: now(),
+      retentionDays,
+      suggestions: suggestionsFor({
+        repos,
+        failed: mine.some((r) => r.status === "failed"),
+        any: mine.length > 0,
+        capabilities: deps.capabilities,
+      }),
+      commands: paletteCommands(deps.commands.list(), ctx.actor),
+    };
+  }
+
+  /** `POST /threads/<id>/send`: the body's text into `dispatch()` as this session (web-chat.md item 11). */
+  async function send(req: HttpRequest, res: ServerResponse, ctx: WebChatContext, id: string): Promise<void> {
+    const answer: Json = (status, body) => {
+      res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      res.end(JSON.stringify(body));
+    };
+    if (!originAllowed(req, { publicBaseUrl: deps.publicBaseUrl })) {
+      answer(403, { error: "forbidden_origin" });
+      req.destroy();
+      return;
+    }
+    const ct = (
+      Array.isArray(req.headers["content-type"]) ? req.headers["content-type"][0] : req.headers["content-type"]
+    )
+      ?.split(";")[0]
+      .trim()
+      .toLowerCase();
+    if (ct !== "application/json") {
+      answer(415, { error: "unsupported_media_type" });
+      req.destroy();
+      return;
+    }
+    const sub = subOf(ctx.actor);
+    const threadKey = threadKeyFor(sub, id);
+    if (!ownLane(sub, threadKey)) {
+      // A thread from another channel is read here and answered there.
+      answer(403, { error: "forbidden", detail: `this thread lives on ${platformOf(threadKey)}; reply there` });
+      req.destroy();
+      return;
+    }
+    const read = await readBody(req, maxBytes);
+    if (!read.ok) {
+      answer(413, { error: "request body too large" });
+      req.destroy();
+      return;
+    }
+    let text: string;
+    try {
+      const parsed = JSON.parse(read.body) as { text?: unknown };
+      if (typeof parsed !== "object" || parsed === null || typeof parsed.text !== "string" || parsed.text.trim() === "")
+        throw new Error("shape");
+      text = parsed.text;
+    } catch {
+      answer(400, { error: "`text` is required and must be a non-empty string" });
+      return;
+    }
+    // The request's root (docs/reference/specs/tracing.md): the identity is the
+    // gate's, the body is parsed; `dispatch()` ends it.
+    const receivedAt = now();
+    const trace = startRequestRoot(deps.core, { channel: "web", receivedAt });
+    const msg: IncomingMessage = {
+      ...requesterOf(ctx.actor, ctx.identity),
+      channelId: `${PLATFORM}:${sub}`,
+      threadKey,
+      text,
+      receivedAt,
+    };
+    const io = new WebIO(async (exceptRunId) =>
+      historyOf((await turnsOf(threadKey, ctx.actor)).turns.filter((t) => t.id !== exceptRunId)),
+    );
+    // Started, not awaited: the dispatcher counts the run from its first line,
+    // so the shutdown drain waits for it like any run; its errors are its own.
+    const done = dispatchFn(deps.core, msg, io, { trace }).catch((err) => {
+      warn(`dispatch: ${err instanceof Error ? err.message : String(err)}`);
+    });
+    // The run's creation raced against completion: a request the pipeline
+    // answers without a run (a hand-back, a `help` answer, a steer, a refusal)
+    // ends dispatch with no `runStarted` and gets its reply text.
+    const started = await Promise.race([io.started, done.then(() => undefined)]);
+    const token = started ? deps.registry.getById(started.id)?.token : undefined;
+    if (started && token !== undefined) {
+      answer(202, {
+        runId: started.id,
+        viewPath: `/runs/${encodeURIComponent(started.id)}?t=${token}`,
+        threadKey,
+      });
+      return;
+    }
+    // A run that left the registry before its token was read is answered like
+    // a run-less request: its reply. A run leaves the registry only through
+    // `discard` (a run the dispatcher abandoned before it ran) or the sweep
+    // after `finish`, both on dispatch's way out — so `done` settles at once
+    // here; a live run always has its token, and takes the `202` above.
+    await done;
+    const run = io.run();
+    answer(200, { reply: io.collected(), ...(run ? { run } : {}) });
+  }
+
+  return (req, res, ctx) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const route = parseThreadsRoute(url.pathname);
+    if (!route) return false;
+    const method = (req.method ?? "GET").toUpperCase();
+    const plain = (status: number, body: string, extra: Record<string, string> = {}) => {
+      res.writeHead(status, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", ...extra });
+      res.end(body);
+    };
+    const failed = (err: unknown) => {
+      const reason = (err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX);
+      if (res.headersSent) {
+        warn(`render failed after the head was sent: ${reason}`);
+        res.end();
+        return;
+      }
+      plain(502, `threads unavailable: ${reason}`);
+    };
+    if (route.kind === "send") {
+      if (method !== "POST") {
+        plain(405, "method not allowed", { allow: "POST" });
+        return true;
+      }
+      send(req, res, ctx, route.id).catch(failed);
+      return true;
+    }
+    if (method !== "GET") {
+      plain(405, "method not allowed", { allow: "GET" });
+      return true;
+    }
+    const render = (title: string, seed: HomeSeed) => {
+      res.writeHead(200, WEB_HTML_HEADERS);
+      res.end(deps.shell(title, seed));
+    };
+    const sub = subOf(ctx.actor);
+    if (route.kind === "new") {
+      const conversation = mintId();
+      seedFor(ctx, conversation, threadKeyFor(sub, conversation), { turns: [], runs: [] })
+        .then((seed) => render("Threads", seed))
+        .catch(failed);
+      return true;
+    }
+    const threadKey = threadKeyFor(sub, route.id);
+    turnsOf(threadKey, ctx.actor)
+      .then(async (open) => {
+        // A thread from another channel the viewer may see nothing of is the
+        // same 404 an unknown run gives (live-view item 19): existence is never
+        // revealed. The viewer's own lane is theirs to open empty.
+        if (open.runs.length === 0 && !ownLane(sub, threadKey)) {
+          res.writeHead(404, WEB_HTML_HEADERS);
+          res.end(deps.shell("Run not found", { page: "runNotFound", retentionDays }));
+          return;
+        }
+        const seed = await seedFor(ctx, route.id, threadKey, open);
+        const liveCount = open.runs.filter((r) => !r.finished).length;
+        render(`${liveCount > 0 ? `(${liveCount}) ` : ""}Threads`, seed);
+      })
+      .catch(failed);
+    return true;
+  };
+}

@@ -23,7 +23,8 @@ export interface RunStreamOptions {
   model: Pick<RunPageModel, "noteElided" | "flushPendingTurn" | "closePhases"> & { state: { stopMode: unknown } };
   /** Every run-event frame past the dedupe, for the page to fold (`model.handle`) and read. */
   handle: (event: unknown) => void;
-  onFinished?: (frame: { finishedAt: number }) => void;
+  /** The agent stopped. `null` when the frame did not parse: the run is finished all the same. */
+  onFinished?: (frame: { finishedAt: number } | null) => void;
   onEnd?: (frame: { sealedAt?: number; replyOk?: boolean }) => void;
   onDisconnected?: () => void;
 }
@@ -63,8 +64,7 @@ export function attachRunStream(opts: RunStreamOptions): RunStream {
     if (range) opts.model.noteElided(range);
   });
   es.addEventListener("finished", (data) => {
-    const frame = parseFinishedFrame(data);
-    if (frame) opts.onFinished?.(frame);
+    opts.onFinished?.(parseFinishedFrame(data));
     if (phase.value === "connecting" || phase.value === "running") phase.value = "finished";
   });
   es.addEventListener("end", (data) => {

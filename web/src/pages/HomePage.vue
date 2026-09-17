@@ -24,6 +24,7 @@ import {
   shouldFollow,
 } from "../lib/homeModel";
 import { formatDuration } from "../lib/format";
+import { SURFACE_NAME } from "../lib/indexRow";
 
 // The home page (docs/reference/specs/web-chat.md; record 0043): a conversation
 // is the runs of one thread, drawn as the person's turns and the runs they
@@ -128,6 +129,9 @@ async function submit(): Promise<void> {
       const urls = liveUrls(payload.viewPath);
       if (!urls) throw new Error("the run's view path was not one");
       person.pending = false;
+      // A fresh conversation exists on the server now: the address names it,
+      // so a reload finds it, without a load or a history entry (rule 3).
+      if (browser.pathname() === "/threads") browser.replaceUrl(`/threads/${encodeURIComponent(conversation)}`);
       items.push({
         key: key("a"),
         kind: "assistant",
@@ -256,6 +260,14 @@ watch(
 /** The browser's local hour, from the page's ticking clock, so a tab left open across a day part greets the new one. */
 const hour = computed(() => new Date(now.value).getHours());
 const empty = computed(() => items.length === 0);
+/** A thread from another channel opens read-only (item 7): no composer; a reply belongs where the thread is.
+ *  Another person's `web:` lane (an all-channels holder reading it) is nobody's channel to reply in. */
+const elsewhere = seed?.elsewhere;
+const elsewhereLine = !elsewhere
+  ? ""
+  : elsewhere.surface === "web"
+    ? "This thread is another person's conversation. You can read it here."
+    : `This thread lives in ${SURFACE_NAME[elsewhere.surface] ?? elsewhere.surface}.`;
 </script>
 
 <template>
@@ -352,9 +364,21 @@ const empty = computed(() => items.length === 0);
         </TransitionGroup>
         <div ref="end" class="end" aria-hidden="true" />
 
+        <!-- A thread from another channel: read here, answered there. -->
+        <p
+          v-if="!empty && elsewhere"
+          class="elsewhere sticky bottom-0 z-10 -mx-3 mt-auto bg-default/85 px-3 py-4 text-center text-[0.8rem] text-toned backdrop-blur sm:-mx-5 sm:px-5"
+          data-testid="elsewhere"
+        >
+          {{ elsewhereLine }}
+          <a v-if="elsewhere.url" :href="elsewhere.url" target="_blank" rel="noopener" class="text-highlighted"
+            >Reply there ↗</a
+          >
+          <template v-else-if="elsewhere.surface !== 'web'">Reply there.</template>
+        </p>
         <!-- With a transcript, the composer stays at the foot; the page scrolls under it. -->
         <div
-          v-if="!empty"
+          v-else-if="!empty"
           class="composer-dock sticky bottom-0 z-10 -mx-3 mt-auto bg-default/85 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur sm:-mx-5 sm:px-5"
         >
           <Transition name="sb-rise">
