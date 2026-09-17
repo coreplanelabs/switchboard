@@ -4,6 +4,7 @@ import type { UnitFacts, UnitRun, UnitRunsView } from "../core/unitRuns.js";
 import type { CostReport } from "../core/costs.js";
 import type { CostsByReport } from "../core/costsBy.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
+import type { CostsView } from "./costsView.js";
 import type { RunCost } from "../core/modelPricing.js";
 import type { DeliveryReport } from "../core/delivery.js";
 import type { ScheduledRow } from "./scheduledPanel.js";
@@ -289,10 +290,10 @@ export interface CostsSeed {
   /** The group's daily report as of the snapshot; null before the first snapshot lands (the page shows the status instead). */
   report: CostReport | null;
   groups: string[];
-  /** Which tab the page opens on: the daily table, or cost by user (`?view=users`). */
-  view: "daily" | "users";
-  /** Present when `view` is `users` and there is a snapshot: the by-user report for the same group and range. */
-  users?: CostsByReport;
+  /** Which tab the page opens on: the daily table, or a cost dimension (`?view=users|threads|channels|agents|models`). */
+  view: CostsView;
+  /** Present when `view` is a dimension and there is a snapshot: that dimension's report for the same group and range. */
+  by?: CostsByReport;
   /** The snapshot every figure on the page comes from: its stamp, the take in flight, when the next is due. */
   snapshot: CostsSnapshotStatus;
   /** Whether the viewer holds `costs:write` — the **Snapshot now** button is offered only then. */

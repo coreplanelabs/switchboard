@@ -95,9 +95,10 @@ const seed = (
 function byReport(over: Partial<CostsByReport> = {}): CostsByReport {
   const r = report();
   const alice = {
-    userId: "slack:U0AL1CE",
-    userName: "alice",
+    key: "slack:U0AL1CE",
+    label: "alice",
     runs: 7,
+    turns: 40,
     wallMs: 3_600_000,
     llmUsd: 12.25,
     cloudUsd: 1.5,
@@ -106,9 +107,10 @@ function byReport(over: Partial<CostsByReport> = {}): CostsByReport {
     byModel: {},
   };
   const bob = {
-    userId: "slack:U0B0B",
-    userName: "bob",
+    key: "slack:U0B0B",
+    label: "bob",
     runs: 2,
+    turns: 9,
     wallMs: 1_200_000,
     llmUsd: 3.5,
     cloudUsd: 0.5,
@@ -118,11 +120,13 @@ function byReport(over: Partial<CostsByReport> = {}): CostsByReport {
   };
   return {
     group: r.group,
+    dimension: "user",
     range: r.range,
     coverage: { from: r.range.from, retentionDays: 30, clamped: false, historyOn: true },
-    users: [alice, bob],
+    rows: [alice, bob],
     days: [],
     pending: 0,
+    cloudAllocated: true,
     reconciliation: {
       attributedLlmUsd: 15.75,
       workspaceLlmUsd: 19.5,
@@ -139,11 +143,11 @@ function byReport(over: Partial<CostsByReport> = {}): CostsByReport {
   };
 }
 
-/** `null`: the page was served without its by-user report. */
-const usersSeed = (users: CostsByReport | null = byReport()): CostsSeed => ({
+/** `null`: the page was served without its dimension report. */
+const usersSeed = (by: CostsByReport | null = byReport()): CostsSeed => ({
   ...seed(),
   view: "users",
-  ...(users ? { users } : {}),
+  ...(by ? { by } : {}),
 });
 
 describe("CostsPage", () => {
@@ -625,14 +629,20 @@ describe("CostsPage", () => {
     expect(w.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/costs");
   });
 
-  it("offers Daily and By user as tabs above the tables; the daily tab shows the daily tables and no user table", () => {
+  it("offers Daily and the five dimensions as tabs above the tables; the daily tab shows the daily tables and no dimension table", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const tabs = w.find('nav[aria-label="View"]');
     expect(tabs.exists()).toBe(true);
     expect(tabs.find('[aria-current="page"]').text()).toBe("Daily");
-    expect(tabs.find("a").attributes("href")).toBe("/costs/switchboard?days=3&view=users");
+    expect(tabs.findAll("a").map((a) => [a.text(), a.attributes("href")])).toEqual([
+      ["By user", "/costs/switchboard?days=3&view=users"],
+      ["By thread", "/costs/switchboard?days=3&view=threads"],
+      ["By channel", "/costs/switchboard?days=3&view=channels"],
+      ["By agent", "/costs/switchboard?days=3&view=agents"],
+      ["By model", "/costs/switchboard?days=3&view=models"],
+    ]);
     expect(w.find("table.data").exists()).toBe(true);
-    expect(w.find("table.users").exists()).toBe(false);
+    expect(w.find("table.by").exists()).toBe(false);
   });
 });
 
@@ -643,7 +653,7 @@ describe("CostsPage · By user", () => {
     // The daily tables step aside; the tiles and the chart stay as the group's context.
     expect(w.find("table.data").exists()).toBe(false);
     expect(w.find("rect.day").exists()).toBe(true);
-    const rows = w.findAll("table.users tbody tr.user-row");
+    const rows = w.findAll("table.by tbody tr.by-row");
     expect(rows.length).toBe(2);
     expect(rows[0].text()).toContain("alice");
     expect(rows[0].findAll("td").map((td) => td.text())).toEqual(
@@ -655,7 +665,7 @@ describe("CostsPage · By user", () => {
     expect(rows[0].classes()).not.toContain("is-me");
     // The id stays reachable on hover; the platform prefix is not the name.
     expect(rows[0].find("td[title]").attributes("title")).toBe("slack:U0AL1CE");
-    expect(w.find("table.users thead").text()).toContain("allocated");
+    expect(w.find("table.by thead").text()).toContain("allocated");
     // Tokens under a model with no list price are said, not $0 in silence.
     expect(rows[1].text()).toContain("unpriced tokens");
     expect(rows[0].text()).not.toContain("unpriced tokens");
@@ -663,22 +673,22 @@ describe("CostsPage · By user", () => {
 
   it("filters by name or id, and the me toggle keeps only the signed-in viewer's rows; the shown subtotal appears when rows are hidden", async () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed() });
-    await w.find("input.user-filter").setValue("ali");
-    let rows = w.findAll("table.users tbody tr.user-row");
+    await w.find("input.key-filter").setValue("ali");
+    let rows = w.findAll("table.by tbody tr.by-row");
     expect(rows.map((r) => r.find("td").text())).toEqual([expect.stringContaining("alice")]);
-    expect(w.find("table.users tfoot").text()).toContain("shown");
-    expect(w.find("table.users tfoot").text()).toContain("$13.75");
-    await w.find("input.user-filter").setValue("U0B0B");
-    rows = w.findAll("table.users tbody tr.user-row");
+    expect(w.find("table.by tfoot").text()).toContain("shown");
+    expect(w.find("table.by tfoot").text()).toContain("$13.75");
+    await w.find("input.key-filter").setValue("U0B0B");
+    rows = w.findAll("table.by tbody tr.by-row");
     expect(rows.map((r) => r.find("td").text())).toEqual([expect.stringContaining("bob")]);
-    await w.find("input.user-filter").setValue("nobody");
-    expect(w.find("table.users td.empty").text()).toBe("no user matches");
-    await w.find("input.user-filter").setValue("");
-    expect(w.find("table.users tfoot").exists()).toBe(false);
+    await w.find("input.key-filter").setValue("nobody");
+    expect(w.find("table.by td.empty").text()).toBe("no user matches");
+    await w.find("input.key-filter").setValue("");
+    expect(w.find("table.by tfoot").exists()).toBe(false);
     const me = w.find(".me-toggle input");
     expect(me.attributes("disabled")).toBeUndefined();
     await me.setValue(true);
-    rows = w.findAll("table.users tbody tr.user-row");
+    rows = w.findAll("table.by tbody tr.by-row");
     expect(rows.length).toBe(1);
     expect(rows[0].text()).toContain("bob");
   });
@@ -723,13 +733,13 @@ describe("CostsPage · By user", () => {
       seed: usersSeed(
         byReport({
           coverage: { from: report().days[2].date, retentionDays: 0, clamped: true, historyOn: false },
-          users: [],
+          rows: [],
           viewer: { userIds: [], matchedByEmail: false },
         }),
       ),
     });
     expect(off.find(".coverage").text()).toContain("run history is off");
-    expect(off.find("table.users td.empty").text()).toBe("no runs in this range");
+    expect(off.find("table.by td.empty").text()).toBe("no runs in this range");
   });
 
   it("carries one reconciliation line: attributed LLM against the workspace figure, the unattributed remainder, cloud allocated and unallocated", () => {
@@ -819,7 +829,87 @@ describe("CostsPage · By user", () => {
     expect(hrefs).toContain("/costs/switchboard?days=3"); // the Daily tab
     expect(w.text()).toContain("GET /costs/switchboard/users.json");
     const missing = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed(null) });
-    expect(missing.text()).toContain("by-user report did not load");
-    expect(missing.find("table.users").exists()).toBe(false);
+    expect(missing.text()).toContain("by user report did not load");
+    expect(missing.find("table.by").exists()).toBe(false);
+  });
+});
+
+// costs.md item 10a: the same table keyed by thread, channel, agent or model.
+describe("CostsPage · the other dimensions", () => {
+  const dimensionSeed = (by: CostsByReport, view: CostsSeed["view"]): CostsSeed => ({ ...seed(), view, by });
+
+  it("By model: the key column is the model ref, turns count instead of runs, there is no cloud column, no me toggle, and the reconciliation line carries no cloud clause", async () => {
+    const models = byReport({
+      dimension: "model",
+      cloudAllocated: false,
+      rows: [
+        {
+          ...byReport().rows[0],
+          key: "anthropic/claude-fable-5-1",
+          label: undefined,
+          runs: 7,
+          turns: 40,
+          cloudUsd: 0,
+          totalUsd: 12.25,
+        },
+        { ...byReport().rows[1], key: "openai/gpt-5", label: undefined, runs: 2, turns: 9, cloudUsd: 0, totalUsd: 3.5 },
+      ],
+      viewer: undefined,
+    });
+    const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
+      seed: dimensionSeed(models, "models"),
+    });
+    expect(w.find('nav[aria-label="View"] [aria-current="page"]').text()).toBe("By model");
+    expect(w.text()).toContain("Cost by model");
+    const heads = w.findAll("table.by thead th").map((th) => th.text().replace(/\s+/g, " ").trim());
+    expect(heads).toEqual(["Model", "Turns", "LLM", "Total", "Share"]);
+    const rows = w.findAll("table.by tbody tr.by-row");
+    expect(rows[0].find("td[title]").attributes("title")).toBe("anthropic/claude-fable-5-1");
+    expect(rows[0].text()).toContain("anthropic/claude-fable-5-1");
+    expect(rows[0].findAll("td").map((td) => td.text())).toEqual(
+      expect.arrayContaining(["40", "$12.25", "$12.25", "78%"]),
+    );
+    expect(rows[1].text()).toContain("unpriced tokens");
+    expect(w.find(".me-toggle").exists()).toBe(false);
+    const line = w.find(".reconciliation").text().replace(/\s+/g, " ");
+    expect(line).toContain("LLM attributed $15.75 of $19.50");
+    expect(line).not.toContain("cloud allocated");
+    expect(w.text()).toContain("cloud is not split by model");
+    expect(w.text()).toContain("GET /costs/switchboard/models.json");
+    // The filter narrows by the ref.
+    await w.find("input.key-filter").setValue("gpt");
+    expect(w.findAll("table.by tbody tr.by-row").length).toBe(1);
+  });
+
+  it("By thread: the key reads without its platform prefix with the platform beside it, cloud is allocated, and the empty match names the dimension", async () => {
+    const threads = byReport({
+      dimension: "thread",
+      rows: [
+        { ...byReport().rows[0], key: "slack:C0PREVIEW:1710000000.000123", label: undefined },
+        { ...byReport().rows[1], key: "http:ops:1", label: undefined },
+      ],
+      viewer: undefined,
+    });
+    const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
+      seed: dimensionSeed(threads, "threads"),
+    });
+    expect(w.find('nav[aria-label="View"] [aria-current="page"]').text()).toBe("By thread");
+    const heads = w.findAll("table.by thead th").map((th) => th.text().replace(/\s+/g, " ").trim());
+    expect(heads).toEqual(["Thread", "Runs", "LLM", "Cloud allocated", "Total", "Share"]);
+    const rows = w.findAll("table.by tbody tr.by-row");
+    expect(rows[0].find("td .text-highlighted").text()).toBe("C0PREVIEW:1710000000.000123");
+    expect(rows[0].find("td .text-dimmed").text()).toBe("slack");
+    expect(rows[0].find("td[title]").attributes("title")).toBe("slack:C0PREVIEW:1710000000.000123");
+    expect(rows[1].find("td .text-highlighted").text()).toBe("ops:1");
+    expect(rows[1].find("td .text-dimmed").text()).toBe("http");
+    expect(w.find(".me-toggle").exists()).toBe(false);
+    expect(w.find("input.key-filter").attributes("placeholder")).toBe("thread");
+    await w.find("input.key-filter").setValue("nothing-here");
+    expect(w.find("table.by td.empty").text()).toBe("no thread matches");
+    expect(w.text()).toContain("GET /costs/switchboard/threads.json");
+    const hrefs = w.findAll("a").map((a) => a.attributes("href"));
+    expect(hrefs).toContain("/costs/switchboard?days=7&view=threads"); // the range pill keeps the tab
   });
 });

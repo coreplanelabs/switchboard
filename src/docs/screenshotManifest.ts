@@ -71,6 +71,12 @@ export const SURFACES = [
     what: "the spend page's By user tab",
   },
   {
+    name: "costs-models",
+    path: "/costs?view=models",
+    page: "web/src/pages/CostsPage.vue",
+    what: "the spend page's By model tab: turns and LLM dollars per model, no cloud column",
+  },
+  {
     name: "scheduled",
     path: "/runs/scheduled",
     page: "web/src/pages/ScheduledPage.vue",

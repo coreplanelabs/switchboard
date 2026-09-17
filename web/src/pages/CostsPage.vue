@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import type { CostReport } from "@core/core/costs.js";
 import type { CostsByReport } from "@core/core/costsBy.js";
 import type { CostsSnapshotStatus } from "@core/core/costsSnapshot.js";
+import type { CostsView } from "@core/channels/costsView.js";
 import AppShell from "../components/AppShell.vue";
 import CostChart from "../components/costs/CostChart.vue";
 import CostsByDimension from "../components/costs/CostsByDimension.vue";
@@ -35,7 +36,7 @@ import {
 // light/sans outlier).
 
 const seed = useSeed("costs");
-/** The report and the by-user report start as the seed's and are replaced when a new snapshot lands (below). */
+/** The report and the open dimension's report start as the seed's and are replaced when a new snapshot lands (below). */
 const report = ref<CostReport | null>(seed?.report ?? null);
 const groups = computed(() => seed?.groups ?? []);
 /** The group the page is for — from the seed even when there is no report yet to name it. */
@@ -45,10 +46,42 @@ const status = ref<CostsSnapshotStatus | null>(seed?.snapshot ?? null);
 /** The snapshot's age ticks by the minute while the page is open. */
 const now = useWallClock(undefined, 60_000);
 const snapshotLine = computed(() => (status.value ? snapshotLineOf(status.value, now.value) : ""));
-/** Which tab is open: the daily tables, or cost by user (`?view=users`, the
- *  by-user report riding along in the seed). */
-const view = computed<"daily" | "users">(() => seed?.view ?? "daily");
-const users = ref<CostsByReport | null>(seed?.view === "users" ? (seed?.users ?? null) : null);
+/** Which tab is open: the daily tables, or a cost dimension (`?view=users|threads|channels|agents|models`,
+ *  that dimension's report riding along in the seed). */
+const view = computed<CostsView>(() => seed?.view ?? "daily");
+const by = ref<CostsByReport | null>(seed && seed.view !== "daily" ? (seed.by ?? null) : null);
+/** The tabs above the tables, in order: the daily tables, then one per cost dimension (costs.md item 10a). */
+const VIEWS: ReadonlyArray<{ view: CostsView; tab: string; subtitle: string }> = [
+  { view: "daily", tab: "Daily", subtitle: "" },
+  {
+    view: "users",
+    tab: "By user",
+    subtitle: "Who started the runs · LLM from their tokens through the price table · cloud allocated by wall-clock",
+  },
+  {
+    view: "threads",
+    tab: "By thread",
+    subtitle:
+      "The thread each run ran in · LLM from its tokens through the price table · cloud allocated by wall-clock",
+  },
+  {
+    view: "channels",
+    tab: "By channel",
+    subtitle:
+      "The channel each run ran in · LLM from its tokens through the price table · cloud allocated by wall-clock",
+  },
+  {
+    view: "agents",
+    tab: "By agent",
+    subtitle: "The agent each run ran on · LLM from its tokens through the price table · cloud allocated by wall-clock",
+  },
+  {
+    view: "models",
+    tab: "By model",
+    subtitle: "The model each turn ran on · LLM from its tokens through the price table · cloud is not split by model",
+  },
+];
+const currentView = computed(() => VIEWS.find((v) => v.view === view.value) ?? VIEWS[0]);
 
 // The status feed (costs.md item 8b): `/costs/<group>?stream=1` streams the
 // snapshot's status — a take starting, landing or failing — so every viewer
@@ -67,13 +100,15 @@ let refetching: Promise<void> | null = null;
 /** Re-read the twins; true when the daily report was replaced. A failure leaves the figures as they were. */
 async function refetchReports(): Promise<boolean> {
   try {
-    const [daily, byUser] = await Promise.all([
+    const [daily, dimension] = await Promise.all([
       fetch(twinUrl(".json"), { credentials: "same-origin" }),
-      view.value === "users" ? fetch(twinUrl("/users.json"), { credentials: "same-origin" }) : Promise.resolve(null),
+      view.value !== "daily"
+        ? fetch(twinUrl(`/${view.value}.json`), { credentials: "same-origin" })
+        : Promise.resolve(null),
     ]);
     if (!daily.ok) return false;
     report.value = (await daily.json()) as CostReport;
-    if (byUser?.ok) users.value = (await byUser.json()) as CostsByReport;
+    if (dimension?.ok) by.value = (await dimension.json()) as CostsByReport;
     return true;
   } catch {
     return false;
@@ -127,9 +162,9 @@ async function takeSnapshot(): Promise<void> {
   taking.value = false;
 }
 /** The same page for another group, range or tab — the two other pills keep the third. */
-function hrefOf(group: string, days: number, v: "daily" | "users"): string {
+function hrefOf(group: string, days: number, v: CostsView): string {
   const q = [`days=${days}`];
-  if (v === "users") q.push("view=users");
+  if (v !== "daily") q.push(`view=${v}`);
   return `/costs/${group}?${q.join("&")}`;
 }
 const series = computed(() => (report.value ? seriesOf(report.value) : []));
@@ -384,37 +419,38 @@ function monthDay(date: string): string {
     </section>
 
     <!-- The tabs above the tables: the group's day-by-day figures, or the same
-         dollars laid against who started the runs. The tiles and the chart
-         above are the group's context on both. -->
-    <nav class="mb-3 flex items-center gap-1 border-b border-default" aria-label="View">
-      <template v-for="v in ['daily', 'users'] as const" :key="v">
+         dollars laid against who started the runs, the thread or channel they
+         ran in, the agent they ran on, or the model whose tokens they spent.
+         The tiles and the chart above are the group's context on every tab. -->
+    <nav class="mb-3 flex flex-wrap items-center gap-1 border-b border-default" aria-label="View">
+      <template v-for="v in VIEWS" :key="v.view">
         <span
-          v-if="v === view"
+          v-if="v.view === view"
           class="-mb-px border-b-2 border-primary px-3 py-1.5 text-sm font-medium text-highlighted"
           aria-current="page"
-          >{{ v === "daily" ? "Daily" : "By user" }}</span
+          >{{ v.tab }}</span
         >
         <a
           v-else
           class="-mb-px border-b-2 border-transparent px-3 py-1.5 text-sm text-muted no-underline hover:border-muted hover:text-highlighted"
-          :href="hrefOf(report.group, report.range.days, v)"
-          >{{ v === "daily" ? "Daily" : "By user" }}</a
+          :href="hrefOf(report.group, report.range.days, v.view)"
+          >{{ v.tab }}</a
         >
       </template>
     </nav>
 
-    <section v-if="view === 'users'" class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
+    <section v-if="view !== 'daily'" class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
       <div>
-        <h2 class="text-[0.9375rem] font-medium">Cost by user</h2>
-        <p class="text-sm text-muted">
-          Who started the runs · LLM at list from their tokens · cloud allocated by wall-clock
-        </p>
+        <h2 class="text-[0.9375rem] font-medium">Cost {{ currentView.tab.toLowerCase() }}</h2>
+        <p class="text-sm text-muted">{{ currentView.subtitle }}</p>
       </div>
-      <CostsByDimension v-if="users" :report="users" />
-      <p v-else class="text-sm text-warn">The by-user report did not load with this page.</p>
+      <CostsByDimension v-if="by" :report="by" />
+      <p v-else class="text-sm text-warn">
+        The {{ currentView.tab.toLowerCase() }} report did not load with this page.
+      </p>
       <p class="text-xs text-muted">
         Machine-readable twin:
-        <code class="rounded bg-accented px-1 py-0.5">GET /costs/{{ report.group }}/users.json</code> (same Access
+        <code class="rounded bg-accented px-1 py-0.5">GET /costs/{{ report.group }}/{{ view }}.json</code> (same Access
         gate).
       </p>
     </section>
@@ -513,8 +549,8 @@ function monthDay(date: string): string {
         <div class="mt-2 grid gap-1.5">
           <div>
             <b>Snapshot.</b> Both billing sources and the run history are read once over the widest range this page
-            offers and kept as a snapshot; every figure here, the JSON twins and the By user tab are arithmetic over it,
-            with <em>today</em> the day it was taken. The line under the range says when that was, how old it is and
+            offers and kept as a snapshot; every figure here, the JSON twins and the dimension tabs are arithmetic over
+            it, with <em>today</em> the day it was taken. The line under the range says when that was, how old it is and
             when the next one is due (<code>costs.snapshot.everyHours</code>, daily by default);
             <code>costs snapshot</code> takes one now. Cloudflare bills vCPU on active use only; memory and disk bill on
             the provisioned size for every second a container is awake. LLM spend is the Anthropic Admin API cost report

@@ -8,7 +8,7 @@ import {
   type CostReportMeta,
   type LlmCostSource,
 } from "./costs.js";
-import { buildCostsByReport, type CostsByReport } from "./costsBy.js";
+import { buildCostsByReport, type CostDimension, type CostsByReport } from "./costsBy.js";
 import type { CostsSnapshot, CostsSnapshotStore } from "./costsSnapshotStore.js";
 import { NO_PRICES, type ModelPriceTable } from "./modelPricing.js";
 import { NullRunStore, type RunStore } from "./runStore.js";
@@ -184,20 +184,20 @@ export function reportFromSnapshot(
 export function byReportFromSnapshot(
   snapshot: CostsSnapshot,
   daily: CostReport,
-  viewer: { viewerUserIds: string[]; matchedByEmail: boolean },
-  prices: ModelPriceTable = NO_PRICES,
+  dimension: CostDimension,
+  opts: { viewer?: { userIds: string[]; matchedByEmail: boolean }; prices?: ModelPriceTable } = {},
 ): CostsByReport {
   return {
     ...buildCostsByReport({
       group: daily.group,
+      dimension,
       range: daily.range,
       usage: snapshot.runUsage ?? { rows: [], pending: 0, retentionDays: 0 },
       days: daily.days,
       historyOn: snapshot.runUsage !== null,
-      viewerUserIds: viewer.viewerUserIds,
-      matchedByEmail: viewer.matchedByEmail,
+      ...(opts.viewer ? { viewer: opts.viewer } : {}),
       generatedAt: Date.parse(snapshot.takenAt),
-      prices,
+      prices: opts.prices ?? NO_PRICES,
     }),
     snapshot: stampOf(snapshot),
   };

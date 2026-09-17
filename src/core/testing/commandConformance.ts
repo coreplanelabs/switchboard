@@ -499,6 +499,8 @@ export const FIELD_HINTS: SampleHints = {
   session: FIXTURE.sessionKey,
   // runs.findings: the pull request the fixture's ship unit opened, reviewed and answered (a reference the pattern accepts is not enough — runs must name it).
   pr: FIXTURE.pullRequest,
+  // costs.by: the one cost group the fixture's costs service is configured with.
+  group: "fixture",
 };
 
 /** A refusal the DATA decides on one surface only (command-registry.md item

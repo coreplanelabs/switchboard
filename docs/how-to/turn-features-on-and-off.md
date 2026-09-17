@@ -65,7 +65,7 @@ A command under two capabilities is on when either gives it a backend.
 | `runHistory` | `runs findings`, `review abridge`, `friction report`, `friction propose` |
 | `runLedger` | — |
 | `mcp` | `mcp list`, `mcp add`, `mcp connect`, `mcp show`, `mcp remove`, `mcp promote` |
-| `costs` | `costs snapshot` |
+| `costs` | `costs by`, `costs snapshot` |
 | `schedules` | `schedule list` |
 | `github` | `delivery report` |
 | `ingress` | — |

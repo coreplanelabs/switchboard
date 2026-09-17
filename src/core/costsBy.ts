@@ -1,37 +1,58 @@
 import type { DailyCost, DateRange } from "./costs.js";
 import { llmUsdOfUsage, type ModelPriceTable, type PricedModelUsage } from "./modelPricing.js";
-import { addUsage, emptyUsage, type RunUsageReport, type UsageRow } from "./runUsage.js";
+import { addUsage, emptyUsage, type RunUsage, type RunUsageReport, type UsageRow } from "./runUsage.js";
 
-// Cost by user (docs/reference/specs/costs.md item 10): who spent what, built from the
-// run history's usage cells (run-history.md item 56 — one per requester,
-// thread, channel, agent and UTC day) and the group's own daily cost report.
-// Pure — every dollar of arithmetic is here and unit-tested; the service only
-// fetches the two inputs and resolves the viewer.
+// Cost by dimension (docs/reference/specs/costs.md items 10–10a): what the runs
+// cost, laid against who started them, the thread and channel they ran in, the
+// agent they ran on, or the model whose tokens they spent — built from the run
+// history's usage cells (run-history.md item 56: one per requester, thread,
+// channel, agent and UTC day) and the group's own daily cost report. Pure —
+// every dollar of arithmetic is here and unit-tested; the service only fetches
+// the two inputs and resolves the viewer.
 //
-// Dollars: a user's tokens priced per model through the price table (costs.md
-// item 4b: `costs.prices` over the Anthropic list, cache writes at the 5-minute
-// rate — the spans record one cache-write number). Cloud: each day's Cloudflare spend is
-// split by each user's share of run wall-clock that day and labelled allocated;
-// a day with spend but no runs is unallocated, never invented onto someone.
-// Range: bounded to what the history holds (its retention and its oldest
-// finish), so an empty day reads as "no data" rather than "$0".
+// Dollars: the cells' tokens priced per model through the price table (item
+// 4b: `costs.prices` over the Anthropic list, cache writes at the 5-minute rate
+// — the spans record one cache-write number). Cloud: each day's Cloudflare
+// spend is split by each key's share of run wall-clock that day and labelled
+// allocated; a day with spend but no runs is unallocated, never invented onto
+// anyone. A run belongs to exactly one user, thread, channel and agent, so those
+// four dimensions partition the runs and the cloud; a run may spend tokens on
+// several models, so the model dimension carries LLM dollars alone. Range:
+// bounded to what the history holds (its retention and its oldest finish), so
+// an empty day reads as "no data" rather than "$0".
+
+/** What the rows are keyed by. */
+export type CostDimension = "user" | "thread" | "channel" | "agent" | "model";
+
+export const COST_DIMENSIONS = [
+  "user",
+  "thread",
+  "channel",
+  "agent",
+  "model",
+] as const satisfies readonly CostDimension[];
 
 export interface CostsByDay {
   day: string;
-  userId: string;
-  userName?: string;
+  /** The dimension's key on this day: a user id, a thread key, a channel id, an agent name, a `<provider>/<model>` ref. */
+  key: string;
+  /** A name for the key when one is known — a user's display name; absent on the other dimensions. */
+  label?: string;
   runs: number;
+  /** Model turns: the count that means something on the model dimension, where a run may span models. */
+  turns: number;
   wallMs: number;
   llmUsd: number;
-  /** The day's Cloudflare spend × this user's share of run wall-clock that day. */
+  /** The day's Cloudflare spend × this key's share of run wall-clock that day; 0 on the model dimension. */
   cloudUsd: number;
   unpricedTokens: number;
 }
 
 export interface CostsByRow {
-  userId: string;
-  userName?: string;
+  key: string;
+  label?: string;
   runs: number;
+  turns: number;
   wallMs: number;
   llmUsd: number;
   cloudUsd: number;
@@ -42,6 +63,7 @@ export interface CostsByRow {
 
 export interface CostsByReport {
   group: string;
+  dimension: CostDimension;
   /** The range as asked, clamped to `coverage.from`. */
   range: DateRange;
   coverage: {
@@ -54,18 +76,23 @@ export interface CostsByReport {
     /** false when the process has no run history at all. */
     historyOn: boolean;
   };
-  /** Per user over the range, largest total first. */
-  users: CostsByRow[];
-  /** Per user per day, oldest day first. */
+  /** Per key over the range, largest total first. */
+  rows: CostsByRow[];
+  /** Per key per day, oldest day first. */
   days: CostsByDay[];
   /** Runs in range whose usage the history has not priced yet (backfill outstanding). */
   pending: number;
+  /** Whether each day's cloud spend is split along this dimension by run wall-clock
+   *  (a run belongs to one user, thread, channel and agent) — false on `model`,
+   *  where a run spans models and the rows carry LLM dollars alone. */
+  cloudAllocated: boolean;
   /** The tie-out, over the covered days that HAVE a workspace figure: a day
    *  whose Anthropic figure is zero while its runs spent tokens was billed to
    *  another workspace (the bot's key before it moved; a key of its own) and
-   *  is counted apart, never subtracted into a negative remainder. */
+   *  is counted apart, never subtracted into a negative remainder. The same on
+   *  every dimension: it is the runs' total against the group's. */
   reconciliation: {
-    /** Sum of the users' LLM dollars (list price, from run tokens) on the compared days. */
+    /** Sum of the runs' LLM dollars (list price, from run tokens) on the compared days. */
     attributedLlmUsd: number;
     /** The group's LLM figure (invoice or estimate) on the compared days. */
     workspaceLlmUsd: number;
@@ -75,14 +102,16 @@ export interface CostsByReport {
     comparedDays: number;
     /** Covered days whose runs spent tokens but whose workspace figure is zero: not compared. */
     uncomparedDays: number;
-    /** The users' LLM dollars on those days (still in each user's row, only left out of the tie-out). */
+    /** The runs' LLM dollars on those days (still in each row, only left out of the tie-out). */
     uncomparedLlmUsd: number;
+    /** Cloud spend on days with run wall-clock to split it by. */
     cloudAllocatedUsd: number;
     /** Cloud spend on days with no run wall-clock to split it by. */
     cloudUnallocatedUsd: number;
   };
-  /** The run user ids that are the signed-in viewer, for the **me** toggle; empty when none could be matched. */
-  viewer: { userIds: string[]; matchedByEmail: boolean };
+  /** The user dimension alone: the run user ids that are the signed-in viewer, for the
+   *  **me** toggle; `userIds` empty when none could be matched. */
+  viewer?: { userIds: string[]; matchedByEmail: boolean };
   generatedAt: number;
   /** The snapshot the report was built from (src/core/costsSnapshot.ts); absent on a report built straight from the sources. */
   snapshot?: { takenAt: string; takenBy: string; durationMs: number };
@@ -102,76 +131,111 @@ export function coverageFrom(range: DateRange, usage: RunUsageReport, generatedA
 
 const dayOfMs = (epochMs: number): string => new Date(epochMs).toISOString().slice(0, 10);
 
-/** The cells folded per (day, user): a user's runs across every thread, channel and agent that day. */
-function cellsPerUserDay(cells: readonly UsageRow[]): UsageRow[] {
-  const out = new Map<string, UsageRow>();
+/** One key's slice of one day: the cells of that key that day, folded. */
+interface KeyDay {
+  day: string;
+  key: string;
+  label?: string;
+  runs: number;
+  turns: number;
+  /** The wall-clock the key's cloud share is figured on (0 on the model dimension: no share). */
+  wallMs: number;
+  usage: RunUsage;
+}
+
+/** The cells laid along the dimension: one slice per (day, key). A run-keyed
+ *  dimension takes the cell whole under its key; the model dimension takes each
+ *  model's tokens out of the cell under the model's ref, the cell's runs and
+ *  wall-clock counted once per model it spent on. */
+function slicesOf(cells: readonly UsageRow[], dimension: CostDimension): KeyDay[] {
+  const out = new Map<string, KeyDay>();
+  const fold = (day: string, key: string, label: string | undefined, runs: number, wallMs: number, usage: RunUsage) => {
+    const id = `${day} ${key}`;
+    const acc = out.get(id) ?? { day, key, runs: 0, turns: 0, wallMs: 0, usage: emptyUsage() };
+    if (label && !acc.label) acc.label = label;
+    acc.runs += runs;
+    acc.turns += usage.turns;
+    acc.wallMs += wallMs;
+    acc.usage = addUsage(acc.usage, usage);
+    out.set(id, acc);
+  };
   for (const c of cells) {
-    const key = `${c.day} ${c.userId}`;
-    const acc = out.get(key) ?? {
-      day: c.day,
-      userId: c.userId,
-      threadKey: "",
-      channelId: "",
-      agent: "",
-      runs: 0,
-      wallMs: 0,
-      usage: emptyUsage(),
-    };
-    if (c.userName && !acc.userName) acc.userName = c.userName;
-    acc.runs += c.runs;
-    acc.wallMs += c.wallMs;
-    acc.usage = addUsage(acc.usage, c.usage);
-    out.set(key, acc);
+    if (dimension === "model") {
+      for (const [ref, m] of Object.entries(c.usage.byModel))
+        fold(c.day, ref, undefined, c.runs, 0, { turns: m.turns, byModel: { [ref]: m } });
+      continue;
+    }
+    const key =
+      dimension === "user"
+        ? c.userId
+        : dimension === "thread"
+          ? c.threadKey
+          : dimension === "channel"
+            ? c.channelId
+            : c.agent;
+    fold(c.day, key, dimension === "user" ? c.userName : undefined, c.runs, c.wallMs, c.usage);
   }
   return [...out.values()];
 }
 
 export function buildCostsByReport(input: {
   group: string;
+  dimension: CostDimension;
   range: DateRange;
   usage: RunUsageReport;
   /** The group's daily cost report for the same range: cloud to allocate, LLM to reconcile against. */
   days: DailyCost[];
   historyOn: boolean;
-  viewerUserIds: string[];
-  matchedByEmail: boolean;
+  /** The user dimension's viewer, for the **me** toggle; ignored on the other dimensions. */
+  viewer?: { userIds: string[]; matchedByEmail: boolean };
   generatedAt: number;
   /** `costs.prices` over the Anthropic list (item 4b); absent → the list alone. */
   prices?: ModelPriceTable;
 }): CostsByReport {
-  const { range, usage } = input;
+  const { range, usage, dimension } = input;
   const from = coverageFrom(range, usage, input.generatedAt);
   const covered = (day: string) => day >= from && day <= range.to;
-  const rowsIn = cellsPerUserDay(usage.rows.filter((r) => covered(r.day)));
+  const cells = usage.rows.filter((r) => covered(r.day));
+  const cloudAllocated = dimension !== "model";
+
+  // The cloud and the tie-out are the runs' as a whole, the same on every dimension.
   const wallByDay = new Map<string, number>();
-  for (const r of rowsIn) wallByDay.set(r.day, (wallByDay.get(r.day) ?? 0) + r.wallMs);
+  for (const c of cells) wallByDay.set(c.day, (wallByDay.get(c.day) ?? 0) + c.wallMs);
   const cloudByDay = new Map(input.days.filter((d) => covered(d.date)).map((d) => [d.date, d.cloudUsd]));
   let cloudAllocatedUsd = 0;
   let cloudUnallocatedUsd = 0;
-  for (const [day, cloud] of cloudByDay) if ((wallByDay.get(day) ?? 0) <= 0) cloudUnallocatedUsd += cloud;
+  for (const [day, cloud] of cloudByDay) {
+    if ((wallByDay.get(day) ?? 0) > 0) cloudAllocatedUsd += cloud;
+    else cloudUnallocatedUsd += cloud;
+  }
+  const attributedByDay = new Map<string, number>();
+  for (const c of cells)
+    attributedByDay.set(c.day, (attributedByDay.get(c.day) ?? 0) + llmUsdOfUsage(c.usage, input.prices).usd);
 
-  const days: CostsByDay[] = rowsIn.map((r) => {
-    const priced = llmUsdOfUsage(r.usage, input.prices);
-    const wall = wallByDay.get(r.day) ?? 0;
-    const cloudUsd = wall > 0 ? (cloudByDay.get(r.day) ?? 0) * (r.wallMs / wall) : 0;
-    cloudAllocatedUsd += cloudUsd;
+  const slices = slicesOf(cells, dimension);
+  const days: CostsByDay[] = slices.map((s) => {
+    const priced = llmUsdOfUsage(s.usage, input.prices);
+    const wall = wallByDay.get(s.day) ?? 0;
+    const cloudUsd = cloudAllocated && wall > 0 ? (cloudByDay.get(s.day) ?? 0) * (s.wallMs / wall) : 0;
     return {
-      day: r.day,
-      userId: r.userId,
-      ...(r.userName ? { userName: r.userName } : {}),
-      runs: r.runs,
-      wallMs: r.wallMs,
+      day: s.day,
+      key: s.key,
+      ...(s.label ? { label: s.label } : {}),
+      runs: s.runs,
+      turns: s.turns,
+      wallMs: s.wallMs,
       llmUsd: priced.usd,
       cloudUsd,
       unpricedTokens: priced.unpricedTokens,
     };
   });
 
-  const users = new Map<string, CostsByRow>();
-  for (const r of rowsIn) {
-    const row = users.get(r.userId) ?? {
-      userId: r.userId,
+  const rows = new Map<string, CostsByRow>();
+  for (const s of slices) {
+    const row = rows.get(s.key) ?? {
+      key: s.key,
       runs: 0,
+      turns: 0,
       wallMs: 0,
       llmUsd: 0,
       cloudUsd: 0,
@@ -179,10 +243,11 @@ export function buildCostsByReport(input: {
       unpricedTokens: 0,
       byModel: {},
     };
-    if (r.userName && !row.userName) row.userName = r.userName;
-    const priced = llmUsdOfUsage(r.usage, input.prices);
-    row.runs += r.runs;
-    row.wallMs += r.wallMs;
+    if (s.label && !row.label) row.label = s.label;
+    const priced = llmUsdOfUsage(s.usage, input.prices);
+    row.runs += s.runs;
+    row.turns += s.turns;
+    row.wallMs += s.wallMs;
     row.llmUsd += priced.usd;
     row.unpricedTokens += priced.unpricedTokens;
     for (const [ref, m] of Object.entries(priced.byModel)) {
@@ -202,20 +267,15 @@ export function buildCostsByReport(input: {
       acc.usd = m.usd === null || acc.usd === null ? null : acc.usd + m.usd;
       row.byModel[ref] = acc;
     }
-    users.set(r.userId, row);
+    rows.set(s.key, row);
   }
-  for (const d of days) {
-    const row = users.get(d.userId)!;
-    row.cloudUsd += d.cloudUsd;
-  }
-  for (const row of users.values()) row.totalUsd = row.llmUsd + row.cloudUsd;
+  for (const d of days) rows.get(d.key)!.cloudUsd += d.cloudUsd;
+  for (const row of rows.values()) row.totalUsd = row.llmUsd + row.cloudUsd;
 
   // The tie-out spans only the days the workspace has a figure for. A day with
   // run tokens and a zero figure was billed elsewhere (the key before it moved
-  // into this workspace); it stays in the users' rows and is named apart.
+  // into this workspace); it stays in the rows and is named apart.
   const workspaceByDay = new Map(input.days.filter((d) => covered(d.date)).map((d) => [d.date, d.llmUsd]));
-  const attributedByDay = new Map<string, number>();
-  for (const d of days) attributedByDay.set(d.day, (attributedByDay.get(d.day) ?? 0) + d.llmUsd);
   const comparedDayList = [...workspaceByDay].filter(([, llm]) => llm > 0).map(([day]) => day);
   const compared = new Set(comparedDayList);
   const attributedLlmUsd = comparedDayList.reduce((s, day) => s + (attributedByDay.get(day) ?? 0), 0);
@@ -224,6 +284,7 @@ export function buildCostsByReport(input: {
   const uncomparedLlmUsd = uncompared.reduce((s, [, llm]) => s + llm, 0);
   return {
     group: input.group,
+    dimension,
     range: {
       ...range,
       from,
@@ -239,9 +300,10 @@ export function buildCostsByReport(input: {
       clamped: from > range.from,
       historyOn: input.historyOn,
     },
-    users: [...users.values()].sort((a, b) => b.totalUsd - a.totalUsd || (a.userId < b.userId ? -1 : 1)),
+    rows: [...rows.values()].sort((a, b) => b.totalUsd - a.totalUsd || (a.key < b.key ? -1 : 1)),
     days,
     pending: usage.pending,
+    cloudAllocated,
     reconciliation: {
       attributedLlmUsd,
       workspaceLlmUsd,
@@ -252,7 +314,7 @@ export function buildCostsByReport(input: {
       cloudAllocatedUsd,
       cloudUnallocatedUsd,
     },
-    viewer: { userIds: input.viewerUserIds, matchedByEmail: input.matchedByEmail },
+    ...(dimension === "user" ? { viewer: input.viewer ?? { userIds: [], matchedByEmail: false } } : {}),
     generatedAt: input.generatedAt,
   };
 }

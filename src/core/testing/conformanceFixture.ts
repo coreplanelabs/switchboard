@@ -43,7 +43,7 @@ import type { DeployRunResult, RestartRunResult } from "../../deploy/run.js";
 import type { PlannedFile } from "../../setup/plan.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import { InMemoryIssueTracker } from "../../execution/githubIssues.js";
-import { EMPTY_USAGE, parseCostsConfig } from "../costs.js";
+import { EMPTY_USAGE, MAX_DAYS, parseCostsConfig, resolveRange } from "../costs.js";
 import { CostsSnapshotter } from "../costsSnapshot.js";
 import { InMemoryCostsSnapshotStore } from "../costsSnapshotStore.js";
 import { createCostsService } from "../costsService.js";
@@ -574,12 +574,50 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   const runs = async () =>
     createRunsService({ registry: s.reg, store: s.store, clock: () => NOW, units: s.units, sessions: s.ledger });
   // `costs snapshot`: the real service over an in-memory snapshotter whose
-  // sources answer at once — a take lands and the stamp comes back.
+  // sources answer at once — a take lands and the stamp comes back. `costs by`:
+  // the store already holds a snapshot with one run's usage cell, so the
+  // report is arithmetic, never a 503 (the in-memory put lands synchronously).
+  const costsStore = new InMemoryCostsSnapshotStore();
+  void costsStore.put({
+    takenAt: new Date(NOW).toISOString(),
+    takenBy: "fixture",
+    durationMs: 1,
+    range: resolveRange(String(MAX_DAYS), new Date(NOW)),
+    usage: EMPTY_USAGE,
+    llm: null,
+    runUsage: {
+      rows: [
+        {
+          day: new Date(NOW).toISOString().slice(0, 10),
+          userId: "slack:U0FIXTURE",
+          threadKey: `${FIXTURE.channel}:1`,
+          channelId: FIXTURE.channel,
+          agent: "coding",
+          runs: 1,
+          wallMs: 60_000,
+          usage: {
+            turns: 1,
+            byModel: {
+              "anthropic/claude-haiku-4-5": {
+                turns: 1,
+                inputTokens: 1000,
+                outputTokens: 100,
+                cacheReadTokens: 0,
+                cacheWriteTokens: 0,
+              },
+            },
+          },
+        },
+      ],
+      pending: 0,
+      retentionDays: 30,
+    },
+  });
   const costs = createCostsService(
     parseCostsConfig({ cloudflareAccountId: "acct-fixture", groups: { fixture: { workers: ["fixture"] } } })!,
     new CostsSnapshotter(
       { cloudflare: { fetchUsage: async () => EMPTY_USAGE }, llm: { fetchDailyCost: async () => null } },
-      new InMemoryCostsSnapshotStore(),
+      costsStore,
       { everyHours: 24, now: () => new Date(NOW) },
     ),
   );

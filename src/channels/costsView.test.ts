@@ -109,28 +109,31 @@ function fakeService(
   };
 }
 
-/** A by-user report shaped like the builder's, small. */
-function byReport(): CostsByReport {
+/** A by-dimension report shaped like the builder's, small; `dimension` as the twin asked. */
+function byReport(dimension: CostsByReport["dimension"] = "user"): CostsByReport {
   const r = report();
   return {
     group: r.group,
+    dimension,
     range: r.range,
     coverage: { from: r.range.from, retentionDays: 30, clamped: false, historyOn: true },
-    users: [
+    rows: [
       {
-        userId: "slack:UALICE",
-        userName: "alice",
+        key: dimension === "user" ? "slack:UALICE" : "anthropic/claude-haiku-4-5",
+        ...(dimension === "user" ? { label: "alice" } : {}),
         runs: 3,
+        turns: 5,
         wallMs: 60_000,
         llmUsd: 12,
-        cloudUsd: 1,
-        totalUsd: 13,
+        cloudUsd: dimension === "model" ? 0 : 1,
+        totalUsd: dimension === "model" ? 12 : 13,
         unpricedTokens: 0,
         byModel: {},
       },
     ],
     days: [],
     pending: 0,
+    cloudAllocated: dimension !== "model",
     reconciliation: {
       attributedLlmUsd: 12,
       workspaceLlmUsd: 19.5,
@@ -141,7 +144,7 @@ function byReport(): CostsByReport {
       cloudAllocatedUsd: 1,
       cloudUnallocatedUsd: 2.4,
     },
-    viewer: { userIds: ["slack:UALICE"], matchedByEmail: true },
+    ...(dimension === "user" ? { viewer: { userIds: ["slack:UALICE"], matchedByEmail: true } } : {}),
     generatedAt: r.generatedAt,
   };
 }
@@ -195,23 +198,25 @@ describe("parseCostsRoute", () => {
     expect(parseCostsRoute("/costs/switchboard.json")).toEqual({ kind: "json", group: "switchboard", view: "daily" });
     expect(parseCostsRoute("/costs.json")).toEqual({ kind: "json", group: null, view: "daily" });
   });
-  // costs.md item 10: the by-user tab and its twin.
-  it("matches the by-user tab (?view=users) and its JSON twin /costs/<group>/users.json; a twin never has a view", () => {
-    expect(parseCostsRoute("/costs/switchboard", "?view=users&days=7")).toEqual({
-      kind: "page",
-      group: "switchboard",
-      view: "users",
-    });
-    expect(parseCostsRoute("/costs", "?view=users")).toEqual({ kind: "page", group: null, view: "users" });
+  // costs.md items 10–10a: the dimension tabs and their twins.
+  it("matches every dimension tab (?view=users|threads|channels|agents|models) and its JSON twin /costs/<group>/<view>.json; a twin never has a view, an unknown view is the daily tab", () => {
+    for (const view of ["users", "threads", "channels", "agents", "models"] as const) {
+      expect(parseCostsRoute("/costs/switchboard", `?view=${view}&days=7`)).toEqual({
+        kind: "page",
+        group: "switchboard",
+        view,
+      });
+      expect(parseCostsRoute("/costs", `?view=${view}`)).toEqual({ kind: "page", group: null, view });
+      expect(parseCostsRoute(`/costs/switchboard/${view}.json`)).toEqual({
+        kind: "by-json",
+        group: "switchboard",
+        view,
+      });
+    }
     expect(parseCostsRoute("/costs/switchboard", "?view=bogus")).toEqual({
       kind: "page",
       group: "switchboard",
       view: "daily",
-    });
-    expect(parseCostsRoute("/costs/switchboard/users.json")).toEqual({
-      kind: "users-json",
-      group: "switchboard",
-      view: "users",
     });
     expect(parseCostsRoute("/costs/switchboard.json", "?view=users")).toEqual({
       kind: "json",
@@ -220,6 +225,12 @@ describe("parseCostsRoute", () => {
     });
     expect(parseCostsRoute("/costs/../users.json")).toBeNull();
     expect(parseCostsRoute("/costs/switchboard/other.json")).toBeNull();
+    expect(parseCostsRoute("/costs/switchboard/daily.json")).toBeNull();
+    expect(parseCostsRoute("/costs/switchboard/users.json", "?view=models")).toEqual({
+      kind: "by-json",
+      group: "switchboard",
+      view: "users",
+    });
   });
   // costs.md item 8b: the status feed rides the page route with `?stream=1`.
   it("matches the status feed (?stream=1) on the bare index and a group page; a twin never streams", () => {
@@ -320,15 +331,15 @@ describe("createCostsViewHandler", () => {
 
   // costs.md item 10: the by-user tab reads one more report, only when asked
   // for, with the verified viewer; its twin serves exactly that report.
-  it("?view=users seeds the by-user report beside the daily one and hands the viewer through; the twin serves the report; the daily page reads no by-user report", async () => {
-    const calls: Array<{ group: string; days: string | null; viewer: unknown }> = [];
+  it("?view=<dimension> seeds that dimension's report beside the daily one and hands the viewer through; the twin serves the report; the daily page reads no dimension report", async () => {
+    const calls: Array<{ group: string; days: string | null; dimension: string; viewer: unknown }> = [];
     const h = createCostsViewHandler(
       fakeService(
         () => Promise.resolve(report()),
         ["switchboard"],
-        (group, days, viewer) => {
-          calls.push({ group, days, viewer });
-          return Promise.resolve(byReport());
+        (group, days, dimension, viewer) => {
+          calls.push({ group, days, dimension, viewer });
+          return Promise.resolve(byReport(dimension));
         },
       ),
       shell,
@@ -340,9 +351,9 @@ describe("createCostsViewHandler", () => {
     expect(page.status).toBe(200);
     const seed = seedOf(page.body());
     expect(seed.view).toBe("users");
-    expect(seed.users).toEqual(byReport());
+    expect(seed.by).toEqual(byReport("user"));
     expect(seed.report).toEqual(report());
-    expect(calls).toEqual([{ group: "switchboard", days: "7", viewer: identity }]);
+    expect(calls).toEqual([{ group: "switchboard", days: "7", dimension: "user", viewer: identity }]);
 
     const twin = fakeReqRes("GET", "/costs/switchboard/users.json?days=7");
     h(twin.req, twin.res, { identity });
@@ -350,15 +361,27 @@ describe("createCostsViewHandler", () => {
     expect(twin.status).toBe(200);
     expect(twin.headers["content-type"]).toContain("application/json");
     expect(twin.headers["cache-control"]).toBe("no-store");
-    expect(JSON.parse(twin.body())).toEqual(byReport());
+    expect(JSON.parse(twin.body())).toEqual(byReport("user"));
     expect(calls).toHaveLength(2);
+
+    // Every other tab and twin asks for its own dimension.
+    const models = fakeReqRes("GET", "/costs/switchboard?view=models");
+    h(models.req, models.res, { identity });
+    await tick();
+    expect(seedOf(models.body()).view).toBe("models");
+    expect(seedOf(models.body()).by?.dimension).toBe("model");
+    const agents = fakeReqRes("GET", "/costs/switchboard/agents.json");
+    h(agents.req, agents.res, { identity });
+    await tick();
+    expect(JSON.parse(agents.body()).dimension).toBe("agent");
+    expect(calls.slice(2).map((c) => c.dimension)).toEqual(["model", "agent"]);
 
     const daily = fakeReqRes("GET", "/costs/switchboard");
     h(daily.req, daily.res, { identity });
     await tick();
     expect(seedOf(daily.body()).view).toBe("daily");
-    expect(seedOf(daily.body()).users).toBeUndefined();
-    expect(calls).toHaveLength(2);
+    expect(seedOf(daily.body()).by).toBeUndefined();
+    expect(calls).toHaveLength(4);
   });
 
   it("a by-user read that fails upstream is a capped 502 like the daily one", async () => {
@@ -406,7 +429,7 @@ describe("createCostsViewHandler", () => {
       view: "users",
       snapshot: NONE_YET,
     });
-    expect(seed.users).toBeUndefined();
+    expect(seed.by).toBeUndefined();
 
     // A take in flight rides the same status field.
     taking = { ...NONE_YET, inFlight: { startedAt: "2026-08-29T06:15:00.000Z", by: "casey" } };
@@ -415,7 +438,12 @@ describe("createCostsViewHandler", () => {
     await tick();
     expect(seedOf(again.body()).snapshot.inFlight).toEqual({ startedAt: "2026-08-29T06:15:00.000Z", by: "casey" });
 
-    for (const path of ["/costs/switchboard.json", "/costs/switchboard/users.json", "/costs.json"]) {
+    for (const path of [
+      "/costs/switchboard.json",
+      "/costs/switchboard/users.json",
+      "/costs/switchboard/models.json",
+      "/costs.json",
+    ]) {
       const twin = fakeReqRes("GET", path);
       h(twin.req, twin.res);
       await tick();

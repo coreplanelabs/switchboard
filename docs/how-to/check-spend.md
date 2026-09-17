@@ -28,6 +28,14 @@ The previous snapshot keeps serving and the status line names the failure (`last
 
 Open `/costs/<group>`.
 
+## See who, what and which model spent it
+
+The tabs above the tables lay the same dollars against the runs: **By user**, **By thread**, **By channel**, **By agent** and **By model** (`/costs/<group>?view=users|threads|channels|agents|models`). Each row is one key with its runs, the LLM dollars from the runs' tokens priced through the price table (`costs.prices` over the Anthropic list), the day's Cloudflare spend allocated by the key's share of run wall-clock (an allocation, not a meter — and none on the model tab, where a run may span models and the rows carry LLM alone), the total and its share. A child run bills to whoever started its parent, in the child's own thread and agent. A model neither table knows reads `unpriced tokens`, never $0. The coverage line says where the run history begins and how many runs are still being priced; the reconciliation line ties the attributed LLM to the group's own figure. On the By user tab, **me** keeps your own rows when your sign-in email matches a Slack user.
+
+The same report on every command surface: `costs by user` in Slack (the `costs:read` grant; a browser session holds it), `switchboard costs by agent --days 7 --group <group>` on the CLI, `GET /api/costs.by?dimension=model` over HTTP, the `costs_by` MCP tool. The JSON twins are `/costs/<group>/<view>.json`.
+
+Every finished run's own dollars are on its run page beside the duration and in `runs get` as `cost` — the same tokens priced the same way, `unpriced` for a model without a price. A model the list does not know (another provider's, a new release) is priced by naming its rates under `costs.prices` in `config.yaml`.
+
 ## Script it
 
 Fetch `/costs/<group>.json`: the same data, machine-readable, behind the same gate. Send what the installation's `dashboard.auth` strategy expects:

@@ -259,31 +259,33 @@ describe("reportFromSnapshot / byReportFromSnapshot", () => {
     expect(week.generatedAt).toBe(T0);
   });
 
-  it("the by-user report is the builder over the snapshot's run usage for the range, history on; with run usage absent the history is off and nothing is attributed", () => {
+  it("a dimension's report is the builder over the snapshot's run usage for the range on that dimension, history on, the viewer on the user dimension alone; with run usage absent the history is off and nothing is attributed", () => {
     const daily = reportFromSnapshot(snapshot, "switchboard", GROUP, "7", meta);
+    const viewer = { userIds: ["slack:UALICE"], matchedByEmail: true };
     const expected = buildCostsByReport({
       group: "switchboard",
+      dimension: "user",
       range: daily.range,
       usage: RUN_USAGE,
       days: daily.days,
       historyOn: true,
-      viewerUserIds: ["slack:UALICE"],
-      matchedByEmail: true,
+      viewer,
       generatedAt: T0,
     });
-    const got = byReportFromSnapshot(snapshot, daily, { viewerUserIds: ["slack:UALICE"], matchedByEmail: true });
+    const got = byReportFromSnapshot(snapshot, daily, "user", { viewer });
     expect(got).toEqual({
       ...expected,
       snapshot: { takenAt: snapshot.takenAt, takenBy: "schedule", durationMs: 31_000 },
     });
-    expect(got.users.map((u) => u.userId)).toEqual(["slack:UALICE"]);
+    expect(got.rows.map((u) => u.key)).toEqual(["slack:UALICE"]);
+    const byAgent = byReportFromSnapshot(snapshot, daily, "agent", {});
+    expect(byAgent.dimension).toBe("agent");
+    expect(byAgent.rows.map((r) => r.key)).toEqual(["general"]);
+    expect(byAgent.viewer).toBeUndefined();
 
-    const off = byReportFromSnapshot({ ...snapshot, runUsage: null }, daily, {
-      viewerUserIds: [],
-      matchedByEmail: false,
-    });
+    const off = byReportFromSnapshot({ ...snapshot, runUsage: null }, daily, "user", {});
     expect(off.coverage.historyOn).toBe(false);
-    expect(off.users).toEqual([]);
+    expect(off.rows).toEqual([]);
   });
 });
 

@@ -1,12 +1,16 @@
+import { z } from "zod";
 import {
   CommandError,
   commandDefiner,
+  type Caller,
   type CommandDef,
   type CommandRegistry,
   type JsonObject,
   type JsonValue,
 } from "../commandRegistry.js";
-import { COSTS_OFF_MESSAGE, type CostsService } from "../costsService.js";
+import { MAX_DAYS } from "../costs.js";
+import { COST_DIMENSIONS } from "../costsBy.js";
+import { COSTS_OFF_MESSAGE, NoCostsSnapshotError, type CostsService, type CostsViewer } from "../costsService.js";
 
 // `costs.snapshot` (docs/reference/specs/costs.md item 6): take the costs
 // snapshot now — both billing sources and the run history read once over the
@@ -80,7 +84,130 @@ export const costsSnapshot = defineCommand({
   },
 });
 
+// `costs.by` (docs/reference/specs/costs.md items 10–10a): what the runs cost
+// by user, thread, channel, agent or model over the range, from the snapshot —
+// the same arithmetic the page's tabs and their JSON twins are, on every
+// surface. Action `costs:read` (a browser session's baseline; a grant for a
+// Slack user or a token), effect read: nothing is taken or written.
+
+const dimensionArg = {
+  name: "dimension",
+  schema: z.enum(COST_DIMENSIONS),
+  describe: "what to lay the runs against: user, thread, channel, agent or model",
+} as const;
+
+/** The signed-in viewer, for the user dimension's `viewer.userIds` (the **me** rows); nobody on the other surfaces. */
+const viewerOf = (caller: Caller): CostsViewer | undefined =>
+  caller.kind === "access" ? { sub: caller.id, ...(caller.email ? { email: caller.email } : {}) } : undefined;
+
+const money = (v: unknown): string => (typeof v === "number" ? `$${v.toFixed(2)}` : "-");
+
+/** The text surfaces' report: a header naming the dimension, the group, the range and the snapshot; one line per
+ *  row (largest first); the coverage and the tie-out. Chat gets ` · `-joined bullets (columns collapse in a
+ *  proportional font); the terminal gets aligned columns. */
+function renderCostsBy(output: JsonValue, surface: "chat" | "text" = "text"): string {
+  const o = output as JsonObject;
+  const rows = (Array.isArray(o.rows) ? o.rows : []) as JsonObject[];
+  const range = (o.range ?? {}) as JsonObject;
+  const rec = (o.reconciliation ?? {}) as JsonObject;
+  const coverage = (o.coverage ?? {}) as JsonObject;
+  const snapshot = (o.snapshot ?? {}) as JsonObject;
+  const cloud = o.cloudAllocated === true;
+  const count = o.dimension === "model" ? "turns" : "runs";
+  const total = rows.reduce((s, r) => s + (typeof r.totalUsd === "number" ? r.totalUsd : 0), 0);
+  const share = (r: JsonObject) =>
+    total > 0 && typeof r.totalUsd === "number" ? Math.round((r.totalUsd / total) * 100) : 0;
+  const head =
+    `costs by ${String(o.dimension)} · ${String(o.group)} · ${String(range.from)} → ${String(range.to)} (${String(range.days)}d)` +
+    (typeof snapshot.takenAt === "string" ? ` · snapshot ${snapshot.takenAt.slice(0, 16).replace("T", " ")} UTC` : "");
+  const name = (r: JsonObject) => (typeof r.label === "string" ? `${r.label} (${String(r.key)})` : String(r.key));
+  const line = (r: JsonObject) => {
+    const n = typeof r[count] === "number" ? String(r[count]) : "0";
+    const unpriced = typeof r.unpricedTokens === "number" && r.unpricedTokens > 0 ? " · unpriced tokens" : "";
+    if (surface === "chat")
+      return `• ${name(r)} — ${n} ${count} · LLM ${money(r.llmUsd)}${cloud ? ` · cloud ${money(r.cloudUsd)}` : ""} · total ${money(r.totalUsd)} (${share(r)}%)${unpriced}`;
+    return `${name(r).padEnd(40)} ${n.padStart(6)} ${money(r.llmUsd).padStart(10)}${cloud ? money(r.cloudUsd).padStart(10) : ""} ${money(r.totalUsd).padStart(10)} ${String(share(r)).padStart(4)}%${unpriced}`;
+  };
+  const columns =
+    surface === "chat"
+      ? []
+      : [
+          `${String(o.dimension).padEnd(40)} ${count.padStart(6)} ${"LLM".padStart(10)}${cloud ? "cloud".padStart(10) : ""} ${"total".padStart(10)} share`,
+        ];
+  const where =
+    coverage.historyOn === false
+      ? "run history is off — no runs to attribute"
+      : `runs from ${String(coverage.from)}${coverage.clamped === true ? ` (earlier days are past the history's ${String(coverage.retentionDays)}-day window)` : ""}${typeof o.pending === "number" && o.pending > 0 ? ` · ${o.pending} run(s) still being priced` : ""}`;
+  const tieOut =
+    typeof rec.comparedDays === "number" && rec.comparedDays > 0
+      ? `LLM attributed ${money(rec.attributedLlmUsd)} of ${money(rec.workspaceLlmUsd)} on the workspace over ${rec.comparedDays} day(s)` +
+        (typeof rec.unattributedLlmUsd === "number" && rec.unattributedLlmUsd < 0
+          ? ` · ${money(-rec.unattributedLlmUsd)} more attributed than the workspace figure`
+          : ` · ${money(rec.unattributedLlmUsd)} unattributed`)
+      : "no day in range has a workspace LLM figure to compare against";
+  const cloudLine = cloud
+    ? ` · cloud allocated ${money(rec.cloudAllocatedUsd)}${typeof rec.cloudUnallocatedUsd === "number" && rec.cloudUnallocatedUsd > 0 ? ` · ${money(rec.cloudUnallocatedUsd)} on days with no runs` : ""}`
+    : "";
+  return [
+    head,
+    ...columns,
+    ...(rows.length === 0 ? ["(no runs in this range)"] : rows.map(line)),
+    where,
+    `${tieOut}${cloudLine}`,
+  ].join("\n");
+}
+
+export const costsBy = defineCommand({
+  id: "costs.by",
+  args: [dimensionArg],
+  options: z.object({
+    days: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_DAYS)
+      .optional()
+      .describe(`the range in UTC days ending on the snapshot's day (default 30, at most ${MAX_DAYS})`),
+    group: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9-]{0,39}$/)
+      .optional()
+      .describe("the cost group under `costs.groups`; default: the first configured"),
+  }),
+  action: "costs:read",
+  effect: "read",
+  enabledWhen: (caps) => caps.costs,
+  describe:
+    "What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written.",
+  render: (output) => renderCostsBy(output, "text"),
+  renderChat: (output) => renderCostsBy(output, "chat"),
+  handler: async ({ args, options, caller, deps }) => {
+    const service = await deps.costs.service();
+    const groups = service.groups();
+    if (groups.length === 0) throw new CommandError("unavailable", COSTS_OFF_MESSAGE);
+    const group = options.group ?? groups[0];
+    if (!groups.includes(group)) throw new CommandError("not_found", `no cost group named ${group}`);
+    try {
+      const report = await service.byReport(
+        group,
+        options.days === undefined ? null : String(options.days),
+        args.dimension,
+        viewerOf(caller),
+      );
+      return report as unknown as JsonValue;
+    } catch (err) {
+      // Before the first snapshot lands the report is a minute away: retry, not "not here".
+      if (err instanceof NoCostsSnapshotError) throw new CommandError("busy", err.message);
+      throw new CommandError(
+        "unavailable",
+        `cost report unavailable: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  },
+});
+
 export const costsCommands: readonly CommandDef<CostsCommandDeps>[] = [
+  costsBy,
   costsSnapshot,
 ] as unknown as CommandDef<CostsCommandDeps>[];
 

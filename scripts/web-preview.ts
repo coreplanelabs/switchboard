@@ -21,7 +21,8 @@ import { wrapUntrusted } from "../src/core/untrusted.js";
 import type { UnitFacts } from "../src/core/unitRuns.js";
 import { ALL_CAPABILITIES, NO_CAPABILITIES } from "../src/core/capabilities.js";
 import type { CostReport, DailyCost } from "../src/core/costs.js";
-import { buildCostsByReport } from "../src/core/costsBy.js";
+import { buildCostsByReport, type CostDimension, type CostsByReport } from "../src/core/costsBy.js";
+import { DIMENSION_OF_VIEW, type CostsByView, type CostsView } from "../src/channels/costsView.js";
 import type { CostsSnapshotStatus } from "../src/core/costsSnapshot.js";
 import type { RunUsage, UsageRow } from "../src/core/runUsage.js";
 import { buildDeliveryReport, resolveDeliveryRange, type PullRequestFacts } from "../src/core/delivery.js";
@@ -1185,21 +1186,23 @@ const COSTS_USER_ROWS: UsageRow[] = COSTS_DAYS.slice(COSTS_USERS_FROM).flatMap((
     });
   return rows;
 });
-const COSTS_USERS = buildCostsByReport({
-  group: COSTS.group,
-  range: COSTS.range,
-  usage: {
-    rows: COSTS_USER_ROWS,
-    pending: 2,
-    earliestFinishedAt: NOW - (29 - COSTS_USERS_FROM) * 86_400_000,
-    retentionDays: 30,
-  },
-  days: COSTS_DAYS,
-  historyOn: true,
-  viewerUserIds: ["slack:U0ALICE00"],
-  matchedByEmail: true,
-  generatedAt: NOW,
-});
+/** One dimension's report over the same cells (costs.md items 10–10a): the same builder the bot runs. */
+const costsBy = (dimension: CostDimension): CostsByReport =>
+  buildCostsByReport({
+    group: COSTS.group,
+    dimension,
+    range: COSTS.range,
+    usage: {
+      rows: COSTS_USER_ROWS,
+      pending: 2,
+      earliestFinishedAt: NOW - (29 - COSTS_USERS_FROM) * 86_400_000,
+      retentionDays: 30,
+    },
+    days: COSTS_DAYS,
+    historyOn: true,
+    viewer: { userIds: ["slack:U0ALICE00"], matchedByEmail: true },
+    generatedAt: NOW,
+  });
 
 // The delivery page's four weeks, built through the real aggregation so the
 // fixture cannot drift from the report shape: eight merged pull requests of
@@ -2344,29 +2347,20 @@ function page(
   if (pathname.startsWith("/residents/"))
     return { title: "acme/web", seed: { page: "resident", slug: "acme/web", record: RESIDENTS.residents[0] } };
   if (pathname.startsWith("/costs")) {
-    const users = new URLSearchParams(search).get("view") === "users";
+    const asked = new URLSearchParams(search).get("view");
+    const view: CostsView = asked !== null && asked in DIMENSION_OF_VIEW ? (asked as CostsByView) : "daily";
     return {
       title: "Switchboard spend",
-      seed: users
-        ? {
-            page: "costs",
-            group: COSTS.group,
-            report: COSTS,
-            groups: ["api", "web"],
-            view: "users",
-            users: COSTS_USERS,
-            snapshot: COSTS_SNAPSHOT,
-            canSnapshot: true,
-          }
-        : {
-            page: "costs",
-            group: COSTS.group,
-            report: COSTS,
-            groups: ["api", "web"],
-            view: "daily",
-            snapshot: COSTS_SNAPSHOT,
-            canSnapshot: true,
-          },
+      seed: {
+        page: "costs",
+        group: COSTS.group,
+        report: COSTS,
+        groups: ["api", "web"],
+        view,
+        ...(view === "daily" ? {} : { by: costsBy(DIMENSION_OF_VIEW[view]) }),
+        snapshot: COSTS_SNAPSHOT,
+        canSnapshot: true,
+      },
     };
   }
   if (pathname.startsWith("/settings")) {

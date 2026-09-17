@@ -2,7 +2,7 @@ import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { authorize } from "../core/authz/authorize.js";
 import type { Actor } from "../core/authz/types.js";
 import type { CostReport } from "../core/costs.js";
-import type { CostsByReport } from "../core/costsBy.js";
+import type { CostDimension, CostsByReport } from "../core/costsBy.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import { COSTS_OFF_MESSAGE, NoCostsSnapshotError, type CostsService, type CostsViewer } from "../core/costsService.js";
 import { nodeSseSink, SSE_HEADERS, SSE_PRELUDE, startSseHeartbeat, type SseSink } from "./liveView/sse.js";
@@ -11,14 +11,15 @@ import { WEB_HTML_HEADERS } from "./webShell.js";
 
 // Costs dash: an Access-gated, read-only browser view of what a group of
 // deployed pieces costs per day — `GET /costs` (first group), `/costs/<group>`,
-// a JSON twin at `/costs/<group>.json` for agents, and cost by user at
-// `/costs/<group>?view=users` with its twin `/costs/<group>/users.json`
-// (costs.md item 10). Every figure comes from the costs snapshot (item 6): the
-// billing sources are read on the snapshot's interval or on request, never in
-// a page load, so a request is arithmetic over stored rows. The seed carries
-// the snapshot's status — its stamp, a take in flight, when the next is due —
-// which the page shows beside the numbers; before the first snapshot lands
-// the page shows that status alone and the twins answer 503.
+// a JSON twin at `/costs/<group>.json` for agents, and the cost dimensions at
+// `/costs/<group>?view=users|threads|channels|agents|models` with their twins
+// `/costs/<group>/<view>.json` (costs.md items 10–10a). Every figure comes from
+// the costs snapshot (item 6): the billing sources are read on the snapshot's
+// interval or on request, never in a page load, so a request is arithmetic
+// over stored rows. The seed carries the snapshot's status — its stamp, a take
+// in flight, when the next is due — which the page shows beside the numbers;
+// before the first snapshot lands the page shows that status alone and the
+// twins answer 503.
 //
 // Auth: like /runs and /residents this surface has no token of its own —
 // Cloudflare Access is the "who" gate, re-verified fail-closed in
@@ -28,25 +29,46 @@ import { WEB_HTML_HEADERS } from "./webShell.js";
 //
 // Rendering lives in the web app (web/src/pages/CostsPage.vue + lib/costs.ts):
 // this handler serves the shared shell with the report + group list as the
-// seed. The JSON twins are exactly the seed's report / users.
+// seed. The JSON twins are exactly the seed's report / by-dimension report.
 
-/** `stream` is the page's status feed (`?stream=1`, costs.md item 8b): the snapshot's status as SSE. */
+/** The tabs a dimension opens on: the `?view=` value and the twin's name. */
+export type CostsByView = "users" | "threads" | "channels" | "agents" | "models";
+export type CostsView = "daily" | CostsByView;
+
+/** `?view=` → the dimension the rows are keyed by. */
+export const DIMENSION_OF_VIEW: Readonly<Record<CostsByView, CostDimension>> = Object.freeze({
+  users: "user",
+  threads: "thread",
+  channels: "channel",
+  agents: "agent",
+  models: "model",
+});
+
+export const COSTS_BY_VIEWS = Object.keys(DIMENSION_OF_VIEW) as readonly CostsByView[];
+
+const isByView = (v: string | null): v is CostsByView => v !== null && v in DIMENSION_OF_VIEW;
+
+/** `page` and `stream` (the page's status feed, `?stream=1`, costs.md item 8b) carry the
+ *  tab; `json` is the daily twin; `by-json` is a dimension's twin, `view` naming it. */
 export type CostsRoute = {
-  kind: "page" | "json" | "users-json" | "stream";
+  kind: "page" | "json" | "by-json" | "stream";
   group: string | null;
-  view: "daily" | "users";
+  view: CostsView;
 };
 
 const GROUP_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
 export function parseCostsRoute(pathname: string, search = ""): CostsRoute | null {
   const params = new URLSearchParams(search);
-  const view = params.get("view") === "users" ? "users" : "daily";
+  const asked = params.get("view");
+  const view: CostsView = isByView(asked) ? asked : "daily";
   const page = params.get("stream") === "1" ? "stream" : "page";
   if (pathname === "/costs" || pathname === "/costs/") return { kind: page, group: null, view };
   if (pathname === "/costs.json") return { kind: "json", group: null, view: "daily" };
-  const users = /^\/costs\/([^/]+?)\/users\.json\/?$/.exec(pathname);
-  if (users) return GROUP_RE.test(users[1]) ? { kind: "users-json", group: users[1], view: "users" } : null;
+  const twin = /^\/costs\/([^/]+?)\/([a-z]+)\.json\/?$/.exec(pathname);
+  if (twin) {
+    return GROUP_RE.test(twin[1]) && isByView(twin[2]) ? { kind: "by-json", group: twin[1], view: twin[2] } : null;
+  }
   const m = /^\/costs\/([^/]+?)(\.json)?\/?$/.exec(pathname);
   if (!m || !GROUP_RE.test(m[1])) return null;
   return m[2] ? { kind: "json", group: m[1], view: "daily" } : { kind: page, group: m[1], view };
@@ -166,10 +188,11 @@ export function createCostsViewHandler(
       const reason = (err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX);
       plain(res, 502, `cost report unavailable: ${reason}`);
     };
-    if (route.kind === "users-json") {
-      service
-        .byReport(group, days, ctx.identity)
-        .then((users: CostsByReport) => json(res, users))
+    const byReport = (view: CostsByView): Promise<CostsByReport> =>
+      service.byReport(group, days, DIMENSION_OF_VIEW[view], ctx.identity);
+    if (route.kind === "by-json" && route.view !== "daily") {
+      byReport(route.view)
+        .then((report: CostsByReport) => json(res, report))
         .catch(failed);
       return true;
     }
@@ -180,12 +203,12 @@ export function createCostsViewHandler(
         .catch(failed);
       return true;
     }
-    // The page: the daily report always (tiles and chart), plus the by-user
-    // report when that tab is open — both from the snapshot; before the first
-    // one lands the page carries the status and no report. The status is read
-    // after the reports so it is the one they were built from.
-    const users = route.view === "users" ? orNone(service.byReport(group, days, ctx.identity)) : Promise.resolve(null);
-    Promise.all([orNone(service.report(group, days)), users])
+    // The page: the daily report always (tiles and chart), plus the open
+    // dimension's report when a tab is open — both from the snapshot; before
+    // the first one lands the page carries the status and no report. The
+    // status is read after the reports so it is the one they were built from.
+    const by = route.view === "daily" ? Promise.resolve(null) : orNone(byReport(route.view));
+    Promise.all([orNone(service.report(group, days)), by])
       .then(([report, byReport]) => {
         res.writeHead(200, WEB_HTML_HEADERS);
         res.end(
@@ -195,7 +218,7 @@ export function createCostsViewHandler(
             report,
             groups,
             view: route.view,
-            ...(byReport ? { users: byReport } : {}),
+            ...(byReport ? { by: byReport } : {}),
             snapshot: service.status(),
             canSnapshot: canSnapshot(ctx.actor),
           }),

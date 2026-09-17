@@ -60,7 +60,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 | Command | What it does | Surfaces |
 |---|---|---|
 | `runs list [--status <active\|finished\|all>] [--agent <string>] [--channel <string>] [--thread <string>] [--parent <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>] [--mine]` | List runs (live and persisted, newest first) — metadata only, never message text. | every surface |
-| `runs get <id> [--include <messages>]` | One run's record; `--include messages` adds its events with free text wrapped as untrusted content. | CLI · HTTP · MCP |
+| `runs get <id> [--include <messages>]` | One run's record, its cost in dollars per model (or unpriced) included; `--include messages` adds its events with free text wrapped as untrusted content. | CLI · HTTP · MCP |
 | `runs events <id> [--after-seq <integer>] [--limit <integer>]` | A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content. | CLI · HTTP · MCP |
 | `runs friction <id>` | One run's friction diagnosis (live: computed now; persisted: as stored). | CLI · HTTP · MCP |
 | `runs stop <id> --mode <soft\|hard>` | Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor. | every surface |
@@ -159,6 +159,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 | Command | What it does | Surfaces |
 |---|---|---|
+| `costs by <user\|thread\|channel\|agent\|model> [--days <integer>] [--group <string>]` | What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written. | every surface |
 | `costs snapshot` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. | every surface |
 
 ### `artifacts`

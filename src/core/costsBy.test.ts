@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { DailyCost, DateRange } from "./costs.js";
-import { buildCostsByReport, coverageFrom } from "./costsBy.js";
+import { buildCostsByReport, COST_DIMENSIONS, coverageFrom } from "./costsBy.js";
+import { parseModelPrices } from "./modelPricing.js";
 import type { RunUsage, RunUsageReport, UsageRow } from "./runUsage.js";
 
-// Feature: docs/reference/specs/costs.md item 10 — cost by user: run tokens priced at
-// list per model, each day's cloud spend split by run wall-clock, the range
-// bounded to what the history holds, one reconciliation against the group's
-// LLM figure.
+// Feature: docs/reference/specs/costs.md items 10–10a — cost by dimension: the
+// usage cells laid against user, thread, channel, agent or model, run tokens
+// priced through the price table, each day's cloud spend split by run
+// wall-clock along the dimensions a run belongs to once, the range bounded to
+// what the history holds, one reconciliation against the group's LLM figure.
 
 const DAY = 86_400_000;
 const T0 = Date.UTC(2026, 8, 13, 0, 0, 0);
@@ -83,38 +85,45 @@ describe("buildCostsByReport", () => {
     retentionDays: 30,
   };
   const days = [day(d0, 3, 12), day(d1, 6, 60), day(d2, 1.5, 0.5)];
-
-  it("sums per user largest first, prices LLM at list, and allocates each day's cloud by wall-clock share", () => {
-    const r = buildCostsByReport({
+  const build = (over: Partial<Parameters<typeof buildCostsByReport>[0]> = {}) =>
+    buildCostsByReport({
       group: "switchboard",
+      dimension: "user",
       range,
       usage: report,
       days,
       historyOn: true,
-      viewerUserIds: ["slack:UALICE"],
-      matchedByEmail: true,
+      viewer: { userIds: ["slack:UALICE"], matchedByEmail: true },
       generatedAt,
+      ...over,
     });
-    expect(r.users.map((u) => u.userId)).toEqual(["slack:UALICE", "slack:UBOB", "http:ops-ingress"]);
-    const alice = r.users[0];
-    expect(alice.userName).toBe("alice");
+
+  it("sums per user largest first, prices LLM at list, and allocates each day's cloud by wall-clock share", () => {
+    const r = build();
+    expect(r.dimension).toBe("user");
+    expect(r.cloudAllocated).toBe(true);
+    expect(r.rows.map((u) => u.key)).toEqual(["slack:UALICE", "slack:UBOB", "http:ops-ingress"]);
+    const alice = r.rows[0];
+    expect(alice.label).toBe("alice");
     expect(alice.runs).toBe(4);
+    expect(alice.turns).toBe(2);
     expect(alice.llmUsd).toBeCloseTo(10 + 50, 9); // 1M fable input + 1M fable output
     // Day 0: $3 cloud split 2h:1h → alice $2, bob $1. Day 1: alice alone → $6.
     expect(alice.cloudUsd).toBeCloseTo(2 + 6, 9);
     expect(alice.totalUsd).toBeCloseTo(68, 9);
     expect(alice.byModel["anthropic/claude-fable-5"].usd).toBeCloseTo(60, 9);
-    const bob = r.users[1];
+    const bob = r.rows[1];
     expect(bob.llmUsd).toBeCloseTo(1, 9);
     expect(bob.cloudUsd).toBeCloseTo(1, 9);
     // The HTTP subject's run ran a model the table does not know: tokens unpriced, cloud still allocated (the only run that day).
-    const ops = r.users[2];
+    const ops = r.rows[2];
+    expect(ops.label).toBeUndefined();
     expect(ops.llmUsd).toBe(0);
     expect(ops.unpricedTokens).toBe(200);
     expect(ops.cloudUsd).toBeCloseTo(1.5, 9);
     expect(ops.byModel["mystery/model-x"].usd).toBeNull();
     // Per day rows, oldest first, with the same numbers.
-    expect(r.days.map((d) => `${d.day} ${d.userId}`)).toEqual([
+    expect(r.days.map((d) => `${d.day} ${d.key}`)).toEqual([
       `${d0} slack:UALICE`,
       `${d0} slack:UBOB`,
       `${d1} slack:UALICE`,
@@ -142,40 +151,140 @@ describe("buildCostsByReport", () => {
         row(d0, "slack:UBOB", 1 * H, usage("anthropic/claude-haiku-4-5", 1_000_000, 0), "bob"),
       ],
     };
-    const r = buildCostsByReport({
-      group: "switchboard",
-      range,
-      usage: split,
-      days: [day(d0, 3, 12)],
-      historyOn: true,
-      viewerUserIds: [],
-      matchedByEmail: false,
-      generatedAt,
-    });
-    expect(r.days.map((d) => `${d.day} ${d.userId} runs=${d.runs}`)).toEqual([
+    const r = build({ usage: split, days: [day(d0, 3, 12)], viewer: undefined });
+    expect(r.days.map((d) => `${d.day} ${d.key} runs=${d.runs}`)).toEqual([
       `${d0} slack:UALICE runs=4`,
       `${d0} slack:UBOB runs=1`,
     ]);
-    const alice = r.users.find((u) => u.userId === "slack:UALICE")!;
-    expect(alice.userName).toBe("alice");
+    const alice = r.rows.find((u) => u.key === "slack:UALICE")!;
+    expect(alice.label).toBe("alice");
     expect(alice.runs).toBe(4);
     expect(alice.llmUsd).toBeCloseTo(4 + 6 + 1, 9);
     expect(alice.byModel["anthropic/claude-fable-5"].inputTokens).toBe(1_000_000);
     // $3 of cloud split 2h:1h between alice's threads together and bob.
     expect(alice.cloudUsd).toBeCloseTo(2, 9);
-    expect(r.users).toHaveLength(2);
+    expect(r.rows).toHaveLength(2);
+    // No viewer handed in on the user dimension: an empty match, still present so the page can say why.
+    expect(r.viewer).toEqual({ userIds: [], matchedByEmail: false });
+  });
+
+  // costs.md item 10a: the same cells along the other dimensions a run belongs to exactly once.
+  it("keys the same cells by thread, channel and agent — cloud allocated by wall-clock along each, no label, no viewer — and the totals agree across dimensions", () => {
+    const cells: RunUsageReport = {
+      ...report,
+      rows: [
+        // Alice: two threads in one channel, one on coding, one on review.
+        row(d0, "slack:UALICE", 2 * H, usage("anthropic/claude-fable-5", 1_000_000, 0), "alice", 3),
+        {
+          ...row(d0, "slack:UALICE", 1 * H, usage("anthropic/claude-haiku-4-5", 1_000_000, 0), "alice", 1),
+          threadKey: "slack:C1:2.0",
+          agent: "review",
+        },
+        // Bob in another channel on coding, day 1.
+        {
+          ...row(d1, "slack:UBOB", 1 * H, usage("anthropic/claude-haiku-4-5", 2_000_000, 0), "bob"),
+          threadKey: "slack:C2:1.0",
+          channelId: "slack:C2",
+          agent: "coding",
+        },
+      ],
+    };
+    const cellsDays = [day(d0, 3, 12), day(d1, 6, 60)];
+    const byThread = build({ dimension: "thread", usage: cells, days: cellsDays });
+    expect(byThread.dimension).toBe("thread");
+    expect(byThread.viewer).toBeUndefined();
+    expect(byThread.rows.map((r) => r.key)).toEqual(["slack:C1:slack:UALICE", "slack:C2:1.0", "slack:C1:2.0"]);
+    expect(byThread.rows.every((r) => r.label === undefined)).toBe(true);
+    // Day 0's $3 cloud splits 2h:1h between alice's two threads; day 1's $6 is bob's thread alone.
+    expect(byThread.rows.map((r) => r.cloudUsd.toFixed(2))).toEqual(["2.00", "6.00", "1.00"]);
+    expect(byThread.rows.map((r) => r.llmUsd)).toEqual([10, 2, 1]);
+    const byChannel = build({ dimension: "channel", usage: cells, days: cellsDays });
+    expect(byChannel.rows.map((r) => [r.key, r.runs, r.llmUsd, r.cloudUsd])).toEqual([
+      ["slack:C1", 4, 11, 3],
+      ["slack:C2", 1, 2, 6],
+    ]);
+    const byAgent = build({ dimension: "agent", usage: cells, days: cellsDays });
+    expect(byAgent.rows.map((r) => [r.key, r.runs, r.llmUsd, r.cloudUsd])).toEqual([
+      ["general", 3, 10, 2],
+      ["coding", 1, 2, 6],
+      ["review", 1, 1, 1],
+    ]);
+    // Whatever the key, the runs' dollars sum to the same total and the tie-out is the same.
+    const byUser = build({ dimension: "user", usage: cells, days: cellsDays });
+    const total = (rows: { totalUsd: number }[]) => rows.reduce((s, r) => s + r.totalUsd, 0);
+    expect(total(byThread.rows)).toBeCloseTo(total(byUser.rows), 9);
+    expect(total(byChannel.rows)).toBeCloseTo(total(byUser.rows), 9);
+    expect(total(byAgent.rows)).toBeCloseTo(total(byUser.rows), 9);
+    expect(byThread.reconciliation).toEqual(byUser.reconciliation);
+    expect(byAgent.reconciliation).toEqual(byUser.reconciliation);
+  });
+
+  it("keys the cells by model: each model's tokens under its ref with the turns counted, a run that spent on two models under both, LLM alone — no cloud — and the reconciliation still the runs' as a whole", () => {
+    const twoModels: UsageRow = {
+      ...row(d0, "slack:UALICE", 2 * H, usage("anthropic/claude-fable-5", 1_000_000, 0), "alice", 2),
+      usage: {
+        turns: 3,
+        byModel: {
+          "anthropic/claude-fable-5": {
+            turns: 2,
+            inputTokens: 1_000_000,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+          "anthropic/claude-haiku-4-5": {
+            turns: 1,
+            inputTokens: 1_000_000,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        },
+      },
+    };
+    const cells: RunUsageReport = {
+      ...report,
+      rows: [twoModels, row(d1, "slack:UBOB", 1 * H, usage("mystery/model-x", 100, 100), "bob")],
+    };
+    const r = build({ dimension: "model", usage: cells, days: [day(d0, 3, 12), day(d1, 6, 60)] });
+    expect(r.dimension).toBe("model");
+    expect(r.cloudAllocated).toBe(false);
+    expect(r.viewer).toBeUndefined();
+    expect(r.rows.map((m) => [m.key, m.runs, m.turns, m.llmUsd, m.cloudUsd, m.unpricedTokens])).toEqual([
+      ["anthropic/claude-fable-5", 2, 2, 10, 0, 0],
+      ["anthropic/claude-haiku-4-5", 2, 1, 1, 0, 0],
+      ["mystery/model-x", 1, 1, 0, 0, 200],
+    ]);
+    expect(r.rows[0].totalUsd).toBe(10);
+    expect(r.days.map((d) => `${d.day} ${d.key} turns=${d.turns}`)).toEqual([
+      `${d0} anthropic/claude-fable-5 turns=2`,
+      `${d0} anthropic/claude-haiku-4-5 turns=1`,
+      `${d1} mystery/model-x turns=1`,
+    ]);
+    // The tie-out is dimension-free: every run's LLM against the workspace, the cloud as the runs allocate it.
+    expect(r.reconciliation.attributedLlmUsd).toBeCloseTo(11, 9);
+    expect(r.reconciliation.workspaceLlmUsd).toBeCloseTo(72, 9);
+    expect(r.reconciliation.cloudAllocatedUsd).toBeCloseTo(9, 9);
+    expect(r.reconciliation.cloudUnallocatedUsd).toBe(0);
+  });
+
+  it("prices every dimension through the configured table: a model the list lacks is priced, an overridden one at the override", () => {
+    const prices = parseModelPrices({
+      "mystery/model-x": { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 },
+      "anthropic/claude-haiku-4-5": { input: 2, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+    });
+    for (const dimension of COST_DIMENSIONS) {
+      const r = build({ dimension, prices, viewer: undefined });
+      expect(r.rows.reduce((s, x) => s + x.unpricedTokens, 0)).toBe(0);
+      // 1M fable in + 1M fable out ($60) + 1M haiku in at the override ($2) + 200 mystery tokens at $10/MTok.
+      expect(r.rows.reduce((s, x) => s + x.llmUsd, 0)).toBeCloseTo(60 + 2 + 0.002, 9);
+    }
   });
 
   it("reconciles: attributed LLM vs the group's figure for the covered days, and cloud allocated vs unallocated", () => {
-    const r = buildCostsByReport({
-      group: "switchboard",
-      range,
-      usage: report,
+    const r = build({
       days: [...days, day(new Date(T0 - 30 * DAY).toISOString().slice(0, 10), 99, 99)], // outside the range: ignored
-      historyOn: true,
-      viewerUserIds: [],
-      matchedByEmail: false,
-      generatedAt,
+      viewer: undefined,
     });
     expect(r.reconciliation.attributedLlmUsd).toBeCloseTo(61, 9);
     expect(r.reconciliation.workspaceLlmUsd).toBeCloseTo(72.5, 9);
@@ -191,24 +300,15 @@ describe("buildCostsByReport", () => {
     // Day 0's spend went to another workspace (the key had not moved yet): $11 of
     // attributed tokens against a $0 figure. Day 1 compares; day 2 has tokens the
     // table cannot price ($0 attributed) against a $0.50 figure and compares too.
-    const r = buildCostsByReport({
-      group: "switchboard",
-      range,
-      usage: report,
-      days: [day(d0, 3, 0), day(d1, 6, 60), day(d2, 1.5, 0.5)],
-      historyOn: true,
-      viewerUserIds: [],
-      matchedByEmail: false,
-      generatedAt,
-    });
+    const r = build({ days: [day(d0, 3, 0), day(d1, 6, 60), day(d2, 1.5, 0.5)], viewer: undefined });
     expect(r.reconciliation.comparedDays).toBe(2);
     expect(r.reconciliation.attributedLlmUsd).toBeCloseTo(50, 9); // day 1 only
     expect(r.reconciliation.workspaceLlmUsd).toBeCloseTo(60.5, 9);
     expect(r.reconciliation.unattributedLlmUsd).toBeCloseTo(10.5, 9);
     expect(r.reconciliation.uncomparedDays).toBe(1);
     expect(r.reconciliation.uncomparedLlmUsd).toBeCloseTo(11, 9); // alice $10 + bob $1 on day 0
-    // The users' own rows still carry every day's dollars.
-    expect(r.users.find((u) => u.userId === "slack:UALICE")?.llmUsd).toBeCloseTo(60, 9);
+    // The rows still carry every day's dollars.
+    expect(r.rows.find((u) => u.key === "slack:UALICE")?.llmUsd).toBeCloseTo(60, 9);
   });
 
   it("a day with cloud spend and no runs is unallocated, never invented onto a user; the range is clamped to where the history begins", () => {
@@ -217,48 +317,21 @@ describe("buildCostsByReport", () => {
       rows: report.rows.filter((x) => x.day !== d0),
       earliestFinishedAt: T0 + DAY,
     };
-    const r = buildCostsByReport({
-      group: "switchboard",
-      range,
-      usage: late,
-      days,
-      historyOn: true,
-      viewerUserIds: [],
-      matchedByEmail: false,
-      generatedAt,
-    });
+    const r = build({ usage: late, viewer: undefined });
     expect(r.coverage).toMatchObject({ from: d1, clamped: true, historyOn: true, retentionDays: 30 });
     expect(r.range).toEqual({ from: d1, to: d2, days: 2, partialLastDay: true });
     // Day 1 has alice alone; day 2 the HTTP subject; day 0 is outside coverage so its $3 is not counted at all.
     expect(r.reconciliation.cloudAllocatedUsd).toBeCloseTo(6 + 1.5, 9);
     expect(r.reconciliation.cloudUnallocatedUsd).toBe(0);
     // A covered day with no runs: unallocated.
-    const gap = buildCostsByReport({
-      group: "switchboard",
-      range,
-      usage: { ...late, rows: late.rows.filter((x) => x.day !== d1) },
-      days,
-      historyOn: true,
-      viewerUserIds: [],
-      matchedByEmail: false,
-      generatedAt,
-    });
+    const gap = build({ usage: { ...late, rows: late.rows.filter((x) => x.day !== d1) }, viewer: undefined });
     expect(gap.reconciliation.cloudUnallocatedUsd).toBeCloseTo(6, 9);
-    expect(gap.users.map((u) => u.userId)).toEqual(["http:ops-ingress"]);
+    expect(gap.rows.map((u) => u.key)).toEqual(["http:ops-ingress"]);
   });
 
   it("with the run history off the report is empty and says so", () => {
-    const r = buildCostsByReport({
-      group: "switchboard",
-      range,
-      usage: { rows: [], pending: 0, retentionDays: 0 },
-      days,
-      historyOn: false,
-      viewerUserIds: [],
-      matchedByEmail: false,
-      generatedAt,
-    });
-    expect(r.users).toEqual([]);
+    const r = build({ usage: { rows: [], pending: 0, retentionDays: 0 }, historyOn: false, viewer: undefined });
+    expect(r.rows).toEqual([]);
     expect(r.coverage.historyOn).toBe(false);
     expect(r.coverage.from).toBe(d0);
     expect(r.reconciliation.cloudUnallocatedUsd).toBeCloseTo(10.5, 9);

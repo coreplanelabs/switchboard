@@ -5,7 +5,7 @@ import {
   type CostReport,
   type CostsConfig,
 } from "./costs.js";
-import type { CostsByReport } from "./costsBy.js";
+import type { CostDimension, CostsByReport } from "./costsBy.js";
 import {
   CostsSnapshotter,
   reportFromSnapshot,
@@ -33,8 +33,14 @@ export interface CostsService {
   groups(): string[];
   /** The group's daily report for `?days`, as of the snapshot. `NoCostsSnapshotError` before the first snapshot lands. */
   report(group: string, daysParam: string | null): Promise<CostReport>;
-  /** Cost by user for the same range, the viewer's own run users marked. `NoCostsSnapshotError` likewise. */
-  byReport(group: string, daysParam: string | null, viewer: CostsViewer | undefined): Promise<CostsByReport>;
+  /** Cost by user, thread, channel, agent or model for the same range (costs.md items 10–10a); on the
+   *  user dimension the viewer's own run users are marked. `NoCostsSnapshotError` likewise. */
+  byReport(
+    group: string,
+    daysParam: string | null,
+    dimension: CostDimension,
+    viewer: CostsViewer | undefined,
+  ): Promise<CostsByReport>;
   /** The snapshot's status: the stamp, the take in flight, when the next one is due. */
   status(): CostsSnapshotStatus;
   /** Take a snapshot now — shared with a take already in flight — and answer its stamp. */
@@ -75,7 +81,12 @@ export class NullCostsService implements CostsService {
   report(_group: string, _daysParam: string | null): Promise<CostReport> {
     return Promise.reject(new Error(COSTS_OFF_MESSAGE));
   }
-  byReport(_group: string, _daysParam: string | null, _viewer: CostsViewer | undefined): Promise<CostsByReport> {
+  byReport(
+    _group: string,
+    _daysParam: string | null,
+    _dimension: CostDimension,
+    _viewer: CostsViewer | undefined,
+  ): Promise<CostsByReport> {
     return Promise.reject(new Error(COSTS_OFF_MESSAGE));
   }
   status(): CostsSnapshotStatus {
@@ -145,22 +156,24 @@ export function createCostsService(
       const g = groupOf(group);
       return reportFromSnapshot(await snapshotOrThrow(), group, g, daysParam, meta);
     },
-    async byReport(group, daysParam, viewer) {
+    async byReport(group, daysParam, dimension, viewer) {
       const g = groupOf(group);
       const snapshot = await snapshotOrThrow();
       const daily = reportFromSnapshot(snapshot, group, g, daysParam, meta);
-      const viewerIds = await viewerRunUserIds(
-        (snapshot.runUsage?.rows ?? []).map((r) => r.userId),
-        viewer,
-        deps.emailOfSlackUser,
-        emailCache,
-      );
-      return byReportFromSnapshot(
-        snapshot,
-        daily,
-        { viewerUserIds: viewerIds.userIds, matchedByEmail: viewerIds.matchedByEmail },
-        cfg.prices,
-      );
+      // Only the user dimension has a "me": the email lookups are spent on it alone.
+      const viewerIds =
+        dimension === "user"
+          ? await viewerRunUserIds(
+              (snapshot.runUsage?.rows ?? []).map((r) => r.userId),
+              viewer,
+              deps.emailOfSlackUser,
+              emailCache,
+            )
+          : undefined;
+      return byReportFromSnapshot(snapshot, daily, dimension, {
+        ...(viewerIds ? { viewer: viewerIds } : {}),
+        prices: cfg.prices,
+      });
     },
     status: () => snapshots.status(),
     async snapshot(by) {
