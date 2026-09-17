@@ -232,7 +232,7 @@ describe("PiRpcTransport", () => {
     t.send({ id: "p", type: "prompt", message: "go" });
     await t.flushed(); // the failure recorded: the chain is spent
     t.send({ type: "steer", message: "behind the failure" }); // held
-    t.send({ type: "abort" }); // a teardown's abort: direct, so it lands even now
+    t.send({ type: "abort" }); // a teardown's abort: its own step past the spent chain, so it lands even now
     t.close();
     await t.flushed(); // settles: the steer held — never a hang
     expect(t.pendingSend).toEqual({ id: "p", type: "prompt", message: "go" });
@@ -319,6 +319,124 @@ describe("PiRpcTransport", () => {
     expect(left.stdin).toEqual([]);
   });
 
+  it("a failed abort's write is its sender's to ask again, never the transport's to keep: `failed` is answered, nothing is recorded (`pendingSend` unset, `takeUnsent` carries no stop) and the chain stays live for the re-ask — chained behind a steer the same reset failed, alone on a live chain, or failing after the queue was dropped, where a kept stop would be a later turn's to meet", async () => {
+    // Chained behind S1, the reset failing both: S1 is `pendingSend`; the abort is nothing.
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    let failSteer!: (err: Error) => void;
+    const realWrite = c.writeLine.bind(c);
+    c.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "steer") await new Promise<void>((_, reject) => (failSteer = reject)); // the steer hangs, then rejects
+      if (cmd.type === "abort") throw new Error("control-reset: the resident's Durable Object was reset");
+      return realWrite(p, line);
+    };
+    const { t } = transport(c);
+    t.send({ type: "steer", message: "S1" }); // in flight
+    await new Promise((r) => setImmediate(r));
+    const abort = t.write({ type: "abort" }); // chained behind S1
+    failSteer(new Error("control-reset: the resident's Durable Object was reset")); // S1 fails; the abort's own write then rejects
+    await expect(abort).resolves.toBe("failed");
+    expect(c.stdin).toEqual([]); // nothing reached pi
+    expect(t.pendingSend).toEqual({ type: "steer", message: "S1" }); // the first failure kept — the steer's, never the abort's
+    expect(t.takeUnsent()).toEqual([]); // the re-attach re-sends no stop: the loop's tick asks again
+
+    // Alone on a live chain: the failure spends nothing, so the sender's
+    // re-ask — and any later write — lands on this same transport.
+    const live = new FakeHarnessContainer();
+    await live.start({ paths, command: "pi", args: [], env: {} });
+    let failAbort = true;
+    const realLive = live.writeLine.bind(live);
+    live.writeLine = async (p, line) => {
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort" && failAbort)
+        throw new Error("control-reset: the resident's Durable Object was reset");
+      return realLive(p, line);
+    };
+    const { t: onLive } = transport(live);
+    await expect(onLive.write({ type: "abort" })).resolves.toBe("failed");
+    expect(live.stdin).toEqual([]); // the stop did not land
+    expect(onLive.pendingSend).toBeUndefined();
+    failAbort = false;
+    await expect(onLive.write({ type: "abort" })).resolves.toBe("landed"); // the re-ask, on the live chain
+    await expect(onLive.write({ id: "p2", type: "prompt", message: "next" })).resolves.toBe("landed");
+    expect(live.commands()).toEqual([{ type: "abort" }, { id: "p2", type: "prompt", message: "next" }]);
+    expect(onLive.takeUnsent()).toEqual([]); // never a stop, never a duplicate of the landed prompt
+
+    // Failing AFTER the queue was dropped — the loop ended with the abort's
+    // write still in flight: nothing is kept for a later turn's re-attach to
+    // meet, so no stale stop can reach that turn's pi.
+    const late = new FakeHarnessContainer();
+    await late.start({ paths, command: "pi", args: [], env: {} });
+    let failLate!: (err: Error) => void;
+    late.writeLine = () => new Promise<void>((_, reject) => (failLate = reject)); // the abort hangs, then rejects
+    const { t: onLate } = transport(late);
+    const lateAbort = onLate.write({ type: "abort" });
+    await new Promise((r) => setImmediate(r));
+    expect(onLate.takeUnsent()).toEqual([]); // the loop ended; its stop is in flight, nothing queued
+    failLate(new Error("control-reset: the resident's Durable Object was reset"));
+    await expect(lateAbort).resolves.toBe("failed");
+    expect(onLate.takeUnsent()).toEqual([]); // nothing filled after the drop: the next turn's re-attach carries no stop
+  });
+
+  it("the ended loop's takeUnsent drops by identity, never by position: on a LIVE chain a write dropped before its turn answers `dropped` and never lands, a write queued after the drop lands in its own turn, and the queue stays one-to-one with the chain's steps — a dead loop's steer in flight ahead of a follow-up turn's prompt can neither land the dead loop's next write nor lose the prompt", async () => {
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    let releaseS1!: () => void;
+    const realWrite = c.writeLine.bind(c);
+    c.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.message === "S1") await new Promise<void>((r) => (releaseS1 = r)); // S1 hangs in flight
+      if (cmd.message === "S2") throw new Error("control-reset: the resident's Durable Object was reset"); // were S2 ever written, the reset would fail it
+      return realWrite(p, line);
+    };
+    const { t } = transport(c);
+    const s1 = t.write({ type: "steer", message: "S1" }); // in flight
+    await new Promise((r) => setImmediate(r));
+    const s2 = t.write({ type: "steer", message: "S2" }); // queued behind S1: the dead loop's wrap-up
+    expect(t.takeUnsent()).toEqual([{ type: "steer", message: "S2" }]); // the loop ended: S2 dropped, S1 in flight nobody's
+    const p = t.write({ id: "p", type: "prompt", message: "the turn's prompt" }); // the next turn's first write, chained behind S2's step
+    releaseS1();
+    await expect(s1).resolves.toBe("landed");
+    await expect(s2).resolves.toBe("dropped"); // S2's step found its own entry gone: never written, and nothing of P's taken
+    await expect(p).resolves.toBe("landed"); // P's own step landed P
+    expect(c.commands().map((cmd) => cmd.message)).toEqual(["S1", "the turn's prompt"]);
+    expect(t.pendingSend).toBeUndefined(); // S2 never spent the chain
+    expect(t.takeUnsent()).toEqual([]); // nothing left behind, nothing duplicated
+
+    // A dropped write is `dropped` whatever the chain's state: S1 hangs, S2 is
+    // queued and dropped, then S1 FAILS and spends the chain — S2's step must
+    // not answer `held` (kept for `takeUnsent`) for a write nothing keeps.
+    const spent = new FakeHarnessContainer();
+    await spent.start({ paths, command: "pi", args: [], env: {} });
+    let failS1!: (err: Error) => void;
+    spent.writeLine = () => new Promise<void>((_, reject) => (failS1 = reject));
+    const { t: onSpent } = transport(spent);
+    const hung = onSpent.write({ type: "steer", message: "S1" });
+    await new Promise((r) => setImmediate(r));
+    const behind = onSpent.write({ type: "steer", message: "S2" });
+    expect(onSpent.takeUnsent()).toEqual([{ type: "steer", message: "S2" }]);
+    failS1(new Error("control-reset: the resident's Durable Object was reset"));
+    await expect(hung).resolves.toBe("failed");
+    await expect(behind).resolves.toBe("dropped"); // not `held`: takeUnsent will never carry it
+    expect(onSpent.pendingSend).toEqual({ type: "steer", message: "S1" });
+    expect(onSpent.takeUnsent()).toEqual([]);
+  });
+
+  it("takeUnsent at the loop's end takes the unsent writes to discard them and answers what it took: a wrap-up steer held on a spent chain is not carried into the next turn, and its sender can tell it was dropped", async () => {
+    const c = new FakeHarnessContainer();
+    await c.start({ paths, command: "pi", args: [], env: {} });
+    const { t } = transport(c);
+    c.failNext = { operation: "send", error: new Error("control-reset: the resident's Durable Object was reset") };
+    t.send({ id: "d1", type: "extension_ui_response", response: {} }); // fails, spends the chain
+    await t.flushed();
+    const wrapUp = { type: "steer", message: "wrap up" };
+    t.send(wrapUp); // held on the spent chain, in `queued`
+    await t.flushed();
+    expect(t.takeUnsent()).toEqual([wrapUp]); // the dead loop's steer, answered so its label clears
+    expect(t.takeUnsent()).toEqual([]); // gone: nothing rides into the next turn
+    expect(t.takeUnsent()).toEqual([]); // nothing to drop twice
+  });
+
   it("no two writes to the FIFO are ever in flight at once: with a two-phase (slow) writeLine, a prompt, an abort asked for while it is in flight and a steer sent after land one after another — each begun only once the one before it ended — in the order pi must see them", async () => {
     const c = new FakeHarnessContainer();
     await c.start({ paths, command: "pi", args: [], env: {} });
@@ -383,15 +501,16 @@ describe("PiRpcTransport", () => {
     await expect(abort).resolves.toBe("dropped");
     expect(left.commands().map((c) => c.type)).toEqual(["prompt"]); // never written here: the fresh transport is the one writer
 
-    // The `failed` leg: the abort's own write rejects. Nobody's — the transport
-    // is being left, the process ended by `kill` — so nothing is recorded and
-    // the chain is not spent: the next write still lands.
+    // The `failed` leg: the abort's own write rejects. Kept as nothing — no
+    // `pendingSend`, nothing for `takeUnsent`, the chain not spent — so the
+    // sender hears `failed` and asks again, and the next write still lands.
     const refusing = new FakeHarnessContainer();
     await refusing.start({ paths, command: "pi", args: [], env: {} });
     const { t: onRefusing } = transport(refusing);
     refusing.failNext = { operation: "send", error: new Error("resident /exec: Peer closed WebSocket: 1006") };
     await expect(onRefusing.write({ type: "abort" })).resolves.toBe("failed");
     expect(onRefusing.pendingSend).toBeUndefined();
+    expect(onRefusing.takeUnsent()).toEqual([]);
     await expect(onRefusing.write({ type: "steer", message: "after" })).resolves.toBe("landed");
     expect(refusing.commands().map((c) => c.type)).toEqual(["steer"]);
   });
@@ -426,7 +545,7 @@ describe("PiRpcTransport", () => {
     expect(caught[1]).toBe(true); // the second, completed by the short read after
   });
 
-  it("a gate reply rides the chain like every other write (only the abort is direct): on a spent chain it is held for the re-attach in its turn, and its own failed write is recorded for the re-attach to re-send as it was — where an abort's failed write is nobody's", async () => {
+  it("a gate reply rides the chain like every other write (only the abort's step ignores a spent chain): on a spent chain it is held for the re-attach in its turn, and its own failed write is recorded for the re-attach to re-send as it was — where an abort's failed write is kept as nothing (no `pendingSend`, nothing for `takeUnsent`, the chain still live): its sender hears `failed` and asks again", async () => {
     const reply = { id: "d1", type: "extension_ui_response", response: { confirmed: true } };
     // A spent chain: the reply is held behind the steer, in order, for the
     // fresh transport — never written on a chain whose next write is a
@@ -458,14 +577,16 @@ describe("PiRpcTransport", () => {
     expect(onFailing.pendingSend).toEqual(reply);
     await expect(collect(onFailing, 1)).rejects.toThrow("control-reset");
 
-    // An abort's failed write is nobody's: nothing recorded, the chain still live.
+    // An abort's failed write is kept as nothing — no `pendingSend`, nothing
+    // for `takeUnsent`, the chain still live: the sender hears `failed` and
+    // asks again on its next tick (the pi harness's `abortPi`).
     const quiet = new FakeHarnessContainer();
     await quiet.start({ paths, command: "pi", args: [], env: {} });
     const { t: onQuiet } = transport(quiet);
     quiet.failNext = { operation: "send", error: new Error("resident /exec: Peer closed WebSocket: 1006") };
-    onQuiet.send({ type: "abort" });
-    await new Promise((r) => setImmediate(r));
+    await expect(onQuiet.write({ type: "abort" })).resolves.toBe("failed");
     expect(onQuiet.pendingSend).toBeUndefined();
+    expect(onQuiet.takeUnsent()).toEqual([]);
     onQuiet.send({ type: "steer", message: "after" });
     await onQuiet.flushed();
     expect(quiet.stdin).toEqual(['{"type":"steer","message":"after"}']);

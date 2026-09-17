@@ -33,6 +33,10 @@ import {
   type PiHarnessFacts,
 } from "../contract.js";
 import {
+  ABORT_DROPPED_NOTE,
+  abortFailedAfterEndNote,
+  abortReaskedNote,
+  abortWriteFailedNote,
   CONTINUE_PROMPT,
   finaleTimedOutNote,
   wrapUpUndeliveredNote,
@@ -458,6 +462,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   let paths: PiRunPaths | undefined;
   /** Hands the follow-ups pi was sent and never echoed back to the inbox; bound once the loop's drain exists. */
   let requeueUnechoed: () => void = () => {};
+  /** The loop or turn is over: drop what the gate and the transport still
+   *  hold, close the stop owed, hear no more landings (defined with the gate,
+   *  below; hoisted like `requeueUnechoed` so a loop that throws drops too). */
+  let dropHeld: (closes: "run" | "turn") => void = () => {};
   /** The loop is over, however it ended: a follow-up whose staging is still
    *  in flight goes back to the inbox instead of through the emptied gate. */
   let loopEnded = false;
@@ -527,6 +535,28 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   /** Whose write-up it is — the loop's, or a follow-up turn's — for the notes a wrap-up that never went leaves. */
   let windingDown: "run" | "turn" = "run";
   let hardStopped = false;
+  /** The stops one loop or follow-up turn asked pi for and what it heard of
+   *  them (harness-pi item 16) — the object its abort callbacks close over, so
+   *  a landing that comes after the loop ended, or after a later turn began,
+   *  settles the series it belongs to and never a later one's. `owed`: the
+   *  last abort's write failed with the reset and the next tick asks again
+   *  (`askOwedAbort`), every tick until a stop lands, no cap; `reasks`: how
+   *  many times it asked, the count the series' one closing line carries;
+   *  `inFlight`: stops sent while live whose landing has not come; `live`:
+   *  false from `dropHeld` on — an abort sent after that gets no callback (the
+   *  transport is lost or the run is being torn down; the kill is the stop),
+   *  while one sent before keeps its callback for the record alone: a landing
+   *  after the drop closes the series or says the stop's write failed, and
+   *  never sets a debt. */
+  type StopSeries = { owed: boolean; reasks: number; inFlight: number; live: boolean; readonly closes: "run" | "turn" };
+  const newStopSeries = (closes: "run" | "turn"): StopSeries => ({
+    owed: false,
+    reasks: 0,
+    inFlight: 0,
+    live: true,
+    closes,
+  });
+  let stops = newStopSeries("run");
   let bypass: GateBypassed | undefined;
   /** An abort was sent to pi this session (`abortPi`): the calls it left open were cut, not settled. */
   let abortSent = false;
@@ -991,22 +1021,90 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     /** The model call the wind-down waited on failed (the finale's abort
      *  included): the answer names it where the write-up would have been. */
     let writeUpFailed: string | undefined;
-    /** Every abort the loop or a turn sends goes this one way, and is told
-     *  its landing: `dropped` — nothing kept it, so pi was never told to stop
-     *  — is noted as the harness's error, never silent. No path reaches it
-     *  today: every abort's sender is the loop or the turn, suspended in the
-     *  recovery that abandons a transport, and after `end()` nothing sends
-     *  one — the note is what makes that seen rather than assumed. */
+    /** Every abort the loop or a turn sends goes this one way and is told its
+     *  landing. `failed` — the reset failed the abort's write, chained behind a
+     *  steer the same reset failed or alone on a live chain — is owed: the
+     *  loop's next tick asks again through this same function (`askOwedAbort`;
+     *  idempotent, past the gate's hold, its own landing heard), on every tick
+     *  until the stop lands, with no cap on the re-asks — a cap could only lose
+     *  the stop, never land it sooner, and the loop's life (its deadline, the
+     *  lease, a hard stop, pi settling) bounds them — and on the loop's clock
+     *  rather than from the landing itself: a re-ask fired there would run
+     *  inside the recovery's wait when the abort failed chained, the transport
+     *  about to be abandoned under it, and would retry at the seam's speed
+     *  while the reset window still fails writes. The tick covers both shapes:
+     *  alone, the seam's read retry survived the reset and no re-attach comes,
+     *  so the re-ask lands on the same live chain (an abort's failure spends
+     *  nothing); chained, the read failed too, and the re-ask goes out after
+     *  the re-attach, on the fresh transport, ahead of the prompt in doubt.
+     *  The transport re-sends no stop. The record gets two lines for the
+     *  series, never one per tick: `abortWriteFailedNote` at the first
+     *  failure (a re-ask that fails writes nothing) and `abortReaskedNote` with
+     *  the count when the re-asked stop lands — or, from `dropHeld`, when the
+     *  loop ends with it unheard. The debt is the loop's: the series is an
+     *  object per loop or turn (`StopSeries`) that this callback closes over,
+     *  so a landing after the loop ended — pi settled by itself with the stop
+     *  still in flight — settles the loop's series, never a later turn's, and
+     *  a run that has ended asks nothing again. The gate keeps an abort's
+     *  callback across `dropHeld` (the abort's alone), so a stop sent while
+     *  live whose write fails after the end — the hard stop's or a bypass's,
+     *  which the same tick sends and breaks on; the recovery's deadline abort
+     *  on a run its throw ends — is seen in one `harness_error` line and owed
+     *  by nobody, and one that lands closes the series (`stop_landed`). An
+     *  abort sent AFTER the drop (the hard stop read after the one more
+     *  command's wait, a turn's stop after its drop) gets no callback: the
+     *  transport is lost or the run is being torn down, and `end()`'s kill is
+     *  the stop. `dropped` — nothing kept it — is noted too; no path reaches
+     *  it today (item 16). */
     const abortPi = (): void => {
       // The calls open now are the abort's to cut: their ends land marked `cut`
       // (harness.md item 13), so the workspace's release reads the command
       // behind each as one that may run on rather than a settle.
       abortSent = true;
       bridge.markOpenCallsCut();
+      const series = stops;
+      if (!series.live) {
+        sends.send({ type: "abort" });
+        return;
+      }
+      // A stop asked for while one is owed IS the re-ask, whoever asks — the
+      // tick's `askOwedAbort` or a hard stop's — so one write goes out, counted once.
+      if (series.owed) {
+        series.owed = false;
+        series.reasks++;
+      }
+      series.inFlight++;
       sends.send({ type: "abort" }, (landing) => {
-        if (landing === "dropped")
-          note("harness_error", "the abort was dropped: no transport kept it, so pi was never told to stop");
+        series.inFlight--;
+        if (landing === "landed") {
+          // Any stop that lands settles the series, whichever sender's: pi has it.
+          if (series.owed || series.reasks > 0)
+            note("stop_landed", abortReaskedNote(series.reasks, "landed", series.closes));
+          series.owed = false;
+          series.reasks = 0;
+        } else if (landing === "failed") {
+          // After the drop: seen, once, and owed by nobody — the ended loop
+          // asks nothing again, and the run's end kills pi.
+          if (!series.live) note("harness_error", abortFailedAfterEndNote(series.closes, series.reasks));
+          else {
+            if (!series.owed && series.reasks === 0) note("harness_error", abortWriteFailedNote(series.closes));
+            series.owed = true;
+          }
+        } else if (landing === "dropped") {
+          // Nothing kept it (no path reaches this today): noted, and owed like
+          // a failed one while the loop lives, so a sender that ever chains a
+          // stop into the abandon window gets the re-ask, not a silent loss.
+          note("harness_error", ABORT_DROPPED_NOTE);
+          if (series.live) series.owed = true;
+        }
       });
+    };
+    /** The stop the loop owes pi, asked again on the tick (`abortPi`, which
+     *  counts it) — on every `check` and `turnCheck`, once the hard stop has
+     *  been read: a hard stop's own abort is the re-ask, so a tick that stops
+     *  the run sends one write, not two. */
+    const askOwedAbort = (): void => {
+      if (stops.owed) abortPi();
     };
     /** The hard stop, once, on every tick and at every end of a wait — the
      *  loop's `check`, a turn's `turnCheck`, the read after `judgeUnsettled`'s
@@ -1045,21 +1143,19 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // transport carries it once re-attached — the clock starting when that
       // one lands. A steer still held when its loop ends is dropped with the
       // rest (`dropHeld` at the loop's and a turn's end) and the label with it.
-      // The landing belongs to the steer this write-up currently owns
-      // (`writeUpSteer`, set by every ask, cleared with the write-up and when
-      // the loop or turn it was asked for ends — `dropHeld`): a loop's steer
-      // whose write is still in flight when the loop ends (dispatched, so not
-      // held, so not dropped) may settle after — in the window before a
-      // follow-up turn, or inside one that has its own write-up by then — and
-      // its landing is then nobody's: never the turn's clock, never a failure
-      // noted after the answer, never a re-ask of the loop's instruction onto
-      // the spent chain for the turn's re-attach to carry to pi; so is the
-      // landing of a steer this write-up already asked again.
+      // A landing acts on nothing once the loop or turn that sent the steer has
+      // ended: `dropHeld` forgets every pending callback (the gate's rule, not a
+      // check here), so a loop's steer whose write is still in flight when the
+      // loop ends (dispatched, so not held, so not dropped) settling after — in
+      // the window before a follow-up turn, or inside one that has its own
+      // write-up by then — is nobody's by construction, never the turn's clock,
+      // never a failure noted after the answer, never a re-ask of the loop's
+      // instruction into the turn. `writeUpSteer` stays only as the handle that
+      // tells whether the wrap-up steer was among the dropped.
       const ask = (): void => {
         const steer = { type: "steer", message: instruction };
         writeUpSteer = steer;
         sends.send(steer, (landing) => {
-          if (writeUpSteer !== steer) return;
           if (landing === "landed") {
             writeUpAt = now();
             return;
@@ -1069,35 +1165,48 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             ask();
             return;
           }
-          // Dropped: nothing kept the steer and nothing will re-send it — and
-          // a steer meets that only after `end()` closed the transport under
-          // teardown (a transport abandoned to a re-attach holds a steer for
-          // the fresh one; the transport exists before the gate does), the
-          // run over and its answer computed, so there is nothing to bound
-          // or to say.
+          // Dropped: nothing kept the steer and nothing will re-send it. A
+          // steer meets that after `end()` closed the transport under teardown
+          // (a transport abandoned to a re-attach holds a steer for the fresh
+          // one; the transport exists before the gate does), the run over and
+          // its answer computed — or when its loop ended with it still queued
+          // (`takeUnsent` at its end), where this callback is already forgotten and the
+          // label cleared by `dropHeld`. Either way, nothing to bound or say.
         });
       };
       ask();
     };
-    /** The loop or turn is over: what the gate still holds is dropped,
-     *  delivering nothing — and if the wrap-up steer was among it, pi never
-     *  saw the instruction and finished on its own, so the write-up is cleared
-     *  (the answer wears no time/turn/soft label for a wrap-up that never went)
-     *  and the record says so. A wrap-up steer still in flight instead is the
-     *  write-up's no longer: its landing, whenever it comes, is nobody's. */
-    const dropHeld = (closes: "run" | "turn"): void => {
-      const dropped = sends.dropHeld();
-      const undelivered =
-        writeUp !== undefined && writeUpSteer !== undefined && dropped.includes(writeUpSteer) ? writeUp : undefined;
-      // Whatever the steer's write is still doing, the loop or turn it was
-      // asked for is over: a write in flight that fails with a reset in the
-      // window before the next turn must neither note a failure after the
-      // answer nor re-ask the instruction onto the spent chain, whence the
-      // turn's re-attach would carry it to pi. The write-up itself stays
-      // where it was not dropped: the answer's label reads it.
-      writeUpSteer = undefined;
-      if (undelivered === undefined) return;
-      note("wrap_up", wrapUpUndeliveredNote(undelivered.kind, closes));
+    /** The loop or turn is over: what the gate still holds and what the
+     *  transport still queues are dropped, delivering nothing — and if the
+     *  wrap-up steer was among either, pi never saw the instruction and
+     *  finished on its own, so the write-up is cleared (the answer wears no
+     *  time/turn/soft label for a wrap-up that never went) and the record says
+     *  so. A wrap-up steer still in flight instead is the write-up's no longer:
+     *  its landing, whenever it comes, is nobody's. */
+    dropHeld = (closes): void => {
+      // The transport's unsent writes are the ended loop's as the gate's held
+      // ones are: a wrap-up steer held on a spent chain must not ride
+      // `takeUnsent` into the next turn, nor one queued on a live chain land
+      // into it — the door the gate's forgetting alone leaves open (item 16).
+      // Both lists feed the label: the wrap-up was dropped wherever it waited.
+      const dropped = [...sends.dropHeld(), ...(transport?.takeUnsent() ?? [])];
+      // A stop this loop owes is not the next turn's to ask: the series ends
+      // with the loop (a turn starts its own), once — a turn drops again in its
+      // `finally`, a loop that throws after its drop drops again in the catch,
+      // and the second drop says nothing more. One still open with no stop in
+      // flight closes here with its one line, the count of re-asks on it; one
+      // with a stop in flight is closed by that stop's landing — the abort's
+      // callback alone survives the gate's drop, for the record: `stop_landed`,
+      // or one `harness_error` for a write that failed after the end. An abort
+      // sent from here on is heard by nobody.
+      const series = stops;
+      if (series.live) {
+        series.live = false;
+        if (series.inFlight === 0 && (series.owed || series.reasks > 0))
+          note("harness_error", abortReaskedNote(series.reasks, "unheard", series.closes));
+      }
+      if (writeUp === undefined || writeUpSteer === undefined || !dropped.includes(writeUpSteer)) return;
+      note("wrap_up", wrapUpUndeliveredNote(writeUp.kind, closes));
       clearWriteUp();
     };
     // Steers go out in the order their follow-ups were drained: the staging of one
@@ -1190,6 +1299,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         hardStop();
         return;
       }
+      askOwedAbort();
       if (writeUp) {
         if (writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) {
           // The write-up itself is bounded by its allowance: past it the
@@ -1359,7 +1469,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       note("resumed", outcome.kind === "word-alive" ? WORD_ALIVE_REATTACH_NOTE : CONTROL_RESET_RESUMED_NOTE);
       // No second wait on the chain before the abandon: nothing chained since
       // the wait began can be an abort — every abort's sender is this loop or
-      // the turn, suspended in the wait itself — and a follow-up steer chained
+      // the turn, suspended in the wait itself, and a stop owed by an abort
+      // that failed during it is the tick's to ask again once the loop resumes
+      // (`askOwedAbort`), never chained here — and a follow-up steer chained
       // meanwhile is the fresh transport's (`takeUnsent`) or, failing in flight
       // on this one, stays unechoed and is handed back at the loop's end; a
       // second wait would observe neither the stop nor `until`, holding a
@@ -1372,7 +1484,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // them passing the hold as the gate's `send` always lets one (the ask it
       // answers is pi's already; held, it would stall the very tool call pi
       // waits on), and a wrap-up steer among them carrying the finale clock's
-      // callback to its landing.
+      // callback to its landing. Never a stop: the transport keeps none, and
+      // the tick's re-ask of an owed one passes the hold like every abort, so
+      // under an await-echo resolution it lands AHEAD of the prompt in doubt
+      // and the writes held behind it — as a stop must, never waiting out the
+      // echo bound; those held writes are the ending loop's, dropped when it ends.
       if (res.kind === "resend") sends.send(res.command);
       if (res.kind === "await-echo") sends.await(res.command);
       for (const command of unsent) sends.send(command);
@@ -1748,6 +1864,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // The loop's write-up, when it took one, is spent: the turn has its own budget.
       clearWriteUp();
       windingDown = "turn";
+      stops = newStopSeries("turn"); // the turn's own stops to hear, until its drop; the loop's land on the loop's series
       finaleAborted = false;
       writeUpFailed = undefined;
       const id = `${ids.prompt}:follow-up:${++followUps}`;
@@ -1763,6 +1880,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           hardStop();
           return;
         }
+        askOwedAbort();
         if (writeUp) {
           if (writeUpAt !== undefined && now() - writeUpAt >= turnLease.finaleMs) {
             writeUpAt = undefined;
@@ -1912,7 +2030,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // generating and calling tools until `end()` — delivered now, since
           // nothing ticks the gate any more: through the gate's exit that never
           // holds it, onto the transport's own step, which the turn's own
-          // failed write spending the chain does not stop.
+          // failed write spending the chain does not stop. Heard by nobody:
+          // the turn dropped what it held above, so this stop is sent with no
+          // callback (`listening`), and its landing into a transport already
+          // lost says nothing after the turn's answer.
           if (run.control?.requested === "hard") {
             hardStop();
             note("stopped", hardStopNote(), "hard");
@@ -1963,6 +2084,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // still staging too, once its staging completes.
     loopEnded = true;
     requeueUnechoed();
+    // A loop that threw dropped nothing yet: what it held is forgotten and the
+    // stop it owed is closed, as a thrown turn's are in its `finally`, so no
+    // landing after the failure — the recovery's deadline abort failing at
+    // teardown — says anything or owes anything.
+    dropHeld("run");
     agentSpan?.end("error");
     await end();
     throw err;

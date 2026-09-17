@@ -5,6 +5,9 @@ import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../
 import { ResidentExecutor } from "../../../execution/resident.js";
 import type { ChatMessage } from "../../chatMessage.js";
 import {
+  abortFailedAfterEndNote,
+  abortReaskedNote,
+  abortWriteFailedNote,
   finaleTimedOutNote,
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
@@ -2303,6 +2306,33 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(noteKinds(w).filter((k) => k === "stopped")).toEqual(["stopped"]);
   });
 
+  it("the hard stop that ends the loop's wait sends its abort after the loop dropped what it held, so its landing is nobody's: the abort's write failing into the transport already lost writes no failure line after the answer and owes nothing — a run that has ended asks nothing again", async () => {
+    const w = world({ sleep: async () => {} });
+    piMidCall(w, (c) => {
+      c.loseTransport("same", "vm-new", 50);
+      c.onDownProbe = () => w.control.requestStop("hard");
+    });
+    const realWrite = w.container.writeLine.bind(w.container);
+    let abortWrites = 0;
+    w.container.writeLine = async (p, line) => {
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort") {
+        abortWrites++;
+        throw new ExecInfraError(TRANSPORT_LOST_TEXT, "answered"); // the stop's write meets the lost transport
+      }
+      return realWrite(p, line);
+    };
+    const answer = await w.start();
+    await new Promise((r) => setImmediate(r)); // the abort's landing comes after the answer
+    await new Promise((r) => setImmediate(r));
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    expect(abortWrites).toBe(1); // the stop was sent
+    expect(noteKinds(w).at(-1)).toBe("stopped"); // and nothing was said after the answer's own note
+    expect(noteSummaries(w).some((n) => n.startsWith("the abort's write failed"))).toBe(false);
+    expect(noteSummaries(w).some((n) => /the stop landed|the stop still unheard|the stop's write failed/.test(n))).toBe(
+      false,
+    );
+  });
+
   it("the wait observes the run: a hard stop requested while the container is down ends the wait at once — no further probe, no pause waited out — and the run ends as the hard stop it was: the abort line as the answer, one stopped note in mode hard, the wait's note saying why it ended, pi ended", async () => {
     const slept: number[] = [];
     const w = world({ sleep: async (ms) => void slept.push(ms) });
@@ -3378,6 +3408,534 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(steers).not.toContain(timeBudgetInstruction()); // the loop's instruction was never re-asked into the turn
     expect(w.notes.some((n) => n.includes("time-budget wrap-up instruction's write failed"))).toBe(false);
     expect(w.notes).not.toContain(finaleTimedOutNote("turn"));
+  });
+
+  it("the finale's abort failing with the reset, chained behind a follow-up steer the same reset failed, still reaches pi: the read fails too, the loop re-attaches, and its next tick asks again on the fresh transport — the failure noted, pi settling on the re-asked stop, the run ending by the finale bound, never waiting on pi finishing its finale by itself", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 20 } });
+    scriptedPi(w.container, () => {}); // pi answers nothing on its own: left alone, its finale never ends
+    let releaseStaging: ((line: string) => void) | undefined;
+    w.run.stageFollowUps = () => new Promise<string>((r) => (releaseStaging = r)); // S1's staging, held until the wrap-up landed
+    w.inbox.push({ text: "S1 first", userId: "user:test", at: NOW });
+    const realWrite = w.container.writeLine.bind(w.container);
+    let failSteer: ((err: Error) => void) | undefined;
+    let abortWrites = 0;
+    w.container.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "steer" && String(cmd.message).includes("S1 first")) {
+        await new Promise<void>((_, reject) => (failSteer = reject)); // S1 in flight until the reset fails it
+      }
+      if (cmd.type === "abort" && ++abortWrites === 1) throw controlReset(); // the finale's abort, behind S1, fails with the same reset
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase: "drain" | "wrapUp" | "finale" | "reset" | "reattach" = "drain";
+    let pollsAfter = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === "drain" && releaseStaging !== undefined) {
+        phase = "wrapUp"; // S1 drained, its staging held: the loop's time runs out now, so the wrap-up steer goes first
+        w.clock.now += 13 * MINUTE_MS;
+      } else if (
+        phase === "wrapUp" &&
+        w.container.commands().some((c) => c.type === "steer" && c.message === timeBudgetInstruction())
+      ) {
+        phase = "finale"; // the wrap-up landed, its clock running: S1's staging completes and its steer goes out — and hangs
+        releaseStaging!("");
+      } else if (phase === "finale" && failSteer !== undefined) {
+        phase = "reset"; // S1 in flight: the finale allowance elapses, the abort chains behind it
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000;
+      } else if (phase === "reset" && w.notes.includes(finaleTimedOutNote())) {
+        phase = "reattach"; // the reset fails S1 — and the abort's step behind it — with it
+        failSteer!(controlReset());
+      } else if (phase === "reattach" && resumedSummaries(w).length > 0 && ++pollsAfter > 8) {
+        finalTurn(w.container, "late finale"); // the bound for the failing case: pi ends its finale by itself, long after
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toMatch(/20-minute budget/); // the run ends by the finale bound, the write-up's answer
+    expect(w.notes).toContain(finaleTimedOutNote());
+    expect(w.notes).toContain(abortWriteFailedNote()); // the failed abort is seen, never assumed away
+    expect(resumedSummaries(w).length).toBe(1);
+    expect(abortWrites).toBe(2); // the failed one, then the tick's re-ask on the fresh transport
+    expect(w.container.commands().filter((c) => c.type === "abort")).toHaveLength(1); // one landed on the fresh transport: pi told to stop
+    expect(pollsAfter).toBeLessThanOrEqual(8); // pi settled on the abort — never on its own finale
+    expect(w.inbox.drain().map((i) => i.text)).toEqual(["S1 first"]); // S1, unechoed, back to the inbox for the fresh turn
+  });
+
+  it("the finale's abort failing ALONE on a live chain — the seam's read retry survived the reset, no write in doubt, so no re-attach follows — is asked again by the loop's next tick: the failure is noted, the re-ask lands on the same transport, pi settles on it and the run ends by the finale bound, never waiting on pi finishing its finale by itself", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 20 } });
+    scriptedPi(w.container, () => {}); // pi answers nothing on its own: left alone, its finale never ends
+    const realWrite = w.container.writeLine.bind(w.container);
+    let abortWrites = 0;
+    w.container.writeLine = async (p, line) => {
+      // The finale's abort, alone on the chain, fails with the reset; the reads go on (the seam re-sent them).
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort" && ++abortWrites === 1) throw controlReset();
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase: "run" | "wrapUp" | "finale" | "owed" = "run";
+    let pollsAfter = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === "run" && w.container.commands().some((c) => c.type === "prompt")) {
+        phase = "wrapUp"; // pi has the prompt: the loop's time runs out now, so the wrap-up steer goes
+        w.clock.now += 13 * MINUTE_MS;
+      } else if (
+        phase === "wrapUp" &&
+        w.container.commands().some((c) => c.type === "steer" && c.message === timeBudgetInstruction())
+      ) {
+        phase = "finale"; // the wrap-up landed, its clock running: the finale allowance elapses, the abort goes alone
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000;
+      } else if (phase === "finale" && w.notes.includes(abortWriteFailedNote())) {
+        phase = "owed"; // the abort's write failed and nothing else did: the read goes on, no re-attach comes
+      } else if (phase === "owed" && ++pollsAfter > 8) {
+        finalTurn(w.container, "late finale"); // the bound for the failing case: pi ends its finale by itself, long after
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toMatch(/20-minute budget/); // the run ends by the finale bound, the write-up's answer
+    expect(w.notes).toContain(finaleTimedOutNote());
+    expect(w.notes).toContain(abortWriteFailedNote()); // the failed abort is seen, never assumed away
+    expect(resumedSummaries(w)).toEqual([]); // no re-attach: the read never failed
+    expect(abortWrites).toBe(2); // the failed one, then the tick's re-ask
+    expect(w.container.commands().filter((c) => c.type === "abort")).toHaveLength(1); // the re-ask landed: pi told to stop
+    expect(w.notes).toContain(abortReaskedNote(1, "landed")); // the series closed: one re-ask, landed
+    expect(pollsAfter).toBeLessThanOrEqual(8); // pi settled on the re-asked abort — never on its own finale
+  });
+
+  it("a stop that keeps failing is asked again on every tick with no cap, and the record gets two lines, never one per tick: the abort's write failing three times running (the finale's, then two re-asks) and landing on the third re-ask writes the failure note once and one closing line saying the loop asked again 3 times", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 20 } });
+    scriptedPi(w.container, () => {}); // pi answers nothing on its own
+    const realWrite = w.container.writeLine.bind(w.container);
+    let abortWrites = 0;
+    w.container.writeLine = async (p, line) => {
+      // The reset window outlives two ticks: the finale's abort and the first two re-asks fail, the third re-ask lands.
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort" && ++abortWrites <= 3) throw controlReset();
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase: "run" | "wrapUp" | "finale" = "run";
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === "run" && w.container.commands().some((c) => c.type === "prompt")) {
+        phase = "wrapUp";
+        w.clock.now += 13 * MINUTE_MS;
+      } else if (
+        phase === "wrapUp" &&
+        w.container.commands().some((c) => c.type === "steer" && c.message === timeBudgetInstruction())
+      ) {
+        phase = "finale";
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000;
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toMatch(/20-minute budget/); // the run ends by the finale bound: the fourth write landed, pi settled on it
+    expect(abortWrites).toBe(4); // the finale's, then three re-asks
+    expect(w.container.commands().filter((c) => c.type === "abort")).toHaveLength(1);
+    const abortNotes = w.notes.filter((n) => n.includes("stop") && (n.includes("abort") || n.includes("asked pi")));
+    expect(abortNotes).toEqual([abortWriteFailedNote(), abortReaskedNote(3, "landed")]); // exactly two: the first failure, the close with the count
+  });
+
+  it("a stop the loop never hears landed closes its series at the loop's end: every abort write failing with the reset while pi ends its finale by itself, the record gets the failure note once and one closing line saying the run ended with the stop unheard and how many times it asked — never a line per tick", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 20 } });
+    scriptedPi(w.container, () => {});
+    const realWrite = w.container.writeLine.bind(w.container);
+    w.container.writeLine = async (p, line) => {
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort") throw controlReset(); // the reset window never closes for the stop
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase: "run" | "wrapUp" | "finale" | "owed" = "run";
+    let pollsAfter = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === "run" && w.container.commands().some((c) => c.type === "prompt")) {
+        phase = "wrapUp";
+        w.clock.now += 13 * MINUTE_MS;
+      } else if (
+        phase === "wrapUp" &&
+        w.container.commands().some((c) => c.type === "steer" && c.message === timeBudgetInstruction())
+      ) {
+        phase = "finale";
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000;
+      } else if (phase === "finale" && w.notes.includes(abortWriteFailedNote())) {
+        phase = "owed";
+      } else if (phase === "owed" && ++pollsAfter > 4) {
+        finalTurn(w.container, "late finale"); // pi ends its finale by itself, the stop never heard landed
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toMatch(/20-minute budget/);
+    expect(w.container.commands().filter((c) => c.type === "abort")).toEqual([]); // no stop ever landed
+    expect(w.notes.filter((n) => n === abortWriteFailedNote())).toHaveLength(1); // the first failure only, whatever the re-asks numbered
+    // One closing line, with the count: the loop's end says the stop is unheard
+    // when no re-ask is in flight at the settle; a re-ask still in flight then
+    // closes the series with its own failure after the end.
+    const closing = w.notes.filter((n) =>
+      /the stop still unheard|the stop's write failed .* after the run ended/.test(n),
+    );
+    expect(closing).toHaveLength(1);
+    expect(closing[0]).toMatch(
+      /^(the run ended with the stop still unheard, after asking pi to stop again (once|\d+ times)|the stop's write failed with the control plane's reset after the run ended, after asking pi to stop again (once|\d+ times); nothing asks again, and the run's end kills pi)$/,
+    );
+    expect(w.notes.some((n) => n.startsWith("the stop landed"))).toBe(false);
+  });
+
+  it("a follow-up turn's stop series is the turn's own and closes once: the turn's finale abort failing on every write while pi ends the turn by itself, the record gets the turn's failure line once and ONE closing line naming the turn — not two, though the turn drops twice, after its loop and in its finally — and a later turn inherits nothing", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) finalTurn(c, "All green."); // the loop's own turn
+      if (n === 2) finalTurn(c, "second"); // the later turn's prompt, once it lands
+    });
+    const session = await w.open();
+    const realWrite = w.container.writeLine.bind(w.container);
+    let failAborts = true;
+    w.container.writeLine = async (p, line) => {
+      if (failAborts && (JSON.parse(line) as Record<string, unknown>).type === "abort") throw controlReset(); // the turn's stops never land
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase: "turn" | "wrapUp" | "finale" | "owed" | "ended" = "turn";
+    let pollsAfter = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === "turn" && w.container.commands().some((c) => c.type === "prompt" && c.message === "one more")) {
+        phase = "wrapUp"; // pi has the turn's prompt: the turn's time runs out, its wrap-up steer goes
+        w.clock.now += 5 * MINUTE_MS + 1_000;
+      } else if (
+        phase === "wrapUp" &&
+        w.container.commands().some((c) => c.type === "steer" && c.message === timeBudgetInstruction())
+      ) {
+        phase = "finale"; // the wrap-up landed: the turn's finale allowance elapses, its abort goes and fails
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000;
+      } else if (phase === "finale" && w.notes.includes(abortWriteFailedNote("turn"))) {
+        phase = "owed";
+      } else if (phase === "owed" && ++pollsAfter > 4) {
+        phase = "ended";
+        w.container.emit({ type: "agent_settled" }); // pi ends the turn by itself between two ticks, the stop still owed
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const notesBefore = w.notes.length;
+    const answer = await session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toMatch(/5-minute budget/); // the turn's answer wears the turn's label
+    const stopNotes = w.notes.slice(notesBefore).filter((n) => /the abort|the stop/.test(n));
+    expect(stopNotes).toHaveLength(2); // the failure line and ONE closing line — the turn's second drop says nothing more
+    expect(stopNotes[0]).toBe(abortWriteFailedNote("turn"));
+    expect(stopNotes[1]).toMatch(
+      /^the turn ended with the stop still unheard, after asking pi to stop again (once|\d+ times)$/,
+    );
+    // A later turn inherits nothing of the dead turn's series: no stop re-asked, no line.
+    failAborts = false;
+    const sentBefore = w.container.stdin.length;
+    const notesBefore2 = w.notes.length;
+    expect(await session.followUp({ text: "again", maxTurns: 4, maxMinutes: 5, toolContext: { executor } })).toBe(
+      "second",
+    );
+    expect(
+      w.container
+        .commands()
+        .slice(sentBefore)
+        .filter((c) => c.type === "abort"),
+    ).toEqual([]);
+    expect(w.notes.slice(notesBefore2).filter((n) => /the abort|the stop/.test(n))).toEqual([]);
+  });
+
+  it("a follow-up turn's stop that lands after a re-ask closes the turn's series as stop_landed, naming the turn: the turn's finale abort fails once, the turn's next tick asks again and that stop lands, pi settles on it and the turn ends by its finale bound with exactly two lines on the record", async () => {
+    const w = tickingWorld();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) finalTurn(c, "All green.");
+    });
+    const session = await w.open();
+    const realWrite = w.container.writeLine.bind(w.container);
+    let abortWrites = 0;
+    w.container.writeLine = async (p, line) => {
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort" && ++abortWrites === 1) throw controlReset(); // the finale's abort alone fails
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase: "turn" | "wrapUp" | "finale" = "turn";
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === "turn" && w.container.commands().some((c) => c.type === "prompt" && c.message === "one more")) {
+        phase = "wrapUp";
+        w.clock.now += 5 * MINUTE_MS + 1_000;
+      } else if (
+        phase === "wrapUp" &&
+        w.container.commands().some((c) => c.type === "steer" && c.message === timeBudgetInstruction())
+      ) {
+        phase = "finale";
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000;
+      }
+      return chunk;
+    };
+    const notesBefore = w.notes.length;
+    const answer = await session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toMatch(/5-minute budget/);
+    expect(abortWrites).toBe(2); // the failed one, then the turn's re-ask
+    expect(w.container.commands().filter((c) => c.type === "abort")).toHaveLength(1); // the re-ask landed: pi told to stop
+    expect(w.notes.slice(notesBefore).filter((n) => /the abort|the stop/.test(n))).toEqual([
+      abortWriteFailedNote("turn"),
+      abortReaskedNote(1, "landed", "turn"),
+    ]);
+  });
+
+  it("a hard stop requested while a stop is owed sends ONE abort on the tick, the hard stop's, and that abort is the re-ask: the tick reads the hard stop before the debt, so the record gets the failure line and one stop_landed line saying the run asked again once, and the run ends as the hard stop", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 20 } });
+    scriptedPi(w.container, () => {}); // pi answers nothing on its own
+    const realWrite = w.container.writeLine.bind(w.container);
+    let abortWrites = 0;
+    w.container.writeLine = async (p, line) => {
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort" && ++abortWrites === 1) throw controlReset(); // the finale's abort alone fails
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase: "run" | "wrapUp" | "finale" | "stopping" = "run";
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === "run" && w.container.commands().some((c) => c.type === "prompt")) {
+        phase = "wrapUp";
+        w.clock.now += 13 * MINUTE_MS;
+      } else if (
+        phase === "wrapUp" &&
+        w.container.commands().some((c) => c.type === "steer" && c.message === timeBudgetInstruction())
+      ) {
+        phase = "finale";
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000;
+      } else if (phase === "finale" && w.notes.includes(abortWriteFailedNote())) {
+        phase = "stopping"; // the stop is owed; the operator asks for a hard stop before the next tick
+        w.control.requestStop("hard");
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    expect(abortWrites).toBe(2); // the finale's (failed), then the hard stop's — never a third from the tick's own re-ask
+    expect(w.container.commands().filter((c) => c.type === "abort")).toHaveLength(1);
+    expect(w.notes.filter((n) => /the abort|the stop/.test(n))).toEqual([
+      abortWriteFailedNote(),
+      abortReaskedNote(1, "landed"), // the hard stop's abort was the re-ask, and it landed
+    ]);
+  });
+
+  it("a stop the loop still owed when it ended is not the next turn's to ask: the finale's abort failing on every write while pi ends its finale by itself, the loop closes the debt at its end, and a follow-up turn that meets a reset carries no abort among the writes its re-attach re-sends and asks none on its ticks — nothing of the dead loop's stop reaches the turn's pi", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 20 } });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 1) finalTurn(c, "done"); // the turn's prompt, once it lands
+    });
+    const realWrite = w.container.writeLine.bind(w.container);
+    let inTurn = false;
+    w.container.writeLine = async (p, line) => {
+      // The loop's stop never lands; a stop sent inside the turn would — so one would show.
+      if (!inTurn && (JSON.parse(line) as Record<string, unknown>).type === "abort") throw controlReset();
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase: "run" | "wrapUp" | "finale" | "owed" | "ended" = "run";
+    let pollsAfter = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === "run" && w.container.commands().some((c) => c.type === "prompt")) {
+        phase = "wrapUp";
+        w.clock.now += 13 * MINUTE_MS;
+      } else if (
+        phase === "wrapUp" &&
+        w.container.commands().some((c) => c.type === "steer" && c.message === timeBudgetInstruction())
+      ) {
+        phase = "finale";
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000;
+      } else if (phase === "finale" && w.notes.includes(abortWriteFailedNote())) {
+        phase = "owed";
+      } else if (phase === "owed" && ++pollsAfter > 4) {
+        phase = "ended";
+        // pi settles by itself between two ticks — one record, so the last
+        // re-ask's failure has been heard and the stop is OWED at the drop,
+        // not in flight — with nothing of a turn for the loop to answer with.
+        w.container.emit({ type: "agent_settled" });
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const session = await w.open();
+    expect(w.notes.some((n) => n.startsWith("the run ended with the stop still unheard"))).toBe(true); // the debt closed with the loop
+    expect(w.container.commands().filter((c) => c.type === "abort")).toEqual([]);
+    // The turn: its prompt's write meets a reset before the line reaches pi, so
+    // the turn re-attaches, awaits the echo that never comes and re-sends the
+    // prompt steer-delivered — the unsent writes go through the gate again.
+    inTurn = true;
+    w.container.failSendType = { type: "prompt", error: controlReset() };
+    const sentBefore = w.container.stdin.length;
+    const notesBefore = w.notes.length;
+    const answer = await session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toBe("done");
+    expect(resumedSummaries(w)).toEqual([CONTROL_RESET_RESUMED_NOTE]); // the turn re-attached once
+    expect(
+      w.container
+        .commands()
+        .slice(sentBefore)
+        .filter((c) => c.type === "abort"),
+    ).toEqual([]); // no stop rode into the turn: not re-sent, not re-asked
+    expect(w.notes.slice(notesBefore).filter((n) => n.includes("abort") || n.includes("the stop"))).toEqual([]);
+  });
+
+  it("the recovery's deadline abort on the run path was sent while the loop was live, so its landing is still heard after the run ended by the throw — for the record alone: the hung write failing after the run ended, the abort's step behind it failing too, one line says the stop's write failed after the run ended and no stop is owed — a run that has ended asks nothing again", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 2 } });
+    scriptedPi(w.container, () => {});
+    const realWrite = w.container.writeLine.bind(w.container);
+    const realRead = w.container.readLog.bind(w.container);
+    let failPrompt: ((err: Error) => void) | undefined;
+    let abortWrites = 0;
+    w.container.writeLine = async (p, line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "prompt") await new Promise<void>((_, reject) => (failPrompt = reject)); // hangs until the test fails it
+      if (cmd.type === "abort") {
+        abortWrites++;
+        throw controlReset();
+      }
+      return realWrite(p, line);
+    };
+    let readFailed = false;
+    w.container.readLog = async (path, offset, max) => {
+      if (failPrompt !== undefined && !readFailed) {
+        readFailed = true;
+        throw controlReset(); // the read fails with the prompt in flight: the recovery waits for the write to settle
+      }
+      return realRead(path, offset, max);
+    };
+    await expect(w.start()).rejects.toThrow(/did not settle before the deadline/);
+    const notesAtFailure = w.notes.length;
+    failPrompt!(controlReset()); // the hung write fails after the run ended; the abort's step behind it runs, and its write fails too
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(abortWrites).toBe(1); // the deadline's stop was sent
+    expect(w.notes.slice(notesAtFailure)).toEqual([abortFailedAfterEndNote("run")]); // its failure is seen, once; nothing owed, nothing re-asked
+  });
+
+  it("a hard stop's abort whose write fails with the reset is seen, never assumed: the tick that sends it also breaks the loop, and the stop's failure lands after the answer — one harness_error line says the stop's write failed after the run ended, no debt is owed, and pi is ended by the kill", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      const msg = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sleep 300" } }]);
+      c.emit(
+        { type: "message_end", message: msg },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "sleep 300" } },
+      );
+      setTimeout(() => w.control.requestStop("hard"), 30); // the operator stops the run mid-command
+    });
+    const realWrite = w.container.writeLine.bind(w.container);
+    let abortWrites = 0;
+    w.container.writeLine = async (p, line) => {
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort") {
+        abortWrites++;
+        throw controlReset(); // the stop's write meets the reset
+      }
+      return realWrite(p, line);
+    };
+    const answer = await w.start();
+    await new Promise((r) => setImmediate(r)); // the abort's landing comes after the answer
+    await new Promise((r) => setImmediate(r));
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    expect(abortWrites).toBe(1); // sent once; a run that has ended asks nothing again
+    expect(w.notes.filter((n) => n === abortFailedAfterEndNote("run"))).toHaveLength(1); // the swallowed stop, seen
+    expect(w.notes.some((n) => n === abortWriteFailedNote())).toBe(false); // never the live loop's "asks again" line
+    expect(w.container.killed).toEqual([4242]); // the run's end is the stop pi did get
+  });
+
+  it("a stop that lands settles the series, whichever sender's, and closes it as `stop_landed`, not an error: the finale's abort fails, the next event's check re-asks and that stop lands, then a gate bypass's abort follows — the record carries the failure line and one stop_landed line (asked again once), never an unheard line and never a redundant re-ask", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 20 } });
+    scriptedPi(w.container, () => {}); // pi answers nothing on its own
+    const realWrite = w.container.writeLine.bind(w.container);
+    let abortWrites = 0;
+    w.container.writeLine = async (p, line) => {
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort" && ++abortWrites === 1) throw controlReset(); // the finale's abort alone fails
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase: "run" | "wrapUp" | "finale" | "bypass" = "run";
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === "run" && w.container.commands().some((c) => c.type === "prompt")) {
+        phase = "wrapUp";
+        w.clock.now += 13 * MINUTE_MS;
+      } else if (
+        phase === "wrapUp" &&
+        w.container.commands().some((c) => c.type === "steer" && c.message === timeBudgetInstruction())
+      ) {
+        phase = "finale";
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000;
+      } else if (phase === "finale" && w.notes.includes(abortWriteFailedNote())) {
+        phase = "bypass"; // the stop is owed; pi's next records carry a tool that ran without asking the gate
+        const msg = assistant([{ type: "toolCall", id: "c9", name: "bash", arguments: { command: "rm -rf /" } }]);
+        w.container.emit(
+          { type: "message_end", message: msg },
+          { type: "tool_execution_start", toolCallId: "c9", toolName: "bash", args: { command: "rm -rf /" } },
+          {
+            type: "tool_execution_end",
+            toolCallId: "c9",
+            toolName: "bash",
+            result: { content: [{ type: "text", text: "done" }] },
+            isError: false,
+          },
+        );
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    await expect(w.start()).rejects.toThrow(/the gate was bypassed/);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(abortWrites).toBe(3); // the finale's (failed), the check's re-ask (landed), the bypass's (landed)
+    const abortNotes = w.events
+      .filter((e) => e.type === "run_note" && /the stop|the abort/.test((e as { summary: string }).summary))
+      .map((e) => [(e as { kind: string }).kind, (e as { summary: string }).summary]);
+    expect(abortNotes).toEqual([
+      ["harness_error", abortWriteFailedNote()],
+      ["stop_landed", abortReaskedNote(1, "landed")], // the series closed well: not an error
+    ]);
+    expect(w.notes.some((n) => n.includes("still unheard"))).toBe(false); // a landed stop is never recorded unheard
+  });
+
+  it("a wrap-up steer the transport held on its spent chain when the loop ended — taken by `takeUnsent` at the loop's end, never in the gate's hands — clears the write-up's label and is said in a `wrap_up` note as a steer the gate dropped is: the answer never wears a label for an instruction pi provably never received", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 20 } });
+    scriptedPi(w.container, () => {}); // pi answers nothing until the test ends its turn
+    // The wrap-up steer's own write fails with the reset — the loop asks again
+    // at once, and the second steer is held on the chain the failure spent —
+    // while the chunk in hand carries pi's own ending: the loop settles before
+    // the transport's next read would surface the failure, so no re-attach comes.
+    w.container.failSendType = { type: "steer", error: controlReset() };
+    const realRead = w.container.readLog.bind(w.container);
+    let ended = false;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0 || ended || !w.container.commands().some((c) => c.type === "prompt")) return chunk;
+      ended = true;
+      w.clock.now += 13 * MINUTE_MS; // the loop's time runs out on the check that reads this chunk's first record
+      finalTurn(w.container, "pi's own ending"); // and the same chunk ends pi's turn
+      return realRead(path, offset, max);
+    };
+    const answer = await w.start();
+    expect(answer).toBe("pi's own ending"); // pi's own, unlabelled: the wrap-up never reached it
+    expect(w.notes.some((n) => n.includes("time-budget wrap-up instruction's write failed"))).toBe(true); // the first steer's failure, noted
+    expect(w.notes).toContain(wrapUpUndeliveredNote("time", "run")); // the second, held then dropped, said so
+    expect(w.container.commands().filter((c) => c.type === "steer")).toEqual([]); // neither steer landed
   });
 
   it("a wrap-up steer's landing after its loop ended is nobody's before the next turn too: the loop's time-budget steer still in flight when the loop ends, failing with a reset before a follow-up turn is prompted, notes no failure after the answer and is never re-asked onto the spent chain — the turn's re-attach carries only the turn's own writes to pi", async () => {
