@@ -2,28 +2,31 @@
 // one set of bounds, shared by the tool layer, every executor, and both deploy
 // Workers (which import from src/execution like shellQuote/residentDetach).
 // Deliberately free of node: imports so wrangler can bundle it into Workers.
+// The numbers are rows of src/core/budgets.ts (docs/decisions/0046); this file
+// keeps their names for the readers that learned them here.
+import { ALLOWANCES, BASH_COMMAND, MINUTE_MS } from "../core/budgets.js";
 
 /** Default per-command budget when the caller passes no timeoutMs. */
-export const BASH_TIMEOUT_MS = 5 * 60_000;
+export const BASH_TIMEOUT_MS = BASH_COMMAND.defaultMinutes * MINUTE_MS;
 
 /** Floor: anything lower is a typo or an attack, not a budget. */
-export const BASH_TIMEOUT_MIN_MS = 1_000;
+export const BASH_TIMEOUT_MIN_MS = BASH_COMMAND.minMs;
 
 /** Hard ceiling a caller can raise the budget to. Not by itself a guarantee
  *  against one command eating a run — 20 minutes is 80% of a 25-minute review
  *  — which is what `bashBudgetWithinRun` below is for. */
-export const BASH_TIMEOUT_MAX_MS = 20 * 60_000;
+export const BASH_TIMEOUT_MAX_MS = BASH_COMMAND.maxMinutes * MINUTE_MS;
 
 /** Wall clock a run keeps back from its last command for the write-up: the
  *  runner's deadline forces a final answer, and a command still running at
  *  that moment would have been wasted anyway. */
-export const RUN_DEADLINE_RESERVE_MS = 60_000;
+export const RUN_DEADLINE_RESERVE_MS = ALLOWANCES.commandWriteUp * MINUTE_MS;
 
 /** Margin the remote exec clients add to their HTTP wait over the command
  *  budget, so the server's own timeout answer (a streamed exit 124) wins the
  *  race against the client's transport deadline instead of both firing at the
  *  same instant. */
-export const EXEC_CALL_MARGIN_MS = 30_000;
+export const EXEC_CALL_MARGIN_MS = ALLOWANCES.execCall * MINUTE_MS;
 
 /** The documented clamp rule, applied identically bot-side and server-side
  *  (a server never trusts the client's number): a finite number is truncated
