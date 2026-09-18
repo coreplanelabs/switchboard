@@ -13,11 +13,13 @@ import {
   TRANSIENT_PLATFORM_WORDING,
   controlResetErr,
   execFailureDocument,
+  runtimeBusyErr,
   runtimeReplacedErr,
   threadErrBuilders,
   type ThreadDataRoute,
   type ThrowPredicates,
 } from "./threadErr";
+import { SandboxRuntimeBusyError } from "../../src/execution/sandboxErrors";
 
 // Feature: docs/reference/specs/execution.md item 9 — a throw no route named is
 // one typed 500 wherever the resident catches it, and a thread data-plane call
@@ -385,5 +387,45 @@ describe("every named refusal carries the seam's cause beside its words (record 
     const doc = execFailureDocument(catchAllErr(new Error("boom"), "attach-failed")) as Record<string, unknown>;
     expect(doc.cause).toBe("system");
     expect(doc.error).toBe("attach-failed: boom");
+  });
+});
+
+// Feature: docs/reference/specs/resident-repos.md item 68 — a loaded container
+// that did not accept the connection is a wait on the resident too: the DO's
+// typed word at the spawn becomes the 503 with the token, wherever the throw
+// was met, and the platform's bare words never are the token by themselves.
+describe("a loaded container's refusal (runtime-busy)", () => {
+  const PLATFORM =
+    "Container is taking too long to accept the connection; the application could be overwhelmed with load";
+  const busy = () => new SandboxRuntimeBusyError({ containerId: "c1", cause: PLATFORM });
+
+  it("runtimeBusyErr is the 503 with the token and the machinery's own cause, the DO's words kept", () => {
+    const err = busy();
+    expect(runtimeBusyErr(err)).toEqual({ error: err.message, status: 503, reason: "runtime-busy", cause: "system" });
+    expect(err.message.startsWith("runtime-busy: ")).toBe(true);
+    expect(err.message).toContain(PLATFORM);
+  });
+
+  it("a rejected stub call carrying the DO's word is answered the same on every route — the client re-sends on the token — after the reset and the replacement, which it is neither", () => {
+    for (const route of ROUTES) {
+      const typed = threadRejectionErr(busy(), route);
+      expect(typed).toEqual({ error: busy().message, status: 503, reason: "runtime-busy", cause: "system" });
+      // After the stub boundary only the name and the message survive.
+      const crossed = Object.assign(new Error(busy().message), { name: "SandboxRuntimeBusyError" });
+      expect(threadRejectionErr(crossed, route)).toEqual(typed);
+    }
+  });
+
+  it("the word is the platform's transient for the catch-all — a re-probe clears it — while the platform's bare words on their own are not the token: the DO names it at the spawn, nothing else does", () => {
+    expect(isTransientPlatformThrow(busy())).toBe(true);
+    expect(catchAllErr(busy(), "attach-failed")).toMatchObject({ status: 500, transient: true });
+    const bare = new Error(PLATFORM);
+    expect(threadRejectionErr(bare, "/exec")).toEqual({
+      error: PLATFORM,
+      status: 500,
+      transient: false,
+      cause: "system",
+    });
+    expect(isTransientPlatformThrow(bare)).toBe(false);
   });
 });
