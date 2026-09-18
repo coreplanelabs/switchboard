@@ -209,6 +209,34 @@ export function vendorOf(
   return { block, model, vendor: block, vendorId: model, vendorSource: "block" };
 }
 
+/** The harness-side provider a block's biller implies (record 0052's
+ *  amendment: the harness write names the biller's own provider, never a
+ *  generic alias). Keyed by the biller — the block's name — for the billers
+ *  whose protocol a harness bundles a provider for. The wires with a package
+ *  of their own (`anthropic-messages` → `@ai-sdk/anthropic`,
+ *  `openai-responses` → `@ai-sdk/openai`) need no entry: the wire names the
+ *  package. A chat-wire biller not here is served generically
+ *  (`@ai-sdk/openai-compatible`), under which a `markers` cache rule cannot be
+ *  vouched for (`decideControls`): the generic provider places no cache
+ *  breakpoints. */
+export interface BillerHarnessProvider {
+  /** The AI SDK package OpenCode's configuration names for the biller
+   *  (`openCodeProviderPackage` adds the `aisdk:` prefix). */
+  openCodePackage: string;
+}
+
+/** The biller-to-provider table: one row per biller a harness speaks natively.
+ *  pi's compat words for the same billers ride this table in a later slice
+ *  (U45). */
+export const BILLER_HARNESS_PROVIDERS: Readonly<Record<string, BillerHarnessProvider>> = {
+  openrouter: { openCodePackage: "@openrouter/ai-sdk-provider" },
+};
+
+/** The biller's harness-side provider, or undefined when it is served generically. */
+export function billerHarnessProvider(biller: string | undefined): BillerHarnessProvider | undefined {
+  return biller === undefined ? undefined : BILLER_HARNESS_PROVIDERS[biller];
+}
+
 /** The env var Anthropic's own SDK reads when an `anthropic` provider block names none. */
 export const ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY";
 

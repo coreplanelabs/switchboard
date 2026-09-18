@@ -138,9 +138,15 @@ export function piCapturedBody(card: ModelCard, asked: AskedControls): Record<st
  *  overlay, then the asked tier's variant `body` overlay — the overlays reach
  *  the wire as the document spells them — the cap under the document's
  *  `compatibility.maxTokensField` (the wire's spelling when it names none),
- *  and `cache_control` markers on the Anthropic dialect alone: OpenCode's
- *  openai-compatible provider has no marker knob, so an aggregator's markers
- *  stay pi's (the driver declares the marker payload row `cannot`). */
+ *  and `cache_control` markers two ways: per-block on the Anthropic dialect,
+ *  and — on the aggregator package, which speaks the aggregator's protocol
+ *  (`usage: { include: true }` for the final chunk's cost, reasoning spelled
+ *  `reasoning: { effort }`, record 0052's amendment) — the provider's
+ *  `settings.extraBody` merged into every request body, the way the binary's
+ *  native providers do: OpenRouter's top-level
+ *  `cache_control: { type: "ephemeral" }` (its "automatic caching"), since the
+ *  pinned binary exempts the openrouter route from per-block placement
+ *  (measured against 2.0.3, `opencode/testing/realDriver.test.ts`). */
 export function openCodeCapturedBody(card: ModelCard, asked: AskedControls): Record<string, unknown> {
   const spec: OpenCodeLaunchSpec = {
     runId: "conformance",
@@ -156,6 +162,8 @@ export function openCodeCapturedBody(card: ModelCard, asked: AskedControls): Rec
     providers: Record<
       string,
       {
+        package: string;
+        settings?: { extraBody?: Record<string, unknown> };
         models: Record<
           string,
           {
@@ -168,9 +176,12 @@ export function openCodeCapturedBody(card: ModelCard, asked: AskedControls): Rec
       }
     >;
   };
-  const entry = config.providers[PROXY_PROVIDER]!.models[card.model]!;
+  const provider = config.providers[PROXY_PROVIDER]!;
+  const entry = provider.models[card.model]!;
   const anthropic = card.wire === "anthropic-messages";
-  const body: Record<string, unknown> = { model: card.model, ...(entry.body ?? {}) };
+  const aggregator = provider.package === "aisdk:@openrouter/ai-sdk-provider";
+  const extraBody = provider.settings?.extraBody;
+  const body: Record<string, unknown> = { model: card.model, ...(extraBody ?? {}), ...(entry.body ?? {}) };
   if (asked.effort !== undefined) {
     const variant = entry.variants?.find((v) => v.id === asked.effort);
     if (variant) Object.assign(body, variant.body);
@@ -180,6 +191,7 @@ export function openCodeCapturedBody(card: ModelCard, asked: AskedControls): Rec
     (anthropic ? "max_tokens" : card.wire === "openai-responses" ? "max_output_tokens" : "max_completion_tokens");
   body[capField] = entry.limit.output;
   if (anthropic) body.cache_control = { type: "ephemeral" };
+  if (aggregator) body.usage = { include: true };
   return body;
 }
 
@@ -368,7 +380,12 @@ export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
     asked: { effort: "xhigh" },
     expect: { outcome: "degraded", applied: "xhigh", vouched: false, why: "unvouched" },
     payload: (body) => {
-      if (body.reasoning_effort !== "xhigh") throw new Error("the payload does not carry the asked tier");
+      // Each harness's provider spells reasoning its own way on the aggregator
+      // (`reasoning: { effort }` on OpenCode's aggregator package,
+      // `reasoning_effort` on pi's completions shape); the asked tier must ride
+      // whichever spelling the write renders.
+      const word = body.reasoning_effort ?? (body.reasoning as { effort?: string } | undefined)?.effort;
+      if (word !== "xhigh") throw new Error("the payload does not carry the asked tier");
     },
   },
   {
@@ -447,6 +464,17 @@ export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
     expect: { outcome: "native", applied: "markers", vouched: true },
   },
   {
+    id: "cache-markers-generic",
+    control: "cache",
+    title: "a markers vendor on a biller with no harness-side provider degrades, the note true on both harnesses",
+    // The record half alone: pi still writes its marker compat for any markers
+    // card until U45 keys it on the biller, so the payload is not asserted here
+    // — the package write is `process.test.ts`'s.
+    ref: "local/anthropic/claude-sonnet-4",
+    asked: {},
+    expect: { outcome: "degraded", applied: "markers", vouched: false, why: "no harness-side provider vouches" },
+  },
+  {
     id: "harness-write-effort-map",
     control: "effort",
     title: "the resolved level map is written into pi's models.json and OpenCode's variants",
@@ -486,8 +514,8 @@ export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
 /** The two drivers: pi and OpenCode, each rendering the request body from its
  *  own harness write (`piCapturedBody`, `openCodeCapturedBody`), so the
  *  harness-write rows prove the card reached the process's configuration.
- *  OpenCode's openai-compatible provider has no cache-marker knob, so the
- *  marker payload row is its one declared `cannot`, with the reason. */
+ *  OpenCode's one declared `cannot` is the Responses row, refused at dispatch
+ *  until its package is measured. */
 export const PROVIDER_DRIVERS: readonly ProviderDriver[] = [
   {
     harness: "pi",
@@ -500,14 +528,10 @@ export const PROVIDER_DRIVERS: readonly ProviderDriver[] = [
     blocks: PROVIDER_BLOCKS,
     registry,
     body: openCodeCapturedBody,
-    // OpenCode's openai-compatible provider has no marker knob, so an
-    // aggregator's markers are pi's alone; the declared reason is the payload
-    // check's own words (a declared cannot must fail for exactly its reason).
     // A Responses block on OpenCode is refused at dispatch by name (U42,
     // `resolveTarget`) until the bundled `@ai-sdk/openai` is measured against
     // the logging fake, so its row is declared, never run.
     cannot: {
-      "harness-write-cache-markers": "the payload carries no cache_control marker",
       "openai-responses-cap":
         "a Responses block on OpenCode is refused at dispatch until @ai-sdk/openai is measured against the logging fake",
     },

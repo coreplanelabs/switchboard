@@ -7,6 +7,11 @@ import type { AgentDef } from "../../../../agents/registry.js";
 import type { Executor } from "../../../../execution/executor.js";
 import { updateStatusTool } from "../../../../tools/status.js";
 import { createHarnessRoutesHandler, isHarnessPath } from "../../../../channels/harnessRoutes.js";
+import { createModelProxyHandler, isModelProxyPath } from "../../../../channels/modelProxy.js";
+import { secretsFrom } from "../../../../secrets.js";
+import type { ModelCard } from "../../../modelCard.js";
+import type { ProviderConfig } from "../../../provider.js";
+import type { SpanRecord } from "../../../trace/types.js";
 import { RunBearerStore, type RunBearerGrant } from "../../../modelProxy/runBearers.js";
 import type { RunEvent } from "../../../runEvents.js";
 import { LedgerTakeover } from "../../../runLedger/takeover.js";
@@ -86,6 +91,18 @@ function answerModel(
 ): void {
   if (authorization === `Bearer ${bearer}`) seen.authOk = true;
   const parsed = JSON.parse(body || "{}") as { model?: string; messages?: Array<{ role: string }> };
+  const chunks = scriptedChunks(parsed, script);
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+  for (const ch of chunks) res.write(`data: ${JSON.stringify(ch)}\n\n`);
+  res.end("data: [DONE]\n\n");
+}
+
+/** The scripted answer's chunks for one captured request body — shared by the
+ *  direct fake model and the proxied logging fake's upstream. */
+function scriptedChunks(
+  parsed: { model?: string; messages?: Array<{ role: string }> },
+  script: ModelScript,
+): unknown[] {
   const results = (parsed.messages ?? []).filter((m) => m.role === "tool").length;
   const base = {
     id: `chatcmpl-${results}`,
@@ -125,9 +142,7 @@ function answerModel(
       { ...base, choices: [], usage: { prompt_tokens: 6, completion_tokens: 6, total_tokens: 12 } },
     ],
   };
-  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-  for (const ch of script(results, chunks)) res.write(`data: ${JSON.stringify(ch)}\n\n`);
-  res.end("data: [DONE]\n\n");
+  return script(results, chunks);
 }
 
 /** The conformance script: call the relayed status tool, then an allowed
@@ -141,7 +156,12 @@ const conformanceScript: ModelScript = (results, chunks) =>
         ? chunks.toolCall("call_push", "shell", { command: "git push origin main" })
         : chunks.text("all done from the real model");
 
-const grantFor = (runId: string, clock: () => number): RunBearerGrant => ({
+const grantFor = (
+  runId: string,
+  clock: () => number,
+  spans: SpanRecord[],
+  over: Partial<RunBearerGrant> = {},
+): RunBearerGrant => ({
   runId,
   modelRef: "switchboard/real-model",
   providerName: "switchboard",
@@ -150,8 +170,9 @@ const grantFor = (runId: string, clock: () => number): RunBearerGrant => ({
   maxTokens: 4096,
   maxTurns: 50,
   expiresAt: clock() + 60 * 60_000,
-  span: createTracer({ clock }).start("request", { sinks: [] }),
+  span: createTracer({ clock }).start("request", { sinks: [{ onEnd: (r) => void spans.push(r) }] }),
   publish: () => {},
+  ...over,
 });
 
 const servers: Server[] = [];
@@ -181,31 +202,83 @@ interface RealRun {
   steps: StepReport[];
   facts: HarnessFacts[];
   statusReports: string[];
-  modelSeen: { authOk: boolean };
+  modelSeen: { authOk: boolean; bodies: Array<Record<string, unknown>> };
+  /** The bodies the upstream saw when the run went through the real proxy. */
+  upstreamBodies: Array<Record<string, unknown>>;
+  /** Every span the grant's tracer ended — the proxy's `model.turn` meter rows among them. */
+  spans: SpanRecord[];
   container: BotHostHarnessContainer;
+}
+
+/** How a run is steered off the default hand-built spec: the run's card and
+ *  effort, its model, and — for the aggregator measurement — the REAL model
+ *  proxy mounted in the bot with a logging fake upstream behind it. */
+interface RealRunOptions {
+  model?: HarnessRun["model"];
+  card?: ModelCard;
+  effort?: NonNullable<HarnessRun["effort"]>;
+  grant?: Partial<RunBearerGrant>;
+  proxy?: { providers: Record<string, ProviderConfig>; env: Record<string, string> };
 }
 
 /** A run driven end to end through the real `OpenCodeHarness` against the
  *  real binary, the bot's routes and the scripted model behind the run bearer;
  *  with a `resume`, the run is a rebuild from that record — the real server
  *  is handed the record as an import (harness.md item 6). */
-async function driveRealRun(runId: string, script: ModelScript, resume?: HarnessResume): Promise<RealRun> {
+async function driveRealRun(
+  runId: string,
+  script: ModelScript,
+  resume?: HarnessResume,
+  opts?: RealRunOptions,
+): Promise<RealRun> {
   const clock = () => Date.now();
   const bearers = new RunBearerStore({ clock });
-  const bearer = bearers.mint(grantFor(runId, clock));
+  const spans: SpanRecord[] = [];
+  const bearer = bearers.mint(grantFor(runId, clock, spans, opts?.grant));
   const harnesses = new HarnessRegistry();
   const takeover = new LedgerTakeover();
   takeover.settle();
 
-  const modelSeen = { authOk: false };
+  const modelSeen = { authOk: false, bodies: [] as Array<Record<string, unknown>> };
+  // The logging fake upstream behind the real proxy: it records every body the
+  // provider would see and answers the same script, the usage frame reporting
+  // cached prompt tokens from the second turn on — what a warm aggregator
+  // cache reports once the markers ride.
+  const upstreamBodies: Array<Record<string, unknown>> = [];
+  const upstreamFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const parsed = JSON.parse(String(init?.body)) as { model?: string; messages?: Array<{ role: string }> };
+    upstreamBodies.push(parsed as Record<string, unknown>);
+    const results = (parsed.messages ?? []).filter((m) => m.role === "tool").length;
+    const chunks = scriptedChunks(parsed, script).map((c) => {
+      const usage = (c as { usage?: Record<string, unknown> }).usage;
+      return usage
+        ? { ...(c as object), usage: { ...usage, prompt_tokens_details: { cached_tokens: results > 0 ? 777 : 0 } } }
+        : c;
+    });
+    const sse = chunks.map((ch) => `data: ${JSON.stringify(ch)}\n\n`).join("") + "data: [DONE]\n\n";
+    return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  const proxyHandler = opts?.proxy
+    ? createModelProxyHandler({
+        bearers,
+        providers: () => opts.proxy!.providers,
+        secrets: secretsFrom(opts.proxy.env),
+        clock,
+        fetch: upstreamFetch,
+      })
+    : undefined;
   const harnessHandler = createHarnessRoutesHandler({ bearers, harnesses, takeover, log: () => {} });
   const bot = createServer((req: IncomingMessage, res: ServerResponse) => {
     const path = (req.url ?? "/").split("?")[0];
     if (isHarnessPath(path)) return harnessHandler(req, res);
+    if (proxyHandler && isModelProxyPath(path)) return proxyHandler(req, res);
     if (path === "/v1/chat/completions") {
       let body = "";
       req.on("data", (c) => (body += c));
-      req.on("end", () => answerModel(body, req.headers.authorization, bearer, modelSeen, res, script));
+      req.on("end", () => {
+        modelSeen.bodies.push(JSON.parse(body || "{}") as Record<string, unknown>);
+        answerModel(body, req.headers.authorization, bearer, modelSeen, res, script);
+      });
       return;
     }
     res.writeHead(404, { "content-type": "application/json" });
@@ -230,7 +303,9 @@ async function driveRealRun(runId: string, script: ModelScript, resume?: Harness
     // The bot's provider NAME, as a live deployment's run carries it — never
     // the configuration's key: the harness must translate it, or the real
     // resolver answers `Model unavailable: anthropic/real-model`.
-    model: { id: "real-model", provider: "anthropic", providerType: "openai-compatible" },
+    model: opts?.model ?? { id: "real-model", provider: "anthropic", providerType: "openai-compatible" },
+    ...(opts?.card ? { card: opts.card } : {}),
+    ...(opts?.effort ? { effort: opts.effort } : {}),
     system: agent.system,
     messages: [
       { role: "user", content: [{ type: "text", text: "earlier question" }] },
@@ -261,7 +336,7 @@ async function driveRealRun(runId: string, script: ModelScript, resume?: Harness
   };
 
   const session = await openThroughSeam(new OpenCodeHarness(), deps, run);
-  return { session, events, steps, facts, statusReports, modelSeen, container };
+  return { session, events, steps, facts, statusReports, modelSeen, upstreamBodies, spans, container };
 }
 
 /** The run's feed, as the tailer wrote it, read whole. */
@@ -520,6 +595,160 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
     expect(notes.some((n) => n.kind === "decline_cascade")).toBe(true);
     expect(session.answer).toBe("all done after the two-call step");
 
+    await session.end();
+  }, 120_000);
+});
+
+// Feature: docs/reference/specs/model-proxy.md item 11 — the harness write
+// names the biller's own provider (record 0052's amendment, U44). A run on an
+// aggregator block goes through the REAL model proxy to a logging fake
+// upstream: the binary's own aggregator provider (`@openrouter/ai-sdk-provider`)
+// asks for the final chunk's usage (`usage: { include: true }`, the cost the
+// meter reads) and spells reasoning its own way (`reasoning: { effort }`), and
+// the proxy's meter row shows the cache read the upstream reports from the
+// second turn on. The cache markers ride the aggregator's own way: the pinned
+// binary places NO per-block `cache_control` breakpoints on the openrouter
+// route — it exempts that route from its automatic placement and no
+// configuration key reaches the request's own `cache` option — so the write
+// carries OpenRouter's other documented spelling, one top-level
+// `cache_control: { type: "ephemeral" }` (its "automatic caching", honoured on
+// its Anthropic-family routes), as the provider's `settings.extraBody`, which
+// the binary merges into every request body (a model-level `options` entry
+// does NOT reach the body — measured). The same script on
+// the generic package (the plain run) carries neither the usage ask nor the
+// reasoning object — asserted against the direct fake's captured bodies.
+describe.skipIf(!openCodeBinaryAvailable())("OpenCode speaks the aggregator's own protocol through the proxy", () => {
+  /** The aggregator card the dispatcher would resolve for the block (record
+   *  0052): markers from the vendor, the levels named through high. */
+  const aggregatorCard: ModelCard = {
+    ref: "openrouter/anthropic/claude-sonnet-4",
+    block: "openrouter",
+    model: "anthropic/claude-sonnet-4",
+    vendor: "anthropic",
+    wire: "openai-chat",
+    levels: {
+      low: { word: "low", named: true },
+      medium: { word: "medium", named: true },
+      high: { word: "high", named: true },
+      xhigh: { word: "high", named: false },
+      max: "refused",
+    },
+    capField: "max_tokens",
+    window: 200_000,
+    inputs: { image: true, document: "unknown" },
+    cache: "markers",
+    provenance: {
+      levels: "registry",
+      capField: "registry",
+      window: "registry",
+      inputs: "registry",
+      cache: "wire",
+      price: "wire",
+    },
+  };
+
+  const markerSpots = (body: Record<string, unknown>) => {
+    const carries = (v: unknown): boolean => JSON.stringify(v)?.includes('"cache_control"') ?? false;
+    const tools = (body.tools as Array<Record<string, unknown>> | undefined) ?? [];
+    const messages = (body.messages as Array<{ role: string; content: unknown }> | undefined) ?? [];
+    const system = messages.filter((m) => m.role === "system" || m.role === "developer");
+    return {
+      lastTool: tools.length > 0 && carries(tools.at(-1)),
+      system: system.some((m) => carries(m.content)),
+      tail: messages.length > 0 && carries(messages.at(-1)),
+      anywhere: carries(body),
+    };
+  };
+
+  it("an aggregator run's captured payload asks for usage, spells reasoning the aggregator's way and carries the top-level cache_control on every turn — per-block markers stay absent, the binary's measured behaviour — and the meter row shows the cache read the upstream reports on the second turn", async () => {
+    const script: ModelScript = (results, chunks) =>
+      results === 0
+        ? chunks.toolCall("call_status", "update_status", { checklist: "○ first step" })
+        : chunks.text("cached and done");
+    const run = await driveRealRun("run-real-aggregator", script, undefined, {
+      model: { id: "anthropic/claude-sonnet-4", provider: "openrouter", providerType: "openai-compatible" },
+      card: aggregatorCard,
+      effort: "high",
+      grant: {
+        modelRef: "openrouter/anthropic/claude-sonnet-4",
+        providerName: "openrouter",
+        providerWire: "openai-chat",
+        model: "anthropic/claude-sonnet-4",
+      },
+      proxy: {
+        providers: {
+          openrouter: {
+            type: "openai-compatible",
+            wire: "openai-chat",
+            vendor: "model",
+            catalog: "openrouter",
+            baseUrl: "http://upstream.test/v1",
+            apiKeyEnv: "OPENROUTER_API_KEY",
+          },
+        },
+        env: { OPENROUTER_API_KEY: "sk-or-fake" },
+      },
+    });
+    const { session, upstreamBodies, spans, statusReports } = run;
+
+    // The run went end to end through the proxy: the relayed tool ran, the
+    // answer is the script's.
+    expect(statusReports).toContain("○ first step");
+    expect(session.answer).toBe("cached and done");
+    expect(upstreamBodies.length).toBeGreaterThanOrEqual(2);
+
+    // The measurement's receipt: where the binary put the markers, verbatim.
+    const spots = upstreamBodies.map(markerSpots);
+    console.log(
+      `[aggregator payload receipt] ${upstreamBodies
+        .map(
+          (b, i) =>
+            `turn ${i}: usage=${JSON.stringify(b.usage)} reasoning=${JSON.stringify(b.reasoning)} markers=${JSON.stringify(spots[i])}`,
+        )
+        .join("; ")}`,
+    );
+
+    for (const [i, body] of upstreamBodies.entries()) {
+      // The aggregator protocol asks for the final chunk's usage (its cost
+      // rides it) and spells the tier its own way — `reasoning.effort`, never
+      // `reasoning_effort`.
+      expect(body.usage, `turn ${i}`).toEqual({ include: true });
+      expect(body.reasoning, `turn ${i}`).toEqual({ effort: "high" });
+      expect(body).not.toHaveProperty("reasoning_effort");
+      // The markers, the aggregator's own way: the provider's
+      // `settings.extraBody` rides every request body as OpenRouter's
+      // top-level `cache_control: { type: "ephemeral" }` ("automatic
+      // caching"). The measured negative stays measured: the pinned binary
+      // exempts the openrouter route from per-block placement, so the last
+      // tool, the system part and the tail carry none.
+      expect(body.cache_control, `turn ${i}`).toEqual({ type: "ephemeral" });
+      expect(spots[i], `turn ${i}`).toMatchObject({ lastTool: false, system: false, tail: false });
+    }
+
+    // The meter's word (model-proxy item 3): the upstream reported cached
+    // prompt tokens from the second turn on, and the proxy's `model.turn` rows
+    // carry them as `cacheReadTokens` — what the run page and the analytics
+    // tie-out read.
+    const turns = spans.filter((s) => s.name === "model.turn");
+    expect(turns.length).toBeGreaterThanOrEqual(2);
+    expect(turns[0]!.attrs.cacheReadTokens ?? 0).toBe(0);
+    expect(turns.at(-1)!.attrs.cacheReadTokens).toBe(777);
+
+    await session.end();
+  }, 120_000);
+
+  it("the generic package places no markers and asks for no usage: the plain run's captured bodies carry neither", async () => {
+    const run = await driveRealRun("run-real-generic-contrast", (results, chunks) =>
+      results === 0 ? chunks.toolCall("call_status", "update_status", { checklist: "○ one step" }) : chunks.text("ok"),
+    );
+    const { session, modelSeen } = run;
+    expect(session.answer).toBe("ok");
+    expect(modelSeen.bodies.length).toBeGreaterThanOrEqual(2);
+    for (const body of modelSeen.bodies) {
+      expect(markerSpots(body).anywhere).toBe(false);
+      expect(body).not.toHaveProperty("usage");
+      expect(body).not.toHaveProperty("reasoning");
+    }
     await session.end();
   }, 120_000);
 });

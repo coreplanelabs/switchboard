@@ -87,10 +87,12 @@ const generalSpec: OpenCodeLaunchSpec = {
   relayTools: ["web_fetch", "update_status", "github_repos"],
 };
 
-/** A card fixture (record 0052): the wire-default card, overridable per test. */
+/** A card fixture (record 0052): the wire-default card on a generic block —
+ *  a biller with no harness-side provider — overridable per test (an
+ *  aggregator test overrides `block: "openrouter"`). */
 const cardOf = (over: Partial<ModelCard>): ModelCard => ({
-  ref: "openrouter/acme/m1",
-  block: "openrouter",
+  ref: "local/acme/m1",
+  block: "local",
   model: "acme/m1",
   vendor: "acme",
   wire: "openai-chat",
@@ -374,6 +376,52 @@ describe("the configuration writer", () => {
     expect(completions.model).toBe("switchboard/gpt-x-large");
     const loopback = openCodeConfig(generalSpec) as any;
     expect(loopback.providers.switchboard.settings.baseURL).toBe("http://127.0.0.1:8080/v1");
+  });
+
+  // The aggregator speaks its own protocol through the proxy (record 0052's
+  // amendment, U44): the biller's package asks for usage.cost and spells
+  // reasoning its own way, and a markers card caches the aggregator's own way
+  // — the top-level `cache_control` as `settings.extraBody`, since the pinned
+  // binary exempts the openrouter route from per-block placement; the proxy
+  // stays the base URL and the bearer the key.
+  it("an aggregator block writes the biller's own package under the proxy's /v1, a markers card's cache_control as settings.extraBody and its variants spelling reasoning: { effort }, and a generic biller keeps the generic package with reasoning_effort and no extraBody", () => {
+    const aggregatorCard = cardOf({
+      ref: "openrouter/anthropic/claude-sonnet-4",
+      block: "openrouter",
+      cache: "markers",
+    });
+    const aggregator = openCodeConfig({
+      ...reviewSpec,
+      model: { ...reviewSpec.model, id: "anthropic/claude-sonnet-4" },
+      card: { ...aggregatorCard, model: "anthropic/claude-sonnet-4" },
+    }) as any;
+    expect(aggregator.providers.switchboard.package).toBe("aisdk:@openrouter/ai-sdk-provider");
+    expect(aggregator.providers.switchboard.settings).toEqual({
+      baseURL: "https://bot.example.com/v1",
+      apiKey: `{env:${RUN_BEARER_ENV}}`,
+      extraBody: { cache_control: { type: "ephemeral" } },
+    });
+    // The extraBody is the markers card's alone: an automatic-cache card on
+    // the same biller carries none.
+    const automatic = openCodeConfig({
+      ...reviewSpec,
+      model: { ...reviewSpec.model, id: "anthropic/claude-sonnet-4" },
+      card: { ...aggregatorCard, model: "anthropic/claude-sonnet-4", cache: "automatic" },
+    }) as any;
+    expect(automatic.providers.switchboard.settings).not.toHaveProperty("extraBody");
+    const variants = aggregator.providers.switchboard.models["anthropic/claude-sonnet-4"].variants as Array<{
+      id: string;
+      body: Record<string, unknown>;
+    }>;
+    expect(variants.map((v) => v.id)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(variants[2]!.body).toEqual({ reasoning: { effort: "high" } });
+    // The generic package is only for a block that is generic in fact: the
+    // same card on a biller the table does not name keeps it, and spells
+    // reasoning the completions dialect's way.
+    const generic = openCodeConfig({ ...reviewSpec, card: cardOf({ cache: "markers" }) }) as any;
+    expect(generic.providers.switchboard.package).toBe("aisdk:@ai-sdk/openai-compatible");
+    expect(generic.providers.switchboard.settings).not.toHaveProperty("extraBody");
+    expect(generic.providers.switchboard.models["gpt-x-large"].variants[2].body).toEqual({ reasoning_effort: "high" });
   });
 
   // A Responses block on OpenCode is refused at dispatch until the bundled

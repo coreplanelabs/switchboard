@@ -10,7 +10,7 @@
 // catalog lives in ./modelRegistry.ts.
 
 import { EFFORT_LEVELS, type Effort } from "../effort.js";
-import { vendorOf, wireOf, type ProviderConfig, type Wire } from "./provider.js";
+import { billerHarnessProvider, vendorOf, wireOf, type ProviderConfig, type Wire } from "./provider.js";
 import type { RegistryCard } from "./modelRegistry.js";
 
 /** Which layer named a field: the operator's block, the registry card, or the
@@ -335,13 +335,29 @@ export function decideControls(card: ModelCard, asked: AskedControls): ControlDe
     why: windowVouched ? "" : `no layer names the window; compacting at ${card.window}`,
   });
 
-  const cacheNative = card.cache !== "unknown";
+  // A `markers` rule needs a harness-side write that places the markers
+  // (record 0052's amendment: the harness write names the biller's own
+  // provider). The Anthropic wire's own packages place per-block breakpoints;
+  // on the chat wire a biller the table names caches the aggregator's own way
+  // — the pinned OpenCode binary exempts the openrouter route from per-block
+  // placement, so the write carries OpenRouter's top-level
+  // `cache_control: { type: "ephemeral" }` via `settings.extraBody` (measured
+  // in `opencode/testing/realDriver.test.ts`), and pi's compat sends the
+  // per-block markers. A biller served generically degrades, never a silent
+  // `native`.
+  const markersUnplaced =
+    card.cache === "markers" && card.wire === "openai-chat" && billerHarnessProvider(card.block) === undefined;
+  const cacheNative = card.cache !== "unknown" && !markersUnplaced;
   decisions.push({
     control: "cache",
     outcome: cacheNative ? "native" : "degraded",
     applied: card.cache,
     vouched: cacheNative,
-    why: cacheNative ? "" : `no layer names ${card.model}'s cache rule`,
+    why: cacheNative
+      ? ""
+      : markersUnplaced
+        ? `no harness-side provider vouches for the "${card.block}" biller's cache markers; the rule goes out unvouched`
+        : `no layer names ${card.model}'s cache rule`,
   });
 
   return decisions;
