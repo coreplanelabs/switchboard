@@ -2,7 +2,7 @@
 // Durable Object applies them inside one transaction; the in-memory ledger
 // applies them in tests; both agree because this is the only copy.
 
-import type { ClaimResult, FenceResult, LivePhase } from "./types.js";
+import type { ClaimResult, FenceResult, IntakeReceipt, IntakeWriteResult, LivePhase } from "./types.js";
 
 /** One live run per thread. The existing row, if any, is what `live_runs` holds
  *  for the thread; the same run re-claimed by its owner is idempotent (a retry
@@ -24,6 +24,14 @@ export function decideClaim(
       ...(existing.idempotencyKey !== undefined ? { idempotencyKey: existing.idempotencyKey } : {}),
     },
   };
+}
+
+/** First writer wins on an intake receipt (item 59): the existing row, if
+ *  any, is what `intake_receipts` holds for the key; only when none stands
+ *  does this write land, and every caller acts on the STORED row. */
+export function decideIntakeInsert(existing: IntakeReceipt | undefined, receipt: IntakeReceipt): IntakeWriteResult {
+  if (existing) return { inserted: false, stored: existing };
+  return { inserted: true, stored: receipt };
 }
 
 /** What an accepted claim does to the thread's row (item 42). `insert`: no row.

@@ -6,7 +6,7 @@ import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
 import { InMemoryRunLedger } from "./inMemory.js";
 import type { RunLedger } from "./ledger.js";
-import { GEN_PATTERN, TRANSCRIPT_PART_BYTES } from "./types.js";
+import { GEN_PATTERN, TRANSCRIPT_PART_BYTES, type IntakeReceipt } from "./types.js";
 import {
   createLedgerWriteThrough,
   LANDED_MAX,
@@ -1633,5 +1633,114 @@ describe("NullLedgerWriteThrough — the write-through of a process without a le
     await run.sink.put(record("r9"));
     expect(puts.map((r) => r.id)).toEqual(["r9"]);
     await expect(run.close()).resolves.toBeUndefined();
+  });
+});
+
+describe("intake receipts — the write-through's retry (run-history item 59)", () => {
+  const receipt = (over: Partial<IntakeReceipt> = {}): IntakeReceipt => ({
+    verdict: "silent",
+    reason: "answering a colleague",
+    source: "model",
+    mode: "classify",
+    model: "prov/mini",
+    gen: 3,
+    threadKey: "slack:C1:1.0",
+    decidedAt: 5_000,
+    ...over,
+  });
+
+  it("recordIntake passes the write through and answers the insert", async () => {
+    const h = harness();
+    expect(await h.wt.recordIntake("slack:C1:2.0", receipt())).toEqual({ inserted: true, stored: receipt() });
+    expect(await h.ledger.readIntake("slack:C1:2.0")).toEqual(receipt());
+    expect(h.sleeps).toEqual([]);
+  });
+
+  it("a lost response is retried by reading the same row after the claim's backoff: this write's own landed row answers inserted", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const ledger = overriding(inner, {
+      recordIntake: async (key, r) => {
+        await inner.recordIntake(key, r); // the insert landed…
+        throw new TransientStoreError("socket hang up"); // …and the response was lost
+      },
+    });
+    const h = harness({ ledger });
+    expect(await h.wt.recordIntake("slack:C1:2.0", receipt())).toEqual({ inserted: true, stored: receipt() });
+    expect(h.sleeps).toEqual([200]);
+    expect(h.warnings).toEqual([]);
+  });
+
+  it("the retry that reads another writer's row answers what it stored, not an insert", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const other = receipt({ gen: 9, decidedAt: 4_000, verdict: "addressed", reason: "the other process won" });
+    await inner.recordIntake("slack:C1:2.0", other);
+    let threw = false;
+    const ledger = overriding(inner, {
+      recordIntake: async (key, r) => {
+        if (!threw) {
+          threw = true;
+          throw new TransientStoreError("socket hang up");
+        }
+        return inner.recordIntake(key, r);
+      },
+    });
+    const h = harness({ ledger });
+    expect(await h.wt.recordIntake("slack:C1:2.0", receipt())).toEqual({ inserted: false, stored: other });
+  });
+
+  it("a retry that finds no row inserts once more", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let failures = 1;
+    const ledger = overriding(inner, {
+      recordIntake: async (key, r) => {
+        if (failures-- > 0) throw new TransientStoreError("socket hang up"); // nothing landed
+        return inner.recordIntake(key, r);
+      },
+    });
+    const h = harness({ ledger });
+    expect(await h.wt.recordIntake("slack:C1:2.0", receipt())).toEqual({ inserted: true, stored: receipt() });
+    expect(await inner.readIntake("slack:C1:2.0")).toEqual(receipt());
+    expect(h.sleeps).toEqual([200]);
+  });
+
+  it("a missing route, a permanent refusal, or a retry that fails again answers undefined with one warning — the caller's degrade", async () => {
+    const missing = harness({
+      ledger: overriding(new InMemoryRunLedger(), {
+        recordIntake: async () => {
+          throw new RouteMissingError("no /runs/intake");
+        },
+      }),
+    });
+    expect(await missing.wt.recordIntake("slack:C1:2.0", receipt())).toBeUndefined();
+    expect(missing.warnings).toHaveLength(1);
+
+    const refused = harness({
+      ledger: overriding(new InMemoryRunLedger(), {
+        recordIntake: async () => {
+          throw new PermanentStoreError("HTTP 400");
+        },
+      }),
+    });
+    expect(await refused.wt.recordIntake("slack:C1:2.0", receipt())).toBeUndefined();
+    expect(refused.warnings).toHaveLength(1);
+
+    const dead = harness({
+      ledger: overriding(new InMemoryRunLedger(), {
+        recordIntake: async () => {
+          throw new TransientStoreError("socket hang up");
+        },
+        readIntake: async () => {
+          throw new TransientStoreError("socket hang up");
+        },
+      }),
+    });
+    expect(await dead.wt.recordIntake("slack:C1:2.0", receipt())).toBeUndefined();
+    expect(dead.warnings).toHaveLength(1);
+    expect(dead.sleeps).toEqual([200]);
+  });
+
+  it("the null write-through records nothing and answers undefined", async () => {
+    const wt = new NullLedgerWriteThrough("gen-A", { put: async () => ({}), abandoned: () => {} });
+    expect(await wt.recordIntake("slack:C1:2.0", receipt())).toBeUndefined();
   });
 });

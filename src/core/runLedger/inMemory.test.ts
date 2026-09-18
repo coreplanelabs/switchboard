@@ -3,7 +3,7 @@ import type { ChatMessage } from "../chatMessage.js";
 import type { RunRecord } from "../runRecord.js";
 import { InMemoryRunLedger } from "./inMemory.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES, GAP_MARKER } from "./sessionLog.js";
-import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest, type StepRecord } from "./types.js";
+import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest, type IntakeReceipt, type StepRecord } from "./types.js";
 
 // The reference ledger (docs/reference/specs/run-history.md items 28–31, 33): the whole
 // protocol over one object, in the shape the Durable Object mirrors.
@@ -453,5 +453,60 @@ describe("InMemoryRunLedger", () => {
     expect(await ledger.writeNotepad(key, "g2", "zombie")).toEqual({ ok: false, reason: "fenced" });
     expect(await ledger.writeNotepad(key, "g1", "decided: keep the helper")).toEqual({ ok: true });
     expect(await ledger.readNotepad(key)).toEqual({ text: "decided: keep the helper", updatedAt: 7_000 });
+  });
+});
+
+describe("intake receipts (run-history item 59)", () => {
+  const receipt = (over: Partial<IntakeReceipt> = {}): IntakeReceipt => ({
+    verdict: "silent",
+    reason: "answering a colleague",
+    source: "model",
+    mode: "classify",
+    model: "prov/mini",
+    gen: 3,
+    threadKey: "slack:C1:1.0",
+    decidedAt: 5_000,
+    ...over,
+  });
+
+  it("recordIntake is insert-if-absent: the first write on a key answers inserted with the row, a second answers the first stored row", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const first = receipt();
+    expect(await ledger.recordIntake("slack:C1:2.0", first)).toEqual({ inserted: true, stored: first });
+    const second = receipt({ verdict: "addressed", reason: "second writer", decidedAt: 6_000 });
+    expect(await ledger.recordIntake("slack:C1:2.0", second)).toEqual({ inserted: false, stored: first });
+    expect(await ledger.readIntake("slack:C1:2.0")).toEqual(first);
+  });
+
+  it("readIntake before any write answers none", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    expect(await ledger.readIntake("slack:C1:2.0")).toBeUndefined();
+  });
+
+  it("listIntake answers a thread's rows and rows since an instant, oldest first", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    const a = receipt({ decidedAt: 1_000 });
+    const b = receipt({ decidedAt: 3_000, verdict: "addressed" });
+    const other = receipt({ threadKey: "slack:C2:9.0", decidedAt: 2_000 });
+    await ledger.recordIntake("slack:C1:3.0", b);
+    await ledger.recordIntake("slack:C1:2.0", a);
+    await ledger.recordIntake("slack:C2:9.5", other);
+    expect(await ledger.listIntake({ threadKey: "slack:C1:1.0" })).toEqual([a, b]);
+    expect(await ledger.listIntake({ since: 2_000 })).toEqual([other, b]);
+    expect(await ledger.listIntake({ threadKey: "slack:C1:1.0", since: 2_000 })).toEqual([b]);
+    expect(await ledger.listIntake({})).toEqual([a, other, b]);
+  });
+
+  it("the failure toggle makes a write and a read throw on demand, and clears back to working", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    ledger.intakeFailure.write = true;
+    await expect(ledger.recordIntake("slack:C1:2.0", receipt())).rejects.toThrow("intake write failed");
+    ledger.intakeFailure.write = false;
+    await ledger.recordIntake("slack:C1:2.0", receipt());
+    ledger.intakeFailure.read = true;
+    await expect(ledger.readIntake("slack:C1:2.0")).rejects.toThrow("intake read failed");
+    await expect(ledger.listIntake({})).rejects.toThrow("intake read failed");
+    ledger.intakeFailure.read = false;
+    expect(await ledger.readIntake("slack:C1:2.0")).toEqual(receipt());
   });
 });

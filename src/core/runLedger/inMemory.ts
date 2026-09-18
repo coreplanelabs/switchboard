@@ -7,6 +7,7 @@ import {
   checkFence,
   decideClaim,
   decideClaimWrite,
+  decideIntakeInsert,
   phaseTransition,
   reclaimPhase,
   selectReclaim,
@@ -32,6 +33,9 @@ import type {
   ClaimResult,
   FenceResult,
   InboxItem,
+  IntakeQuery,
+  IntakeReceipt,
+  IntakeWriteResult,
   LiveRunRow,
   ReclaimedRun,
   RunJob,
@@ -77,6 +81,10 @@ export class InMemoryRunLedger implements RunLedger {
   readonly transcripts = new Map<string, Transcript>();
   readonly sessions = new Map<string, SessionLog>();
   readonly finished = new Map<string, RunRecord>();
+  readonly intake = new Map<string, IntakeReceipt>();
+  /** The failure toggle (run-history item 59): tests flip a flag to make the
+   *  next intake write or read throw, the way a lost Worker does. */
+  readonly intakeFailure: { write?: boolean; read?: boolean } = {};
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -459,6 +467,29 @@ export class InMemoryRunLedger implements RunLedger {
       });
     }
     return out;
+  }
+
+  async recordIntake(key: string, receipt: IntakeReceipt): Promise<IntakeWriteResult> {
+    if (this.intakeFailure.write) throw new Error("intake write failed (toggled)");
+    const out = decideIntakeInsert(this.intake.get(key), receipt);
+    if (out.inserted) this.intake.set(key, receipt);
+    return out;
+  }
+
+  async readIntake(key: string): Promise<IntakeReceipt | undefined> {
+    if (this.intakeFailure.read) throw new Error("intake read failed (toggled)");
+    return this.intake.get(key);
+  }
+
+  async listIntake(query: IntakeQuery): Promise<IntakeReceipt[]> {
+    if (this.intakeFailure.read) throw new Error("intake read failed (toggled)");
+    return [...this.intake.values()]
+      .filter(
+        (r) =>
+          (query.threadKey === undefined || r.threadKey === query.threadKey) &&
+          (query.since === undefined || r.decidedAt >= query.since),
+      )
+      .sort((a, b) => a.decidedAt - b.decidedAt);
   }
 
   async readEvents(runId: string): Promise<AppendableEvent[]> {

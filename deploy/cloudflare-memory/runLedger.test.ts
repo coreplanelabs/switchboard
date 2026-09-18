@@ -1,4 +1,4 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
@@ -1126,5 +1126,112 @@ describe("the sessions registry and the sweep's drop of a session log", () => {
     expect(await runInDurableObject(stub, (inst: RunHistoryDO) => inst.sweepSessions(candidates))).toBe(2);
     expect((await post("/runs/session/tail", { key: sA })).data).toEqual({ next: 0 });
     expect(await sql(key, `SELECT key FROM sessions`)).toEqual([]);
+  });
+});
+
+describe("run ledger — intake receipts (item 59)", () => {
+  const HOUR = 3_600_000;
+  const intakeReceipt = (threadKey: string, over: Record<string, unknown> = {}) => ({
+    verdict: "silent",
+    reason: "answering a colleague",
+    source: "model",
+    mode: "classify",
+    model: "prov/mini",
+    gen: 3,
+    threadKey,
+    decidedAt: 5_000,
+    ...over,
+  });
+
+  it("the insert is if-absent inside the transaction: the first write answers inserted with the row, a second on the key answers the first stored row; read answers the row or null", async () => {
+    const key = storeKey();
+    expect((await post("/runs/intake/read", { storeKey: key, key: "slack:C1:2.0" })).data).toEqual({ receipt: null });
+    const first = intakeReceipt("slack:C1:1.0");
+    expect(await post("/runs/intake", { storeKey: key, key: "slack:C1:2.0", receipt: first })).toMatchObject({
+      status: 200,
+      data: { inserted: true, stored: first },
+    });
+    const second = intakeReceipt("slack:C1:1.0", { verdict: "addressed", decidedAt: 6_000, gen: 9 });
+    expect((await post("/runs/intake", { storeKey: key, key: "slack:C1:2.0", receipt: second })).data).toEqual({
+      inserted: false,
+      stored: first,
+    });
+    expect((await post("/runs/intake/read", { storeKey: key, key: "slack:C1:2.0" })).data).toEqual({
+      receipt: first,
+    });
+  });
+
+  it("list answers a thread's rows and rows since an instant, oldest first", async () => {
+    const key = storeKey();
+    const a = intakeReceipt("slack:C1:1.0", { decidedAt: 1_000 });
+    const b = intakeReceipt("slack:C1:1.0", { decidedAt: 3_000, verdict: "addressed" });
+    const other = intakeReceipt("slack:C2:9.0", { decidedAt: 2_000 });
+    await post("/runs/intake", { storeKey: key, key: "slack:C1:3.0", receipt: b });
+    await post("/runs/intake", { storeKey: key, key: "slack:C1:2.0", receipt: a });
+    await post("/runs/intake", { storeKey: key, key: "slack:C2:9.5", receipt: other });
+    expect((await post("/runs/intake/list", { storeKey: key, threadKey: "slack:C1:1.0" })).data).toEqual({
+      receipts: [a, b],
+    });
+    expect((await post("/runs/intake/list", { storeKey: key, since: 2_000 })).data).toEqual({
+      receipts: [other, b],
+    });
+    expect((await post("/runs/intake/list", { storeKey: key, threadKey: "slack:C1:1.0", since: 2_000 })).data).toEqual({
+      receipts: [b],
+    });
+    expect((await post("/runs/intake/list", { storeKey: key })).data).toEqual({ receipts: [a, other, b] });
+  });
+
+  it("the alarm prunes by both arms of the bound: a 30 minute window keeps a row 24 hours, a two day window keeps it the window plus the drain deadline", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    const min30 = 30 * 60_000;
+    const twoDays = 48 * HOUR;
+    const at = (hoursAgo: number) => intakeReceipt("slack:C1:1.0", { decidedAt: now - hoursAgo * HOUR });
+    // The 24-hour arm: a 30 minute window keeps rows 24 hours, no more.
+    await post("/runs/intake", { storeKey: key, key: "k:24h-out", receipt: at(25), windowMs: min30 });
+    await post("/runs/intake", { storeKey: key, key: "k:24h-kept", receipt: at(23), windowMs: min30 });
+    // The window arm: a two-day window keeps rows the window plus the drain (90 min).
+    await post("/runs/intake", { storeKey: key, key: "k:win-out", receipt: at(50), windowMs: twoDays });
+    await post("/runs/intake", { storeKey: key, key: "k:win-kept", receipt: at(49), windowMs: twoDays });
+    expect(await runDurableObjectAlarm(env.RUNS.get(env.RUNS.idFromName(key)))).toBe(true); // armed by the first insert
+    const read = async (k: string) =>
+      (await post("/runs/intake/read", { storeKey: key, key: k })).data.receipt as unknown;
+    expect(await read("k:24h-out")).toBeNull();
+    expect(await read("k:24h-kept")).not.toBeNull();
+    expect(await read("k:win-out")).toBeNull();
+    expect(await read("k:win-kept")).not.toBeNull();
+  });
+
+  it("validates: a missing or overlong key, a malformed receipt or windowMs is 400; no bearer is 401", async () => {
+    const key = storeKey();
+    expect((await post("/runs/intake", { storeKey: key, receipt: intakeReceipt("slack:C1:1.0") })).status).toBe(400);
+    expect(
+      (await post("/runs/intake", { storeKey: key, key: "k".repeat(300), receipt: intakeReceipt("slack:C1:1.0") }))
+        .status,
+    ).toBe(400);
+    expect(
+      (await post("/runs/intake", { storeKey: key, key: "slack:C1:2.0", receipt: { verdict: "maybe" } })).status,
+    ).toBe(400);
+    expect(
+      (
+        await post("/runs/intake", {
+          storeKey: key,
+          key: "slack:C1:2.0",
+          receipt: intakeReceipt("slack:C1:1.0"),
+          windowMs: -5,
+        })
+      ).status,
+    ).toBe(400);
+    expect((await post("/runs/intake/read", { storeKey: key })).status).toBe(400);
+    expect((await post("/runs/intake/list", { storeKey: key, since: "yesterday" })).status).toBe(400);
+    expect(
+      (
+        await post(
+          "/runs/intake",
+          { storeKey: key, key: "k", receipt: intakeReceipt("slack:C1:1.0") },
+          { "content-type": "application/json" },
+        )
+      ).status,
+    ).toBe(401);
   });
 });

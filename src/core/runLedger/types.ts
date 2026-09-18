@@ -254,3 +254,58 @@ export interface CompactionEntry {
 export type TranscriptTurn = { idx: number; message: ChatMessage } | { idx: number; compaction: CompactionEntry };
 
 export type AppendableEvent = RunEvent & { seq: number };
+
+/** One intake verdict as the ledger stores it (docs/reference/specs/run-history.md item
+ *  59; docs/decisions/0058): keyed by the message (`<channel>:<ts>`), written
+ *  first-writer-wins so one unmentioned thread reply is decided once across
+ *  processes and the reconnect catch-up reads the verdict instead of deciding
+ *  again. The shape is the intake seam's (`src/core/intake.ts` re-exports it);
+ *  spelled out here because this file is shared with the state Worker. */
+export interface IntakeReceipt {
+  verdict: "addressed" | "silent";
+  reason: string;
+  source: "model" | "mode" | "error" | "timeout";
+  mode: "mention" | "classify";
+  /** The `<provider>/<model>` ref the verdict ran on. */
+  model: string;
+  /** The deciding process's generation counter, for telling a retried write's
+   *  own landed row from another writer's. */
+  gen: number;
+  threadKey: string;
+  /** Epoch ms. */
+  decidedAt: number;
+}
+
+/** What an intake write answers: whether THIS write landed, and the row that
+ *  stands — the first writer's, whoever that was. */
+export interface IntakeWriteResult {
+  inserted: boolean;
+  stored: IntakeReceipt;
+}
+
+/** `listIntake`'s filters: a thread's rows, rows since an instant, or both. */
+export interface IntakeQuery {
+  threadKey?: string;
+  since?: number;
+}
+
+/** The receipt as the Worker route validates it: every field present and of
+ *  its type, the enums closed — a malformed receipt is 400, never stored. */
+export function isIntakeReceipt(v: unknown): v is IntakeReceipt {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as Record<string, unknown>;
+  return (
+    (r.verdict === "addressed" || r.verdict === "silent") &&
+    typeof r.reason === "string" &&
+    (r.source === "model" || r.source === "mode" || r.source === "error" || r.source === "timeout") &&
+    (r.mode === "mention" || r.mode === "classify") &&
+    typeof r.model === "string" &&
+    typeof r.gen === "number" &&
+    Number.isFinite(r.gen) &&
+    typeof r.threadKey === "string" &&
+    r.threadKey.length > 0 &&
+    r.threadKey.length <= 256 &&
+    typeof r.decidedAt === "number" &&
+    Number.isFinite(r.decidedAt)
+  );
+}

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { secretsFrom } from "../secrets.js";
 import type { ChatMessage } from "./chatMessage.js";
-import { buildRunLedger, WorkerRunLedger } from "./runLedgerWorker.js";
-import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest } from "./runLedger/types.js";
+import { buildRunLedger, WorkerRunLedger, type WorkerRunLedgerOptions } from "./runLedgerWorker.js";
+import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
+import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest, type IntakeReceipt } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 
 // The Worker client (docs/reference/specs/run-history.md item 28): routes, bodies, the
@@ -14,6 +15,7 @@ function stubWorker(
     status: 200,
     data: { ok: true },
   }),
+  opts: Partial<WorkerRunLedgerOptions> = {},
 ) {
   const calls: Array<{ path: string; body: Record<string, unknown>; auth: string | null }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -31,6 +33,7 @@ function stubWorker(
     token: "tok",
     storeKey: "runs:default",
     fetch: fetchImpl,
+    ...opts,
   });
   return { ledger, calls };
 }
@@ -318,5 +321,86 @@ describe("buildRunLedger — the client for the configured history (run-history 
     });
     await clamped!.claimSession("slack:C1:1.0:review", "r1", "g1");
     expect(bodies.at(-1)).toMatchObject({ maxBytes: 16 * 1024 * 1024 });
+  });
+});
+
+describe("intake receipts — the routes and the retry (run-history item 59)", () => {
+  const receipt = (over: Partial<IntakeReceipt> = {}): IntakeReceipt => ({
+    verdict: "silent",
+    reason: "answering a colleague",
+    source: "model",
+    mode: "classify",
+    model: "prov/mini",
+    gen: 3,
+    threadKey: "slack:C1:1.0",
+    decidedAt: 5_000,
+    ...over,
+  });
+
+  it("recordIntake posts the key and receipt under the store key — windowMs only when the client carries one — and answers the insert", async () => {
+    const stored = receipt();
+    const w = stubWorker(() => ({ status: 200, data: { inserted: true, stored } }));
+    expect(await w.ledger.recordIntake("slack:C1:2.0", stored)).toEqual({ inserted: true, stored });
+    expect(w.calls.map((c) => c.path)).toEqual(["/runs/intake"]);
+    expect(w.calls[0].body).toEqual({ storeKey: "runs:default", key: "slack:C1:2.0", receipt: stored });
+
+    const windowed = stubWorker(() => ({ status: 200, data: { inserted: true, stored } }), {
+      catchUpWindowMs: 1_800_000,
+    });
+    await windowed.ledger.recordIntake("slack:C1:2.0", stored);
+    expect(windowed.calls[0].body).toEqual({
+      storeKey: "runs:default",
+      key: "slack:C1:2.0",
+      receipt: stored,
+      windowMs: 1_800_000,
+    });
+  });
+
+  it("readIntake answers the row or none; listIntake passes only the filters given and answers the rows", async () => {
+    const stored = receipt();
+    const w = stubWorker((path) =>
+      path === "/runs/intake/read"
+        ? { status: 200, data: { receipt: stored } }
+        : { status: 200, data: { receipts: [stored] } },
+    );
+    expect(await w.ledger.readIntake("slack:C1:2.0")).toEqual(stored);
+    expect(w.calls[0]).toMatchObject({
+      path: "/runs/intake/read",
+      body: { storeKey: "runs:default", key: "slack:C1:2.0" },
+    });
+    expect(await w.ledger.listIntake({ threadKey: "slack:C1:1.0", since: 2_000 })).toEqual([stored]);
+    expect(w.calls[1]).toMatchObject({
+      path: "/runs/intake/list",
+      body: { storeKey: "runs:default", threadKey: "slack:C1:1.0", since: 2_000 },
+    });
+    await w.ledger.listIntake({});
+    expect(w.calls[2].body).toEqual({ storeKey: "runs:default" });
+
+    const none = stubWorker(() => ({ status: 200, data: { receipt: null } }));
+    expect(await none.ledger.readIntake("slack:C1:2.0")).toBeUndefined();
+  });
+
+  it("the write-through's retry after a lost response reads the same row and answers the stored insert", async () => {
+    const rows = new Map<string, IntakeReceipt>();
+    const w = stubWorker((path, body) => {
+      if (path === "/runs/intake") {
+        const key = body.key as string;
+        if (!rows.has(key)) rows.set(key, body.receipt as IntakeReceipt); // the insert lands…
+        return { status: 503, data: { error: "gateway" } }; // …and the response is lost
+      }
+      if (path === "/runs/intake/read") {
+        return { status: 200, data: { receipt: rows.get(body.key as string) ?? null } };
+      }
+      return { status: 200, data: { ok: true } };
+    });
+    const wt = createLedgerWriteThrough({
+      ledger: w.ledger,
+      gen: "gen-A",
+      fallback: { put: async () => ({}), abandoned: () => {} },
+      warn: () => {},
+      sleep: async () => {},
+    });
+    expect(await wt.recordIntake("slack:C1:2.0", receipt())).toEqual({ inserted: true, stored: receipt() });
+    expect(w.calls.map((c) => c.path)).toEqual(["/runs/intake", "/runs/intake/read"]);
   });
 });
