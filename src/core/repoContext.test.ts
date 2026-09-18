@@ -1001,6 +1001,34 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
     ).resolves.toEqual({ repo: "acme/web" });
   });
 
+  it("a determiner between in and the target is skipped: in-the-atlas-repo addresses atlas, and the word the is never itself an address", async () => {
+    // The Slack shape that refused with "no repository": a mention, then
+    // `in the <name> repo, …` — the word after `in` was `the`.
+    await expect(
+      resolveRepoContext(
+        msg("<@bot> in the atlas repo, we have PRs whose buttons should be swapped"),
+        [],
+        probe,
+        slugs,
+      ),
+    ).resolves.toEqual({ repo: "acme/atlas" });
+    await expect(
+      resolveRepoContext(msg("agent:coding in our atlas repository: fix it"), [], probe, slugs),
+    ).resolves.toEqual({ repo: "acme/atlas" });
+    // A determined slug is addressed too, and rebinds a bound thread.
+    await expect(
+      resolveRepoContext(msg("agent:coding in the acme/web repo: fix the login page"), boundToApi, probe, slugs),
+    ).resolves.toEqual({ repo: "acme/web" });
+    // The determiner itself is never a candidate: `in the logs` addresses
+    // `logs`, an unknown name, so it is prose and binds nothing.
+    await expect(resolveRepoContext(msg("<@bot> in the logs, api crashed"), [], probe, slugs)).resolves.toEqual({});
+    // Still directive-position only: a determined name deep in prose is prose.
+    const boundToWeb = [{ role: "user" as const, text: "look at https://github.com/acme/web first" }];
+    await expect(
+      resolveRepoContext(msg("the crash is in the api repo, see the logs"), boundToWeb, probe, slugs),
+    ).resolves.toEqual({ repo: "acme/web" });
+  });
+
   it("the registry did not ANSWER for an addressed slug in the current message → unverifiedRepo, never a fall back to the thread's old repo", async () => {
     const down = vi.fn(async (): Promise<boolean | "unreachable"> => "unreachable");
     await expect(resolveRepoContext(msg("agent:coding in acme/web: fix it"), boundToApi, down, slugs)).resolves.toEqual(
