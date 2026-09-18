@@ -191,8 +191,10 @@ export interface LedgerRun {
    *  generation owns the row) and for an untracked one. */
   abandon(): Promise<void>;
   /** True when a resume could continue this run: its seed and seed record
-   *  landed (or it was adopted from a resume). A ship pipeline, a detached run
-   *  and a run whose seed failed are not. */
+   *  landed, it was adopted from a resume, or it is a hosted ship parent
+   *  (record 0060) — a row with no process of its own that the next
+   *  generation re-hosts, so SIGTERM hands it off like any resumable run. A
+   *  detached run and a run whose seed failed are not. */
   readonly resumable: boolean;
   /** True once this generation handed the run to the next (SIGTERM). */
   readonly handedOff: boolean;
@@ -662,6 +664,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     /** A detach left the log short of what the model saw: the record says `broken`. */
     private broken = false;
     private stepNo: number;
+    /** The row is a hosted ship parent's (record 0060): `meta.hosted` at the claim. */
+    private readonly hosted: boolean;
     private lastSeq: number;
     private state: RunState;
     private stateSending: Promise<void> = Promise.resolve();
@@ -683,12 +687,13 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     });
 
     constructor(
-      req: Pick<OpenRunRequest, "runId" | "threadKey" | "state" | "onStop" | "onFenced">,
+      req: Pick<OpenRunRequest, "runId" | "threadKey" | "state" | "onStop" | "onFenced"> & { meta?: LiveRunMeta },
       from: { stepNo: number; lastSeq: number; resumable?: boolean; session?: RunSession } = {
         stepNo: 0,
         lastSeq: 0,
       },
     ) {
+      this.hosted = req.meta?.hosted === true;
       this.runId = req.runId;
       this.threadKey = req.threadKey;
       this.state = req.state ?? {};
@@ -712,7 +717,9 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
 
     get resumable(): boolean {
-      return !this.detached && (this.seeded || this.adopted);
+      // A hosted ship parent has no seed — no process runs it here — but the
+      // next generation re-hosts its row (record 0060), so it hands off too.
+      return !this.detached && (this.seeded || this.adopted || this.hosted);
     }
 
     markHandedOff(): void {

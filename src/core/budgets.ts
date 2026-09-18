@@ -153,6 +153,12 @@ export const FLOORS: Readonly<Record<RoundKind, number>> = {
  *  when the remainder allows it. */
 export const MERGE_WAIT_ASK_MINUTES = 60;
 
+/** A hosted ship parent's deadline margin past the pipeline's wall clock
+ *  (record 0060): the row's `state.hosting.until` is the hand-off time plus
+ *  the instance's `caps.maxMinutes` plus this hour, absorbing the runner's own
+ *  scheduling slack before a reclaim closes the row `interrupted`. */
+export const HOSTED_DEADLINE_MARGIN_MINUTES = 60;
+
 /** The ship runner's waits, in minutes: the margin a child's wait allows past
  *  its budget, the slice a wait is asked in, the merge door's re-ask cadence,
  *  and the pause before a busy spawn is asked again. */

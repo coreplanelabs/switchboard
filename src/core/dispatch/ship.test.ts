@@ -508,6 +508,33 @@ describe("runShipBranch — the host key and the hosted marker (record 0060)", (
     expect(s.registry.getById("run-s")).toMatchObject({ hosted: true, threadKey: THREAD });
   });
 
+  it("after a tracked, taken hand-off the parent stays live (record 0060): the registry row is unfinished, the ledger row is `live` with `state.hosting` (the instance and the deadline of the caps plus one hour), the stream carries a second run_meta naming the instance, the card still closes ✅ and the reply says where the plan runs", async () => {
+    const s = ledgerSetup();
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    await new Promise((r) => setImmediate(r)); // the coalesced state write settles
+    expect(s.refusals).toEqual([]);
+    expect(s.created).toEqual(["plan-fix-the-login-redirect-6435ec"]);
+    // Unfinished on the registry: the finish, `finishing` and the seal are the
+    // runner's, at the pipeline's end — not the branch's.
+    expect(s.registry.getById("run-s")).toMatchObject({ hosted: true, finished: false });
+    // Live on the ledger — `finishing` was never taken — with the hosting fact:
+    // the instance and the deadline (the caps' 200 minutes plus the hour's margin).
+    const row = s.inner.live.get("run-s")!;
+    expect(row.phase).toBe("live");
+    expect(row.state).toMatchObject({
+      hosting: { instanceId: "plan-fix-the-login-redirect-6435ec", until: NOW + (200 + 60) * 60_000 },
+    });
+    // The second `run_meta` names the instance; the first carries none.
+    const metas = (s.registry.snapshot("run-s", "tok")?.events ?? []).filter((e) => e.type === "run_meta");
+    expect(metas).toHaveLength(2);
+    expect(metas[0]).not.toHaveProperty("instanceId");
+    expect(metas[1]).toMatchObject({ agent: "ship", instanceId: "plan-fix-the-login-redirect-6435ec" });
+    // The thread still hears the ack and the card closes ✅ as before.
+    expect(s.replies).toHaveLength(1);
+    expect(s.replies[0]).toContain("Handed to the plan runner");
+    expect(JSON.stringify(s.closes[0])).toContain("✅");
+  });
+
   it("one pipeline per thread: a live host-key row refuses a second ship by name — nothing handed to the runner, the card closes ⚠️, the run still ends completed", async () => {
     const s = ledgerSetup();
     await s.inner.claim({
@@ -530,6 +557,32 @@ describe("runShipBranch — the host key and the hosted marker (record 0060)", (
     expect(s.inner.live.get("r-live")).toMatchObject({ threadKey: `${THREAD}#host`, ownerGen: "gen-OTHER" });
   });
 
+  // Every exit after the host-key claim that hands nothing off — a refused
+  // hand-off, a throw — finishes the run as today, so no host-keyed row
+  // outlives a request that handed nothing off.
+  it("a hand-off refused after the host-key claim leaves no live row: the run finishes `completed`, the ledger row closes with the record, and the next ship request in the thread claims the host key", async () => {
+    const s = ledgerSetup();
+    s.deps.createCoordinatorInstance = async (id) => ({ kind: "failed", id, reason: "engine down" });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed" });
+    await s.writer.settled();
+    expect((await s.inner.listLive()).filter((r) => r.threadKey === `${THREAD}#host`)).toHaveLength(0);
+
+    // The next ship request in the thread claims the host key and is handed off.
+    const t = setup("slack:UADMIN", { minutes: 200 });
+    t.deps.runLedger = createLedgerWriteThrough({
+      ledger: s.inner,
+      gen: "gen-T",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+    await runShipBranch(t.deps, t.msg, t.io, t.ctx);
+    expect(t.refusals).toEqual([]);
+    expect(t.created).toHaveLength(1);
+    expect(t.replies[0]).toContain("Handed to the plan runner");
+    expect(s.inner.live.get("run-s")).toMatchObject({ threadKey: `${THREAD}#host`, phase: "live" });
+  });
+
   it("an untracked answer that is not thread-live (missing routes) hands off as before: the runner is asked and the reply says where the plan runs", async () => {
     const s = setup("slack:UADMIN", { minutes: 200 });
     const inner = new InMemoryRunLedger(() => NOW);
@@ -547,6 +600,9 @@ describe("runShipBranch — the host key and the hosted marker (record 0060)", (
     expect(s.refusals).toEqual([]);
     expect(s.created).toHaveLength(1);
     expect(s.replies[0]).toContain("Handed to the plan runner");
+    // An untracked hand-off finishes as today: no ledger row mirrors the run,
+    // so nothing could re-host it (record 0060).
+    expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed" });
   });
 });
 
