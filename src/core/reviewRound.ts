@@ -656,6 +656,11 @@ export async function runReviewPostStep(input: {
   post: (target: ReviewCommentTarget, body: string) => Promise<void>;
   fetchPrHead: FetchPrHead;
   reply: (text: string) => Promise<void>;
+  /** An acknowledgement's reply (routing-and-config item 28) — the carried-
+   *  review note goes out through it, so the request's verbosity decides;
+   *  absent, `reply`. The notes that need the person (a review not posted, a
+   *  head that moved after the pin) stay on `reply`. */
+  ack?: (text: string) => Promise<void>;
   /** The run's stream (`registry.publish` bound to the run): the outcome is
    *  published as a `review_posted` event or a `review_not_posted` note for a
    *  review round that was asked to post (item 18). Absent → the outcome is
@@ -794,7 +799,7 @@ export async function runReviewPostStep(input: {
     console.log(
       `[review-post] ${logKey} → ${where} (${verdict?.verdict ?? "no verdict"})${carried ? ` carried ${carried.reviewed.slice(0, 7)} → ${pinned.slice(0, 7)}` : ""}`,
     );
-    if (carried) await input.reply(headCarriedNote({ where, ...carried })).catch(() => {});
+    if (carried) await (input.ack ?? input.reply)(headCarriedNote({ where, ...carried })).catch(() => {});
     // Head-moved note (item 10): a push that landed after the head was last
     // checked makes this a review of an outdated commit — pinned, so it
     // will not auto-approve (correct) but silent in the thread (not). One

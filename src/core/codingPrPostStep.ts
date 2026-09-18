@@ -67,6 +67,7 @@
 // base".
 
 import { shellQuote } from "../execution/shellQuote.js";
+import { shows, type Verbosity } from "./verbosity.js";
 import {
   resolveBaseRef,
   resolveBaseRefLazy,
@@ -475,6 +476,9 @@ export interface CodingPrTarget {
  * dispatcher passes the thread key).
  */
 export async function runCodingPrPostStep(input: {
+  /** The request's verbosity (routing-and-config item 28): the note's link
+   *  and state are for everyone; the head it was rendered at is `verbose`. */
+  verbosity: Verbosity;
   observed: WorkspaceObservation;
   description: PrDescription | undefined;
   target: CodingPrTarget;
@@ -670,8 +674,8 @@ export async function runCodingPrPostStep(input: {
         at: systemClock(),
       });
       return state === "open"
-        ? `🔀 PR updated: ${url} — body re-rendered at \`${prHead.slice(0, 7)}\``
-        : `🔀 PR updated: ${url} — body re-rendered at \`${prHead.slice(0, 7)}\` (the pull request is ${state}; its description was edited in place)`;
+        ? `🔀 PR updated: ${url}${renderedAt(input.verbosity, prHead)}`
+        : `🔀 PR updated: ${url}${renderedAt(input.verbosity, prHead)} (the pull request is ${state}; its description was edited in place)`;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       console.error(`[pr-post] ${logKey} update failed for ${repo}#${number}: ${reason}`);
@@ -741,7 +745,8 @@ export async function runCodingPrPostStep(input: {
         ...submittedPrDescriptionArtifact(prDescription, { repo, pr: existing.number, headSha: prHead, body }),
         at: systemClock(),
       });
-      return `🔀 PR updated: ${url} — body re-rendered at its head \`${prHead.slice(0, 7)}\`; ${caveat}`;
+      // A dash, never a bare `;` on the URL: autolinkers fold trailing punctuation into the link.
+      return `🔀 PR updated: ${url}${renderedAt(input.verbosity, prHead, "its head ")} — ${caveat}`;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       console.error(`[pr-post] ${logKey} update failed for ${repo}#${existing.number}: ${reason}`);
@@ -797,7 +802,7 @@ export async function runCodingPrPostStep(input: {
       });
       return opened.created
         ? `🔀 PR opened: ${opened.htmlUrl} (\`${branch}\` → \`${base}\`)`
-        : `🔀 PR updated: ${opened.htmlUrl} — body re-rendered at \`${headSha.slice(0, 7)}\``;
+        : `🔀 PR updated: ${opened.htmlUrl}${renderedAt(input.verbosity, headSha)}`;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       console.error(`[pr-post] ${logKey} open/edit failed for ${repo} ${branch}: ${reason}`);
@@ -1019,4 +1024,11 @@ function parseOriginRemoteOutput(output: string): string | undefined {
   const name = m[2].replace(/\.git$/i, "");
   if (name.length === 0 || name.length > 100 || /^\.+$/.test(name)) return undefined;
   return `${m[1]}/${name}`.toLowerCase();
+}
+
+/** The note's tail naming the head the body was rendered at — `verbose`
+ *  material (routing-and-config item 28); empty at quiet, where the link and
+ *  the pull request's state are the whole note. */
+function renderedAt(verbosity: Verbosity, sha: string, where = ""): string {
+  return shows(verbosity, "verbose") ? ` — body re-rendered at ${where}\`${sha.slice(0, 7)}\`` : "";
 }

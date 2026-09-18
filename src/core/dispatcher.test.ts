@@ -1970,7 +1970,7 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
       const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
       f.io.offer = vi.fn(async (o) => void offers.push(o));
       await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), f.io);
-      // First reply: receipt + footer (no error text in this reply).
+      // First reply: the receipt (no error text in this reply).
       expect(f.replies).toHaveLength(1);
       expect(f.replies[0]).toContain("routed: repo test acme/switchboar main");
       // Then the offer with Yes/No.
@@ -1994,7 +1994,7 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
       const { deps, store } = wiredNearMatch();
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), io);
-      // Two replies: receipt+footer, then the text question.
+      // Two replies: the receipt, then the text question.
       expect(replies).toHaveLength(2);
       expect(replies[0]).toContain("routed: repo test acme/switchboar main");
       expect(replies[1]).toContain("Did you mean:");
@@ -3215,7 +3215,7 @@ describe("review post-step", () => {
         { base: "main", sha: OTHER_HEAD },
       ]);
       expect(replies).toContain(
-        "ℹ️ acme/api#42 moved during the run: reviewed e8e43f4, head is now d75b5a5 — a rebase of the same 2 commits (same messages, same files). The review applies unchanged and was posted pinned to d75b5a5.",
+        "ℹ️ acme/api#42: review carried to d75b5a5 — a rebase of the same 2 commits (reviewed e8e43f4).",
       );
       expect(replies.some((r) => r.includes("re-request"))).toBe(false);
     });
@@ -5718,6 +5718,15 @@ describe("closed-card checklist and review verdict run link", () => {
     expect(painted!.activity).toEqual({ kind: "command", tool: "bash", command });
     expect(painted!.detail).toBe("✱ Read the diff");
     for (const s of statuses) expect(s.detail ?? "").not.toContain("→ $");
+    // At quiet — the default — the same run paints the caption alone: the
+    // shell line is verbose material (routing-and-config item 28).
+    n = 0;
+    const quiet = fakeIO();
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), quiet.io);
+    expect(quiet.statuses.some((s) => s.activity?.kind === "command")).toBe(false);
+    expect(quiet.statuses.some((s) => s.activity?.kind === "line" && s.activity.text === "→ bash")).toBe(true);
+    for (const s of quiet.statuses) expect(s.title).not.toMatch(/thinking \(|running bash/);
     const last = statuses[statuses.length - 1];
     expect(last.title).toContain("✅");
     expect(last.activity).toBeUndefined();
@@ -6781,7 +6790,7 @@ channels:
     expect(provider.requests[0].system ?? "").not.toMatch(/Harness:/);
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("config set me --harness.general pi"), io);
-    expect(replies[0]).toMatch(/Updated your scope.*"harness":\{"general":"pi"\}/);
+    expect(replies[0]).toMatch(/Updated your scope.*harness `general=pi`/);
     await dispatch(deps, msg("which harness am I on?"), fakeIO().io);
     const sys = provider.requests[1].system ?? "";
     expect(sys).toContain("Harness: pi (your scope)");
@@ -6800,7 +6809,7 @@ channels:
 
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("config set me --effort medium"), io);
-    expect(replies[0]).toMatch(/Updated your scope.*"effort":"medium"/);
+    expect(replies[0]).toMatch(/Updated your scope.*effort `medium`/);
     await dispatch(deps, msg("and now?"), fakeIO().io);
     expect(provider.requests[1].effort).toBe("medium");
     expect(provider.requests[1].system).toContain("user override: effort `medium`");
@@ -7212,7 +7221,7 @@ describe("custom instructions in the system prompt", () => {
     await dispatch(deps, msg(`config instructions me ${long}`), io);
     await dispatch(deps, msg("config set me --agent review"), io);
     expect(replies[1]).toMatch(/Updated your scope/);
-    expect(replies[1]).toContain('"agent":"review"');
+    expect(replies[1]).toContain("agent `review`");
     expect(replies[1]).not.toContain(long);
     expect(replies[1]).toMatch(new RegExp(`instructions.*${long.length} chars`));
   });
@@ -16587,7 +16596,7 @@ describe("the confirm axis through dispatch(): the door hands back at or after t
     expect(first).toBe(RECEIPT_LINE);
     // The command's own reply: the channel's effective scope, its static confirm beside the new model.
     expect(rest.join("\n")).toBe(
-      'Updated channel scope. Now: {"boundary":{"confirm":"destructive"},"models":{"coding":"anthropic/claude-opus-5"}}',
+      "Updated channel scope: models `coding=anthropic/claude-opus-5`, boundary confirm=destructive.",
     );
     expect(replies[0]).not.toMatch(/^To run this: /);
     expect(statuses).toEqual([]);
@@ -16655,7 +16664,6 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
   const HAND_BACK_LINE = "To run this: config set channel --models.coding anthropic/claude-opus-5";
   const LINE = "config set channel --models.coding anthropic/claude-opus-5";
   const RISK = "changes the scope's settings for everyone in it until reset";
-  const BUILT_IN_FOOTER = "confirmation required by the built-in default";
   const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
   const contentTypes = (events: readonly RunEvent[]) => events.filter((e) => !isSpanRecord(e)).map((e) => e.type);
   const requester: Actor = { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS };
@@ -16726,7 +16734,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     return dispatchClick(deps, { kind, id, actor, io: io.io }).then((outcome) => ({ outcome, ...io }));
   };
 
-  it("a routed write on a channel with `offer` mints one row and offers the full line, the risk line and the footer naming the built-in default; one record with outcome offered, nothing invoked, no run signal and no plain reply", async () => {
+  it("a routed write on a channel with `offer` mints one row and offers the full line and the risk line — no footer; one record with outcome offered, nothing invoked, no run signal and no plain reply", async () => {
     const { deps, registry, provider, store, now } = wired();
     const { offers, replies, statuses, started, finished } = await offered(deps);
     expect(deps.routeModel).toHaveBeenCalledTimes(1);
@@ -16735,7 +16743,6 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
         id: expect.stringMatching(/^[0-9a-f-]{36}$/),
         line: LINE,
         risk: RISK,
-        footer: BUILT_IN_FOOTER,
         expiresAt: now() + CONFIRMATION_TTL_MS,
       },
     ]);
@@ -16780,13 +16787,6 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
       outcome: "offered",
       receipt: expect.stringMatching(/^config set channel --models\.coding anthropic\/x+…$/),
     });
-  });
-
-  it("the footer names the scope that asked: a channel that set `confirm` is `this channel's boundary`", async () => {
-    const yaml = ROUTING_ON_YAML + `channels:\n  "slack:CX":\n    boundary:\n      confirm: write\n`;
-    const { deps } = wired(yaml);
-    const { offers } = await offered(deps);
-    expect(offers[0]).toMatchObject({ footer: "confirmation required by this channel's boundary" });
   });
 
   it("without `offer` on the channel the hand-back is byte for byte today's and no row is minted", async () => {
@@ -16858,7 +16858,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     const first = await click(deps, "confirm", id, requester);
     expect(first.outcome).toEqual({ status: "completed" });
     expect(first.replies).toEqual([
-      `routed: ${LINE}\nUpdated channel scope. Now: {"models":{"coding":"anthropic/claude-opus-5"}}`,
+      `routed: ${LINE}\nUpdated channel scope: models \`coding=anthropic/claude-opus-5\`.`,
     ]);
     expect(deps.invoked).toEqual(["config.set"]);
     expect(audits).toEqual([

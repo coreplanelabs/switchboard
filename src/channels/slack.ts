@@ -1019,7 +1019,7 @@ export class SlackIO implements ChannelIO {
 
   /** The confirmation a routed write is offered as (docs/reference/specs/slack-channel.md
    *  item 14, record 0044): one message in the thread — the exact line to run
-   *  as a code span, the risk line and the footer as context, and Run and
+   *  as a code span, the risk line as context, and Run and
    *  Cancel whose value is the offer's id — with the offer's text as the
    *  fallback, so a client without blocks still shows the line to type. */
   async offer(offer: ConfirmationOffer): Promise<void> {
@@ -1335,8 +1335,8 @@ function chunkText(text: string, limit: number): string[] {
 
 /** The offer's Block Kit (item 14): the line as code — a span, or a fenced
  *  block when the line itself carries a backtick, which a span cannot hold —
- *  the risk (when the command declares one) and the footer as context, and the
- *  two buttons, each carrying the id the core consumes. Every text is escaped
+ *  the risk (when the command declares one) as context, and the two buttons,
+ *  each carrying the id the core consumes. Every text is escaped
  *  for mrkdwn: `&`, `<`, `>` are structural even inside code. */
 function offerBlocks(offer: ConfirmationOffer): slackTypes.KnownBlock[] {
   const line = escapeMrkdwn(offer.line);
@@ -1365,13 +1365,15 @@ function offerBlocks(offer: ConfirmationOffer): slackTypes.KnownBlock[] {
       },
     ];
   }
-  const context: slackTypes.ContextBlockElement[] = [
-    ...(offer.risk ? [{ type: "mrkdwn" as const, text: escapeMrkdwn(offer.risk) }] : []),
-    { type: "mrkdwn", text: escapeMrkdwn(offer.footer) },
-  ];
+  // The risk rides as context when the command declares one; a command
+  // without a risk gets the line and the buttons alone — no footer (routing-
+  // and-config item 28: which scope asked is an operator's fact).
+  const context: slackTypes.KnownBlock[] = offer.risk
+    ? [{ type: "context", elements: [{ type: "mrkdwn", text: escapeMrkdwn(offer.risk) }] }]
+    : [];
   return [
     { type: "section", text: { type: "mrkdwn", text: code } },
-    { type: "context", elements: context },
+    ...context,
     {
       type: "actions",
       elements: [

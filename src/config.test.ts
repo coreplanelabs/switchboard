@@ -239,6 +239,18 @@ users:
     );
   });
 
+  it("a scope's severity, intake mode and grant read as words in config show and the config set reply (fmtScope)", async () => {
+    const s = store();
+    await s.setUserOverride("slack:UX", {
+      review: { addressSeverity: "major" },
+      intake: { threadReplies: "mention" },
+      ship: { grant: { renewals: 2, costCapUsd: 40 } },
+    });
+    expect(s.describe("slack:CX", "slack:UX")).toMatch(
+      /\*Your scope:\* severity `major`, intake `mention`, grant renewals=2 cap=\$40/,
+    );
+  });
+
   it("config show names the effective level for the caller, the defaults' word when set, and each scope's own", async () => {
     const s = store(VERBOSITY_YAML);
     const text = s.describe("slack:CDEBUG", "slack:UQUIET");

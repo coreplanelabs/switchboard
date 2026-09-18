@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  fmtScope,
   formatConfigDescription,
   type ChannelScopeIndexRow,
   type ConfigDescription,
@@ -436,9 +437,15 @@ export const configSet = defineCommand({
   annotations: { destructive: false, risk: () => "changes the scope's settings for everyone in it until reset" },
   describe:
     "Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, or the intake gate's mode for a thread (gated like the channel); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
+  // A sentence for the person who typed the command (routing-and-config item
+  // 28): the scope's settings in `config show`'s words, never a JSON dump.
   render: (output) => {
     const o = output as JsonObject;
-    return `Updated ${who(o.scope as "channel" | "me" | "thread")} scope. Now: ${JSON.stringify(o.effective)}`;
+    const effective = o.effective as Scope;
+    // The instructions text is never echoed (custom-instructions item 5):
+    // `summarizeScope` left its length in its place, and the sentence names it.
+    const instructions = effective.instructions !== undefined ? `, instructions ${effective.instructions}` : "";
+    return `Updated ${who(o.scope as "channel" | "me" | "thread")} scope: ${fmtScope(effective)}${instructions}.`;
   },
   handler: async ({ args, options, caller, deps }) => {
     const agents = deps.config.agentNames();

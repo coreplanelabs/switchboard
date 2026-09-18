@@ -91,14 +91,13 @@ export function classifyHeadMove(before: PrCommitList, after: PrCommitList): Hea
   };
 }
 
-/** Thread note for a carried-forward review (rebase-only move). */
+/** Thread note for a carried-forward review (rebase-only move): one line, an
+ *  acknowledgement of what the system did — `verbose` material (routing-and-
+ *  config item 28); the verdict that follows is what the thread needs. */
 export function headCarriedNote(input: { where: string; reviewed: string; current: string; commits: number }): string {
   const r = short(input.reviewed);
   const c = short(input.current);
-  return (
-    `ℹ️ ${input.where} moved during the run: reviewed ${r}, head is now ${c} — a rebase of the same ${plural(input.commits, "commit")} ` +
-    `(same messages, same files). The review applies unchanged and was posted pinned to ${c}.`
-  );
+  return `ℹ️ ${input.where}: review carried to ${c} — a rebase of the same ${plural(input.commits, "commit")} (reviewed ${r}).`;
 }
 
 /** Appended to the posted GitHub body of a carried-forward review, so the

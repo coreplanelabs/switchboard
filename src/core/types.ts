@@ -230,13 +230,13 @@ export interface UploadTicket {
 /** What the core needs from a channel to serve one request. */
 /** What a channel shows for a confirmation (`ChannelIO.offer`): the id its
  *  affordance carries back, the full command line to run, the one risk line
- *  (empty when the command declares none), the footer naming the scope that
- *  asked, and when the offer expires (ms epoch, the config object's clock). */
+ *  (empty when the command declares none), and when the offer expires (ms
+ *  epoch, the config object's clock). No footer: the button is the affordance,
+ *  and which scope asked is an operator's fact (`config show` names it). */
 export interface ConfirmationOffer {
   id: string;
   line: string;
   risk: string;
-  footer: string;
   expiresAt: number;
   /** Present on a question's offer (record 0054): the refusal's sentence,
    *  shown above the line, and the evidence naming the match, shown under it.
@@ -286,8 +286,8 @@ export interface ChannelIO {
   /**
    * Show the confirmation a routed write is offered as
    * (docs/reference/specs/routing-and-config.md item 25, record 0044): the full
-   * command line the router bound, its one risk line, the footer naming the
-   * scope that asked, and the id the channel's affordance carries back to
+   * command line the router bound, its one risk line, and the id the
+   * channel's affordance carries back to
    * `dispatchClick` — a button whose value is the id, on a channel with
    * components. Optional; a channel without it (the CLI, an HTTP reply, the
    * browser) is answered the pasteable line instead, and nothing below the

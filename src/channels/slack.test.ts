@@ -701,7 +701,6 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
   type Client = ConstructorParameters<typeof SlackIO>[0];
   const LINE = "config set channel --models.coding anthropic/claude-opus-5";
   const RISK = "changes the scope's settings for everyone in it until reset";
-  const FOOTER = "confirmation required by the built-in default";
   const client = () => {
     const postMessage = vi.fn(async (_o: Record<string, unknown>) => ({ ok: true, ts: "4.0" }));
     return { c: { chat: { postMessage } } as unknown as Client, postMessage };
@@ -709,9 +708,9 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
   type Block = { type: string; text?: { type: string; text: string }; elements?: Array<Record<string, unknown>> };
   const blocksOf = (call: Record<string, unknown>) => call.blocks as Block[];
 
-  it("posts one message in the thread: the line as a code span, the risk and the footer as context, Run (primary) and Cancel carrying the id, and a text fallback that carries the line", async () => {
+  it("posts one message in the thread: the line as a code span, the risk as context, Run (primary) and Cancel carrying the id, and a text fallback that carries the line", async () => {
     const { c, postMessage } = client();
-    await new SlackIO(c, ev).offer({ id: "c-1", line: LINE, risk: RISK, footer: FOOTER, expiresAt: 600_000 });
+    await new SlackIO(c, ev).offer({ id: "c-1", line: LINE, risk: RISK, expiresAt: 600_000 });
     expect(postMessage).toHaveBeenCalledTimes(1);
     const call = postMessage.mock.calls[0]![0];
     expect(call).toMatchObject({ channel: "C1", thread_ts: "1.0" });
@@ -719,10 +718,7 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
     const blocks = blocksOf(call);
     expect(blocks.map((b) => b.type)).toEqual(["section", "context", "actions"]);
     expect(blocks[0]!.text).toEqual({ type: "mrkdwn", text: `\`${LINE}\`` });
-    expect(blocks[1]!.elements).toEqual([
-      { type: "mrkdwn", text: RISK },
-      { type: "mrkdwn", text: FOOTER },
-    ]);
+    expect(blocks[1]!.elements).toEqual([{ type: "mrkdwn", text: RISK }]);
     expect(blocks[2]!.elements).toEqual([
       {
         type: "button",
@@ -735,12 +731,12 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
     ]);
   });
 
-  it("a command that declares no risk gets the footer alone in the context; a line with a backtick rides as a fenced block; `&`, `<` and `>` are escaped for Slack, in the span and in the fallback", async () => {
+  it("a command that declares no risk gets the line and the buttons alone — no context block, no footer (routing-and-config item 28); a line with a backtick rides as a fenced block; `&`, `<` and `>` are escaped for Slack, in the span and in the fallback", async () => {
     const { c, postMessage } = client();
-    await new SlackIO(c, ev).offer({ id: "c-2", line: LINE, risk: "", footer: FOOTER, expiresAt: 600_000 });
-    expect(blocksOf(postMessage.mock.calls[0]![0])[1]!.elements).toEqual([{ type: "mrkdwn", text: FOOTER }]);
+    await new SlackIO(c, ev).offer({ id: "c-2", line: LINE, risk: "", expiresAt: 600_000 });
+    expect(blocksOf(postMessage.mock.calls[0]![0]).map((b) => b.type)).toEqual(["section", "actions"]);
     const tricky = 'config instructions channel "use `npm` & <nothing> else"';
-    await new SlackIO(c, ev).offer({ id: "c-3", line: tricky, risk: RISK, footer: FOOTER, expiresAt: 600_000 });
+    await new SlackIO(c, ev).offer({ id: "c-3", line: tricky, risk: RISK, expiresAt: 600_000 });
     const call = postMessage.mock.calls[1]![0];
     expect(blocksOf(call)[0]!.text!.text).toBe(
       '```\nconfig instructions channel "use `npm` &amp; &lt;nothing&gt; else"\n```',
@@ -756,7 +752,6 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
       id: "q-1",
       line: "agent:ship repo:acme/api fix it",
       risk: "",
-      footer: "",
       expiresAt: 600_000,
       question: {
         text: "acme/api is not onboarded here.",

@@ -104,8 +104,7 @@ describe("classifyHeadMove (item 12)", () => {
 describe("item 12 thread notes and posted-body footer", () => {
   it("carried note: both shas, the rebase fact, the pin", () => {
     expect(headCarriedNote({ where: "acme/api#42", reviewed: A, current: B, commits: 3 })).toBe(
-      "ℹ️ acme/api#42 moved during the run: reviewed e8e43f4, head is now d75b5a5 — a rebase of the same 3 commits " +
-        "(same messages, same files). The review applies unchanged and was posted pinned to d75b5a5.",
+      "ℹ️ acme/api#42: review carried to d75b5a5 — a rebase of the same 3 commits (reviewed e8e43f4).",
     );
     expect(headCarriedNote({ where: "acme/api#42", reviewed: A, current: B, commits: 1 })).toContain(
       "the same 1 commit (",

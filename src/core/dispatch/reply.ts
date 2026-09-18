@@ -314,6 +314,14 @@ export function cardActivity(e: RunEvent): StatusActivity {
   return { kind: "line", text: activityLine(e) };
 }
 
+/** The activity as a quiet card paints it (routing-and-config item 28): a
+ *  command becomes the caption Slack would draw over its code block — `→ bash`
+ *  — and the block itself is kept for `verbose`; a line is a line. */
+export function quietActivity(activity: StatusActivity | undefined): StatusActivity | undefined {
+  if (activity?.kind === "command") return { kind: "line", text: `→ ${activity.tool}` };
+  return activity;
+}
+
 /**
  * One-line note of what rode along with the request, for the `input` event
  * (docs/reference/specs/live-view.md item 12): `[+2 images, 1 document]`. Counts only — the
@@ -430,7 +438,6 @@ async function offerQuestion(refusal: Refusal, io: ChannelIO, store: Confirmatio
     id: row.id,
     line: guess.line,
     risk: "",
-    footer: "",
     expiresAt: row.expiresAt,
     question: { text: refusal.text, evidence: guess.evidence },
   });

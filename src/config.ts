@@ -1476,7 +1476,10 @@ export function formatConfigDescription(d: ConfigDescription): string {
   return lines.join("\n");
 }
 
-function fmtScope(s: Scope): string {
+/** One scope's own settings as a clause — `agent \`review\`, effort \`low\``
+ *  — the words `config show` prints for a scope and `config set` answers with
+ *  (a sentence, never a JSON dump). `_none_` when the scope sets nothing. */
+export function fmtScope(s: Scope): string {
   const parts: string[] = [];
   if (s.agent) parts.push(`agent \`${s.agent}\``);
   if (s.model) parts.push(`model \`${s.model}\``);
@@ -1492,6 +1495,12 @@ function fmtScope(s: Scope): string {
         .join(" ")}`,
     );
   if (s.boundary) parts.push(`boundary ${fmtBoundary(s.boundary)}`);
+  if (s.review?.addressSeverity) parts.push(`severity \`${s.review.addressSeverity}\``);
+  if (s.intake?.threadReplies) parts.push(`intake \`${s.intake.threadReplies}\``);
+  if (s.ship?.grant)
+    parts.push(
+      `grant renewals=${s.ship.grant.renewals}${s.ship.grant.costCapUsd !== undefined ? ` cap=$${s.ship.grant.costCapUsd}` : ""}`,
+    );
   return parts.length > 0 ? parts.join(", ") : "_none_";
 }
 

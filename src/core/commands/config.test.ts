@@ -394,7 +394,7 @@ describe("config set", () => {
       chat(config, "slack:UX"),
     );
     expect(text).toBe(
-      'Updated your scope. Now: {"agent":"review","models":{"coding":"anthropic/opus"},"effort":"low","efforts":{"review":"high"}}',
+      "Updated your scope: agent `review`, models `coding=anthropic/opus`, effort `low`, efforts `review=high`.",
     );
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({
       agent: "review",
@@ -412,7 +412,7 @@ describe("config set", () => {
     const config = store();
     const commands = bind(config);
     const { text } = await say(commands, "config set me --verbosity debug", chat(config, "slack:UX"));
-    expect(text).toBe('Updated your scope. Now: {"verbosity":"debug"}');
+    expect(text).toBe("Updated your scope: verbosity `debug`.");
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({ verbosity: "debug" });
     expect(config.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).verbosity).toBe("debug");
     expect(config.resolve({ channelId: "slack:CX", userId: "slack:UY", request: {} }).verbosity).toBe("quiet");
@@ -428,7 +428,7 @@ describe("config set", () => {
     const open = store(OPEN_YAML);
     const openCmds = bind(open);
     expect((await say(openCmds, "config set channel --model openai/gpt-5", chat(open, "slack:UX"))).text).toBe(
-      'Updated channel scope. Now: {"model":"openai/gpt-5"}',
+      "Updated channel scope: model `openai/gpt-5`.",
     );
     expect(open.scopes("slack:CX", "slack:UX").channel).toEqual({ model: "openai/gpt-5" });
     await say(openCmds, "config set channel --agent review --channel slack:COTHER", chat(open, "slack:UX"));
@@ -634,7 +634,7 @@ describe("config set thread / config clear thread — the thread scope", () => {
     await commands.invoke("config.set", { args: ["me"], options: { intake: { threadReplies: "classify" } } }, me);
     const { res, text } = await say(commands, "config set thread --intake.threadReplies mention", me);
     expect(res.ok).toBe(true);
-    expect(text).toBe('Updated thread scope. Now: {"intake":{"threadReplies":"mention"}}');
+    expect(text).toBe("Updated thread scope: intake `mention`.");
     expect(config.intakeModeFor("slack:CX:1.0", "slack:UX", "slack:CX")).toBe("mention");
     // Another thread resolves the user's mode: the thread layer is that thread's alone.
     expect(config.intakeModeFor("slack:CX:2.0", "slack:UX", "slack:CX")).toBe("classify");
@@ -819,9 +819,7 @@ describe("config set --boundary.<axis> and config show's effective boundary", ()
       "config set me --boundary.maxMinutes 45 --boundary.maxIdentity read --boundary.machines none,repo-cold",
       chat(config, "slack:UX"),
     );
-    expect(text).toBe(
-      'Updated your scope. Now: {"boundary":{"maxMinutes":45,"maxIdentity":"read","machines":["none","repo-cold"]}}',
-    );
+    expect(text).toBe("Updated your scope: boundary maxMinutes=45 maxIdentity=read machines=none,repo-cold.");
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({
       boundary: { maxMinutes: 45, maxIdentity: "read", machines: ["none", "repo-cold"] },
     });
@@ -960,7 +958,7 @@ describe("config set --boundary.<axis> and config show's effective boundary", ()
     expect(before.text).not.toMatch(/confirm/i);
     expect(before.res.ok && before.res.value).not.toHaveProperty("effective.confirm");
     const { text } = await say(commands, "config set me --boundary.confirm destructive", me);
-    expect(text).toBe('Updated your scope. Now: {"boundary":{"confirm":"destructive"}}');
+    expect(text).toBe("Updated your scope: boundary confirm=destructive.");
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({ boundary: { confirm: "destructive" } });
     expect(config.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).boundary).toBeUndefined();
     const shown = await say(commands, "config show", me);
@@ -1021,7 +1019,7 @@ describe("config set --harness.<agent> and config show's effective harness", () 
     const commands = bind(config);
     const me = chat(config, "slack:UX");
     const { text } = await say(commands, "config set me --harness.coding opencode", me);
-    expect(text).toBe('Updated your scope. Now: {"harness":{"coding":"opencode"}}');
+    expect(text).toBe("Updated your scope: harness `coding=opencode`.");
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({ harness: { coding: "opencode" } });
     const coding = { channelId: "slack:CX", request: { agent: "coding" } };
     expect(config.resolve({ ...coding, userId: "slack:UX" }).harness).toEqual({ name: "opencode", scope: "user" });
@@ -1052,7 +1050,7 @@ describe("config set --harness.<agent> and config show's effective harness", () 
     ).toMatchObject({ ok: false, error: "unauthorized", message: "Channel config changes are restricted." });
     expect(gated.scopes("slack:CX", "slack:UX").channel).toEqual({});
     const { text } = await say(commands, "config set channel --harness.coding opencode", chat(gated, "slack:UADMIN"));
-    expect(text).toBe('Updated channel scope. Now: {"harness":{"coding":"opencode"}}');
+    expect(text).toBe("Updated channel scope: harness `coding=opencode`.");
     expect(gated.scopes("slack:CX", "slack:UY").channel).toEqual({ harness: { coding: "opencode" } });
     expect(gated.resolve({ channelId: "slack:CX", userId: "slack:UY", request: { agent: "coding" } }).harness).toEqual({
       name: "opencode",
@@ -1094,7 +1092,7 @@ describe("config set --review.addressSeverity", () => {
     const config = store();
     const commands = bind(config);
     const { text } = await say(commands, "config set me --review.addressSeverity major", chat(config, "slack:UX"));
-    expect(text).toContain('"review":{"addressSeverity":"major"}');
+    expect(text).toContain("severity `major`");
     expect(config.scopes("slack:CX", "slack:UX").user.review).toEqual({ addressSeverity: "major" });
     const bad = await say(commands, "config set me --review.addressSeverity huge", chat(config, "slack:UX"));
     expect(bad.text).toMatch(/addressSeverity/);

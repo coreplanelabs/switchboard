@@ -672,6 +672,29 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       expect(events[0]).toMatchObject({ type: "review_posted", head: OTHER });
     });
 
+    it("the carried-review note is an acknowledgement (routing-and-config item 28): one line through `ack` when the caller gives one, never through `reply`; without `ack` it falls back to `reply`", async () => {
+      const h = harness();
+      const acks: string[] = [];
+      await runReviewPostStep({
+        ...base(h, []),
+        carried: { reviewed: HEAD, current: OTHER, commits: 2 },
+        fetchPrHead: async () => OTHER,
+        ack: async (text: string) => void acks.push(text),
+      });
+      expect(acks).toEqual([
+        `ℹ️ acme/api#42: review carried to ${OTHER.slice(0, 7)} — a rebase of the same 2 commits (reviewed ${HEAD.slice(0, 7)}).`,
+      ]);
+      expect(h.replies).toEqual([]);
+      const bare = harness();
+      await runReviewPostStep({
+        ...base(bare, []),
+        carried: { reviewed: HEAD, current: OTHER, commits: 2 },
+        fetchPrHead: async () => OTHER,
+      });
+      expect(bare.replies).toHaveLength(1);
+      expect(bare.replies[0]).toContain("review carried to");
+    });
+
     it("a skipped post (the reviewed-head guard) publishes a `review_not_posted` note carrying the reason the outcome carries — a recorded skip, distinguishable from a post GitHub has not surfaced yet", async () => {
       const h = harness();
       const events: RunEvent[] = [];

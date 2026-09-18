@@ -106,7 +106,6 @@ const pending = (id: string, user = "slack:UADMIN"): PendingConfirmation => ({
   input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
   receipt: "config set channel --models.coding anthropic/claude-opus-5",
   risk: "changes the scope's settings for everyone in it until reset",
-  footer: "confirmation required by the built-in default",
   model: "anthropic/general-model",
 });
 
@@ -156,7 +155,7 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     if (res.kind !== "ran") throw new Error("unreachable");
     const [first, ...rest] = res.text.split("\n");
     expect(first).toBe("routed: config set channel --models.coding anthropic/claude-opus-5");
-    expect(rest.join("\n")).toBe('Updated channel scope. Now: {"models":{"coding":"anthropic/claude-opus-5"}}');
+    expect(rest.join("\n")).toBe("Updated channel scope: models `coding=anthropic/claude-opus-5`.");
     expect(codingModelIn(d)).toBe("anthropic/claude-opus-5");
     expect(d.audits).toEqual([
       expect.objectContaining({ commandId: "config.set", callerId: "slack:UADMIN", outcome: "ok", source: "confirm" }),

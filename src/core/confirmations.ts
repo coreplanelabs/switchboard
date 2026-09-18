@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import type { ConfirmScope } from "../config/profile.js";
 import type { Secrets } from "../secrets.js";
 import type { CommandInput } from "./commandRegistry.js";
 import { systemClock } from "./trace/clock.js";
@@ -34,7 +33,7 @@ import type { ConfirmationOffer, IncomingMessage } from "./types.js";
  *  — the typed path reads them at the click; the sentence's attachments are
  *  not stored, see `confirmationMessageOf`), the command and its parsed,
  *  validated input, the capped receipt the record keeps, the offer's risk
- *  line and footer, the router's model (for the confirmed run's `route`
+ *  line, the router's model (for the confirmed run's `route`
  *  event) and the expiry the config object stamped. A row stored before the
  *  union existed carries no `kind`; the parsers read it as this one. */
 export interface RunConfirmation {
@@ -45,7 +44,6 @@ export interface RunConfirmation {
   input: CommandInput;
   receipt: string;
   risk: string;
-  footer: string;
   model: string;
   expiresAt: number;
 }
@@ -128,34 +126,15 @@ export const UNSHOWABLE_LINE = "this command carries a value that cannot be show
  *  at mint time: the person loses the button and nothing else. */
 export const STORE_UNREACHABLE_NOTE = "(the confirmation store could not be reached, so there is no button to press)";
 
-/** The offer's footer: which scope on the request's path asked for the
- *  confirmation (`effectiveConfirm`'s scope), the built-in default included. */
-export function confirmationFooter(scope: ConfirmScope): string {
-  switch (scope) {
-    case "channel":
-      return "confirmation required by this channel's boundary";
-    case "user":
-      return "confirmation required by your boundary";
-    case "defaults":
-      return "confirmation required by the defaults' boundary";
-    case "built-in":
-      return "confirmation required by the built-in default";
-    default:
-      // `effectiveConfirm` walks the config layers alone, so a directive or a
-      // parent never reaches here; the word is still named rather than dropped.
-      return `confirmation required by the ${scope} boundary`;
-  }
-}
-
-/** The offer as text — the line, the risk when the command declares one, the
- *  footer: what the record's `answer` keeps, and what a channel shows around
- *  its affordance. A question's offer (record 0054) reads as the question the
+/** The offer as text — the line, the risk when the command declares one:
+ *  what the record's `answer` keeps, and what a channel shows around its
+ *  affordance. A question's offer (record 0054) reads as the question the
  *  renderer would have sent without a button — the producer's sentence, the
  *  marker, the line as one code span, the evidence — so a client without
  *  blocks still shows the line to type. */
 export function renderOffer(offer: ConfirmationOffer): string {
   if (offer.question) return `${offer.question.text}\nDid you mean:\n\`${offer.line}\`\n\n${offer.question.evidence}`;
-  return [offer.line, ...(offer.risk ? [offer.risk] : []), offer.footer].join("\n");
+  return [offer.line, ...(offer.risk ? [offer.risk] : [])].join("\n");
 }
 
 /** The message as the row stores it: everything the typed path reads at the
@@ -194,7 +173,6 @@ function isRunShape(v: Record<string, unknown>): boolean {
     isRecord(v.input) &&
     typeof v.receipt === "string" &&
     typeof v.risk === "string" &&
-    typeof v.footer === "string" &&
     typeof v.model === "string"
   );
 }
