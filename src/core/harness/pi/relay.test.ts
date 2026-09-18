@@ -16,11 +16,14 @@ import type { RunEvent } from "../../runEvents.js";
 import type { RunsService, RunView } from "../../runsService.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import { createTracer } from "../../trace/tracer.js";
+import { commandPastLoopEndRefusal } from "../windDown.js";
 import type { ChannelIO, IncomingMessage } from "../../types.js";
+import { POINTER_SUMMARY_PREFIX, pointerSummary } from "./compactionFallback.js";
 import {
   HarnessRegistry,
   RELAY_POLL_WINDOW_MS,
   RelayedCalls,
+  answerCompaction,
   authorizeToolCall,
   piContentOf,
   relayToolCall,
@@ -73,7 +76,9 @@ const executor: Executor = {
   writeFile: async () => "",
 };
 
-function live(opts: { blocked?: string; withSpan?: boolean; identity?: "none" | "read" | "write" } = {}) {
+function live(
+  opts: { blocked?: string; withSpan?: boolean; identity?: "none" | "read" | "write"; loopEndsIn?: () => number } = {},
+) {
   const events: RunEvent[] = [];
   const progress: string[] = [];
   const sink = recordingSink();
@@ -89,7 +94,12 @@ function live(opts: { blocked?: string; withSpan?: boolean; identity?: "none" | 
     tools: [echo, throwing, seeing],
     toolContext: { executor, reportProgress: (c) => void progress.push(c) },
     backend: "resident",
-    rules: { identity: opts.identity ?? "write", checkout: "/work/repo", branch: "feat/x" },
+    rules: {
+      identity: opts.identity ?? "write",
+      checkout: "/work/repo",
+      branch: "feat/x",
+      ...(opts.loopEndsIn ? { loopEndsIn: opts.loopEndsIn } : {}),
+    },
     emit: (e) => void events.push(e),
     toolSpan: (callId) => (callId === "c1" ? openSpan : undefined),
     gateSaw: (callId) => void seen.push(callId),
@@ -156,6 +166,26 @@ describe("relayedToolDefinitions", () => {
   });
 });
 
+describe("answerCompaction — the bot's word on how pi's compaction is written", () => {
+  it("leaves the summary to pi while the run's last compaction stands or the harness offers no failure; hands the pointer summary once the last one failed for good, taken once", () => {
+    const ask = { reason: "threshold", tokensBefore: 187_000, readFiles: ["src/a.ts"], modifiedFiles: [] };
+    const { harness } = live();
+    expect(answerCompaction(harness, ask)).toEqual({});
+    let failure: string | undefined = "Auto-compaction failed: summary refused under the provider's usage policy";
+    harness.takeCompactionFailure = () => {
+      const f = failure;
+      failure = undefined;
+      return f;
+    };
+    const answer = answerCompaction(harness, ask);
+    expect(answer.summary?.startsWith(POINTER_SUMMARY_PREFIX)).toBe(true);
+    expect(answer.summary).toBe(
+      pointerSummary(ask, "Auto-compaction failed: summary refused under the provider's usage policy"),
+    );
+    expect(answerCompaction(harness, ask)).toEqual({});
+  });
+});
+
 describe("authorizeToolCall — the gate", () => {
   it("allows a relayed tool and an ordinary pi command; refuses a push off the run's branch with the rule as the reason and a tool_refused note", () => {
     const { harness, events } = live();
@@ -183,6 +213,30 @@ describe("authorizeToolCall — the gate", () => {
         type: "run_note",
         kind: "tool_refused",
         summary: "submit_verdict refused: submit_verdict is the `verdict` bundle, outside the write identity's reach",
+      },
+    ]);
+  });
+
+  it("refuses a bash call whose explicit timeout reaches past the loop's end: the refusal is the tool's result in the wind-down's words and a tool_refused note on the record; a timeout inside the end and a call naming none run", () => {
+    const { harness, events } = live({ loopEndsIn: () => 384_000 });
+    expect(
+      authorizeToolCall(harness, { toolCallId: "a", tool: "bash", input: { command: "npm run verify", timeout: 600 } }),
+    ).toEqual({ allow: false, reason: commandPastLoopEndRefusal(600, 384) });
+    expect(
+      authorizeToolCall(harness, {
+        toolCallId: "b",
+        tool: "bash",
+        input: { command: "npm test -- one.test.ts", timeout: 60 },
+      }),
+    ).toEqual({ allow: true });
+    expect(
+      authorizeToolCall(harness, { toolCallId: "c", tool: "bash", input: { command: "git push origin feat/x" } }),
+    ).toEqual({ allow: true });
+    expect(events).toEqual([
+      {
+        type: "run_note",
+        kind: "tool_refused",
+        summary: `bash refused: ${commandPastLoopEndRefusal(600, 384)}`,
       },
     ]);
   });

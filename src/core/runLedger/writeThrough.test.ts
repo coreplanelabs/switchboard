@@ -6,7 +6,7 @@ import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
 import { InMemoryRunLedger } from "./inMemory.js";
 import type { RunLedger } from "./ledger.js";
-import { GEN_PATTERN, TRANSCRIPT_PART_BYTES } from "./types.js";
+import { GEN_PATTERN, TRANSCRIPT_PART_BYTES, type IntakeReceipt } from "./types.js";
 import {
   createLedgerWriteThrough,
   LANDED_MAX,
@@ -359,6 +359,82 @@ describe("reserve — the row before the prompt (item 42)", () => {
       expect(ledger.live.get("r1")!.ownerGen).toBe("gen-B");
       expect(warnings.some((w) => w.includes("fenced"))).toBe(true);
     }
+  });
+
+  it("a reserved run whose promotion claim fails three times is abandoned (row gone, not just heartbeat-stopped) and onUntracked fires with why — the attaching row does not stand for the reclaim sweep to restart the run", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let reservationDone = false;
+    // Let the reservation's own claim through; fail every subsequent one (the promotion).
+    const failing = harness({
+      ledger: overriding(inner, {
+        claim: async (req) => {
+          if (!reservationDone) {
+            reservationDone = true;
+            return inner.claim(req);
+          }
+          throw new TransientStoreError("socket hang up");
+        },
+      }),
+    });
+    const reserved = runOf(await failing.wt.reserve(reserveReq()))!;
+    // The reserved row is attaching while the promotion claim will fail repeatedly.
+    expect(failing.ledger.live.get("r1")).toMatchObject({ phase: "attaching", ownerGen: "gen-A" });
+    const untrackedWhys: string[] = [];
+    const opened = await failing.wt.open(
+      openReq({ reservation: reserved, onUntracked: (why) => untrackedWhys.push(why) }),
+    );
+    expect(opened).toBeUndefined();
+    // The attaching row must be gone — not still standing with a dead heartbeat.
+    expect(failing.ledger.live.get("r1")).toBeUndefined();
+    expect(failing.ledger.finished.get("r1")).toBeUndefined();
+    // The run is no longer live.
+    expect(failing.wt.liveRuns()).toEqual([]);
+    // onUntracked was called with the reason (the note the record carries).
+    expect(untrackedWhys).toHaveLength(1);
+    expect(untrackedWhys[0]).toMatch(/claim failed after 3 attempt/);
+    // No record went to the fallback store (no run_meta, no finish).
+    expect(failing.fallbackPuts).toEqual([]);
+  });
+
+  it("a promotion gone untracked whose abandon itself fails leaves the run known as this generation's dead reservation: the thread's next claim abandons the row again and is tracked — the safety net of item 54 holds on the promotion path too", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let reservationDone = false;
+    let abandonFailures = 1;
+    const claims: string[] = [];
+    const { ledger, wt, warnings } = harness({
+      ledger: overriding(inner, {
+        claim: async (req) => {
+          // Let each run's first claim (its reservation) through; fail the
+          // promotion's — the same transient shape as the abandon's below.
+          if (req.runId === "r1" && reservationDone) throw new TransientStoreError("socket hang up");
+          if (req.runId === "r1") reservationDone = true;
+          const result = await inner.claim(req);
+          claims.push(`${req.runId} ${result.ok ? "ok" : result.reason}`);
+          return result;
+        },
+        abandon: async (runId, gen) => {
+          if (abandonFailures-- > 0) throw new TransientStoreError("run ledger /runs/abandon: HTTP 503");
+          return inner.abandon(runId, gen);
+        },
+      }),
+    });
+    const reserved = runOf(await wt.reserve(reserveReq()))!;
+    const untrackedWhys: string[] = [];
+    expect(
+      await wt.open(openReq({ reservation: reserved, onUntracked: (why) => untrackedWhys.push(why) })),
+    ).toBeUndefined();
+    expect(untrackedWhys).toHaveLength(1);
+    // The abandon threw: the attaching row still stands, its heartbeat stopped —
+    // exactly the shape the next claim's re-abandon exists for.
+    expect(ledger.live.get("r1")).toMatchObject({ phase: "attaching", ownerGen: "gen-A" });
+    expect(warnings.some((w) => w.includes("abandon failed") && w.includes("abandons the row again"))).toBe(true);
+    const said: string[] = [];
+    const next = await reserveSaying(wt, { ...reserveReq(), runId: "next" }, said);
+    expect(next?.tracked()).toBe(true);
+    expect(claims).toEqual(["r1 ok", "next thread-live", "next ok"]);
+    expect(ledger.live.has("r1")).toBe(false);
+    expect(ledger.live.get("next")).toMatchObject({ phase: "attaching", ownerGen: "gen-A" });
+    expect(said).toEqual([]);
   });
 
   it("abandon: a reserved run whose dispatch ended before its prompt existed drops its row with NO record — heartbeat stopped, no longer live, the fallback store untouched; a fenced reservation's abandon is a no-op (the row is another generation's); a null run's abandon is nothing", async () => {
@@ -1523,6 +1599,35 @@ describe("the session log — a run is a range of it", () => {
   });
 });
 
+// Record 0057: authored session rows — rows carry actor through append.
+describe("actor — rows carry the author's id through the write-through", () => {
+  const KEY = "slack:C1:1.0:review";
+
+  it("a seed with actors in its actor map writes those actors into the stored JSON for the corresponding rows", async () => {
+    const { ledger, wt } = harness();
+    const messages = [user("earlier"), assistant("sure"), user("go")];
+    const actors: (string | undefined)[] = [undefined, undefined, "slack:UALICE"];
+    const run = await wt.open(openReq({ seed: { messages, budgetMs: 600_000, actors } }));
+    expect(run?.tracked()).toBe(true);
+    const log = ledger.sessions.get(KEY)!;
+    // row idx=2 is user("go"), authored by UALICE
+    const goRow = log.rows.find((r) => r.idx === 2 && r.part === 0);
+    expect(goRow).toBeDefined();
+    const stored = JSON.parse(goRow!.json) as Record<string, unknown>;
+    expect(stored.actor).toBe("slack:UALICE");
+    // row idx=0 is user("earlier"), no actor
+    const earlierRow = log.rows.find((r) => r.idx === 0 && r.part === 0);
+    expect(earlierRow).toBeDefined();
+    const earlierStored = JSON.parse(earlierRow!.json) as Record<string, unknown>;
+    expect(earlierStored.actor).toBeUndefined();
+    // row idx=1 is assistant("sure"), no actor
+    const assistantRow = log.rows.find((r) => r.idx === 1 && r.part === 0);
+    expect(assistantRow).toBeDefined();
+    const assistantStored = JSON.parse(assistantRow!.json) as Record<string, unknown>;
+    expect(assistantStored.actor).toBeUndefined();
+  });
+});
+
 describe("NullLedgerWriteThrough — the write-through of a process without a ledger", () => {
   it("open claims nothing (undefined — the untracked answer), nothing is live, the inbox holds nothing, the handoff marks nothing, and the generation is the process's", async () => {
     const puts: RunRecord[] = [];
@@ -1557,5 +1662,114 @@ describe("NullLedgerWriteThrough — the write-through of a process without a le
     await run.sink.put(record("r9"));
     expect(puts.map((r) => r.id)).toEqual(["r9"]);
     await expect(run.close()).resolves.toBeUndefined();
+  });
+});
+
+describe("intake receipts — the write-through's retry (run-history item 59)", () => {
+  const receipt = (over: Partial<IntakeReceipt> = {}): IntakeReceipt => ({
+    verdict: "silent",
+    reason: "answering a colleague",
+    source: "model",
+    mode: "classify",
+    model: "prov/mini",
+    gen: 3,
+    threadKey: "slack:C1:1.0",
+    decidedAt: 5_000,
+    ...over,
+  });
+
+  it("recordIntake passes the write through and answers the insert", async () => {
+    const h = harness();
+    expect(await h.wt.recordIntake("slack:C1:2.0", receipt())).toEqual({ inserted: true, stored: receipt() });
+    expect(await h.ledger.readIntake("slack:C1:2.0")).toEqual(receipt());
+    expect(h.sleeps).toEqual([]);
+  });
+
+  it("a lost response is retried by reading the same row after the claim's backoff: this write's own landed row answers inserted", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const ledger = overriding(inner, {
+      recordIntake: async (key, r) => {
+        await inner.recordIntake(key, r); // the insert landed…
+        throw new TransientStoreError("socket hang up"); // …and the response was lost
+      },
+    });
+    const h = harness({ ledger });
+    expect(await h.wt.recordIntake("slack:C1:2.0", receipt())).toEqual({ inserted: true, stored: receipt() });
+    expect(h.sleeps).toEqual([200]);
+    expect(h.warnings).toEqual([]);
+  });
+
+  it("the retry that reads another writer's row answers what it stored, not an insert", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const other = receipt({ gen: 9, decidedAt: 4_000, verdict: "addressed", reason: "the other process won" });
+    await inner.recordIntake("slack:C1:2.0", other);
+    let threw = false;
+    const ledger = overriding(inner, {
+      recordIntake: async (key, r) => {
+        if (!threw) {
+          threw = true;
+          throw new TransientStoreError("socket hang up");
+        }
+        return inner.recordIntake(key, r);
+      },
+    });
+    const h = harness({ ledger });
+    expect(await h.wt.recordIntake("slack:C1:2.0", receipt())).toEqual({ inserted: false, stored: other });
+  });
+
+  it("a retry that finds no row inserts once more", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let failures = 1;
+    const ledger = overriding(inner, {
+      recordIntake: async (key, r) => {
+        if (failures-- > 0) throw new TransientStoreError("socket hang up"); // nothing landed
+        return inner.recordIntake(key, r);
+      },
+    });
+    const h = harness({ ledger });
+    expect(await h.wt.recordIntake("slack:C1:2.0", receipt())).toEqual({ inserted: true, stored: receipt() });
+    expect(await inner.readIntake("slack:C1:2.0")).toEqual(receipt());
+    expect(h.sleeps).toEqual([200]);
+  });
+
+  it("a missing route, a permanent refusal, or a retry that fails again answers undefined with one warning — the caller's degrade", async () => {
+    const missing = harness({
+      ledger: overriding(new InMemoryRunLedger(), {
+        recordIntake: async () => {
+          throw new RouteMissingError("no /runs/intake");
+        },
+      }),
+    });
+    expect(await missing.wt.recordIntake("slack:C1:2.0", receipt())).toBeUndefined();
+    expect(missing.warnings).toHaveLength(1);
+
+    const refused = harness({
+      ledger: overriding(new InMemoryRunLedger(), {
+        recordIntake: async () => {
+          throw new PermanentStoreError("HTTP 400");
+        },
+      }),
+    });
+    expect(await refused.wt.recordIntake("slack:C1:2.0", receipt())).toBeUndefined();
+    expect(refused.warnings).toHaveLength(1);
+
+    const dead = harness({
+      ledger: overriding(new InMemoryRunLedger(), {
+        recordIntake: async () => {
+          throw new TransientStoreError("socket hang up");
+        },
+        readIntake: async () => {
+          throw new TransientStoreError("socket hang up");
+        },
+      }),
+    });
+    expect(await dead.wt.recordIntake("slack:C1:2.0", receipt())).toBeUndefined();
+    expect(dead.warnings).toHaveLength(1);
+    expect(dead.sleeps).toEqual([200]);
+  });
+
+  it("the null write-through records nothing and answers undefined", async () => {
+    const wt = new NullLedgerWriteThrough("gen-A", { put: async () => ({}), abandoned: () => {} });
+    expect(await wt.recordIntake("slack:C1:2.0", receipt())).toBeUndefined();
   });
 });

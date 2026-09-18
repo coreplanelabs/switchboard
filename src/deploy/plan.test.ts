@@ -82,6 +82,14 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
       healthUrl: BOT_HEALTH_URL,
     });
     expect(byName.resident.preflight).toEqual({ forceEnv: "RESIDENT_DEPLOY_FORCE", baseUrlEnv: "RESIDENT_BASE_URL" });
+    // The drain (resident-repos item 69): the resident alone can be drained, with the drain-only bearer.
+    expect(byName.resident.drain).toEqual({ tokenEnv: "RESIDENT_DRAIN_TOKEN" });
+    for (const n of ["memory", "bot", "sandbox"] as const) expect(byName[n].drain, n).toBeUndefined();
+    const residentStep = plan().steps.find((st) => st.name === "resident")!;
+    expect(residentStep.drain).toEqual({
+      url: "https://switchboard-resident.example.test",
+      tokenEnv: "RESIDENT_DRAIN_TOKEN",
+    });
     // Each Worker knows its own origin — what its preflight is pointed at.
     expect(WORKERS.map((w) => w.baseUrl)).toEqual([
       "https://switchboard-memory.example.test",

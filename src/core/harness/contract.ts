@@ -13,12 +13,14 @@ import type { AgentDef, Identity } from "../../agents/registry.js";
 import type { Effort } from "../../effort.js";
 import type { RunnableTool, ToolContext } from "../../tools/runnableTool.js";
 import type { ChatMessage } from "../chatMessage.js";
+import type { ModelCard } from "../modelCard.js";
 import type { RunBearerStore } from "../modelProxy/runBearers.js";
 import type { ProviderConfig } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import type { Settlement } from "../runLedger/resume.js";
 import type { StepReport } from "../runLedger/stepReport.js";
 import type { AssembledCompaction } from "../runLedger/transcript.js";
+import type { WindDownEnding } from "./windDown.js";
 import type { Notepad } from "../runLedger/types.js";
 import type { RunControl } from "../runRegistry/runControl.js";
 import type { FollowUpInbox, FollowUpInput } from "../threadAdmission.js";
@@ -34,8 +36,15 @@ import type { ToolRuleContext } from "./pi/toolRules.js";
  *  record carries), `impossible` (the harness never causes it — a harness error
  *  if it arrives anyway), `note` (a `run_note`). A kind a harness's table does
  *  not name is a `harness_error` note naming it, so a harness bump shows in
- *  the first run's record. */
+ *  the first run's record — said once per kind (`SAID_ONCE_SUFFIX`). */
 export type Disposition = "mapped" | "structure" | "folded" | "impossible" | "note";
+
+/** The tail of a `harness_error` that names an event kind — one the table does
+ *  not name, one marked `impossible` that arrived all the same. Each bridge
+ *  says such a note once per kind for the run (its `namedKinds`): the first
+ *  arrival is the finding, and one wrong table entry must be one line on the
+ *  record, never one per event (measured live: two notes per shell call). */
+export const SAID_ONCE_SUFFIX = " (said once: later events of this kind are not noted)";
 
 /** What a run's row remembers about its pi (harness-pi.md item 8), so the next
  *  bot generation finds it: read by `harnessFactsOf`, written by pi's loop. */
@@ -366,6 +375,10 @@ export type FollowUpTurn = (input: FollowUpTurnInput) => Promise<string>;
  *  Ending is idempotent; a follow-up after it throws. */
 export interface HarnessSession {
   answer: string;
+  /** The wind-down that labelled `answer`, when one did (harness-pi.md item
+   *  6): the run loop composes the thread's answer from it again once its
+   *  post-steps have established what the tree held and where it went. */
+  ending?: WindDownEnding;
   followUp: FollowUpTurn;
   /** What the run's lease still holds, in ms, read at the call — what the
    *  post-step turns carve their minutes from (`postStepLease`); negative once
@@ -420,6 +433,12 @@ export interface HarnessRun {
   agent: AgentDef;
   effort?: Effort;
   model: { id: string; provider: string; providerType: ProviderConfig["type"] };
+  /** The run's resolved model card (record 0052), what the dispatcher decided
+   *  the controls against: the harness writes it into its process's own
+   *  configuration — pi's `models.json`, OpenCode's document — in place of an
+   *  invented one, so the word on the wire is the card's. Absent on a
+   *  hand-built run (a test): the harness's wire-default card stands. */
+  card?: ModelCard;
   system: string;
   /** The seed conversation as the dispatcher composed it — the thread's earlier
    *  turns, then the request as the last user turn (the conversation clause). */

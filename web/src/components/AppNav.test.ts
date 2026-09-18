@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { h } from "vue";
+import { RouterLink } from "vue-router";
 import type { Capabilities } from "@core/core/capabilities.js";
 import type { WebSeed } from "@core/channels/webSeed.js";
 import AppNav from "./AppNav.vue";
@@ -18,6 +19,7 @@ import { browser } from "../lib/browser";
  *  itself is irrelevant to the chrome, so the smallest seed stands in. */
 const island = (over: Partial<Capabilities> = {}): WebSeed => ({
   page: "runNotFound",
+  title: "Run not found",
   retentionDays: null,
   capabilities: { ...ALL_ON, ...over },
 });
@@ -63,7 +65,7 @@ describe("navSections — which sections exist", () => {
 });
 
 describe("AppNav", () => {
-  it("renders the five sections in fixed order with clean hrefs (no tokens, no query strings)", () => {
+  it("renders the five sections in fixed order with clean hrefs (no tokens, no query strings), each a RouterLink — navigated in place", () => {
     const wrapper = mountApp(AppNav, { props: { current: "runs" }, seed: island() });
     const links = wrapper.findAll("nav.site a");
     expect(links.map((a) => a.text())).toEqual(["Threads", "Runs", "Residents", "Costs", "Delivery"]);
@@ -72,6 +74,13 @@ describe("AppNav", () => {
       expect(a.attributes("href")).not.toContain("?");
       expect(a.attributes("href")).not.toContain("t=");
     }
+    expect(wrapper.findAllComponents(RouterLink).map((l) => l.props("to"))).toEqual([
+      "/threads",
+      "/runs",
+      "/residents",
+      "/costs",
+      "/delivery",
+    ]);
   });
 
   it("marks exactly the current section with aria-current=page", () => {

@@ -54,7 +54,7 @@ describe("the attach refuses a stale tip instead of running it", () => {
     const catchBlock = b.slice(b.indexOf('err.step === "unknown-ref"'));
     expect(catchBlock).toMatch(/err\.step === "stale-tip"/);
     expect(catchBlock).toMatch(
-      /error: `stale-tip: \$\{err\.message\}`, status: 409, state: s\.state, reason: "stale-tip"/,
+      /error: `stale-tip: \$\{err\.message\}`,\s*status: 409,\s*state: s\.state,\s*reason: "stale-tip",\s*cause: "system"/,
     );
   });
 });

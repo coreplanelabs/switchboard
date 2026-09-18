@@ -48,6 +48,7 @@ import {
   type HarnessDeps,
   type HarnessRecord,
   type HarnessRun,
+  SAID_ONCE_SUFFIX,
 } from "../contract.js";
 import type { ProxyRefusalCode } from "../../../channels/modelProxy.js";
 import {
@@ -82,23 +83,24 @@ import {
   CONTINUE_PROMPT,
   finaleAbortReason,
   finaleTimedOutNote,
+  finaleWaitNote,
   HARD_STOP_MESSAGE,
   hardStopNote,
   MODEL_CALL_IN_FLIGHT,
   type NeverPostedEnd,
   SOFT_STOP_INSTRUCTION,
-  softStopAnswer,
   softStopNote,
-  timeBudgetAnswer,
   timeBudgetInstruction,
   timeBudgetNote,
   toolCutNote,
-  turnGuardAnswer,
   turnGuardInstruction,
   turnGuardNote,
   turnGuardPace,
   unlabelledAnswer,
+  windDownAnswer,
+  windDownEndingOf,
   windDownFailureNote,
+  type WindDownEnding,
   wrapUpInstruction,
   wrapUpNeverPostedNote,
   wrapUpNote,
@@ -118,7 +120,7 @@ import {
   type OpenCodePermissionRequest,
 } from "./client.js";
 import { openCodeDispositionOf } from "./dispositions.js";
-import { openCodeReplacedCallNote, openCodeSettlementNote } from "./session.js";
+import { openCodeReplacedCallNote, openCodeSettlementNote, openCodeStoreRowCount } from "./session.js";
 import { openCodeBuiltinToolsFor, OPENCODE_READY_MS, type OpenCodeRunPaths } from "./process.js";
 
 /** A tool call the model ran to its end with no ask the bot answered, or an
@@ -311,9 +313,19 @@ const RESOURCE_PERMISSIONS: ReadonlySet<string> = new Set(["external_directory",
 export interface OpenCodeReply {
   requestID: string;
   callId?: string;
+  /** The step the ask named (`source.messageID`): what a withdrawn ask's sibling refusal is looked up by. */
+  stepID?: string;
   reply: "once" | "reject";
   message?: string;
 }
+
+/** How a gate reply whose landing the server's answer left open was read off
+ *  the server's own pending asks (`resolveReplyAgainstPending`): `landed`, the
+ *  reply took; `withdrawn`, the server dropped the ask before the reply
+ *  reached it (an `ask_withdrawn` note, the run going on); `failed`, the
+ *  reply never landed and cannot be made to — the run stops, fail closed. */
+export type OpenCodeReplyResolution =
+  { outcome: "landed" | "withdrawn" } | { outcome: "failed"; failure: { status: number } | Error };
 
 /** What the harness does with one observed feed record. */
 export interface OpenCodeBridgeObservation {
@@ -332,6 +344,13 @@ export interface OpenCodeBridgeObservation {
   boundary?: boolean;
   /** The model call failed for another reason: the run fails by that name. */
   providerError?: string;
+  /** The inbox id of a steer the server just delivered (`session.inbox.delivered`):
+   *  the steer's fate is now known — the connection's `inboxFate` resolves it. */
+  inboxDelivered?: string;
+  /** The execution ended interrupted and was not the loop-end cut's own: any
+   *  steer enqueued but not yet delivered is dropped with it — the connection's
+   *  `inboxFate` is told, and each waiter resolves `false`. */
+  inboxDropped?: boolean;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
@@ -430,6 +449,12 @@ export interface OpenCodeBridgeDeps {
   onStep?: (report: StepReport) => Promise<void>;
   /** The ledger rows the transcript holds before the first step (the seed). */
   seedLength: number;
+  /** The store rows the seed occupies — what the store projection skips.
+   *  Absent, the ledger rows: one store row per turn, a fresh run's shape. A
+   *  rebuild's import writes fewer rows than the record has turns (a turn of
+   *  tool results alone is folded into the assistant row before it), so a
+   *  rebuild passes the count its import wrote (`openCodeStoreRowCount`). */
+  storeSeed?: number;
   remainingMs: () => number;
   /** Relayed tools that declare `failsInText`: an `error:`-opening result is `ok:false`. */
   textFailing?: ReadonlySet<string>;
@@ -443,12 +468,23 @@ export class OpenCodeBridge {
   turns = 0;
   toolCalls = 0;
   private answerText: string | undefined;
+  /** The terminal event whose store refill the tailer owes (`REFILL_ON`): the
+   *  loop's own execution ended `succeeded` or `interrupted`, and the row that
+   *  carries the answer reaches the feed only in the refill written after that
+   *  event (the tailer's GET for the last step answers after the server has
+   *  ended the execution). The settle is the refill stamped with this reason —
+   *  or the tailer's note that the refill failed — never the event alone. */
+  private settleOwedTo: string | undefined;
   /** Narration text seen since the last turn's start, emitted beside its call. */
   private pendingNarration: string | undefined;
   /** A model call is under way: a step OpenCode started and has not ended.
    *  What the budget note says the run was at when no tool call is open
    *  (`doingNow`), as pi's bridge reads it off `turn_start`. */
   private stepOpen = false;
+  /** The event kinds a `harness_error` has named — a kind the table does not
+   *  know, a kind marked impossible — so the note is said once per kind
+   *  (`noteKindOnce`), never once per arrival. */
+  private readonly namedKinds = new Set<string>();
   /** callId → the tool name the model gave it (from `session.tool.input.started`). */
   private readonly toolNames = new Map<string, string>();
   /** The open calls' spans, by callId. */
@@ -461,6 +497,27 @@ export class OpenCodeBridge {
    *  call not among these ran with no decision; a success for a call the bot
    *  rejected ran against the reject. Both are bypasses. */
   private readonly answered = new Map<string, "once" | "reject">();
+  /** stepID → the calls of that step the gate refused, in the order refused:
+   *  what explains a sibling ask the server withdrew (`askWithdrawn`). A
+   *  step's entry is dropped when the step ends or fails, so the map never
+   *  outgrows the open step on a long run. */
+  private readonly refusedByStep = new Map<string, Array<{ callId: string; tool: string; message?: string }>>();
+  /** The re-prompt text for a decline cascade on the last step: set when
+   *  `askWithdrawn` sees a withdrawal whose sibling refusal is on the record —
+   *  the binary declines every other pending ask at a reject and ends their step
+   *  `session.step.failed {aborted}`, the execution ending `interrupted` — so
+   *  the loop re-prompts the model with the refusal and the cascade note,
+   *  exactly as it would after a single refusal. Consumed once by
+   *  `takeCascadeRePrompt` so the loop posts exactly one re-prompt per cascade. */
+  private cascadeRePrompt: string | undefined;
+  /** The calls the cascade withdrew on the step that produced `cascadeRePrompt`,
+   *  accumulated across withdrawals so the re-prompt names every one — reset
+   *  when a new step cascades. */
+  private cascadeWithdrawn: string[] = [];
+  /** The step id that produced the cascade (`cascadeRePrompt`): the step whose
+   *  `session.step.failed {aborted}` is the cascade's own end and is not a
+   *  harness error — the server's expected behaviour at a reject cascade. */
+  private cascadeStepID: string | undefined;
   /** requestID → the reply the bot decided, and whether the server has echoed
    *  it once. A `permission.replied` is the bot's own echo only when its
    *  requestID is here, its effect equals the decided one, and it is the first;
@@ -473,10 +530,21 @@ export class OpenCodeBridge {
    *  answered while the bot was away — by the dead generation an instant
    *  before it died, or by the model's shell with the server's password — and
    *  the run cannot tell by whom (`unattributable`): its echo fails the run
-   *  closed, at most one model call lost. */
+   *  closed, at most one model call lost. An ask the server withdrew before
+   *  the bot's reply reached it, with the bot's own refusal of another call of
+   *  the same step on the record as the cause (`askWithdrawn`), is
+   *  `withdrawn`: the server's own `reject` for it is the cascade's echo, not
+   *  a reply the bot did not send. A withdrawal with no such refusal leaves
+   *  the mark off, and its echo is judged as any reply is. */
   private readonly decidedReplies = new Map<
     string,
-    { reply: "once" | "reject" | undefined; callId: string; echoed: boolean; unattributable?: boolean }
+    {
+      reply: "once" | "reject" | undefined;
+      callId: string;
+      echoed: boolean;
+      unattributable?: boolean;
+      withdrawn?: boolean;
+    }
   >();
   /** The calls whose result the ledger held at the re-attach: the dead generation saw them run. */
   private readonly ledgerResults = new Set<string>();
@@ -608,7 +676,7 @@ export class OpenCodeBridge {
   private mirrorChain: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: OpenCodeBridgeDeps) {
-    this.storeSeed = deps.seedLength;
+    this.storeSeed = deps.storeSeed ?? deps.seedLength;
     this.mirror = new PiMirror({
       ...(deps.onStep ? { onStep: deps.onStep } : {}),
       seedLength: deps.seedLength,
@@ -764,6 +832,69 @@ export class OpenCodeBridge {
    *  between steps, or settled. Read structurally by the loop's wind-down (a
    *  tool open is cut, a model call is steered) and worded by `doingWords` for
    *  the notes — the same words pi's bridge gives. */
+  /** The server withdrew an ask before the gate's reply to it landed (the
+   *  reply refused 404, the ask gone from the pending asks): said once, as an
+   *  `ask_withdrawn` note naming the call, the reply the gate had decided and
+   *  the refusal of the same step that explains it when the step has one
+   *  (harness.md item 2). Information, not a failure: nothing ran that the
+   *  gate did not decide, the loop is not stopped, and the step ends by the
+   *  server's word. Only a withdrawal the bot's own refusal of another call of
+   *  the step explains marks the ask `withdrawn` for its echo: the cascade
+   *  needs our reject as its cause, and with none on the record the server's
+   *  `reject` echo is judged as any reply is (`onPermissionReplied`). */
+  /** The steps whose refusals are still held for a withdrawn sibling's note
+   *  (`refusedByStep`): each step's entry goes when the step ends. */
+  stepsWithHeldRefusals(): string[] {
+    return [...this.refusedByStep.keys()];
+  }
+
+  /** The re-prompt text for a decline cascade, consumed once: set when the
+   *  gate refused a call and the server declined every other pending ask of
+   *  the step (`askWithdrawn` with siblings), so the loop posts it as a
+   *  `queue` prompt after the execution ends `interrupted`. Returns `undefined`
+   *  when no cascade occurred or the text was already consumed. */
+  takeCascadeRePrompt(): string | undefined {
+    const text = this.cascadeRePrompt;
+    this.cascadeRePrompt = undefined;
+    return text;
+  }
+
+  askWithdrawn(reply: OpenCodeReply): void {
+    const tool = openCodeToolNameWord(this.toolNames.get(reply.callId ?? "") ?? "tool");
+    const call = reply.callId ? `${tool} (call ${reply.callId})` : `request ${reply.requestID}`;
+    const refused = (reply.stepID !== undefined ? this.refusedByStep.get(reply.stepID) : undefined) ?? [];
+    const siblings = refused.filter((r) => r.callId !== reply.callId);
+    if (siblings.length > 0) {
+      const decided = this.decidedReplies.get(reply.requestID);
+      if (decided !== undefined) decided.withdrawn = true;
+      // The decline cascade: the bot refused a call and the server declined
+      // every other pending ask of the step with it, ending the step `aborted`
+      // and the execution `interrupted`. The loop re-prompts the model with the
+      // refusal so it can continue — the same path a single refusal takes — and
+      // does not end the run answerless (`cascadeRePrompt`, `takeCascadeRePrompt`).
+      // One note per withdrawal; the re-prompt is rebuilt on each so it carries
+      // ALL refusals and ALL withdrawn calls of the step — two withdrawn calls
+      // in one step produce one re-prompt naming both.
+      const refusalLines = siblings.map((s) => `${s.tool} refused${s.message ? `: ${s.message}` : ""}`).join("; ");
+      if (this.cascadeStepID === reply.stepID) this.cascadeWithdrawn.push(call);
+      else this.cascadeWithdrawn = [call];
+      const withdrawn = this.cascadeWithdrawn.join(" and ");
+      const were = this.cascadeWithdrawn.length > 1 ? "were" : "was";
+      this.cascadeRePrompt = `The gate refused the following tool call(s) in this step: ${refusalLines}. ${withdrawn} ${were} declined with it — the step ended. Continue from this refusal: try a different approach or write up what you have found so far.`;
+      // Track the step so its `session.step.failed {aborted}` is not named as
+      // a harness error — it is the server's expected end of a cascade step.
+      this.cascadeStepID = reply.stepID;
+    }
+    const why =
+      siblings.length > 0
+        ? `the gate refused ${siblings.map((s) => `${s.tool} (call ${s.callId})`).join(", ")} in the same step, and at a reject OpenCode declines every other pending ask and ends their step`
+        : "no refusal of the same step is on the record, so the server dropped it for a reason of its own";
+    this.note(
+      "ask_withdrawn",
+      `OpenCode withdrew the ask for ${call} before the gate's reply (${reply.reply}) landed — ${why}; the loop is not stopped; the step ends by the server's word`,
+    );
+  }
+
   doingNow(): DoingNow | undefined {
     const open = [...this.openTools.values()].map((o) => o.tool);
     if (open.length > 0) return { tools: open };
@@ -808,6 +939,15 @@ export class OpenCodeBridge {
     this.emit({ type: "run_note", kind, summary });
   }
 
+  /** A `harness_error` naming an event kind, said once per kind for the run
+   *  (harness.md item 4): the first arrival is the finding; the rest of a flood
+   *  of the same kind is not more news and would bury the record. */
+  private noteKindOnce(eventKind: string, summary: string): void {
+    if (this.namedKinds.has(eventKind)) return;
+    this.namedKinds.add(eventKind);
+    this.note("harness_error", `${summary}${SAID_ONCE_SUFFIX}`);
+  }
+
   private emit(event: RunEvent): void {
     this.deps.emit(event.at === undefined ? { ...event, at: this.deps.clock() } : event);
   }
@@ -821,12 +961,37 @@ export class OpenCodeBridge {
         // and the pinned binary drops them at the interrupt anyway.
         if (this.observing === "earlier") return { replies: [], settled: false };
         return this.onPermissionsRefill(record.data);
-      case "messages":
-        return this.onMessagesRefill(record.data);
+      case "messages": {
+        const out = this.onMessagesRefill(record.data);
+        // The refill the terminal event owed has landed (the tailer stamps it
+        // with the event's type): every row of the ended execution is in the
+        // store — the last step's, written just before it — so the loop settles.
+        // The pairing is by reason alone — the tailer stamps no execution on a
+        // refill — on the assumption that one owed refill of a kind is in
+        // flight at a time: the tailer refills in event order, so the cut
+        // execution's `interrupted` refill is written before the loop's own end
+        // can owe one of the same kind. An execution stamp on the refill, if
+        // the tailer ever grows one, would replace this assumption.
+        if (this.settleOwedTo !== undefined && record.reason === this.settleOwedTo) {
+          this.settleOwedTo = undefined;
+          out.settled = true;
+        }
+        return out;
+      }
       case "tailer":
         // A dropped stream is a note; the refill that follows repairs the record.
         if (record.note === "stream closed" || record.note.includes("failed"))
           this.deps.onProgress?.(`opencode feed: ${redactAndCap(record.note, 120)}`);
+        // The refill the terminal event owed will not come — the tailer says its
+        // store read failed for that reason — so the loop settles on what landed.
+        if (
+          this.settleOwedTo !== undefined &&
+          (record.note === "message refill failed" || record.note === "refill failed") &&
+          record.reason === this.settleOwedTo
+        ) {
+          this.settleOwedTo = undefined;
+          return { replies: [], settled: true };
+        }
         return { replies: [], settled: false };
     }
   }
@@ -835,14 +1000,14 @@ export class OpenCodeBridge {
     const out: OpenCodeBridgeObservation = { replies: [], settled: false };
     const disposition = openCodeDispositionOf(event.type);
     if (disposition === undefined) {
-      this.note(
-        "harness_error",
+      this.noteKindOnce(
+        event.type,
         `OpenCode emitted an event kind this build does not know: ${redactAndCap(event.type, 80)}`,
       );
       return out;
     }
     if (disposition === "impossible") {
-      this.note("harness_error", `OpenCode emitted ${event.type}, which this run's configuration turns off`);
+      this.noteKindOnce(event.type, `OpenCode emitted ${event.type}, which this run's configuration turns off`);
       return out;
     }
     const data = isRecord(event.data) ? event.data : {};
@@ -890,6 +1055,8 @@ export class OpenCodeBridge {
         break;
       case "session.step.ended":
         out.boundary = true;
+        // The step's end is heard here alone: its held refusals (`refusedByStep`) go with it.
+        if (typeof data.assistantMessageID === "string") this.refusedByStep.delete(data.assistantMessageID);
         if (earlier) break;
         this.pendingNarration = undefined;
         this.stepOpen = false;
@@ -926,6 +1093,8 @@ export class OpenCodeBridge {
         break;
       case "session.step.failed":
         out.boundary = true;
+        // The step's end, failing: its held refusals (`refusedByStep`) go with it.
+        if (typeof data.assistantMessageID === "string") this.refusedByStep.delete(data.assistantMessageID);
         // An earlier execution's step failing is the interrupt's doing — the
         // wind-down the loop before wrote is on the record; said again it would
         // be a second `harness_error` for one ending.
@@ -944,6 +1113,20 @@ export class OpenCodeBridge {
           errorTypeOf(data.error) === "aborted"
         )
           break;
+        // The decline cascade's step aborting: the server's expected end of a
+        // step whose sibling call the gate refused — not a harness error, but the
+        // server's own closure of the step the cascade ended (`cascadeStepID`).
+        // The re-prompt the loop posts after the execution ends `interrupted`
+        // carries the refusal note; saying this as a harness_error would bury it.
+        if (
+          this.cascadeStepID !== undefined &&
+          typeof data.assistantMessageID === "string" &&
+          data.assistantMessageID === this.cascadeStepID &&
+          errorTypeOf(data.error) === "aborted"
+        ) {
+          this.cascadeStepID = undefined;
+          break;
+        }
         this.note("harness_error", `an OpenCode step failed: ${redactAndCap(errorMessage(data.error), 200)}`);
         break;
       case "session.execution.failed": {
@@ -980,6 +1163,15 @@ export class OpenCodeBridge {
         }
         break;
       }
+      case "session.inbox.delivered":
+        // The server delivered a steer to the session's model at a step boundary
+        // (`session.inbox.delivered` carries `inboxID`, which equals the message id
+        // the steer's POST answer named). The drainer waits on this to confirm
+        // the steer landed rather than trusting the POST answer alone — a steer
+        // enqueued but not delivered before an interrupt is dropped, and the POST
+        // answer's id alone cannot tell the two apart.
+        if (typeof data.inboxID === "string") out.inboxDelivered = data.inboxID;
+        break;
       case "session.execution.succeeded":
       case "session.execution.interrupted":
       case "session.idle":
@@ -993,11 +1185,29 @@ export class OpenCodeBridge {
         // kind can tell the two executions apart (the class doc, the schema).
         if (this.isCutsEnd(event.type)) {
           if (!earlier) this.note("settle_set_aside", owedEndNote(event.type));
+          // The cut execution's `interrupted` end drops any steer it had not
+          // yet delivered: the drainer's `InboxFate` waiters are resolved now
+          // so no steer waits past the interrupt it was dropped with.
+          if (event.type === "session.execution.interrupted" && !earlier) out.inboxDropped = true;
           break;
         }
         if (earlier) break;
         this.stepOpen = false;
-        out.settled = true;
+        // An `interrupted` end that is not the cut's drops any steer that was
+        // enqueued but not yet delivered: the drainer's `InboxFate` is told.
+        if (event.type === "session.execution.interrupted") out.inboxDropped = true;
+        // The tailer refills the store after `succeeded` and `interrupted`, and
+        // the last step's refill — the row that carries the answer — lands
+        // after the event too: the settle is that refill's (`settleOwedTo`),
+        // read off the feed, never the event's. `session.idle` causes no
+        // refill, so it settles here. Only the loop's own end owes a refill:
+        // the dead generation's end, replayed while catching up, is history
+        // the loop discards (its `settled` is never read), and arming the
+        // owed settle there would leave it dangling into the live generation
+        // — the death may have cut the feed inside the tailer's GET window —
+        // for an earlier execution's refill of the same kind to pay.
+        if (event.type === "session.idle" || this.observing !== "own") out.settled = true;
+        else this.settleOwedTo = event.type;
         break;
       default:
         break;
@@ -1346,11 +1556,20 @@ export class OpenCodeBridge {
     // overwrite an allowance.
     if (this.answered.get(callId) !== "reject") this.answered.set(callId, verdict.reply);
     this.decidedReplies.set(request.id, { reply: verdict.reply, callId, echoed: false });
-    if (verdict.reply === "reject")
+    const stepID = typeof request.source?.messageID === "string" ? request.source.messageID : undefined;
+    if (verdict.reply === "reject") {
       this.note("tool_refused", `${verdict.tool} refused: ${redactAndCap(verdict.message ?? "", 300)}`);
+      if (stepID !== undefined) {
+        const refused = this.refusedByStep.get(stepID);
+        const entry = { callId, tool: verdict.tool, ...(verdict.message ? { message: verdict.message } : {}) };
+        if (refused === undefined) this.refusedByStep.set(stepID, [entry]);
+        else refused.push(entry);
+      }
+    }
     out.replies.push({
       requestID: request.id,
       callId,
+      ...(stepID !== undefined ? { stepID } : {}),
       reply: verdict.reply,
       ...(verdict.message ? { message: verdict.message } : {}),
     });
@@ -1388,6 +1607,17 @@ export class OpenCodeBridge {
         decided.reply = reply;
         this.answered.set(decided.callId, reply);
       }
+      decided.echoed = true;
+      return;
+    }
+    if (reply === "reject" && decided.withdrawn === true && !decided.echoed) {
+      // The server's own rejection of an ask it withdrew under the bot's own
+      // refusal of a sibling — the binary rejects the step's other pending asks
+      // itself at a reject (measured, `testing/realDriver.test.ts`) — is the
+      // cascade's echo, whatever the bot had decided for it: no tool ran on it.
+      // A second echo, one answering `once`, or a withdrawal no refusal of ours
+      // explains (`askWithdrawn` leaves the mark off) is judged below as any
+      // reply is.
       decided.echoed = true;
       return;
     }
@@ -1760,6 +1990,13 @@ export interface OpenCodeConnection {
   writes?: { seq: number; ownPrompts: Map<string, number>; imported: ReadonlySet<string> };
   /** The step boundaries the loop's feed delivers, for a steer's resolution to wait on (`StepBoundaries`). */
   boundaries?: StepBoundaries;
+  /** The inbox delivery tracker: populated by the loop from `session.inbox.delivered`
+   *  and `session.execution.interrupted` events, so the drainer can wait for a steer's
+   *  fate rather than trusting the POST answer's id alone. A steer enqueued into a
+   *  running execution is delivered only at the next step boundary; an interrupt
+   *  between the POST and that boundary drops it. `InboxFate.wait(inboxID)` resolves
+   *  `true` on delivery, `false` when `interruptAll` fires. */
+  inboxFate?: InboxFate;
   /** The failure by name the follow-up drainer hands the loop (`error` set): the
    *  loop ends on it — the interrupt posted, no stop asked of the run's control
    *  and no `stopped` note — and the harness throws it once the loop has left.
@@ -1799,6 +2036,60 @@ export class StepBoundaries {
   }
 }
 
+/** Whether a steer the server enqueued (its POST answer named an inbox id)
+ *  was delivered to the session's model (`session.inbox.delivered`) or dropped
+ *  by an interrupted execution before delivery. The drainer waits on this
+ *  instead of trusting the POST answer alone: a steer enqueued into a running
+ *  execution lands only at the next step boundary, and an interrupt between the
+ *  POST and that boundary drops it with no row in the store and no
+ *  `session.inbox.delivered`. `wait(inboxID)` resolves `true` when delivery
+ *  is confirmed, `false` when the execution that held the steer ended
+ *  interrupted (`interruptAll`). */
+export class InboxFate {
+  private readonly delivered = new Set<string>();
+  private gone = false;
+  private readonly waiters = new Map<string, Array<(delivered: boolean) => void>>();
+
+  /** The server delivered the steer: resolve all waiters for this id. */
+  deliver(inboxID: string): void {
+    this.delivered.add(inboxID);
+    const w = this.waiters.get(inboxID);
+    if (w !== undefined) {
+      for (const fn of w.splice(0)) fn(true);
+      this.waiters.delete(inboxID);
+    }
+  }
+
+  /** An interrupted execution dropped all steers it had not yet delivered:
+   *  resolve every waiter pending at this moment as `false` (dropped). The
+   *  tracker stays open — a steer posted after this interrupt (into the
+   *  write-up's execution the loop-end cut starts, say) can still be
+   *  delivered at that execution's step boundary, so only `close` latches. */
+  interruptAll(): void {
+    for (const fns of this.waiters.values()) for (const fn of fns) fn(false);
+    this.waiters.clear();
+  }
+
+  /** The loop is leaving: no delivery will ever come, so every pending waiter
+   *  resolves `false` and every later `wait` answers `false` on the spot.
+   *  Idempotent — a second call is a safe no-op. */
+  close(): void {
+    this.gone = true;
+    this.interruptAll();
+  }
+
+  /** Wait for this inbox id's fate: `true` (delivered) or `false` (dropped by an interrupt). */
+  wait(inboxID: string): Promise<boolean> {
+    if (this.delivered.has(inboxID)) return Promise.resolve(true);
+    if (this.gone) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const list = this.waiters.get(inboxID) ?? [];
+      list.push(resolve);
+      this.waiters.set(inboxID, list);
+    });
+  }
+}
+
 /** What a re-attach found on the still-answering server and in its feed. */
 export interface OpenCodeReattach {
   /** The session's store as the server holds it at the re-attach, every page. */
@@ -1828,7 +2119,14 @@ export async function driveOpenCode(
    *  lease is the caller's carved minutes, it holds nothing back for a
    *  write-up, and it publishes no `lease` event — the loop's stands. */
   kind: "loop" | "turn" = "loop",
-): Promise<{ answer: string; remainingMs: () => number; storeIds: string[]; hardStopped: boolean }> {
+): Promise<{
+  answer: string;
+  /** The wind-down that labelled the answer, for the run loop to compose the thread's answer from (harness-pi item 6). */
+  ending?: WindDownEnding;
+  remainingMs: () => number;
+  storeIds: string[];
+  hardStopped: boolean;
+}> {
   const now = () => deps.clock();
   const agentSpan = run.span?.start("run.agent");
   if (agentSpan) deps.bearers?.reparent(run.runId, agentSpan);
@@ -1864,6 +2162,13 @@ export async function driveOpenCode(
     // transcript and every compaction row), which the store holds and the
     // request-prompt appends past.
     seedLength: run.resume ? run.resume.messages.length + (run.resume.compactions?.length ?? 0) : run.messages.length,
+    // A rebuild's store holds fewer rows than the record has turns: a turn of
+    // tool results alone is folded into the assistant row before it, so the
+    // store skip is the rows the import wrote, or the mirror would skip the
+    // first answer past the seed too.
+    ...(run.resume
+      ? { storeSeed: openCodeStoreRowCount(run.resume.messages, run.resume.compactions?.length ?? 0) }
+      : {}),
     remainingMs: () => deadline - now(),
     textFailing: new Set(run.tools.filter((t) => t.failsInText).map((t) => t.name)),
   });
@@ -2334,17 +2639,27 @@ export async function driveOpenCode(
       }
       // The write-up is bounded by its allowance, as pi's is (harness.md item
       // 5): past the bound the run closes by the wind-down's own answer with no
-      // write-up — the call in flight interrupted, its failure the wind-down's
-      // note — and the loop leaves now rather than wait for a settle a hung
-      // turn never sends: a turn that answered nothing for the bound answers
-      // nothing to the interrupt either, and the caller ends the process.
+      // write-up — what was in flight interrupted, the wind-down's note saying
+      // what that was — and the loop leaves now rather than wait for a settle a
+      // hung turn never sends: a turn that answered nothing for the bound
+      // answers nothing to the interrupt either, and the caller ends the
+      // process. The note is worded for what the bound fell on: a model call
+      // (pi's shape, the write-up's own call hanging) is a model call that
+      // failed under the wind-down; a tool call — the loop-end cut's tool with
+      // its interrupt still unanswered, or a tool the write-up's own execution
+      // made — is a wait the bound ended, no model call having failed.
       if (writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) {
         writeUpAt = undefined;
         ended = "finale";
         const reason = finaleAbortReason(lease.finaleMs);
         writeUpFailed ??= reason;
         run.onProgress?.(finaleTimedOutNote());
-        note("harness_error", windDownFailureNote(reason));
+        const doing = bridge.doingNow();
+        const onTool = doing !== undefined && doing !== "model";
+        note(
+          "harness_error",
+          cutInFlight || onTool ? finaleWaitNote(reason, doingWords(doing), cutInFlight) : windDownFailureNote(reason),
+        );
         void interrupt({ ending: "the write-up's finale" });
       }
       return;
@@ -2453,64 +2768,95 @@ export async function driveOpenCode(
     return read.messages.find((m) => m.type === "user" && !known.has(m.id) && (m as { text?: unknown }).text === text)
       ?.id;
   };
-  /** A gate reply the reset cut, resolved from the pending asks: still pending,
-   *  re-issued once (a 404 then is the ask dropped meanwhile — the binary's
-   *  interrupt — and decides nothing); gone, landed. The failure, if any. */
-  const resolveReplyAfterReset = async (
+  /** A gate reply whose landing the server's answer left open — cut by a
+   *  control reset, or refused 404 — resolved from the server's own pending
+   *  asks (`GET …/permission`, the one idempotent read), never re-sent blind.
+   *  The ask gone after a reset: the reply landed before the reset cut its
+   *  answer, or the interrupt dropped the ask — nothing owed either way. The
+   *  ask gone after a 404: the server withdrew it before the reply reached it
+   *  — the gate refused a sibling call of the same step and the binary ended
+   *  the step on the refusal, its other asks dropped with it (measured against
+   *  the pinned binary, `testing/realDriver.test.ts`) — so the reply is
+   *  `withdrawn` and the call settles by the server's own tool event. The ask
+   *  still pending after a reset: the reply never landed and is re-issued
+   *  once, a 404 on the re-issue read here again (the ask dropped between the
+   *  listing and the re-issue). The ask still pending after a 404: the server
+   *  lists an ask it refuses to answer — the reply genuinely failed. A listing
+   *  that cannot be read or is not a list, or a re-issue that meets the reset
+   *  again, is `OpenCodeWriteUnresolvedError`: the outcome unknown, fail closed. */
+  const resolveReplyAgainstPending = async (
     route: { method: string; path: string },
     body: unknown,
     requestID: string,
-  ): Promise<{ status: number } | Error | undefined> => {
+    after: "reset" | "not-found",
+  ): Promise<OpenCodeReplyResolution> => {
     const what = `the gate's reply for request ${requestID}`;
+    const unresolved = (why: string): OpenCodeReplyResolution => ({
+      outcome: "failed",
+      failure: new OpenCodeWriteUnresolvedError(what, why),
+    });
     let listed: HarnessResponse;
     try {
       listed = await request(sessionRoutes["session.permission.list"]);
     } catch (err) {
-      return new OpenCodeWriteUnresolvedError(
-        what,
+      return unresolved(
         `the pending asks could not be listed: ${redactAndCap(err instanceof Error ? err.message : String(err), 200)}`,
       );
     }
     if (listed.status < 200 || listed.status >= 300)
-      return new OpenCodeWriteUnresolvedError(what, `the pending-asks listing answered ${listed.status}`);
-    if (!(parsePermissionList(listed.body) ?? []).some((ask) => ask.id === requestID)) return undefined;
+      return unresolved(`the pending-asks listing answered ${listed.status}`);
+    const asks = parsePermissionList(listed.body);
+    if (asks === undefined) return unresolved("the pending-asks listing was not a list");
+    if (!asks.some((ask) => ask.id === requestID)) return { outcome: after === "reset" ? "landed" : "withdrawn" };
+    if (after === "not-found") return { outcome: "failed", failure: { status: 404 } };
     try {
       const res = await request(route, body);
-      if (res.status === 404) return undefined;
-      if (res.status < 200 || res.status >= 300) return { status: res.status };
-      return undefined;
+      if (res.status === 404) return resolveReplyAgainstPending(route, body, requestID, "not-found");
+      if (res.status < 200 || res.status >= 300) return { outcome: "failed", failure: { status: res.status } };
+      return { outcome: "landed" };
     } catch (again) {
-      if (again instanceof Error && isControlReset(again))
-        return new OpenCodeWriteUnresolvedError(what, "the re-issued reply met the reset again");
-      return again instanceof Error ? again : new Error(String(again));
+      if (again instanceof Error && isControlReset(again)) return unresolved("the re-issued reply met the reset again");
+      return { outcome: "failed", failure: again instanceof Error ? again : new Error(String(again)) };
     }
   };
-  /** The bridge's replies posted, `once` or `reject`. A reply that does not
-   *  land — the request threw, or the server answered outside 2xx — stops the
-   *  run, fail closed: the ask is still pending, so the tool has not run and
-   *  nothing is lost, where a turn waiting on an unanswered ask would hang to
-   *  its deadline. Answers the failure, or nothing when every reply landed. */
+  /** The bridge's replies posted, `once` or `reject`. A reply the server
+   *  answers 2xx landed. One it answers 404 is read against its pending asks
+   *  (`resolveReplyAgainstPending`): the ask gone, the server withdrew it
+   *  before the reply reached it — one `ask_withdrawn` note, the run going on,
+   *  the call settling by the server's own tool event; the ask still pending,
+   *  the reply genuinely failed. A reply that fails — the request threw, the
+   *  server answered another status outside 2xx, or a 404's ask is still
+   *  pending — stops the run, fail closed: the ask is still pending, so the
+   *  tool has not run and nothing is lost, where a turn waiting on an
+   *  unanswered ask would hang to its deadline. Answers the failure, or
+   *  nothing when every reply landed or was withdrawn. */
   const postReplies = async (obs: OpenCodeBridgeObservation): Promise<OpenCodeReplyFailedError | undefined> => {
     for (const reply of obs.replies) {
-      let failure: { status: number } | Error | undefined;
+      let resolution: OpenCodeReplyResolution;
       const route = openCodePermissionReplyRoute(conn.sessionID, reply.requestID);
       const body = { reply: reply.reply, ...(reply.message ? { message: reply.message } : {}) };
       try {
         const res = await request(route, body);
-        if (res.status < 200 || res.status >= 300) failure = { status: res.status };
+        resolution =
+          res.status >= 200 && res.status < 300
+            ? { outcome: "landed" }
+            : res.status === 404
+              ? await resolveReplyAgainstPending(route, body, reply.requestID, "not-found")
+              : { outcome: "failed", failure: { status: res.status } };
       } catch (err) {
         if (err instanceof Error && isControlReset(err)) {
           // The reset cut the reply's answer: the server's own state says
-          // whether it landed. The ask still pending, it did not, and is
-          // re-issued once; the ask gone, it did — or the interrupt dropped the
-          // ask (the binary's way; a reply to it answers 404, the answer, not a
-          // failure). Never re-sent blind.
+          // whether it landed. Never re-sent blind.
           resetUnder();
-          failure = await resolveReplyAfterReset(route, body, reply.requestID);
-        } else failure = err instanceof Error ? err : new Error(String(err));
+          resolution = await resolveReplyAgainstPending(route, body, reply.requestID, "reset");
+        } else resolution = { outcome: "failed", failure: err instanceof Error ? err : new Error(String(err)) };
       }
-      if (failure !== undefined) {
-        replyFailed = new OpenCodeReplyFailedError(reply.requestID, reply.callId, reply.reply, failure);
+      if (resolution.outcome === "withdrawn") {
+        bridge.askWithdrawn(reply);
+        continue;
+      }
+      if (resolution.outcome === "failed") {
+        replyFailed = new OpenCodeReplyFailedError(reply.requestID, reply.callId, reply.reply, resolution.failure);
         note("harness_error", `${replyFailed.message} — the run is stopped`);
         void interrupt({ ending: "a gate reply left unresolved" });
         return replyFailed;
@@ -2699,6 +3045,13 @@ export async function driveOpenCode(
       // lands at a boundary the live server reaches, and a replayed one would
       // only send the drainer to read a store that cannot yet hold its row.
       if (!reattachCatchUp && obs.boundary === true) conn.boundaries?.reached();
+      // The inbox delivery tracker: tell the drainer when a steer was delivered
+      // or when an interrupted execution dropped all pending steers.
+      // Gated like the boundary line above: a dead generation's replayed
+      // `session.inbox.delivered` or `interrupted` end is history — acting on
+      // it would resolve a live steer's fate from an execution already over.
+      if (!reattachCatchUp && obs.inboxDelivered !== undefined) conn.inboxFate?.deliver(obs.inboxDelivered);
+      if (!reattachCatchUp && obs.inboxDropped === true) conn.inboxFate?.interruptAll();
       if (record.feed === "messages" && conn.saveOffset !== undefined) {
         const save = conn.saveOffset;
         void bridge.flush().then(() => save(after));
@@ -2743,14 +3096,93 @@ export async function driveOpenCode(
         } else providerError = obs.providerError;
       }
       if (obs.settled) {
-        settled = true;
-        break;
+        // The decline cascade: the server declined every other pending ask of a
+        // step whose other call(s) the gate refused, ending the step `aborted`
+        // and the execution `interrupted` — the bot did not post the interrupt
+        // (`!interrupts.cut`, `!cutInFlight`), so this settle is the server's
+        // own end after the cascade. The model never read the refusal: re-prompt
+        // it with the refusal and the cascade note, exactly as a single refusal
+        // lets it continue (harness.md item 2). The loop does not settle
+        // here; the new execution runs and its answer is the run's answer.
+        // A write-up already under way (the budget, the turn guard, a soft stop)
+        // wins: its instruction was already posted or decided, and the cascade
+        // re-prompt would start a second execution the write-up's loop would
+        // never read — the loop settles on the write-up's answer and leaves the
+        // re-prompt unconsumed.
+        const cascadePrompt = !interrupts.cut && !cutInFlight && !writeUp ? bridge.takeCascadeRePrompt() : undefined;
+        if (cascadePrompt !== undefined) {
+          // Re-prompt the model with the refusal note: a `queue` prompt, since
+          // the execution is now idle. The bridge reads the new execution's
+          // records in `earlier` mode until its `session.execution.started`
+          // makes it own again. The first-event bound is armed for the queued
+          // re-prompt: the run has not gone silent — the cascade's end was a live
+          // server action — but a re-prompt the server silently ignores would
+          // wait to the budget; the bound fails it by name first.
+          executionOwned = false;
+          note(
+            "decline_cascade",
+            `the execution ended on the decline cascade — re-prompting the model with the refusal so it can continue`,
+          );
+          const promptSeq = conn.writes ? ++conn.writes.seq : 0;
+          const rePromptReq = request(sessionRoutes["session.prompt"], {
+            text: cascadePrompt,
+            delivery: "queue",
+          }).then(
+            (admitted) => {
+              if (ended !== undefined || left) return;
+              if (admitted.status < 200 || admitted.status >= 300) {
+                const err = new OpenCodeRequestRefusedError(
+                  "decline cascade re-prompt",
+                  admitted.status,
+                  admitted.body,
+                );
+                note("harness_error", `${err.message} — the run is stopped`);
+                conn.failure.error ??= err;
+                return;
+              }
+              const id = parseAnswerId(admitted.body);
+              if (id !== undefined) {
+                conn.writes?.ownPrompts.set(id, promptSeq);
+                conn.knownMessageIds?.add(id);
+              }
+              // The admission response and the feed travel separate streams,
+              // so the new execution's `session.execution.started` can be read
+              // before this callback runs; arming then would leave `awaiting`
+              // set forever and falsely end the live run "silent". Arm only
+              // while the execution is not yet the loop's own.
+              if (!executionOwned) awaiting = { phase: "the decline cascade re-prompt", since: now() };
+            },
+            (err: unknown) => {
+              if (ended !== undefined || left) return;
+              const msg = `the decline cascade re-prompt did not reach the server: ${redactAndCap(err instanceof Error ? err.message : String(err), 200)}`;
+              note("harness_error", `${msg} — the run is stopped`);
+              conn.failure.error ??= new Error(msg);
+            },
+          );
+          conn.posted?.add(rePromptReq);
+          void rePromptReq.then(() => conn.posted?.delete(rePromptReq));
+        } else {
+          settled = true;
+          break;
+        }
       }
       check();
     }
   } finally {
     left = true;
     conn.boundaries?.left();
+    // Any steer still waiting for inbox delivery (`inboxFate.wait`) is unblocked
+    // when the loop leaves: a delivery the feed already confirmed was handled
+    // before this point; one the feed never confirmed is the loop gone with the
+    // execution that held the steer — the drainer reads `false` (not delivered)
+    // and hands the steer back to the inbox for a fresh turn. Called after
+    // `conn.boundaries.left()` so a boundary waiter resolves before an inbox
+    // waiter on the same tick: the order matches the server's `step.ended →
+    // inbox.delivered` sequence, and an inbox waiter that resolves `false` hands
+    // the steer back rather than reading a step boundary that will not come.
+    // `close`, not `interruptAll`: only here is "no delivery will ever come"
+    // true, so only here does the tracker latch for good.
+    conn.inboxFate?.close();
     transport.close();
     // The span says what the outcome says: an operator's abort, a bypass, a
     // reply or a request the server refused, a replaced or lost container, a
@@ -2891,8 +3323,14 @@ export async function driveOpenCode(
     note("wrap_up", wrapUpNeverPostedNote(writeUp.kind, "run", neverPostedEnd));
     writeUp = undefined;
   }
-  const answer = writeUpAnswer(writeUp, text, run.agent.maxMinutes, writeUpFailed, neverPostedEnd);
-  return { answer, remainingMs: remaining, hardStopped: false, ...handOver() };
+  // The ending the run loop composes the thread's answer from once its
+  // post-steps have run (harness-pi item 6); the answer here is the same words
+  // with no facts. No label when the wind-down's instruction never reached the
+  // model, but what ended the wait is still said: a model call that failed
+  // under it, or the finale bound ending a wait on an interrupt never answered.
+  const ending = windDownEndingOf(writeUp, text, writeUpFailed, neverPostedEnd === "finale" ? "finale" : "failed");
+  const answer = ending ? windDownAnswer(ending, run.agent.maxMinutes) : unlabelledAnswer(text, undefined);
+  return { answer, ...(ending ? { ending } : {}), remainingMs: remaining, hardStopped: false, ...handOver() };
 }
 
 /** The wind-downs that steer a write-up, and what each labels the answer with. */
@@ -2900,19 +3338,3 @@ type WriteUp = { kind: "time" } | { kind: "turns"; pace: string } | { kind: "sof
 /** The session's interrupt as the loop reads its answer (`interrupt`): landed on a live execution, landed on an
  *  idle one, or failed — refused, unanswered, or answered as no interrupt does — with the failure the run is named by. */
 type InterruptAnswer = "interrupted" | "idle" | { failed: Error };
-
-function writeUpAnswer(
-  writeUp: WriteUp | undefined,
-  text: string,
-  maxMinutes: number,
-  writeUpFailed: string | undefined,
-  neverPostedEnd: NeverPostedEnd,
-): string {
-  if (writeUp?.kind === "time") return timeBudgetAnswer(text, maxMinutes, writeUpFailed);
-  if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
-  if (writeUp?.kind === "soft") return softStopAnswer(text, writeUpFailed);
-  // No label — the wind-down's instruction never reached the model — but what
-  // ended the wait is still said: a model call that failed under it, or the
-  // finale bound ending a wait on an interrupt never answered.
-  return unlabelledAnswer(text, writeUpFailed, neverPostedEnd === "finale" ? "finale" : "failed");
-}

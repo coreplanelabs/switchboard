@@ -12,7 +12,8 @@ import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { RunRegistry } from "../runRegistry.js";
-import { NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
+import { createLedgerWriteThrough, NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { InMemoryRunStore, NullRunStore } from "../runStore.js";
 import { InMemoryCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { ThreadAdmission } from "../threadAdmission.js";
@@ -111,9 +112,9 @@ function setup(
   const ctx = {
     agent: getAgent("ship"),
     // The parent's effective profile, as the gate admitted it: the preset's
-    // declared 120 clipped to 110 by a channel boundary — above the fit the
-    // fork asserts (108 at three rounds), so the runner is asked.
-    profile: { ...declaredProfile(getAgent("ship")), minutes: over.minutes ?? 110, boundedBy: "channel" as const },
+    // declared 240 clipped to 200 by a channel boundary — above the fit the
+    // fork asserts (163 at three rounds), so the runner is asked.
+    profile: { ...declaredProfile(getAgent("ship")), minutes: over.minutes ?? 200, boundedBy: "channel" as const },
     modelRef: "anthropic/general-model",
     agentSource: "directive" as const,
     label: "*ship* · acme/api",
@@ -131,9 +132,10 @@ function setup(
     ending,
     trace,
     closeLines: () => ({}),
-    refuse: <T>(outcome: string, fn: () => Promise<T>) => {
-      refusals.push(outcome);
-      return fn();
+    refuse: async (refusal: { code: string; text: string }, side?: () => Promise<void>) => {
+      refusals.push(refusal.code);
+      await side?.();
+      await io.reply(refusal.text);
     },
     doneLines: () => ({}),
   };
@@ -157,7 +159,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
   it("refused at the preflight (ship allowed, coding not): one `dispatch.refuse` outcome, the card closes 🚫 naming the missing grant, the reply names it, no run exists and the runner is never asked", async () => {
     const s = setup("slack:UREV");
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
-    expect(s.refusals).toEqual(["ship_preflight"]);
+    expect(s.refusals).toEqual(["ship_preflight_permission"]);
     expect(s.closes).toHaveLength(1);
     expect(JSON.stringify(s.closes[0])).toContain("🚫");
     expect(s.replies).toHaveLength(1);
@@ -181,7 +183,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
       threadKey: THREAD,
       repo: "acme/api",
       base: "main",
-      caps: { maxRounds: 3, maxMinutes: 110 },
+      caps: { maxRounds: 3, maxMinutes: 200 },
       card: { channel: "CX", ts: "1.5" },
       runId: "run-s",
       label: "*ship* · acme/api",
@@ -205,46 +207,46 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
       status: "completed",
       agent: "ship",
       replyOk: true,
-      profile: { preset: "ship", machine: "repo-resident", identity: "write", minutes: 110, boundedBy: "channel" },
+      profile: { preset: "ship", machine: "repo-resident", identity: "write", minutes: 200, boundedBy: "channel" },
     });
   });
 
   // agent-ship.md item 8: the runner's wall clock is the parent's EFFECTIVE
   // profile's minutes — the preset's declared budget as the gate clipped it —
   // never the `ship` config block read again; the rounds cap is the block's.
-  it("the caps handed to the runner: `maxMinutes` is the profile's minutes (the channel's 110, not the block's 120), `maxRounds` the config block's", async () => {
-    const s = setup("slack:UADMIN", { configExtra: "ship:\n  maxRounds: 2\n  maxMinutes: 120\n" });
+  it("the caps handed to the runner: `maxMinutes` is the profile's minutes (the channel's 200, not the block's 240), `maxRounds` the config block's", async () => {
+    const s = setup("slack:UADMIN", { configExtra: "ship:\n  maxRounds: 2\n  maxMinutes: 240\n" });
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect((await s.instances.get("plan-fix-the-login-redirect-6435ec"))?.caps).toEqual({
       maxRounds: 2,
-      maxMinutes: 110,
+      maxMinutes: 200,
     });
   });
 
   // agent-ship.md item 8, decision 0046: the fit at the fork. A boundary or a
   // `budget:` directive that clipped the pipeline under the loop it allows is
   // refused with the sum on the card, and no instance opens.
-  it("a boundary that clips ship under its loop refuses at the fork with the sum: 40 minutes cannot hold three review rounds (108 needed), no instance is created, the card closes 🚫 and the reply names the numbers", async () => {
+  it("a boundary that clips ship under its loop refuses at the fork with the sum: 40 minutes cannot hold three review rounds (163 needed), no instance is created, the card closes 🚫 and the reply names the numbers", async () => {
     const s = setup("slack:UADMIN", { minutes: 40 });
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect(s.created).toEqual([]);
     expect(s.refusals).toEqual(["ship_budget"]);
     expect(JSON.stringify(s.closes[0])).toContain("🚫");
     expect(JSON.stringify(s.closes[0])).toContain(
-      "budget 40 min cannot hold the ship loop (3 review rounds need 108 min)",
+      "budget 40 min cannot hold the ship loop (3 review rounds need 163 min)",
     );
     expect(s.replies[0]).toContain("Ship cannot start under a 40-minute budget");
-    expect(s.replies[0]).toContain("needs 108 minutes");
+    expect(s.replies[0]).toContain("needs 163 minutes");
     expect(s.replies[0]).toContain("`agent:coding`");
   });
 
-  it("a boundary at the fit's sum starts the runner: 108 minutes hold three review rounds", async () => {
-    const s = setup("slack:UADMIN", { minutes: 108 });
+  it("a boundary at the fit's sum starts the runner: 163 minutes hold three review rounds", async () => {
+    const s = setup("slack:UADMIN", { minutes: 163 });
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect(s.created).toEqual(["plan-fix-the-login-redirect-6435ec"]);
     expect((await s.instances.get("plan-fix-the-login-redirect-6435ec"))?.caps).toEqual({
       maxRounds: 3,
-      maxMinutes: 108,
+      maxMinutes: 163,
     });
   });
 
@@ -354,5 +356,97 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     s.ending.drain(false);
     await s.writer.settled();
     expect(await s.store.get("run-s")).toMatchObject({ status: "failed", replyOk: false });
+  });
+
+  // A ship start the fit refuses at the fork must not leave a live
+  // ledger row for the thread — otherwise the next run in the thread is
+  // untracked (its record notes `ledger_untracked`, no durable inbox, no
+  // reclaim). A start refused before any run exists must write no live row, or
+  // finish the one it wrote in the same step as the refusal.
+  it("fit refusal leaves the thread's ledger row free: the live ledger has no row for the thread after a budget refusal, and the next run in the thread is tracked", async () => {
+    const inner = new InMemoryRunLedger(() => NOW);
+    const ledger = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "gen-T",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+    const s = setup("slack:UADMIN", { minutes: 40 });
+    s.deps.runLedger = ledger;
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.refusals).toEqual(["ship_budget"]);
+    // The thread must have no live ledger row after the fit refusal.
+    const liveAfterRefusal = await inner.listLive();
+    expect(liveAfterRefusal.filter((r) => r.threadKey === THREAD)).toHaveLength(0);
+  });
+
+  it("fit refusal leaves the thread's row free so the next run in the thread is tracked: a second ship call after the budget refusal opens a live ledger row", async () => {
+    const inner = new InMemoryRunLedger(() => NOW);
+    const ledger = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "gen-T",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+
+    // First call: fit refusal at 40 min.
+    const s1 = setup("slack:UADMIN", { minutes: 40 });
+    s1.deps.runLedger = ledger;
+    await runShipBranch(s1.deps, s1.msg, s1.io, s1.ctx);
+    expect(s1.refusals).toEqual(["ship_budget"]);
+
+    // Second call: a new registry so a new run id is minted, sufficient budget.
+    const s2 = setup("slack:UADMIN", { minutes: 200 });
+    s2.deps.runLedger = ledger;
+    await runShipBranch(s2.deps, s2.msg, s2.io, s2.ctx);
+    // The second call must succeed (no refusals) and the runner must be asked.
+    expect(s2.refusals).toEqual([]);
+    expect(s2.created).toHaveLength(1);
+    // Wait for the second run's ledger write (the finish) to settle so the live
+    // map reflects the final state.
+    await s2.writer.settled();
+    // The thread's row has been opened and then finished by the second run
+    // (finished rows are removed from `live`). The live map is empty because
+    // the run ended, which proves no stale row from the first call blocked the
+    // second — if the first call's row had remained, the second call's
+    // ledger.open() would have returned undefined and the run would have been
+    // untracked, but the hand-off above ran, showing the second run was tracked.
+    const liveAfterSecond = await inner.listLive();
+    const threadRows = liveAfterSecond.filter((r) => r.threadKey === THREAD);
+    expect(threadRows).toHaveLength(0);
+  });
+});
+
+// Feature: record 0051 R2 (run-history item 2) — the live ship run's record
+// names its instance from the moment the hand-off creates it: the branch
+// publishes `ship_handoff` after a successful hand-off and none after a refusal.
+describe("runShipBranch — the ship_handoff event (record 0051 R2)", () => {
+  beforeEach(() => vi.stubEnv("PUBLIC_BASE_URL", ""));
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("a successful hand-off publishes one ship_handoff naming the instance, before the answer, and the record projects it as instanceId", async () => {
+    const s = setup("slack:UADMIN");
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    const events = s.registry.snapshot("run-s", "tok")?.events ?? [];
+    const types = events.map((e) => e.type);
+    expect(types.indexOf("ship_handoff")).toBeGreaterThanOrEqual(0);
+    expect(types.indexOf("ship_handoff")).toBeLessThan(types.indexOf("answer"));
+    expect(events.filter((e) => e.type === "ship_handoff")).toEqual([
+      expect.objectContaining({ instanceId: "plan-fix-the-login-redirect-6435ec" }),
+    ]);
+    s.ending.drain(true);
+    await s.writer.settled();
+    expect(await s.store.get("run-s")).toMatchObject({ instanceId: "plan-fix-the-login-redirect-6435ec" });
+  });
+
+  it("a refused hand-off publishes none and the record carries no instanceId", async () => {
+    const s = setup("slack:UADMIN", { minutes: 40 }); // the fit refusal: no instance opens
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    const events = s.registry.snapshot("run-s", "tok")?.events ?? [];
+    expect(events.map((e) => e.type)).not.toContain("ship_handoff");
+    s.ending.drain(true);
+    await s.writer.settled();
+    const record = await s.store.get("run-s");
+    expect(record === null || record.instanceId === undefined).toBe(true);
   });
 });

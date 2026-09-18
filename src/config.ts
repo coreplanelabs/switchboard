@@ -24,6 +24,7 @@ import {
   type GrantsTable,
   type RestrictConfig,
 } from "./core/authz/grants.js";
+import { isViewablePerson } from "./core/authz/viewAs.js";
 import { ConfigDocumentClient, parseConfigLocation, stateWorkerFrom } from "./configDocument.js";
 import type { EnvRecord, Secrets } from "./secrets.js";
 import type { Actor, Grants } from "./core/authz/types.js";
@@ -40,8 +41,10 @@ import {
   validateMcpServers,
   validateRestrict,
   validateScopeEfforts,
+  type IntakeMode,
   type RouteAnswerMode,
 } from "./config/validate.js";
+export type { IntakeMode } from "./config/validate.js";
 import type { HarnessName } from "./core/harness/contract.js";
 import type { HarnessScope } from "./core/harness/roster.js";
 import type { OpenCodeCompactionConfig } from "./core/harness/opencode/process.js";
@@ -115,6 +118,14 @@ export interface Scope {
    */
   ship?: { grant?: Grant };
   /**
+   * The thread-reply intake gate's mode in this scope (routing-and-config
+   * item 27, record 0058): user over channel over the top-level `intake`
+   * block, whose default is `classify`; a thread scope lands in a later unit
+   * above them all. Validated at load (`validateScopeBlocks`). Nothing reads
+   * it yet.
+   */
+  intake?: { threadReplies?: IntakeMode };
+  /**
    * Free-text custom instructions folded into the system prompt as ADVISORY
    * content only. Channel text applies to every run in the
    * channel; user text applies only to runs that user requests. Never read by
@@ -135,6 +146,23 @@ export interface Scope {
    */
   mcpServers?: Record<string, McpServerEntry>;
 }
+
+/** The `intake` block (`AppConfig.intake`): the gate's defaults layer. */
+export interface IntakeConfig {
+  /** The default mode; `classify` when unset (`defaultIntakeMode`). */
+  threadReplies?: IntakeMode;
+  /** The verdict's model, `<provider>/<model>`; default `routing.model`, else
+   *  `defaults.models.general` (`intakeModelRef`). */
+  model?: string;
+}
+
+/** The gate's default mode and the verdict's model ref (routing-and-config
+ *  item 27): `defaultIntakeMode` is `intake.threadReplies` else `classify`,
+ *  `intakeModelRef` is `intake.model`, else `routing.model`, else
+ *  `defaults.models.general`. Each lives once, beside the validator that
+ *  checks the card under them at load, so the load-time check and the runtime
+ *  call cannot drift; re-exported here for every other caller. */
+export { defaultIntakeMode, intakeModelRef } from "./config/validate.js";
 
 /** The `routing` block (`AppConfig.routing`). */
 export interface RoutingConfig {
@@ -347,6 +375,14 @@ export interface AppConfig {
    */
   routing?: RoutingConfig;
   /**
+   * The thread-reply intake gate's defaults layer (docs/decisions/
+   * 0058-a-thread-reply-is-read-before-it-is-answered-intake-decides-whether-the-bot-was-addressed.md;
+   * docs/reference/specs/routing-and-config.md item 27): the mode an
+   * unmentioned reply in a bot thread is judged under, and the model of the
+   * one cheap call. Nothing reads it yet — the gate arrives in a later unit.
+   */
+  intake?: IntakeConfig;
+  /**
    * The linked-thread resolver (docs/decisions/0037-a-linked-thread-is-quoted-not-joined.md):
    * a permalink to another thread the bot is in becomes a quoted, untrusted
    * block on the request turn. Off by default (`referencesOn`); a deployment
@@ -432,6 +468,15 @@ export interface SlackConfig {
      */
     windowMinutes?: number;
   };
+  /**
+   * The apps whose relay footer (`Sent by Claude in <#C…> on behalf of <@U…> ·
+   * <permalink>`) names the requester (docs/reference/specs/slack-channel.md
+   * item 13), by Slack `bot_id` (`B…` — the id a run record's `postedBy:
+   * slack:bot:B…` carries). A footer is message text any app can write, so it
+   * is read only from an app named here; from any other app the app itself is
+   * the requester. Absent or empty = no footer is honoured. Validated at load.
+   */
+  relayApps?: string[];
 }
 
 export interface Overrides {
@@ -1111,6 +1156,12 @@ export class ConfigStore {
    *  `Caller.actor`: the ONLY thing `authorize` reads about a caller. */
   grantsFor(actorId: string): Grants {
     return grantsIn(this.grants, actorId);
+  }
+
+  /** The Slack people the grants table names, in its order — whoever holds anything by name (the
+   *  people an admin may want to view the dashboard as, record 0053). Never a credential or a surface. */
+  grantedPeople(): string[] {
+    return [...this.grants.grants.keys()].filter(isViewablePerson);
   }
 
   /** Who to ask when denied — for actionable error messages: the Slack users

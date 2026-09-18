@@ -33,13 +33,13 @@
 # registry-to-registry transfer over HTTPS: nothing is installed for it, and
 # the Cloudflare token needs Containers Edit.
 #
-# A busy bot is not busy (docs/reference/specs/release-and-deploy.md item 13). Since the
-# run ledger's handoff (run-history item 39) the bot hands its runs to the next
-# container on SIGTERM and exits within seconds, so the bot preflight no longer
-# refuses for runs in flight and this job never waits on them or re-dispatches
-# itself. The preflight still refuses while a container rollout is in progress
-# (`deploy all` waits that out for its default budget) and fails closed when
-# the bot cannot be consulted; any failure is red, for a person.
+# A deploy never rolls over a live run (docs/reference/specs/release-and-deploy.md
+# item 13). The bot preflight refuses while runs are in flight or a container
+# rollout is in progress, and fails closed when the bot cannot be consulted;
+# `deploy all` retries a refusal every minute for its default budget and then
+# fails by name — it never proceeds over what refused, and this job never
+# re-dispatches itself. Any failure is red, for a person: once the runs finish,
+# `gh run rerun RUN_ID --failed` deploys.
 #
 # Secrets — declared below so a caller in another repository passes them by
 # name (`secrets:`); this repository's own call passes `secrets: inherit`. Set
@@ -56,6 +56,8 @@
 #   CLOUDFLARE_API_TOKEN  fallback while CLOUDFLARE_DEPLOY_TOKEN is unset (the
 #                         docs Worker's narrower token)
 #   RESIDENT_READ_TOKEN   the resident preflight reads GET /residents with it;
+#   RESIDENT_DRAIN_TOKEN  the resident step drains the fleet with it (POST /drain, then /undrain; the bearer passes nothing else) so the
+#                         deploy lands once the runs in flight end; optional — without it the step waits without a drain and says so.
 #                         read scope is enough (any of the three bearers works)
 #   MEMORY_TOKEN          the state Worker's bearer: `deploy all` pushes the
 #                         bot's config to it as the `base` document right before
@@ -95,7 +97,7 @@ on:
         type: string
         default: affected
       force:
-        description: Bypass the bot/resident preflights — deploy over a rollout in progress, or blind when a bot cannot be consulted (in-flight bot runs hand off regardless)
+        description: Bypass the bot/resident preflights — deploy over a rollout in progress, over runs in flight (this kills the ones no resume recovers), or blind when a bot cannot be consulted
         type: boolean
         default: false
       profile:
@@ -127,6 +129,9 @@ on:
       RESIDENT_READ_TOKEN:
         required: false
         description: the resident preflight's read bearer
+      RESIDENT_DRAIN_TOKEN:
+        required: false
+        description: the resident fleet's drain-only bearer (POST /drain and /undrain, nothing else) — the resident step drains the fleet with it so the deploy lands once the runs in flight end; without it the step waits for a quiet minute that steady traffic never gives
       SANDBOX_TOKEN:
         required: false
         description: the sandbox live gate's bearer
@@ -143,7 +148,7 @@ on:
         type: string
         default: affected
       force:
-        description: Bypass the bot/resident preflights — deploy over a rollout in progress, or blind when a bot cannot be consulted (in-flight bot runs hand off regardless)
+        description: Bypass the bot/resident preflights — deploy over a rollout in progress, over runs in flight (this kills the ones no resume recovers), or blind when a bot cannot be consulted
         type: boolean
         default: false
 
@@ -175,6 +180,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
       DEPLOY_TOKEN_SOURCE: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN && 'CLOUDFLARE_DEPLOY_TOKEN' || 'CLOUDFLARE_API_TOKEN (the docs token — fallback)' }}
       RESIDENT_READ_TOKEN: ${{ secrets.RESIDENT_READ_TOKEN }}
+      RESIDENT_DRAIN_TOKEN: ${{ secrets.RESIDENT_DRAIN_TOKEN }}
       MEMORY_TOKEN: ${{ secrets.MEMORY_TOKEN }}
       SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
       # The profile (and, through its `configSource`, the bot's config): the
@@ -291,6 +297,7 @@ jobs:
           echo "Cloudflare credential: $DEPLOY_TOKEN_SOURCE"
           if [ "${DEPLOY_TOKEN_SOURCE#CLOUDFLARE_API_TOKEN}" != "$DEPLOY_TOKEN_SOURCE" ]; then echo "::warning::deploying with the docs Worker's token — it may lack the Containers/R2 scopes; deploy all checks before touching a Worker"; fi
           if [ -z "$RESIDENT_READ_TOKEN" ]; then echo "::warning::RESIDENT_READ_TOKEN is not set — a resident step would be refused before anything deploys"; fi
+          if [ -z "$RESIDENT_DRAIN_TOKEN" ]; then echo "::warning::RESIDENT_DRAIN_TOKEN is not set — the resident step cannot drain the fleet and waits for a quiet minute instead (new runs keep landing); add the secret so a release lands once the runs in flight end"; fi
           if [ -z "$MEMORY_TOKEN" ]; then echo "::warning::MEMORY_TOKEN is not set — a bot step would be refused before anything deploys (deploy all pushes the bot's config to the state Worker with it)"; fi
           if [ -z "$SANDBOX_TOKEN" ]; then echo "::warning::SANDBOX_TOKEN is not set — a sandbox step would be refused before anything deploys, and --affected judges the sandbox against the last release tag, not what it serves"; fi
       - name: the selection
@@ -364,8 +371,9 @@ jobs:
           ARGS: ${{ steps.selection.outputs.args }}
           CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
         run: |
-          # Any non-zero exit is a real failure and fails here: since the
-          # handoff (run-history item 39) a bot with runs in flight is not busy.
+          # Any non-zero exit is a real failure and fails here: a preflight
+          # still refusing at the end of its budget (runs in flight, a rollout
+          # in progress) is one — the deploy did not proceed; re-run the job.
           # shellcheck disable=SC2086
           $CLI deploy all $ARGS --allow-branch
       # What production serves now, whatever happened above — the receipt.

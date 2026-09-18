@@ -4,8 +4,7 @@ import type { Actor } from "../core/authz/types.js";
 import { runFactsOf, type DeliveryRange, type DeliveryService, type RunFact } from "../core/delivery.js";
 import { RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 import type { RunsService } from "../core/runsService.js";
-import type { ShellRenderer } from "./webShell.js";
-import { WEB_HTML_HEADERS } from "./webShell.js";
+import type { PageSender } from "./webShell.js";
 
 // Delivery page: an Access-gated, read-only browser view of how work reaches
 // `main` — `GET /delivery` (the first configured repository),
@@ -70,7 +69,7 @@ function plain(res: ServerResponse, status: number, body: string, extra: Record<
  */
 export function createDeliveryViewHandler(
   deps: DeliveryViewDeps,
-  shell: ShellRenderer,
+  page: PageSender,
 ): (req: HttpRequest, res: ServerResponse, ctx: DeliveryViewContext) => boolean {
   return (req, res, ctx) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -119,17 +118,15 @@ export function createDeliveryViewHandler(
         runs,
       })
       .then((report) => {
-        // Render before the head is written: a renderer that throws lands in
-        // the catch below as one 502, never a second set of headers.
+        // The sender builds the body before it writes the head: one that throws
+        // lands in the catch below as one 502, never a second set of headers.
         if (route.kind === "json") {
           const body = JSON.stringify(report);
           res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
           res.end(body);
           return;
         }
-        const html = shell(ctx.actor, `${report.repo} delivery`, { page: "delivery", report, repos });
-        res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(html);
+        page(req, res, 200, ctx.actor, `${report.repo} delivery`, { page: "delivery", report, repos });
       })
       .catch((err: unknown) => {
         const reason = (err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX);

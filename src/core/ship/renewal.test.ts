@@ -109,7 +109,7 @@ describe("progressOf — progress is read off the row, never asked of the model"
 
 const progressed: Progress = { progressed: true, by: "push", sha: B };
 const stuck: Progress = { progressed: false, why: "no head newer than the lease's start was pushed to `x`" };
-const PIPELINE = { maxRounds: 3, maxMinutes: 120 };
+const PIPELINE = { maxRounds: 3, maxMinutes: 240 };
 
 describe("renewalDecision — renew only when progress, a renewal and the cap all hold, else name the clause that failed", () => {
   it("renews when the row shows progress, the grant has a renewal left, spend is under the cap and the pipeline still fits; the next segment is numbered and the sha it continues from is named", () => {
@@ -224,7 +224,7 @@ describe("renewalDecision — renew only when progress, a renewal and the cap al
     ).toEqual({
       renew: false,
       why: "unfit",
-      detail: "a 40-minute segment cannot hold the ship loop (3 review rounds need 108 min)",
+      detail: "a 40-minute segment cannot hold the ship loop (3 review rounds need 163 min)",
       renewalsLeft: 6,
     });
   });
@@ -267,11 +267,11 @@ describe("renderRenewal — the card's words, as the record's trace has them", (
         {
           renew: false,
           why: "unfit",
-          detail: "a 40-minute segment cannot hold the ship loop (3 review rounds need 108 min)",
+          detail: "a 40-minute segment cannot hold the ship loop (3 review rounds need 163 min)",
           renewalsLeft: 6,
         },
         { renewals: 6 },
       ),
-    ).toBe("a 40-minute segment cannot hold the ship loop (3 review rounds need 108 min)");
+    ).toBe("a 40-minute segment cannot hold the ship loop (3 review rounds need 163 min)");
   });
 });

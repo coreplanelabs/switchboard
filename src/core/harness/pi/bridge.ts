@@ -24,8 +24,9 @@ import {
 } from "../../runEvents.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
 import type { Clock, Span } from "../../trace/types.js";
-import type { Disposition } from "../contract.js";
+import { type Disposition, SAID_ONCE_SUFFIX } from "../contract.js";
 import { MODEL_CALL_IN_FLIGHT } from "../windDown.js";
+import { POINTER_SUMMARY_PREFIX } from "./compactionFallback.js";
 import { BLOCKED_AT_DOOR_PREFIX, BLOCKED_UNAVAILABLE_PREFIX } from "./extensionSource.js";
 import { piAnsweredWithoutRunning, type PiEvent } from "./protocol.js";
 
@@ -108,6 +109,10 @@ export interface BridgeObservation {
    *  appends to the session log (docs/reference/specs/session-log.md item 6). Absent
    *  when the compaction failed, was aborted, or carried no summary. */
   compaction?: CompactionEntry;
+  /** pi's compaction failed — not aborted — with these words: the harness
+   *  judges whether the next one is written with its pointer summary
+   *  (harness-pi item 7). */
+  compactionFailed?: string;
 }
 
 export interface BridgeDeps {
@@ -185,6 +190,10 @@ export class PiBridge {
    *  were vetted by the bot generation that died, and this one never heard. */
   judgeGate = true;
   private summarizationRetries = 0;
+  /** The event kinds a `harness_error` has named — a kind the table does not
+   *  know, a kind marked impossible — so the note is said once per kind
+   *  (`noteKindOnce`), never once per arrival. */
+  private readonly namedKinds = new Set<string>();
   /** The span a starting call's `tool.<name>` opens under: the run's
    *  `run.agent` for the loop, a follow-up turn's own for its duration
    *  (`under`; harness-pi item 14). */
@@ -227,11 +236,14 @@ export class PiBridge {
     const out: BridgeObservation = { replies: [], settled: false };
     const disposition = PI_EVENT_DISPOSITION[event.type];
     if (disposition === undefined) {
-      this.note("harness_error", `pi emitted an event kind this build does not know: ${redactAndCap(event.type, 80)}`);
+      this.noteKindOnce(
+        event.type,
+        `pi emitted an event kind this build does not know: ${redactAndCap(event.type, 80)}`,
+      );
       return out;
     }
     if (disposition === "impossible") {
-      this.note("harness_error", `pi emitted ${event.type}, which the harness turns off at start`);
+      this.noteKindOnce(event.type, `pi emitted ${event.type}, which the harness turns off at start`);
       return out;
     }
     switch (event.type) {
@@ -292,6 +304,15 @@ export class PiBridge {
   private note(kind: RunNoteKind, summary: string): void {
     this.deps.onProgress?.(summary);
     this.emit({ type: "run_note", kind, summary });
+  }
+
+  /** A `harness_error` naming an event kind, said once per kind for the run
+   *  (harness.md item 4): the first arrival is the finding; the rest of a flood
+   *  of the same kind is not more news and would bury the record. */
+  private noteKindOnce(eventKind: string, summary: string): void {
+    if (this.namedKinds.has(eventKind)) return;
+    this.namedKinds.add(eventKind);
+    this.note("harness_error", `${summary}${SAID_ONCE_SUFFIX}`);
   }
 
   private emit(event: RunEvent): void {
@@ -423,19 +444,24 @@ export class PiBridge {
   private onCompactionEnd(event: PiEvent, out: BridgeObservation): void {
     const result = isRecord(event.result) ? event.result : undefined;
     if (event.aborted === true || !result) {
+      const why = typeof event.errorMessage === "string" ? event.errorMessage : undefined;
       this.note(
         "harness_error",
-        `pi's compaction ${event.aborted === true ? "was aborted" : "failed"}${typeof event.errorMessage === "string" ? `: ${redactAndCap(event.errorMessage, 200)}` : ""}`,
+        `pi's compaction ${event.aborted === true ? "was aborted" : "failed"}${why !== undefined ? `: ${redactAndCap(why, 200)}` : ""}`,
       );
+      if (event.aborted !== true) out.compactionFailed = why ?? "compaction failed";
       return;
     }
     const before = typeof result.tokensBefore === "number" ? result.tokensBefore : undefined;
     const after = typeof result.estimatedTokensAfter === "number" ? result.estimatedTokensAfter : undefined;
     const retries = this.summarizationRetries;
     this.summarizationRetries = 0;
+    // The bot's pointer summary opens with its fixed prefix (harness-pi item
+    // 7): the note says whose summary the window now carries.
+    const pointer = typeof result.summary === "string" && result.summary.startsWith(POINTER_SUMMARY_PREFIX);
     this.note(
       "compacted",
-      `pi compacted the context (${str(event.reason)}): ${before ?? "?"} → about ${after ?? "?"} tokens; the transcript keeps the originals${retries > 0 ? `; ${retries} summarization retr${retries === 1 ? "y" : "ies"}` : ""}`,
+      `pi compacted the context (${str(event.reason)})${pointer ? " with the bot's pointer summary, pi's own having failed" : ""}: ${before ?? "?"} → about ${after ?? "?"} tokens; the transcript keeps the originals${retries > 0 ? `; ${retries} summarization retr${retries === 1 ? "y" : "ies"}` : ""}`,
     );
     // The entry for the session log (session-log item 6): pi's own id for the
     // first kept entry rides along for forensics; the mirror has no map from

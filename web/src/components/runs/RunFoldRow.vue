@@ -123,12 +123,12 @@ function onToggle(ev: Event): void {
         <span class="count shrink-0 text-right font-mono text-xs tabular-nums text-dimmed sm:min-w-[6em]">{{
           countText(run)
         }}</span>
-        <a
+        <RouterLink
           class="open shrink-0 font-mono text-xs text-primary no-underline hover:underline"
-          :href="href"
+          :to="href"
           :aria-label="`open run ${run.label || shortId(run.id)}`"
           @click.stop
-          >open ↗</a
+          >open ↗</RouterLink
         >
       </summary>
       <RunTimeline v-if="opened" :run="run" :land="land" />
@@ -163,11 +163,11 @@ function onToggle(ev: Event): void {
       <span class="count shrink-0 text-right font-mono text-xs tabular-nums text-dimmed sm:min-w-[6em]">{{
         countText(run)
       }}</span>
-      <a
+      <RouterLink
         class="open shrink-0 font-mono text-xs text-primary no-underline hover:underline"
-        :href="href"
+        :to="href"
         :aria-label="`open run ${run.label || shortId(run.id)}`"
-        >open ↗</a
+        >open ↗</RouterLink
       >
     </div>
   </li>

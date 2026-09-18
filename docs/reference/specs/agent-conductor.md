@@ -24,7 +24,7 @@ A run that starts other runs. `agent:conductor` — or the router's compound for
 
 ## Roadmap (gaps)
 
-- `[gap]` The board: `parentRunId` is on the record and the live summary, a ship unit's row names its coding thread and its review thread, a unit's runs list in round order from one read and on one page (`runs unit`, [agent-ship.md](agent-ship.md) item 17; [live-view.md](live-view.md) item 28) and a conductor's children from one read and on its run page (`runs children`, item 11); the `/runs` index does not yet draw the tree ([record 0034](../../decisions/0034-one-agent-per-unit-a-run-continues-a-transcript.md), the unit as the reading unit).
+- `[gap]` The board: `parentRunId` is on the record and the live summary, a ship unit's row names its thread, a unit's runs list in round order from one read and on one page (`runs unit`, [agent-ship.md](agent-ship.md) item 17; [live-view.md](live-view.md) item 28) and a conductor's children from one read and on its run page (`runs children`, item 11); the `/runs` index does not yet draw the tree ([record 0034](../../decisions/0034-one-agent-per-unit-a-run-continues-a-transcript.md), the unit as the reading unit).
 
 A child that asks for clarification is `awaiting_input`, not a completed result.
 The run tools report its question as untrusted output; `await_runs` returns

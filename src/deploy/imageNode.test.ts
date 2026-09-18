@@ -93,3 +93,44 @@ describe.each(EXECUTION_IMAGES)("%s", (path) => {
     expect(firstGlobalInstall).toBeGreaterThan(swap);
   });
 });
+
+// Feature: docs/reference/specs/execution.md item 16 — the 12 GiB instance was
+// chosen so one cold thread can typecheck a large monorepo, and a Node heap
+// limit can quietly undo that: V8's own default is a quarter of physical
+// memory (~3 GiB on this instance), and the resident image once pinned it lower
+// still, at 1,536 MB (an eighth, meant as a fair share among its sixteen
+// seats) — below what this repository's own two `tsc` passes need: they die
+// with "heap out of memory" at 1,536 MB and pass at 3,072 MB with ~2 GB of RSS
+// each (measured). A per-process heap limit never shared memory between
+// processes (16 × 1,536 MB already exceeded the instance); the cgroup does
+// that. So the cap is a runaway guard, sized for the largest legitimate
+// command with room to spare, set explicitly in both execution images, and the
+// same in both.
+const HEAP_CAP_MIB = 8192;
+
+/** The `--max-old-space-size` (MiB) a Dockerfile's `ENV … NODE_OPTIONS=…` sets, or null when it sets none. */
+function heapCapMiB(lines: string[]): number | null {
+  for (const l of lines) {
+    const env = /^ENV\b.*\bNODE_OPTIONS=(\S+)/.exec(l);
+    if (!env) continue;
+    const size = /--max-old-space-size=(\d+)/.exec(env[1]);
+    return size ? Number(size[1]) : null;
+  }
+  return null;
+}
+
+describe("the execution images' Node heap", () => {
+  const caps = Object.fromEntries(EXECUTION_IMAGES.map((path) => [path, heapCapMiB(instructions(read(path)))]));
+
+  it("each execution image sets NODE_OPTIONS=--max-old-space-size explicitly — V8's default would be a quarter of the instance", () => {
+    for (const path of EXECUTION_IMAGES) expect(caps[path], `${path} sets a heap cap`).not.toBeNull();
+  });
+
+  it("the cap is 8 GiB of the 12 — the largest single command the instance was sized for fits, with room", () => {
+    for (const path of EXECUTION_IMAGES) expect(caps[path], path).toBe(HEAP_CAP_MIB);
+  });
+
+  it("the two images set the same cap, so a command that fits one cold thread fits a resident thread too", () => {
+    expect(new Set(Object.values(caps)).size).toBe(1);
+  });
+});

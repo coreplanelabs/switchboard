@@ -68,6 +68,10 @@ describe("the price table — costs.prices over the list", () => {
     expect(modelPriceOf("openai/gpt-5")).toBeUndefined();
     expect(modelPriceOf("anthropic/claude-future-9", prices)).toBeUndefined();
     expect(modelPriceOf("unknown", prices)).toBeUndefined();
+    // An aggregator's vendor-prefixed ref drops the provider prefix alone: the
+    // remainder is no list family, so its tokens stay unpriced (item 4b), never
+    // silently billed at Anthropic's native list.
+    expect(modelPriceOf("openrouter/anthropic/claude-sonnet-5", NO_PRICES)).toBeUndefined();
   });
 
   it("llmUsdOfUsage prices through the table: a configured provider's model at its rates, an overridden Anthropic model at the override, the rest at list", () => {

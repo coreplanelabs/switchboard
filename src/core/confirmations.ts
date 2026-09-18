@@ -26,15 +26,18 @@ import type { ConfirmationOffer, IncomingMessage } from "./types.js";
 //   POST /config/confirmations/put     {id, threadKey, requester, body, ttlMs} → {ok, expiresAt}   (replaces the thread's older row; the object stamps the expiry)
 //   POST /config/confirmations/consume {id, actorIds} → {row: {id, threadKey, requester, expiresAt, body}} | {refused: used | expired | foreign}
 //   POST /config/confirmations/cancel  {id, actorIds} → {ok} | {refused: used | foreign}
+//   POST /config/confirmations/cancel-by-thread {threadKey, actorIds} → {ok} | {refused: used | foreign}
 
-/** One pending confirmation as the store holds it: the message the sentence
- *  arrived as (its identity, thread and relay fields — the typed path reads
- *  them at the click; the sentence's attachments are not stored, see
- *  `confirmationMessageOf`), the command and its parsed, validated input, the
- *  capped receipt the record keeps, the offer's risk line and footer, the
- *  router's model (for the confirmed run's `route` event) and the expiry the
- *  config object stamped. */
-export interface Confirmation {
+/** A routed write's pending confirmation as the store holds it (record 0044):
+ *  the message the sentence arrived as (its identity, thread and relay fields
+ *  — the typed path reads them at the click; the sentence's attachments are
+ *  not stored, see `confirmationMessageOf`), the command and its parsed,
+ *  validated input, the capped receipt the record keeps, the offer's risk
+ *  line and footer, the router's model (for the confirmed run's `route`
+ *  event) and the expiry the config object stamped. A row stored before the
+ *  union existed carries no `kind`; the parsers read it as this one. */
+export interface RunConfirmation {
+  kind: "run";
   id: string;
   message: IncomingMessage;
   command: string;
@@ -46,15 +49,42 @@ export interface Confirmation {
   expiresAt: number;
 }
 
+/** A question's pending Yes (record 0054): the stored proposal — the person's
+ *  message with the fix applied, whose `userId` is the requester the store
+ *  judges the click against — the line the button shows, the evidence that
+ *  names the match, and the question's refusal code, which the redispatched
+ *  request's record names ([run-history.md](../../docs/reference/specs/run-history.md)
+ *  item 2). Yes hands `message` to `dispatch()` as the requester; No deletes
+ *  the row and runs nothing. */
+export interface RedispatchConfirmation {
+  kind: "redispatch";
+  id: string;
+  message: IncomingMessage;
+  line: string;
+  evidence: string;
+  code: string;
+  expiresAt: number;
+}
+
+/** One pending confirmation as the store holds it: the discriminated union of
+ *  the routed write's row and the question's Yes. */
+export type Confirmation = RunConfirmation | RedispatchConfirmation;
+
 /** What the door mints: the row before the store stamps its expiry. */
-export type PendingConfirmation = Omit<Confirmation, "expiresAt">;
+export type PendingConfirmation = Omit<RunConfirmation, "expiresAt"> | Omit<RedispatchConfirmation, "expiresAt">;
 
 /** Why a consume or a cancel refused: the row is gone — consumed, cancelled or
  *  never there (`used`); past its expiry (`expired`); someone else's (`foreign`). */
 export type ConfirmationRefusal = "used" | "expired" | "foreign";
 export const CONFIRMATION_REFUSALS: readonly ConfirmationRefusal[] = ["used", "expired", "foreign"];
 
-export type ConsumeOutcome = { ok: true; row: Confirmation } | { ok: false; refused: ConfirmationRefusal };
+/** A refusal carries the row when the store still holds one — `expired` (read,
+ *  then deleted) and `foreign` (kept for its requester) — so the click's
+ *  refusal can be recorded against the command that was bound (record 0054;
+ *  [run-history.md](../../docs/reference/specs/run-history.md) item 2). A
+ *  `used` row is gone, so that refusal names nothing. */
+export type ConsumeOutcome =
+  { ok: true; row: Confirmation } | { ok: false; refused: ConfirmationRefusal; row?: Confirmation };
 export type CancelOutcome = { ok: true } | { ok: false; refused: Exclude<ConfirmationRefusal, "expired"> };
 
 export interface ConfirmationStore {
@@ -69,6 +99,10 @@ export interface ConfirmationStore {
   /** Delete under the same requester check; a cancel and a consume on one id
    *  cannot both succeed. */
   cancel(id: string, actorIds: readonly string[]): Promise<CancelOutcome>;
+  /** Delete the thread's pending row under the same requester check — a typed
+   *  answer supersedes the button (record 0054), so a click cannot follow it.
+   *  A thread with no row is `used`. */
+  cancelByThread(threadKey: string, actorIds: readonly string[]): Promise<CancelOutcome>;
   describe(): string;
 }
 
@@ -109,8 +143,12 @@ export function confirmationFooter(scope: ConfirmScope): string {
 
 /** The offer as text — the line, the risk when the command declares one, the
  *  footer: what the record's `answer` keeps, and what a channel shows around
- *  its affordance. */
+ *  its affordance. A question's offer (record 0054) reads as the question the
+ *  renderer would have sent without a button — the producer's sentence, the
+ *  marker, the line as one code span, the evidence — so a client without
+ *  blocks still shows the line to type. */
 export function renderOffer(offer: ConfirmationOffer): string {
+  if (offer.question) return `${offer.question.text}\nDid you mean:\n\`${offer.line}\`\n\n${offer.question.evidence}`;
   return [offer.line, ...(offer.risk ? [offer.risk] : []), offer.footer].join("\n");
 }
 
@@ -140,10 +178,10 @@ function isMessage(v: unknown): v is IncomingMessage {
   );
 }
 
-/** A row the store wrote: the shape above, field by field. */
-export function isPendingConfirmation(v: unknown): v is PendingConfirmation {
+/** The routed write's shape, field by field — `kind` left aside, because a
+ *  row stored before the union existed carries none. */
+function isRunShape(v: Record<string, unknown>): boolean {
   return (
-    isRecord(v) &&
     typeof v.id === "string" &&
     isMessage(v.message) &&
     typeof v.command === "string" &&
@@ -155,8 +193,37 @@ export function isPendingConfirmation(v: unknown): v is PendingConfirmation {
   );
 }
 
+function isRedispatchShape(v: Record<string, unknown>): boolean {
+  return (
+    typeof v.id === "string" &&
+    isMessage(v.message) &&
+    typeof v.line === "string" &&
+    typeof v.evidence === "string" &&
+    typeof v.code === "string"
+  );
+}
+
+/** A row the store wrote, read back as the union: a `redispatch` row by its
+ *  `kind`, everything else — today's rows and every row stored before the
+ *  union existed, which carries no `kind` — as a `run` row, the `kind`
+ *  stamped on the way out (record 0054: old rows still parse). */
+export function parsePendingConfirmation(v: unknown): PendingConfirmation | undefined {
+  if (!isRecord(v)) return undefined;
+  if (v.kind === "redispatch")
+    return isRedispatchShape(v) ? (v as unknown as Omit<RedispatchConfirmation, "expiresAt">) : undefined;
+  if (v.kind !== undefined && v.kind !== "run") return undefined;
+  return isRunShape(v) ? ({ ...v, kind: "run" } as unknown as Omit<RunConfirmation, "expiresAt">) : undefined;
+}
+
+/** The stored row with the expiry the object stamped, or nothing. */
+export function parseConfirmation(v: unknown): Confirmation | undefined {
+  if (!isRecord(v) || typeof v.expiresAt !== "number") return undefined;
+  const pending = parsePendingConfirmation(v);
+  return pending ? ({ ...pending, expiresAt: v.expiresAt } as Confirmation) : undefined;
+}
+
 export function isConfirmation(v: unknown): v is Confirmation {
-  return isPendingConfirmation(v) && typeof (v as { expiresAt?: unknown }).expiresAt === "number";
+  return parseConfirmation(v) !== undefined;
 }
 
 function isRefusal(v: unknown): v is ConfirmationRefusal {
@@ -179,9 +246,10 @@ function judge(
   if (!row) return { ok: false, refused: "used" };
   if (kind === "consume" && row.expiresAt <= now) {
     rows.delete(id);
-    return { ok: false, refused: "expired" };
+    return { ok: false, refused: "expired", row };
   }
-  if (!actorIds.includes(row.message.userId)) return { ok: false, refused: "foreign" };
+  if (!actorIds.includes(row.message.userId))
+    return kind === "consume" ? { ok: false, refused: "foreign", row } : { ok: false, refused: "foreign" };
   rows.delete(id);
   return kind === "consume" ? { ok: true, row } : { ok: true };
 }
@@ -189,6 +257,13 @@ function judge(
 function replaceThreadRow(rows: Map<string, Confirmation>, row: Confirmation): void {
   for (const [id, r] of rows) if (r.message.threadKey === row.message.threadKey) rows.delete(id);
   rows.set(row.id, row);
+}
+
+/** The thread's pending row's id, for a cancel by thread: at most one exists
+ *  (`replaceThreadRow`); none is the cancel's `used`. */
+function threadRowId(rows: Map<string, Confirmation>, threadKey: string): string | undefined {
+  for (const [id, r] of rows) if (r.message.threadKey === threadKey) return id;
+  return undefined;
 }
 
 export class InMemoryConfirmationStore implements ConfirmationStore {
@@ -204,9 +279,15 @@ export class InMemoryConfirmationStore implements ConfirmationStore {
   }
   async consume(id: string, actorIds: readonly string[]): Promise<ConsumeOutcome> {
     const out = judge(this.rows, id, actorIds, this.clock(), "consume") as ConsumeOutcome;
-    return out.ok ? { ok: true, row: structuredClone(out.row) } : out;
+    if (out.ok) return { ok: true, row: structuredClone(out.row) };
+    return out.row ? { ...out, row: structuredClone(out.row) } : out;
   }
   async cancel(id: string, actorIds: readonly string[]): Promise<CancelOutcome> {
+    return judge(this.rows, id, actorIds, this.clock(), "cancel") as CancelOutcome;
+  }
+  async cancelByThread(threadKey: string, actorIds: readonly string[]): Promise<CancelOutcome> {
+    const id = threadRowId(this.rows, threadKey);
+    if (id === undefined) return { ok: false, refused: "used" };
     return judge(this.rows, id, actorIds, this.clock(), "cancel") as CancelOutcome;
   }
   describe(): string {
@@ -228,7 +309,10 @@ export class FileConfirmationStore implements ConfirmationStore {
     const rows = new Map<string, Confirmation>();
     if (!existsSync(this.path)) return rows;
     const raw = JSON.parse(readFileSync(this.path, "utf8")) as { confirmations?: unknown };
-    for (const v of Array.isArray(raw.confirmations) ? raw.confirmations : []) if (isConfirmation(v)) rows.set(v.id, v);
+    for (const v of Array.isArray(raw.confirmations) ? raw.confirmations : []) {
+      const row = parseConfirmation(v);
+      if (row) rows.set(row.id, row);
+    }
     return rows;
   }
   private write(rows: Map<string, Confirmation>): void {
@@ -250,6 +334,14 @@ export class FileConfirmationStore implements ConfirmationStore {
   }
   async cancel(id: string, actorIds: readonly string[]): Promise<CancelOutcome> {
     const rows = this.read();
+    const out = judge(rows, id, actorIds, this.clock(), "cancel") as CancelOutcome;
+    this.write(rows);
+    return out;
+  }
+  async cancelByThread(threadKey: string, actorIds: readonly string[]): Promise<CancelOutcome> {
+    const rows = this.read();
+    const id = threadRowId(rows, threadKey);
+    if (id === undefined) return { ok: false, refused: "used" };
     const out = judge(rows, id, actorIds, this.clock(), "cancel") as CancelOutcome;
     this.write(rows);
     return out;
@@ -288,10 +380,15 @@ export class WorkerConfirmationStore implements ConfirmationStore {
   }
   async consume(id: string, actorIds: readonly string[]): Promise<ConsumeOutcome> {
     const body = await this.post("/config/confirmations/consume", { id, actorIds });
-    if (isRefusal(body.refused)) return { ok: false, refused: body.refused };
     const stored = isRecord(body.row) ? body.row : undefined;
-    const row = stored && isRecord(stored.body) ? { ...stored.body, expiresAt: stored.expiresAt } : undefined;
-    if (!isConfirmation(row)) throw new Error("confirmation store answered a consume outside its contract");
+    const row = parseConfirmation(
+      stored && isRecord(stored.body) ? { ...stored.body, expiresAt: stored.expiresAt } : undefined,
+    );
+    if (isRefusal(body.refused))
+      // The row beside a refusal is best-effort context (an older object
+      // answers without it): absent or malformed, the refusal stands alone.
+      return { ok: false, refused: body.refused, ...(row ? { row } : {}) };
+    if (!row) throw new Error("confirmation store answered a consume outside its contract");
     return { ok: true, row };
   }
   async cancel(id: string, actorIds: readonly string[]): Promise<CancelOutcome> {
@@ -299,6 +396,12 @@ export class WorkerConfirmationStore implements ConfirmationStore {
     if (body.ok === true) return { ok: true };
     if (body.refused === "used" || body.refused === "foreign") return { ok: false, refused: body.refused };
     throw new Error("confirmation store answered a cancel outside its contract");
+  }
+  async cancelByThread(threadKey: string, actorIds: readonly string[]): Promise<CancelOutcome> {
+    const body = await this.post("/config/confirmations/cancel-by-thread", { threadKey, actorIds });
+    if (body.ok === true) return { ok: true };
+    if (body.refused === "used" || body.refused === "foreign") return { ok: false, refused: body.refused };
+    throw new Error("confirmation store answered a cancel-by-thread outside its contract");
   }
   describe(): string {
     return `state Worker ${this.baseUrl} (ConfigDO confirmations)`;

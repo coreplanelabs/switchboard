@@ -37,8 +37,8 @@ const THEMES = [
 
 const menuItems = computed(() => [
   // The docs and the settings cog sit in their own group: chrome, not sections
-  // of this app — the docs the only item here that leaves the page, settings a
-  // full page load like the sections.
+  // of this app — the docs the only item here that leaves the app, settings
+  // navigated in place like the sections.
   [
     { label: DOCS_LABEL, icon: DOCS_ICON, to: DOCS_HREF, target: "_blank" as const },
     {
@@ -54,7 +54,7 @@ const menuItems = computed(() => [
     icon: s.icon,
     type: "checkbox" as const,
     checked: s.id === props.nav,
-    // A full page load, like the desktop nav — the server seeds each section.
+    // In place, like the desktop nav — the router loads each section's seed.
     onSelect: () => browser.navigate(s.href),
   })),
   THEMES.map((t) => ({
@@ -82,13 +82,13 @@ const menuItems = computed(() => [
            own title beside them, subordinate — the product is always named, the
            page is what changes. -->
       <h1 class="flex min-w-0 items-center gap-2 text-base tracking-tight">
-        <a
+        <RouterLink
           class="home brand flex shrink-0 items-center gap-2 font-medium text-highlighted no-underline"
-          href="/threads"
+          to="/threads"
           aria-label="Switchboard home"
         >
           <BrandMark /><span class="wordmark">Switchboard</span>
-        </a>
+        </RouterLink>
         <span class="sep select-none text-dimmed" aria-hidden="true">/</span>
         <span class="title min-w-0 truncate font-normal text-toned">{{ title }}</span>
       </h1>

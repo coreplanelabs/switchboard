@@ -32,6 +32,9 @@
 //   POST /runs/session/search      {key, query, limit}                   → {hits, gaps}
 //   POST /runs/session/notepad     {key}                                 → {notepad: {text, updatedAt} | null}
 //   POST /runs/session/notepad/write {key, gen, text}                    → {ok} | 409 fenced | 400 over the size
+//   POST /runs/intake           {storeKey, key, receipt, windowMs?}      → {inserted, stored}   (insert-if-absent, item 59)
+//   POST /runs/intake/read      {storeKey, key}                          → {receipt: IntakeReceipt | null}
+//   POST /runs/intake/list      {storeKey, threadKey?, since?}           → {receipts: IntakeReceipt[]}
 
 import { RUN_ID_PATTERN, SESSION_KEY_PATTERN, type RunRecord } from "./runRecord.js";
 import type { Notepad, SessionHit } from "./runLedger/types.js";
@@ -49,8 +52,12 @@ import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./runLedger/sessionLog.js";
 import { assembleTranscript, chunkRows, turnRows, type AssembledTranscript } from "./runLedger/transcript.js";
 import {
   GEN_PATTERN,
+  isIntakeReceipt,
   TRANSCRIPT_REQUEST_BYTES,
   type AppendableEvent,
+  type IntakeQuery,
+  type IntakeReceipt,
+  type IntakeWriteResult,
   type ClaimRequest,
   type ClaimResult,
   type FenceResult,
@@ -73,6 +80,10 @@ export interface WorkerRunLedgerOptions {
   storeKey: string;
   /** The session log byte budget every owner claim carries (`RetentionPolicy.sessionLogMaxBytes`). */
   sessionLogMaxBytes?: number;
+  /** The reconnect catch-up window, carried on every intake write so the
+   *  object prunes by run-history item 59's bound (24 h, or the window plus
+   *  the drain deadline); absent, the object keeps the 24-hour floor. */
+  catchUpWindowMs?: number;
   fetch?: typeof fetch;
 }
 
@@ -196,7 +207,12 @@ export class WorkerRunLedger implements RunLedger {
     const rows: TranscriptRow[] = [];
     const attachments: TranscriptAttachment[] = [];
     for (const t of turns) {
-      const out = turnRows(t.idx, "message" in t ? t.message : { compaction: t.compaction });
+      const out = turnRows(
+        t.idx,
+        "message" in t ? t.message : { compaction: t.compaction },
+        {},
+        "message" in t ? t.actor : undefined,
+      );
       rows.push(...out.rows);
       attachments.push(...out.attachments);
     }
@@ -410,6 +426,33 @@ export class WorkerRunLedger implements RunLedger {
     this.checkIds(runId);
     const r = await this.post("/runs/live-events", { storeKey: this.opts.storeKey, runId });
     return Array.isArray(r.data.events) ? (r.data.events as AppendableEvent[]) : [];
+  }
+
+  async recordIntake(key: string, receipt: IntakeReceipt): Promise<IntakeWriteResult> {
+    const r = await this.post("/runs/intake", {
+      storeKey: this.opts.storeKey,
+      key,
+      receipt,
+      ...(this.opts.catchUpWindowMs !== undefined ? { windowMs: this.opts.catchUpWindowMs } : {}),
+    });
+    return {
+      inserted: r.data.inserted === true,
+      stored: isIntakeReceipt(r.data.stored) ? r.data.stored : receipt,
+    };
+  }
+
+  async readIntake(key: string): Promise<IntakeReceipt | undefined> {
+    const r = await this.post("/runs/intake/read", { storeKey: this.opts.storeKey, key });
+    return isIntakeReceipt(r.data.receipt) ? r.data.receipt : undefined;
+  }
+
+  async listIntake(query: IntakeQuery): Promise<IntakeReceipt[]> {
+    const r = await this.post("/runs/intake/list", {
+      storeKey: this.opts.storeKey,
+      ...(query.threadKey !== undefined ? { threadKey: query.threadKey } : {}),
+      ...(query.since !== undefined ? { since: query.since } : {}),
+    });
+    return Array.isArray(r.data.receipts) ? r.data.receipts.filter(isIntakeReceipt) : [];
   }
 
   async readTranscript(runId: string): Promise<AssembledTranscript> {

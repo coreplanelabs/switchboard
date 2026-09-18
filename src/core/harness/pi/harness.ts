@@ -45,20 +45,20 @@ import {
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
   hardStopNote,
-  softStopAnswer,
   softStopNote,
-  timeBudgetAnswer,
   timeBudgetInstruction,
   timeBudgetNote,
-  turnGuardAnswer,
   turnGuardInstruction,
   turnGuardNote,
   turnGuardPace,
+  windDownAnswer,
+  windDownEndingOf,
   windDownFailureNote,
   wrapUpInstruction,
   wrapUpNote,
   toolCutNote,
   unlabelledAnswer,
+  type WindDownEnding,
 } from "../windDown.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
@@ -100,9 +100,11 @@ import {
   piLaunchFiles,
   piRunPaths,
   piRunPathsAt,
+  piRunWire,
   type PiLaunchSpec,
   type PiRunPaths,
 } from "./process.js";
+import { piApiFor } from "../piAi.js";
 import { parsePiLine } from "./protocol.js";
 import { RELAY_POLL_WINDOW_MS, stillRunningNote, type LiveHarness, type RelayedToolAnswer } from "./relay.js";
 import type { ToolRuleContext } from "./toolRules.js";
@@ -532,6 +534,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
 
   let writeUp: WriteUp | undefined;
   let writeUpAt: number | undefined;
+  /** The words pi's last compaction failed in for good (item 7): a policy
+   *  refusal of the summary, a summary over its cap — never a transient the
+   *  next try would ride out. The relay takes it when the extension asks how
+   *  the next compaction is written; a compaction that lands clears it. */
+  let compactionFailure: string | undefined;
   /** The wrap-up steer the write-up sent — the very object the gate holds or
    *  the transport re-sends — so a loop's end can tell whether pi ever got it. */
   let writeUpSteer: Record<string, unknown> | undefined;
@@ -581,7 +588,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       return "the run has hit its turn guard: no more tool calls — write your final answer now";
     return "an operator asked this run to stop: no more tool calls — write your final answer now";
   };
-  const rules: ToolRuleContext = { ...run.rules, identity: run.agent.identity };
+  // The loop's clock rides on the rules: a bash call whose explicit timeout
+  // reaches past `loopEnd` — the moment the cut below fires — is refused at
+  // the gate before it runs (harness-pi item 7), not cut at the end.
+  const rules: ToolRuleContext = { ...run.rules, identity: run.agent.identity, loopEndsIn: () => loopEnd - now() };
   // The waits on the bridge pace with the log poll: a test that polls every millisecond is not made to wait fifty.
   const seenTick = Math.min(CALL_SEEN_TICK_MS, deps.pollMs ?? CALL_SEEN_TICK_MS);
   const live: LiveHarness = {
@@ -594,6 +604,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     toolSpan: (callId) => bridge.openSpan(callId),
     gateSaw: (callId) => bridge.gateSaw(callId),
     toolsBlocked,
+    takeCompactionFailure: () => {
+      const failure = compactionFailure;
+      compactionFailure = undefined;
+      return failure;
+    },
     callSeen: async (callId) => {
       for (let waited = 0; !bridge.callOpen(callId) && waited < CALL_SEEN_WAIT_MS; waited += seenTick)
         await deps.sleep(seenTick);
@@ -856,6 +871,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         paths,
         model: { id: run.model.id, providerType: run.model.providerType, maxTokens: run.agent.maxTokens },
         harnessUrl: deps.harnessUrl,
+        ...(run.card ? { card: run.card } : {}),
         ...(run.effort ? { effort: run.effort } : {}),
         identity: run.agent.identity,
         system: run.system,
@@ -931,7 +947,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               model: {
                 provider: run.model.provider,
                 id: run.model.id,
-                api: run.model.providerType === "anthropic" ? "anthropic-messages" : "openai-completions",
+                api: piApiFor(piRunWire({ model: { providerType: run.model.providerType }, card: run.card })),
               },
               at: now(),
             },
@@ -1675,7 +1691,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       if (obs.message?.role === "user") steerEchoed(obs.message);
       if (obs.message && (await mirror.onMessage(obs.message, bridge.turns))) held();
+      // A compaction that failed for good arms the bot's pointer summary for
+      // the next one (item 7): pi tries again at every turn boundary while
+      // the window stays over the threshold, and the same words are refused
+      // again, so the try after this one is written without a model call. A
+      // transient failure — an overload, a cut stream — arms nothing: pi's
+      // next try is the retry.
+      if (obs.compactionFailed !== undefined && !isTransientProviderError(obs.compactionFailed))
+        compactionFailure = obs.compactionFailed;
       if (obs.compaction) {
+        compactionFailure = undefined;
         if (await mirror.onCompaction(obs.compaction, bridge.turns)) held();
         // The notepad's second read point (session-log item 10): after every
         // compaction, at pi's next turn boundary, unless the run is winding
@@ -1832,6 +1857,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       throw new Error(`pi exited before the run settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`);
     };
     let answer: string;
+    let ending: WindDownEnding | undefined;
     // The wind-down owns the ending (item 15): a transport loss, or the word,
     // met while the finale was being aborted is said on the record and never
     // judged — no probe, no verdict, no thrown transport error — and the
@@ -1863,17 +1889,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         );
       }
       const text = bridge.answer() ?? "";
-      answer =
-        writeUp?.kind === "time"
-          ? timeBudgetAnswer(text, run.agent.maxMinutes, writeUpFailed)
-          : writeUp?.kind === "turns"
-            ? turnGuardAnswer(text, writeUp.pace, writeUpFailed)
-            : writeUp?.kind === "soft" || stopMode === "soft"
-              ? softStopAnswer(text, writeUpFailed)
-              : // A wrap-up pi never saw clears the label, never the failure the
-                // reader had (harness-pi item 16): the model's own text with the
-                // failure after it, or the failure alone when pi wrote nothing.
-                unlabelledAnswer(text, writeUpFailed);
+      // The ending the run loop composes the thread's answer from once its
+      // post-steps have run (item 6); the answer here is the same words with
+      // no facts. A wrap-up pi never saw clears the label, never the failure
+      // the reader had (harness-pi item 16): the model's own text with the
+      // failure after it, or the failure alone when pi wrote nothing.
+      ending = windDownEndingOf(writeUp ?? (stopMode === "soft" ? { kind: "soft" } : undefined), text, writeUpFailed);
+      answer = ending ? windDownAnswer(ending, run.agent.maxMinutes) : unlabelledAnswer(text, undefined);
     }
     // The loop is over: its `run.agent` ends here, as the native loop's does,
     // before any follow-up turn — each of those opens a `run.agent` of its own.
@@ -1914,6 +1936,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
        *  a wait under the turn gives up here, never at the deadline. */
       const turnEnd = turnDeadline + turnLease.finaleMs;
       input.toolContext.remainingMs = () => turnDeadline - now();
+      // The turn's loop ends at its own deadline: a timeout is judged against that, not the run's loop end.
+      live.rules = { ...rules, loopEndsIn: () => turnLease.loopEnd - now() };
       const turnsBefore = bridge.turns;
       // The loop's write-up, when it took one, is spent: the turn has its own budget.
       clearWriteUp();
@@ -2110,10 +2134,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           throw new Error(`the model call failed: ${turnError}`);
         }
         const text = bridge.answer() ?? "";
-        if (writeUp?.kind === "time") return timeBudgetAnswer(text, input.maxMinutes, writeUpFailed);
-        if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
-        if (writeUp?.kind === "soft") return softStopAnswer(text, writeUpFailed);
-        return unlabelledAnswer(text, writeUpFailed);
+        const turnEnding = windDownEndingOf(writeUp, text, writeUpFailed);
+        return turnEnding ? windDownAnswer(turnEnding, input.maxMinutes) : unlabelledAnswer(text, undefined);
       } catch (err) {
         turnFailed = true;
         // The same fail-by-name as the loop's: the note carries the vanished
@@ -2123,6 +2145,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       } finally {
         deps.bearers?.clearTurn(run.runId);
         live.toolContext = runContext;
+        live.rules = rules;
         bridge.under(undefined);
         // A turn that threw before its loop's end dropped nothing yet: nothing
         // of it may reach the next turn either.
@@ -2130,7 +2153,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         turnSpan?.end(hardStopped || bypass || turnFailed ? "error" : "ok");
       }
     };
-    return { answer, followUp, remainingMs: () => deadline - now(), end };
+    return { answer, ...(ending ? { ending } : {}), followUp, remainingMs: () => deadline - now(), end };
   } catch (err) {
     // A loop that throws — a refused prompt, a dead pi, a failed model call, a
     // gate bypass — is a failed loop, and its span says so. The follow-ups it

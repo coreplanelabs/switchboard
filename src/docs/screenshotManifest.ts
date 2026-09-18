@@ -98,7 +98,7 @@ export const SURFACES = [
     name: "unit-page-coding-only",
     path: "/runs/unit/plan-acme-3:U14",
     page: "web/src/pages/UnitRoutePage.vue",
-    what: "a unit whose review thread does not exist yet, its coding round in flight",
+    what: "a unit in its first coding round, one thread, nothing reviewed yet",
   },
   {
     name: "unit-search",

@@ -14,12 +14,16 @@ import type { BoundaryScope, ProfileRefusal, ProfileResolution, RunProfile } fro
 import type { RequestDirectives } from "../../directives.js";
 import type { Capabilities } from "../capabilities.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
-import { currentPrHeadSha, type RepoContext } from "../repoContext.js";
+import { currentPrHeadSha, type RepoContext, type ResidentSlugs } from "../repoContext.js";
+import { nearMatch } from "../nearMatch.js";
+import { residentSlugsLister } from "../../execution/factory.js";
 import { checkPrHeadPreflight, guardAttachedHead } from "../reviewRound.js";
 import type { CardShell } from "../statusCardFrame.js";
 import type { Clock, Span } from "../trace/types.js";
 import type { ChannelIO, IncomingMessage, StatusHandle } from "../types.js";
 import type { ResumeContext } from "./admission.js";
+import { refusalOf, type Guess, type Refusal } from "../refusal.js";
+import { REFUSAL_SENTENCES } from "./reply.js";
 
 /** What the gates read off the dispatcher's dependencies. `CoreDeps` extends
  *  this; a caller's shape is unchanged. */
@@ -38,6 +42,14 @@ export interface AuthorizeDeps {
    * Injectable so tests assert the note without a network call.
    */
   fetchPrHead?: (pr: { repo: string; number: number }) => Promise<string | undefined>;
+  /**
+   * The resident registry listing, for the not-onboarded gate's best guess
+   * (record 0054): one bounded call — the probe's timeout, skipped inside a
+   * probe-outage window — whose failure leaves the question without a guess.
+   * Default: the production lister over the configured resident. Injectable so
+   * tests assert the guess without a network call.
+   */
+  residentSlugs?: ResidentSlugs;
 }
 
 /** How a gate ended: the request goes on, or it was refused — the thread has
@@ -50,7 +62,10 @@ export type Gate<Reason extends string> = { kind: "allowed" } | { kind: "refused
 export interface GateContext {
   msg: IncomingMessage;
   io: ChannelIO;
-  refuse: <T>(outcome: string, fn: () => Promise<T>) => Promise<T>;
+  /** The dispatch's refusal wrap (record 0054): the site's `Refusal` stamped on
+   *  the span, the root and the outcome, the side work (a card close, a
+   *  release) run inside the span, and the sentence rendered in one place. */
+  refuse: (refusal: Refusal, side?: () => Promise<void>) => Promise<void>;
 }
 
 /** The ack card a gate that runs after it closes with its reason before replying. */
@@ -73,13 +88,14 @@ export async function authorizeAgent(
   deps: AuthorizeDeps,
   ctx: GateContext & { agentName: string },
 ): Promise<Gate<"agent_allowlist">> {
-  const { msg, io, refuse, agentName } = ctx;
+  const { msg, refuse, agentName } = ctx;
   // Authorization gate: checked against the *resolved* agent and invoking
   // user, so no config layer (directives, user or channel scope) bypasses it.
   if (!deps.config.canRunAgent(chatActorOf(deps.config, msg), agentName)) {
-    await refuse("agent_allowlist", () =>
-      io.reply(
-        `🚫 You're not on the allowlist for the \`${agentName}\` agent. Ask ${deps.config.adminsHint()} for access.`,
+    await refuse(
+      refusalOf(
+        "agent_allowlist",
+        REFUSAL_SENTENCES.agent_allowlist({ agent: agentName, adminsHint: deps.config.adminsHint() }),
       ),
     );
     return { kind: "refused", reason: "agent_allowlist" };
@@ -105,11 +121,11 @@ export async function authorizeProfile(
   deps: AuthorizeDeps,
   ctx: GateContext & { agent: AgentDef; resolution: ProfileResolution },
 ): Promise<ProfileGate> {
-  const { msg, io, refuse, agent, resolution } = ctx;
+  const { msg, refuse, agent, resolution } = ctx;
   if (resolution.kind === "profile") return { kind: "allowed", profile: resolution.profile };
   const { refusal } = resolution;
   console.log(`[dispatch] ${msg.threadKey} not started: profile bounded (${agent.name}: ${refusalSummary(refusal)})`);
-  await refuse("profile_bounded", () => io.reply(profileRefusalReply(agent.name, refusal, deps.config.adminsHint())));
+  await refuse(refusalOf("profile_bounded", profileRefusalReply(agent.name, refusal, deps.config.adminsHint())));
   return { kind: "refused", reason: "profile_bounded" };
 }
 
@@ -204,6 +220,38 @@ export function profileRefusalReply(agentName: string, refusal: ProfileRefusal, 
   return `🚫 \`${agentName}\` runs on a \`${refusal.needs}\` machine; ${who} only ${allowed}. ${capitalize(how)}.`;
 }
 
+/** Escape a literal for a regular expression. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The person's message with the rejected slug corrected — the line the
+ *  question shows them to type. The whole token, case-insensitively; a message
+ *  that does not carry the slug has no line to correct, so there is no guess. */
+function correctedMessage(msg: IncomingMessage, slug: string, match: string): IncomingMessage | undefined {
+  const pattern = new RegExp(`(^|[^A-Za-z0-9._/-])${escapeRegExp(slug)}(?![A-Za-z0-9._/-])`, "gi");
+  const text = msg.text.replace(pattern, (_m, lead: string) => `${lead}${match}`);
+  return text === msg.text ? undefined : { ...msg, text };
+}
+
+/**
+ * The not-onboarded gate's best guess (record 0054): one registry call for the
+ * resident list — bounded like the probe and skipped inside a probe-outage
+ * window, both the lister's own — then one near-match pass. No list, no unique
+ * match, or a message that does not carry the slug → no guess; the question
+ * still stands without one.
+ */
+async function onboardedGuess(deps: AuthorizeDeps, msg: IncomingMessage, slug: string): Promise<Guess | undefined> {
+  const list = deps.residentSlugs ?? residentSlugsLister(deps.config.config.execution?.resident);
+  const candidates = await list?.().catch(() => undefined);
+  if (!candidates || candidates.length === 0) return undefined;
+  const near = nearMatch(slug, candidates);
+  if (!near.guess) return undefined;
+  const proposal = correctedMessage(msg, slug, near.guess);
+  if (!proposal) return undefined;
+  return { proposal, line: proposal.text, evidence: `${near.reason ?? `\`${near.guess}\``}, which is onboarded` };
+}
+
 /**
  * The repository gates, once the target has landed and the ack card is up: a
  * repo-needing agent whose bare slug its vet refused — the resident registry's
@@ -216,7 +264,7 @@ export async function authorizeRepo(
   deps: AuthorizeDeps,
   ctx: GateContext & GateCard & { agent: AgentDef; profile: RunProfile; needsRepo: boolean; repoCtx: RepoContext },
 ): Promise<Gate<"repo_not_onboarded" | "repo_not_visible" | "repo_unverified" | "repo_access">> {
-  const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, needsRepo, repoCtx } = ctx;
+  const { msg, refuse, card, shell, closeLines, clock, agent, profile, needsRepo, repoCtx } = ctx;
   // A `repo-cold` run's vet was GitHub's, not the registry's
   // (docs/reference/specs/execution.md item 18): a refused slug is a repository
   // this installation cannot see — a resident fleet, or its absence, has
@@ -226,15 +274,11 @@ export async function authorizeRepo(
     if (repoCtx.rejectedRepo) {
       const slug = repoCtx.rejectedRepo;
       console.log(`[dispatch] ${msg.threadKey} not started: repo not visible (${slug}: GitHub answered 404)`);
-      await refuse("repo_not_visible", async () => {
-        await card.done(
+      await refuse(refusalOf("repo_not_visible", REFUSAL_SENTENCES.repo_not_visible({ slug, agent: agent.name })), () =>
+        card.done(
           shell.close({ kind: "not_started", icon: "📦", reason: "repo not visible", ...closeLines(clock(), false) }),
-        );
-        await io.reply(
-          `📦 \`${slug}\` is not a repository this installation can see — GitHub answered 404 — so I did not start ${aRun(agent.name)} for it. ` +
-            `The repository is outside the Switchboard GitHub App installation (\`github_repos\` lists the reachable ones), or the name is wrong.`,
-        );
-      });
+        ),
+      );
       return { kind: "refused", reason: "repo_not_visible" };
     }
     if (repoCtx.unverifiedRepo) {
@@ -242,19 +286,18 @@ export async function authorizeRepo(
       console.log(
         `[dispatch] ${msg.threadKey} not started: repo could not be verified (${slug}: GitHub did not answer)`,
       );
-      await refuse("repo_unverified", async () => {
-        await card.done(
-          shell.close({
-            kind: "not_started",
-            icon: "📦",
-            reason: "repo could not be verified",
-            ...closeLines(clock(), false),
-          }),
-        );
-        await io.reply(
-          `⚠️ I couldn't verify \`${slug}\` against GitHub — it didn't answer — so I did not start ${aRun(agent.name)} rather than guess which repository you meant. Try again in a minute.`,
-        );
-      });
+      await refuse(
+        refusalOf("repo_unverified", REFUSAL_SENTENCES.repo_unverified({ slug, agent: agent.name, via: "github" })),
+        () =>
+          card.done(
+            shell.close({
+              kind: "not_started",
+              icon: "📦",
+              reason: "repo could not be verified",
+              ...closeLines(clock(), false),
+            }),
+          ),
+      );
       return { kind: "refused", reason: "repo_unverified" };
     }
   }
@@ -277,16 +320,18 @@ export async function authorizeRepo(
     const onboardHint = deps.config.canManageRepos(chatActorOf(deps.config, msg))
       ? `Onboard it (\`repo onboard ${slug}\`)`
       : `Ask ${deps.config.adminsHint()} to onboard it (\`repo onboard ${slug}\`)`;
-    await refuse("repo_not_onboarded", async () => {
-      await card.done(
-        shell.close({ kind: "not_started", icon: "📦", reason: "repo not onboarded", ...closeLines(clock(), false) }),
-      );
-      await io.reply(
-        `📦 \`${slug}\` is not onboarded as a resident, so I did not start a *${agent.name}* run for it. ` +
-          `${onboardHint} for a warm, deps-ready environment, or name the repository by URL ` +
-          `(https://github.com/${slug}) to run in a cold per-thread sandbox.`,
-      );
-    });
+    const guess = await onboardedGuess(deps, msg, slug);
+    await refuse(
+      refusalOf(
+        "repo_not_onboarded",
+        REFUSAL_SENTENCES.repo_not_onboarded({ slug, agent: agent.name, onboardHint }),
+        guess ? { guess } : undefined,
+      ),
+      () =>
+        card.done(
+          shell.close({ kind: "not_started", icon: "📦", reason: "repo not onboarded", ...closeLines(clock(), false) }),
+        ),
+    );
     return { kind: "refused", reason: "repo_not_onboarded" };
   }
 
@@ -301,20 +346,18 @@ export async function authorizeRepo(
     console.log(
       `[dispatch] ${msg.threadKey} not started: repo could not be verified (${slug}: resident registry unreachable)`,
     );
-    await refuse("repo_unverified", async () => {
-      await card.done(
-        shell.close({
-          kind: "not_started",
-          icon: "📦",
-          reason: "repo could not be verified",
-          ...closeLines(clock(), false),
-        }),
-      );
-      await io.reply(
-        `⚠️ I couldn't verify that \`${slug}\` is an onboarded repo — the resident registry didn't answer — so I did not start a *${agent.name}* run rather than guess which repo you meant. ` +
-          `Try again in a minute, or name the repository by URL (https://github.com/${slug}) to run in a cold per-thread sandbox.`,
-      );
-    });
+    await refuse(
+      refusalOf("repo_unverified", REFUSAL_SENTENCES.repo_unverified({ slug, agent: agent.name, via: "registry" })),
+      () =>
+        card.done(
+          shell.close({
+            kind: "not_started",
+            icon: "📦",
+            reason: "repo could not be verified",
+            ...closeLines(clock(), false),
+          }),
+        ),
+    );
     return { kind: "refused", reason: "repo_unverified" };
   }
 
@@ -323,22 +366,16 @@ export async function authorizeRepo(
   // refused user must see why, never get a silent per-thread fallback.
   if (needsRepo && repoCtx.repo && !deps.config.canUseRepo(chatActorOf(deps.config, msg), repoCtx.repo)) {
     const repo = repoCtx.repo;
-    await refuse("repo_access", async () => {
-      await card.done(
-        shell.close({ kind: "not_started", icon: "🚫", reason: "repo access", ...closeLines(clock(), false) }),
-      );
-      await io.reply(
-        `🚫 You're not on the allowlist for the \`${repo}\` repo environment. Ask ${deps.config.adminsHint()} for access.`,
-      );
-    });
+    await refuse(
+      refusalOf("repo_access", REFUSAL_SENTENCES.repo_access({ repo, adminsHint: deps.config.adminsHint() })),
+      () =>
+        card.done(
+          shell.close({ kind: "not_started", icon: "🚫", reason: "repo access", ...closeLines(clock(), false) }),
+        ),
+    );
     return { kind: "refused", reason: "repo_access" };
   }
   return { kind: "allowed" };
-}
-
-/** `a *coding* run`, `an *explore* run`: the agent's name with its article. */
-function aRun(agentName: string): string {
-  return `${/^[aeiou]/i.test(agentName) ? "an" : "a"} *${agentName}* run`;
 }
 
 /**
@@ -350,7 +387,7 @@ function aRun(agentName: string): string {
 export async function authorizePrHead(
   ctx: GateContext & GateCard & { agent: AgentDef; directives: RequestDirectives; repoCtx: RepoContext },
 ): Promise<Gate<"pr_head_unknown">> {
-  const { msg, io, refuse, card, shell, closeLines, clock, agent, directives, repoCtx } = ctx;
+  const { msg, refuse, card, shell, closeLines, clock, agent, directives, repoCtx } = ctx;
   // Unknown-head check (docs/reference/specs/agent-review.md item 11): a review whose PR
   // head could not be resolved is a guaranteed refusal downstream — not
   // started instead, before any attach, one named reply (the decision and
@@ -359,12 +396,11 @@ export async function authorizePrHead(
   const preflight = checkPrHeadPreflight({ agent, requestText: directives.text, repoCtx });
   if (!preflight.ok) {
     console.log(`[review] ${msg.threadKey} not started: PR head unknown (${preflight.where})`);
-    await refuse("pr_head_unknown", async () => {
-      await card.done(
+    await refuse(refusalOf("pr_head_unknown", preflight.reply), () =>
+      card.done(
         shell.close({ kind: "not_started", icon: "🔀", reason: "PR head unknown", ...closeLines(clock(), false) }),
-      );
-      await io.reply(preflight.reply);
-    });
+      ),
+    );
     return { kind: "refused", reason: "pr_head_unknown" };
   }
   return { kind: "allowed" };
@@ -397,7 +433,7 @@ export async function authorizeAttachedHead(
       root: Span;
     },
 ): Promise<AttachedHeadGate> {
-  const { msg, io, refuse, card, shell, closeLines, clock, agent, resume, selection, root } = ctx;
+  const { msg, refuse, card, shell, closeLines, clock, agent, resume, selection, root } = ctx;
   const { executor, resident, binding } = selection;
   let repoCtx = ctx.repoCtx;
   // Attach-head check (docs/reference/specs/agent-review.md item 10): for a PR
@@ -432,13 +468,11 @@ export async function authorizeAttachedHead(
       verifiedAtAttach = true;
       headAdopted = true;
     } else if (guard.outcome === "refused") {
-      const reply = guard.reply;
-      await refuse("branch_moved", async () => {
+      await refuse(refusalOf("branch_moved", guard.reply), async () => {
         if (executor.release) await executor.release("always").catch(() => {});
         await card.done(
           shell.close({ kind: "not_started", icon: "🔀", reason: "branch moved", ...closeLines(clock(), false) }),
         );
-        await io.reply(reply);
       });
       return { kind: "refused", reason: "branch_moved" };
     }

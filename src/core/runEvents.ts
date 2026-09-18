@@ -1,8 +1,9 @@
 // Types only, and from the zod-free module deliberately: this file is part of
 // the node-free contract the memory Worker and web app compile with their own
 // tsconfigs — importing prDescription.ts would drag zod into those graphs.
-import type { PrDescription, RenderedPointer } from "./prDescriptionTypes.js";
+import type { DescriptionIssue, PrDescription, RecordedJson, RenderedPointer } from "./prDescriptionTypes.js";
 import type { HarnessScope } from "./harness/scope.js";
+import type { ModelCard } from "./modelCard.js";
 
 /** The `pr_description` review artifact minus the event envelope
  *  (docs/reference/specs/reading-diff.md item 7). */
@@ -122,17 +123,38 @@ export type RunNoteKind =
    *  (docs/reference/specs/run-history.md item 37); the summary says how many calls were
    *  in flight at the kill and how each was settled. Published by the runner. */
   | "resumed"
+  /** A control was decided against the model card and is not native (record
+   *  0052): a fallback (`applied` differs from `asked`, `vouched` true) or
+   *  an unvouched send (`vouched` false). One note per degraded control,
+   *  published by the dispatcher before the first turn. `why` says what the
+   *  card could not vouch for; `summary` is the human line. */
+  | "control_degraded"
   /** What the run's session seed could not do (docs/reference/specs/session-log.md
    *  item 9): the log could not be read so the run seeds from the channel, the
    *  newest turn alone was over the seed budget, the previous run's end was
    *  unknown so no line since could be told apart. One note per reason,
    *  published by the dispatcher before the first turn. */
   | "seed"
+  /** This run is a question's Yes (record 0054;
+   *  docs/reference/specs/run-history.md item 2): the stored proposal went
+   *  back through `dispatch()` as the requester, and the summary names the
+   *  question's refusal code. Published by the dispatcher before the first
+   *  turn. */
+  | "redispatch"
   /** A coding run pushed onto a branch that already heads an open PR without
    *  resubmitting the PR description, and the same run is being given one
    *  bounded extra model turn to submit it (docs/reference/specs/pr-description.md
    *  item 5). Published by the dispatcher before that turn. */
   | "description_turn"
+  /** `submit_pr_description` refused the object (docs/reference/specs/pr-description.md
+   *  item 5): the summary counts the fields over their cap and names them
+   *  (or the issues, when none is a cap), `description` is the object as
+   *  submitted — redacted like the accepted `pr_description` event's, and not
+   *  necessarily a valid `PrDescription` — and `issues` the refusal's list
+   *  with each cap's count to remove and the prefix that fits, so the record
+   *  says what the model changed between one submit and the next. Published
+   *  by the tool, before it answers. */
+  | "description_refused"
   /** A review run's loop ended on a pull request without `submit_verdict`, and
    *  the same run is being given one bounded extra model turn to call it
    *  (docs/reference/specs/agent-review.md item 5; verdictTurn.ts). Published by
@@ -217,6 +239,18 @@ export type RunNoteKind =
    *  item 7): the summary names the tool and the rule; the model read the same
    *  reason as the tool's result. Published by the bot's authorize route. */
   | "tool_refused"
+  /** OpenCode withdrew a pending ask before the gate's reply to it landed
+   *  (harness.md item 2): the server answered the reply 404 and its pending
+   *  asks no longer listed the ask — the gate refused a sibling call of the
+   *  same step, and at a reject the binary declines every other pending ask
+   *  (`packages/core/src/permission.ts:203-220` at the pinned v2.0.3) and
+   *  ends their step (measured in `opencode/testing/realDriver.test.ts`).
+   *  The summary names the call, the reply the gate had decided and the
+   *  sibling's refusal when the step has one (or says no refusal is on the
+   *  record). Information, not a failure: nothing ran that the gate did not
+   *  decide, the loop is not stopped, and the step ends by the server's word.
+   *  Published by the OpenCode bridge. */
+  | "ask_withdrawn"
   /** An OpenCode tool settled under a step this loop never saw start and the
    *  settle was set aside (harness.md item 13): an earlier execution's late
    *  result — the pinned binary's ordinary shape after a hung call's interrupt
@@ -248,7 +282,15 @@ export type RunNoteKind =
   /** The native loop's stuck-loop guard: the same tool call failed identically
    *  six times in a row and the run was forced into its write-up. Written by
    *  no loop since that loop's deletion; a record from before it may carry it. */
-  | "stuck_loop";
+  | "stuck_loop"
+  /** OpenCode's reject cascade ended the execution `interrupted` after the bot
+   *  refused one of a step's two (or more) calls — the binary declines every
+   *  other pending ask at a reject and ends the step `session.step.failed
+   *  {aborted}`, the execution ending `session.execution.interrupted` — and the
+   *  model never read the refusal. The loop re-prompts with the refusal so the
+   *  model can continue, exactly as it does after a single refusal. Published
+   *  by the OpenCode bridge. */
+  | "decline_cascade";
 
 /** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
  *  this; adding a kind to the union without adding it here is a type error). */
@@ -269,8 +311,11 @@ export const RUN_NOTE_KINDS = [
   "mcp_unavailable",
   "follow_up",
   "resumed",
+  "control_degraded",
   "seed",
+  "redispatch",
   "description_turn",
+  "description_refused",
   "verdict_turn",
   "cold_sandbox",
   "ledger_untracked",
@@ -283,11 +328,13 @@ export const RUN_NOTE_KINDS = [
   "harness_error",
   "policy_refusal",
   "tool_refused",
+  "ask_withdrawn",
   "settle_set_aside",
   "tool_unnamed",
   "directory_reached",
   "budget_salvage",
   "stuck_loop",
+  "decline_cascade",
 ] as const satisfies readonly RunNoteKind[];
 type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] ? true : never;
 const _everyKindListed: _EveryKindListed = true;
@@ -389,6 +436,7 @@ export function isHeadMaterial(event: RunEvent): boolean {
         event.kind === "mcp_unavailable" ||
         event.kind === "spans_dropped" ||
         event.kind === "cold_sandbox" ||
+        event.kind === "control_degraded" ||
         event.kind === "ledger_untracked" ||
         event.kind === "rebind_refused"
       );
@@ -462,7 +510,7 @@ export type RouteInputValue = RouteInputLeafOrList | RouteInputObject3;
  *  `pasted` — the typed line that followed a hand-back in its thread, with the
  *  same receipt, ran. A routed read carries no outcome: it is not a decision
  *  about a state change. */
-export type RouteOutcome = "hand_back" | "offered" | "confirmed" | "pasted";
+export type RouteOutcome = "hand_back" | "offered" | "confirmed" | "pasted" | "refused";
 
 export type RunEvent =
   /** `callId` is the provider's tool_use id — the explicit pair key between a
@@ -525,10 +573,24 @@ export type RunEvent =
       summary: string;
       mode?: StopMode;
       actor?: RunActor;
+      /** On a `control_degraded` note only (record 0052): which control,
+       *  the word asked, the word applied, whether a layer vouched for the
+       *  applied word, and what the card could not vouch for. */
+      control?: string;
+      asked?: string;
+      applied?: string;
+      vouched?: boolean;
+      why?: string;
       /** On a `spans_dropped` note only (docs/reference/specs/tracing.md): the runner-clock
        *  interval the dropped setup records covered — a `not recorded` loss. */
       from?: number;
       to?: number;
+      /** On a `description_refused` note only: the refused object as submitted
+       *  (JSON, not necessarily a valid `PrDescription`; `RecordedJson` says
+       *  why it is typed level by level), every string leaf redacted, and the
+       *  issues the refusal named. */
+      description?: RecordedJson;
+      issues?: DescriptionIssue[];
       spanId?: string;
       seq?: number;
       at?: number;
@@ -563,6 +625,13 @@ export type RunEvent =
        *  run sent rather than a person (a parent's `send_to_run`), that run's
        *  id (docs/reference/specs/agent-conductor.md item 8). */
       source?: { url?: string; channel?: string; user?: string; run?: string };
+      /** How the turn was delivered when it consumed a unit's thread events
+       *  (record 0051's mode-as-receipt rule): the mode read off the owner's state when
+       *  each event arrived — a receipt, never a switch — and the sequence
+       *  numbers consumed, so the record names the events it folded. Absent on
+       *  every run that consumed none. */
+      mode?: "steer" | "wake" | "interrupt";
+      consumed?: number[];
       seq?: number;
       at?: number;
     }
@@ -624,6 +693,12 @@ export type RunEvent =
        *  written before the word was a scope setting. */
       harnessScope?: HarnessScope;
       effort?: string;
+      /** The model card this run resolved before its first call (record
+       *  0052): the wire, vendor, levels, cap field, window, inputs, cache rule
+       *  and price source, each with the layer that named it. Absent on a
+       *  command run and on a record written before the card existed.
+       *  Additive. */
+      card?: ModelCard;
       repo?: string;
       ref?: string;
       pr?: number;
@@ -783,6 +858,13 @@ export type RunEvent =
    *  `base` is absent when the spawn knew none; the post-step then falls to
    *  the coordinator store's `instance.base`. Additive: unknown → ignored. */
   | { type: "coordinator_tag"; parentInstanceId: string; unit?: string; base?: string; seq?: number; at?: number }
+  /** The plan runner instance a ship run's hand-off created (record 0051 R2;
+   *  docs/reference/specs/run-history.md item 2): published by the ship branch
+   *  after `handOffToCoordinator` succeeds, straight to the registry like
+   *  `pr_opened`, and projected onto `RunRecord.instanceId` the way
+   *  `coordinator_tag` is — so the thread's owner rule can find the instance
+   *  from the page's ship run. Additive: unknown → ignored. */
+  | { type: "ship_handoff"; instanceId: string; seq?: number; at?: number }
   /** The review post-step's outcome when the verdict landed
    *  (docs/reference/specs/agent-review.md item 18): the pull request it was
    *  posted to, the head it was pinned to (the carried head after a rebase,
@@ -864,10 +946,22 @@ export type RunEvent =
       input?: { readonly [key: string]: RouteInputValue };
       receipt?: string;
       outcome?: RouteOutcome;
+      /** The refusal's code (src/core/refusal.ts) when `outcome` is `refused`
+       *  (record 0054): a refusal after a command was bound is a run
+       *  record, and the door report counts it by cause and code. */
+      refusalCode?: string;
       handBackRunId?: string;
       seq?: number;
       at?: number;
     }
+  /** A refusal the door made ([record 0054](../../docs/decisions/0054-a-refusal-the-person-caused-is-one-question-with-a-best-guess.md),
+   *  as amended: every refusal is a run record; run-history.md item 2): the
+   *  code, its one cause, and the sentence the person read — redacted and
+   *  capped like a route receipt (`ROUTE_RECEIPT_CAP`). Exactly one per `door`
+   *  record, published by `recordRefusal` beside the redacted request, so the
+   *  door report counts every refusal — a gate refusal before any command is
+   *  bound included — from the run store alone. Additive: unknown → ignored. */
+  | { type: "refusal"; code: string; cause: string; text: string; seq?: number; at?: number }
   /** The span records (docs/reference/specs/tracing.md): published, counted and stored like
    *  every other event, read as timing and never as content. */
   | SpanStartEvent

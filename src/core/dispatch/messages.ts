@@ -23,12 +23,51 @@ export function buildMessages(
   currentDocuments?: DocumentAttachment[],
   references?: readonly string[],
 ): ChatMessage[] {
-  const messages: ChatMessage[] = history.map((h) => ({
+  return buildConversation(history, currentText, currentImages, currentDocuments, references).messages;
+}
+
+/** The channel seed with its authors (docs/reference/specs/session-log.md
+ *  item 12, record 0057): the provider turns exactly as `buildMessages` makes
+ *  them, plus — when any turn has one — the author of each, by index. */
+export interface BuiltConversation {
+  messages: ChatMessage[];
+  /** The platform-namespaced author id per message; a machine turn's entry is
+   *  undefined, and so is a merged turn's when its authors differ. Absent when
+   *  no turn has an author. */
+  actors?: readonly (string | undefined)[];
+}
+
+/**
+ * `buildMessages` plus the authors: each user turn of the history carries its
+ * `HistoryItem.user`, the request turn the requester's id, and the actors ride
+ * the same merges the messages do — a merged turn keeps its author only when
+ * every merged turn is that one person's, since the stored row will carry all
+ * of their words (session-log item 12).
+ */
+export function buildConversation(
+  history: HistoryItem[],
+  currentText: string,
+  currentImages?: ImageAttachment[],
+  currentDocuments?: DocumentAttachment[],
+  references?: readonly string[],
+  requestActor?: string,
+): BuiltConversation {
+  const authored: AuthoredMessage[] = history.map((h) => ({
     role: h.role,
     content: turnContent(h.text, h.images, h.documents),
+    ...(h.role === "user" && h.user !== undefined ? { actor: h.user } : {}),
   }));
-  messages.push({ role: "user", content: requestContent(currentText, currentImages, currentDocuments, references) });
-  return normalizeAlternation(messages);
+  authored.push({
+    role: "user",
+    content: requestContent(currentText, currentImages, currentDocuments, references),
+    ...(requestActor !== undefined ? { actor: requestActor } : {}),
+  });
+  const merged = normalizeAlternation(authored);
+  const actors = merged.some((m) => m.actor !== undefined) ? merged.map((m) => m.actor) : undefined;
+  return {
+    messages: merged.map(({ role, content }) => ({ role, content })),
+    ...(actors !== undefined ? { actors } : {}),
+  };
 }
 
 /** The request turn's parts: its attachments and text (`turnContent`), then
@@ -131,15 +170,22 @@ function fenceFile(name: string | undefined, content: string): string {
   return `\n\n[file: ${name ?? "attachment"}]\n\`\`\`\n${content}\n\`\`\`\n`;
 }
 
-/** Providers require user-first and behave best with merged consecutive roles. */
-function normalizeAlternation(messages: ChatMessage[]): ChatMessage[] {
-  const out: ChatMessage[] = [];
+/** A provider turn still carrying its author, until `buildConversation`
+ *  splits the two apart. */
+type AuthoredMessage = ChatMessage & { actor?: string };
+
+/** Providers require user-first and behave best with merged consecutive roles.
+ *  A merge keeps the turn's author only when both sides agree — a row of mixed
+ *  or partly unknown authorship stores none (session-log item 12). */
+function normalizeAlternation(messages: AuthoredMessage[]): AuthoredMessage[] {
+  const out: AuthoredMessage[] = [];
   for (const m of messages) {
     const last = out[out.length - 1];
     if (last && last.role === m.role) {
       last.content.push(...m.content);
+      if (last.actor !== m.actor) delete last.actor;
     } else {
-      out.push({ role: m.role, content: [...m.content] });
+      out.push({ role: m.role, content: [...m.content], ...(m.actor !== undefined ? { actor: m.actor } : {}) });
     }
   }
   while (out.length > 0 && out[0].role !== "user") out.shift();

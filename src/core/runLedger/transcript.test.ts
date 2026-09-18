@@ -210,3 +210,34 @@ describe("the session log's rows — a base index, and compaction rows between t
     expect(out.messages).toEqual([user("go")]);
   });
 });
+
+// docs/reference/specs/session-log.md item 12: authored session rows (record 0057).
+describe("actor — the row's author, stored in the JSON, absent for bot turns", () => {
+  it("a user turn authored by a person carries that person's actor id in the stored JSON", () => {
+    const message: ChatMessage = { role: "user", content: [text("hi")] };
+    const { rows } = turnRows(0, message, {}, "slack:UALICE");
+    const stored = JSON.parse(rows[0].json) as Record<string, unknown>;
+    expect(stored.actor).toBe("slack:UALICE");
+  });
+
+  it("a bot's turn (assistant role) and a compaction row carry no actor field in the stored JSON", () => {
+    const assistant: ChatMessage = { role: "assistant", content: [text("done")] };
+    const { rows: aRows } = turnRows(0, assistant);
+    const aStored = JSON.parse(aRows[0].json) as Record<string, unknown>;
+    expect(aStored.actor).toBeUndefined();
+
+    const { rows: cRows } = turnRows(1, { compaction: { summary: "s" } });
+    const cStored = JSON.parse(cRows[0].json) as Record<string, unknown>;
+    expect(cStored.actor).toBeUndefined();
+  });
+
+  it("the assembled transcript's messages carry no actor field — assembleTranscript reads role and part only", () => {
+    const row = turnRows(0, { role: "user", content: [text("hi")] }, {}, "slack:UALICE").rows[0];
+    const out = assembleTranscript([row], []);
+    expect(out.complete).toBe(true);
+    const msg = (out as { messages: ChatMessage[] }).messages[0];
+    expect((msg as unknown as Record<string, unknown>).actor).toBeUndefined();
+    expect(msg.role).toBe("user");
+    expect(msg.content).toEqual([text("hi")]);
+  });
+});

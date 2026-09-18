@@ -102,7 +102,7 @@ export function handleAdminModelProxyBearer(
       bearer: issued.token,
       expiresAt: issued.expiresAt,
       model: facts.modelRef,
-      path: PROXY_PATHS[facts.providerType],
+      path: PROXY_PATHS[facts.providerWire],
       turns: { used: facts.turns, max: facts.maxTurns },
     });
   })();

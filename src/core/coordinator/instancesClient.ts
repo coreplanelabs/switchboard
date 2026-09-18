@@ -7,7 +7,7 @@
 // the base URL or the bearer, and a shim that cannot be reached, are
 // `unanswered` by reason — the ship branch replies with the reason, never throws.
 
-import type { Secret } from "../../secrets.js";
+import { processSecrets, type Secret } from "../../secrets.js";
 import { parseIngressTokenMap, tokenForSubject } from "../ingressTokens.js";
 import { COORDINATOR_IDENTITY, type WorkflowSender } from "./contract.js";
 import {
@@ -31,6 +31,15 @@ export interface ShimInstancesOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+
+/** The shim address THIS process holds — `PUBLIC_BASE_URL` and the process's
+ *  own token map, read live — the one place every default client over the shim
+ *  (the ship branch's create and status reads, the Workflow sender, the
+ *  dispatcher's gone-instance probe) gets its address from, so a caller can
+ *  never reach the shim by a path a test wires but production does not. */
+export function processShimOptions(): ShimInstancesOptions {
+  return { baseUrl: process.env.PUBLIC_BASE_URL, tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS") };
+}
 
 /** Where the shim is and what to present: unanswered by reason when the process has neither. */
 function shimAddress(opts: ShimInstancesOptions): { base: string; bearer: string } | { reason: string } {

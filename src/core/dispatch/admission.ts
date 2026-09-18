@@ -35,6 +35,8 @@ import {
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import { reclaimedRunRecord } from "./record.js";
 import type { RunStatus } from "../runRecord.js";
+import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
+import { replyAck, REFUSAL_SENTENCES } from "./reply.js";
 
 /** What thread admission reads off the dispatcher's dependencies. `CoreDeps`
  *  extends this; a caller's shape is unchanged. */
@@ -137,6 +139,39 @@ export interface RestartContext {
 
 export { DURABLE_INBOX_MAX_BYTES, durableInboxMessage } from "../runLedger/inboxMessage.js";
 
+/** The attributed join of a unit's unconsumed thread events (record 0051's fold rule):
+ *  `<sender>: <text>` in arrival order, one block per event — the shape the
+ *  durable inbox's join gives a run's carried follow-ups, reused for the fold
+ *  before a coding spawn and for the leftovers a unit's end runs as one fresh
+ *  turn. An event that lost its attachments says so on its own line. */
+export function foldThreadEvents(
+  events: ReadonlyArray<{ sender: string; senderName?: string; text: string; attachmentsDropped?: number }>,
+): string {
+  return events
+    .map((e) => {
+      const dropped =
+        e.attachmentsDropped !== undefined && e.attachmentsDropped > 0
+          ? `\n(${e.attachmentsDropped} attachment${e.attachmentsDropped === 1 ? "" : "s"} could not be carried and ${e.attachmentsDropped === 1 ? "is" : "are"} not attached.)`
+          : "";
+      return `${e.senderName ?? e.sender}: ${e.text}${dropped}`;
+    })
+    .join("\n\n");
+}
+
+/** The stored attachments of a unit's thread events as one message's images
+ *  and documents (the reader of what the append kept under the cap): an image
+ *  by its media type, anything else a document, in arrival order — so a
+ *  screenshot on a between-rounds reply reaches the child the fold feeds and
+ *  the fresh turn the leftovers run as, never only the text beside it. */
+export function foldThreadAttachments(
+  events: ReadonlyArray<{ attachments?: ReadonlyArray<{ mediaType: string; data: string; name?: string }> }>,
+): Pick<IncomingMessage, "images" | "documents"> {
+  const all = events.flatMap((e) => e.attachments ?? []);
+  const images = all.filter((a) => a.mediaType.startsWith("image/")).map((a) => ({ ...a }));
+  const documents = all.filter((a) => !a.mediaType.startsWith("image/")).map((a) => ({ ...a }));
+  return { ...(images.length > 0 ? { images } : {}), ...(documents.length > 0 ? { documents } : {}) };
+}
+
 /** A durable inbox item back as a follow-up for the resumed run, on the
  *  resume's channel handle — none for a steer a run sent, which is never run
  *  fresh; undefined when the stored shape is not one this build wrote
@@ -230,7 +265,10 @@ export interface AdmissionContext {
   /** The request's root; the stage's spans are its children. */
   root: Span;
   /** The dispatch's refusal wrap: one `dispatch.refuse` span naming why, and the request ends refused. */
-  refuse: <T>(outcome: string, fn: () => Promise<T>) => Promise<T>;
+  refuse: (refusal: Refusal, side?: () => Promise<void>) => Promise<void>;
+  /** The wrap for a refusal nothing is said for (a coordinator's spawn):
+   *  stamped and counted, rendered by nobody. */
+  refuseSilently: <T>(outcome: RefusalCode, side: () => Promise<T>) => Promise<T>;
   /** The per-process admission map (`deps.admission`, or the default). */
   admission: ThreadAdmission<DispatchFollowUp>;
   hooks: {
@@ -274,7 +312,20 @@ export type AdmissionOutcome =
  * exists in which two runs can attach the same per-thread workspace.
  */
 export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise<AdmissionOutcome> {
-  const { msg, io, directives, agentName, resume, restart, carriedRow, clock, root, refuse, admission } = ctx;
+  const {
+    msg,
+    io,
+    directives,
+    agentName,
+    resume,
+    restart,
+    carriedRow,
+    clock,
+    root,
+    refuse,
+    refuseSilently,
+    admission,
+  } = ctx;
   // Thread admission (docs/reference/specs/thread-admission.md item 1): ONE live run per
   // thread. Claimed HERE — after the agent gate (a follow-up's sender must be
   // allowed to run the live agent, exactly like a first message) and before
@@ -348,7 +399,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     console.log(
       `[dispatch] ${msg.threadKey} coordinator spawn (${ctx.coordinator.idempotencyKey}) refused: the ${claim.live.agent} run ${claim.live.runId ?? "(unnamed)"} is in flight`,
     );
-    await refuse("coordinator_thread_live", async () => {});
+    await refuseSilently("coordinator_thread_live", async () => {});
     return { kind: "refused", reason: "coordinator_thread_live" };
   }
   if (claim.kind === "live") {
@@ -358,9 +409,10 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     // run that one too (invariant 3 — no path runs an agent for a user the
     // allowlist excludes, and "run" includes "is heard by").
     if (!deps.config.canRunAgent(chatActorOf(deps.config, msg), claim.live.agent)) {
-      await refuse("live_agent_allowlist", () =>
-        io.reply(
-          `🚫 You're not on the allowlist for the \`${claim.live.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
+      await refuse(
+        refusalOf(
+          "live_agent_allowlist",
+          REFUSAL_SENTENCES.live_agent_allowlist({ agent: claim.live.agent, adminsHint: deps.config.adminsHint() }),
         ),
       );
       return { kind: "refused", reason: "live_agent_allowlist" };
@@ -370,7 +422,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       console.log(
         `[dispatch] ${msg.threadKey} follow-up refused (${decision.reason}): ${claim.live.agent} run in flight`,
       );
-      await refuse("follow_up_refused", () => io.reply(refusalReply(claim.live, decision, clock())));
+      await refuse(refusalOf("follow_up_refused", refusalReply(claim.live, decision, clock())));
       return { kind: "refused", reason: "follow_up_refused" };
     }
     // The durable copy first (run-history item 40), so its seq rides on the
@@ -393,7 +445,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     console.log(
       `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
     );
-    await root.span("dispatch.admission", () => (io.acknowledge ?? io.reply).call(io, steerAck(claim.live, at)), {
+    await root.span("dispatch.admission", () => replyAck(io, steerAck(claim.live, at)), {
       attrs: { outcome: "steered" },
     });
     return { kind: "steered", where: "here" };
@@ -431,7 +483,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     console.log(
       `[dispatch] ${msg.threadKey} coordinator spawn (${ctx.coordinator.idempotencyKey}) refused: run ${elsewhere.runId} is in flight on another generation`,
     );
-    await refuse("coordinator_thread_live", async () => {});
+    await refuseSilently("coordinator_thread_live", async () => {});
     return { kind: "refused", reason: "coordinator_thread_live" };
   }
   if (elsewhere && io.isolateFollowUps && elsewhere.userId !== msg.userId) {
@@ -456,8 +508,13 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       runId: elsewhere.runId,
     };
     if (!deps.config.canRunAgent(chatActorOf(deps.config, msg), far.agent)) {
-      await io.reply(
-        `🚫 You're not on the allowlist for the \`${far.agent}\` agent, whose run is in flight in this thread. Ask ${deps.config.adminsHint()} for access.`,
+      // The far-generation twin of the allowlist gate gets a span of its own
+      // (record 0054): before the seam it was a bare reply no trace saw.
+      await refuse(
+        refusalOf(
+          "elsewhere_agent_allowlist",
+          REFUSAL_SENTENCES.elsewhere_agent_allowlist({ agent: far.agent, adminsHint: deps.config.adminsHint() }),
+        ),
       );
       return { kind: "refused", reason: "elsewhere_agent_allowlist" };
     }
@@ -467,7 +524,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       console.log(
         `[dispatch] ${msg.threadKey} follow-up refused (${decision.reason}): ${far.agent} run ${far.runId} live on another generation`,
       );
-      await io.reply(refusalReply(far, decision, now));
+      await refuse(refusalOf("elsewhere_follow_up_refused", refusalReply(far, decision, now)));
       return { kind: "refused", reason: "elsewhere_follow_up_refused" };
     }
     const seq = await deps.runLedger.pushInbox(elsewhere.runId, durableInboxMessage(msg, directives.text, now));
@@ -481,7 +538,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       console.log(
         `[dispatch] ${msg.threadKey} follow-up steered into run ${elsewhere.runId} live on another generation (durable seq ${seq}${nowLive ? ", now live here" : ""})`,
       );
-      await (io.acknowledge ?? io.reply).call(io, steerAck(far, now));
+      await replyAck(io, steerAck(far, now));
       return { kind: "steered", where: "elsewhere" };
     }
     deps.threadsElsewhere.forget(msg.threadKey);

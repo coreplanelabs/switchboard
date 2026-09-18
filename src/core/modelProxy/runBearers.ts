@@ -22,7 +22,7 @@
 // bearer is the same hash, which buys nothing on its own.
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import type { ProviderConfig } from "../provider.js";
+import type { Wire } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import type { Clock, Span } from "../trace/types.js";
 import { bearerExpiresAt } from "../budgets.js";
@@ -38,7 +38,7 @@ export interface RunBearerGrant {
   modelRef: string;
   /** The `providers:` entry the call is forwarded to, and its wire shape. */
   providerName: string;
-  providerType: ProviderConfig["type"];
+  providerWire: Wire;
   /** The bare model id the wire carries, whatever the request named. */
   model: string;
   /** The per-call output cap and the turn cap, the preset's. */

@@ -7,7 +7,7 @@ import type { UnitThread } from "@core/core/unitRuns.js";
 import SettingSelect from "../SettingSelect.vue";
 
 // The unit page's search (session-log item 11; record 0035): one session's
-// log at a time — the coding thread's or the review thread's, since the index
+// log at a time — the coding agent's or the review agent's, since the index
 // is per session and no cross-session index exists — through the same read
 // the model's `recall` makes, `GET /api/runs.search`. Each hit names its turn,
 // who spoke, a one-line snippet (the route wraps it as untrusted content for
@@ -34,8 +34,8 @@ const emit = defineEmits<{ open: [runId: string, turn: number] }>();
 /** Hits the page asks for — a person reads a short list; the route caps at its own maximum. */
 const PAGE_HITS = 20;
 
-/** The threads as the select's data: `coding thread`, `review thread`. */
-const sessionItems = computed(() => props.sessions.map((s) => ({ label: `${s.thread} thread`, value: s.thread })));
+/** The sessions as the select's data: `coding session`, `review session` — one agent's transcript each. */
+const sessionItems = computed(() => props.sessions.map((s) => ({ label: `${s.thread} session`, value: s.thread })));
 const thread = ref<UnitThread>(
   props.sessions.find((s) => s.thread === props.initial?.thread)?.thread ?? props.sessions[0]?.thread ?? "coding",
 );

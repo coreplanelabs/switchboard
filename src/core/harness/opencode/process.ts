@@ -15,8 +15,10 @@
 
 import { randomBytes } from "node:crypto";
 import type { Identity } from "../../../agents/registry.js";
+import { EFFORT_LEVELS, type Effort } from "../../../effort.js";
+import type { ModelCard } from "../../modelCard.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
-import type { ProviderConfig } from "../../provider.js";
+import { WIRE_ALIASES, type ProviderConfig, type Wire } from "../../provider.js";
 import type { Clock } from "../../trace/types.js";
 import {
   HarnessContainerError,
@@ -28,7 +30,7 @@ import {
   type HarnessResponse,
 } from "../container.js";
 import type { OpenCodeHarnessFacts } from "../contract.js";
-import { HARNESS_URL_ENV, PROXY_PROVIDER, RUN_BEARER_ENV } from "../pi/process.js";
+import { HARNESS_URL_ENV, PROXY_PROVIDER, RUN_BEARER_ENV, takesAdaptiveThinking } from "../pi/process.js";
 import {
   OPENCODE_ROUTES,
   OPENCODE_VERSION,
@@ -235,24 +237,88 @@ export interface OpenCodeLaunchSpec {
   system: string;
   /** The harness's own tools the plugin will register, so the prompt can name them. */
   relayTools: readonly string[];
+  /** The run's resolved model card (record 0052): what the configuration says
+   *  of the model — `limit.context` from the window, `capabilities.input` from
+   *  the inputs, one `variants` entry per tier whose `body` overlay spells the
+   *  wire's word, the cap field — in place of the invented one. Absent (a
+   *  hand-built spec), the defaults stand and no variants are declared. */
+  card?: ModelCard;
   compaction?: OpenCodeCompactionConfig;
 }
 
-/** The provider package for the run's wire shape: both map onto providers the
- *  binary bundles (`packages/core/src/aisdk-native.ts:98-119`;
- *  `@ai-sdk/anthropic` 3.0.82 and `@ai-sdk/openai-compatible` 2.0.41 are
- *  `packages/core` dependencies), so nothing is installed at runtime. */
-export function openCodeProviderPackage(providerType: ProviderConfig["type"]): string {
-  return providerType === "anthropic" ? "aisdk:@ai-sdk/anthropic" : "aisdk:@ai-sdk/openai-compatible";
+/** The wire a run's OpenCode speaks: the card's (record 0052 — every
+ *  dispatched run carries one), else the legacy provider type's alias for a
+ *  hand-built spec. */
+export function openCodeRunWire(spec: { model: { providerType: ProviderConfig["type"] }; card?: ModelCard }): Wire {
+  return spec.card?.wire ?? WIRE_ALIASES[spec.model.providerType] ?? "openai-chat";
 }
 
-/** The proxy as the provider's base URL: both native providers hang their
+/** The provider package for the run's wire shape: each maps onto a provider the
+ *  binary bundles (`packages/core/src/aisdk-native.ts:98-119`;
+ *  `@ai-sdk/anthropic` 3.0.82, `@ai-sdk/openai-compatible` 2.0.41 and
+ *  `@ai-sdk/openai` are `packages/core` dependencies), so nothing is installed
+ *  at runtime. The Responses wire maps to `@ai-sdk/openai`, but a Responses
+ *  block on OpenCode is refused at dispatch by name until that package is
+ *  measured against the logging fake (record 0052; the matrix's `cannot`). */
+export function openCodeProviderPackage(wire: Wire): string {
+  if (wire === "anthropic-messages") return "aisdk:@ai-sdk/anthropic";
+  if (wire === "openai-responses") return "aisdk:@ai-sdk/openai";
+  return "aisdk:@ai-sdk/openai-compatible";
+}
+
+/** The proxy as the provider's base URL: the native providers hang their
  *  route under it — `/messages` on the Anthropic shape, `/chat/completions`
- *  on the OpenAI shape (measured against a logging fake) — and the proxy
- *  serves `/v1/messages` and `/v1/chat/completions`, so the base is `<bot>/v1`
- *  for either. */
+ *  on the chat shape (measured against a logging fake), `/responses` on the
+ *  Responses shape — and the proxy
+ *  serves `/v1/messages`, `/v1/chat/completions` and `/v1/responses`, so the
+ *  base is `<bot>/v1` for each. */
 export function openCodeProviderBaseUrl(harnessUrl: string): string {
   return `${harnessUrl.replace(/\/$/, "")}/v1`;
+}
+
+/** The card's effort tiers as the model's `variants` (record 0052): one entry
+ *  per tier the card does not refuse, the tier as the variant's id — the word
+ *  a session selects the tier by (`model.variant`; the harness's `effort()`
+ *  answers the tier itself) — and a `body` overlay that spells the wire's own
+ *  word for it, so the word on the wire is the card's and never one the
+ *  harness chose: `reasoning_effort` on the completions dialect;
+ *  `output_config.effort` with adaptive thinking on the Anthropic dialect,
+ *  where only a model that takes adaptive thinking carries an effort word at
+ *  all (a budget model has no word to spell, so it gets no variants and the
+ *  tier is left to the provider's default). Unknown levels are the identity
+ *  map — the asked tier's own word, unvouched, never a silent clamp. */
+export function openCodeVariants(
+  model: { id: string; providerType: ProviderConfig["type"] },
+  card: ModelCard | undefined,
+): Array<{ id: string; body: Record<string, unknown> }> | undefined {
+  if (card === undefined) return undefined;
+  const anthropic = model.providerType === "anthropic";
+  if (anthropic && !takesAdaptiveThinking(model.id)) return undefined;
+  const variants: Array<{ id: string; body: Record<string, unknown> }> = [];
+  for (const tier of EFFORT_LEVELS) {
+    const level = card.levels === "unknown" ? undefined : card.levels[tier];
+    if (level === "refused") continue;
+    const word = level === undefined ? tier : level.word;
+    variants.push({
+      id: tier,
+      body: anthropic
+        ? { thinking: { type: "adaptive" }, output_config: { effort: word } }
+        : { reasoning_effort: word },
+    });
+  }
+  return variants.length > 0 ? variants : undefined;
+}
+
+/** The variant a run's tier selects on the session's model ref: the tier
+ *  itself, exactly when the configuration declares it (`openCodeVariants`), so
+ *  a session never names a variant the document does not carry. */
+export function openCodeVariantId(
+  effort: Effort | undefined,
+  model: { id: string; providerType: ProviderConfig["type"] },
+  card: ModelCard | undefined,
+): string | undefined {
+  if (effort === undefined) return undefined;
+  return openCodeVariants(model, card)?.some((v) => v.id === effort) ? effort : undefined;
 }
 
 /** What the system prompt gains under OpenCode: the workspace tools are
@@ -294,7 +360,10 @@ export function openCodeSystemPrompt(spec: OpenCodeLaunchSpec): string {
  *  OpenCode at load (`packages/core/src/config/variable.ts:27-33`; a provider with
  *  `settings.apiKey` needs no credential-store entry,
  *  `packages/core/src/model-resolver.ts:262`) and a zero rate card because the
- *  proxy meters; that model as the default; the `switchboard` agent as the
+ *  proxy meters — the entry the run's card (record 0052): `limit.context` from
+ *  the card's window, `capabilities.input` from its inputs, one `variants`
+ *  entry per tier with the wire's word (`openCodeVariants`), the cap field as
+ *  `compatibility.maxTokensField` on the completions dialect; that model as the default; the `switchboard` agent as the
  *  default agent, primary, with the composed prompt and the gate's rules; the
  *  `title` agent removed (`packages/core/src/config/plugin/agent.ts:97-100`), or
  *  every session's first prompt spends one more model call — a proxy turn — on a
@@ -304,21 +373,44 @@ export function openCodeSystemPrompt(spec: OpenCodeLaunchSpec): string {
  *  take `false`: `packages/schema/src/config/lsp.ts:19`, `formatter.ts:14`); and
  *  the compaction thresholds when the deployment sets them. */
 export function openCodeConfig(spec: OpenCodeLaunchSpec): Record<string, unknown> {
-  const { id, maxTokens, providerType, contextTokens } = spec.model;
+  const { id, maxTokens, contextTokens } = spec.model;
+  const card = spec.card;
   const compaction = {
     ...(spec.compaction?.buffer !== undefined ? { buffer: spec.compaction.buffer } : {}),
     ...(spec.compaction?.keepTokens !== undefined ? { keep: { tokens: spec.compaction.keepTokens } } : {}),
   };
+  const variants = openCodeVariants(spec.model, card);
+  const wire = openCodeRunWire(spec);
+  // The cap field the completions dialect spells the output cap with, the
+  // card's word when it is one the schema takes (`compatibility.maxTokensField`
+  // knows the two chat spellings; the Anthropic dialect's cap is always
+  // `max_tokens`, the Responses dialect's `max_output_tokens` — its adapter's
+  // own spelling, no compat needed).
+  const capField =
+    wire === "openai-chat" && (card?.capField === "max_completion_tokens" || card?.capField === "max_tokens")
+      ? card.capField
+      : undefined;
   return {
     providers: {
       [PROXY_PROVIDER]: {
         name: "Switchboard model proxy",
-        package: openCodeProviderPackage(providerType),
+        package: openCodeProviderPackage(wire),
         settings: { baseURL: openCodeProviderBaseUrl(spec.harnessUrl), apiKey: `{env:${RUN_BEARER_ENV}}` },
         models: {
           [id]: {
             name: id,
-            limit: { context: contextTokens ?? OPENCODE_DEFAULT_CONTEXT_TOKENS, output: maxTokens },
+            limit: { context: card?.window ?? contextTokens ?? OPENCODE_DEFAULT_CONTEXT_TOKENS, output: maxTokens },
+            ...(card !== undefined
+              ? {
+                  capabilities: {
+                    tools: true,
+                    input: card.inputs.image === false ? ["text"] : ["text", "image"],
+                    output: ["text"],
+                  },
+                }
+              : {}),
+            ...(variants !== undefined ? { variants } : {}),
+            ...(capField !== undefined ? { compatibility: { maxTokensField: capField } } : {}),
             cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
           },
         },

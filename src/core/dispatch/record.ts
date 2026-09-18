@@ -13,6 +13,7 @@ import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import { usageOfEvents } from "../runUsage.js";
 import {
   fitRecordToBudget,
+  instanceIdOfEvents,
   leaseOfEvents,
   prOfEvents,
   pushedHeadsOf,
@@ -350,6 +351,9 @@ export function assembleRunRecord(input: {
   // The route the run ran under: the caller's (a sticky-carried decision has
   // no `route` event), else what the events say.
   const route = input.route ?? routeOfEvents(events);
+  // The plan runner instance a ship run's hand-off created (record 0051 R2):
+  // its `ship_handoff` event, projected like the coordinator tag.
+  const instanceId = instanceIdOfEvents(events);
   const fitted = fitRecordToBudget({
     id: run.id,
     ...(run.label !== undefined ? { label: run.label } : {}),
@@ -396,6 +400,7 @@ export function assembleRunRecord(input: {
     ...(input.profile !== undefined ? { profile: input.profile } : {}),
     ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
     ...coordinatorFields(input.coordinator),
+    ...(instanceId !== undefined ? { instanceId } : {}),
     ...(input.seed !== undefined ? { seed: input.seed } : {}),
     ...(input.session !== undefined ? { session: input.session } : {}),
     ...(input.failure !== undefined ? { failure: input.failure } : {}),

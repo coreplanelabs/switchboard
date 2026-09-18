@@ -81,6 +81,124 @@ export function runFinishedEventType(runId: string): string {
   return `${RUN_FINISHED_EVENT_PREFIX}${runId}`;
 }
 
+/** A message into a thread an unfinished unit owns (record 0051's reply-as-event rule): one row
+ *  of the unit's event list, appended by the dispatcher, folded into the
+ *  unit's next coding spawn — or run as one fresh turn at the unit's end.
+ *  `mode` is a receipt of the owner's state at append (record 0051): `steer` into a
+ *  live run or between rounds, `wake` into an idle owner, `interrupt` into an
+ *  owner idle after a stop — never a switch the sender fills. */
+export type ThreadEventMode = "steer" | "wake" | "interrupt";
+
+export interface ThreadEventAttachment {
+  mediaType: string;
+  data: string;
+  name?: string;
+}
+
+export interface ThreadEvent {
+  /** Assigned by the store's append, in arrival order, per unit. */
+  seq: number;
+  /** The channel's message id, when the platform gave one. */
+  id?: string;
+  /** The sender (platform-namespaced) and the display name the channel knew. */
+  sender: string;
+  senderName?: string;
+  text: string;
+  attachments?: ThreadEventAttachment[];
+  /** How many attachments were dropped because the event was over the cap. */
+  attachmentsDropped?: number;
+  /** How many characters were cut from the end of `text` because the row was
+   *  still over the cap without any attachment. */
+  textDropped?: number;
+  mode: ThreadEventMode;
+  at: number;
+  /** The spawn step or run that consumed the event; absent while unconsumed. */
+  consumedBy?: string;
+}
+
+/** The most one durable event row may weigh, serialized — the durable inbox's
+ *  own cap (`DURABLE_INBOX_MAX_BYTES`), restated here because this contract is
+ *  node-free and the state Worker enforces it too. */
+export const THREAD_EVENT_MAX_BYTES = 400 * 1024;
+
+const serializedBytes = (v: unknown): number => new TextEncoder().encode(JSON.stringify(v)).length;
+
+/** The event under the cap: attachments ride when the serialized row fits,
+ *  else all of them are dropped and the row says how many — all or nothing,
+ *  like the durable inbox (a partial carry would hand the model some of the
+ *  sender's attachments as if they were all of them). A row still over the cap
+ *  with no attachment left — a text alone past 400 KiB, possible through the
+ *  ingress body — has its text cut from the end until the row fits, and the
+ *  row says how many characters went: no event escapes the constant's promise.
+ *  `TextEncoder`, not `Buffer`: both stores — the bot's and the state Worker's —
+ *  apply it. */
+export function capThreadEvent<T extends Omit<ThreadEvent, "seq"> & { seq?: number }>(
+  event: T,
+): T & Pick<ThreadEvent, "attachmentsDropped" | "textDropped"> {
+  if (serializedBytes(event) <= THREAD_EVENT_MAX_BYTES) return event;
+  const attachments = event.attachments;
+  let capped: T & Pick<ThreadEvent, "attachmentsDropped" | "textDropped"> = event;
+  if (attachments && attachments.length > 0) {
+    const { attachments: _dropped, ...rest } = event;
+    capped = { ...rest, attachmentsDropped: attachments.length } as typeof capped;
+    if (serializedBytes(capped) <= THREAD_EVENT_MAX_BYTES) return capped;
+  }
+  // Text-only overflow: the row's shape is fixed except for the text, so the
+  // text is cut — by characters, so a multibyte cut never splits a code point
+  // pair the decoder would read as garbage — and shrunk until the bytes fit.
+  const text = capped.text;
+  const overhead = serializedBytes({ ...capped, text: "", textDropped: text.length });
+  let keep = Math.max(0, Math.min(text.length, THREAD_EVENT_MAX_BYTES - overhead));
+  for (;;) {
+    const cut = { ...capped, text: text.slice(0, keep), textDropped: text.length - keep };
+    if (keep === 0 || serializedBytes(cut) <= THREAD_EVENT_MAX_BYTES) return cut;
+    keep = Math.floor(keep * 0.9);
+  }
+}
+
+const isThreadEventAttachment = (v: unknown): v is ThreadEventAttachment =>
+  isObject(v) &&
+  typeof v.mediaType === "string" &&
+  typeof v.data === "string" &&
+  (v.name === undefined || typeof v.name === "string");
+
+const isThreadEventMode = (v: unknown): v is ThreadEventMode => v === "steer" || v === "wake" || v === "interrupt";
+
+/** Structural check on an event row from outside the process. */
+export function isThreadEvent(v: unknown): v is ThreadEvent {
+  if (!isObject(v)) return false;
+  const r = v;
+  if (typeof r.seq !== "number" || !Number.isInteger(r.seq) || r.seq < 1) return false;
+  // The fixed fields are bounded too, so the cap's text cut has a floor to
+  // land on: a row whose id or names alone weighed the cap could never fit.
+  if (!isOptionalText(r.id)) return false;
+  if (!isText(r.sender)) return false;
+  if (!isOptionalText(r.senderName)) return false;
+  if (typeof r.text !== "string") return false;
+  if (r.attachments !== undefined && (!Array.isArray(r.attachments) || !r.attachments.every(isThreadEventAttachment)))
+    return false;
+  if (r.attachmentsDropped !== undefined && !isCount(r.attachmentsDropped)) return false;
+  if (r.textDropped !== undefined && !isCount(r.textDropped)) return false;
+  if (!isThreadEventMode(r.mode)) return false;
+  if (!isFinite(r.at)) return false;
+  if (!isOptionalText(r.consumedBy)) return false;
+  return true;
+}
+
+/** The payload-free nudge the dispatcher sends an instance when a thread
+ *  event lands on one of its units (record 0051's reply-as-event rule): the relay's
+ *  alphabet — letters, digits, `_` and `-`, at most 100 characters, a colon
+ *  refused — so the type is the two ids joined by `-`. The send addresses the
+ *  instance by id (`workflow.get(id)`), so the type only has to name the unit
+ *  within it: when the two ids together overflow the cap, the INSTANCE id is
+ *  clipped and the unit is kept whole, and both ends compute the same string. */
+export const UNIT_NUDGE_EVENT_PREFIX = "unit-nudge-";
+export function unitNudgeEventType(key: { instanceId: string; unit: string }): string {
+  const suffix = `-${key.unit}`;
+  const room = 100 - UNIT_NUDGE_EVENT_PREFIX.length - suffix.length;
+  return `${UNIT_NUDGE_EVENT_PREFIX}${key.instanceId.slice(0, room)}${suffix}`;
+}
+
 /** The event the bot's GitHub check-run intake sends a merge-waiting parent:
  *  the type carries the head sha (hex — inside the platform's alphabet), so a
  *  driver waiting at that head matches its own event and any other head's is
@@ -233,9 +351,10 @@ export interface CoordinatorUnit {
   /** The unit's thread, once opened; a generated plan's is the requesting thread from the start. */
   threadKey?: string;
   sourceUrl?: string;
-  /** The unit's review thread, opened once beside the unit's thread: every
-   *  review round runs there (record 0034), so the review child's worktree is
-   *  readonly and its own and no round wipes the coding thread's. */
+  /** Retired (record 0055): a bot before it opened a review thread beside the
+   *  unit's and ran every review round there. A row that carries one keeps its
+   *  review rounds there; a new row never gets one — every child of the unit
+   *  runs in the unit's thread. */
   reviewThread?: { threadKey: string; sourceUrl?: string };
   /** The unit's board issue in the repository, when one titled by the unit id exists — the handoff's destination. */
   issue?: number;
@@ -277,6 +396,8 @@ const MAX_ROUNDS = 200;
 const isText = (v: unknown, max = MAX_TEXT): v is string => typeof v === "string" && v.length > 0 && v.length <= max;
 const isOptionalText = (v: unknown): boolean => v === undefined || isText(v);
 const isFinite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+/** A count the writers produce: a non-negative integer, never a fraction, a negative or NaN. */
+const isCount = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const isPr = (v: unknown): boolean => isObject(v) && isFinite(v.number) && isText(v.url, 2048);
 const isResume = (v: unknown): boolean =>

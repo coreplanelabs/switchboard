@@ -229,6 +229,97 @@ describe("resolveTarget — the provider checked, and the target repo/ref/PR sta
     ).toThrow(/Unknown provider "nope"\. Configured providers: anthropic/);
   });
 
+  // The card (record 0052): resolved here, beside the block check,
+  // and every control decided before any ack card, span or model call.
+  it("resolves the run's one model card and its decisions beside the block check", () => {
+    const agent = getAgent("general");
+    const resolved = resolveRun(
+      { config: configStore() },
+      { msg: message, directives: { agent: "general", effort: "high", text: message.text }, history },
+    ).resolved;
+    const out = resolveTarget(
+      { config: configStore() },
+      {
+        msg: message,
+        history,
+        agent,
+        profile: declaredProfile(agent),
+        resolved,
+        resume: undefined,
+        root: root(message).root,
+      },
+    );
+    // `general-model` is no registry card, so every field falls to the wire
+    // layer and the asked tier goes out unvouched — decided, not refused.
+    expect(out.modelCard.ref).toBe("anthropic/general-model");
+    expect(out.modelCard.wire).toBe("anthropic-messages");
+    expect(out.modelCard.provenance.levels).toBe("wire");
+    expect(out.decisions.find((d) => d.control === "effort")).toMatchObject({
+      outcome: "degraded",
+      asked: "high",
+      applied: "high",
+      vouched: false,
+    });
+  });
+
+  it("a control the card refuses ends the run here, naming the model and what it takes", () => {
+    const withOverride = YAML.replace(
+      "    apiKeyEnv: ANTHROPIC_API_KEY",
+      "    apiKeyEnv: ANTHROPIC_API_KEY\n    models:\n      general-model:\n        levels: { max: null }",
+    );
+    const agent = getAgent("general");
+    const resolved = resolveRun(
+      { config: configStore(withOverride) },
+      { msg: message, directives: { agent: "general", effort: "max", text: message.text }, history },
+    ).resolved;
+    expect(() =>
+      resolveTarget(
+        { config: configStore(withOverride) },
+        {
+          msg: message,
+          history,
+          agent,
+          profile: declaredProfile(agent),
+          resolved,
+          resume: undefined,
+          root: root(message).root,
+        },
+      ),
+    ).toThrow(/Model "anthropic\/general-model" refuses effort "max": general-model does not take effort "max"/);
+  });
+
+  // The Responses wire is pi's alone (record 0052, U42): OpenCode's bundled
+  // @ai-sdk/openai is unmeasured against the logging fake, so a preset on
+  // OpenCode with a Responses block is refused here by name, never a call
+  // that fails mid-run. The same block on pi (the default harness) resolves.
+  it("a preset on OpenCode with a Responses block is refused at dispatch by name; the same block on pi resolves", () => {
+    const withResponses = YAML.replace(
+      "    apiKeyEnv: ANTHROPIC_API_KEY",
+      "    apiKeyEnv: ANTHROPIC_API_KEY\n  openai:\n    wire: openai-responses\n    baseUrl: https://api.openai.com/v1\n    apiKeyEnv: OPENAI_API_KEY",
+    );
+    const agent = getAgent("general");
+    const resolved = resolveRun(
+      { config: configStore(withResponses) },
+      { msg: message, directives: { agent: "general", model: "openai/gpt-5.4", text: message.text }, history },
+    ).resolved;
+    const ctxFor = (harness: typeof resolved.harness) => ({
+      msg: message,
+      history,
+      agent,
+      profile: declaredProfile(agent),
+      resolved: { ...resolved, ...(harness ? { harness } : {}) },
+      resume: undefined,
+      root: root(message).root,
+    });
+    expect(() =>
+      resolveTarget({ config: configStore(withResponses) }, ctxFor({ name: "opencode", scope: "user" })),
+    ).toThrow(
+      /Model "openai\/gpt-5\.4" speaks the openai-responses wire, which the "opencode" harness cannot speak yet/,
+    );
+    const onPi = resolveTarget({ config: configStore(withResponses) }, ctxFor(undefined));
+    expect(onPi.modelCard.wire).toBe("openai-responses");
+  });
+
   it("a repo-needing agent resolves the target through the injected resolver, once, with the message and the history; an empty answer means no repo", async () => {
     const calls: unknown[] = [];
     let answer: RepoContext = { repo: "acme/api", ref: "main" };

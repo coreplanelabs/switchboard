@@ -69,6 +69,56 @@ describe("openCodeStoreMessages — the seed as store messages", () => {
       type: "text",
       text: "the bot restarted while this call was in flight; re-check its effects",
     });
+    // The error state the schema requires (`Session.StructuredError`: `type`
+    // and `message`): OpenCode's own type for a tool it interrupts, the note as
+    // the message (what the store's projection falls back to).
+    expect(state.status).toBe("error");
+    expect(state.error).toEqual({
+      type: "aborted",
+      message: "the bot restarted while this call was in flight; re-check its effects",
+    });
+  });
+
+  it("an error tool content with no text carries OpenCode's own words as its message, so the state still decodes", () => {
+    const transcript: ChatMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "call_silent", name: "bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "call_silent", content: "", isError: true }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "call_hung", name: "bash", input: {} }] },
+    ];
+    const messages = openCodeStoreMessages(transcript, opts);
+    const stateOf = (i: number) =>
+      (messages[i].content as Array<Record<string, unknown>>)[0].state as Record<string, unknown>;
+    expect(stateOf(0).error).toEqual({ type: "tool.execution", message: "The tool call failed" });
+    expect(stateOf(1).error).toEqual({ type: "aborted", message: "Tool execution interrupted" });
+  });
+
+  it("a call whose following result the record marked an error becomes an error tool content typed as the tool's own failure, its output as the content", () => {
+    const transcript: ChatMessage[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "call_failed", name: "bash", input: { command: "make" } }],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "call_failed", content: "make: *** [all] Error 2", isError: true }],
+      },
+    ];
+    const messages = openCodeStoreMessages(transcript, opts);
+    expect(messages).toHaveLength(1);
+    const state = (messages[0].content as Array<Record<string, unknown>>)[0].state as Record<string, unknown>;
+    expect(state.status).toBe("error");
+    expect(state.error).toEqual({ type: "tool.execution", message: "make: *** [all] Error 2" });
+    expect(state.content).toEqual([{ type: "text", text: "make: *** [all] Error 2" }]);
+  });
+
+  it("a completed tool content carries no error", () => {
+    const transcript: ChatMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "call_ok", name: "bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "call_ok", content: "ok" }] },
+    ];
+    const state = (openCodeStoreMessages(transcript, opts)[0].content as Array<Record<string, unknown>>)[0]
+      .state as Record<string, unknown>;
+    expect(state).not.toHaveProperty("error");
   });
 });
 

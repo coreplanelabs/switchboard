@@ -36,7 +36,7 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `help show` | How to ask in plain words: describe what you want, force an agent, change a route in the thread. | anyone |
+| `help show` | How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show. | anyone |
 | `help commands` | Every chat command by group, the grammar, and the per-request directives. | anyone |
 
 ### `status`
@@ -133,6 +133,12 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 |---|---|---|
 | `costs by <user\|thread\|channel\|agent\|model> [--days <integer>] [--group <string>]` | What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written. | admins |
 | `costs snapshot` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. | admins |
+
+### `providers`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `providers check` | Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each. | admins |
 
 <!-- /generated:chat-commands -->
 

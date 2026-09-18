@@ -8,10 +8,27 @@ import {
   composeRunLabel,
   deliverAnswer,
   LONG_COMMAND_REPLY_CHARS,
+  REFUSAL_SENTENCES,
+  renderConfirmationOffer,
+  renderRefusal,
   replyCommandOutput,
   runPageLink,
   type ReplyDeps,
 } from "./reply.js";
+import { refusalOf, REFUSAL_CODES, type RefusalCode } from "../refusal.js";
+import { profileRefusalReply } from "./authorize.js";
+import { refusalReply } from "../threadAdmission.js";
+import { renderOffer } from "../confirmations.js";
+import type { ConfirmationOffer } from "../types.js";
+import {
+  OFFER_CANCELLED_LINE,
+  OFFER_EXPIRED_LINE,
+  OFFER_FOREIGN_LINE,
+  OFFER_UNREADABLE_LINE,
+  OFFER_USED_LINE,
+} from "./confirm.js";
+import { REFERENCE_REFUSAL } from "./references.js";
+import { FOLLOW_UP_DROPPED_BY_STOP } from "./settle.js";
 import type { ChannelIO } from "../types.js";
 import { nullChannelIO } from "../nullChannelIo.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -182,6 +199,299 @@ describe("attachmentSuffix", () => {
     expect(attachmentSuffix([img], undefined)).toBe("[+1 image]");
     expect(attachmentSuffix([img, img], [doc])).toBe("[+2 images, 1 document]");
     expect(attachmentSuffix(undefined, [doc, doc])).toBe("[+2 documents]");
+  });
+});
+
+// Feature: record 0054:
+// one renderer turns a `Refusal` into what the person reads; the text is the
+// producer's sentence, byte-identical to today's, and the renderer adds nothing
+// the producer did not put in `text` or `wayForward`. A `system` refusal never
+// renders an offer or a Yes.
+describe("renderRefusal — the one rendering of a Refusal", () => {
+  const capture = () => {
+    const replies: string[] = [];
+    const offer = vi.fn();
+    const io: ChannelIO = {
+      ...nullChannelIO("slack:CX:1.0", () => {}),
+      reply: async (t: string) => void replies.push(t),
+      offer,
+    };
+    return { io, replies, offer };
+  };
+
+  it("renders every gate sentence and all eight reference reasons byte-identical — the producing sites' own builders diffed against the inventory's quotes", async () => {
+    // Each entry pairs a code with the SENTENCE ITS PRODUCING SITE BUILDS —
+    // `REFUSAL_SENTENCES`, `profileRefusalReply`, `refusalReply`, confirm.ts's
+    // lines, the references' one line — and the inventory's quote as a
+    // literal, so a drifted builder fails here instead of shipping. Codes
+    // whose text another module builds from live data (`pr_head_unknown` from
+    // `checkPrHeadPreflight`, `branch_moved` from `guardAttachedHead`,
+    // `ship_preflight` from the ship preflight) are proven byte-identical by
+    // those modules' own tests; the silent codes (`coordinator_thread_live`,
+    // `workspace_lost`, `setup_failed`) and `uncaught` render nothing.
+    const adminsHint = "an admin";
+    const liveThread = { agent: "coding", startedAt: 0, inbox: [] } as unknown as Parameters<typeof refusalReply>[0];
+    const table: ReadonlyArray<{ code: RefusalCode; built: string; quoted: string }> = [
+      {
+        code: "agent_allowlist",
+        built: REFUSAL_SENTENCES.agent_allowlist({ agent: "coding", adminsHint }),
+        quoted: "🚫 You're not on the allowlist for the `coding` agent. Ask an admin for access.",
+      },
+      {
+        code: "live_agent_allowlist",
+        built: REFUSAL_SENTENCES.live_agent_allowlist({ agent: "coding", adminsHint }),
+        quoted:
+          "🚫 You're not on the allowlist for the `coding` agent, whose run is in flight in this thread. Ask an admin for access.",
+      },
+      {
+        code: "elsewhere_agent_allowlist",
+        built: REFUSAL_SENTENCES.elsewhere_agent_allowlist({ agent: "coding", adminsHint }),
+        quoted:
+          "🚫 You're not on the allowlist for the `coding` agent, whose run is in flight in this thread. Ask an admin for access.",
+      },
+      {
+        code: "profile_bounded",
+        built: profileRefusalReply(
+          "coding",
+          { axis: "identity", needs: "write", cap: "read", scope: "channel" },
+          adminsHint,
+        ),
+        quoted:
+          "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Run it in a channel that allows `write`, or ask an admin to raise this channel's boundary.",
+      },
+      {
+        code: "repo_not_visible",
+        built: REFUSAL_SENTENCES.repo_not_visible({ slug: "o/r", agent: "coding" }),
+        quoted:
+          "📦 `o/r` is not a repository this installation can see — GitHub answered 404 — so I did not start a *coding* run for it. " +
+          "The repository is outside the Switchboard GitHub App installation (`github_repos` lists the reachable ones), or the name is wrong.",
+      },
+      {
+        code: "repo_unverified",
+        built: REFUSAL_SENTENCES.repo_unverified({ slug: "o/r", agent: "coding", via: "github" }),
+        quoted:
+          "⚠️ I couldn't verify `o/r` against GitHub — it didn't answer — so I did not start a *coding* run rather than guess which repository you meant. Try again in a minute.",
+      },
+      {
+        code: "repo_unverified",
+        built: REFUSAL_SENTENCES.repo_unverified({ slug: "o/r", agent: "coding", via: "registry" }),
+        quoted:
+          "⚠️ I couldn't verify that `o/r` is an onboarded repo — the resident registry didn't answer — so I did not start a *coding* run rather than guess which repo you meant. " +
+          "Try again in a minute, or name the repository by URL (https://github.com/o/r) to run in a cold per-thread sandbox.",
+      },
+      {
+        code: "repo_not_onboarded",
+        built: REFUSAL_SENTENCES.repo_not_onboarded({
+          slug: "o/r",
+          agent: "coding",
+          onboardHint: "Onboard it (`repo onboard o/r`)",
+        }),
+        quoted:
+          "📦 `o/r` is not onboarded as a resident, so I did not start a *coding* run for it. " +
+          "Onboard it (`repo onboard o/r`) for a warm, deps-ready environment, or name the repository by URL " +
+          "(https://github.com/o/r) to run in a cold per-thread sandbox.",
+      },
+      {
+        code: "repo_access",
+        built: REFUSAL_SENTENCES.repo_access({ repo: "o/r", adminsHint }),
+        quoted: "🚫 You're not on the allowlist for the `o/r` repo environment. Ask an admin for access.",
+      },
+      {
+        code: "follow_up_refused",
+        built: refusalReply(liveThread, { requestedAgent: "review" }, 120_000),
+        quoted:
+          "⏳ A *coding* run is already in flight in this thread (120s in).\n" +
+          "An `agent:review` request cannot start beside it — one run per thread. Wait for it to finish and re-send, or start a new thread.",
+      },
+      {
+        code: "elsewhere_follow_up_refused",
+        built: refusalReply(liveThread, { requestedAgent: "review" }, 120_000),
+        quoted:
+          "⏳ A *coding* run is already in flight in this thread (120s in).\n" +
+          "An `agent:review` request cannot start beside it — one run per thread. Wait for it to finish and re-send, or start a new thread.",
+      },
+      {
+        code: "which_branch",
+        built: REFUSAL_SENTENCES.which_branch({ repo: "o/r" }),
+        quoted:
+          '🌿 Which branch of `o/r` should this thread work on? No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I\'ll pick it up from there.',
+      },
+      {
+        code: "ship_budget",
+        built: REFUSAL_SENTENCES.ship_budget({ maxMinutes: 10, maxRounds: 1, need: 25, provision: 5, coding: 15 }),
+        quoted:
+          "🚫 Ship cannot start under a 10-minute budget: the loop it allows (1 review rounds) needs 25 minutes — " +
+          "5 to provision, the coding child's 15, and the reserve for the rounds after it at their floors. " +
+          "Widen the budget or the boundary that clipped it, or run `agent:coding` for a single pass without the review loop.",
+      },
+      {
+        code: "confirmation_expired",
+        built: OFFER_EXPIRED_LINE,
+        quoted: "this offer expired; type the line to run it",
+      },
+      { code: "confirmation_foreign", built: OFFER_FOREIGN_LINE, quoted: "only the requester can confirm this" },
+      { code: "confirmation_used", built: OFFER_USED_LINE, quoted: "this offer was already used" },
+      {
+        code: "confirmation_unreadable",
+        built: OFFER_UNREADABLE_LINE,
+        quoted: "the confirmation could not be read; type the line to run it",
+      },
+      // Record 0037: ONE sentence for all eight reference codes.
+      ...(
+        [
+          "reference_over_cap",
+          "reference_rate_limited",
+          "reference_guest",
+          "reference_not_a_member",
+          "reference_denied",
+          "reference_timed_out",
+          "reference_never",
+          "reference_fetch_failed",
+        ] as const
+      ).map((code) => ({ code, built: REFERENCE_REFUSAL, quoted: "I can't read that thread." })),
+      {
+        code: "follow_up_dropped",
+        built: FOLLOW_UP_DROPPED_BY_STOP,
+        quoted:
+          "⛔ The run this was folded into was stopped before it read this follow-up, so it was not run. Re-send it to run it fresh.",
+      },
+    ];
+    // Every code in the closed table is accounted for: rendered here, built by
+    // another module's tested builder, or silent by design.
+    const provenElsewhere: RefusalCode[] = [
+      "pr_head_unknown",
+      "branch_moved",
+      // (record 0054): each producer's own test proves its sentences
+      // byte-identical — the ship preflight's nine (preflight.test.ts), the
+      // plan hand-off's fifteen (handOff.test.ts), the directive and resolve
+      // parsers (directives.test.ts, resolve's dispatcher coverage), the typed
+      // commands' `chatErrorLine` (commandChat.test.ts), and the resident
+      // attach errors (resident.test.ts).
+      "ship_preflight_channel",
+      "ship_preflight_permission",
+      "ship_preflight_no_repo",
+      "ship_preflight_pr_unreachable",
+      "ship_preflight_pr_facts",
+      "ship_preflight_fork_head",
+      "ship_preflight_head_unknown",
+      "ship_preflight_closed_resume",
+      "ship_preflight_no_task",
+      "plan_base_unknown",
+      "plan_routed_seed",
+      "plan_id_invalid",
+      "plan_unreadable",
+      "plan_no_units",
+      "plan_units_unknown",
+      "plan_runner_state_unknown",
+      "plan_runner_live",
+      "plan_runner_state_unread",
+      "plan_units_merged",
+      "plan_history_unavailable",
+      "plan_runner_conflict",
+      "plan_instance_orphaned",
+      "plan_start_failed",
+      "directive_agent",
+      "directive_effort",
+      "directive_budget",
+      "directive_severity",
+      "directive_renewals",
+      "provider_unknown",
+      // resolve.test.ts proves the card's refusal sentence — the model, the
+      // refused control and the card's why (record 0052).
+      "model_card_refused",
+      "command_unauthorized",
+      "command_invalid_input",
+      "command_not_found",
+      "command_conflict",
+      "command_unavailable",
+      "command_busy",
+      "command_internal",
+      "resident_attach_rejected",
+      "resident_attach_failed",
+    ];
+    const silent: RefusalCode[] = ["coordinator_thread_live", "workspace_lost", "setup_failed", "uncaught"];
+    const covered = new Set<RefusalCode>([...table.map((r) => r.code), ...provenElsewhere, ...silent]);
+    expect([...REFUSAL_CODES].filter((c) => !covered.has(c))).toEqual([]);
+    for (const row of table) {
+      expect(row.built, row.code).toBe(row.quoted);
+      const { io, replies } = capture();
+      await renderRefusal(refusalOf(row.code, row.built), io);
+      expect(replies).toEqual([row.built]);
+    }
+  });
+
+  it("the offer goes out through the one renderer: the Block Kit shape rides `io.offer` verbatim, and a channel without `offer` gets the offer's text form", async () => {
+    const shown: ConfirmationOffer = {
+      id: "c1",
+      line: "config set channel --models.coding anthropic/claude-opus-5",
+      risk: "changes the scope's settings for everyone in it until reset",
+      footer: "confirmation required by the built-in default",
+      expiresAt: 1_000,
+    };
+    const { io, offer, replies } = capture();
+    await renderConfirmationOffer(io, shown);
+    expect(offer).toHaveBeenCalledExactlyOnceWith(shown);
+    expect(replies).toEqual([]);
+    const bare = { ...capture().io, offer: undefined } as ChannelIO;
+    const bareReplies: string[] = [];
+    bare.reply = async (t: string) => void bareReplies.push(t);
+    await renderConfirmationOffer(bare, shown);
+    expect(bareReplies).toEqual([renderOffer(shown)]);
+  });
+
+  it("a `system` refusal renders the text as the error it is and never an offer (no Yes)", async () => {
+    const { io, replies, offer } = capture();
+    await renderRefusal(refusalOf("uncaught", "⚠️ boom"), io);
+    expect(replies).toEqual(["⚠️ boom"]);
+    expect(offer).not.toHaveBeenCalled();
+  });
+
+  it("a `policy` refusal renders the way forward the producer set, after its text", async () => {
+    const { io, replies } = capture();
+    await renderRefusal(
+      refusalOf("repo_access", "🚫 You're not on the allowlist for the `o/r` repo environment.", {
+        wayForward: "Ask an admin for access.",
+      }),
+      io,
+    );
+    expect(replies).toEqual([
+      "🚫 You're not on the allowlist for the `o/r` repo environment. Ask an admin for access.",
+    ]);
+  });
+
+  it("a `request` refusal without a guess renders the text — which names what the door needs — and nothing more", async () => {
+    const { io, replies, offer } = capture();
+    const cancelled = refusalOf("confirmation_expired", OFFER_EXPIRED_LINE);
+    await renderRefusal(cancelled, io);
+    expect(replies).toEqual([OFFER_EXPIRED_LINE]);
+    expect(offer).not.toHaveBeenCalled();
+    expect(OFFER_CANCELLED_LINE).toBe("Cancelled; nothing ran"); // the No path's line, unchanged by the seam
+  });
+
+  it("a `request` refusal with a guess is one question: the sentence, the marker, the corrected line as one code span, and the evidence — and it is the line to type on a channel with no offer", async () => {
+    const { io, replies, offer } = capture();
+    const proposal = {
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      threadKey: "slack:CX:1.0",
+      text: "agent:ship in acme/infrastructure: change the onboarding link",
+    };
+    const guess = {
+      proposal,
+      line: proposal.text,
+      evidence: "one edit from `acme/infrastructure`, which is onboarded",
+    };
+    await renderRefusal(
+      refusalOf("repo_not_onboarded", "📦 `acme/infra` is not onboarded as a resident.", { guess }),
+      io,
+    );
+    expect(replies).toEqual([
+      "📦 `acme/infra` is not onboarded as a resident.\n" +
+        "Did you mean:\n" +
+        "`agent:ship in acme/infrastructure: change the onboarding link`\n\n" +
+        "one edit from `acme/infrastructure`, which is onboarded",
+    ]);
+    expect(offer).not.toHaveBeenCalled();
   });
 });
 

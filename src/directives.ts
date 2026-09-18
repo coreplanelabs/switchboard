@@ -1,3 +1,4 @@
+import { refusalOf, RefusalError } from "./core/refusal.js";
 import { AGENTS } from "./agents/registry.js";
 import { MIN_BOUNDARY_MINUTES } from "./config/validate.js";
 import { GRANT_RENEWALS_MAX } from "./core/budgets.js";
@@ -101,36 +102,49 @@ export function parseDirectives(input: string): RequestDirectives {
   for (const f of found) {
     if (f.key === "agent") {
       if (!AGENTS[f.value]) {
-        throw new Error(`Unknown agent "${f.value}". Available: ${Object.keys(AGENTS).join(", ")}`);
+        throw new RefusalError(
+          refusalOf("directive_agent", `Unknown agent "${f.value}". Available: ${Object.keys(AGENTS).join(", ")}`),
+        );
       }
       out.agent = f.value;
     } else if (f.key === "model") {
       out.model = f.value;
     } else if (f.key === "effort") {
       if (!isEffort(f.value)) {
-        throw new Error(`Unknown effort "${f.value}". Valid: ${EFFORT_LEVELS_HINT}`);
+        throw new RefusalError(
+          refusalOf("directive_effort", `Unknown effort "${f.value}". Valid: ${EFFORT_LEVELS_HINT}`),
+        );
       }
       out.effort = f.value;
     } else if (f.key === "budget") {
       const minutes = parseBudgetMinutes(f.value);
       if (minutes === undefined) {
-        throw new Error(
-          `Invalid budget "${f.value}": budget:<minutes> takes a whole number of minutes, at least ${MIN_BOUNDARY_MINUTES} (e.g. budget:30). It narrows this run's wall clock and never widens it.`,
+        throw new RefusalError(
+          refusalOf(
+            "directive_budget",
+            `Invalid budget "${f.value}": budget:<minutes> takes a whole number of minutes, at least ${MIN_BOUNDARY_MINUTES} (e.g. budget:30). It narrows this run's wall clock and never widens it.`,
+          ),
         );
       }
       out.budget = minutes;
     } else if (f.key === "severity") {
       if (!isAddressSeverity(f.value)) {
-        throw new Error(
-          `Unknown severity "${f.value}". severity:<level> takes one of ${ADDRESS_SEVERITIES.join(", ")} — the severity to address: a review's approve carrying a finding at or above it is a request_changes.`,
+        throw new RefusalError(
+          refusalOf(
+            "directive_severity",
+            `Unknown severity "${f.value}". severity:<level> takes one of ${ADDRESS_SEVERITIES.join(", ")} — the severity to address: a review's approve carrying a finding at or above it is a request_changes.`,
+          ),
         );
       }
       out.severity = f.value;
     } else if (f.key === "renewals") {
       const count = /^\d+$/.test(f.value) ? Number(f.value) : undefined;
       if (count === undefined || count > GRANT_RENEWALS_MAX) {
-        throw new Error(
-          `Invalid renewals "${f.value}": renewals:<count> takes a whole number from 0 to ${GRANT_RENEWALS_MAX} — the segments agent:ship may add after its first lease.`,
+        throw new RefusalError(
+          refusalOf(
+            "directive_renewals",
+            `Invalid renewals "${f.value}": renewals:<count> takes a whole number from 0 to ${GRANT_RENEWALS_MAX} — the segments agent:ship may add after its first lease.`,
+          ),
         );
       }
       out.renewals = count;

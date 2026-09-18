@@ -17,12 +17,16 @@ import type { LedgerRun } from "../runLedger/writeThrough.js";
 import { systemClock } from "../trace/index.js";
 import type { RunOwner } from "../trace/streamSpans.js";
 import type { RequestTrace } from "../requestTrace.js";
-import type { RepoContext } from "../repoContext.js";
+import type { RepoContext, ResidentSlugs } from "../repoContext.js";
+import { residentSlugsLister } from "../../execution/factory.js";
 import { fetchPullRequestFacts, fetchRepoShipInfo, type PullRequestFacts } from "../../execution/githubPulls.js";
-import { processSecrets } from "../../secrets.js";
 import { handOffToCoordinator, type HandOffOutcome } from "../coordinator/handOff.js";
 import { ALLOWANCES, ASKS, fit } from "../budgets.js";
-import { createInstanceViaShim, fetchInstanceStatusViaShim } from "../coordinator/instancesClient.js";
+import {
+  createInstanceViaShim,
+  fetchInstanceStatusViaShim,
+  processShimOptions,
+} from "../coordinator/instancesClient.js";
 import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../coordinator/instancesRoute.js";
 import { resolveAddressSeverity, resolveGrant, resolveShipCaps } from "../shipPipeline.js";
@@ -42,6 +46,9 @@ import { defaultRunRegistry, REPLAY_EVERYTHING } from "../runRegistry.js";
 import { createCardShell } from "../statusCardFrame.js";
 import type { RunEnding } from "../runEnding.js";
 import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, type StatusHandle } from "../types.js";
+import { refusalOf, type Refusal } from "../refusal.js";
+import { renderRefusal, replyAck } from "./reply.js";
+import { REFUSAL_SENTENCES } from "./reply.js";
 
 /** What the ship branch reads: the run slice (the config, the registry and
  *  history writers, the GitHub client the hand-off reads the plan with), the
@@ -75,6 +82,14 @@ export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegi
    * Default: `fetchInstanceStatusViaShim` over the same base URL and token map.
    */
   fetchCoordinatorInstanceStatus?: (id: string) => Promise<InstanceStatusAnswer>;
+  /**
+   * The resident registry listing, for the no-repo refusal's best guess
+   * (record 0054): one bounded call — the probe's timeout, skipped inside a
+   * probe-outage window — whose failure leaves the question without a guess.
+   * Default: the production lister over the configured resident. Injectable so
+   * tests assert the guess without a network call.
+   */
+  residentSlugs?: ResidentSlugs;
 }
 
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
@@ -111,8 +126,9 @@ export interface ShipContext {
   trace: RequestTrace;
   /** The card's shape and queued lines at a close, from the dispatch's window. */
   closeLines: (end: number, finished: boolean, owner?: RunOwner) => { shape?: string; queued?: string };
-  /** A refusal as one `dispatch.refuse` span. */
-  refuse: <T>(outcome: string, fn: () => Promise<T>) => Promise<T>;
+  /** A refusal as one `dispatch.refuse` span: the site's `Refusal`, the side
+   *  work inside the span, the sentence rendered in one place. */
+  refuse: (refusal: Refusal, side?: () => Promise<void>) => Promise<void>;
   /** The done card's shape and queued lines, from the finish-site diagnosis. */
   doneLines: (diagnosis: FrictionDiagnosis | undefined) => { shape?: string; queued?: string };
   /** How the ship preset was chosen (`run_meta.agentSource`). */
@@ -145,12 +161,17 @@ export async function runShipBranch(
   const clock = deps.clock ?? systemClock;
   // The same one-builder card shell as the main path, on the same label and clock.
   const shell = createCardShell({ label, startedAt: ctx.startedAt, now: clock });
+  // Record 0054: only a request that resolved NO repository pays for the
+  // registry listing, and only to guess the one the person meant.
+  const listSlugs = deps.residentSlugs ?? residentSlugsLister(deps.config.config.execution?.resident);
+  const repoCandidates = repoCtx.repo ? undefined : await listSlugs?.().catch(() => undefined);
   const pre = await root.span("dispatch.ship_preflight", () =>
     shipPreflight({
       channelId: msg.channelId,
       threadKey: msg.threadKey,
       requestText: directives.text,
       repoCtx,
+      ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates } : {}),
       gates: {
         canRunAgent: (a) => deps.config.canRunAgent(chatActorOf(deps.config, msg), a),
         adminsHint: () => deps.config.adminsHint(),
@@ -162,13 +183,43 @@ export async function runShipBranch(
   );
   if (!pre.ok) {
     console.log(`[ship] ${msg.threadKey} not started: ${pre.where}`);
-    await refuse("ship_preflight", async () => {
-      await card.done(shell.close({ kind: "refused", icon: "🚫", reason: pre.card, ...closeLines(clock(), false) }));
-      await io.reply(pre.reply);
-    });
+    await refuse(pre.refusal, () =>
+      card.done(shell.close({ kind: "refused", icon: "🚫", reason: pre.card, ...closeLines(clock(), false) })),
+    );
     return;
   }
   const entry = pre.entry;
+
+  // The runner's caps (agent-ship.md item 8): the rounds cap is the config
+  // block's; the wall clock is the parent's effective budget — the preset's
+  // declared `ship.maxMinutes` as a boundary or a `budget:` directive clipped
+  // it — so every child round the runner spawns is clipped to what remains of THAT.
+  const caps = { ...resolveShipCaps(deps.config.config.ship), maxMinutes: profile.minutes };
+  // The fit at the fork (agent-ship item 8, decision 0046): a boundary or a
+  // `budget:` directive that clipped the pipeline under the loop it allows is
+  // refused here with the sum on the card, never carved into a child that
+  // cannot do useful work. The check runs BEFORE the run record or ledger row
+  // is created, so a refused start writes no live row and the thread's next
+  // run is tracked.
+  const held = fit(caps);
+  if (!held.ok) {
+    const reason = `budget ${caps.maxMinutes} min cannot hold the ship loop (${caps.maxRounds} review rounds need ${held.need} min)`;
+    console.log(`[ship] ${msg.threadKey} not started: ${reason}`);
+    await refuse(
+      refusalOf(
+        "ship_budget",
+        REFUSAL_SENTENCES.ship_budget({
+          maxMinutes: caps.maxMinutes,
+          maxRounds: caps.maxRounds,
+          need: held.need,
+          provision: ALLOWANCES.provision,
+          coding: ASKS.coding,
+        }),
+      ),
+      () => card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
+    );
+    return;
+  }
 
   // The one run record: registered and stamped exactly like the main
   // path — input, run_meta, bounded context, the tombstone.
@@ -318,29 +369,6 @@ export async function runShipBranch(
   shell.setLink(liveUrl ? { url: liveUrl, label: "Live run" } : undefined);
   let outcome: HandOffOutcome | undefined;
   let shipDiagnosis: FrictionDiagnosis | undefined;
-  // The runner's caps (agent-ship.md item 8): the rounds cap is the config
-  // block's; the wall clock is the parent's effective budget — the preset's
-  // declared `ship.maxMinutes` as a boundary or a `budget:` directive clipped
-  // it — so every child round the runner spawns is clipped to what remains of THAT.
-  const caps = { ...resolveShipCaps(deps.config.config.ship), maxMinutes: profile.minutes };
-  // The fit at the fork (agent-ship item 8, decision 0046): a boundary or a
-  // `budget:` directive that clipped the pipeline under the loop it allows is
-  // refused here with the sum on the card, never carved into a child that
-  // cannot do useful work.
-  const held = fit(caps);
-  if (!held.ok) {
-    const reason = `budget ${caps.maxMinutes} min cannot hold the ship loop (${caps.maxRounds} review rounds need ${held.need} min)`;
-    console.log(`[ship] ${msg.threadKey} not started: ${reason}`);
-    await refuse("ship_budget", async () => {
-      await card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) }));
-      await io.reply(
-        `🚫 Ship cannot start under a ${caps.maxMinutes}-minute budget: the loop it allows (${caps.maxRounds} review rounds) needs ${held.need} minutes — ` +
-          `${ALLOWANCES.provision} to provision, the coding child's ${ASKS.coding}, and the reserve for the rounds after it at their floors. ` +
-          `Widen the budget or the boundary that clipped it, or run \`agent:coding\` for a single pass without the review loop.`,
-      );
-    });
-    return;
-  }
   // The severity to address, resolved once here — the request's
   // `severity:` directive over the user's scope over the channel's over the
   // org's — and handed to the runner on the instance beside `merge`.
@@ -361,10 +389,7 @@ export async function runShipBranch(
     user: scopes.user.ship?.grant,
     run: directives.renewals,
   });
-  const shim = () => ({
-    baseUrl: process.env.PUBLIC_BASE_URL,
-    tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
-  });
+  const shim = processShimOptions;
   try {
     // The hand-off (agent-ship.md item 16): the request — a plan, a task, or a
     // resume at review — becomes a plan runner instance; the bot writes the
@@ -375,8 +400,8 @@ export async function runShipBranch(
     outcome = await root.span("dispatch.ship_hand_off", () =>
       handOffToCoordinator(
         {
-          readFile: (repo, path, ref) =>
-            githubCapabilityFor(deps, chatActorOf(deps.config, msg)).api.readFile(repo, path, ref),
+          readFile: (repo, path, ref, opts) =>
+            githubCapabilityFor(deps, chatActorOf(deps.config, msg)).api.readFile(repo, path, ref, opts),
           instances: deps.coordinatorInstances ?? new NullCoordinatorInstanceStore(),
           create: deps.createCoordinatorInstance ?? ((id) => createInstanceViaShim(shim(), id)),
           status: deps.fetchCoordinatorInstanceStatus ?? ((id) => fetchInstanceStatusViaShim(shim(), id)),
@@ -396,6 +421,11 @@ export async function runShipBranch(
         },
       ),
     );
+    // The instance the hand-off created enters the stream first (record 0051
+    // R2): projected onto `RunRecord.instanceId`, it is how the thread's owner
+    // rule finds the plan runner from the page's ship run. None after a refusal.
+    if (outcome.instanceId !== undefined)
+      registry.publish(run.id, { type: "ship_handoff", instanceId: outcome.instanceId, at: clock() });
     // The run record is the source of truth: the answer enters the stream
     // BEFORE finish() below (a publish on a finished run is a no-op).
     publishText("answer", outcome.reply);
@@ -474,6 +504,9 @@ export async function runShipBranch(
   await ending.sealAfterReply(
     () =>
       root.span("post.card_close", () => card.done(shell.close({ kind: "done", icon, ...doneLines(shipDiagnosis) }))),
-    () => root.span("post.reply", () => io.reply(outcome.reply)),
+    () =>
+      root.span("post.reply", () =>
+        outcome.refusal ? renderRefusal(outcome.refusal, io) : replyAck(io, outcome.reply),
+      ),
   );
 }

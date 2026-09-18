@@ -40,6 +40,16 @@ describe("the resident's not-serviceable answers name what the client cannot wai
     expect(withState.filter((l) => /error: `not-serviceable: \$\{errMsg\(err\)\}`/.test(l))).toHaveLength(3);
   });
 
+  it("every named refusal carries the seam's cause beside its words (record 0054): the onboard 403 is `policy` — the admin's to fix — the thread's ref failures are `request`, and the machinery's own answers are `system`, so a caller reads a field and never the sentence", () => {
+    // The onboard 403: the repository is not in the App installation.
+    expect(source).toMatch(/not-in-installation[\s\S]{0,900}?cause: "policy"/);
+    // needs-ref and unknown-ref, the two ref failures the thread can cause.
+    expect(source.match(/cause: "request"/g) ?? []).toHaveLength(3);
+    expect(source.match(/cause: "policy"/g) ?? []).toHaveLength(1);
+    for (const literal of answers503().filter((l) => /reason: ("mirror-busy"|"unregistered")/.test(l)))
+      expect(literal, literal).toMatch(/cause: "system"/);
+  });
+
   it("the Worker wires the thread data plane's builders from threadErr.ts over the predicates only it can supply — the SDK's reset and platform-transient predicates, imported side by side, and its own replacement classifier and vouch — and defines none of the shapes or rules itself, so what threadErr.test.ts runs is what the Worker answers", () => {
     expect(source).toMatch(/import \{\n {2}isDurableObjectCodeUpdateReset,\n {2}isPlatformTransientError,/);
     expect(source).toMatch(

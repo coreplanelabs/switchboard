@@ -7,8 +7,10 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { secretsFrom, type Secrets } from "./secrets.js";
 import {
   ConfigStore,
+  defaultIntakeMode,
   FileOverridesBacking,
   InMemoryOverridesBacking,
+  intakeModelRef,
   loadAppConfigFrom,
   openConfigStore,
   OverridesConflictError,
@@ -497,6 +499,15 @@ describe("grantsFor — the grants the policy table decides on", () => {
     expect(more.canRunAgent("slack:URANDOM", "coding")).toBe(false);
   });
 
+  it("grantedPeople lists the Slack people the grants table names, in its order, whatever they hold — never a credential, a surface star or a schedule", () => {
+    const s = store(
+      withGrants(
+        `  "slack:*": { actions: [runs:read] }\n  "access:op-1": { actions: all, channels: all, repos: all }\n  "http:ops": { actions: [runs:read] }\n`,
+      ),
+    );
+    expect(s.grantedPeople()).toEqual(["slack:UADMIN", "slack:UDEV"]);
+  });
+
   it("adminsHint names people, never a surface: `slack:*` holding everything makes everyone an admin, and the hint still points at UADMIN", async () => {
     const s = store(withGrants(`  "slack:*": { actions: all, channels: all, repos: all }\n`));
     expect(s.grantsFor("slack:URANDOM")).toEqual(ALL_GRANTS);
@@ -784,6 +795,81 @@ describe("routing block (routing.auto, routing.model)", () => {
   });
 });
 
+// Feature: docs/reference/specs/routing-and-config.md item 27 (record 0058) —
+// the `intake` block and the `intake` scope field: the thread-reply gate's
+// mode, its model, and the load-time card check under the classify default.
+describe("intake block and Scope.intake (routing-and-config item 27)", () => {
+  it("parses the block; a config without an intake block resolves the default mode classify", () => {
+    const s = store(YAML_FIXTURE + "intake:\n  threadReplies: mention\n  model: anthropic/fast-model\n");
+    expect(s.config.intake).toEqual({ threadReplies: "mention", model: "anthropic/fast-model" });
+    expect(defaultIntakeMode(s.config)).toBe("mention");
+    expect(store().config.intake).toBeUndefined();
+    expect(defaultIntakeMode(store().config)).toBe("classify");
+  });
+
+  it("the intake model resolves intake.model, else routing.model, else defaults.models.general", () => {
+    expect(intakeModelRef(store().config)).toBe("anthropic/general-model");
+    expect(intakeModelRef(store(YAML_FIXTURE + "routing:\n  model: anthropic/fast-model\n").config)).toBe(
+      "anthropic/fast-model",
+    );
+    expect(
+      intakeModelRef(
+        store(YAML_FIXTURE + "routing:\n  model: anthropic/fast-model\nintake:\n  model: anthropic/gate-model\n")
+          .config,
+      ),
+    ).toBe("anthropic/gate-model");
+  });
+
+  it("refuses an unknown mode by name — a typo can never read as a working setting", () => {
+    for (const value of ['"sometimes"', "true", '"Classify"'])
+      expect(() => store(YAML_FIXTURE + `intake:\n  threadReplies: ${value}\n`)).toThrow(
+        /intake\.threadReplies must be mention, classify or always/,
+      );
+    expect(() => store(YAML_FIXTURE + "intake: true\n")).toThrow(/intake must be a mapping/);
+    expect(() => store(YAML_FIXTURE + "intake:\n  mode: classify\n")).toThrow(/intake\.mode is not a known key/);
+  });
+
+  it("refuses intake.model when it is not a <provider>/<model> ref or names an undeclared provider", () => {
+    expect(() => store(YAML_FIXTURE + "intake:\n  model: fast-model\n")).toThrow(
+      /intake\.model must be a <provider>\/<model> ref/,
+    );
+    expect(() => store(YAML_FIXTURE + "intake:\n  model: openai/gpt-5\n")).toThrow(
+      /intake\.model names provider "openai", which providers does not define/,
+    );
+  });
+
+  it("a card that supports neither a forced tool call nor the text contract is refused at load when the effective default mode is classify — and loads under mention or always", () => {
+    const card = "    models:\n      gate-model:\n        answers: []\n";
+    const providers = `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\n${card}defaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`;
+    expect(() => store(providers + "intake:\n  model: anthropic/gate-model\n")).toThrow(
+      /intake.*neither.*(tool|text)/s,
+    );
+    // The same card is fine when intake never calls a model by default.
+    expect(() => store(providers + "intake:\n  model: anthropic/gate-model\n  threadReplies: always\n")).not.toThrow();
+    expect(() => store(providers + "intake:\n  model: anthropic/gate-model\n  threadReplies: mention\n")).not.toThrow();
+    // A card that names an answer shape loads under classify.
+    const tools = providers.replace("answers: []", 'answers: ["tool"]');
+    expect(() => store(tools + "intake:\n  model: anthropic/gate-model\n")).not.toThrow();
+    // A card that declares nothing is not refused: both shapes are assumed.
+    expect(() => store(YAML_FIXTURE + "intake:\n  model: anthropic/general-model\n")).not.toThrow();
+  });
+
+  it("Scope.intake validates by name on channels and users: only threadReplies, only a known mode", () => {
+    const withChannel = (block: string) => YAML_FIXTURE.replace("channels:", `channels:\n  "slack:CQUIET":\n${block}`);
+    const s = store(withChannel("    intake:\n      threadReplies: mention"));
+    expect(s.config.channels?.["slack:CQUIET"]?.intake).toEqual({ threadReplies: "mention" });
+    expect(() =>
+      store(YAML_FIXTURE.replace("users:", 'users:\n  "slack:UX":\n    intake:\n      threadReplies: sometimes')),
+    ).toThrow(/users\.slack:UX\.intake\.threadReplies must be mention, classify or always/);
+    expect(() => store(withChannel("    intake:\n      model: anthropic/x"))).toThrow(
+      /channels\.slack:CQUIET\.intake\.model is not a known key/,
+    );
+    expect(() => store(withChannel("    intake: classify"))).toThrow(
+      /channels\.slack:CQUIET\.intake must be a mapping/,
+    );
+  });
+});
+
 // Feature: docs/reference/specs/harness.md item 8; harness-pi.md item 1 — the
 // `harness` block puts a preset on a harness by the name the harness object
 // declares: `pi` or `opencode`, the roster's two words, read off the roster
@@ -1018,8 +1104,8 @@ describe("spawn block (spawn.maxChildren)", () => {
 
 describe("ship caps block (agent:ship pipeline)", () => {
   it("parses maxRounds/maxMinutes; absent block leaves the field unset", async () => {
-    const s = store(YAML_FIXTURE + "ship:\n  maxRounds: 2\n  maxMinutes: 90\n");
-    expect(s.config.ship).toEqual({ maxRounds: 2, maxMinutes: 90 });
+    const s = store(YAML_FIXTURE + "ship:\n  maxRounds: 2\n  maxMinutes: 180\n");
+    expect(s.config.ship).toEqual({ maxRounds: 2, maxMinutes: 180 });
     expect(store().config.ship).toBeUndefined();
   });
 
@@ -1032,14 +1118,14 @@ describe("ship caps block (agent:ship pipeline)", () => {
   // agent-ship.md item 8, decision 0046: the fit at config load — the pipeline
   // holds its first child at its ask and every later round at its floor, or
   // the config is refused naming the sum, never left to cap out on every unit.
-  it("a ship pipeline that cannot hold its loop is refused with the sum: 40 minutes against the 108 three review rounds need, 120 against the 129 four need; 108 at three rounds loads, and the default 120 at three rounds loads", async () => {
+  it("a ship pipeline that cannot hold its loop is refused with the sum: 40 minutes against the 163 three review rounds need, 180 against the 189 four need; 163 at three rounds loads, and the default 240 at three rounds loads", async () => {
     expect(() => store(YAML_FIXTURE + "ship:\n  maxMinutes: 40\n")).toThrow(
-      /ship\.maxMinutes 40 cannot hold the loop ship\.maxRounds 3 allows — 108 minutes are needed \(3 to provision, the coding child's 45, and the reserve for 3 review rounds at their floors\)/,
+      /ship\.maxMinutes 40 cannot hold the loop ship\.maxRounds 3 allows — 163 minutes are needed \(3 to provision, the coding child's 90, and the reserve for 3 review rounds at their floors\)/,
     );
-    expect(() => store(YAML_FIXTURE + "ship:\n  maxRounds: 4\n")).toThrow(
-      /ship\.maxMinutes 120 cannot hold the loop ship\.maxRounds 4 allows — 129 minutes are needed/,
+    expect(() => store(YAML_FIXTURE + "ship:\n  maxRounds: 4\n  maxMinutes: 180\n")).toThrow(
+      /ship\.maxMinutes 180 cannot hold the loop ship\.maxRounds 4 allows — 189 minutes are needed/,
     );
-    expect(store(YAML_FIXTURE + "ship:\n  maxMinutes: 108\n").config.ship).toEqual({ maxMinutes: 108 });
+    expect(store(YAML_FIXTURE + "ship:\n  maxMinutes: 163\n").config.ship).toEqual({ maxMinutes: 163 });
     expect(store(YAML_FIXTURE + "ship:\n  maxRounds: 3\n").config.ship).toEqual({ maxRounds: 3 });
   });
 
@@ -1180,7 +1266,7 @@ describe("ship caps block (agent:ship pipeline)", () => {
     expect(shipPresetFor({ maxRounds: 1 })).toEqual(AGENTS.ship);
     expect(shipPresetFor({ maxMinutes: 45 })).toEqual({ ...AGENTS.ship, maxMinutes: 45 });
     expect(shipPresetFor({ maxMinutes: 45 }).maxMinutes).toBe(resolveShipCaps({ maxMinutes: 45 }).maxMinutes);
-    expect(AGENTS.ship.maxMinutes).toBe(120); // the shared def is never mutated
+    expect(AGENTS.ship.maxMinutes).toBe(240); // the shared def is never mutated
   });
 
   it("the example config (config/config.example.yaml) still loads through ConfigStore", async () => {
@@ -1199,6 +1285,9 @@ describe("the example config's provider blocks", () => {
   const EXAMPLE = readFileSync(join(process.cwd(), "config/config.example.yaml"), "utf8");
   const OPENROUTER = {
     type: "openai-compatible",
+    wire: "openai-chat",
+    vendor: "model",
+    catalog: "openrouter",
     baseUrl: "https://openrouter.ai/api/v1",
     apiKeyEnv: "OPENROUTER_API_KEY",
   };
@@ -1323,13 +1412,13 @@ describe("the example config's provider blocks", () => {
     });
     const block = store.config.providers[ref.provider];
     expect(
-      upstreamFor("openai-compatible", ref.provider, block, secretsFrom({ OPENROUTER_API_KEY: "sk-or-test" }), {}),
+      upstreamFor("openai-chat", ref.provider, block, secretsFrom({ OPENROUTER_API_KEY: "sk-or-test" }), {}),
     ).toEqual({
       ok: true,
       url: `${OPENROUTER.baseUrl}/chat/completions`,
       headers: { "content-type": "application/json", authorization: "Bearer sk-or-test" },
     });
-    expect(upstreamFor("openai-compatible", ref.provider, block, secretsFrom({}), {})).toEqual({
+    expect(upstreamFor("openai-chat", ref.provider, block, secretsFrom({}), {})).toEqual({
       ok: false,
       code: "provider_key_missing",
       message: 'provider "openrouter": OPENROUTER_API_KEY is not set',

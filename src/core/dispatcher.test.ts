@@ -1,4 +1,4 @@
-import { bearerExpiresAt } from "./budgets.js";
+import { ASKS, bearerExpiresAt } from "./budgets.js";
 import { contractFromPlan, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./ship/contract.js";
 import { NO_VERDICT_LINE } from "./reviewVerdict.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
@@ -16,6 +16,7 @@ import type { CompletionRequest, CompletionResult, Provider } from "./provider.j
 import { AGENTS, getAgent } from "../agents/registry.js";
 import { CONFIG_AWARENESS_HEADER } from "./configAwareness.js";
 import { planResume } from "./runLedger/resume.js";
+import { actorOfStoredRow } from "./runLedger/sessionLog.js";
 import { knownToolsFor, launchResumes, resumeMessage } from "./resumeLaunch.js";
 import { reclaimRuns } from "./boot.js";
 import { piRunPaths, RUN_BEARER_ENV } from "./harness/pi/process.js";
@@ -46,6 +47,7 @@ import {
 import { setShutdownNotice } from "./dispatch/run.js";
 import { durableInboxMessage, type DispatchFollowUp } from "./dispatch/admission.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
+import { TITLE_GATE_REPOSITORY } from "./prDescription.js";
 import { RunRegistry } from "./runRegistry.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
 import { activityText } from "./statusCardFrame.js";
@@ -104,7 +106,7 @@ import { ROUTE_RECEIPT_CAP, type RouteModel, type RoutePrompt } from "./dispatch
 import { capabilitiesFrom } from "./capabilities.js";
 import { NO_FLEET } from "./residentFleet.js";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
-import type { CoordinatorInstance } from "./coordinator/contract.js";
+import type { CoordinatorInstance, CoordinatorUnit } from "./coordinator/contract.js";
 import type { Operations } from "./operations.js";
 import type { ResidentAdminClient } from "./residentAdmin.js";
 import { bearerHashOf, RunBearerStore } from "./modelProxy/runBearers.js";
@@ -998,6 +1000,17 @@ describe("executor provisioning by agent resources", () => {
     expect(replies.some((r) => r.includes("sandbox worker unreachable"))).toBe(true);
   });
 
+  it("an uncaught throw in dispatch() is the catch-all: the ⚠️ reply as today, the outcome carrying `uncaught` and `cause: system` (record 0054)", async () => {
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, capturingProvider());
+    const { io, replies } = fakeIO();
+    io.history = () => {
+      throw new Error("history exploded");
+    };
+    const ended = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(replies.some((r) => r.includes("⚠️ history exploded"))).toBe(true);
+    expect(ended).toMatchObject({ status: "failed", refusal: "uncaught", cause: "system" });
+  });
+
   it("a setup failure carrying remote text closes the card with one redacted line and redacts the reply (resident-repos item 62)", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -1166,6 +1179,193 @@ describe("resident repo dispatch", () => {
     expect(provider.requests).toHaveLength(0); // no model turn
     expect(makeExecutor).not.toHaveBeenCalled(); // no workspace of any kind
     expect(statuses[statuses.length - 1].title).toContain("not started");
+  });
+
+  // Feature: record 0054 — a request-caused refusal becomes one question with
+  // the bot's best guess: the corrected line to type and the evidence, over the
+  // resident registry listing (one bounded call).
+  it("fresh thread + a rejected bare slug near ONE resident → one question: the corrected line to type and the evidence (record 0054)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.capabilities = { ...deps.capabilities, residents: true };
+    deps.resolveRepoContext = () => ({ rejectedRepo: "acme/infra" });
+    deps.residentSlugs = async () => ["acme/infrastructure", "acme/api"];
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding in acme/infra: change the onboarding link", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("not onboarded");
+    expect(replies[0]).toContain("Did you mean:");
+    expect(replies[0]).toContain("`agent:coding in acme/infrastructure: change the onboarding link`");
+    expect(replies[0]).toContain("which is onboarded");
+    expect(provider.requests).toHaveLength(0); // no model turn
+    expect(makeExecutor).not.toHaveBeenCalled();
+  });
+
+  it("two residents tie: the question stands without a guess — no line is proposed (record 0054)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.capabilities = { ...deps.capabilities, residents: true };
+    deps.resolveRepoContext = () => ({ rejectedRepo: "acme/infra" });
+    deps.residentSlugs = async () => ["acme/infrastructure", "acme/infra-tools"];
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding in acme/infra: change the onboarding link", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("not onboarded");
+    expect(replies[0]).not.toContain("Did you mean:");
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  // Feature: record 0054's Yes — on a channel that can show an offer, the
+  // question with a guess carries Yes and No; Yes hands the stored proposal to
+  // dispatch() as the requester and the run's record names the question's code.
+  describe("the question's Yes: the guess is stored and one click redispatches it (record 0054)", () => {
+    const requester: Actor = { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS };
+    const stranger: Actor = { kind: "user", id: "slack:UOTHER", grants: NO_GRANTS };
+    /** The rejected-slug request on an offering channel with the store wired:
+     *  everything the question needs to mint its row. */
+    const wiredQuestion = () => {
+      let n = 0;
+      const now = 1_000_000;
+      const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
+      const provider = capturingProvider();
+      const deps = makeDeps(REPO_PERMS_YAML, provider);
+      deps.runRegistry = registry;
+      deps.admission = new ThreadAdmission();
+      deps.clock = () => now;
+      deps.capabilities = { ...deps.capabilities, residents: true };
+      deps.resolveRepoContext = () => ({ rejectedRepo: "acme/apj" });
+      deps.residentSlugs = async () => ["acme/api"];
+      const store = new InMemoryConfirmationStore({ clock: () => now });
+      deps.confirmations = store;
+      const f = fakeIO();
+      const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+      f.io.offer = vi.fn(async (o) => void offers.push(o));
+      return { deps, registry, provider, store, offers, ...f, now: () => now };
+    };
+    const ask = (deps: TestDeps, io: ChannelIO) =>
+      dispatch(deps, msg("agent:coding in acme/apj: say hi", "slack:UADMIN"), io);
+
+    it("the question with a guess mints one redispatch row — the proposal as the requester's message, the code — and offers Yes: the sentence, the line and the evidence ride the offer; no plain reply", async () => {
+      const w = wiredQuestion();
+      await ask(w.deps, w.io);
+      expect(w.replies).toEqual([]);
+      expect(w.offers).toHaveLength(1);
+      const offer = w.offers[0]!;
+      expect(offer).toMatchObject({
+        line: "agent:coding in acme/api: say hi",
+        expiresAt: w.now() + CONFIRMATION_TTL_MS,
+        question: {
+          text: expect.stringContaining("not onboarded"),
+          evidence: expect.stringContaining("which is onboarded"),
+        },
+      });
+      expect(w.store.rows.get(offer.id)).toMatchObject({
+        kind: "redispatch",
+        message: { channelId: "slack:CX", userId: "slack:UADMIN", text: "agent:coding in acme/api: say hi" },
+        line: "agent:coding in acme/api: say hi",
+        code: "repo_not_onboarded",
+      });
+      expect(w.provider.requests).toHaveLength(0); // nothing ran yet
+    });
+
+    it("Yes consumes the row and hands the proposal to dispatch() as the requester — one run, counted in flight once, its record carrying the question's code in a redispatch note", async () => {
+      const w = wiredQuestion();
+      await ask(w.deps, w.io);
+      const id = w.offers[0]!.id;
+      // The corrected slug resolves now — that is what the fix fixed.
+      w.deps.resolveRepoContext = () => ({ repo: "acme/api" });
+      const inFlight: number[] = [];
+      w.provider.complete = async (req) => {
+        w.provider.requests.push(req);
+        inFlight.push(activeRunCount());
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      };
+      const clickIO = fakeIO();
+      const outcome = await dispatchClick(w.deps, { kind: "confirm", id, actor: requester, io: clickIO.io });
+      expect(outcome).toEqual({ status: "completed" });
+      expect(clickIO.replies).toContain("answer");
+      expect(w.provider.requests).toHaveLength(1); // the redispatched run's one model turn
+      // The click's slot was handed over: one click is one run in flight, never two.
+      expect(inFlight).toEqual([1]);
+      expect(activeRunCount()).toBe(0);
+      // The redispatched run's record names the question it answered (run-history item 2).
+      // The question's refusal registered its own `door` record (record 0054,
+      // as amended), so the Yes-run sits beside it on the thread.
+      const runs = ["r1", "r2", "r3", "r4"].map((id2) => w.registry.snapshotById(id2)).filter((s) => s !== null);
+      const note = runs.flatMap((s) => s!.events).find((e) => e.type === "run_note" && e.kind === "redispatch");
+      expect(note).toMatchObject({ summary: "confirmed after question repo_not_onboarded" });
+      // Consumed: a second Yes is `used` and runs nothing more.
+      const again = await dispatchClick(w.deps, { kind: "confirm", id, actor: requester, io: fakeIO().io });
+      expect(again).toMatchObject({ status: "refused", refusal: "confirmation_used" });
+      expect(w.provider.requests).toHaveLength(1);
+    });
+
+    it("a stranger's Yes is refused with the requester line and the row stays; No cancels for the requester — `Cancelled; nothing ran`, the row gone", async () => {
+      const w = wiredQuestion();
+      await ask(w.deps, w.io);
+      const id = w.offers[0]!.id;
+      const foreign = fakeIO();
+      const refusedOutcome = await dispatchClick(w.deps, { kind: "confirm", id, actor: stranger, io: foreign.io });
+      expect(refusedOutcome).toMatchObject({ status: "refused", refusal: "confirmation_foreign" });
+      expect(foreign.replies).toEqual(["only the requester can confirm this"]);
+      expect(w.store.rows.has(id)).toBe(true); // kept for the requester
+      const no = fakeIO();
+      const cancelled = await dispatchClick(w.deps, { kind: "cancel", id, actor: requester, io: no.io });
+      expect(cancelled).toEqual({ status: "completed" });
+      expect(no.replies).toEqual(["Cancelled; nothing ran"]);
+      expect(w.store.rows.size).toBe(0);
+      expect(w.provider.requests).toHaveLength(0);
+      // A refused click still leaves exactly one record (record 0054, as
+      // amended): the stranger's Yes wrote one `door` record carrying the
+      // stored proposal and the click's code — beside the question's own (r1)
+      // — and the cancel, a completed decision, recorded nothing more.
+      const doorRows = ["r1", "r2", "r3", "r4"]
+        .map((id2) => w.registry.getById(id2))
+        .filter((r) => r?.agent === "door");
+      expect(doorRows).toHaveLength(2);
+      expect(doorRows[0]).toMatchObject({ status: "completed" });
+      const foreignRecord = w.registry.snapshotById(doorRows[1]!.id);
+      expect(foreignRecord?.events.find((e) => e.type === "refusal")).toMatchObject({
+        code: "confirmation_foreign",
+        cause: "policy",
+        text: "only the requester can confirm this",
+      });
+      expect(foreignRecord?.events.find((e) => e.type === "input")).toMatchObject({
+        text: "agent:coding in acme/api: say hi",
+      });
+    });
+
+    it("a store that cannot be reached at the mint costs the button alone: the same question goes out as text, the line to type in it", async () => {
+      const w = wiredQuestion();
+      w.deps.confirmations = {
+        put: async () => {
+          throw new Error("object unreachable");
+        },
+        consume: (id, ids) => w.store.consume(id, ids),
+        cancel: (id, ids) => w.store.cancel(id, ids),
+        cancelByThread: (key, ids) => w.store.cancelByThread(key, ids),
+        describe: () => "throwing",
+      };
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await ask(w.deps, w.io);
+      } finally {
+        warn.mockRestore();
+      }
+      expect(w.offers).toEqual([]);
+      expect(w.replies).toHaveLength(1);
+      expect(w.replies[0]).toContain("Did you mean:");
+      expect(w.replies[0]).toContain("`agent:coding in acme/api: say hi`");
+    });
+
+    it("without `offer` on the channel the question is byte for byte the text one — no row minted", async () => {
+      const w = wiredQuestion();
+      const plain = fakeIO();
+      await ask(w.deps, plain.io);
+      expect(plain.replies).toHaveLength(1);
+      expect(plain.replies[0]).toContain("Did you mean:");
+      expect(w.store.rows.size).toBe(0);
+    });
   });
 
   // Feature: docs/reference/specs/routing-and-config.md item 16 — the note names `repo
@@ -1720,6 +1920,103 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     expect(replies[0]).toContain("⚠️");
     expect(replies[0]).toContain("backend exploded");
     expect(provider.requests).toHaveLength(0);
+  });
+
+  // Feature: docs/reference/specs/routing-and-config.md item 21 (record 0054's Yes on a
+  // command refusal) — when the router binds `repo test` with a near-matching slug,
+  // the refusal carries a `Guess` so the channel shows Yes and No.
+  describe("a not-onboarded typo through the door renders Yes and No on an offering channel (routing-and-config item 21, record 0054)", () => {
+    const now = 1_000_000;
+
+    /** Router, ops backend, registry and deps wired for the near-match case:
+     *  `acme/switchboar` is the typo; `acme/switchboard` is onboarded. */
+    function wiredNearMatch() {
+      const provider = capturingProvider();
+      const deps = makeDeps(ROUTING_ON_YAML, provider);
+      let n = 0;
+      const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
+      deps.runRegistry = registry;
+      deps.admission = new ThreadAdmission();
+      deps.clock = () => now;
+      // The "not-onboarded" backend result; `onboardedSlugs` asks the admin client.
+      deps.operations = fakeOps({ kind: "not-onboarded" });
+      deps.residentAdmin = {
+        onboard: vi.fn(),
+        offboard: vi.fn(),
+        reconfigure: vi.fn(),
+        rebuild: vi.fn(),
+        residents: vi.fn(async () => ({
+          status: 200,
+          data: {
+            cap: 8,
+            count: 1,
+            residents: [{ resource: "repo:acme/switchboard", defaultRef: "main", live: { state: "warm", reason: "" } }],
+          },
+        })),
+        status: vi.fn(),
+      } as unknown as ResidentAdminClient;
+      deps.routeModel = bindsRepoTest("acme/switchboar", "main");
+      const store = new InMemoryConfirmationStore({ clock: () => now });
+      deps.confirmations = store;
+      return { deps, registry, provider, store };
+    }
+
+    it("with `offer`: the routed typo renders Yes and No — the receipt and footer as one reply, then the offer with the question sentence, the corrected line and the evidence; one redispatch row whose proposal is `repo test acme/switchboard main`", async () => {
+      const { deps, store } = wiredNearMatch();
+      const f = fakeIO();
+      const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+      f.io.offer = vi.fn(async (o) => void offers.push(o));
+      await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), f.io);
+      // First reply: receipt + footer (no error text in this reply).
+      expect(f.replies).toHaveLength(1);
+      expect(f.replies[0]).toContain("routed: repo test acme/switchboar main");
+      expect(f.replies[0]).toContain(FOOTER);
+      // Then the offer with Yes/No.
+      expect(offers).toHaveLength(1);
+      const offer = offers[0]!;
+      expect(offer.line).toBe("repo test acme/switchboard main");
+      expect(offer.question?.text).toContain("not onboarded");
+      expect(offer.question?.evidence).toContain("which is onboarded");
+      // The redispatch row: proposal text is the corrected line.
+      expect(store.rows.size).toBe(1);
+      const row = [...store.rows.values()][0]!;
+      expect(row.kind).toBe("redispatch");
+      if (row.kind === "redispatch") {
+        expect(row.message.text).toBe("repo test acme/switchboard main");
+        expect(row.line).toBe("repo test acme/switchboard main");
+        expect(row.code).toBe("command_not_found");
+      }
+    });
+
+    it("without `offer`: the text question goes out as a second reply — the receipt+footer first, then `Did you mean:` with the corrected line — no row minted", async () => {
+      const { deps, store } = wiredNearMatch();
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), io);
+      // Two replies: receipt+footer, then the text question.
+      expect(replies).toHaveLength(2);
+      expect(replies[0]).toContain("routed: repo test acme/switchboar main");
+      expect(replies[0]).toContain(FOOTER);
+      expect(replies[1]).toContain("Did you mean:");
+      expect(replies[1]).toContain("`repo test acme/switchboard main`");
+      expect(replies[1]).toContain("which is onboarded");
+      expect(store.rows.size).toBe(0);
+    });
+
+    it("the error sentence stays byte-identical whether the channel offers or not", async () => {
+      const { deps } = wiredNearMatch();
+      const withOffer = fakeIO();
+      const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+      withOffer.io.offer = vi.fn(async (o) => void offers.push(o));
+      await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), withOffer.io);
+      const { io: plainIO, replies: plainReplies } = fakeIO();
+      const { deps: deps2 } = wiredNearMatch();
+      await dispatch(deps2, msg("run the tests on acme/switchboar", "slack:UADMIN"), plainIO);
+      // The error sentence in the offer's question text equals the error sentence
+      // in the plain text reply's first line.
+      const offerText = offers[0]!.question?.text ?? "";
+      const plainText = plainReplies[1]!.split("\n")[0] ?? "";
+      expect(offerText).toBe(plainText);
+    });
   });
 });
 
@@ -3758,6 +4055,145 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(replies.some((r) => r.includes("https://github.com/acme/api/pull/7") && /PR opened/.test(r))).toBe(true);
   });
 
+  it("on the repository that carries the title gate, the tool refuses a title CI's `title` check would refuse — the gate's sentence in the tool result — and the corrected resubmit opens the PR; the same title on another repository opens as before", async () => {
+    // The incident: a run on the bot's own repository submitted a scope the
+    // code map does not name, the tool said "recorded", CI failed the title.
+    const refused = { ...DESCRIPTION, title: "feat(dispatch): every gate refusal is a Refusal with a cause, counted" };
+    const corrected = { ...DESCRIPTION, title: "feat(dispatcher): every gate refusal is a Refusal with a cause" };
+    const submitThenSubmit = (): Provider => {
+      let n = 0;
+      return {
+        name: "fake",
+        async complete(): Promise<CompletionResult> {
+          n++;
+          if (n === 1)
+            return {
+              content: [{ type: "tool_use", id: "d1", name: "submit_pr_description", input: refused }],
+              stopReason: "tool_use",
+            };
+          if (n === 2)
+            return {
+              content: [{ type: "tool_use", id: "d2", name: "submit_pr_description", input: corrected }],
+              stopReason: "tool_use",
+            };
+          return { content: [{ type: "text", text: "Done — branch pushed." }], stopReason: "end_turn" };
+        },
+      };
+    };
+    const own = codingDeps(submitThenSubmit());
+    own.resolveRepoContext = () => ({ repo: TITLE_GATE_REPOSITORY, ref: "main" });
+    codingExecutor({ head: HEAD, branch: "feat/refusals", bindingRef: "main" });
+    const ownSpy = openSpy();
+    own.openPullRequest = ownSpy.fn;
+    const registry = new RunRegistry({ genId: () => "r-gate", genToken: () => "t-gate" });
+    own.runRegistry = registry;
+    await dispatch(own, msg("agent:coding count every gate refusal", "slack:UADMIN"), fakeIO().io);
+    expect(ownSpy.calls.map((c) => c.title)).toEqual([corrected.title]);
+    const results = (registry.snapshot("r-gate", "t-gate")?.events ?? []).filter(
+      (e) => e.type === "tool_result" && e.tool === "submit_pr_description",
+    );
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({ ok: false });
+    expect(`${results[0].type === "tool_result" ? (results[0].output ?? results[0].summary) : ""}`).toMatch(
+      /unknown scope "dispatch" — use one of: dispatcher, core, /,
+    );
+    expect(results[1]).toMatchObject({ ok: true });
+
+    // Another repository never sees this repository's vocabulary: the refused title opens there.
+    const foreign = codingDeps(describeThenAnswer(refused));
+    codingExecutor({ head: HEAD, branch: "feat/refusals", bindingRef: "main" });
+    const foreignSpy = openSpy();
+    foreign.openPullRequest = foreignSpy.fn;
+    await dispatch(foreign, msg("agent:coding count every gate refusal", "slack:UADMIN"), fakeIO().io);
+    expect(foreignSpy.calls.map((c) => c.title)).toEqual([refused.title]);
+  });
+
+  it("a description over two caps is refused ONCE with both fields, each with the count to remove and a prefix that fits; the model's copy of the two prefixes opens the PR; the record carries the refused object redacted", async () => {
+    // The incident: a run overshot two caps by a few characters and needed
+    // four submits — one refusal per field, and a trim the counter could not
+    // see. Now the first refusal names both fields with a fitting prefix, so
+    // the second submit is a copy of the refusal.
+    const secret = `ghp_${"B".repeat(36)}`;
+    const over = {
+      ...DESCRIPTION,
+      risk: `${"blast radius ".repeat(22)}[#9](https://github.com/acme/api/issues/9) then the world ${secret}`,
+      feedbackWanted: `${"the cut ".repeat(25)}itself`,
+    };
+    const quoted = (refusal: string, field: string): string => {
+      const m = refusal.match(
+        new RegExp(
+          `${field}: at most \\d+ visible characters \\(got \\d+\\) — remove at least \\d+ visible characters; a prefix that fits: "([^"]*)"`,
+        ),
+      );
+      if (!m) throw new Error(`no cut for ${field} in: ${refusal}`);
+      return m[1];
+    };
+    let n = 0;
+    const copyThePrefixes: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        n++;
+        if (n === 1)
+          return {
+            content: [{ type: "tool_use", id: "d1", name: "submit_pr_description", input: over }],
+            stopReason: "tool_use",
+          };
+        if (n === 2) {
+          const result = req.messages
+            .flatMap((m) => (typeof m.content === "string" ? [] : m.content))
+            .find((p) => p.type === "tool_result");
+          const refusal = String(result && result.type === "tool_result" ? result.content : "");
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "d2",
+                name: "submit_pr_description",
+                input: { ...over, risk: quoted(refusal, "risk"), feedbackWanted: quoted(refusal, "feedbackWanted") },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        }
+        return { content: [{ type: "text", text: "Done — branch pushed." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = codingDeps(copyThePrefixes);
+    codingExecutor({ head: HEAD, branch: "fix/the-cut", bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const registry = new RunRegistry({ genId: () => "r-cut", genToken: () => "t-cut" });
+    deps.runRegistry = registry;
+    await dispatch(deps, msg("agent:coding cut the prose", "slack:UADMIN"), fakeIO().io);
+    // Two submits, not four: one refusal naming both fields, then the accepted copy.
+    const events = registry.snapshot("r-cut", "t-cut")?.events ?? [];
+    const results = events.filter((e) => e.type === "tool_result" && e.tool === "submit_pr_description");
+    expect(results.map((r) => (r.type === "tool_result" ? r.ok : undefined))).toEqual([false, true]);
+    const refusal = results[0].type === "tool_result" ? String(results[0].output ?? results[0].summary) : "";
+    expect(refusal).toContain(
+      "feedbackWanted: at most 200 visible characters (got 206) — remove at least 6 visible characters",
+    );
+    expect(refusal).toContain("risk: at most 300 visible characters (got");
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].body).toContain("**Risk:** blast radius");
+    expect(spy.calls[0].body).toContain("[#9](https://github.com/acme/api/issues/9)");
+    // The refused object is a fact of the run, redacted like the accepted one.
+    const refused = events.find((e) => e.type === "run_note" && e.kind === "description_refused");
+    expect(refused).toMatchObject({
+      type: "run_note",
+      kind: "description_refused",
+      summary: "description refused: 2 fields over their cap — feedbackWanted, risk",
+    });
+    expect(JSON.stringify(refused)).not.toContain(secret);
+    expect(JSON.stringify(refused)).toContain("«redacted-github-token»");
+    expect(refused && refused.type === "run_note" ? refused.issues?.map((i) => i.path) : []).toEqual([
+      "feedbackWanted",
+      "risk",
+    ]);
+    // The accepted object rides the record too, so the two can be diffed.
+    expect(events.some((e) => e.type === "pr_description")).toBe(true);
+  });
+
   /** A coding-agent provider that runs `steps` as bash commands in order, then
    *  submits the description, then answers — the shape of a run that pushes
    *  and keeps working in the checkout afterwards. */
@@ -4881,6 +5317,8 @@ describe("live run-view wiring (Area 2)", () => {
       "+request",
       "input",
       "run_meta",
+      "run_note", // control_degraded: the fixture model has no card, so the cap goes out unvouched (record 0052)
+      "run_note", // control_degraded: no layer names the window
       "+run.agent",
       "lease", // the harness's clocks, published as the loop starts (harness-pi item 15)
       "+model.turn",
@@ -5032,6 +5470,10 @@ describe("live run-view wiring (Area 2)", () => {
       "+request",
       "input",
       "run_meta",
+      "run_note", // control_degraded: the fixture model has no card, so the cap goes out unvouched (record 0052)
+      "run_note", // control_degraded: the attachments' inputs, decided against the card
+      "run_note", // control_degraded: the attachments' inputs, decided against the card
+      "run_note", // control_degraded: no layer names the window
       "+run.agent",
       "lease", // the harness's clocks, published as the loop starts (harness-pi item 15)
       "+model.turn",
@@ -5085,6 +5527,7 @@ describe("live run-view wiring (Area 2)", () => {
       model: expect.stringContaining("/"),
       traceId: expect.any(String),
       harness: "pi", // the harness the process drives runs with (harness.md item 8)
+      card: expect.objectContaining({ ref: "anthropic/general-model", wire: "anthropic-messages" }), // the model card the run resolved (record 0052)
       at: expect.any(Number),
     });
   });
@@ -6504,7 +6947,7 @@ describe("self-improvement wiring", () => {
     expect(rec.runId).toBe("run-friction-1");
     expect(rec.agent).toBe("general");
     expect(rec.label).toContain("general");
-    expect(rec.diagnosis.eventCount).toBe(3); // the gate's tool_refused note, tool_call, tool_result (the narrative events are not steps)
+    expect(rec.diagnosis.eventCount).toBe(5); // two control_degraded notes (no card for the fixture model), the gate's tool_refused note, tool_call, tool_result (the narrative events are not steps)
     // The general agent has no shell: its `bash` call is an unknown tool → a failed_tool finding.
     expect(rec.diagnosis.byCategory.failed_tool.count).toBe(1);
   });
@@ -7294,7 +7737,7 @@ describe("friction diagnosis reads the registry backlog", () => {
       }),
     );
     expect(rec.diagnosis.shape).toBeDefined();
-    expect(rec.diagnosis.eventCount).toBe(3); // the gate's tool_refused note, tool_call, tool_result; the narrative events do not count
+    expect(rec.diagnosis.eventCount).toBe(5); // two control_degraded notes (no card), the gate's tool_refused note, tool_call, tool_result; the narrative events do not count
   });
 });
 
@@ -7980,7 +8423,7 @@ describe("run history write path", () => {
       const tomb = puts[0];
       expect(tomb.id).toBe("run-h");
       expect(tomb.finishedAt).toBe(tomb.startedAt); // provisional: nobody knows a crash's real death time
-      expect(runShapeOf(tomb.events)).toEqual(["+request", "input", "run_meta", "context"]);
+      expect(runShapeOf(tomb.events)).toEqual(["+request", "input", "run_meta", "run_note", "run_note", "context"]);
       expect(tomb).toMatchObject({
         agent: "general",
         model: "anthropic/general-model",
@@ -8645,7 +9088,7 @@ workspaceDir: __WORKDIR__
       repo: "acme/api",
       branch: SHIP_BRANCH,
       base: "main",
-      caps: { maxRounds: 3, maxMinutes: 120 },
+      caps: { maxRounds: 3, maxMinutes: 240 },
       runId: "run-ship1",
     });
     expect(unit).toMatchObject({ unit: "U1", slug: "u1", branch: SHIP_BRANCH, dependsOn: [], rounds: [] });
@@ -8687,9 +9130,9 @@ workspaceDir: __WORKDIR__
     for (const text of surfaces) expect(text).not.toContain("ship/");
   });
 
-  it("a channel boundary clips the pipeline's wall clock: the preset's 120 becomes the channel's 110 in the caps handed to the runner, the card names the clip and the record carries the ship profile; a boundary under the loop's fit (10 against 108) is refused before any instance opens, naming the sum", async () => {
+  it("a channel boundary clips the pipeline's wall clock: the preset's 240 becomes the channel's 200 in the caps handed to the runner, the card names the clip and the record carries the ship profile; a boundary under the loop's fit (10 against 163) is refused before any instance opens, naming the sum", async () => {
     const { deps, instances } = shipDeps(
-      SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 110\n',
+      SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 200\n',
     );
     const store = new InMemoryRunStore();
     const registry = new RunRegistry({ genId: () => "run-shipb", genToken: () => "tok" });
@@ -8704,38 +9147,38 @@ workspaceDir: __WORKDIR__
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     await deps.runHistoryWriter.settled();
     expect(replies[0]).toContain("Handed to the plan runner");
-    expect((await handed(instances, "run-shipb")).instance?.caps).toEqual({ maxRounds: 3, maxMinutes: 110 });
+    expect((await handed(instances, "run-shipb")).instance?.caps).toEqual({ maxRounds: 3, maxMinutes: 200 });
     expect(
       statuses
         .map((s) => JSON.stringify(s))
-        .some((s) => s.includes("budget 110 min (channel boundary; preset asks 120)")),
+        .some((s) => s.includes("budget 200 min (channel boundary; preset asks 240)")),
     ).toBe(true);
-    const profile = { preset: "ship", machine: "repo-resident", identity: "write", minutes: 110, boundedBy: "channel" };
+    const profile = { preset: "ship", machine: "repo-resident", identity: "write", minutes: 200, boundedBy: "channel" };
     expect((await store.get("run-shipb"))!.profile).toEqual(profile);
-    expect(AGENTS.ship.maxMinutes).toBe(120); // the shared def is never mutated
+    expect(AGENTS.ship.maxMinutes).toBe(240); // the shared def is never mutated
 
     // The fit at the fork (agent-ship item 8): a boundary of 10 cannot hold the
-    // loop's 108, so the request is refused with the sum and no instance opens.
+    // loop's 163, so the request is refused with the sum and no instance opens.
     const tight = shipDeps(SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 10\n');
     tight.deps.runRegistry = new RunRegistry({ genId: () => "run-shipt", genToken: () => "tok" });
     const tightIo = fakeIO();
     await dispatch(tight.deps, msg(TASK_MSG, "slack:UADMIN"), tightIo.io);
     expect(tightIo.replies[0]).toContain("Ship cannot start under a 10-minute budget");
-    expect(tightIo.replies[0]).toContain("needs 108 minutes");
+    expect(tightIo.replies[0]).toContain("needs 163 minutes");
     expect(tight.created).toEqual([]);
   });
 
-  it("`agent:ship budget:90` clips the pipeline's wall clock as the caller's own boundary; `ship.maxMinutes` stays the preset's declared budget the card names; the block's rounds cap rides unclipped", async () => {
-    const { deps, instances } = shipDeps(SHIP_YAML + "ship:\n  maxMinutes: 120\n  maxRounds: 2\n");
+  it("`agent:ship budget:200` clips the pipeline's wall clock as the caller's own boundary; `ship.maxMinutes` stays the preset's declared budget the card names; the block's rounds cap rides unclipped", async () => {
+    const { deps, instances } = shipDeps(SHIP_YAML + "ship:\n  maxMinutes: 240\n  maxRounds: 2\n");
     const registry = new RunRegistry({ genId: () => "run-shipd", genToken: () => "tok" });
     deps.runRegistry = registry;
     const { io, statuses } = fakeIO();
-    await dispatch(deps, msg("agent:ship budget:90 in acme/api: fix the login redirect", "slack:UADMIN"), io);
-    expect((await handed(instances, "run-shipd")).instance?.caps).toEqual({ maxRounds: 2, maxMinutes: 90 });
+    await dispatch(deps, msg("agent:ship budget:200 in acme/api: fix the login redirect", "slack:UADMIN"), io);
+    expect((await handed(instances, "run-shipd")).instance?.caps).toEqual({ maxRounds: 2, maxMinutes: 200 });
     expect(
       statuses
         .map((s) => JSON.stringify(s))
-        .some((s) => s.includes("budget 90 min (budget directive; preset asks 120)")),
+        .some((s) => s.includes("budget 200 min (budget directive; preset asks 240)")),
     ).toBe(true);
   });
 
@@ -9379,7 +9822,9 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await firstStarted;
     const second = fakeIO();
     await dispatch(deps, threadMsg("agent:research look up the numbers"), second.io);
-    expect(registry.listActive()).toHaveLength(1);
+    // One live run; the refusal's own `door` record (record 0054, as amended)
+    // sits finished beside it, never a second run.
+    expect(registry.listActive().filter((r) => r.agent !== "door")).toHaveLength(1);
     expect(second.statuses).toEqual([]);
     expect(second.replies[0]).toMatch(/^⏳ A \*general\* run is already in flight/);
     expect(second.replies[0]).toContain("`agent:research`");
@@ -9617,7 +10062,13 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
   });
 
   function wired(provider: Provider, over: { ledger?: InMemoryRunLedger; gen?: string; yaml?: string } = {}) {
-    const registry = new RunRegistry({ genId: () => "run-l", genToken: () => "tok" });
+    // The first row is the run's (`run-l`, what every assertion names); a later
+    // one — a refusal's `door` record (record 0054, as amended) — gets its own id.
+    let minted = 0;
+    const registry = new RunRegistry({
+      genId: () => (++minted === 1 ? "run-l" : `run-l${minted}`),
+      genToken: () => "tok",
+    });
     const store = new InMemoryRunStore();
     const ledger = over.ledger ?? new InMemoryRunLedger();
     const warnings: string[] = [];
@@ -9736,7 +10187,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
           expect(ledger.finished.has("old")).toBe(false);
           expect((await ledger.reclaim("gen-next", 40_001, 30_000)).map((r) => r.row.runId)).toEqual(["old"]);
         } else {
-          expect(outcome).toEqual({ status: "refused", refusal: "channel_access" });
+          expect(outcome).toEqual({ status: "refused", refusal: "channel_access", cause: "policy" });
           expect(ledger.live.has("old")).toBe(false);
           expect(ledger.finished.get("old")?.status).toBe("interrupted");
           expect(replies).toHaveLength(1);
@@ -9966,7 +10417,14 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     // request and its meta. The record's first CONTENT event is still `input`,
     // and everything ahead of it is head material — the protected head runs
     // unbroken from the first event through the request.
-    expect(streamAtAttach.filter((e) => !isSpanRecord(e)).map((e) => e.type)).toEqual(["input", "run_meta", "context"]);
+    expect(streamAtAttach.filter((e) => !isSpanRecord(e)).map((e) => e.type)).toEqual([
+      "input",
+      "run_meta",
+      "run_note", // control_degraded ×3: effort unvouched, cap unvouched, window unknown (record 0052)
+      "run_note",
+      "run_note",
+      "context",
+    ]);
     // The attach span has started (its start streamed live, the mock runs inside it).
     expect(streamAtAttach.map((e) => (e.type === "span_start" ? e.name : e.type))).toEqual(
       expect.arrayContaining(["dispatch.ack_card", "input", "run_meta", "dispatch.workspace.attach"]),
@@ -10057,7 +10515,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.finished.get("run-l")).toMatchObject({ id: "run-l", status: "completed", ...tag });
     expect(isRunRecord(ledger.finished.get("run-l")!)).toBe(true);
     expect(replies.at(-1)).toBe("done");
-    expect(secondOutcome).toEqual({ status: "refused", refusal: "coordinator_thread_live" });
+    expect(secondOutcome).toEqual({ status: "refused", refusal: "coordinator_thread_live", cause: "system" });
     expect(second.replies).toEqual([]);
     expect(ledger.live.size).toBe(0);
     expect(warnings).toEqual([]);
@@ -10088,12 +10546,15 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(replies.some((r) => r.includes("Which branch"))).toBe(true);
     expect(ledger.live.size).toBe(0);
     expect(ledger.finished.size).toBe(0);
-    expect(registry.listActive()).toEqual([]);
+    // The refusal's own `door` record is the one row left (record 0054, as
+    // amended: every refusal is a run record); the run that never started is gone.
+    expect(registry.listActive().map((r) => r.agent)).toEqual(["door"]);
     // The row came (the create, then one upsert per content event published at
     // the reservation — request, meta, context) and went (the discard), and
-    // nothing came after the removal.
+    // nothing more came for it after the removal.
     expect(index[0]?.type).toBe("upsert");
-    expect(index.at(-1)).toEqual({ type: "removed", id: "run-l" });
+    const rowEvents = index.filter((ev) => (ev.type === "removed" ? ev.id : ev.run.id) === "run-l");
+    expect(rowEvents.at(-1)).toEqual({ type: "removed", id: "run-l" });
     expect(index.filter((ev) => ev.type === "removed")).toHaveLength(1);
     expect(warnings).toEqual([]);
   });
@@ -10779,7 +11240,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await writer.settled();
     expect(replies[0]).toContain("🚫"); // the refusal is still said, as for any dispatch
     expect(provider.requests).toEqual([]);
-    expect(registry.listActive()).toEqual([]);
+    // The refusal's `door` record is the one row left (record 0054, as amended).
+    expect(registry.listActive().map((r) => r.agent)).toEqual(["door"]);
     expect(ledger.live.has("run-old")).toBe(false);
     expect(ledger.finished.get("run-old")?.status).toBe("interrupted");
   });
@@ -11131,12 +11593,21 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(calls.every((c) => c.host === "resident.example")).toBe(true);
     expect(provider.requests).toHaveLength(1);
     expect(replies.at(-1)).toBe("started over and done");
-    expect(registry.listActive().map((r) => r.id)).toEqual(["run-l"]);
-    expect(ledger.finished.get("run-l")?.status).toBe("completed");
+    // The re-attach refusal's own `door` record took the first minted id
+    // (record 0054, as amended: every refusal is a run record), so the
+    // restarted run is `run-l2` and rides beside it.
+    expect(
+      registry
+        .listActive()
+        .filter((r) => r.agent !== "door")
+        .map((r) => r.id),
+    ).toEqual(["run-l2"]);
+    expect(registry.listActive().find((r) => r.agent === "door")).toMatchObject({ id: "run-l", status: "completed" });
+    expect(ledger.finished.get("run-l2")?.status).toBe("completed");
     expect(ledger.live.has("run-old")).toBe(false);
     // The restarted run is the same instance's child: its own coordinator_tag names the plan's base,
     // so its unit branch is its push target and the base is what the gate protects.
-    expect(ledger.finished.get("run-l")?.events.find((e) => e.type === "coordinator_tag")).toMatchObject({
+    expect(ledger.finished.get("run-l2")?.events.find((e) => e.type === "coordinator_tag")).toMatchObject({
       parentInstanceId: "plan-p",
       base: "main",
     });
@@ -11449,9 +11920,15 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       kind: string;
       summary: string;
     }>;
-    // The verdict, then the outcome — both the floor's kind; never `resumed` on a run that is not.
-    expect(notes.map((n) => n.kind)).toEqual(["sandbox_restarted", "sandbox_restarted"]);
-    expect(notes[1]!.summary).toBe(
+    // The card's degradations first (published before the first turn), then
+    // the verdict and the outcome — both the floor's kind; never `resumed` on a run that is not.
+    expect(notes.map((n) => n.kind)).toEqual([
+      "control_degraded",
+      "control_degraded",
+      "sandbox_restarted",
+      "sandbox_restarted",
+    ]);
+    expect(notes[3]!.summary).toBe(
       "the run's workspace could not be re-attached in the replacement container (the resident's worktree for this thread is /workspace/threads/t/other as worker3, not the run's recorded /workspace/threads/t/main as worker2); the run restarts from its request as a new run in this thread",
     );
     // Never a push into the closed row, no steer ack in the thread; the map forgot the run.
@@ -11739,14 +12216,17 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(a.replies.some((r) => r.includes("mcp discovery exploded"))).toBe(true);
     // The follow-up was not lost: it ran as its own turn, on its own sender's handle…
     expect(b.replies.at(-1)).toBe("answer 2");
-    // …and its reservation found the thread free: run-1's row was abandoned BEFORE the settle handed the follow-up on.
-    expect(order.indexOf("abandon run-1")).toBeLessThan(order.indexOf("claim run-2 ok"));
-    expect(order.filter((o) => o.startsWith("claim run-2"))).toEqual(["claim run-2 ok", "claim run-2 ok"]);
+    // …and its reservation found the thread free: run-1's row was abandoned
+    // BEFORE the settle handed the follow-up on. (run-2 is the failure's own
+    // `door` refusal record — record 0054, as amended — which claims no thread;
+    // the fresh turn's run is run-3.)
+    expect(order.indexOf("abandon run-1")).toBeLessThan(order.indexOf("claim run-3 ok"));
+    expect(order.filter((o) => o.startsWith("claim run-3"))).toEqual(["claim run-3 ok", "claim run-3 ok"]);
     expect(inner.live.has("run-1")).toBe(false);
     expect(inner.finished.has("run-1")).toBe(false); // never started: no record of it
-    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(inner.finished.get("run-3")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
     expect(
-      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+      inner.finished.get("run-3")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
     ).toEqual([]);
     expect(inner.live.size).toBe(0);
   });
@@ -11834,16 +12314,18 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await writer.settled();
     expect(b.replies.at(-1)).toBe("answer 2");
     // The finally's abandon threw; the fresh turn's claim met the dead row, abandoned it again, and claimed once more.
+    // run-2 is the failure's own `door` refusal record (record 0054, as
+    // amended), which claims no thread; the fresh turn's run is run-3.
     expect(order.slice(0, 4)).toEqual([
       "abandon run-1 threw",
-      "claim run-2 thread-live",
+      "claim run-3 thread-live",
       "abandon run-1",
-      "claim run-2 ok",
+      "claim run-3 ok",
     ]);
     expect(inner.live.has("run-1")).toBe(false);
-    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(inner.finished.get("run-3")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
     expect(
-      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+      inner.finished.get("run-3")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
     ).toEqual([]);
     expect(inner.live.size).toBe(0);
   });
@@ -12927,16 +13409,21 @@ describe("no gaps: every awaited step runs inside a span (docs/reference/specs/t
     expect(log.ended("dispatch.workspace.attach")!.attrs).toEqual({ backend: "sandbox" });
   });
 
-  it("a refusal (the agent allowlist): the reply is a dispatch.refuse span, the root ends refused with no run", async () => {
+  it("a refusal (the agent allowlist): the reply is a dispatch.refuse span carrying the code and its cause, the root ends refused carrying both, no run", async () => {
     const { ticks, log, deps, io } = traced(capturingProvider());
-    await dispatch(deps, msg("agent:coding fix it"), io); // slack:UX may not run coding
+    const ended = await dispatch(deps, msg("agent:coding fix it"), io); // slack:UX may not run coding
     expect(ticks.map((t) => [t.dep, t.span])).toEqual([
       ["io.history", "dispatch.history"],
       ["io.reply", "dispatch.refuse"],
     ]);
     const root = log.ended("request")!;
-    expect(root.attrs).toEqual({ channel: "slack", status: "refused" });
-    expect(log.ended("dispatch.refuse")!.attrs).toEqual({ outcome: "agent_allowlist" });
+    expect(root.attrs).toEqual({ channel: "slack", status: "refused", refusal: "agent_allowlist", cause: "policy" });
+    expect(log.ended("dispatch.refuse")!.attrs).toEqual({
+      outcome: "agent_allowlist",
+      refusal: "agent_allowlist",
+      cause: "policy",
+    });
+    expect(ended).toMatchObject({ status: "refused", refusal: "agent_allowlist", cause: "policy" });
     const p = check(log, ticks, { start: root.startedAt, end: root.endedAt! });
     expect(p).toMatchObject({ gettingReadyMs: 2000, overheadMs: 0 });
   });
@@ -12985,7 +13472,8 @@ describe("no gaps: every awaited step runs inside a span (docs/reference/specs/t
     const roots = log.ends.filter((r) => r.name === "request");
     expect(roots.map((r) => r.attrs)).toEqual([
       { channel: "slack", status: "completed", queuedBeforeMs: 5_000 }, // the follow-up's own dispatch: steered; its platform delay is its own
-      { channel: "slack", runId: "r1", status: "failed" },
+      // A provider explosion is the catch-all's uncaught refusal on the root (record 0054).
+      { channel: "slack", runId: "r1", status: "failed", refusal: "uncaught", cause: "system" },
       { channel: "slack", runId: "r2", status: "completed", queuedBehindMs: expect.any(Number) },
     ]);
     const [, firstRoot, fresh] = roots;
@@ -13187,7 +13675,7 @@ workspaceDir: __WORKDIR__
     const profile = { machine: "repo-resident", identity: "write", minutes: 10, boundedBy: "channel" };
     expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(profile);
     expect(vi.mocked(runPiHarnessOpen).mock.calls[0][1].agent.maxMinutes).toBe(10); // the runner's deadline is the clipped budget
-    expect(AGENTS.coding.maxMinutes).toBe(45); // the shared def is never mutated
+    expect(AGENTS.coding.maxMinutes).toBe(ASKS.coding); // the shared def is never mutated
     // The ledger row and its seed carry the clip, so a resume runs on it (run-history's resume rule).
     expect(seen.row?.meta).toMatchObject({ agent: "coding", readonly: false, profile });
     expect(seen.steps).toEqual([expect.objectContaining({ step: 0, remainingMs: 10 * 60_000 })]);
@@ -13196,7 +13684,7 @@ workspaceDir: __WORKDIR__
     expect(
       statuses
         .map((s) => JSON.stringify(s))
-        .some((s) => s.includes("budget 10 min (channel boundary; preset asks 45)")),
+        .some((s) => s.includes("budget 10 min (channel boundary; preset asks 90)")),
     ).toBe(true);
   });
 
@@ -13205,11 +13693,11 @@ workspaceDir: __WORKDIR__
     const { io, statuses } = fakeIO();
     await dispatch(deps, inChannel("CX", "agent:coding fix it"), io);
     await writer.settled();
-    const declared = { machine: "repo-resident", identity: "write", minutes: 45 };
+    const declared = { machine: "repo-resident", identity: "write", minutes: ASKS.coding };
     expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(declared);
-    expect(vi.mocked(runPiHarnessOpen).mock.calls[0][1].agent.maxMinutes).toBe(45);
+    expect(vi.mocked(runPiHarnessOpen).mock.calls[0][1].agent.maxMinutes).toBe(ASKS.coding);
     expect(seen.row?.meta).toMatchObject({ agent: "coding", readonly: false, profile: declared });
-    expect(seen.steps).toEqual([expect.objectContaining({ step: 0, remainingMs: 45 * 60_000 })]);
+    expect(seen.steps).toEqual([expect.objectContaining({ step: 0, remainingMs: ASKS.coding * 60_000 })]);
     expect((await store.get("run-u"))!.profile).toEqual({ preset: "coding", ...declared });
     expect(statuses.map((s) => JSON.stringify(s)).some((s) => s.includes("budget"))).toBe(false);
   });
@@ -13655,7 +14143,9 @@ workspaceDir: __WORKDIR__
     expect(parent.replies[0]).toContain("spawn refused (agent_allowlist)");
     expect(parent.replies[0]).toContain("not on the allowlist");
     expect(agentsProvisioned()).toEqual(["conductor"]);
-    expect(t.registry.getById("run-child")).toBeNull();
+    // The child's gate refusal is a `door` record in the child's thread
+    // (record 0054, as amended) — never a child run.
+    expect(t.registry.getById("run-child")).toMatchObject({ agent: "door", status: "completed" });
   });
 
   it("a child whose preset needs `read` in a channel bounded to `none` ends at the profile gate — the parent, identity `none`, runs there — and the parent is told by the gate's name", async () => {
@@ -13668,7 +14158,9 @@ workspaceDir: __WORKDIR__
     expect(child.replies[0]).toContain("this channel's boundary");
     expect(parent.replies[0]).toContain("spawn refused (profile_bounded)");
     expect(agentsProvisioned()).toEqual(["conductor"]);
-    expect(t.registry.getById("run-child")).toBeNull();
+    // The child's gate refusal is a `door` record in the child's thread
+    // (record 0054, as amended) — never a child run.
+    expect(t.registry.getById("run-child")).toMatchObject({ agent: "door", status: "completed" });
   });
 
   // docs/reference/specs/agent-conductor.md item 3: a child is a reader — a
@@ -14388,7 +14880,7 @@ describe("the model proxy's run bearer through dispatch()", () => {
       runId,
       modelRef: "anthropic/general-model",
       providerName: "anthropic",
-      providerType: "anthropic",
+      providerWire: "anthropic-messages",
       model: "general-model",
       maxTurns: 30, // the general preset's turn guard: its five minutes × RUNAWAY_TURNS_PER_MINUTE
       maxTokens: 16000,
@@ -15217,6 +15709,77 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const log = await t.ledger.readSession(KEY, 0);
     expect(log.messages).toEqual([...tail, user("also check the lockfile"), user("and bump the version")]);
     expect(t.warnings).toEqual([]);
+  });
+
+  // docs/reference/specs/session-log.md item 12 (record 0057): the rows a
+  // person's turns produce carry that person's actor id; machine rows carry none.
+  it("the request row and the channel line since carry their authors' actor ids in the log; the tail's reused rows carry none", async () => {
+    const t = await threadWithSession(PI_YAML);
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("bumped"));
+    const authored: HistoryItem[] = [
+      { role: "user", text: "fix the flaky test", at: NOW - 20_000, user: "slack:UALICE" },
+      { role: "assistant", text: "fixed it", at: NOW - 11_000 },
+      { role: "user", text: "also check the lockfile", at: NOW - 5_000, user: "slack:UBOB" },
+    ];
+    const { io } = fakeIO(authored);
+    await dispatch(t.deps, followUp, io);
+    await t.writer.settled();
+    const rows = t.ledger.sessions.get(KEY)!.rows;
+    const actorAt = (idx: number) => actorOfStoredRow(rows.find((r) => r.idx === idx && r.part === 0)!.json);
+    // Rows 0..3 are the reused tail (no actor); row 4 is the line written
+    // since, Bob's; row 5 the request, the requester's.
+    expect([0, 1, 2, 3].map(actorAt)).toEqual([undefined, undefined, undefined, undefined]);
+    expect(actorAt(4)).toBe("slack:UBOB");
+    expect(actorAt(5)).toBe("slack:UADMIN");
+  });
+
+  // docs/reference/specs/session-log.md item 12 (record 0057): a thread's
+  // FIRST run — an empty log, so the seed is the channel's history — stores its
+  // rows authored too: each history line its author, the request the requester.
+  it("a first run's channel seed writes authored rows: each channel line carries its author's actor id, the request row the requester's, machine rows none", async () => {
+    const t = await threadWithSession(PI_YAML);
+    t.deps.runLedger.readSessionTail = async () => ({
+      from: 0,
+      transcript: { complete: true, turns: 0, messages: [], compactions: [] },
+    });
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("done"));
+    const authored: HistoryItem[] = [
+      { role: "user", text: "fix the flaky test", at: NOW - 20_000, user: "slack:UALICE" },
+      { role: "assistant", text: "fixed it", at: NOW - 11_000 },
+      { role: "user", text: "also check the lockfile", at: NOW - 5_000, user: "slack:UBOB" },
+    ];
+    const { io } = fakeIO(authored);
+    await dispatch(t.deps, followUp, io);
+    await t.writer.settled();
+    const record = t.ledger.finished.get("run-next")!;
+    expect(record).toMatchObject({ seed: "channel", status: "completed" });
+    const rows = t.ledger.sessions.get(KEY)!.rows;
+    const actorAt = (idx: number) => actorOfStoredRow(rows.find((r) => r.idx === idx && r.part === 0)!.json);
+    // The run's own rows follow the earlier run's log (idx 0..3): row 4 Alice's
+    // line, row 5 the bot's, row 6 Bob's line merged with the requester's
+    // request — mixed authors, so the merged row stores none…
+    expect([4, 5].map(actorAt)).toEqual(["slack:UALICE", undefined]);
+    expect(actorAt(6)).toBeUndefined();
+    const again = await threadWithSession(PI_YAML);
+    again.deps.runLedger.readSessionTail = async () => ({
+      from: 0,
+      transcript: { complete: true, turns: 0, messages: [], compactions: [] },
+    });
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("done"));
+    // …and a requester whose own line is the last one keeps the merged row theirs.
+    const ownLine: HistoryItem[] = [
+      { role: "user", text: "fix the flaky test", at: NOW - 20_000, user: "slack:UALICE" },
+      { role: "assistant", text: "fixed it", at: NOW - 11_000 },
+      { role: "user", text: "also check the lockfile", at: NOW - 5_000, user: "slack:UADMIN" },
+    ];
+    await dispatch(again.deps, followUp, fakeIO(ownLine).io);
+    await again.writer.settled();
+    const ownRows = again.ledger.sessions.get(KEY)!.rows;
+    const ownActorAt = (idx: number) => actorOfStoredRow(ownRows.find((r) => r.idx === idx && r.part === 0)!.json);
+    expect([4, 5, 6].map(ownActorAt)).toEqual(["slack:UALICE", undefined, "slack:UADMIN"]);
   });
 
   // docs/reference/specs/session-log.md item 9 (record 0034 "The session", as
@@ -16302,6 +16865,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
       },
       consume: (id, ids) => store.consume(id, ids),
       cancel: (id, ids) => store.cancel(id, ids),
+      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
       describe: () => "throwing",
     };
     deps.confirmations = throwing;
@@ -16348,7 +16912,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     });
     expect(registry.snapshotById("r3")).toBeNull();
     const second = await click(deps, "confirm", id, requester);
-    expect(second.outcome).toEqual({ status: "refused", refusal: "confirmation_used" });
+    expect(second.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
     expect(second.replies).toEqual([OFFER_USED_LINE]);
     expect(deps.invoked).toEqual(["config.set"]);
     expect(registry.snapshotById("r3")).toBeNull();
@@ -16359,17 +16923,76 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     const { offers } = await offered(deps);
     tick(CONFIRMATION_TTL_MS);
     const late = await click(deps, "confirm", offers[0]!.id, requester);
-    expect(late.outcome).toEqual({ status: "refused", refusal: "confirmation_expired" });
+    expect(late.outcome).toEqual({ status: "refused", refusal: "confirmation_expired", cause: "request" });
     expect(late.replies).toEqual([OFFER_EXPIRED_LINE]);
     expect(deps.invoked).toEqual([]);
     expect(codingModelIn(deps)).toBe("anthropic/coding-model");
+  });
+
+  it("a refused click whose store refusal names the row is a run record: expired writes one with outcome refused, the code and the row's command; nothing runs (record 0054)", async () => {
+    const { deps, registry, tick } = wired();
+    const { offers } = await offered(deps);
+    tick(CONFIRMATION_TTL_MS);
+    const late = await click(deps, "confirm", offers[0]!.id, requester);
+    expect(late.outcome).toEqual({ status: "refused", refusal: "confirmation_expired", cause: "request" });
+    expect(late.replies).toEqual([OFFER_EXPIRED_LINE]);
+    expect(deps.invoked).toEqual([]);
+    const snap = registry.snapshotById("r2");
+    expect(registry.getById("r2")).toMatchObject({ status: "completed", agent: "command", threadKey: "slack:CX:1.0" });
+    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
+      preset: "command",
+      reason: "refused after offer",
+      model: "anthropic/general-model",
+      command: "config.set",
+      input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
+      receipt: LINE,
+      outcome: "refused",
+      refusalCode: "confirmation_expired",
+    });
+    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: OFFER_EXPIRED_LINE });
+    expect(registry.snapshotById("r3")).toBeNull();
+  });
+
+  it("a foreign click's refusal is recorded with its code and the row stays; a used click and an unreadable store name no row and write no record", async () => {
+    const { deps, registry, store } = wired();
+    const { offers } = await offered(deps);
+    const foreign = await click(deps, "confirm", offers[0]!.id, stranger);
+    expect(foreign.replies).toEqual([OFFER_FOREIGN_LINE]);
+    expect(registry.snapshotById("r2")?.events.find((e) => e.type === "route")).toMatchObject({
+      outcome: "refused",
+      refusalCode: "confirmation_foreign",
+    });
+    const own = await click(deps, "confirm", offers[0]!.id, requester);
+    expect(own.outcome).toEqual({ status: "completed" });
+    // r3 is the confirmed run; the used click that follows writes no record.
+    const used = await click(deps, "confirm", offers[0]!.id, requester);
+    expect(used.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
+    expect(registry.snapshotById("r4")).toBeNull();
+    deps.confirmations = {
+      put: (row, ttl) => store.put(row, ttl),
+      cancel: (id, ids) => store.cancel(id, ids),
+      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
+      describe: () => "throwing",
+      consume: async () => {
+        throw new Error("object unreachable");
+      },
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const unreadable = await click(deps, "confirm", offers[0]!.id, requester);
+      expect(unreadable.outcome).toEqual({ status: "refused", refusal: "confirmation_unreadable", cause: "system" });
+      expect(registry.snapshotById("r4")).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("a clicker whose id and `self` miss the requester is refused and nothing runs; the requester still can", async () => {
     const { deps, audits } = wired();
     const { offers } = await offered(deps);
     const foreign = await click(deps, "confirm", offers[0]!.id, stranger);
-    expect(foreign.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign" });
+    expect(foreign.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign", cause: "policy" });
     expect(foreign.replies).toEqual([OFFER_FOREIGN_LINE]);
     expect(deps.invoked).toEqual([]);
     expect(audits).toEqual([]);
@@ -16392,13 +17015,13 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     const one = wired();
     const first = await offered(one.deps);
     const strangerCancel = await click(one.deps, "cancel", first.offers[0]!.id, stranger);
-    expect(strangerCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign" });
+    expect(strangerCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign", cause: "policy" });
     expect(strangerCancel.replies).toEqual([OFFER_FOREIGN_LINE]);
     const cancelled = await click(one.deps, "cancel", first.offers[0]!.id, requester);
     expect(cancelled.outcome).toEqual({ status: "completed" });
     expect(cancelled.replies).toEqual([OFFER_CANCELLED_LINE]);
     const afterCancel = await click(one.deps, "confirm", first.offers[0]!.id, requester);
-    expect(afterCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_used" });
+    expect(afterCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
     expect(one.deps.invoked).toEqual([]);
     expect(codingModelIn(one.deps)).toBe("anthropic/coding-model");
     const two = wired();
@@ -16407,7 +17030,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
       status: "completed",
     });
     const afterConfirm = await click(two.deps, "cancel", second.offers[0]!.id, requester);
-    expect(afterConfirm.outcome).toEqual({ status: "refused", refusal: "confirmation_used" });
+    expect(afterConfirm.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
     expect(afterConfirm.replies).toEqual([OFFER_USED_LINE]);
     expect(two.deps.invoked).toEqual(["config.set"]);
   });
@@ -16418,6 +17041,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     deps.confirmations = {
       put: (row, ttl) => store.put(row, ttl),
       cancel: (id, ids) => store.cancel(id, ids),
+      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
       describe: () => "throwing",
       consume: async () => {
         throw new Error("object unreachable");
@@ -16426,7 +17050,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const res = await click(deps, "confirm", offers[0]!.id, requester);
-      expect(res.outcome).toEqual({ status: "refused", refusal: "confirmation_unreadable" });
+      expect(res.outcome).toEqual({ status: "refused", refusal: "confirmation_unreadable", cause: "system" });
       expect(res.replies).toEqual([OFFER_UNREADABLE_LINE]);
       expect(deps.invoked).toEqual([]);
     } finally {
@@ -16443,6 +17067,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     deps.confirmations = {
       put: (row, ttl) => store.put(row, ttl),
       cancel: (id, ids) => store.cancel(id, ids),
+      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
       describe: () => "gated",
       consume: async (id, ids) => {
         await gate;
@@ -16469,7 +17094,7 @@ describe("current channel access before dispatch", () => {
       io.checkAccess = vi.fn(async () => false);
       io.history = vi.fn(async () => []);
       const outcome = await dispatch(deps, msg(text), io);
-      expect(outcome).toEqual({ status: "refused", refusal: "channel_access" });
+      expect(outcome).toEqual({ status: "refused", refusal: "channel_access", cause: "policy" });
       expect(io.checkAccess).toHaveBeenCalledWith("slack:UX");
       expect(io.history).not.toHaveBeenCalled();
       expect(provider.requests).toHaveLength(0);
@@ -16708,4 +17333,268 @@ describe("coordinator clarification replies", () => {
       expect(provider.requests).toEqual([]);
     },
   );
+});
+
+// Feature: record 0051's reply-as-event and gone-instance rules (thread-admission; routing-and-config item 21)
+// — a plain reply into a thread owned by an unfinished unit with no live run is
+// one thread event on the unit: appended with mode `steer`, the instance
+// nudged, the sender acked; the router is never called and no run starts. A
+// directive naming an agent keeps today's meaning; a gone instance ends the
+// row `terminated` and routes fresh; any other send failure keeps the event
+// and acks it as queued.
+describe("a unit-owned thread (record 0051's reply-as-event and gone-instance rules)", () => {
+  const INSTANCE = "plan-fix-the-login-6435ec";
+  const THREAD = "slack:CX:1.0";
+  const unitRow = (over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
+    instanceId: INSTANCE,
+    unit: "U12",
+    slug: "u12",
+    branch: `plan/fix-the-login-6435ec/u12`,
+    dependsOn: [],
+    rounds: [],
+    threadKey: THREAD,
+    ...over,
+  });
+
+  async function unitOwnedSetup(over: Partial<CoordinatorUnit> = {}) {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    // The page names the instance through the coordinator child's tag — a
+    // child is never the sticky session, so a fresh route is the default agent.
+    await threadWithFinishedRun(deps, "coding", {
+      parentInstanceId: INSTANCE,
+      idempotencyKey: `${INSTANCE}:U12/0/coding`,
+    });
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.putUnits([unitRow(over)]);
+    deps.coordinatorInstances = instances;
+    const sends: Array<{ instance: string; type: string }> = [];
+    deps.workflow = {
+      get: async (id) => ({
+        sendEvent: async (e: { type: string; payload: unknown }) => void sends.push({ instance: id, type: e.type }),
+      }),
+    };
+    return { provider, deps, instances, sends, key: { instanceId: INSTANCE, unit: "U12" } };
+  }
+
+  it("a plain reply appends one event with mode steer, sends one nudge, acks, calls no router and starts no run", async () => {
+    const s = await unitOwnedSetup();
+    const { io, replies } = fakeIO([{ role: "user", text: "agent:ship fix the login" }]);
+    await dispatch(s.deps, msg("also update the readme", "slack:UADMIN"), io);
+    const events = await s.instances.listEvents(s.key);
+    expect(events).toEqual([
+      expect.objectContaining({ seq: 1, sender: "slack:UADMIN", text: "also update the readme", mode: "steer" }),
+    ]);
+    expect(events[0]!.consumedBy).toBeUndefined();
+    expect(s.sends).toEqual([{ instance: INSTANCE, type: `unit-nudge-${INSTANCE}-U12` }]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("U12");
+    expect(replies[0]).toContain(`${INSTANCE}:U12`);
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
+  it("attachments over the cap are recorded dropped", async () => {
+    const s = await unitOwnedSetup();
+    const { io } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(
+      s.deps,
+      {
+        ...msg("see the screenshot", "slack:UADMIN"),
+        images: [{ mediaType: "image/png", data: "x".repeat(500 * 1024) }],
+      },
+      io,
+    );
+    const [event] = await s.instances.listEvents(s.key);
+    expect(event!.attachments).toBeUndefined();
+    expect(event!.attachmentsDropped).toBe(1);
+  });
+
+  it("a directive naming an agent runs today's path — no event, no nudge", async () => {
+    const s = await unitOwnedSetup();
+    const { io } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("agent:review look at the tests again", "slack:UADMIN"), io);
+    expect(await s.instances.listEvents(s.key)).toEqual([]);
+    expect(s.sends).toEqual([]);
+    expect(s.provider.requests[0]!.model).toBe("review-model");
+  });
+
+  it("a sender who may not run the coding agent is refused by the allowlist before anything is appended — no event, no nudge, no run", async () => {
+    const s = await unitOwnedSetup();
+    const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("also remove the auth checks", "slack:UX"), io); // UX may not run coding
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("not on the allowlist");
+    expect(replies[0]).toContain("`coding`");
+    expect(await s.instances.listEvents(s.key)).toEqual([]);
+    expect(s.sends).toEqual([]);
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
+  it("a store whose append throws (the Worker store on a failed call) routes the message fresh instead of losing it", async () => {
+    const s = await unitOwnedSetup();
+    s.instances.appendEvent = async () => {
+      throw new Error("coordinator store /runs/coordinator/events/append: HTTP 503");
+    };
+    const { io } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    expect(s.sends).toEqual([]);
+    expect(s.provider.requests[0]!.model).toBe("general-model");
+  });
+
+  it("a reply into a thread whose unit has ended routes fresh", async () => {
+    const s = await unitOwnedSetup({ ending: { kind: "merged", report: "merged", at: 1_000 } });
+    const { io } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    expect(await s.instances.listEvents(s.key)).toEqual([]);
+    expect(s.sends).toEqual([]);
+    expect(s.provider.requests[0]!.model).toBe("general-model");
+  });
+
+  it("the relay's no-instance ends the row terminated and routes fresh with the line saying so", async () => {
+    const s = await unitOwnedSetup();
+    s.deps.workflow = {
+      get: async () => ({
+        sendEvent: async () => {
+          throw new Error(`no such instance: ${INSTANCE}`);
+        },
+      }),
+    };
+    s.deps.fetchCoordinatorInstanceStatus = vi.fn(async () => ({ kind: "absent" as const }));
+    const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    const [row] = await s.instances.listUnits(INSTANCE);
+    expect(row!.ending).toMatchObject({ kind: "terminated" });
+    expect(replies[0]).toContain("gone");
+    expect(s.provider.requests[0]!.model).toBe("general-model");
+  });
+
+  it("without an injected status reader the dispatcher asks its own shim's status route — the production path — and a no_instance answer ends the row terminated", async () => {
+    const s = await unitOwnedSetup();
+    s.deps.workflow = {
+      get: async () => ({
+        sendEvent: async () => {
+          throw new Error(`no such instance: ${INSTANCE}`);
+        },
+      }),
+    };
+    delete s.deps.fetchCoordinatorInstanceStatus;
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
+    vi.stubEnv("SWITCHBOARD_INGRESS_TOKENS", JSON.stringify({ "coord-bearer": { subject: "coordinator" } }));
+    const fetchSpy = vi.fn(
+      async (_url: string | URL | Request, _init?: RequestInit) =>
+        new Response(JSON.stringify({ ok: false, error: "no_instance" }), { status: 404 }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    const statusCall = fetchSpy.mock.calls.find(([url]) => String(url).includes("/admin/coordinator/instances/"));
+    expect(statusCall).toBeDefined();
+    expect(String(statusCall![0])).toBe(`https://bot.example/admin/coordinator/instances/${INSTANCE}`);
+    expect(statusCall![1]?.headers).toMatchObject({ authorization: "Bearer coord-bearer" });
+    const [row] = await s.instances.listUnits(INSTANCE);
+    expect(row!.ending).toMatchObject({ kind: "terminated" });
+    expect(replies[0]).toContain("gone");
+    expect(s.provider.requests[0]!.model).toBe("general-model");
+  });
+
+  it("a 502 keeps the event, acks it as queued and routes nothing", async () => {
+    const s = await unitOwnedSetup();
+    s.deps.workflow = {
+      get: async () => ({
+        sendEvent: async () => {
+          throw new Error("HTTP 502 from the shim");
+        },
+      }),
+    };
+    s.deps.fetchCoordinatorInstanceStatus = vi.fn(async () => ({
+      kind: "unanswered" as const,
+      reason: "shim unreachable",
+    }));
+    const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    const events = await s.instances.listEvents(s.key, true);
+    expect(events).toHaveLength(1);
+    const [row] = await s.instances.listUnits(INSTANCE);
+    expect(row!.ending).toBeUndefined();
+    expect(replies[0]).toContain("queued");
+    expect(s.provider.requests).toHaveLength(0);
+  });
+});
+
+// Feature: record 0054, as amended — every refusal the door makes is a run
+// record (docs/reference/specs/run-history.md item 2;
+// docs/reference/specs/routing-and-config.md item 4): a gate refusal before any
+// command is bound and before admission, a silent refusal and the catch-all
+// alike leave one `door` record whose `refusal` event carries the code and its
+// cause, with no thread claim, no run signalled to the channel and the reply
+// byte-identical — so `npm run load -- door` counts refusals per day, cause and
+// code from the run store alone.
+describe("every refusal is a run record (record 0054, as amended)", () => {
+  const wired = (fixture = YAML_FIXTURE) => {
+    let n = 0;
+    const deps = makeDeps(fixture, capturingProvider());
+    deps.runRegistry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
+    deps.admission = new ThreadAdmission();
+    const store = new InMemoryRunStore();
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    return { deps, store };
+  };
+
+  it("a gate refusal (the agent allowlist) leaves one `door` record — completed, its refusal event carrying the code, the cause and the reply's own sentence — with no run signalled and the reply unchanged", async () => {
+    const { deps, store } = wired();
+    const { io, replies } = fakeIO();
+    const started = vi.fn();
+    const finished = vi.fn();
+    io.runStarted = started;
+    io.runFinished = finished;
+    const ended = await dispatch(deps, msg("agent:coding fix it"), io);
+    expect(ended).toMatchObject({ status: "refused", refusal: "agent_allowlist", cause: "policy" });
+    expect(replies).toHaveLength(1); // the named 🚫 line, exactly as before the record existed
+    expect(started).not.toHaveBeenCalled();
+    expect(finished).not.toHaveBeenCalled();
+    // No thread claim: the gate refused before admission, so nothing holds the thread.
+    expect(deps.admission!.get("slack:CX:1.0")).toBeUndefined();
+    await deps.runHistoryWriter.settled();
+    const rec = (await store.get("r1"))!;
+    expect(rec).toMatchObject({
+      agent: "door",
+      status: "completed",
+      threadKey: "slack:CX:1.0",
+      channelId: "slack:CX",
+      userId: "slack:UX",
+    });
+    expect(rec.label).toMatch(/^agent_allowlist · /);
+    expect(rec.events.filter((e) => e.type === "input" || e.type === "refusal").map((e) => e.type)).toEqual([
+      "input",
+      "refusal",
+    ]);
+    expect(rec.events.find((e) => e.type === "input")).toMatchObject({ text: "agent:coding fix it" });
+    expect(rec.events.find((e) => e.type === "refusal")).toMatchObject({
+      code: "agent_allowlist",
+      cause: "policy",
+      text: replies[0],
+    });
+    // One refusal, one record: nothing else was registered for this request.
+    expect(await store.get("r2")).toBeNull();
+  });
+
+  it("the catch-all's uncaught refusal records with cause `system`: the ⚠️ reply as today, one `door` record carrying `uncaught`", async () => {
+    const { deps, store } = wired();
+    const { io, replies } = fakeIO();
+    io.history = () => {
+      throw new Error("history exploded");
+    };
+    const ended = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(ended).toMatchObject({ status: "failed", refusal: "uncaught", cause: "system" });
+    expect(replies.some((r) => r.includes("⚠️ history exploded"))).toBe(true);
+    await deps.runHistoryWriter.settled();
+    const rec = (await store.get("r1"))!;
+    expect(rec).toMatchObject({ agent: "door", status: "completed" });
+    expect(rec.events.find((e) => e.type === "refusal")).toMatchObject({
+      code: "uncaught",
+      cause: "system",
+      text: "history exploded",
+    });
+    expect(await store.get("r2")).toBeNull();
+  });
 });

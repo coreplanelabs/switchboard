@@ -1001,6 +1001,66 @@ describe("addressed repos: `in <owner/name>` and `in <name>` bind and rebind onc
     ).resolves.toEqual({ repo: "acme/web" });
   });
 
+  it("a determiner between in and the target is skipped: in-the-atlas-repo addresses atlas, and the word the is never itself an address", async () => {
+    // The Slack shape that refused with "no repository": a mention, then
+    // `in the <name> repo, …` — the word after `in` was `the`.
+    await expect(
+      resolveRepoContext(
+        msg("<@bot> in the atlas repo, we have PRs whose buttons should be swapped"),
+        [],
+        probe,
+        slugs,
+      ),
+    ).resolves.toEqual({ repo: "acme/atlas" });
+    await expect(
+      resolveRepoContext(msg("agent:coding in our atlas repository: fix it"), [], probe, slugs),
+    ).resolves.toEqual({ repo: "acme/atlas" });
+    // A determined slug is addressed too, and rebinds a bound thread.
+    await expect(
+      resolveRepoContext(msg("agent:coding in the acme/web repo: fix the login page"), boundToApi, probe, slugs),
+    ).resolves.toEqual({ repo: "acme/web" });
+    // The determiner itself is never a candidate: `in the logs` addresses
+    // `logs`, an unknown name, so it is prose and binds nothing.
+    await expect(resolveRepoContext(msg("<@bot> in the logs, api crashed"), [], probe, slugs)).resolves.toEqual({});
+    // Still directive-position only: a determined name deep in prose is prose.
+    const boundToWeb = [{ role: "user" as const, text: "look at https://github.com/acme/web first" }];
+    await expect(
+      resolveRepoContext(msg("the crash is in the api repo, see the logs"), boundToWeb, probe, slugs),
+    ).resolves.toEqual({ repo: "acme/web" });
+  });
+
+  it("a repository named at the start of a line is addressed: On-the-atlas-repo heading a paragraph binds atlas, and a follow-up in that thread inherits it", async () => {
+    // The Slack shape that refused with "no repository": a chatty opener, then
+    // a paragraph headed `*On the atlas repo:*`. `on` is the ref keyword, so
+    // the trailing `repo`/`repository` word is what makes it an address; the
+    // line start is the compose position, like the message head.
+    const opener = {
+      role: "user" as const,
+      text: "<@bot> my hopes are on you right now\n\nI need you to do this for me\n\n*On the atlas repo:* the topology screen should show one button",
+    };
+    await expect(resolveRepoContext(msg(opener.text), [], probe, slugs)).resolves.toEqual({ repo: "acme/atlas" });
+    // `agent:ship the above` in that thread: the opener's address binds it.
+    await expect(resolveRepoContext(msg("agent:ship the above"), [opener], probe, slugs)).resolves.toEqual({
+      repo: "acme/atlas",
+    });
+    // `In the <name> repo:` at a line start binds too, prose on the line before notwithstanding.
+    await expect(
+      resolveRepoContext(msg("here is what I need\nin the atlas repo: swap the two buttons"), [], probe, slugs),
+    ).resolves.toEqual({ repo: "acme/atlas" });
+    // Mid-line, the same words are prose: no binding on a fresh thread, and a bound thread keeps its repo.
+    await expect(
+      resolveRepoContext(msg("we talked about it on the atlas repo yesterday"), [], probe, slugs),
+    ).resolves.toEqual({});
+    await expect(
+      resolveRepoContext(msg("we talked about it on the atlas repo yesterday"), boundToApi, probe, slugs),
+    ).resolves.toEqual({ repo: "acme/api" });
+    // `on <name>` without the repo word stays the ref position it always was.
+    const onAtlas = await resolveRepoContext(msg("agent:coding on atlas: fix it"), [], probe, slugs);
+    expect(onAtlas.repo).toBeUndefined();
+    const onBranch = await resolveRepoContext(msg("agent:coding on the main branch: fix it"), [], probe, slugs);
+    expect(onBranch.repo).toBeUndefined();
+  });
+
   it("the registry did not ANSWER for an addressed slug in the current message → unverifiedRepo, never a fall back to the thread's old repo", async () => {
     const down = vi.fn(async (): Promise<boolean | "unreachable"> => "unreachable");
     await expect(resolveRepoContext(msg("agent:coding in acme/web: fix it"), boundToApi, down, slugs)).resolves.toEqual(

@@ -84,6 +84,16 @@ export function roleOfStoredRow(json: string): "user" | "assistant" | undefined 
   return role === "user" || role === "assistant" ? role : undefined;
 }
 
+/** The platform-namespaced id of the person who authored the turn a stored
+ *  row belongs to (e.g. `slack:U…`); absent for machine turns, compaction
+ *  rows, unreadable rows, and rows written before record 0057. */
+export function actorOfStoredRow(json: string): string | undefined {
+  const stored = parseStored(json);
+  if (!stored || "compaction" in stored) return undefined;
+  const actor = (stored as { actor?: unknown }).actor;
+  return typeof actor === "string" ? actor : undefined;
+}
+
 /** The notepad's size (record 0035, "The notepad"): one document per session,
  *  written whole, at most this many UTF-8 bytes; `notes` refuses over it naming
  *  the size, and the object's write route does too. */

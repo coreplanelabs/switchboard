@@ -36,7 +36,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 | Command | What it does | Surfaces |
 |---|---|---|
-| `help show` | How to ask in plain words: describe what you want, force an agent, change a route in the thread. | every surface |
+| `help show` | How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show. | every surface |
 | `help commands` | Every chat command by group, the grammar, and the per-request directives. | every surface |
 
 ### `status`
@@ -126,7 +126,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 |---|---|---|
 | `deploy plan [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why. | every surface |
 | `deploy all [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>] [--dry-run]` | Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an `echo ok` probe — until the new containers are live. In `registry` mode it first copies the release's images its Workers lack into the account registry (what `deploy images` does). --affected deploys only the Workers whose inputs changed since what they serve — the release deploy. | CLI only |
-| `deploy restart [--only <bot>] [--force] [--wait-max <integer>] [--poll <integer>]` | Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt. | CLI only |
+| `deploy restart [--only <bot>] [--force] [--wait-max <integer>] [--poll <integer>]` | Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): refused while runs are in flight (waited out, then failed by name); done once /healthz answers with a later startedAt. | CLI only |
 | `deploy init [--check]` | Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the `deploy:check` gate). | CLI only |
 | `deploy secrets <memory\|bot\|resident\|sandbox> [--only <string>]` | Put a Worker's secrets from the deployment profile's secretsSource (a directory of &lt;NAME&gt; files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into `wrangler secret put`; none is ever printed. | CLI only |
 | `deploy config [--source <string>]` | Push the bot's config to the state Worker as the `base` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until `deploy restart`. | CLI only |
@@ -162,6 +162,12 @@ One table per group, in registration order. "Surfaces" is where that command can
 |---|---|---|
 | `costs by <user\|thread\|channel\|agent\|model> [--days <integer>] [--group <string>]` | What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written. | every surface |
 | `costs snapshot` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. | every surface |
+
+### `providers`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `providers check` | Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each. | every surface |
 
 ### `artifacts`
 

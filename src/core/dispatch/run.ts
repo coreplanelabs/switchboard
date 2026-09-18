@@ -9,7 +9,12 @@
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import type { RouteDecided } from "./route.js";
-import { coordinatorFields, unitOfIdempotencyKey, type CoordinatorTag } from "../coordinator/contract.js";
+import {
+  coordinatorFields,
+  unitOfIdempotencyKey,
+  type CoordinatorTag,
+  type WorkflowSender,
+} from "../coordinator/contract.js";
 import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { RunProfile } from "../../config/profile.js";
 import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
@@ -37,6 +42,7 @@ import type { AuthorizeDeps } from "./authorize.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { RecordDeps } from "./record.js";
 import { processSecrets } from "../../secrets.js";
+import { oneLine, redactAndCap } from "../redact.js";
 import type { HarnessRoster } from "../harness/roster.js";
 import type { HarnessContainer } from "../harness/container.js";
 import type { HarnessRegistry } from "../harness/pi/relay.js";
@@ -115,6 +121,15 @@ export interface RunDeps
    */
   coordinatorInstances?: CoordinatorInstanceStore;
   /**
+   * The Workflow sender over the shim's event relay (`shimWorkflowSender`) —
+   * the sender the check-run intake already uses — through which the
+   * dispatcher nudges a unit's instance when a thread event lands on it
+   * (record 0051's reply-as-event rule). Absent (a test, a process without a shim): the
+   * nudge fails like any other send failure — the event stays appended and
+   * the sender is acked as queued.
+   */
+  workflow?: WorkflowSender;
+  /**
    * The runs service behind the `list_runs` / `get_run_status` tools
    * (docs/reference/specs/agent-conductor.md item 4): the ONE service every
    * surface reads — the command registry's, the run pages' — so a run sees
@@ -170,6 +185,14 @@ export interface RunDeps
    */
   updatePullRequest?: (repo: string, number: number, patch: { title: string; body: string }) => Promise<void>;
   /**
+   * The branch's commits over the base (githubPulls.commitsOverBase): the
+   * post-step asks it when a proven-pushed branch comes with no description
+   * and no open pull request, so a branch with nothing over the base is
+   * reported as nothing to open instead of a compare link over an empty diff
+   * (docs/reference/specs/agent-ship.md item 12). Injectable for the same reason.
+   */
+  commitsOverBase?: (repo: string, base: string, branch: string) => Promise<number | undefined>;
+  /**
    * Repo facts for the agent:ship entry (docs/reference/specs/agent-ship.md items 9
    * and 10): the repo's default branch, the PR base of last resort — a failed
    * lookup proceeds with none; auto-merge is the pull request's own fact, read
@@ -222,10 +245,17 @@ export interface ClaimContext {
   seed?: RunSeed;
   /** The router's decision when it chose the preset, on the row (run-history item 35). */
   route?: RouteDecided;
+  /** Marks the run's card `untracked by the ledger` when the promotion's claim
+   *  goes untracked — the same label the reserve-time untracked path sets in
+   *  the dispatcher, wired from there because the card's shell lives there. */
+  markUntracked?: () => void;
   /** For a seed read from the session's log (session-log item 9): the rows of
    *  the log the first messages of `messages` are, so the write-through
    *  appends only what follows them. */
   seedLog?: { from: number; turns: number };
+  /** The author of each seed message by index (record 0057): rides the open
+   *  request so the write-through stores the actor on the rows it writes. */
+  seedActors?: readonly (string | undefined)[];
 }
 
 /**
@@ -262,6 +292,8 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     seed,
     route,
     seedLog,
+    markUntracked,
+    seedActors,
   } = ctx;
   const { resident, binding } = selection;
   let ledgerRun = ctx.ledgerRun;
@@ -325,13 +357,37 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         // The seed carries the EFFECTIVE budget, so a resume runs on what
         // this run was admitted with, not on the preset's own number — and,
         // for a seed read from the log, the rows it reuses (session-log item 9).
-        seed: { messages, budgetMs: profile.minutes * 60_000, ...(seedLog ? { log: seedLog } : {}) },
+        seed: {
+          messages,
+          budgetMs: profile.minutes * 60_000,
+          ...(seedLog ? { log: seedLog } : {}),
+          ...(seedActors !== undefined ? { actors: seedActors } : {}),
+        },
         // A stop asked of another container (`/runs/stop` there) reaches this
         // run through its heartbeat and is honored like a local one; a fence
         // (another generation took the run) is a hard stop — nothing more may
         // run or reply here (D9).
         onStop: (mode) => void run.control.requestStop(mode),
         onFenced: () => void run.control.requestStop("hard"),
+        // The promotion's claim went untracked (failing retries or
+        // RouteMissingError) while the reserved row stood: the row is now
+        // abandoned and the run is untracked. Publish the note so the record
+        // says why, and mark the card as the reserve-time path does — the same
+        // one place as the reservation's own note (D9).
+        onUntracked: (why) => {
+          registry.publish(run.id, {
+            type: "run_note",
+            kind: "ledger_untracked",
+            summary: redactAndCap(
+              oneLine(
+                `not tracked by the run ledger: ${why} — no handoff, resume or reclaim reaches this run; its record still reaches the store`,
+              ),
+              500,
+            ),
+            at: clock(),
+          });
+          markUntracked?.();
+        },
       }),
     );
     if (opened) {

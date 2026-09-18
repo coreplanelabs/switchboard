@@ -17,6 +17,7 @@
 // pass off the run's trace — and nothing here changes that.
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import type {
   AnthropicOptions,
   AssistantMessage as PiAssistantMessage,
@@ -25,6 +26,7 @@ import type {
   Message,
   Model,
   OpenAICompletionsOptions,
+  OpenAIResponsesOptions,
   ProviderStreams,
   StopReason,
   TextContent,
@@ -34,29 +36,34 @@ import type {
 } from "@earendil-works/pi-ai";
 import {
   ANTHROPIC_API_KEY_ENV,
+  wireOf,
   type CompletionRequest,
   type CompletionResult,
   type Provider,
   type ProviderConfig,
   type TokenUsage,
+  type Wire,
 } from "../provider.js";
 import type { ChatMessage, ContentPart, ToolResultContent } from "../chatMessage.js";
 import { processSecrets, type Secrets } from "../../secrets.js";
 import { systemClock } from "../trace/clock.js";
 import type { Clock } from "../trace/types.js";
 
-/** The two APIs pi speaks for the two provider types `config.yaml` knows. */
-export type PiApi = "anthropic-messages" | "openai-completions";
+/** The three APIs pi speaks for the three wires `config.yaml` knows. */
+export type PiApi = "anthropic-messages" | "openai-completions" | "openai-responses";
 
 /** Where pi's Anthropic adapter posts when a block names no base URL: the SDK's
  *  own host, the one the native adapter defaulted to. */
 export const ANTHROPIC_BASE_URL = "https://api.anthropic.com";
 
-/** A provider block's type as pi's API — the same mapping the harness writes
- *  into a run's `models.json` (`piModelsJson`): an `anthropic` block speaks
- *  the Messages API, an `openai-compatible` one Chat Completions. */
-export function piApiFor(type: ProviderConfig["type"]): PiApi {
-  return type === "anthropic" ? "anthropic-messages" : "openai-completions";
+/** A provider block's wire as pi's API — the same mapping the harness writes
+ *  into a run's `models.json` (`piModelsJson`): an `anthropic-messages` block
+ *  speaks the Messages API, an `openai-chat` one Chat Completions (pi's word
+ *  is `openai-completions`), an `openai-responses` one the Responses API. */
+export function piApiFor(wire: Wire): PiApi {
+  if (wire === "anthropic-messages") return "anthropic-messages";
+  if (wire === "openai-responses") return "openai-responses";
+  return "openai-completions";
 }
 
 /** A zero rate card: pi prices every answer from the model's card, and the
@@ -126,7 +133,7 @@ export class PiAiProvider implements Provider {
 
   constructor(name: string, cfg: ProviderConfig, opts: PiAiOptions = {}) {
     this.name = name;
-    this.api = piApiFor(cfg.type);
+    this.api = piApiFor(wireOf(cfg));
     if (cfg.type === "openai-compatible" && !cfg.baseUrl) {
       throw new Error(`Provider "${name}": openai-compatible providers require baseUrl`);
     }
@@ -184,7 +191,12 @@ export class PiAiProvider implements Provider {
    *  kept; a scripted one stands in for it in tests. */
   private api$(): ProviderStreams {
     this.streams ??=
-      this.scripted ?? (this.api === "anthropic-messages" ? anthropicMessagesApi() : openAICompletionsApi());
+      this.scripted ??
+      (this.api === "anthropic-messages"
+        ? anthropicMessagesApi()
+        : this.api === "openai-responses"
+          ? openAIResponsesApi()
+          : openAICompletionsApi());
     return this.streams;
   }
 }
@@ -196,9 +208,10 @@ export class PiAiProvider implements Provider {
  *  request's TTL asks for (`1h` → long; else pi's default, short), and the
  *  forced tool call as each API spells it — Anthropic's `tool_choice: {type:
  *  "tool", name}`, Chat Completions' `{type: "function", function: {name}}`
- *  — the same two spellings the native adapters sent — or, for `{type: "any"}`
+ *  and the Responses API's flat `{type: "function", name}`
+ *  — the same spellings the adapters send natively — or, for `{type: "any"}`
  *  (one tool of many, the router's menu), each API's own word for it —
- *  Anthropic's `"any"`, Chat Completions' `"required"` — with an `onPayload`
+ *  Anthropic's `"any"`, both OpenAI dialects' `"required"` — with an `onPayload`
  *  hook that switches parallel calls off on the wire
  *  (`tool_choice.disable_parallel_tool_use: true` / `parallel_tool_calls:
  *  false`), so a forced answer is exactly one call. */
@@ -206,7 +219,7 @@ export function piStreamOptions(
   api: PiApi,
   req: CompletionRequest,
   key: string | undefined,
-): AnthropicOptions | OpenAICompletionsOptions {
+): AnthropicOptions | OpenAICompletionsOptions | OpenAIResponsesOptions {
   const shared = {
     ...(key !== undefined ? { apiKey: key } : { apiKey: "unused", headers: { Authorization: null } }),
     maxTokens: req.maxTokens,
@@ -219,9 +232,9 @@ export function piStreamOptions(
       ? { ...shared, toolChoice: "any", onPayload: anthropicParallelOff }
       : { ...shared, toolChoice: "required", onPayload: openAiParallelOff };
   }
-  return api === "anthropic-messages"
-    ? { ...shared, toolChoice: { type: "tool", name: req.toolChoice.name } }
-    : { ...shared, toolChoice: { type: "function", function: { name: req.toolChoice.name } } };
+  if (api === "anthropic-messages") return { ...shared, toolChoice: { type: "tool", name: req.toolChoice.name } };
+  if (api === "openai-responses") return { ...shared, toolChoice: { type: "function", name: req.toolChoice.name } };
+  return { ...shared, toolChoice: { type: "function", function: { name: req.toolChoice.name } } };
 }
 
 /** The wire payload with Anthropic's parallel switch off: `disable_parallel_tool_use`

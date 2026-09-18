@@ -13,16 +13,31 @@ import type { Secrets } from "../../secrets.js";
 import type { RunHistoryConfig } from "../runStore.js";
 import { DEFAULT_RUN_STORE_TOKEN_ENV, RUN_STORE_KEY, RUN_STORE_TIMEOUT_MS } from "../runStoreWorker.js";
 import {
+  capThreadEvent,
   isCoordinatorInstance,
   isCoordinatorUnit,
+  isThreadEvent,
   type CoordinatorInstance,
   type CoordinatorUnit,
+  type ThreadEvent,
 } from "./contract.js";
 
 /** `exists`: a different record already holds the id (an identical put is
  *  idempotent); `unavailable`: no durable store in this process. */
 export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "unavailable" };
 export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" };
+export type AppendEventResult = { ok: true; seq: number } | { ok: false; reason: "unavailable" };
+export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailable" };
+
+/** The (instance, unit) a thread event belongs to. */
+export interface UnitEventKey {
+  instanceId: string;
+  unit: string;
+}
+
+/** What a caller appends: everything but the sequence the store assigns and
+ *  the consumer a later step marks. */
+export type ThreadEventInput = Omit<ThreadEvent, "seq" | "consumedBy">;
 
 export interface CoordinatorInstanceStore {
   put(instance: CoordinatorInstance): Promise<PutInstanceResult>;
@@ -38,6 +53,16 @@ export interface CoordinatorInstanceStore {
   putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult>;
   /** An instance's unit rows in the order they were first written — the plan's. */
   listUnits(instanceId: string): Promise<CoordinatorUnit[]>;
+  /** A thread event onto the unit's list (record 0051's reply-as-event rule): the store assigns
+   *  the next sequence and enforces the per-event cap (attachments dropped
+   *  whole, the row saying how many). A sibling of the unit rows, never a
+   *  field on them: `putUnits` replaces a row whole, and an append landing
+   *  between a route's read and its put would be lost (record 0051). */
+  appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult>;
+  /** The unit's events in sequence order; `unconsumedOnly` filters to the rows no spawn or run has consumed. */
+  listEvents(key: UnitEventKey, unconsumedOnly?: boolean): Promise<ThreadEvent[]>;
+  /** Named sequences consumed by a spawn step or a run — idempotent: a row already consumed keeps its first consumer. */
+  markConsumed(key: UnitEventKey, seqs: readonly number[], by: string): Promise<MarkConsumedResult>;
 }
 
 const unitKey = (u: Pick<CoordinatorUnit, "instanceId" | "unit">) => `${u.instanceId}\0${u.unit}`;
@@ -46,6 +71,8 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
   private readonly rows = new Map<string, string>();
   /** Insertion-ordered, so a replace keeps a row's place. */
   private readonly units = new Map<string, string>();
+  /** The unit event lists, by unit key — the Worker's `coordinator_unit_events` table mirrored. */
+  private readonly events = new Map<string, ThreadEvent[]>();
   async put(instance: CoordinatorInstance): Promise<PutInstanceResult> {
     const text = JSON.stringify(instance);
     const existing = this.rows.get(instance.id);
@@ -72,6 +99,22 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       if (key.startsWith(`${instanceId}\0`)) out.push(JSON.parse(text) as CoordinatorUnit);
     return out;
   }
+  async appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult> {
+    const list = this.events.get(unitKey(key)) ?? [];
+    const seq = (list[list.length - 1]?.seq ?? 0) + 1;
+    list.push(capThreadEvent({ ...event, seq }));
+    this.events.set(unitKey(key), list);
+    return { ok: true, seq };
+  }
+  async listEvents(key: UnitEventKey, unconsumedOnly = false): Promise<ThreadEvent[]> {
+    const list = this.events.get(unitKey(key)) ?? [];
+    return list.filter((e) => !unconsumedOnly || e.consumedBy === undefined).map((e) => ({ ...e }));
+  }
+  async markConsumed(key: UnitEventKey, seqs: readonly number[], by: string): Promise<MarkConsumedResult> {
+    const list = this.events.get(unitKey(key)) ?? [];
+    for (const e of list) if (seqs.includes(e.seq) && e.consumedBy === undefined) e.consumedBy = by;
+    return { ok: true };
+  }
 }
 
 /** The store of a process without a durable state Worker: no instance exists
@@ -91,6 +134,15 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
   }
   async listUnits(_instanceId: string): Promise<CoordinatorUnit[]> {
     return [];
+  }
+  async appendEvent(_key: UnitEventKey, _event: ThreadEventInput): Promise<AppendEventResult> {
+    return { ok: false, reason: "unavailable" };
+  }
+  async listEvents(_key: UnitEventKey, _unconsumedOnly?: boolean): Promise<ThreadEvent[]> {
+    return [];
+  }
+  async markConsumed(_key: UnitEventKey, _seqs: readonly number[], _by: string): Promise<MarkConsumedResult> {
+    return { ok: false, reason: "unavailable" };
   }
 }
 
@@ -170,6 +222,28 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     if (!Array.isArray(d.units) || !d.units.every(isCoordinatorUnit))
       throw new Error("coordinator store /runs/coordinator/units/list: the answer is not a list of unit rows");
     return d.units;
+  }
+
+  async appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult> {
+    const r = await this.post("/runs/coordinator/events/append", { ...key, event });
+    const d = r.data as { ok?: unknown; seq?: unknown };
+    if (d.ok === true && typeof d.seq === "number") return { ok: true, seq: d.seq };
+    throw new Error(`coordinator store /runs/coordinator/events/append: unexpected answer (HTTP ${r.status})`);
+  }
+
+  async listEvents(key: UnitEventKey, unconsumedOnly = false): Promise<ThreadEvent[]> {
+    const r = await this.post("/runs/coordinator/events/list", { ...key, unconsumedOnly });
+    const d = r.data as { events?: unknown };
+    if (!Array.isArray(d.events) || !d.events.every(isThreadEvent))
+      throw new Error("coordinator store /runs/coordinator/events/list: the answer is not a list of thread events");
+    return d.events;
+  }
+
+  async markConsumed(key: UnitEventKey, seqs: readonly number[], by: string): Promise<MarkConsumedResult> {
+    const r = await this.post("/runs/coordinator/events/mark-consumed", { ...key, seqs: [...seqs], by });
+    const d = r.data as { ok?: unknown };
+    if (d.ok === true) return { ok: true };
+    throw new Error(`coordinator store /runs/coordinator/events/mark-consumed: unexpected answer (HTTP ${r.status})`);
   }
 }
 

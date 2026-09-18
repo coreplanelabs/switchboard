@@ -94,6 +94,7 @@ import {
   replayImperative,
   replayRoutes,
   routeChecks,
+  type RouteFacts,
   tableWritePreset,
   tallyingProvider,
   typedLabels,
@@ -132,6 +133,7 @@ const USAGE = `usage: tsx scripts/load.ts <command> [flags]
 
 commands
   history    peak concurrency and durations from the run store
+             [--limit N]: stop after N runs have been read (default: unlimited, 0 = unlimited)
              env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env)
   resident   N synthetic threads against one resident
              --resource repo:owner/name  --threads N  --hold S  --stagger S  --profile review|coding
@@ -325,6 +327,7 @@ async function history(f: Flags): Promise<boolean> {
   const startedAt = new Date(systemClock()).toISOString();
   const base = str(f, "state-url", process.env.SWITCHBOARD_STATE_WORKER_URL).replace(/\/$/, "");
   const token = bearer(str(f, "token-env", "MEMORY_TOKEN"));
+  const limit = num(f, "limit", 0);
   const items = await pageAll(
     async (cursor) => {
       const body: Record<string, unknown> = { storeKey: "runs:default", limit: 200, ...(cursor ?? {}) };
@@ -339,7 +342,7 @@ async function history(f: Flags): Promise<boolean> {
       };
       return data.items;
     },
-    { pageSize: 200, maxPages: 50 },
+    { pageSize: 200, maxPages: 50, ...(limit > 0 ? { maxItems: limit } : {}) },
   );
   const runs = realRuns(items);
   const peak = peakConcurrency(runs);
@@ -1217,10 +1220,14 @@ async function routeReplay(f: Flags): Promise<boolean> {
   // One decision function for both halves: the production prompt, the compound
   // form offered under the cap — so a single that the router splits is a
   // misroute in the table, and a decoy split is counted where it belongs.
-  const decide = (text: string) =>
-    route({ text, recentDirectives: {}, presets, allowed, fallback: defaultPreset, compound: { maxParts } }, model, {
-      timeoutMs: ROUTE_TIMEOUT_MS,
-    });
+  // A fixture's facts — the conversations it links, a command fixture's thread
+  // repository — ride the user turn as the route stage puts them there.
+  const decide = (text: string, facts?: RouteFacts) =>
+    route(
+      { text, recentDirectives: {}, presets, allowed, fallback: defaultPreset, compound: { maxParts }, ...facts },
+      model,
+      { timeoutMs: ROUTE_TIMEOUT_MS },
+    );
   // The command half's menu: the bare full-capability catalogue —
   // `registerCoreCommands` over a fresh registry, never a bound deployment's —
   // so every offered command is scored; the replay binds and parses only,
@@ -1228,7 +1235,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
   const commandRegistry = new CommandRegistry<CoreCommandDeps>({ audit: () => {}, capabilities: ALL_CAPABILITIES });
   registerCoreCommands(commandRegistry);
   const menu = routableCommands(commandRegistry);
-  const decideCommand = (text: string, threadRepo?: string) =>
+  const decideCommand = (text: string, facts?: RouteFacts) =>
     route(
       {
         text,
@@ -1238,7 +1245,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
         fallback: defaultPreset,
         compound: { maxParts },
         commands: menu,
-        ...(threadRepo ? { threadRepo } : {}),
+        ...facts,
       },
       model,
       { timeoutMs: ROUTE_TIMEOUT_MS },

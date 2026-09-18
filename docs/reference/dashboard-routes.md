@@ -4,6 +4,8 @@ Every route below sits behind the dashboard's one identity gate unless noted. Wh
 
 The header lists only the surfaces this installation has: **Residents** appears when resident environments are configured (`execution.resident`), **Costs** when `costs` is configured with its analytics token, **Delivery** when a GitHub credential is set, the **Scheduled** tab when `schedules.worker` records firings. The **settings cog** beside the docs link is always there (every installation has channel scopes); the page's MCPs tab only with an `mcp` block. The docs link is always there: it opens the project's published site. The routes themselves still answer without their subsystem — with a `503` naming the config that turns them on.
 
+Every page route below also answers its data alone as JSON to a request whose `Accept` header is `application/json` — the same status and the same content the page paints from. The dashboard navigates between its pages that way, without a document load; an agent may read a page the same way.
+
 | Route | Shows | Notes |
 |---|---|---|
 | `GET /runs` | Active runs, newest first | Default view excludes finished runs; each row's link carries that run's capability token — the index itself is gated specifically because of this |
@@ -44,7 +46,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 
 | Route | Methods | Action | What it does |
 |---|---|---|---|
-| `/api/help.show` | `GET`, `POST` | `help:read` | How to ask in plain words: describe what you want, force an agent, change a route in the thread. |
+| `/api/help.show` | `GET`, `POST` | `help:read` | How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show. |
 | `/api/help.commands` | `GET`, `POST` | `help:read` | Every chat command by group, the grammar, and the per-request directives. |
 | `/api/status.show` | `GET`, `POST` | `status:read` | Which build this process runs: version, commit, when it was built and started, runs in flight, draining. |
 | `/api/config.show` | `GET`, `POST` | `config:read` | The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel. |
@@ -85,6 +87,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/delivery.report` | `GET`, `POST` | `delivery:read` | Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written. |
 | `/api/costs.by` | `GET`, `POST` | `costs:read` | What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written. |
 | `/api/costs.snapshot` | `POST` | `costs:write` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. |
+| `/api/providers.check` | `GET`, `POST` | `providers:read` | Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each. |
 
 <!-- /generated:api-routes -->
 

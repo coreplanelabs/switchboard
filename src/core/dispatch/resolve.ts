@@ -5,6 +5,7 @@
 // and the target repository, ref and pull request, started as a promise so the
 // GitHub round trip overlaps the memory read and lands after the ack card.
 // Pure resolution — the gates that judge the result are authorize.ts.
+import { refusalOf, RefusalError } from "../refusal.js";
 import { leaseMinimum } from "../budgets.js";
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import { machineNeedsRepo, type AgentDef } from "../../agents/registry.js";
@@ -16,6 +17,9 @@ import {
   type ThreadDirectives,
 } from "../../directives.js";
 import { parseModelRef } from "../provider.js";
+import { decideControls, resolveModelCard, type ControlDecision, type ModelCard } from "../modelCard.js";
+import { installedModelRegistry } from "../installedModelRegistry.js";
+import { DEFAULT_HARNESS } from "../harness/roster.js";
 import {
   githubTokenScopeFor,
   residentOnboardedProbe,
@@ -181,11 +185,17 @@ export function resolveProfile(ctx: {
   return resolution;
 }
 
-/** Whether the run's machine class carries a repository, and the target's
- *  resolution in flight. */
+/** Whether the run's machine class carries a repository, the target's
+ *  resolution in flight, and the model card resolved beside the block check
+ *  (record 0052) with every control decided against it. */
 export interface ResolvedTarget {
   needsRepo: boolean;
   repoCtxP: Promise<RepoContext>;
+  /** The card resolved before the first call; the run records it. */
+  modelCard: ModelCard;
+  /** Every control's decision — the degraded ones become notes on the record
+   *  before the first turn; a refused one throws above. */
+  decisions: ControlDecision[];
 }
 
 /** What `resolveTarget` reads off the dispatch. */
@@ -218,7 +228,46 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
   const { provider: providerName } = parseModelRef(resolved.modelRef);
   const providers = deps.config.config.providers;
   if (!providers[providerName]) {
-    throw new Error(`Unknown provider "${providerName}". Configured providers: ${Object.keys(providers).join(", ")}`);
+    throw new RefusalError(
+      refusalOf(
+        "provider_unknown",
+        `Unknown provider "${providerName}". Configured providers: ${Object.keys(providers).join(", ")}`,
+      ),
+    );
+  }
+
+  // The model card (record 0052): resolved once, here, where the block is
+  // checked, and decided before any card or span opens. A control the card
+  // refuses ends the run with a reply naming the model and what it takes, the
+  // same shape as the unknown-provider refusal above.
+  const modelCard = resolveModelCard(resolved.modelRef, providers, installedModelRegistry);
+  const decisions = decideControls(modelCard, {
+    ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+    ...(msg.images ? { images: msg.images.length } : {}),
+    ...(msg.documents ? { documents: msg.documents.length } : {}),
+  });
+  const refused = decisions.find((d) => d.outcome === "refused");
+  if (refused) {
+    throw new RefusalError(
+      refusalOf(
+        "model_card_refused",
+        `Model "${resolved.modelRef}" refuses ${refused.control}${refused.asked !== undefined ? ` "${refused.asked}"` : ""}: ${refused.why}`,
+      ),
+    );
+  }
+
+  // The Responses wire is pi's alone for now (record 0052, U42): a preset on
+  // OpenCode with a Responses block is refused here, by name, before any card
+  // or span — never a call that fails mid-run — until OpenCode's bundled
+  // `@ai-sdk/openai` is measured against the logging fake (the matrix's
+  // declared `cannot` carries the same reason).
+  if (modelCard.wire === "openai-responses" && (resolved.harness?.name ?? DEFAULT_HARNESS) === "opencode") {
+    throw new RefusalError(
+      refusalOf(
+        "model_card_refused",
+        `Model "${resolved.modelRef}" speaks the openai-responses wire, which the "opencode" harness cannot speak yet: run it on pi, or use an openai-chat block.`,
+      ),
+    );
   }
 
   // Target repo/ref for resident environments, resolved BEFORE the model
@@ -251,7 +300,7 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
         : Promise.resolve({}),
   );
   repoCtxP.catch(() => {});
-  return { needsRepo, repoCtxP };
+  return { needsRepo, repoCtxP, modelCard, decisions };
 }
 
 /**

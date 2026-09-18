@@ -1000,7 +1000,63 @@ describe("makeExecutor resident selection", () => {
     const second = await makeExecutor(residentOpts(), repoCtx());
     expect(second.executor).toBeInstanceOf(CloudflareSandboxExecutor);
     expect(second.note).toMatch(/unreachable/);
-    expect(fn).toHaveBeenCalledTimes(1); // circuit breaker: one timeout per outage window
+    expect(fn).toHaveBeenCalledTimes(1); // circuit breaker: one connection failure per outage window
+  });
+
+  // resident-repos.md item 25: a deadline miss is the host answering slowly,
+  // not the service gone. Live, one /status in 1,633 was cancelled at the old
+  // 2 s deadline on a healthy resident and sent its run cold — and, through
+  // the breaker, every dispatch of the next 30 s with it.
+  it("a probe that misses its deadline falls cold for THIS dispatch alone and arms NO outage window: the next dispatch probes again", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const { calls } = stubFetchLate(
+        { body: { state: "warm", reason: "" }, afterMs: 60_000 },
+        { body: { state: "warm", reason: "" }, afterMs: 60_000 },
+      );
+      let first: { note?: string; executor?: unknown } | undefined;
+      void makeExecutor(residentOpts(), repoCtx()).then((s) => (first = s));
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(first?.executor).toBeInstanceOf(CloudflareSandboxExecutor);
+      expect(first?.note).toBe("resident unreachable (the 8s call deadline passed) — using fresh sandbox");
+      let second: { note?: string } | undefined;
+      void makeExecutor(residentOpts(), repoCtx()).then((s) => (second = s));
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(second?.note).toBe("resident unreachable (the 8s call deadline passed) — using fresh sandbox");
+      expect(second?.note).not.toMatch(/outage window/);
+      expect(calls).toEqual(["/status", "/status"]); // the second dispatch probed: nothing was cached
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the default probe deadline is 8 s: a resident that answers at 7.9 s is selected warm", async () => {
+    vi.useFakeTimers();
+    try {
+      stubEnvs();
+      const { calls } = stubFetchLate(
+        { body: { state: "warm", reason: "" }, afterMs: 7_900 },
+        {
+          body: {
+            workspace: "/workspace/threads/x/master",
+            ref: "master",
+            sha: "abc1234def",
+            user: "worker2",
+            deps: "hardlink",
+          },
+        },
+      );
+      let settled: { executor?: unknown } | undefined;
+      void makeExecutor(residentOpts(), repoCtx()).then((s) => (settled = s));
+      await vi.advanceTimersByTimeAsync(7_899);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(101);
+      expect(settled?.executor).toBeInstanceOf(ResidentExecutor);
+      expect(calls).toEqual(["/status", "/attach"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a transport failure met on a re-probe inside the blip wait ends the wait at once AND opens the outage breaker, as the first probe's would: the next dispatch inside the window skips the fetch", async () => {
@@ -1215,14 +1271,14 @@ describe("makeExecutor resident selection", () => {
     }
   });
 
-  it("a configured `probeTimeoutMs` bounds every probe of the selection's wait, not only the first: a re-probe that hangs is the transport failing at the configured second (2 s by default), never at the wake's 5 s, so the operator's cold-fallback pace holds through the blip", async () => {
+  it("a configured `probeTimeoutMs` bounds every probe of the selection's wait, not only the first: a re-probe that hangs is the deadline passing at the configured second (8 s by default), never at the wake's 5 s, so the operator's cold-fallback pace holds through the blip", async () => {
     vi.useFakeTimers();
     try {
       stubEnvs();
       const transient = { status: 500, body: { error: "internal error", status: 500, transient: true } };
       for (const { probeTimeoutMs, deadline } of [
         { probeTimeoutMs: 1_000, deadline: "1s" },
-        { probeTimeoutMs: undefined, deadline: "2s" },
+        { probeTimeoutMs: undefined, deadline: "8s" },
       ]) {
         resetResidentProbeCache();
         const { calls } = stubFetchLate(transient, { ...transient, afterMs: 60_000 });
@@ -1236,7 +1292,7 @@ describe("makeExecutor resident selection", () => {
         };
         let settled: { note?: string } | undefined;
         void makeExecutor(opts, repoCtx()).then((s) => (settled = s));
-        await vi.advanceTimersByTimeAsync((probeTimeoutMs ?? 2_000) - 1);
+        await vi.advanceTimersByTimeAsync((probeTimeoutMs ?? 8_000) - 1);
         expect(settled, deadline).toBeUndefined();
         await vi.advanceTimersByTimeAsync(1);
         expect(settled?.note).toBe(
@@ -1372,6 +1428,20 @@ describe("makeExecutor resident selection", () => {
         "onboard it (`repo onboard jshttp/vary`) for a warm, deps-ready environment",
     );
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("404 not-onboarded with the registry answering names the resident the typed repo is near (record 0054)", async () => {
+    stubEnvs();
+    vi.stubEnv("RESIDENT_ADMIN_TOKEN", "atok");
+    resetResidentProbeCache();
+    const { fn } = stubFetch(
+      { status: 404, body: { error: "unknown resource" } },
+      { body: { residents: [{ resource: "repo:jshttp/vary" }, { resource: "repo:acme/api" }] } },
+    );
+    const { note } = await makeExecutor(residentOpts(), { ...ctxOf(AGENTS.coding), repo: "jshttp/var", ref: "master" });
+    expect(note).toContain("did you mean `jshttp/vary`?");
+    expect(fn).toHaveBeenCalledTimes(2);
+    vi.unstubAllEnvs();
   });
 
   it("resident configured but its token env unset → legible error", async () => {
@@ -2007,6 +2077,29 @@ describe("residentSlugsLister", () => {
     await expect(list?.()).resolves.toBeUndefined();
     await expect(list?.()).resolves.toBeUndefined();
     expect(fn).toHaveBeenCalledTimes(1); // second call answered from the outage window
+  });
+
+  it("a listing that misses its deadline answers undefined but opens NO outage window (the next call fetches again), like the selection's probe", async () => {
+    vi.useFakeTimers();
+    try {
+      const fn = vi.fn(
+        (_url: unknown, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+          }),
+      );
+      vi.stubGlobal("fetch", fn);
+      const list = residentSlugsLister(cfg, env);
+      const first = list?.();
+      await vi.advanceTimersByTimeAsync(8_000);
+      await expect(first).resolves.toBeUndefined();
+      const second = list?.();
+      await vi.advanceTimersByTimeAsync(8_000);
+      await expect(second).resolves.toBeUndefined();
+      expect(fn).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -14,7 +14,7 @@ import {
   parseSettingsRoute,
 } from "./settingsView.js";
 import { SEED_ELEMENT_ID, type SettingsSeed } from "./webSeed.js";
-import { makeShellRenderer } from "./webShell.js";
+import { makePageSender } from "./webShell.js";
 
 // Feature: docs/reference/specs/settings-page.md items 1, 2, 4 — the settings
 // view: its routes, the seed each tab carries (the answers of the registry
@@ -110,7 +110,7 @@ const happy: Invoke = (id) => {
   }
 };
 
-const shell = makeShellRenderer({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
+const page = makePageSender({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
 const ADMIN: AccessIdentity = { sub: "admin-sub", email: "admin@example.test" };
 const MEMBER: AccessIdentity = { sub: "member-sub" };
 
@@ -145,7 +145,7 @@ function handler(
       vocabulary: VOCABULARY,
       capabilities: opts.capabilities ?? ALL_CAPABILITIES,
     },
-    shell,
+    page,
   );
   return { view, commands };
 }
@@ -163,7 +163,7 @@ async function get(view: ReturnType<typeof handler>["view"], url: string, identi
       body = b ?? "";
     },
   };
-  const handled = view({ url, method } as never, res as never, { identity });
+  const handled = view({ url, method, headers: {} } as never, res as never, { identity });
   // The handler answers asynchronously for the command-backed tabs.
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
@@ -422,7 +422,7 @@ describe("the settings view", () => {
     expect(seedOf((await get(view, "/settings")).body).tab).toBe("channels");
   });
 
-  it("a shell that throws after the 200 was written closes the response instead of writing a second head", async () => {
+  it("a page sender that throws before any head is one 502 with the reason, never a second head or an unhandled rejection", async () => {
     const commands = fakeCommands(happy);
     const view = createSettingsViewHandler(
       {
@@ -433,9 +433,41 @@ describe("the settings view", () => {
         capabilities: ALL_CAPABILITIES,
       },
       () => {
-        throw new Error("shell exploded");
+        throw new Error("sender exploded");
       },
     );
+    const heads: number[] = [];
+    let ended = 0;
+    let body = "";
+    const res = {
+      headersSent: false,
+      writeHead(s: number) {
+        heads.push(s);
+        this.headersSent = true;
+      },
+      end(b?: string) {
+        ended += 1;
+        body = b ?? "";
+      },
+    };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      view({ url: "/settings/mcps", method: "GET", headers: {} } as never, res as never, { identity: ADMIN });
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(heads).toEqual([502]);
+    expect(ended).toBe(1);
+    expect(body).toBe("settings unavailable: sender exploded");
+    expect(unhandled).toEqual([]);
+  });
+
+  it("a response that fails after the 200 was written is closed, never given a second head", async () => {
+    const { view } = handler(happy);
     const heads: number[] = [];
     let ended = 0;
     const res = {
@@ -446,20 +478,21 @@ describe("the settings view", () => {
       },
       end() {
         ended += 1;
+        if (ended === 1) throw new Error("socket gone");
       },
     };
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown) => unhandled.push(reason);
     process.on("unhandledRejection", onUnhandled);
     try {
-      view({ url: "/settings/mcps", method: "GET" } as never, res as never, { identity: ADMIN });
+      view({ url: "/settings/mcps", method: "GET", headers: {} } as never, res as never, { identity: ADMIN });
       await new Promise((r) => setTimeout(r, 0));
       await new Promise((r) => setTimeout(r, 0));
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }
     expect(heads).toEqual([200]);
-    expect(ended).toBe(1);
+    expect(ended).toBe(2);
     expect(unhandled).toEqual([]);
   });
 

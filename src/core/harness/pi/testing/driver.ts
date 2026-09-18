@@ -20,14 +20,16 @@ import { FakeHarnessContainer } from "../../testing/fakeContainer.js";
 import {
   CONFORMANCE_MAX_MINUTES,
   FAILED_MODEL_CALL_ERROR,
+  NEAR_LOOP_END_SECONDS,
   type DrivenRun,
   type HarnessDriver,
   type RunScript,
 } from "../../testing/scenarios.js";
 import { PiHarness } from "../piHarness.js";
-import { piRunPaths } from "../process.js";
+import { piBuiltinToolsFor, piRunPaths, piRunPathsAt } from "../process.js";
 import { HarnessRegistry } from "../relay.js";
 import { scriptPiFromProvider, type ProviderPi } from "./providerPi.js";
+import { bearerHashOf } from "../../../modelProxy/runBearers.js";
 
 const RUN_ID = "run-c";
 /** The bearer every conformance run is started with: the proxy's shape, a secret a row can look for. */
@@ -138,6 +140,18 @@ export function piDriver(): HarnessDriver {
       // survival clause's alive-here): its pid answers `alive` before anything
       // is started, so `open` finds it and reconciles with it.
       if (script.processAliveOnResume && script.resume?.facts) container.alivePids.add(script.resume.facts.pid);
+      // A re-attach is possible when the facts carry the bearer hash the
+      // driver minted, so the harness can honour it: the container's log and
+      // FIFO must sit where the facts say. The fake container's `readLog` uses
+      // the started-process path when one was set; without a start, it reads
+      // from any path — so no extra setup is needed for the re-attach's log
+      // reads. The FIFO path check likewise passes because the driver's path
+      // matches what the harness's transport will write to.
+      const willReattach =
+        script.processAliveOnResume === true &&
+        script.resume?.facts?.harness === "pi" &&
+        script.resume.facts.root !== undefined &&
+        script.resume.facts.bearerHash === bearerHashOf(BEARER);
       const registry = new HarnessRegistry();
       const control = new RunControl();
       const inbox = new FollowUpInbox();
@@ -183,6 +197,11 @@ export function piDriver(): HarnessDriver {
             // write-up that follows runs within the lease, as the row asserts.
             clock.now = lease.loopEnd + 1;
             await awaitSteer();
+          }
+          if (script.nearLoopEndBeforeModelCall === modelCalls) {
+            // The clock sits inside the loop, short of its end by the script's
+            // distance: the gate judges a bash timeout against what is left.
+            clock.now = lease.loopEnd - NEAR_LOOP_END_SECONDS * 1000;
           }
           if (script.softStopBeforeModelCall === modelCalls) {
             // An operator's soft stop with this call under way: the harness's
@@ -270,6 +289,27 @@ export function piDriver(): HarnessDriver {
         },
         ...(script.bypassGate ? { bypassGate: true } : {}),
         ...(script.unknownEventKind !== undefined ? { emitUnknownKind: script.unknownEventKind } : {}),
+        // When the harness will re-attach to an already-running pi, seed the
+        // scripted double with that pi's session so it can answer commands
+        // (prompt / steer / get_state) without a prior `container.start`. The
+        // session is the resume's transcript, as the real re-attached pi reads
+        // it from its session file; the session file path is derived from the
+        // recorded root, as `piRunPaths(RUN_ID).sessionDir` is. The model and
+        // tools come from what a fresh start would have given, since the pi
+        // this double plays was started by the same driver — so the model id,
+        // effort and builtin-tool set are the same generation's.
+        ...(willReattach && script.resume?.facts?.harness === "pi" && script.resume.facts.root !== undefined
+          ? {
+              alreadyRunning: {
+                runId: RUN_ID,
+                model: "claude-fable-5",
+                builtins: [...piBuiltinToolsFor(identity)],
+                system: "You are the conformance run.",
+                sessionFile: `${piRunPathsAt(script.resume.facts.root).sessionDir}/session.jsonl`,
+                messages: script.resume.messages.map((m) => ({ role: m.role, content: [...m.content] })),
+              },
+            }
+          : {}),
       });
       const run: HarnessRun = {
         runId: RUN_ID,
@@ -312,7 +352,7 @@ export function piDriver(): HarnessDriver {
         // The seam's door, as the run loop opens every run: the refusal of a
         // foreign row is the seam's, not the object's.
         const session = await openThroughSeam(object, deps, run);
-        outcome = { kind: "answered", answer: session.answer };
+        outcome = { kind: "answered", answer: session.answer, ...(session.ending ? { ending: session.ending } : {}) };
         await session.end();
       } catch (err) {
         outcome = { kind: "failed", error: err instanceof Error ? err : new Error(String(err)) };

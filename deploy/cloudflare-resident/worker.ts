@@ -13,6 +13,7 @@
 //
 // Route surface (JSON in/out; every route below requires a bearer secret):
 //   admin scope     POST /onboard /offboard /reconfigure /rebuild /debug (all ops)
+//   drain scope     POST /drain /undrain (admin implied) — the deploy's bearer, nothing else
 //   read scope      GET /residents   POST /debug ops info|schedules|threads only (admin implied)
 //   operator scope  POST /attach /detach /exec /read /write /op            GET /status (state, reason, inFlight)
 //   unauthenticated GET /healthz (deploy wake ping; touches no DO)
@@ -158,6 +159,11 @@ import {
 } from "../../src/core/schedules.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 import { RestoreWaiters } from "../../src/execution/restoreWaiters.js";
+import {
+  isRuntimeBusySignal,
+  RUNTIME_BUSY_REASON,
+  SandboxRuntimeBusyError,
+} from "../../src/execution/sandboxErrors.js";
 import {
   decisivePull,
   effectiveLimits,
@@ -323,11 +329,13 @@ import {
 } from "../../src/execution/residentDepsStore.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
+import { drainRefusal, liveDrain, parseDrainRequest, type DrainRecord } from "./drain";
 import {
   ControlResetError,
   RuntimeReplacedError,
   controlResetErr,
   execFailureDocument,
+  runtimeBusyErr,
   runtimeReplacedErr,
   selfAndCauses,
   threadErrBuilders,
@@ -417,6 +425,10 @@ export interface Env {
    *  (info, schedules, threads) — for dashboards and humans who need to look,
    *  never to change anything. Unset = no read scope exists. */
   RESIDENT_READ_TOKEN?: string;
+  /** Optional drain-only bearer (item 69): POST /drain and /undrain, nothing
+   *  else — what a release deploy holds so it can close the fleet without the
+   *  admin bearer. Unset = only admin can drain. */
+  RESIDENT_DRAIN_TOKEN?: string;
   // GitHub App identity for minting installation tokens inside residents
   // (provisioned via `npm run secrets` from deploy/secrets.manifest.json; when
   // unset, clones/fetches run anonymously —
@@ -605,6 +617,12 @@ const LIFECYCLE_KEY = "resident:lifecycle";
  *  resident, with the step it last reported and the cycle lease it holds, and
  *  the last bucket the cron skipped (a live cycle, a duplicate id). */
 const REFRESH_INSTANCE_KEY = "resident:refreshInstance";
+/** The settled state a cycle found before it wrote `refreshing` (item 68):
+ *  what a cycle that yields to a busy container puts back. Rewritten by every
+ *  cycle right before its `refreshing` write, so it always names the state
+ *  under the current marker and nothing older. */
+const REFRESHING_FROM_KEY = "resident:refreshingFrom";
+type RefreshingFrom = ResidentStatus;
 /** A `du` over a multi-GB checkout plus every live tree is seconds warm, tens
  *  of seconds on a cold page cache — the same class as a git network step. */
 const DU_TIMEOUT_MS = GIT_NETWORK_TIMEOUT_MS;
@@ -628,7 +646,7 @@ const ATTACH_MUTEX_WAIT_MS = 60_000;
  *  20-minute ceiling (`BASH_TIMEOUT_MAX_MS`) — clamped server-side by
  *  `clampBashTimeout` in handleExec, never trusting the client's number. The
  *  heartbeat keeps every HTTP hop alive for the whole budget; the ceiling
- *  stays far inside the bot's 45-min run budget. Work beyond 20 minutes
+ *  stays far inside the bot's 90-min coding budget. Work beyond 20 minutes
  *  belongs in background jobs.
  *
  *  /op runs (test/build) get the flat 20-minute ceiling — the deterministic op
@@ -841,6 +859,18 @@ class RuntimeUnreachableError extends Error {
  *  command's own output is a `StepError` with an exit code and never gets here. */
 function isRuntimeUnreachable(err: unknown): boolean {
   for (const link of selfAndCauses(err)) if (isRuntimeUnreachableSignal(link)) return true;
+  return false;
+}
+
+/** Did the platform refuse the connect inside its own accept allowance
+ *  (docs/reference/specs/resident-repos.md item 68; execution.md item 28)? The
+ *  platform's own wording — a plain `Error`, the SDK hands it on unwrapped —
+ *  anywhere in the cause chain; its words blame load, which the platform never
+ *  measured and an idle container has disproved. Asked only of a spawn-phase
+ *  error, after `isRuntimeReplacement`: such a container is neither replaced
+ *  nor silent for good, and a command's own output never gets here. */
+function isRuntimeBusy(err: unknown): boolean {
+  for (const link of selfAndCauses(err)) if (isRuntimeBusySignal(link)) return true;
   return false;
 }
 /** Trailing slice of one string for an error reason. Command RESULTS are not
@@ -1347,6 +1377,11 @@ const registryKey = (resource: string) => `${REGISTRY_KEY_PREFIX}${resource}`;
 /** Registry-DO key for the admin test overrides (gc.ts `StoredTestOverrides`).
  *  Deliberately OUTSIDE the `resident:` prefix so it never counts as a slot. */
 const TEST_OVERRIDES_KEY = "testOverrides";
+/** Registry-DO key for the fleet drain (drain.ts; docs/reference/specs/resident-repos.md
+ *  item 69). Outside the `resident:` prefix like the overrides, so it never
+ *  counts as a slot; it survives the isolate swap a deploy performs, which is
+ *  why the record carries its own end. */
+const DRAIN_KEY = "drain";
 
 type OnboardResult = { ok: true; record: ResidentRecord } | { ok: false; status: number; error: string };
 
@@ -1461,6 +1496,25 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 
   async remove(resource: string): Promise<boolean> {
     return this.ctx.storage.delete(registryKey(resource));
+  }
+
+  /** The stored drain record as it is — `liveDrain` (drain.ts) decides at the
+   *  caller's clock whether it is in force; the registry keeps no clock of its
+   *  own so an expired record is read the same by every route. */
+  async getDrain(): Promise<unknown> {
+    return (await this.ctx.storage.get(DRAIN_KEY)) ?? null;
+  }
+
+  /** Admin-only by construction (reached solely via POST /drain): replaces
+   *  whatever drain stood — a second deploy's drain extends the first's. */
+  async setDrain(record: DrainRecord): Promise<DrainRecord> {
+    await this.ctx.storage.put(DRAIN_KEY, record);
+    return record;
+  }
+
+  /** Admin-only by construction (POST /undrain): true when a record was there. */
+  async clearDrain(): Promise<boolean> {
+    return this.ctx.storage.delete(DRAIN_KEY);
   }
 }
 
@@ -2027,6 +2081,14 @@ export class ResidentDO extends Sandbox<Env> {
       // read as a replaced container.
       if (isControlReset(err)) throw new ControlResetError("spawn", err);
       if (!isRuntimeReplacement(err)) {
+        // The container is running but did not accept the SDK's connect inside
+        // the platform's own allowance (item 68): a command already running in
+        // it has its cores. Nothing started, the worktree is as it was, and the
+        // container accepts again in moments — the typed word, for the thread
+        // routes to answer with the wait token; never counted as unreachable.
+        if (isRuntimeBusy(err)) {
+          throw new SandboxRuntimeBusyError({ containerId: this.ctx.id.toString(), cause: errMsg(err) });
+        }
         // The control port never answered the SDK's connect (its 30 s abort,
         // raised inside the wake path): no process started and nothing about
         // the repository is known. Count it in storage — the ladder of item 64
@@ -3306,6 +3368,9 @@ export class ResidentDO extends Sandbox<Env> {
       }
     }
 
+    // Item 68: remember what `refreshing` covers, so a cycle the busy container
+    // turns away can put it back — the last snapshot never stopped serving.
+    await this.ctx.storage.put(REFRESHING_FROM_KEY, (await this.getStatus()) satisfies RefreshingFrom);
     await this.setResidentState("refreshing");
     let sha: string;
     try {
@@ -3328,6 +3393,9 @@ export class ResidentDO extends Sandbox<Env> {
       // and die at git-setup). Name the disk instead: not
       // serviceable, and the recovery below can free it.
       const failure = await this.classifyFailure("fetch", message);
+      // Item 68: the container did not accept the connect — a run's command
+      // has its cores. Not GitHub, not the mirror: the instance step yields.
+      if (failure.busy) throw err;
       if (failure.diskFull) {
         await this.setResidentState("degraded", failure.reason);
         await this.recoverFromDiskFull(failure.reason, selfInFlight);
@@ -3481,7 +3549,9 @@ export class ResidentDO extends Sandbox<Env> {
    *  error can surface between steps — with the generic "refresh" step, whose
    *  failure reason is the `refresh-failed: …` shape. A full disk is a third
    *  class: `disk-full: …`, never serviceable, and the one failure the
-   *  resident can act on itself (recoverFromDiskFull). */
+   *  resident can act on itself (recoverFromDiskFull). A container that did
+   *  not accept the connect (`runtime-busy`, item 68) is a fourth: `busy`,
+   *  and the cycle yields to the run that holds it. */
   private async classifyCycleError(err: unknown): Promise<RefreshFailure> {
     // The control port never answered (item 64): the count decides, and a disk
     // probe would only cost another 30 s abort against the same silent port.
@@ -3859,7 +3929,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  on purpose (`CycleRestartError`), is thrown to the engine, whose retry
    *  re-enters the same idempotent method — the row stays `refreshing`, never
    *  `degraded`, and a `refreshing` younger than the stale bound keeps the
-   *  cron from creating a second instance meanwhile. A failure of the repo's
+   *  cron from creating a second instance meanwhile. A container that turned
+   *  the step's connect away (`runtime-busy`, item 68) ends the cycle as
+   *  `stopped` with nothing recorded — `yieldCycle` puts back the state the
+   *  cycle found. A failure of the repo's
    *  own is recorded — `degraded` with the reason, the last snapshot still
    *  serving — and answered `failed`, which ends the cycle; the next cron
    *  firing starts the next one from that state. */
@@ -3911,6 +3984,21 @@ export class ResidentDO extends Sandbox<Env> {
         return { ...result, startedAt, trace: trace.steps() };
       }
       const failure = await this.classifyCycleError(err);
+      if (failure.busy) {
+        // Item 68: the container did not accept the cycle's connect — a run's
+        // command has its cores. Nothing ran and nothing about the repository
+        // is known: the cycle yields, the state it found goes back, and no
+        // failure is recorded — not `degraded`, not a rung of item 67's ladder
+        // (three cycles of it used to destroy the container under the run).
+        // The next cron firing tries again; the engine is not asked to retry
+        // into the same busy container.
+        outcome = `yielded (${failure.reason})`;
+        console.log(
+          `refresh instance ${instance}: ${step} yielded — ${failure.reason.slice(0, 400)}; the next cycle retries`,
+        );
+        await this.yieldCycle(instance);
+        return { status: "stopped", why: RUNTIME_BUSY_REASON, startedAt, trace: trace.steps() };
+      }
       if (failure.interrupted) {
         outcome = `interrupted (${failure.reason}) — the engine retries`;
         console.log(`refresh instance ${instance}: ${step} interrupted — ${failure.reason.slice(0, 400)}; retrying`);
@@ -3930,6 +4018,27 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(`refresh instance ${instance}: recording ${step} failed: ${errMsg(err)}`),
       );
     }
+  }
+
+  /** A cycle that met the busy container ends here (item 68): the lease it
+   *  holds goes back, and the `refreshing` it wrote is undone to the settled
+   *  state it found, so the row says what the last snapshot still is — warm,
+   *  or the degraded an earlier cycle earned — never a `degraded` of this
+   *  cycle's own. A `refreshing` this cycle did not write (a step past the
+   *  fetch found the marker of a cycle that died mid-flight) is left to the
+   *  watchdog, which normalizes it. */
+  private async yieldCycle(instance: string): Promise<void> {
+    await this.clearInstanceLease(instance);
+    const status = await this.getStatus();
+    if (status.state !== "refreshing") return;
+    const from = await this.ctx.storage.get<RefreshingFrom>(REFRESHING_FROM_KEY);
+    if (!from || (from.state !== "warm" && from.state !== "degraded")) {
+      console.log(
+        `refresh instance ${instance}: yielded from \`refreshing\` over ${from?.state ?? "no recorded state"}; left for the watchdog`,
+      );
+      return;
+    }
+    await this.setResidentState(from.state, from.reason);
   }
 
   /** Step `fetch`: the gates, the cycle lease, the fetch and the plan. The
@@ -4175,7 +4284,8 @@ export class ResidentDO extends Sandbox<Env> {
    *  errno, so a full-disk attach reads like a lock bug without the probe. */
   private async classifyFailure(step: string, message: string): Promise<RefreshFailure> {
     const direct = classifyRefreshFailure({ step, message });
-    if (direct.diskFull || direct.interrupted) return direct;
+    // A busy container (item 68) would only refuse the disk probe's exec too.
+    if (direct.diskFull || direct.interrupted || direct.busy) return direct;
     return classifyRefreshFailure({ step, message, freeKiB: await this.freeKiB() });
   }
 
@@ -4861,6 +4971,20 @@ export class ResidentDO extends Sandbox<Env> {
   ): Promise<AttachOk | ThreadErr> {
     try {
       await this.ensureHydrated();
+      // The fleet drain (item 69): a deploy is waiting for the runs in flight
+      // to end, and a NEW run's attach is refused with the record the bot
+      // waits on — a real 503 in the streamed document, read by the client as
+      // `draining`, never as the platform's transient. A run already in flight
+      // — registered from its attach to its release (item 44) — re-attaches
+      // through: a rolled container, an evicted worktree, a resumed run are
+      // the runs the drain waits FOR, and refusing them would hold the fleet
+      // closed on the run it is closed for. Read before the image reconcile so
+      // a refused attach never restarts a container.
+      const drain = await this.fleetDrain();
+      if (drain && !(await this.ctx.storage.get(runRegKey(threadKey)))) {
+        const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
+        return refusal;
+      }
       const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
       if (await this.reconcileImage("attach")) {
         return {
@@ -4937,6 +5061,7 @@ export class ResidentDO extends Sandbox<Env> {
         state: s.state,
         stateReason: s.reason,
         reason: s.reason,
+        cause: "system",
       };
     }
     // `resourceId` was read by the caller a moment ago (item 15 of the audit:
@@ -4952,7 +5077,12 @@ export class ResidentDO extends Sandbox<Env> {
     // Typed `reason` beside the words: the client reads the field — a refusal no
     // wait clears, unlike the restore window's 503s — never the sentence.
     if (!record || !facts)
-      return { error: "not-serviceable: registry record or repo facts missing", status: 503, reason: "unregistered" };
+      return {
+        error: "not-serviceable: registry record or repo facts missing",
+        status: 503,
+        reason: "unregistered",
+        cause: "system",
+      };
 
     // The binding's ref wins for the thread's whole life, with one exception
     // (item 16): a thread bound to the repo default for want of a named branch
@@ -4981,6 +5111,7 @@ export class ResidentDO extends Sandbox<Env> {
         status: 409,
         needs: "ref",
         defaultRef: facts.defaultRef,
+        cause: "request",
       };
     }
     const worktreePath = prior?.worktreePath ?? (await threadWorktreePath(threadKey, ref));
@@ -5102,7 +5233,14 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
+        return {
+          error: errMsg(err),
+          status: 503,
+          state: s.state,
+          stateReason: s.reason,
+          reason: "mirror-busy",
+          cause: "system",
+        };
       }
       return catchAllErr(err, "attach-failed");
     }
@@ -5404,17 +5542,30 @@ export class ResidentDO extends Sandbox<Env> {
         return { error: `reuse-refused: ${err.why}`, status: 409, needs: "recreate" };
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
+        return {
+          error: errMsg(err),
+          status: 503,
+          state: s.state,
+          stateReason: s.reason,
+          reason: "mirror-busy",
+          cause: "system",
+        };
       }
       if (err instanceof StepError && err.step === "unknown-ref") {
-        return { error: `unknown-ref: ${err.message}`, status: 400 };
+        return { error: `unknown-ref: ${err.message}`, status: 400, cause: "request" };
       }
       if (err instanceof StepError && err.step === "stale-tip") {
         // Item 51: not a resident fault and not a caller fault — a fact about
         // the mirror at this instant. 409 with the state, so the bot's named
         // fallback runs cold at the commit it asked for.
         const s = await this.getStatus();
-        return { error: `stale-tip: ${err.message}`, status: 409, state: s.state, reason: "stale-tip" };
+        return {
+          error: `stale-tip: ${err.message}`,
+          status: 409,
+          state: s.state,
+          reason: "stale-tip",
+          cause: "system",
+        };
       }
       return this.attachFailed(err);
     }
@@ -5449,7 +5600,14 @@ export class ResidentDO extends Sandbox<Env> {
       // worktree lock above, so the bot-side fallback can retry.
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
+        return {
+          error: errMsg(err),
+          status: 503,
+          state: s.state,
+          stateReason: s.reason,
+          reason: "mirror-busy",
+          cause: "system",
+        };
       }
       return this.attachFailed(err);
     }
@@ -6293,6 +6451,7 @@ export class ResidentDO extends Sandbox<Env> {
         state: s.state,
         stateReason: s.reason,
         reason: s.reason,
+        cause: "system",
       };
     }
     const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
@@ -6381,6 +6540,9 @@ export class ResidentDO extends Sandbox<Env> {
       // container is unchanged, so no `replacedExecAnswer` gate applies.
       if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return this.replacedExecAnswer(err);
+      // A refused connect at the command's spawn (item 68): the wait token,
+      // the command never started.
+      if (err instanceof SandboxRuntimeBusyError) return runtimeBusyErr(err);
       throw err;
     }
   }
@@ -6461,6 +6623,7 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
+      if (err instanceof SandboxRuntimeBusyError) return runtimeBusyErr(err);
       throw err;
     }
     if (r.exitCode !== 0 || r.timedOut) return { error: `read-failed: ${describeStepFailure(r)}`, status: 404 };
@@ -6510,6 +6673,7 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
+      if (err instanceof SandboxRuntimeBusyError) return runtimeBusyErr(err);
       throw err;
     }
   }
@@ -6557,6 +6721,7 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
+      if (err instanceof SandboxRuntimeBusyError) return runtimeBusyErr(err);
       const step = err instanceof StepError ? ` at ${err.step}` : "";
       return { error: `write-failed${step}: ${errMsg(err)}`, status: 400 };
     }
@@ -6781,6 +6946,19 @@ export class ResidentDO extends Sandbox<Env> {
     const threadOps = [...this.threadOpsInFlight.values()].reduce((a, n) => a + n, 0);
     return threadOps + this.opUsersInUse.size + this.attachesInFlight;
   }
+  /** The fleet drain in force (item 69), read from the registry at this clock;
+   *  a registry that cannot be read is NO drain: a run must never fail because
+   *  a flag could not be read, and the deploy's own preflight fails closed on
+   *  its side (an unknown fleet refuses the deploy), so the failure lands on
+   *  the deploy, never on the run. Said in the log. */
+  private async fleetDrain(): Promise<DrainRecord | null> {
+    try {
+      return liveDrain(await this.registry().getDrain(), systemClock());
+    } catch (err) {
+      console.warn(`[drain] registry unreadable at attach — treating as no drain: ${errMsg(err)}`);
+      return null;
+    }
+  }
   /** In-flight activity for the deploy preflight (GET /status, GET /residents).
    *  The in-memory counters (a fresh isolate answers 0 for them — nothing of
    *  THEIRS survived to be interrupted) plus the durable run registrations:
@@ -6928,6 +7106,7 @@ export class ResidentDO extends Sandbox<Env> {
         state: s.state,
         stateReason: s.reason,
         reason: s.reason,
+        cause: "system",
       };
     }
     // One storage round trip for the two facts; the registry lookup stays (an
@@ -6939,7 +7118,12 @@ export class ResidentDO extends Sandbox<Env> {
     // Typed `reason` beside the words: the client reads the field — a refusal no
     // wait clears, unlike the restore window's 503s — never the sentence.
     if (!record || !facts)
-      return { error: "not-serviceable: registry record or repo facts missing", status: 503, reason: "unregistered" };
+      return {
+        error: "not-serviceable: registry record or repo facts missing",
+        status: 503,
+        reason: "unregistered",
+        cause: "system",
+      };
     const command = record.commands[op];
     if (!command) return { error: `op-unavailable: the command table has no "${op}" entry`, status: 400 };
 
@@ -7035,10 +7219,17 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
+        return {
+          error: errMsg(err),
+          status: 503,
+          state: s.state,
+          stateReason: s.reason,
+          reason: "mirror-busy",
+          cause: "system",
+        };
       }
       if (err instanceof StepError && err.step === "unknown-ref") {
-        return { error: `unknown-ref: ${err.message}`, status: 400 };
+        return { error: `unknown-ref: ${err.message}`, status: 400, cause: "request" };
       }
       // A step that failed is named and deterministic; a throw no step named is
       // typed by the one builder every such 500 goes through.
@@ -7821,7 +8012,7 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-type Scope = "admin" | "operator" | "read";
+type Scope = "admin" | "operator" | "read" | "drain";
 
 /** Which token a bearer is, or null. Constant-time per comparison; fail closed
  *  on unset/empty secrets. */
@@ -7830,6 +8021,7 @@ function tokenScope(env: Env, token: string | null): Scope | null {
   if (env.RESIDENT_ADMIN_TOKEN && timingSafeEqual(token, env.RESIDENT_ADMIN_TOKEN)) return "admin";
   if (env.RESIDENT_OPERATOR_TOKEN && timingSafeEqual(token, env.RESIDENT_OPERATOR_TOKEN)) return "operator";
   if (env.RESIDENT_READ_TOKEN && timingSafeEqual(token, env.RESIDENT_READ_TOKEN)) return "read";
+  if (env.RESIDENT_DRAIN_TOKEN && timingSafeEqual(token, env.RESIDENT_DRAIN_TOKEN)) return "drain";
   return null;
 }
 
@@ -8009,6 +8201,8 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/offboard": { scope: "admin", method: "POST" },
   "/reconfigure": { scope: "admin", method: "POST" },
   "/rebuild": { scope: "admin", method: "POST" },
+  "/drain": { scope: "drain", method: "POST" }, // close the fleet to new runs for a deploy (item 69; admin implied)
+  "/undrain": { scope: "drain", method: "POST" }, // reopen it
   "/residents": { scope: "read", method: "GET" }, // admin implied; read-only bearer allowed
   "/debug": { scope: "read", method: "POST" }, // per-op: READ_DEBUG_OPS for read scope, everything for admin
   "/status": { scope: "operator", method: "GET" },
@@ -8109,6 +8303,10 @@ export default {
             return await handleReconfigure(env, body);
           case "/rebuild":
             return await handleRebuild(env, body);
+          case "/drain":
+            return await handleDrain(env, body);
+          case "/undrain":
+            return await handleUndrain(env);
           case "/residents":
             return await handleResidents(env);
           case "/debug": {
@@ -8239,6 +8437,7 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
             `exact name (GitHub's token API answers the same 422 for both). An org admin adds it under the ` +
             `App's installation settings (Settings → GitHub Apps → Configure → Repository access), ` +
             `then retry (${errMsg(err)})`,
+          cause: "policy",
         },
         403,
       );
@@ -8529,6 +8728,26 @@ async function handleRebuild(env: Env, body: Record<string, unknown>): Promise<R
  *  targets a different DO, so they run concurrently; a failing one degrades
  *  to {error} without touching its neighbors, and the response order follows
  *  the registry list. */
+/** POST /drain (admin): close the fleet to new runs (docs/reference/specs/resident-repos.md
+ *  item 69). The record carries its own end (`until`), so a drain nobody lifts
+ *  ends by itself; a second drain replaces the first. Runs in flight are
+ *  untouched — the deploy that asked waits for them through `/residents`. */
+async function handleDrain(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const parsed = parseDrainRequest(body, systemClock());
+  if (!parsed.ok) return json({ error: parsed.error }, 400);
+  const record = await registryStub(env).setDrain(parsed.record);
+  console.log(`[drain] fleet closed to new runs by ${record.by} for ${record.reason}: until ${record.until}`);
+  return json({ draining: record });
+}
+
+/** POST /undrain (admin): reopen the fleet. Idempotent — `cleared` says whether
+ *  a drain stood. */
+async function handleUndrain(env: Env): Promise<Response> {
+  const cleared = await registryStub(env).clearDrain();
+  console.log(`[drain] fleet reopened (${cleared ? "a drain stood" : "no drain stood"})`);
+  return json({ draining: null, cleared });
+}
+
 async function handleResidents(env: Env): Promise<Response> {
   const residents = await registryStub(env).list();
   const settled = await Promise.allSettled(
@@ -8564,6 +8783,9 @@ async function handleResidents(env: Env): Promise<Response> {
     count: residents.length,
     inFlight,
     inFlightUnknown,
+    // The drain in force, or null (item 69): the deploy runner and the
+    // dashboard read it here; the attach route reads the same record.
+    draining: liveDrain(await registryStub(env).getDrain(), systemClock()),
     residents: enriched,
   });
 }

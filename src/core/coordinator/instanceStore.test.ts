@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { secretsFrom } from "../../secrets.js";
-import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
+import { capThreadEvent, type CoordinatorInstance, type CoordinatorUnit, type ThreadEvent } from "./contract.js";
 import {
   buildCoordinatorInstanceStore,
   InMemoryCoordinatorInstanceStore,
@@ -29,6 +29,7 @@ const instance: CoordinatorInstance = {
 function workerDouble() {
   const rows = new Map<string, string>();
   const units = new Map<string, string>();
+  const events = new Map<string, ThreadEvent[]>();
   const calls: Array<{ path: string; body: Record<string, unknown>; auth: string | null }> = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -63,6 +64,24 @@ function workerDouble() {
         .filter(([k]) => k.startsWith(`${body.instanceId as string}/`))
         .map(([, text]) => JSON.parse(text) as CoordinatorUnit);
       return Response.json({ units: out });
+    }
+    const eventKey = `${body.instanceId as string}/${body.unit as string}`;
+    if (path === "/runs/coordinator/events/append") {
+      const list = events.get(eventKey) ?? [];
+      const seq = (list[list.length - 1]?.seq ?? 0) + 1;
+      list.push(capThreadEvent({ ...(body.event as Omit<ThreadEvent, "seq">), seq }));
+      events.set(eventKey, list);
+      return Response.json({ ok: true, seq });
+    }
+    if (path === "/runs/coordinator/events/list") {
+      const list = events.get(eventKey) ?? [];
+      return Response.json({ events: list.filter((e) => body.unconsumedOnly !== true || e.consumedBy === undefined) });
+    }
+    if (path === "/runs/coordinator/events/mark-consumed") {
+      const list = events.get(eventKey) ?? [];
+      for (const e of list)
+        if ((body.seqs as number[]).includes(e.seq) && e.consumedBy === undefined) e.consumedBy = body.by as string;
+      return Response.json({ ok: true });
     }
     return Response.json({ error: "not found" }, { status: 404 });
   };
@@ -121,6 +140,50 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
       expect(await store.putUnits([reached])).toEqual({ ok: true });
       expect(await store.listUnits(instance.id)).toEqual([reached, unitRow("U13", { dependsOn: ["U12"] })]);
       expect(await store.listUnits("ship_none")).toEqual([]);
+    });
+
+    // record 0051's reply-as-event rule: the unit's thread events — a sibling of the row,
+    // appended in arrival order, consumed once, untouched by a row's put.
+    it("appendEvent assigns sequences in order and caps per event; listEvents filters unconsumed; markConsumed is idempotent; a put of the unit row leaves the events untouched", async () => {
+      const store = make();
+      const key = { instanceId: instance.id, unit: "U12" };
+      const event = (text: string): Parameters<CoordinatorInstanceStore["appendEvent"]>[1] => ({
+        sender: "slack:UALICE",
+        text,
+        mode: "steer",
+        at: 5_000,
+      });
+      expect(await store.appendEvent(key, event("first"))).toEqual({ ok: true, seq: 1 });
+      expect(await store.appendEvent(key, event("second"))).toEqual({ ok: true, seq: 2 });
+      // Over the cap: attachments dropped whole, the row saying how many.
+      const heavy = {
+        ...event("third"),
+        attachments: [{ mediaType: "image/png", data: "x".repeat(500 * 1024) }],
+      };
+      expect(await store.appendEvent(key, heavy)).toEqual({ ok: true, seq: 3 });
+      const all = await store.listEvents(key);
+      expect(all.map((e) => [e.seq, e.text])).toEqual([
+        [1, "first"],
+        [2, "second"],
+        [3, "third"],
+      ]);
+      expect(all[2]!.attachments).toBeUndefined();
+      expect(all[2]!.attachmentsDropped).toBe(1);
+      // Consumed once: a second mark keeps the first consumer, list filters.
+      expect(await store.markConsumed(key, [1, 2], "spawn:U12/1/fix")).toEqual({ ok: true });
+      expect(await store.markConsumed(key, [1], "spawn:U12/2/fix")).toEqual({ ok: true });
+      const unconsumed = await store.listEvents(key, true);
+      expect(unconsumed.map((e) => e.seq)).toEqual([3]);
+      expect((await store.listEvents(key)).map((e) => e.consumedBy)).toEqual([
+        "spawn:U12/1/fix",
+        "spawn:U12/1/fix",
+        undefined,
+      ]);
+      // A put of the unit row leaves the events untouched.
+      await store.putUnits([unitRow("U12", { threadKey: "slack:C1:2.0" })]);
+      expect((await store.listEvents(key)).map((e) => e.seq)).toEqual([1, 2, 3]);
+      // Another unit's list is its own.
+      expect(await store.listEvents({ instanceId: instance.id, unit: "U13" })).toEqual([]);
     });
   });
 };
@@ -187,6 +250,13 @@ describe("NullCoordinatorInstanceStore and the builder", () => {
     expect(await store.replace(instance)).toEqual({ ok: false, reason: "unavailable" });
     expect(await store.listUnits(instance.id)).toEqual([]);
     expect(await store.putUnits([unitRow("U12")])).toEqual({ ok: false, reason: "unavailable" });
+    const key = { instanceId: instance.id, unit: "U12" };
+    expect(await store.appendEvent(key, { sender: "slack:UALICE", text: "x", mode: "steer", at: 1 })).toEqual({
+      ok: false,
+      reason: "unavailable",
+    });
+    expect(await store.listEvents(key)).toEqual([]);
+    expect(await store.markConsumed(key, [1], "run:r1")).toEqual({ ok: false, reason: "unavailable" });
   });
 
   it("the builder answers the Worker store for a Worker-backed run history and the null store otherwise (no config, a file store, a missing bearer)", () => {

@@ -10,6 +10,7 @@
 // whether its log ends short) and the requests of that agent the provider
 // refused under its usage policy (the rows the seed leaves out). Read only for
 // a reply in an existing thread: a message that starts a thread has no runs.
+import type { CoordinatorUnit } from "../coordinator/contract.js";
 import type { RunPullRequest } from "../runRecord.js";
 import type { RunView, RunsService } from "../runsService.js";
 import type { PreviousRun } from "./seed.js";
@@ -52,6 +53,15 @@ export function continuable(run: RunView): run is RunView & { agent: string } {
  *  review children sit newest on the page; they are the runner's turns, and a
  *  person's follow-up is not a continuation of them. */
 const addressed = (run: RunView): boolean => run.parentInstanceId === undefined;
+
+/** The thread's requester (routing-and-config item 27, record 0058): the
+ *  person of the thread's newest run a person addressed — whether that run is
+ *  live, finished or refused at a gate, since "who the bot is talking to" does
+ *  not change when a run ends. A coordinator's child is skipped, never the
+ *  requester; a page with no addressed run names nobody. */
+export function requesterOf(runs: readonly RunView[]): string | undefined {
+  return runs.find(addressed)?.userId;
+}
 
 /** The thread's sticky agent by transcript (routing-and-config item 3): the
  *  agent of the thread's newest run a person addressed, when that run can be
@@ -121,6 +131,51 @@ export function refusedRequestsOf(runs: readonly RunView[], agent: string): numb
   return runs
     .filter((r) => r.agent === agent && continuable(r) && r.failure?.kind === "policy_refusal")
     .map((r) => r.session!.request);
+}
+
+/** The coordinator instance the thread's page names (record 0051's owner rule): the
+ *  newest run that carries one — a ship run's own hand-off (`instanceId`) or a
+ *  coordinator child's parent (`parentInstanceId`) — so the owner rule costs
+ *  the page it already read plus at most one read of that instance's units. */
+export function instanceOf(runs: readonly RunView[]): string | undefined {
+  for (const r of runs) {
+    if (r.instanceId !== undefined) return r.instanceId;
+    if (r.parentInstanceId !== undefined) return r.parentInstanceId;
+  }
+  return undefined;
+}
+
+/** The thread's owner for its life (record 0051's owner rule), in this order: the live
+ *  run while one is in flight; the unfinished unit of the page's instance
+ *  whose row names this thread (however the page names the instance — the
+ *  ship run's own `ship_handoff`, or a child's `parentInstanceId`); the
+ *  newest continuable session a person addressed (`stickyAgentOf` — a
+ *  coordinator's child is never the owner); none. A unit with an ending never
+ *  owns: the thread is the router's again. `unitsOf` is the caller's one
+ *  extra read, asked only when the page names an instance; a read that fails
+ *  leaves the unit out rather than guessing. */
+export type ThreadOwner =
+  | { kind: "live"; run: RunView }
+  | { kind: "unit"; instanceId: string; unit: CoordinatorUnit }
+  | { kind: "session"; agent: string }
+  | { kind: "none" };
+
+export async function ownerOf(
+  runs: readonly RunView[],
+  unitsOf: (instanceId: string) => Promise<CoordinatorUnit[]>,
+  threadKey: string,
+): Promise<ThreadOwner> {
+  const live = runs.find((r) => !r.finished);
+  if (live !== undefined) return { kind: "live", run: live };
+  const instanceId = instanceOf(runs);
+  if (instanceId !== undefined) {
+    const units = await unitsOf(instanceId).catch(() => [] as CoordinatorUnit[]);
+    const unit = units.find((u) => u.threadKey === threadKey && u.ending === undefined);
+    if (unit !== undefined) return { kind: "unit", instanceId, unit };
+  }
+  const agent = stickyAgentOf(runs);
+  if (agent !== undefined) return { kind: "session", agent };
+  return { kind: "none" };
 }
 
 /** The pull request the thread's work lives on (docs/reference/specs/

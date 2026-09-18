@@ -9,7 +9,7 @@ import { residentTraceOf, type ResidentTrace } from "./residentTrace.js";
 import { mkdirSync } from "node:fs";
 import type { AgentDef, Identity, MachineClass } from "../agents/registry.js";
 import type { RunProfile } from "../config/profile.js";
-import { LocalExecutor, isRunStopError, type Executor } from "./executor.js";
+import { LocalExecutor, execDeadline, isDeadlineMiss, isRunStopError, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import {
@@ -33,6 +33,7 @@ import {
   type ResidentStatusProbe,
 } from "./resident.js";
 import { repoResourceId } from "../core/residentAdmin.js";
+import { nearMatch } from "../core/nearMatch.js";
 import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
 import { isServiceable } from "./residentState.js";
 import { systemClock } from "../core/trace/clock.js";
@@ -47,7 +48,8 @@ export interface ResidentExecutionConfig {
    *  commands (default RESIDENT_ADMIN_TOKEN). Unset env = repo-management
    *  commands answer with a named configuration error; runs are unaffected. */
   adminTokenEnv?: string;
-  /** /status probe timeout in ms (default 2000); a timed-out probe = not warm */
+  /** /status probe deadline in ms (default `PROBE_TIMEOUT_MS`, 8000); a probe
+   *  that misses it = not warm for this dispatch, never an outage. */
   probeTimeoutMs?: number;
 }
 
@@ -289,11 +291,22 @@ export interface ExecutorSelection {
 // rebuild escapes).
 
 // Negative cache (circuit breaker) for resident /status probe TRANSPORT
-// failures only: a resident-service outage costs one probe timeout, not one
-// per concurrent dispatch. Not-warm lifecycle states are definite answers and
-// are NEVER cached (the next dispatch must see a recovery immediately).
-// In-process only — deliberately not persisted (restart-survival invariant).
+// failures that did not reach the host: a resident-service outage costs one
+// failed connect, not one per concurrent dispatch. A probe whose own deadline
+// passed reached a host that answered slowly — one such miss in 1,633 probes
+// sent a run cold off a healthy resident and, through this breaker, every
+// dispatch of the next 30 s with it — so a deadline miss falls cold for its
+// dispatch alone and arms nothing. Not-warm lifecycle states are definite
+// answers and are NEVER cached (the next dispatch must see a recovery
+// immediately). In-process only — deliberately not persisted (restart-survival
+// invariant).
 const PROBE_OUTAGE_WINDOW_MS = 30_000;
+
+/** The /status probe's default deadline. Wide enough for the route's fan-out
+ *  (the registry and four resident reads) on a busy Durable Object; a resident
+ *  that is gone fails the connect long before it, and a wedged one costs the
+ *  dispatch these seconds once, then the cold fallback. */
+export const PROBE_TIMEOUT_MS = 8_000;
 
 /** How long the bot holds its one /await-restore request (item 27): generous
  *  next to the resident's own restore ceiling, so the server's answer — the
@@ -475,10 +488,14 @@ export async function makeExecutor(
       // not-onboarded is the ordinary per-thread case — but still make the cold
       // fall-through visible: the user needs to know coding ran cold in a
       // per-thread sandbox instead of on a warm, deps-ready resident, and how to
-      // fix it. Routing is unchanged; only the note is added.
+      // fix it. Routing is unchanged; only the note is added. Record 0054: the
+      // note names the resident they probably meant, when the registry answers
+      // with one near match (one bounded read; silence changes nothing).
+      const near = await nearOnboarded(resident, ctx.repo);
       note =
         `repo not onboarded as a resident — running in a cold per-thread sandbox; ` +
-        `onboard it (\`repo onboard ${ctx.repo}\`) for a warm, deps-ready environment`;
+        `onboard it (\`repo onboard ${ctx.repo}\`) for a warm, deps-ready environment` +
+        (near ? ` (did you mean \`${near}\`?)` : "");
     }
     if (reason !== undefined) {
       // The seed (docs/reference/specs/execution.md item 26): the resident could
@@ -850,13 +867,12 @@ export function residentSlugsLister(
     try {
       res = await fetch(`${cfg.baseUrl.replace(/\/$/, "")}/residents`, {
         headers: { authorization: `Bearer ${token.reveal()}` },
-        signal: AbortSignal.timeout(cfg.probeTimeoutMs ?? 2000),
+        signal: execDeadline(cfg.probeTimeoutMs ?? PROBE_TIMEOUT_MS),
       });
     } catch (err) {
-      probeOutage = {
-        until: systemClock() + PROBE_OUTAGE_WINDOW_MS,
-        error: err instanceof Error ? err.message : String(err),
-      };
+      // A failed connect opens the window like the selection probe's would; a
+      // deadline miss is the host answering slowly and arms nothing (item 25).
+      if (!isDeadlineMiss(err)) armOutage(err instanceof Error ? err.message : String(err));
       return undefined;
     }
     if (!res.ok) return undefined;
@@ -869,6 +885,17 @@ export function residentSlugsLister(
       .filter((resource) => resource.startsWith("repo:"))
       .map((resource) => resource.slice("repo:".length).toLowerCase());
   };
+}
+
+/** The one resident a typed repo name is near (record 0054), over the same
+ *  bounded listing the resolver uses: `undefined` when the list does not
+ *  answer, when no candidate is within budget, or when several tie — the cold
+ *  fall-through note then names only the fix, never a wrong repo. */
+async function nearOnboarded(cfg: ResidentExecutionConfig | undefined, typed: string): Promise<string | undefined> {
+  const list = residentSlugsLister(cfg);
+  const candidates = await list?.().catch(() => undefined);
+  if (!candidates || candidates.length === 0) return undefined;
+  return nearMatch(typed, candidates).guess;
 }
 
 /** /status probe through the negative cache: inside an outage window the
@@ -892,14 +919,16 @@ async function probeResident(
     cfg.baseUrl,
     token.reveal(),
     resource,
-    cfg.probeTimeoutMs ?? 2000,
+    cfg.probeTimeoutMs ?? PROBE_TIMEOUT_MS,
     span,
     stop,
   );
   // The run's own stop aborted the request: the stop's signal decides before
   // the error's name, as at every send — the caller's stop, never the network,
-  // and no outage window for every other dispatch in the process.
-  if (probe.kind === "unreachable" && probe.transport && !stop?.aborted) armOutage(probe.error);
+  // and no outage window for every other dispatch in the process. A deadline
+  // miss arms none either: the host was reached and answered slowly, which is
+  // this dispatch's cold fallback and nobody else's (item 25).
+  if (probe.kind === "unreachable" && probe.transport && !probe.timedOut && !stop?.aborted) armOutage(probe.error);
   return probe;
 }
 

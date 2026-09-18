@@ -1,3 +1,5 @@
+import { DRAIN } from "../core/budgets.js";
+import { refusalOf, residentErrorCause, RefusalError } from "../core/refusal.js";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { classifyError } from "../core/trace/classify.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
@@ -26,8 +28,15 @@ import { repoResourceId } from "../core/residentAdmin.js";
 import { EXEC_CALL_MARGIN_MS, attachBoundWithinRun, clampBashTimeout } from "./bashTimeout.js";
 import { DISK_PRESSURE_REASON } from "./residentDiskBudget.js";
 import {
+  RUNTIME_BUSY_BACKOFF_MS,
+  RUNTIME_BUSY_REASON,
+  RUNTIME_BUSY_WAIT_MAX_MS,
+  runtimeBusyExhaustedMessage,
+} from "./sandboxErrors.js";
+import {
   BASH_TIMEOUT_MS,
   BASH_TIMEOUT_MAX_MS,
+  ExecCapacityError,
   ExecControlResetError,
   ExecInfraError,
   ExecSandboxRestartedError,
@@ -43,7 +52,7 @@ import {
   type ReleaseMode,
   type ReleaseResult,
 } from "./executor.js";
-import type { ExecTraceOptions, MoveOptions, ReleaseOptions } from "./executor.js";
+import { isDeadlineMiss, type ExecTraceOptions, type MoveOptions, type ReleaseOptions } from "./executor.js";
 import type { LeftBehind } from "./residentCleanliness.js";
 
 // Remote execution against a resident repo environment — the always-warm
@@ -166,6 +175,53 @@ export function isTransientRefusal(answer: { status: number; data: Record<string
   return answer.data.transient === true || typeof answer.data.error !== "string";
 }
 
+/** The fleet drain (docs/reference/specs/resident-repos.md item 69): `/attach`
+ *  answers 503 with a `draining` record while a deploy waits for the runs in
+ *  flight to end. A new run waits at its attach for the fleet to reopen — one
+ *  re-attach per poll — under its own lease, never the wake budget (a drain
+ *  lasts as long as the longest run in flight, tens of minutes; a wake is
+ *  seconds). The refusal is read by its record, never by its words. */
+export const DRAIN_POLL_MS: number = DRAIN.pollMs;
+/** The most a run waits for a drain to lift with no lease to clip it (the CLI,
+ *  staging): past a coding child's whole lease, like the deploy's own wait. */
+export const DRAIN_WAIT_MAX_MS: number = DRAIN.waitMaxMs;
+/** What the wait leaves of the run's lease for the attach and the work after
+ *  it: a drained run that would start with less has nothing to start for. */
+export const DRAIN_LEASE_RESERVE_MS: number = DRAIN.leaseReserveMs;
+
+export function isDrainingRefusal(answer: { status: number; data: Record<string, unknown> }): boolean {
+  const d = answer.data.draining;
+  return (
+    answer.status === 503 && typeof d === "object" && d !== null && typeof (d as { until?: unknown }).until === "string"
+  );
+}
+
+/** The drain's own end, as the record says it; undefined when unreadable. */
+function drainingUntil(answer: { data: Record<string, unknown> }): string | undefined {
+  const d = answer.data.draining as { until?: unknown } | undefined;
+  return typeof d?.until === "string" ? d.until : undefined;
+}
+
+/** The wait for the fleet to reopen ran out — the run's lease, or the ceiling
+ *  — with the fleet still drained. Typed `refused`: no wait clears it, and the
+ *  factory reports it as the attach's own refusal, naming the drain. */
+export class ResidentDrainingError extends ExecInfraError {
+  constructor(
+    readonly resource: string,
+    readonly waitedMs: number,
+    readonly until: string | undefined,
+    words: string,
+  ) {
+    super(
+      `resident /attach: the fleet is drained for a deploy and did not reopen within the ${Math.round(waitedMs / 1000)}s this run could wait` +
+        `${until ? ` (the drain ends by ${until})` : ""} — ${words}`,
+      "refused",
+    );
+    this.name = "ResidentDrainingError";
+    classifyError(this, { kind: "infra", code: "attach" });
+  }
+}
+
 /** An attach this executor did not open: the run's lease is inside its
  *  write-up reserve, or has less past it than an attach needs
  *  (`attachBoundWithinRun` said `exhausted`; execution.md item 9). Thrown by
@@ -206,7 +262,12 @@ function refusalWords(answer: { status: number; data: Record<string, unknown> })
  *  (`image-stale`). The answer's other own words never reach this reading:
  *  `unregistered` is refused before it (`residentAnswerReason`), and
  *  `runtime-replaced` and `control-reset` are 409s carrying no state. */
-const ANSWER_OWN_WORDS: ReadonlySet<string> = new Set(["mirror-busy", DISK_PRESSURE_REASON, "image-stale"]);
+const ANSWER_OWN_WORDS: ReadonlySet<string> = new Set([
+  "mirror-busy",
+  DISK_PRESSURE_REASON,
+  "image-stale",
+  RUNTIME_BUSY_REASON,
+]);
 
 /** The lifecycle reason on a resident answer: `stateReason` where the Worker
  *  names it (every 503 that carries `state`); on a Worker that predates the
@@ -336,6 +397,34 @@ export const wakeStopped = (route: string): ExecInfraError =>
     new ExecInfraError(`resident ${route}: stopped waiting for the resident to wake: the run was stopped`, "aborted"),
     { kind: "transport" },
   );
+
+/** The busy wait's end by the run's own stop during a pause: the same one
+ *  typed shape as the wake wait's (`wakeStopped`), naming this wait. */
+export const busyStopped = (route: string): ExecInfraError =>
+  classifyError(
+    new ExecInfraError(
+      `resident ${route}: stopped waiting for the container to accept the connection: the run was stopped`,
+      "aborted",
+    ),
+    { kind: "transport" },
+  );
+
+/** Resolve after `ms`, or reject with the stop's typed error the moment
+ *  `signal` fires — a hard stop must not sit out a busy wait. */
+function pauseUnlessStopped(route: string, ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(busyStopped(route));
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(busyStopped(route));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 /** Resolve after `ms`; reject the moment `signal` fires. A hard stop never
  *  sits out a wake, and the rejection is `wakeStopped`. */
@@ -709,7 +798,8 @@ export class ResidentOperations implements Operations {
 
 /** Result of a /status probe: a definite lifecycle answer, or an unreachable
  *  marker. `transport: true` means the failure was network-level (fetch threw
- *  or timed out) — the only kind the factory's negative cache may store. */
+ *  or timed out); of those, only a failure that is NOT `timedOut` may the
+ *  factory's negative cache store (resident-repos.md item 25). */
 export type ResidentStatusProbe =
   | { kind: "status"; state: string; reason: string; seed?: ResidentSeedHandle }
   | {
@@ -717,6 +807,10 @@ export type ResidentStatusProbe =
       error: string;
       /** The request itself failed (nothing answered). `false` when something answered with a non-2xx, carried as `status`. */
       transport: boolean;
+      /** Set with `transport` when what failed was the probe's own deadline:
+       *  the host was reached and answered nothing in time. Slow is not gone —
+       *  this dispatch falls cold, and the breaker stays closed for the rest. */
+      timedOut?: true;
       status?: number;
       /** The non-2xx was the platform's transient, by its provenance: the Worker
        *  typed its own answer so (`catchAllErr` at the fetch handler: the Durable
@@ -814,7 +908,9 @@ export class ResidentExecutor implements Executor {
     return ex;
   }
 
-  /** One operator-scope GET /status, bounded by timeoutMs. Never throws. */
+  /** One operator-scope GET /status, bounded by timeoutMs. Never throws. A
+   *  deadline miss is flagged `timedOut` beside `transport`, so the factory
+   *  falls cold for the one dispatch without arming its breaker. */
   static async probeStatus(
     baseUrl: string,
     token: string,
@@ -835,8 +931,15 @@ export class ResidentExecutor implements Executor {
         { route: "/status" },
       );
     } catch (err) {
-      // network failure or probe timeout — not-warm, and negative-cacheable
-      return { kind: "unreachable", error: err instanceof Error ? err.message : String(err), transport: true };
+      // Network failure or the probe's own deadline — not warm either way. The
+      // deadline is named apart (`execDeadline` aborts with a TimeoutError): the
+      // host answered slowly, and only a failure to reach it is negative-cacheable.
+      return {
+        kind: "unreachable",
+        error: err instanceof Error ? err.message : String(err),
+        transport: true,
+        ...(isDeadlineMiss(err) ? { timedOut: true } : {}),
+      };
     }
     if (res.status === 404) {
       // a definite answer (resource not onboarded), never a service failure
@@ -994,6 +1097,10 @@ export class ResidentExecutor implements Executor {
   async attach(span?: Span, opts: { signal?: AbortSignal; budgetMs?: number } = {}): Promise<ResidentBinding> {
     const answer = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
     if (answer.ok) return answer.binding;
+    if (isDrainingRefusal(answer)) {
+      const reopened = await this.awaitDrainEnd(answer, opts, span);
+      return { ...reopened.binding, wokeAfterMs: reopened.waitedMs };
+    }
     if (isTransientRefusal(answer)) {
       const woke = await this.awaitWake("/attach", refusalWords(answer), {
         origin: "transient-refusal",
@@ -1004,6 +1111,51 @@ export class ResidentExecutor implements Executor {
       return { ...woke.binding, wokeAfterMs: woke.waitedMs };
     }
     throw this.attachRefusal(answer);
+  }
+
+  /** The wait for a drained fleet to reopen (item 69): one re-attach every
+   *  `DRAIN_POLL_MS` until the fleet admits the run, under the run's own lease
+   *  less what the attach and the work need (`DRAIN_LEASE_RESERVE_MS`), or the
+   *  ceiling with no lease. The run's stop ends it at once (the pause and the
+   *  re-attach both carry its signal). An answer that is no longer the drain is
+   *  judged as `attach` judges a first answer: admitted, the platform's transient
+   *  (handed to the wake wait with what the budget left), or the attach's own
+   *  refusal. The budget ending with the fleet still drained is the typed
+   *  `ResidentDrainingError`, naming how long the run could wait and when the
+   *  drain says it ends. */
+  private async awaitDrainEnd(
+    first: { status: number; data: Record<string, unknown> },
+    opts: { signal?: AbortSignal; budgetMs?: number },
+    span?: Span,
+  ): Promise<{ binding: ResidentBinding; waitedMs: number }> {
+    const t0 = systemClock();
+    const left = this.opts.remainingMs?.();
+    const budget = Math.min(
+      DRAIN_WAIT_MAX_MS,
+      left === undefined ? DRAIN_WAIT_MAX_MS : Math.max(0, left - DRAIN_LEASE_RESERVE_MS),
+    );
+    const deadline = t0 + budget;
+    let answer = first;
+    for (;;) {
+      const now = systemClock();
+      if (now >= deadline)
+        throw new ResidentDrainingError(this.opts.resource, now - t0, drainingUntil(answer), refusalWords(answer));
+      await wakePause(Math.min(DRAIN_POLL_MS, deadline - now), opts.signal, "/attach");
+      const next = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
+      if (next.ok) return { binding: next.binding, waitedMs: systemClock() - t0 };
+      answer = next;
+      if (isDrainingRefusal(answer)) continue;
+      if (isTransientRefusal(answer)) {
+        const woke = await this.awaitWake("/attach", refusalWords(answer), {
+          origin: "transient-refusal",
+          signal: opts.signal,
+          budgetMs: Math.max(0, deadline - systemClock()),
+          span,
+        });
+        return { binding: woke.binding, waitedMs: systemClock() - t0 };
+      }
+      throw this.attachRefusal(answer);
+    }
   }
 
   /** One `/attach`, answered rather than thrown: the binding on a 200, else
@@ -1087,13 +1239,29 @@ export class ResidentExecutor implements Executor {
     }
     if (status === 409 && data.needs === "recreate")
       return traced(new ResidentReuseRefusedError(this.opts.resource, err));
-    if (status === 404) return traced(new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`));
+    if (status === 404)
+      // A registry fact, not the person's wording (record 0054): `system`.
+      return traced(
+        new RefusalError(
+          refusalOf("resident_attach_failed", `resident attach: ${this.opts.resource} is not onboarded (${err})`),
+        ),
+      );
     // A deterministic refusal — `attach-failed at <step>`, a throw in the route,
     // a 4xx — is the attach's own legible error, judged at once. A refusal the
     // platform's transient (`isTransientRefusal`) never reaches here: every
     // caller waits on it first (`attach`, the wake wait's re-attach), and a
     // wait spent is the wake's strike.
-    return traced(new Error(`resident attach failed for ${this.opts.resource}: ${err}`));
+    // The Worker's `error` prefix names the cause (record 0054): a wrong or
+    // missing ref is the person's to fix; everything else is the machinery's.
+    const cause = residentErrorCause(err);
+    return traced(
+      new RefusalError(
+        refusalOf(
+          cause === "request" ? "resident_attach_rejected" : "resident_attach_failed",
+          `resident attach failed for ${this.opts.resource}: ${err}`,
+        ),
+      ),
+    );
   }
 
   /** Move the thread's worktree to `sha` (agent-review.md item 12): one more
@@ -1220,13 +1388,17 @@ export class ResidentExecutor implements Executor {
       waitStarted ??= systemClock();
       return Math.max(0, waitBudget - (systemClock() - waitStarted));
     };
+    // A refused connect (resident-repos.md item 68) is waited out around every
+    // send this operation makes, inside the command's own budget.
+    const busyBudgetMs = Math.min(opts.waitBudgetMs ?? BASH_TIMEOUT_MS, RUNTIME_BUSY_WAIT_MAX_MS);
+    const send = () => this.callWaitingOutBusy(route, body, callTimeoutMs, busyBudgetMs, signal, span);
     // Every attach an operation opens from here — the rolling wake's re-attach,
     // which recreates the worktree from the mirror, and the three recovery
     // attaches — runs under the attach's own default clipped to the run's
     // remaining clock where this executor carries it (`attachBoundMs`): the
     // op's call bound is the command's, and the wake budget bounds the
     // probing alone.
-    let r = await this.call(route, body, callTimeoutMs, signal, span);
+    let r = await send();
     if (isContainerRolling(r.data.error)) {
       const woke = await this.awaitWake(route, String(r.data.error), {
         origin: "container-exited",
@@ -1239,7 +1411,7 @@ export class ResidentExecutor implements Executor {
           sandboxRestartedMessage({ waitedMs: woke.waitedMs, ref: woke.binding.ref, sha: woke.binding.sha }),
           woke.waitedMs,
         );
-      r = await this.call(route, body, callTimeoutMs, signal, span);
+      r = await send();
       if (isContainerRolling(r.data.error)) {
         throw classifyError(
           new ExecInfraError(
@@ -1254,7 +1426,7 @@ export class ResidentExecutor implements Executor {
     controlResetUnderThread(r.data);
     if (r.data.needs === "attach") {
       await this.attach(span, { signal, budgetMs: waitLeft() }); // the recovery rides the same trace as the op it rescues
-      r = await this.call(route, body, callTimeoutMs, signal, span);
+      r = await send();
       goneUnderThread(r.data);
       controlResetUnderThread(r.data);
       if (r.data.needs === "attach") throw stillGone(r.data);
@@ -1265,7 +1437,7 @@ export class ResidentExecutor implements Executor {
       // second landing is harmless here (`/read`, idempotent by shape; `/write`,
       // a full-content put). Still reset after the re-issue → the unknown outcome.
       await this.attach(span, { signal, budgetMs: waitLeft() }); // the recovery rides the same trace as the op it rescues
-      r = await this.call(route, body, callTimeoutMs, signal, span);
+      r = await send();
       if (saysControlReset(r.data)) throw new ExecControlResetError(String(r.data.error).trim());
       // Compound fault: the reset also left the worktree evicted. The re-attach
       // above was this op's one re-attach, so name it precisely, as the
@@ -1277,7 +1449,7 @@ export class ResidentExecutor implements Executor {
       // An idempotent route (/exec threw above): re-attach once and re-issue.
       this.noteRuntimeReplaced(route, r.data);
       await this.attach(span, { signal, budgetMs: waitLeft() }); // the recovery rides the same trace as the op it rescues
-      r = await this.call(route, body, callTimeoutMs, signal, span);
+      r = await send();
       if (r.data.reason === "runtime-replaced") this.noteRuntimeReplaced(route, r.data);
       // Compound fault: the deploy also left the worktree evicted. The
       // re-attach above was this op's one re-attach, so name it precisely
@@ -1286,6 +1458,38 @@ export class ResidentExecutor implements Executor {
     }
     if (typeof r.data.error !== "string" || !r.data.error) this.runtimeReplacedStreak = 0;
     return r;
+  }
+
+  /** One send, re-sent while the resident answers `runtime-busy`
+   *  (docs/reference/specs/resident-repos.md item 68; the thread sandbox's
+   *  execution.md item 28): the container is running but did not accept the
+   *  SDK's connect because a command already running in it has its cores, so
+   *  nothing ran and the IDENTICAL request is safe to re-send — after 3 s,
+   *  5 s, then 10 s, until the total wait reaches `budgetMs` (the command's
+   *  own, under the five-minute cap). Then `ExecCapacityError`, never
+   *  `ExecInfraError`: a container that refused a connect is not a dead one. A hard stop ends
+   *  the pause at once with the stop's typed error. Every other answer is
+   *  returned as it came for the caller's own rules. */
+  private async callWaitingOutBusy(
+    route: string,
+    body: Record<string, unknown>,
+    callTimeoutMs: number,
+    budgetMs: number,
+    signal?: AbortSignal,
+    span?: Span,
+  ): Promise<{ status: number; data: Record<string, unknown> }> {
+    let waited = 0;
+    let attempt = 0;
+    for (;;) {
+      const r = await this.call(route, body, callTimeoutMs, signal, span);
+      if (r.data.reason !== RUNTIME_BUSY_REASON) return r;
+      if (waited >= budgetMs) throw new ExecCapacityError(runtimeBusyExhaustedMessage(waited));
+      const step = RUNTIME_BUSY_BACKOFF_MS[Math.min(attempt, RUNTIME_BUSY_BACKOFF_MS.length - 1)];
+      const delay = Math.min(step, budgetMs - waited);
+      attempt++;
+      await pauseUnlessStopped(route, delay, signal);
+      waited += delay;
+    }
   }
 
   private noteRuntimeReplaced(route: string, data: Record<string, unknown>): void {
@@ -1429,7 +1633,7 @@ export class ResidentExecutor implements Executor {
           // too; anything else is the attach's own error, a needs-ref carrying the
           // wait so its caller's retry draws on one budget and names the total.
           if (isTransientRefusal(answer)) transient = true;
-          else if (!isContainerRolling(answer.data.error)) {
+          else if (!isContainerRolling(answer.data.error) && !isDrainingRefusal(answer)) {
             const refused = this.attachRefusal(answer);
             if (refused instanceof ResidentNeedsRefError) refused.wokeAfterMs = spent();
             throw refused;

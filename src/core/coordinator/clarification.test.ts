@@ -67,8 +67,13 @@ describe("coordinator clarification context", () => {
     });
   });
 
-  it("resumes a review against the unit's recorded PR", async () => {
+  it.each([false, true])("resumes a review against the unit's recorded PR (legacy thread: %s)", async (legacy) => {
     const f = await fixture("linear", "review");
+    if (!legacy) {
+      f.unit.threadKey = f.msg.threadKey;
+      delete f.unit.reviewThread;
+      await f.instances.putUnits([f.unit]);
+    }
     expect(await coordinatorClarificationFor(f)).toMatchObject({
       preset: "review",
       targetText: "https://github.com/acme/api/pull/7",

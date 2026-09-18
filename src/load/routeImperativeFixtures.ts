@@ -1,33 +1,48 @@
 // The checked-in imperative set of `load:route` (docs/reference/specs/
-// load-harness.md item 17): twenty terse imperatives a person types into a
-// channel or thread that is bound to a repository — an order to change
-// something or to make a failure go away, with no file, cause or repository
-// named — which the router must read as a request to change code (the table's
+// load-harness.md item 17): the orders a person types into a channel or
+// thread that the router must read as a request to change code (the table's
 // write preset is `ship`: a routed write ask runs the coding → review loop,
-// its generated plan merged by a person); five decoys
-// that look imperative but are read-only (a question or a check about the same
-// failure), which must never reach a write preset; and six review-shaped asks
-// that name a pull request, which are a review, not an order to change it —
-// one of them with a note about the request's own history ("retry at head …:
-// the run died"), the shape the replay routed to `ship` once `ship` held the
-// write seat. The
-// set exists because the replay over the run history has almost no such
-// requests: the one it had was the router's one real coding misroute. Neutral
-// names only (acme/…, PR NNNN): the public tree carries no private references.
+// its generated plan merged by a person), the read-only look-alikes that must
+// never reach a write preset, and the review-shaped asks that are a review,
+// not an order. Three shapes of order: twenty terse imperatives — one short
+// line, no file, cause or repository named — three spec-shaped asks — longer,
+// on a named repository, saying how something should behave and asking for it
+// to be done, one of them the production ask that routed to `explore` because
+// it named no verb like "fix" — and two that point at a conversation whose
+// quoted thread carries the task ("in <repo> ship <thread link>", the
+// production ask that routed to `general` because the link read as something
+// to read first). Eight decoys: five read-only asks about the same failures,
+// a question about the repository in the spec-shaped voice, an ask that only a
+// sandbox answers (a timing) and a read-only ask about a linked thread. Six
+// review-shaped asks that name a pull request, one with a note about the
+// request's own history ("retry at head …: the run died"), the shape the
+// replay routed to `ship` once `ship` held the write seat. The set exists
+// because the replay over the run history has almost no such requests: each
+// shape here is a router miss production found once. Neutral names only
+// (acme/…, PR NNNN, a permalink on acme's own workspace): the public tree
+// carries no private references.
 
 /** One example: the text as typed and the presets that count as a right
- *  answer — the table's write preset (`ship`) for an imperative, either read-only preset that
- *  answers a question for a decoy, the review preset for a review-shaped ask. */
+ *  answer — the table's write preset (`ship`) for an imperative, a read-only
+ *  preset that answers a question for a decoy, the review preset for a
+ *  review-shaped ask. */
 export interface RouteImperativeFixture {
   id: string;
   kind: "imperative" | "decoy" | "review";
   text: string;
   presets: readonly string[];
+  /** How many conversations the text links that the bot could quote (record
+   *  0037) — what the route stage counts off the request's own URLs, no
+   *  adapter asked, and puts on the router's user turn as a fact; the replay
+   *  hands the same count to `route()`. Absent: the text links none. */
+  references?: number;
 }
 
 const SHIP = ["ship"];
 const READ_ONLY = ["research", "general"];
 const REVIEW = ["review"];
+/** A permalink in acme's own workspace, the shape the Slack reader parses. */
+const THREAD = "https://acme.slack.com/archives/C1ABCDEF/p1700000000000000";
 
 export const ROUTE_IMPERATIVE_FIXTURES: readonly RouteImperativeFixture[] = [
   // Imperatives: an order to change code or repair a failure, terse.
@@ -51,12 +66,82 @@ export const ROUTE_IMPERATIVE_FIXTURES: readonly RouteImperativeFixture[] = [
   { id: "i18", kind: "imperative", text: "add retries to the webhook call", presets: SHIP },
   { id: "i19", kind: "imperative", text: "the docs check is red, sort it out", presets: SHIP },
   { id: "i20", kind: "imperative", text: "get ci green", presets: SHIP },
+  // Imperatives in the shape of a specification: how something should behave,
+  // on a named repository, and an ask for it to be done — no "fix" or
+  // "implement" anywhere. s01 is the production ask that routed to `explore`,
+  // verbatim except the repository (the bot mention is not part of the text
+  // the router sees).
+  {
+    id: "s01",
+    kind: "imperative",
+    text: [
+      "my boi I put all my hopes on your right now",
+      "",
+      "I need you to do this for me and send me screenshots",
+      "",
+      "*On the acme repo:* the topology screen should show connect github single button if there's nothing connected (currently shows the install script)",
+      "",
+      "if github is connected but no cloud is connected, it should not show the topology of just the repos, it should show connect cloud accounts",
+    ].join("\n"),
+    presets: SHIP,
+  },
+  {
+    id: "s02",
+    kind: "imperative",
+    text: "in acme/web: the settings page should default to the dark theme when the OS is dark, and the toggle should remember the choice across reloads. Need this done today, ping me with before/after screenshots",
+    presets: SHIP,
+  },
+  {
+    id: "s03",
+    kind: "imperative",
+    text: "for acme/api — when a request has no auth header the response should be a 401 with a JSON body, not the HTML error page it returns now. Please take care of it",
+    presets: SHIP,
+  },
+  // Imperatives whose task is in a linked conversation: the sentence's verb is
+  // the order, the quoted thread carries what to do. t01 is the production ask
+  // that routed to `general`, verbatim except the repository and the permalink.
+  {
+    id: "t01",
+    kind: "imperative",
+    text: `in acme ship ${THREAD} - this, (read the whole thread)`,
+    presets: SHIP,
+    references: 1,
+  },
+  {
+    id: "t02",
+    kind: "imperative",
+    text: `do the above ${THREAD}?thread_ts=1700000000.000000 — the thread has the spec, option B`,
+    presets: SHIP,
+    references: 1,
+  },
   // Decoys: read-only asks about the same failures — a question, a check, a list.
   { id: "d01", kind: "decoy", text: "check whether ci is red", presets: READ_ONLY },
   { id: "d02", kind: "decoy", text: "tell me why the build failed", presets: READ_ONLY },
   { id: "d03", kind: "decoy", text: "list the failing tests", presets: READ_ONLY },
   { id: "d04", kind: "decoy", text: "why did ci fail?", presets: READ_ONLY },
   { id: "d05", kind: "decoy", text: "what broke in the last run?", presets: READ_ONLY },
+  // Decoys in the shapes above: a question about the repository in the
+  // spec-shaped voice, an ask only a sandbox answers, a read-only ask about a
+  // linked thread — each a look-alike of an order, none an order.
+  {
+    id: "d06",
+    kind: "decoy",
+    text: "on the acme repo: does the topology screen show the install script when nothing is connected? just tell me what it does today, change nothing",
+    presets: READ_ONLY,
+  },
+  {
+    id: "d07",
+    kind: "decoy",
+    text: "in acme/api: how long does `npm run typecheck` take on a fresh checkout? time it once",
+    presets: ["explore"],
+  },
+  {
+    id: "d08",
+    kind: "decoy",
+    text: `what did we decide in ${THREAD} ? summarize it for me`,
+    presets: READ_ONLY,
+    references: 1,
+  },
   // Review-shaped: a pull request to look at, never an order to change it.
   { id: "r01", kind: "review", text: "look at PR 42", presets: REVIEW },
   { id: "r02", kind: "review", text: "anything wrong with this PR?", presets: REVIEW },

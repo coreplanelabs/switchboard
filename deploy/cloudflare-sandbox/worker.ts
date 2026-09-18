@@ -58,9 +58,14 @@ import {
   fleetBusyAnswer,
   fleetBusyExecAnswer,
   isFleetBusyError,
+  isRuntimeBusyError,
+  isRuntimeBusySignal,
   isRuntimeUnreachableError,
+  runtimeBusyAnswer,
+  runtimeBusyExecAnswer,
   runtimeUnreachableAnswer,
   runtimeUnreachableExecAnswer,
+  SandboxRuntimeBusyError,
   SandboxRuntimeUnreachableError,
   sandboxStartingAnswer,
   sandboxStartingExecAnswer,
@@ -182,6 +187,16 @@ function isRuntimeUnreachable(err: unknown): boolean {
   return false;
 }
 
+/** Did the platform refuse the connect inside its own accept allowance
+ *  (docs/reference/specs/execution.md item 28)? The platform's own wording,
+ *  anywhere in the cause chain; a plain `Error`, so the wording is all there
+ *  is — and its words blame load the platform never measured. Asked only of
+ *  a failure met before a process was started. */
+function isRuntimeBusy(err: unknown): boolean {
+  for (const link of selfAndCauses(err)) if (isRuntimeBusySignal(link)) return true;
+  return false;
+}
+
 /** A finished command, as `/exec` answers it. `durationMs` is the command's
  *  wall time in the sandbox (docs/reference/specs/tracing.md item 19). */
 export interface ExecAnswer {
@@ -194,7 +209,7 @@ export interface ExecAnswer {
 /** A command the sandbox never answered for, in the dual in-body shape
  *  (docs/reference/specs/execution.md item 3): a new executor throws on `error`, an
  *  older one still renders `exit 127: <stderr>`. `reason` names the machine
- *  token when there is one (`fleet-busy`, `runtime-unreachable`). */
+ *  token when there is one (`fleet-busy`, `runtime-busy`, `runtime-unreachable`). */
 export interface ExecFailure {
   error: string;
   reason?: string;
@@ -205,8 +220,8 @@ export interface ExecFailure {
 
 /** A file route's refusal, with the HTTP status the fetch handler answers and,
  *  when the refusal is a named condition the executor waits on (`fleet-busy`,
- *  `runtime-unreachable`), its machine token — the executor reads the token,
- *  never the text, so a refusal without it is a dead sandbox to it. */
+ *  `runtime-busy`, `runtime-unreachable`), its machine token — the executor
+ *  reads the token, never the text, so a refusal without it is a dead sandbox to it. */
 interface FileRefusal {
   error: string;
   status: number;
@@ -321,9 +336,10 @@ export class SwitchboardSandbox extends Sandbox<Env> {
           (cause) => sandboxStartingExecAnswer(cause),
         );
       } catch (err) {
-        // The warm-up's own failure, handed on by the gate: a full fleet or a
-        // silent control port keeps its name; anything else propagates.
-        return this.execFailure(err, startedAt);
+        // The warm-up's own failure, handed on by the gate: a full fleet, a
+        // refused connect or a silent control port keeps its name; anything
+        // else propagates. Nothing ran — the warm-up is a spawn.
+        return this.spawnFailure(err, startedAt);
       }
     });
   }
@@ -343,7 +359,10 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     try {
       proc = await createExtensionProcessSandbox(this).exec(argv, { env: envVars, timeout: backstopMs });
     } catch (err) {
-      return this.execFailure(err, startedAt);
+      // The process was never started: a refused connect is the wait token
+      // here and only here (item 28) — the executor re-sends, and
+      // nothing runs twice.
+      return this.spawnFailure(err, startedAt);
     }
     try {
       const out = await proc.output({
@@ -631,6 +650,20 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     return { stdout: out.stdout, stderr: out.stderr, exitCode: out.timedOut ? 124 : out.exitCode };
   }
 
+  /** A failure met BEFORE a process was started — the spawn, or the gate's
+   *  warm-up: a container that did not accept the connection is named with
+   *  its wait token (docs/reference/specs/execution.md item 28), since
+   *  nothing ran and the identical request is safe to re-send. Every other
+   *  failure is classified as after a start (`execFailure`). A failure of a
+   *  running command's output never comes here: the process exists, and a
+   *  re-send would run it again. */
+  private spawnFailure(err: unknown, startedAt: number): ExecFailure {
+    if (!isFleetBusyError(err) && !isRuntimeReplacement(err) && isRuntimeBusy(err)) {
+      return runtimeBusyExecAnswer(this.runtimeBusy(thrownText(thrownShape(err))).message);
+    }
+    return this.execFailure(err, startedAt);
+  }
+
   /** The named failures, as `/exec` data; anything else is thrown as it came. */
   private execFailure(err: unknown, startedAt: number): ExecFailure {
     const raw = thrownText(thrownShape(err));
@@ -660,15 +693,25 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     });
   }
 
+  /** The typed, named error for a container that did not accept the
+   *  connection (item 28), with this container's id — thrown across the RPC
+   *  boundary to the fetch handler on the file routes, matched by name. */
+  private runtimeBusy(cause: string): SandboxRuntimeBusyError {
+    return new SandboxRuntimeBusyError({ containerId: this.ctx.id.toString(), cause });
+  }
+
   /** A file operation with its runtime failures named for the fetch handler:
-   *  a silent control port becomes the typed error (item 9); a missing file
-   *  is the refusal the route answers 404. The SDK's other errors propagate. */
+   *  a refused connect (item 28) and a silent control port (item 9) become
+   *  the typed errors; a missing file is the refusal the route answers 404.
+   *  The SDK's other errors propagate. A file operation that met either
+   *  never reached the runtime, so the executor's re-send does nothing twice. */
   private async fileOp<T>(op: () => Promise<T>): Promise<T | FileRefusal> {
     try {
       return await op();
     } catch (err) {
       const shape = thrownShape(err);
       if (shape.name === "FileNotFoundError") return { error: `read-failed: ${thrownText(shape)}`, status: 404 };
+      if (!isRuntimeReplacement(err) && isRuntimeBusy(err)) throw this.runtimeBusy(thrownText(shape));
       if (!isRuntimeReplacement(err) && isRuntimeUnreachable(err)) throw this.runtimeUnreachable(thrownText(shape));
       throw err;
     }
@@ -884,6 +927,9 @@ export default {
       // op never reached a runtime, so a 503 the executor's transport retry
       // re-sends, with the named reason and the container in the text.
       if (isRuntimeUnreachableError(err)) return json(runtimeUnreachableAnswer(msg), 503);
+      // The container did not accept the connection (item 28): the file op
+      // never reached it either — a 503 with the wait token.
+      if (isRuntimeBusyError(err)) return json(runtimeBusyAnswer(msg), 503);
       // A full fleet (docs/reference/specs/execution.md item 14): no container
       // instance for this thread's Durable Object, so the file op never
       // started — re-sending is safe by construction. Named so the executor
@@ -972,6 +1018,7 @@ function streamExec(run: () => Promise<ExecAnswer | ExecFailure>, traceparent: s
       const shape = thrownShape(err);
       const raw = thrownText(shape);
       if (isRuntimeUnreachableError(err)) return runtimeUnreachableExecAnswer(raw);
+      if (isRuntimeBusyError(err)) return runtimeBusyExecAnswer(raw);
       if (isFleetBusyError(err)) return fleetBusyExecAnswer(raw);
       // A recycle the Durable Object did not catch by type: by name, or
       // a recycle-shaped text minutes into the attempt (item 9).

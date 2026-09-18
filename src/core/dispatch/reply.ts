@@ -6,7 +6,9 @@
 // work over the core's own types — no channel SDK (AGENTS.md invariant 1).
 import { buildReviewChannelReply, type ReviewPost, type ReviewVerdict } from "../reviewVerdict.js";
 import { visibilityOf } from "../authz/channelDirectory.js";
-import type { ChannelIO, DocumentAttachment, ImageAttachment } from "../types.js";
+import type { ChannelIO, ConfirmationOffer, DocumentAttachment, ImageAttachment } from "../types.js";
+import { confirmationMessageOf, newConfirmationId, renderOffer, type ConfirmationStore } from "../confirmations.js";
+import { CONFIRMATION_TTL_MS } from "../budgets.js";
 import type { ParsedChatCommand } from "../commandChat.js";
 import { cliWords } from "../commandSurface.js";
 import { toMarkdownDocument } from "../markdownDocument.js";
@@ -30,6 +32,7 @@ import type { RunEnding } from "../runEnding.js";
 import type { CardShell } from "../statusCardFrame.js";
 import type { Span } from "../trace/types.js";
 import type { HistoryItem, IncomingMessage, StatusActivity, StatusHandle } from "../types.js";
+import { refusalLine, type Refusal } from "../refusal.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { RouteDeps } from "./route.js";
 
@@ -286,8 +289,12 @@ export function activityLine(e: RunEvent): string {
       return "review posted"; // published straight to the registry — never arrives here
     case "ship_round":
       return `round ${e.index} (${e.agent}): ${e.outcome}`; // published straight to the registry — never arrives here
+    case "ship_handoff":
+      return "handed to the plan runner"; // published straight to the registry — never arrives here
     case "route":
       return `routed to ${e.preset}`; // published straight to the registry — never arrives here
+    case "refusal":
+      return `refused: ${e.code}`; // published straight to the registry — never arrives here (a door record has no card)
     case "span_start":
     case "span_end":
       return ""; // timing, not activity (docs/reference/specs/tracing.md): the card's activity line never shows a span
@@ -362,6 +369,152 @@ export const STATUS_PREFIXES = ["⏳", "✅", "◐", "◓", "◑", "◒"];
  *  and a failed inline run's `answer` are built from it, so they cannot drift. */
 export function errorReply(err: unknown): string {
   return `⚠️ ${err instanceof Error ? err.message : String(err)}`;
+}
+/**
+ * The one place a `Refusal` becomes what the person reads (record 0054):
+ * the text is the producer's own sentence, byte-identical to what the site
+ * said before the seam — the renderer adds nothing the producer did not put
+ * in `text` or `wayForward`. A `policy` refusal appends its way forward when
+ * the producer set one apart from the text; a `system` refusal renders the
+ * text as the error it is and never an offer or a Yes; a `request` refusal
+ * without a guess renders the text — which names what the door needs.
+ */
+export async function renderRefusal(
+  refusal: Refusal,
+  io: ChannelIO,
+  ctx: { confirmations?: ConfirmationStore } = {},
+): Promise<void> {
+  // A `request` refusal that holds a guess is one question: the producer's
+  // sentence, the marker, the corrected line to type and the evidence that
+  // names the match. A channel that offers gets Yes and No on the same
+  // question (record 0054's button): the proposal is stored as a `redispatch`
+  // row and Yes hands it to `dispatch()` as the requester — a button showing
+  // the exact line, as record 0044's Run is. A channel without `offer`, a
+  // process without the store, or a store that cannot be reached at mint
+  // costs the button and nothing else: the line to type is what the person
+  // reads (the record's channel-without-offer shape).
+  if (refusal.cause === "request" && refusal.guess) {
+    if (await offerQuestion(refusal, io, ctx.confirmations)) return;
+    return io.reply(refusalQuestion(refusal));
+  }
+  return io.reply(refusalLine(refusal));
+}
+
+/** Mint the question's `redispatch` row and show Yes and No on the channel's
+ *  offer; answers whether the offer went out. */
+async function offerQuestion(refusal: Refusal, io: ChannelIO, store: ConfirmationStore | undefined): Promise<boolean> {
+  const guess = refusal.guess;
+  if (!guess || !io.offer || !store) return false;
+  const proposal = confirmationMessageOf(guess.proposal);
+  let row;
+  try {
+    row = await store.put(
+      {
+        kind: "redispatch",
+        id: newConfirmationId(),
+        message: proposal,
+        line: guess.line,
+        evidence: guess.evidence,
+        code: refusal.code,
+      },
+      CONFIRMATION_TTL_MS,
+    );
+  } catch (err) {
+    console.warn(
+      `[reply] ${proposal.threadKey} confirmation store unreachable at the question's mint, rendering the line to type: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return false;
+  }
+  await io.offer({
+    id: row.id,
+    line: guess.line,
+    risk: "",
+    footer: "",
+    expiresAt: row.expiresAt,
+    question: { text: refusal.text, evidence: guess.evidence },
+  });
+  return true;
+}
+/**
+ * The one question a `request` refusal with a guess renders (record 0054): the
+ * producer's sentence, then the marker — `Did you mean:`, the corrected line as
+ * one code span — and the evidence. Pure and exported so the surfaces that
+ * render a refusal without a channel (the chat error line, tests) read the same
+ * bytes the renderer sends.
+ */
+export function refusalQuestion(refusal: Refusal): string {
+  const guess = refusal.guess;
+  if (!guess) return refusalLine(refusal);
+  return `${refusal.text}\nDid you mean:\n\`${guess.line}\`\n\n${guess.evidence}`;
+}
+/**
+ * An acknowledgement from a producing module the fence covers (record 0054):
+ * a steered follow-up's ack, a hand-off's accepted reply — sentences that
+ * refuse nothing. The fence (`refusals/no-raw-refusal`) keeps producers off
+ * `io.reply`; what goes through here is review's to judge as an ack, never a
+ * refusal in ack's clothing.
+ */
+export async function replyAck(io: ChannelIO, text: string): Promise<void> {
+  return (io.acknowledge ?? io.reply).call(io, text);
+}
+/**
+ * The one caller of a channel's `offer` (record 0054): the Block Kit an
+ * offered confirmation shows goes out through the reply stage, so the unit
+ * that gives a `request` refusal its question and Yes reuses this seam. A
+ * channel without `offer` gets the offer's text form — the same words the
+ * record's `answer` carries (`renderOffer`).
+ */
+export async function renderConfirmationOffer(io: ChannelIO, offer: ConfirmationOffer): Promise<void> {
+  if (io.offer) return io.offer(offer);
+  return io.reply(renderOffer(offer));
+}
+/**
+ * The gate sentences, keyed by refusal code (record 0054): each builder
+ * returns the exact bytes the gate said before the seam — the producing site
+ * calls its builder, the byte-identity test diffs the builders against the
+ * inventory's quotes, and a drifted sentence fails there instead of shipping.
+ * Codes missing here carry producer-built text on the `Refusal` instead:
+ * `profile_bounded` (`profileRefusalReply`), `follow_up_refused` and its
+ * `elsewhere_` twin (`refusalReply` in admission.ts), `pr_head_unknown`
+ * (`checkPrHeadPreflight`), `branch_moved` (`guardAttachedHead`),
+ * `ship_preflight` (the preflight's own reply), the reference codes (the one
+ * `REFERENCE_REFUSAL` line), the click codes (confirm.ts's lines), and the
+ * silent codes (`coordinator_thread_live`, `workspace_lost`, `setup_failed`,
+ * `uncaught`) that render nothing here.
+ */
+export const REFUSAL_SENTENCES = {
+  agent_allowlist: (p: { agent: string; adminsHint: string }) =>
+    `🚫 You're not on the allowlist for the \`${p.agent}\` agent. Ask ${p.adminsHint} for access.`,
+  live_agent_allowlist: (p: { agent: string; adminsHint: string }) =>
+    `🚫 You're not on the allowlist for the \`${p.agent}\` agent, whose run is in flight in this thread. Ask ${p.adminsHint} for access.`,
+  elsewhere_agent_allowlist: (p: { agent: string; adminsHint: string }) =>
+    `🚫 You're not on the allowlist for the \`${p.agent}\` agent, whose run is in flight in this thread. Ask ${p.adminsHint} for access.`,
+  repo_not_visible: (p: { slug: string; agent: string }) =>
+    `📦 \`${p.slug}\` is not a repository this installation can see — GitHub answered 404 — so I did not start ${aRun(p.agent)} for it. ` +
+    `The repository is outside the Switchboard GitHub App installation (\`github_repos\` lists the reachable ones), or the name is wrong.`,
+  repo_unverified: (p: { slug: string; agent: string; via: "github" | "registry" }) =>
+    p.via === "github"
+      ? `⚠️ I couldn't verify \`${p.slug}\` against GitHub — it didn't answer — so I did not start ${aRun(p.agent)} rather than guess which repository you meant. Try again in a minute.`
+      : `⚠️ I couldn't verify that \`${p.slug}\` is an onboarded repo — the resident registry didn't answer — so I did not start a *${p.agent}* run rather than guess which repo you meant. ` +
+        `Try again in a minute, or name the repository by URL (https://github.com/${p.slug}) to run in a cold per-thread sandbox.`,
+  repo_not_onboarded: (p: { slug: string; agent: string; onboardHint: string }) =>
+    `📦 \`${p.slug}\` is not onboarded as a resident, so I did not start a *${p.agent}* run for it. ` +
+    `${p.onboardHint} for a warm, deps-ready environment, or name the repository by URL ` +
+    `(https://github.com/${p.slug}) to run in a cold per-thread sandbox.`,
+  repo_access: (p: { repo: string; adminsHint: string }) =>
+    `🚫 You're not on the allowlist for the \`${p.repo}\` repo environment. Ask ${p.adminsHint} for access.`,
+  which_branch: (p: { repo: string | undefined }) =>
+    `🌿 Which branch of \`${p.repo}\` should this thread work on? ` +
+    `No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I'll pick it up from there.`,
+  ship_budget: (p: { maxMinutes: number; maxRounds: number; need: number; provision: number; coding: number }) =>
+    `🚫 Ship cannot start under a ${p.maxMinutes}-minute budget: the loop it allows (${p.maxRounds} review rounds) needs ${p.need} minutes — ` +
+    `${p.provision} to provision, the coding child's ${p.coding}, and the reserve for the rounds after it at their floors. ` +
+    `Widen the budget or the boundary that clipped it, or run \`agent:coding\` for a single pass without the review loop.`,
+} as const;
+
+/** `a *coding* run`, `an *explore* run`: the agent's name with its article. */
+function aRun(agentName: string): string {
+  return `${/^[aeiou]/i.test(agentName) ? "an" : "a"} *${agentName}* run`;
 }
 /** The card's shape and queued lines at a close (docs/reference/specs/tracing.md item 5):
  *  the root's streamed children so far, partitioned over the request's window

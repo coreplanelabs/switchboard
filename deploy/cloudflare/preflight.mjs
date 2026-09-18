@@ -1,22 +1,23 @@
 #!/usr/bin/env node
 // Deploy preflight for the bot Worker (docs/reference/specs/slack-channel.md item 8).
 //
-// `wrangler deploy` rolls the bot container. Cloudflare's rollout sends SIGTERM;
-// since the run ledger's handoff (docs/reference/specs/run-history.md item 39) the bot
-// hands every resumable run to the next generation and exits within seconds,
-// and the next generation continues the runs under their own cards — so a
-// deploy no longer waits on runs, and this preflight no longer refuses for
-// them. `npm run deploy` runs it first and refuses only while
+// `wrangler deploy` rolls the bot container. Cloudflare's rollout sends SIGTERM
+// and the container is gone at the drain's end, whatever it was still driving:
+// the run ledger's handoff (docs/reference/specs/run-history.md item 39) lets the
+// next generation resume a run, but a resume is a recovery, not a guarantee —
+// one that fails costs the run — so a deploy never rolls over a live run.
+// `npm run deploy` runs this first and refuses while
+//   - the bot reports runs in flight (`GET /healthz` `inFlight > 0`): the
+//     runner retries every minute up to its budget, then fails by name;
 //   - the container application is not in a settled state (a rollout is still
 //     provisioning/updating — `wrangler containers list --json`): a second
 //     rollout on top of one in progress replaces the instance the first put
 //     into its graceful drain and kills whatever it was running (two deploys
 //     90 s apart once killed a review at 153 s).
-// It WARNS (never refuses) when the bot reports runs in flight (`inFlight > 0`
-// — they hand off) or is already draining (`draining: true` — its resumable
-// runs were handed off; a ship pipeline still in flight would be killed), and
-// when /healthz says the reconnect catch-up is failing or the bot token lacks
-// required scopes (`catchUp.error`, `catchUp.missingScopes`).
+// It WARNS (never refuses) when the bot is already draining with nothing in
+// flight (`draining: true` — the instance exits on its own), and when /healthz
+// says the reconnect catch-up is failing or the bot token lacks required
+// scopes (`catchUp.error`, `catchUp.missingScopes`).
 //
 // Fail closed: unreachable bot, a body without the JSON shape (a bot whose
 // /healthz answers a bare `ok` is not one this preflight can read), a wrangler failure, or an app
@@ -40,7 +41,7 @@ export const APP_NAME = "switchboard-switchboardserver";
 const SETTLED_APP_STATES = new Set(["active", "ready"]);
 
 const HOW_TO_FORCE =
-  "to deploy anyway (over a rollout in progress, or blind when the bot cannot be consulted): `SWITCHBOARD_DEPLOY_FORCE=1 npm run deploy` (`node preflight.mjs --force` checks alone)";
+  "to deploy anyway (over the runs in flight — this kills them —, over a rollout in progress, or blind when the bot cannot be consulted): `SWITCHBOARD_DEPLOY_FORCE=1 npm run deploy` (`node preflight.mjs --force` checks alone)";
 
 /** GET /healthz. Never throws: `{ok:true,payload}` (parsed JSON, or the raw text when not JSON) or `{ok:false,error}`. */
 export async function fetchHealth(baseUrl, { timeoutMs = 20_000 } = {}) {
@@ -164,15 +165,16 @@ export function decide({ health, apps }, { force = false } = {}) {
       if (!Number.isInteger(p.inFlight) || p.inFlight < 0) {
         problems.push(`bot reports an impossible inFlight=${JSON.stringify(p.inFlight)} (counter bug or old Worker)`);
       } else if (p.inFlight > 0) {
-        // Not a refusal since the handoff (run-history item 39): SIGTERM hands
-        // every resumable run to the next generation, which continues it.
-        warnings.push(
-          `${p.inFlight} run(s) in flight — handed to the next generation on SIGTERM (run-history item 39); they continue there under their own cards`,
+        // A refusal: the rollout rolls the container under these runs. A
+        // handoff (run-history item 39) may resume them on the next generation,
+        // but a resume that fails costs the run — the deploy waits instead.
+        problems.push(
+          `${p.inFlight} run(s) in flight — the rollout would roll the bot container under them (a handoff is a recovery, not a guarantee)`,
         );
       }
       if (p.draining === true) {
         warnings.push(
-          "bot is already draining from a previous deploy — its resumable runs are handed off; a ship pipeline still in flight would be killed when this rollout replaces the draining instance",
+          "bot is already draining from a previous deploy — the draining instance exits on its own; this rollout replaces it at once",
         );
       }
     }
@@ -209,7 +211,7 @@ export function decide({ health, apps }, { force = false } = {}) {
       forced: true,
       problems,
       warnings,
-      message: `preflight WARNING: deploying by force despite —\n${detail}\n  a rollout landing on one in progress can disrupt it; in-flight runs hand off regardless (run-history item 39)${warningText}`,
+      message: `preflight WARNING: deploying by force despite —\n${detail}\n  this WILL kill the runs in flight that no resume recovers, and a rollout landing on one in progress can disrupt it${warningText}`,
     };
   }
   return {
@@ -217,7 +219,7 @@ export function decide({ health, apps }, { force = false } = {}) {
     forced: false,
     problems,
     warnings,
-    message: `preflight REFUSED: a Worker deploy rolls the bot container —\n${detail}\n  wait and retry; ${HOW_TO_FORCE}${warningText}`,
+    message: `preflight REFUSED: a Worker deploy rolls the bot container —\n${detail}\n  wait for them to finish and retry; ${HOW_TO_FORCE}${warningText}`,
   };
 }
 

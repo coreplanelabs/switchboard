@@ -146,8 +146,8 @@ onMounted(async () => {
     <p v-if="state === 'loading'" class="loading py-2 font-mono text-xs text-dimmed">reading the run's record…</p>
     <p v-else-if="state === 'failed'" class="failed py-2 font-mono text-xs text-warn">
       the run's record could not be read —
-      <a class="text-primary no-underline hover:underline" :href="`/runs/${encodeURIComponent(run.id)}`"
-        >open the run</a
+      <RouterLink class="text-primary no-underline hover:underline" :to="`/runs/${encodeURIComponent(run.id)}`"
+        >open the run</RouterLink
       >
     </p>
     <template v-else-if="timeline">
@@ -163,11 +163,11 @@ onMounted(async () => {
         <p class="landing-head flex flex-wrap items-baseline gap-x-2 font-mono text-xs text-muted">
           <span class="turn tabular-nums">turn {{ land }}</span>
           <span class="what min-w-0 truncate text-toned">· {{ landing.what }}</span>
-          <a
+          <RouterLink
             class="page ml-auto shrink-0 text-primary no-underline hover:underline"
-            :href="pageHref(landing.anchor)"
+            :to="pageHref(landing.anchor)"
             title="the same step on the run's own page"
-            >open on the run's page ↗</a
+            >open on the run's page ↗</RouterLink
           >
         </p>
         <ol v-if="landing.step" class="m-0 mt-1 list-none p-0">

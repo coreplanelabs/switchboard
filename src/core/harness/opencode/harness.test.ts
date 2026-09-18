@@ -25,6 +25,7 @@ import { recordingSink } from "../../testing/recordingSink.js";
 import {
   finaleAbortReason,
   finaleTimedOutNote,
+  finaleWaitNote,
   HARD_STOP_MESSAGE,
   MODEL_CALL_IN_FLIGHT,
   timeBudgetAnswer,
@@ -87,8 +88,8 @@ describe("OpenCodeHarness — the contract's object", () => {
     expect(object.builtinTools("write")).not.toContain("glob");
   });
 
-  it("leaves the effort tier to OpenCode's default in stage A (no reasoning variants declared)", () => {
-    expect(object.effort("high")).toBeUndefined();
+  it("answers the effort tier as the variant id — the configuration declares one variant per tier from the card (record 0052)", () => {
+    expect(object.effort("high")).toBe("high");
     expect(object.effort(undefined)).toBeUndefined();
   });
 
@@ -612,13 +613,55 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
     expect(r.steps.map((s) => [s.firstIdx, s.turns.map((t) => t.role)])).toEqual([[3, ["assistant"]]]);
   });
 
+  it("a dead generation's `session.execution.interrupted` replayed while catching up does not poison the resumed run's steer fate: a follow-up steered into the live execution is delivered and folded in, never recorded as not delivered", async () => {
+    // The dead generation's execution ended interrupted before the bot died — its
+    // end sits in the feed after the row's offset, so the re-attach replays it
+    // catching up. Acting on it (`inboxFate.interruptAll`) would mark every later
+    // steer of the resumed run dropped while the live server delivers it — the
+    // model reading it twice. The inbox-fate lines are gated `!reattachCatchUp`
+    // like the step-boundary line beside them.
+    const feedAfter = [feedEvent("session.execution.interrupted", { sessionID: "ses_run-c", reason: "aborted" })];
+    const driver = openCodeDriver({ reattach: { feedAfter }, followUpAtPrompt: "also check the docs" });
+    const rowFacts = rowFor(driver, { logOffset: feedByteLength(TAILER_READY_NOTES) });
+    const r = await driver.run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo hi" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "resumed done" }], stopReason: "end_turn" },
+      ],
+      processAliveOnResume: true,
+      resume: resume(
+        rowFacts,
+        [request, { role: "assistant", content: [{ type: "text", text: "was answering" }] }],
+        [],
+      ),
+    });
+    expect(r.outcome).toEqual({ kind: "answered", answer: "resumed done" });
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(followUps.some((s) => /folded in/.test(s))).toBe(true);
+    expect(followUps.some((s) => /not delivered/.test(s))).toBe(false);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(
+      r.modelCalls.some((c) =>
+        c.messages.some(
+          (m) =>
+            m.role === "user" && m.content.some((p) => p.type === "text" && p.text.includes("also check the docs")),
+        ),
+      ),
+    ).toBe(true);
+  });
+
   it("the row's bearer joins this generation's proxy only once every check has passed: after a refused re-attach the dead generation's bearer is still refused at the proxy, after one that went through it verifies there", async () => {
     const clock = () => 1_700_000_000_000;
     const grant = (): RunBearerGrant => ({
       runId: "run-c",
       modelRef: "anthropic/claude-fable-5",
       providerName: "anthropic",
-      providerType: "anthropic",
+      providerWire: "anthropic-messages",
       model: "claude-fable-5",
       maxTokens: 4096,
       maxTurns: 50,
@@ -923,15 +966,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       pollMs: 1,
       tickMs: 5,
     };
-    return {
-      opened: openThroughSeam(new OpenCodeHarness(), deps, run),
-      events,
-      progress,
-      container,
-      sink,
-      lease,
-      clock,
-    };
+    return { opened: openThroughSeam(new OpenCodeHarness(), deps, run), events, progress, container, sink, lease };
   }
   const postTurn = { text: "describe the change", maxTurns: 5, maxMinutes: 5, toolContext: { executor } };
 
@@ -1450,13 +1485,12 @@ describe("the post-turn on the run's session — refused, answered by silence, o
 
   it("a tool call cut at the loop's end whose interrupt is never answered: the finale bound ends the wait, the write-up was never posted, and the record says that — the wrap_up note names the finale, not an idle session or a provider failure, and the unlabelled answer names the finale bound; the cut call is closed marked cut for the release", async () => {
     // The interrupt answers only once the server is killed (`interruptAnswersAfterKill`), so the loop-end cut's
-    // interrupt is in flight for the rest of the loop; the clock is moved past the finale bound once the wind-down
-    // has decided (the budget note), on the next real ticks — never inside the note's own emit, where the write-up's
-    // clock is stamped right after.
-    const o = openRun({ hangToolCall: 1, interruptAnswersAfterKill: "refused" }, sleepThenNever, (e) => {
-      if (e.type === "run_note" && e.kind === "time_budget_exhausted")
-        setTimeout(() => void (o.clock.now += o.lease.finaleMs + 1), 40);
-    });
+    // interrupt is in flight for the rest of the loop, and the fake moves the clock past the finale bound on that
+    // interrupt's request (`finaleDuringCutInterrupt`) — after the write-up's clock was stamped, before any answer.
+    const o = openRun(
+      { hangToolCall: 1, interruptAnswersAfterKill: "refused", finaleDuringCutInterrupt: true },
+      sleepThenNever,
+    );
     const session = await o.opened;
     const reason = finaleAbortReason(o.lease.finaleMs);
     expect(o.progress).toContain(finaleTimedOutNote());
@@ -1466,11 +1500,13 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         .filter((n) => n.kind === "wrap_up")
         .map((n) => n.summary),
     ).toContain(wrapUpNeverPostedNote("time", "run", "finale"));
-    expect(
-      notes(o.events)
-        .filter((n) => n.kind === "harness_error")
-        .map((n) => n.summary),
-    ).toContain(windDownFailureNote(reason));
+    // The record's own note says what the finale ended: a wait on the cut tool with its interrupt unanswered — no
+    // model call was in flight, so none is said to have failed.
+    const errors = notes(o.events)
+      .filter((n) => n.kind === "harness_error")
+      .map((n) => n.summary);
+    expect(errors).toContain(finaleWaitNote(reason, "running bash", true));
+    expect(errors).not.toContain(windDownFailureNote(reason));
     // One prompt (the request's): the write-up was never posted; the cut's interrupt, then the finale's own.
     expect(o.container.requests.filter((q) => q.method === "POST" && /\/prompt$/.test(q.path))).toHaveLength(1);
     expect(o.container.requests.filter((q) => q.method === "POST" && /\/interrupt$/.test(q.path))).toHaveLength(2);
@@ -1628,7 +1664,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         .map((n) => n.summary),
     ).toEqual([
       windDownFailureNote(reason),
-      "OpenCode emitted an event kind this build does not know: made_up_late_kind",
+      "OpenCode emitted an event kind this build does not know: made_up_late_kind (said once: later events of this kind are not noted)",
     ]);
     // The earlier execution's compaction is record state, landed in every mode.
     expect(notes(o.events).some((n) => n.kind === "compacted")).toBe(true);
@@ -1893,6 +1929,24 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(r.inboxLeft.map((i) => i.text)).toEqual(["also check the docs"]);
   });
 
+  it("a follow-up's steer into a running execution that the finale's interrupt drops — enqueued (the server answered the POST with an id) but not delivered before the interrupt lands — is handed back to the inbox, never recorded as folded in", async () => {
+    // The steer POST answers with an id (session.inbox.enqueued), but the model call hangs and the
+    // finale's interrupt lands before any session.inbox.delivered — the execution ends interrupted,
+    // the steer is dropped. The harness must record it as not delivered and hand it back, never as
+    // folded in on the POST answer's id.
+    const r = await openCodeDriver({
+      followUpAtPrompt: "also check the docs",
+      interruptSettlesLate: "interrupted",
+    }).run(hungCall);
+    // The run fails at the finale: the loop left the feed with the execution still showing, the
+    // steer unresolvable from the store — handed back with the run's failure, never folded in.
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["also check the docs"]);
+    expect(notes(r).some((n) => n.kind === "follow_up" && /folded in/.test(n.summary))).toBe(false);
+    expect(notes(r).some((n) => n.kind === "follow_up" && /not delivered/.test(n.summary))).toBe(true);
+    // The model never saw it.
+    expect(modelSaw(r, "also check the docs")).toBe(false);
+  });
+
   it("a follow-up's steer into a RUNNING execution the reset cut before the server took it: no row when its execution ends — the idle marker newest since the steer, the store's word — is the steer lost: handed back to the inbox, the run continuing, the model never shown it", async () => {
     const r = await openCodeDriver({ controlResetOnSteer: "lost", followUpAtFirstAsk: "also check the docs" }).run(
       toolTurn,
@@ -2147,6 +2201,41 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(replies(r)).toHaveLength(2);
     expect(gets(r, "/permission")).toHaveLength(1);
     expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
+  // Feature: docs/reference/specs/harness.md item 2 — a 404 on the re-issued
+  // reply is read against the pending asks as item 2 reads any 404: the ask
+  // gone is the server's withdrawal (a note, the run going on), still listed
+  // is a reply that failed, fail closed.
+  it("a gate reply the reset cut, still pending at the re-list, re-issued once and answered 404 with the ask gone by then is the ask withdrawn: one ask_withdrawn note (no refusal of the step on the record), two replies, two listings, no harness_error, and the run answers", async () => {
+    const r = await openCodeDriver({ controlResetOnReply: "lost-then-dropped" }).run(toolTurn);
+    expect(answered(r)).toBe("done");
+    expect(replies(r)).toHaveLength(2);
+    expect(gets(r, "/permission")).toHaveLength(2);
+    const withdrawn = notes(r).filter((n) => n.kind === "ask_withdrawn");
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0].summary).toMatch(
+      /withdrew the ask for bash \(call c1\) before the gate's reply \(once\) landed/,
+    );
+    expect(withdrawn[0].summary).toMatch(/no refusal of the same step is on the record/);
+    expect(notes(r).filter((n) => n.kind === "resumed")).toHaveLength(1);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(posts(r, "/interrupt")).toHaveLength(0);
+    // The call settled by the server's own word: aborted, never run.
+    expect(r.events.some((e) => e.type === "tool_result" && e.callId === "c1" && !e.ok)).toBe(true);
+  });
+
+  it("a gate reply the reset cut, still pending at the re-list, re-issued once and answered 404 while the ask stays listed fails the run closed by name: OpenCodeReplyFailedError naming the 404, two replies, two listings, a harness_error, the interrupt posted, no ask_withdrawn note", async () => {
+    const r = await openCodeDriver({ controlResetOnReply: "lost-then-refused" }).run(toolTurn);
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err?.name).toBe("OpenCodeReplyFailedError");
+    expect(err?.message).toMatch(/for request per_c1 \(call c1\) could not be posted \(the server answered 404\)/);
+    expect(replies(r)).toHaveLength(2);
+    expect(gets(r, "/permission")).toHaveLength(2);
+    expect(notes(r).filter((n) => n.kind === "ask_withdrawn")).toEqual([]);
+    expect(notes(r).some((n) => n.kind === "harness_error" && /could not be posted/.test(n.summary))).toBe(true);
+    expect(posts(r, "/interrupt")).toHaveLength(1);
   });
 
   it("a gate reply whose outcome the server cannot be asked about fails the run closed by name: OpenCodeReplyFailedError carrying the unresolved write, a harness_error naming the request, the interrupt posted", async () => {

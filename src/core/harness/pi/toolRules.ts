@@ -14,6 +14,7 @@
 
 import { isAbsolute, relative, resolve } from "node:path";
 import type { Identity } from "../../../agents/registry.js";
+import { commandPastLoopEndRefusal } from "../windDown.js";
 
 /** pi's built-in tools (packages/coding-agent/src/core/tools) and the harness
  *  extension's, each on the capability-profile bundle it exercises (the
@@ -81,6 +82,12 @@ export interface ToolRuleContext {
   /** Branches a run without a branch of its own may never push to: the base
    *  its pull request would target, the repository's default. */
   protectedBranches?: readonly string[];
+  /** How long until the LOOP ends, in ms, on the harness's clock — the moment
+   *  the loop-end cut fires (`loopClock.loopEnd`; a follow-up turn's own
+   *  deadline while a turn runs), never the lease's end: a bash call whose
+   *  explicit timeout reaches past it is refused before it runs. Absent (a
+   *  preview, a gate whose ask carries no timeout), no call is judged by it. */
+  loopEndsIn?: () => number;
 }
 
 const allowed: ToolVerdict = { verdict: "allowed" };
@@ -179,13 +186,19 @@ export function judgeToolCall(tool: string, input: unknown, ctx: ToolRuleContext
     );
   }
   const args = isRecord(input) ? input : {};
-  if (tool === "bash") return judgeBash(args.command, ctx);
+  if (tool === "bash") return judgeBash(args.command, args.timeout, ctx);
   if (bundle === "files" || bundle === "write-files") return judgePath(args.path, ctx);
   return allowed;
 }
 
-function judgeBash(command: unknown, ctx: ToolRuleContext): ToolVerdict {
+function judgeBash(command: unknown, timeout: unknown, ctx: ToolRuleContext): ToolVerdict {
   if (typeof command !== "string") return refused("malformed — bash without a string command");
+  const verdict = judgeBashCommand(command, ctx);
+  if (verdict.verdict !== "allowed") return verdict;
+  return judgeBashTimeout(timeout, ctx);
+}
+
+function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
   if (CREDENTIAL_FILE.test(command)) return refused("credential — reads the executor's credential store");
   if (ENV_DUMP.test(command)) return refused("credential — dumps the process environment");
   if (CREDENTIAL_VAR.test(command)) return refused("credential — expands a credential variable");
@@ -209,6 +222,21 @@ function judgeBash(command: unknown, ctx: ToolRuleContext): ToolVerdict {
     if (verdict.verdict !== "allowed") return verdict;
   }
   return allowed;
+}
+
+/** pi's bash `timeout` is seconds, optional, and unbounded when absent (the
+ *  pinned pi runs a call without one until it exits or the loop's end cuts it;
+ *  a non-finite or non-positive number pi refuses itself). An explicit one
+ *  that reaches past the loop's end (harness-pi item 7) is refused before the
+ *  command runs, with the seconds left and the two ways forward — so the
+ *  model learns at once, not from the cut, that the command could never
+ *  finish. A call naming no timeout is never refused here: a `git push` in
+ *  the last minute must run, and the loop's end bounds it as it always did. */
+function judgeBashTimeout(timeout: unknown, ctx: ToolRuleContext): ToolVerdict {
+  if (!ctx.loopEndsIn || typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) return allowed;
+  const leftMs = ctx.loopEndsIn();
+  if (timeout * 1000 <= leftMs) return allowed;
+  return refused(commandPastLoopEndRefusal(Math.round(timeout), Math.max(0, Math.floor(leftMs / 1000))));
 }
 
 /** `git push [flags] [remote [refspec]]`: the run's repository is `origin`

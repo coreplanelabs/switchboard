@@ -129,6 +129,13 @@ export const CONTRACT_SECTION_HEADINGS = {
  *  repository's rules file (~15k characters) and a long unit both inside it. */
 export const DEFAULT_CONTRACT_MAX_CHARS = 48_000;
 
+/** The most of a plan a reader hands the parsers: ten times the tool clip
+ *  (`MAX_FILE_CHARS`, `src/execution/githubApi.ts`), which a plan that grows by
+ *  amendment passes — the program plan crossed 400k characters and the seed
+ *  then saw its first 25 units alone. A plan past this bound is refused by
+ *  name, never parsed short. */
+export const PLAN_MAX_CHARS = 2_000_000;
+
 const UNIT_HEADING = /^### (U\d+)\. (.+?)\s*$/;
 const ANY_HEADING = /^#{2,3} /;
 const BULLET = /^- \*\*([^*]+)\*\*:(?:\s?(.*))?$/;
@@ -422,6 +429,16 @@ function hasApproach(unit: ContractUnit): boolean {
   return "Approach" in unit.bullets;
 }
 
+/** The timeout clause every coding contract carries after the wind-down
+ *  sentence (agent-coding item 13; harness-pi items 7 and 15): the harness
+ *  refuses a bash call whose explicit timeout reaches past the loop's end
+ *  before it runs, so a stated timeout is what turns a command that could
+ *  never finish into a refusal the model reads at once, instead of minutes
+ *  spent on it and a cut at the end. One sentence, stack-agnostic. */
+export const TIMEOUT_ON_LONG_COMMANDS =
+  "State a timeout on any command you expect to run longer than a minute: a timeout that reaches past the loop's " +
+  "end is refused before the command runs, never cut midway.";
+
 function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
   const branch = rebase.branch ? `\`${rebase.branch}\`` : "the unit's branch";
   const onto = rebase.onto ? `\`${rebase.onto}\`` : "the merged parent";
@@ -432,7 +449,7 @@ function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
     `full verification, which runs after that push with any fix as a further commit; an unpushed tree does not ` +
     `survive the run's end. Right before each push, fetch ${onto} again and rebase once more if it moved while ` +
     `you worked, so the pull request is not born conflicting. At the wind-down note, commit and push what compiles, ` +
-    `say what does not, then answer.`
+    `say what does not, then answer. ${TIMEOUT_ON_LONG_COMMANDS}`
   );
 }
 

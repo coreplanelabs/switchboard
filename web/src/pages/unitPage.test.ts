@@ -269,7 +269,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("/runs/c1/events");
   });
 
-  it("a unit whose review thread does not exist yet lists the coding thread alone, says the review thread is not opened yet, and searches one session; a unit not started lists nothing and says so", () => {
+  it("a unit with one thread lists its runs by agent, shows no review thread cell, and searches both sessions on that thread; a unit not started lists nothing and says so", () => {
     const codingOnly = mountApp(UnitPage, {
       seed: seed(
         {
@@ -283,10 +283,10 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
       ),
     });
     expect(codingOnly.findAll("#unitruns li.fold").map((li) => li.attributes("data-thread"))).toEqual(["coding"]);
-    expect(codingOnly.find('#unitmeta [data-thread="review"]').text()).toBe("review thread not opened yet");
+    expect(codingOnly.find('#unitmeta [data-thread="review"]').exists()).toBe(false);
     expect(codingOnly.find('#unitmeta [data-thread="coding"] a').exists()).toBe(true);
     expect(codingOnly.find("#unitmeta .rounds").text()).toBe("1 round");
-    expect(selectLabels(codingOnly, "#search-session")).toEqual(["coding thread"]);
+    expect(selectLabels(codingOnly, "#search-session")).toEqual(["coding session", "review session"]);
     expect(codingOnly.find("#standing .chip").text()).toBe("round 0 · coding ended");
     expect(codingOnly.find("#unitmeta a.prlink").exists()).toBe(false);
 
@@ -342,7 +342,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     const w = mountApp(UnitPage, { seed: seed() });
     const box = w.find("#search");
     expect(box.find("h2").text()).toContain("Search the conversation");
-    expect(selectLabels(w, "#search-session")).toEqual(["coding thread", "review thread"]);
+    expect(selectLabels(w, "#search-session")).toEqual(["coding session", "review session"]);
     await box.find("#search-words").setValue("lockfile");
     await box.find("form").trigger("submit");
     expect(fetchMock).toHaveBeenCalledTimes(1);

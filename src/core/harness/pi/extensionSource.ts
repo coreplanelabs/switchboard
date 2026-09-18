@@ -9,9 +9,13 @@
 // conductor's waits run for minutes; the bot runs the call once); and its
 // `tool_call` hook asks the bot before every tool executes, pi's own included,
 // and blocks with the bot's reason when the bot refuses or cannot be reached
-// for long enough. The bearer and the bot's URL come from the process
-// environment the harness started pi with; nothing here holds a rule, a key or
-// a decision.
+// for long enough. Its `session_before_compact` hook asks the bot how the
+// compaction pi is about to write is written — pi's own summary, or the bot's
+// pointer summary after one that failed for good — and hands pi the bot's
+// compaction under pi's own kept entry and size; a bot that cannot be reached
+// leaves the compaction to pi. The bearer and the bot's URL come from the
+// process environment the harness started pi with; nothing here holds a rule,
+// a key or a decision.
 //
 // Shipped as a string on purpose: the file the container runs is exactly this
 // text, the tests import it from a file they write, and `tsc` carries it to
@@ -174,6 +178,54 @@ function relayTool(def) {
   };
 }
 
+/** pi's own file lists for the turns a compaction drops (its \`computeFileLists\`
+ *  over the preparation's \`fileOps\`): the files written or edited, and the
+ *  files only read. */
+function fileLists(fileOps) {
+  const list = (set) => Array.from(set || []);
+  const modified = new Set([...list(fileOps && fileOps.edited), ...list(fileOps && fileOps.written)]);
+  return {
+    readFiles: list(fileOps && fileOps.read).filter((f) => !modified.has(f)).sort(),
+    modifiedFiles: [...modified].sort(),
+  };
+}
+
+/** The bot's word on the compaction pi is about to write: asked once with the
+ *  preparation's facts — pi's own summary stands when the bot says nothing,
+ *  cannot be reached or refuses — and the bot's summary becomes the
+ *  extension's compaction under pi's own first kept entry and size. */
+async function compaction(event) {
+  const preparation = event.preparation;
+  if (!preparation) return undefined;
+  const files = fileLists(preparation.fileOps);
+  let answer;
+  try {
+    answer = await call(
+      "POST",
+      "/harness/compaction",
+      {
+        reason: event.reason,
+        tokensBefore: preparation.tokensBefore,
+        previousSummary: preparation.previousSummary,
+        readFiles: files.readFiles,
+        modifiedFiles: files.modifiedFiles,
+      },
+      requestSignal(event.signal),
+    );
+  } catch {
+    return undefined;
+  }
+  if (!answer || typeof answer.summary !== "string") return undefined;
+  return {
+    compaction: {
+      summary: answer.summary,
+      firstKeptEntryId: preparation.firstKeptEntryId,
+      tokensBefore: preparation.tokensBefore,
+      details: files,
+    },
+  };
+}
+
 export default async function switchboardHarness(pi) {
   const { tools } = await call("GET", "/harness/tools");
   for (const def of tools) pi.registerTool(relayTool(def));
@@ -182,5 +234,6 @@ export default async function switchboardHarness(pi) {
     if (!verdict.allow) return { block: true, reason: verdict.reason };
     return undefined;
   });
+  pi.on("session_before_compact", compaction);
 }
 `;

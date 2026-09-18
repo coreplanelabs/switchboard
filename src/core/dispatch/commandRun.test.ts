@@ -13,7 +13,15 @@ import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import type { RunRecord } from "../runRecord.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { FastPathDeps } from "./fastPath.js";
-import { isInlineRunCommand, recordRoutedDecision, runChatCommand, type RouteEventFields } from "./commandRun.js";
+import {
+  isInlineRunCommand,
+  recordRefusal,
+  recordRoutedDecision,
+  runChatCommand,
+  type RouteEventFields,
+} from "./commandRun.js";
+import { refusalOf } from "../refusal.js";
+import { ROUTE_RECEIPT_CAP } from "./route.js";
 
 // Feature: docs/reference/specs/command-registry.md item 18 — the command-run
 // machinery the fast paths and the request router's command branch share
@@ -271,7 +279,7 @@ describe("runChatCommand — the recording rule widens to a routed decision with
     expect(finished).not.toHaveBeenCalled();
   });
 
-  it("the same call with a route and no outcome — a routed read's shape — records nothing, as today", async () => {
+  it("the same call with a route and no outcome \u2014 a routed read's shape \u2014 records nothing, as today", async () => {
     const d = deps();
     const invoke = spiedInvoke(d);
     const { message, io, ending, trace } = request("set the coding model here", d);
@@ -312,5 +320,71 @@ describe("runChatCommand — the recording rule widens to a routed decision with
       outcome: "pasted",
       handBackRunId: "run-hb",
     });
+  });
+});
+
+// Feature: docs/reference/specs/run-history.md item 2 and record 0054, as
+// amended: every refusal the door makes is a run record — agent `door`, the
+// code as the label's lead, completed, no surface told, the redacted request
+// and one `refusal` event carrying the code, the cause and the capped sentence.
+describe("recordRefusal — every refusal is a run record (record 0054, as amended)", () => {
+  it("writes one `door` record: completed, the code leading the label, input + refusal as its content events, and neither runStarted nor runFinished", async () => {
+    const d = deps();
+    const kept = keepingWriter();
+    d.runHistoryWriter = kept.writer;
+    const { message, io, ending, trace, replies } = request("agent:coding fix it", d);
+    const started = vi.fn();
+    const finished = vi.fn();
+    io.runStarted = started;
+    io.runFinished = finished;
+    await recordRefusal(d, message, io, refusalOf("agent_allowlist", "you may not run coding here"), ending, trace);
+    ending.drain(undefined);
+    const snap = d.runRegistry.snapshotById("run-cmd");
+    expect(snap?.finished).toBe(true);
+    expect(d.runRegistry.getById("run-cmd")).toMatchObject({ status: "completed", agent: "door" });
+    expect(d.runRegistry.getById("run-cmd")?.label).toMatch(/^agent_allowlist · /);
+    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "refusal"]);
+    expect(snap?.events.find((e) => e.type === "input")).toMatchObject({ text: "agent:coding fix it" });
+    expect(snap?.events.find((e) => e.type === "refusal")).toMatchObject({
+      code: "agent_allowlist",
+      cause: "policy",
+      text: "you may not run coding here",
+    });
+    expect(started).not.toHaveBeenCalled();
+    expect(finished).not.toHaveBeenCalled();
+    expect(replies).toEqual([]); // the record says nothing: the caller already rendered the sentence
+    const records = kept.records();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      id: "run-cmd",
+      agent: "door",
+      status: "completed",
+      threadKey: "slack:CX:1.0",
+    });
+    expect(records[0]!.events.find((e) => e.type === "refusal")).toMatchObject({ code: "agent_allowlist" });
+  });
+
+  it("the refusal event's sentence is redacted and capped like a receipt", async () => {
+    const d = deps();
+    const { message, io, ending, trace } = request("x", d);
+    const long = `the token ghp_abcdefghijklmnopqrstuvwxyz0123456789 was refused ${"y".repeat(400)}`;
+    await recordRefusal(d, message, io, refusalOf("uncaught", long), ending, trace);
+    const refusal = d.runRegistry.snapshotById("run-cmd")?.events.find((e) => e.type === "refusal");
+    expect(refusal).toMatchObject({ code: "uncaught", cause: "system" });
+    const text = (refusal as { text: string }).text;
+    expect(text).not.toContain("ghp_abcdefghijklmnop");
+    expect(text.length).toBeLessThanOrEqual(ROUTE_RECEIPT_CAP + 1); // the cap plus the ellipsis
+    expect(text.endsWith("…")).toBe(true);
+  });
+
+  it("a message with no thread of its own records with the channel as its thread key", async () => {
+    const d = deps();
+    const kept = keepingWriter();
+    d.runHistoryWriter = kept.writer;
+    const { message, io, ending, trace } = request("hi", d);
+    await recordRefusal(d, { ...message, threadKey: "" }, io, refusalOf("uncaught", "boom"), ending, trace);
+    ending.drain(undefined);
+    expect(d.runRegistry.getById("run-cmd")).toMatchObject({ threadKey: "slack:CX" });
+    expect(kept.records()[0]).toMatchObject({ threadKey: "slack:CX" });
   });
 });

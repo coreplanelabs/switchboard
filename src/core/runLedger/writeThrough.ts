@@ -33,6 +33,8 @@ import {
   LEASE_MS,
   type AppendableEvent,
   type CardHandle,
+  type IntakeReceipt,
+  type IntakeWriteResult,
   type LiveRunMeta,
   type RunState,
   type StepRecord,
@@ -107,6 +109,10 @@ export interface OpenRunRequest {
      *  at the log's tail. Named rows that do not end at the tail (the log moved
      *  under the seed) are written whole as new rows, with one warning. */
     log?: { from: number; turns: number };
+    /** Platform-namespaced author ids, parallel to `messages`, for the rows
+     *  the seed writes (absent entries and undefined mean no actor; record
+     *  0057). Machine turns and reused log rows carry none. */
+    actors?: readonly (string | undefined)[];
   };
   /** A stop another generation requested (`/runs/stop` on a different
    *  container), relayed by the heartbeat — once per mode. */
@@ -115,6 +121,11 @@ export interface OpenRunRequest {
    *  caller must stop the run at once — it must not reply, and its next tool
    *  call would act on a run someone else is driving. Once per run. */
   onFenced?: () => void;
+  /** The promotion's claim went untracked (failing retries or RouteMissingError)
+   *  while a reservation stood: the row has been abandoned, the heartbeat
+   *  stopped, and the run will run untracked — why, in the words the run's
+   *  record gets (item 54). Called once, only when a `reservation` was given. */
+  onUntracked?: (why: string) => void;
   /** The run's reservation from admission (item 42), when it has one: the open
    *  promotes that row in place — same tracked run, same heartbeat — instead
    *  of claiming a new one. */
@@ -223,7 +234,9 @@ export interface LedgerWriteThrough {
    *  live row already (another generation's — reclaim is the resume phase's),
    *  the routes are missing, or the claim kept failing — or, with a
    *  reservation, the row was taken by another generation (the reservation is
-   *  told through `onFenced`; this process must not run it). */
+   *  told through `onFenced`; this process must not run it). When a reservation
+   *  is given and the promotion's claim goes untracked, `onUntracked` is called
+   *  with why before returning `undefined`, and the reserved row is abandoned. */
   open(req: OpenRunRequest): Promise<LedgerRun | undefined>;
   /** Take up a reclaimed run: heartbeat, steps, events and state continue
    *  under this generation with no claim and no seed. Synchronous — the row is
@@ -259,6 +272,14 @@ export interface LedgerWriteThrough {
    *  running here until the process exits; their writes are fenced the moment
    *  the next generation reclaims them. Returns the run ids marked. */
   handoff(): Promise<{ marked: string[]; failed?: string }>;
+  /** An intake receipt write with the claim's retry (run-history item 59): a
+   *  lost response is retried after `RETRY_MS[0]` by READING the same row —
+   *  the insert may have landed — and a row carrying this write's `gen` and
+   *  `decidedAt` answers `inserted: true`, another writer's answers what it
+   *  stored; a read that finds none inserts once more. `undefined` (with one
+   *  warning) when the ledger cannot say — the route missing, a permanent
+   *  refusal, or the retry failing too — the caller's degrade (record 0058). */
+  recordIntake(key: string, receipt: IntakeReceipt): Promise<IntakeWriteResult | undefined>;
 }
 
 /** The write-through of a process without a run ledger (a Null Object,
@@ -307,6 +328,9 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   }
   async handoff(): Promise<{ marked: string[]; failed?: string }> {
     return { marked: [] };
+  }
+  async recordIntake(_key: string, _receipt: IntakeReceipt): Promise<IntakeWriteResult | undefined> {
+    return undefined;
   }
 }
 
@@ -763,7 +787,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
      *  to judge the transcript against (`transcriptCompleteness`) — a row with
      *  no record at all was killed before its conversation was stored and
      *  closes `interrupted`. */
-    async seed(messages: ChatMessage[], budgetMs: number): Promise<void> {
+    async seed(messages: ChatMessage[], budgetMs: number, actors?: readonly (string | undefined)[]): Promise<void> {
       // Every row at its log index (`rowIndex`). The messages the seed reused
       // from the log (item 9) — the rows between `seedFrom` and the range's
       // start — are there already and are skipped.
@@ -771,9 +795,11 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         this.sessionRow && this.sessionRow.range !== "broken"
           ? this.sessionRow.range.from - this.sessionRow.seedFrom
           : 0;
-      const turns: TranscriptTurn[] = messages
-        .slice(reused)
-        .map((message, i) => ({ idx: this.rowIndex(reused + i), message }));
+      const turns: TranscriptTurn[] = messages.slice(reused).map((message, i) => ({
+        idx: this.rowIndex(reused + i),
+        message,
+        ...(actors?.[reused + i] !== undefined ? { actor: actors[reused + i] } : {}),
+      }));
       try {
         const seeded = await ledger.seed(this.runId, gen, turns, this.sessionRow?.key);
         if (!seeded.ok) {
@@ -986,22 +1012,30 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // goes on untracked, as an open without a reservation would.
         if (!reserved.tracked()) return undefined;
         const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
-        unpromoted.delete(reserved.runId); // promoted, fenced or stale: no longer a reservation to abandon
         if (claimed.outcome === "fenced") {
+          unpromoted.delete(reserved.runId); // the row is another generation's: nothing of ours to abandon
           reserved.detach("promotion refused (fenced)");
           return undefined;
         }
         if (claimed.outcome !== "ok") {
-          await reserved.close();
-          live.delete(reserved);
+          // Abandon the row — not close (close only stops the heartbeat,
+          // leaving the attaching row on the ledger where the reclaim sweep
+          // would see it as an expired reservation and restart the run, while
+          // the untracked original is still running). Abandon removes the row
+          // and owns the `unpromoted` bookkeeping: an abandon that fails keeps
+          // the run there, so the thread's next claim abandons the row again
+          // (item 54) — the safety net the pre-delete would have defeated.
+          await reserved.abandon();
+          req.onUntracked?.(claimed.why);
           return undefined;
         }
+        unpromoted.delete(reserved.runId); // promoted: no longer a reservation to abandon
         if (claimed.session) reserved.bindSession(claimed.session);
         // The claim wrote the dispatcher's state onto the row (the workspace
         // binding, item 54); the reserved run merges it into its own, so the
         // first patch after the claim carries it on instead of writing over it.
         if (req.state) reserved.adoptState(req.state);
-        if (req.seed) await reserved.seed(req.seed.messages, req.seed.budgetMs);
+        if (req.seed) await reserved.seed(req.seed.messages, req.seed.budgetMs, req.seed.actors);
         return reserved;
       }
       const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
@@ -1015,7 +1049,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         lastSeq: 0,
         ...(claimed.session ? { session: claimed.session } : {}),
       });
-      if (req.seed) await run.seed(req.seed.messages, req.seed.budgetMs);
+      if (req.seed) await run.seed(req.seed.messages, req.seed.budgetMs, req.seed.actors);
       run.startHeartbeat();
       live.add(run);
       return run;
@@ -1075,6 +1109,36 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         return { marked };
       } catch (err) {
         return { marked: [], failed: describe(err) };
+      }
+    },
+
+    async recordIntake(key, receipt) {
+      const degraded = (why: string): undefined => {
+        warn(`[ledger] intake receipt ${key} not recorded: ${why} — acting on the verdict without one`);
+        return undefined;
+      };
+      try {
+        return await ledger.recordIntake(key, receipt);
+      } catch (err) {
+        if (err instanceof RouteMissingError) return degraded("the state Worker has no intake routes");
+        if (err instanceof PermanentStoreError) return degraded(describe(err));
+        // A lost response: the insert may have landed. Retry by reading the
+        // same row after the claim's backoff — this write's own row (its gen
+        // and decidedAt) answers inserted, another writer's answers what it
+        // stored; none at all means the insert never landed, so insert once.
+        try {
+          await sleep(RETRY_MS[0]);
+          const stored = await ledger.readIntake(key);
+          if (stored !== undefined) {
+            return {
+              inserted: stored.gen === receipt.gen && stored.decidedAt === receipt.decidedAt,
+              stored,
+            };
+          }
+          return await ledger.recordIntake(key, receipt);
+        } catch (retryErr) {
+          return degraded(`${describe(err)}; the retry failed too: ${describe(retryErr)}`);
+        }
       }
     },
   };

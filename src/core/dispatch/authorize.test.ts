@@ -9,6 +9,7 @@ import type { ExecutorSelection } from "../../execution/factory.js";
 import { NO_CAPABILITIES } from "../capabilities.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { RepoContext } from "../repoContext.js";
+import type { Refusal } from "../refusal.js";
 import { createCardShell } from "../statusCardFrame.js";
 import type { ChannelIO, IncomingMessage, StatusHandle, StatusUpdate } from "../types.js";
 import type { ResumeContext } from "./admission.js";
@@ -87,12 +88,17 @@ function setup(over: { user?: string; text?: string; residents?: boolean } = {})
     history: async () => [],
   };
   const refusals: string[] = [];
+  const refusalObjects: Refusal[] = [];
   const gate: GateContext = {
     msg: message,
     io,
-    refuse: async (outcome, fn) => {
-      refusals.push(outcome);
-      return fn();
+    // The production wrap's shape (record 0054): the side work inside the
+    // span, then the Refusal's sentence through the one renderer.
+    refuse: async (refusal, side) => {
+      refusals.push(refusal.code);
+      refusalObjects.push(refusal);
+      await side?.();
+      await io.reply(refusal.text);
     },
   };
   const closes: StatusUpdate[] = [];
@@ -104,7 +110,7 @@ function setup(over: { user?: string; text?: string; residents?: boolean } = {})
     capabilities: { ...NO_CAPABILITIES, residents: over.residents ?? true },
   };
   const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf(message.channelId), receivedAt: NOW });
-  return { deps, gate, cardCtx, replies, refusals, closes, root: trace.root, message };
+  return { deps, gate, cardCtx, replies, refusals, refusalObjects, closes, root: trace.root, message };
 }
 
 /** The reason a closed card carries — somewhere in the frame's text. */
@@ -229,6 +235,82 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
       kind: "allowed",
     });
     expect(replies).toEqual([]);
+  });
+
+  it("the not-onboarded gate guesses the one near resident: one registry call, the corrected line and the evidence on the refusal", async () => {
+    const { deps, gate, cardCtx, refusalObjects } = setup({
+      user: "slack:UADMIN",
+      text: "agent:ship in acme/infra the infra repo, change the onboarding link",
+    });
+    const calls: number[] = [];
+    deps.residentSlugs = async () => {
+      calls.push(1);
+      return ["acme/infrastructure", "acme/api"];
+    };
+    expect(
+      await authorizeRepo(deps, {
+        ...gate,
+        ...cardCtx,
+        agent: coding,
+        profile: declaredProfile(coding),
+        needsRepo: true,
+        repoCtx: { rejectedRepo: "acme/infra" },
+      }),
+    ).toEqual({ kind: "refused", reason: "repo_not_onboarded" });
+    expect(calls).toHaveLength(1);
+    const guess = refusalObjects[0].guess;
+    expect(guess?.line).toBe("agent:ship in acme/infrastructure the infra repo, change the onboarding link");
+    expect(guess?.proposal.text).toBe(guess?.line);
+    expect(guess?.evidence).toContain("`acme/infrastructure`");
+    expect(guess?.evidence).toContain("onboarded");
+  });
+
+  it("two residents tie: both are listed and none is proposed", async () => {
+    const { deps, gate, cardCtx, refusalObjects } = setup({ user: "slack:UADMIN", text: "in acme/infra do it" });
+    deps.residentSlugs = async () => ["acme/infrastructure", "acme/infra-tools"];
+    await authorizeRepo(deps, {
+      ...gate,
+      ...cardCtx,
+      agent: coding,
+      profile: declaredProfile(coding),
+      needsRepo: true,
+      repoCtx: { rejectedRepo: "acme/infra" },
+    });
+    expect(refusalObjects[0].guess).toBeUndefined();
+  });
+
+  it("a registry that does not answer leaves the question without a guess, and a cold profile never pays for the call", async () => {
+    const silent = setup({ user: "slack:UADMIN", text: "in acme/infra do it" });
+    silent.deps.residentSlugs = async () => {
+      throw new Error("registry down");
+    };
+    await authorizeRepo(silent.deps, {
+      ...silent.gate,
+      ...silent.cardCtx,
+      agent: coding,
+      profile: declaredProfile(coding),
+      needsRepo: true,
+      repoCtx: { rejectedRepo: "acme/infra" },
+    });
+    expect(silent.refusalObjects[0].guess).toBeUndefined();
+
+    const cold = setup({ user: "slack:UADMIN", text: "in acme/infra do it" });
+    let coldCalls = 0;
+    cold.deps.residentSlugs = async () => {
+      coldCalls++;
+      return ["acme/infrastructure"];
+    };
+    expect(
+      await authorizeRepo(cold.deps, {
+        ...cold.gate,
+        ...cold.cardCtx,
+        agent: coding,
+        profile: { ...declaredProfile(coding), machine: "repo-cold" },
+        needsRepo: true,
+        repoCtx: { rejectedRepo: "acme/infra" },
+      }),
+    ).toEqual({ kind: "refused", reason: "repo_not_visible" });
+    expect(coldCalls).toBe(0);
   });
 
   it("a repo the registry did not answer for is not guessed: refused as unverified, with the retry-or-URL reply", async () => {

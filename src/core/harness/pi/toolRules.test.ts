@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { CODING_REACH, NONE_REACH, PI_TOOL_BUNDLES, READ_REACH, judgeToolCall, reachFor } from "./toolRules.js";
+import {
+  CODING_REACH,
+  NONE_REACH,
+  PI_TOOL_BUNDLES,
+  READ_REACH,
+  judgeToolCall,
+  reachFor,
+  type ToolRuleContext,
+} from "./toolRules.js";
+import { commandPastLoopEndRefusal } from "../windDown.js";
 
 // A preset's tool rules under pi (docs/reference/specs/harness-pi.md items 7
 // and 10): which calls are refused by name, and which name a reach the run's
@@ -316,5 +325,71 @@ describe("judgeToolCall — file tools", () => {
   it("a search tool without a path searches the checkout and is allowed", () => {
     expect(judgeToolCall("grep", { pattern: "reasonOf" }, ctx)).toEqual({ verdict: "allowed" });
     expect(judgeToolCall("find", { pattern: "*.ts", path: "src" }, ctx)).toEqual({ verdict: "allowed" });
+  });
+});
+
+// docs/reference/specs/harness-pi.md items 7 and 15 — a bash call whose
+// explicit `timeout` (pi's, in seconds; pi runs a call without one unbounded)
+// reaches past the loop's end is refused before it runs, in the wind-down's
+// words: the seconds left, the seconds asked, and the two ways forward. Only
+// an explicit, finite, positive timeout is judged; a call naming none runs
+// (a `git push` in the last minutes must) and the loop's end cuts it as today.
+describe("judgeToolCall — bash: an explicit timeout against the loop's end", () => {
+  const nearEnd = { ...ctx, loopEndsIn: () => 384_500 };
+  const timed = (command: string, timeout: unknown, rules: ToolRuleContext = nearEnd) =>
+    judgeToolCall("bash", { command, timeout }, rules);
+
+  it("refuses a timeout that reaches past the loop's end with the exact sentence — the seconds left, the seconds asked, re-issue inside what is left or push and write up", () => {
+    expect(timed("npm run verify", 600)).toEqual({
+      verdict: "refused",
+      reason:
+        "budget — this command asked for a 600 s timeout and the loop ends in 384 s, so it could never finish: re-issue it with a timeout inside the 384 s left if it finishes sooner, or push what you have and write up — the full verification is CI's.",
+    });
+    expect(timed("npm run verify", 600)).toEqual({
+      verdict: "refused",
+      reason: commandPastLoopEndRefusal(600, 384),
+    });
+  });
+
+  it("allows a timeout inside the loop's end, one that ends exactly at it, and one that rounds to it", () => {
+    expect(timed("npm test -- one.test.ts", 60)).toEqual({ verdict: "allowed" });
+    expect(timed("npm test -- one.test.ts", 384.5)).toEqual({ verdict: "allowed" });
+    expect(timed("npm test -- one.test.ts", 384)).toEqual({ verdict: "allowed" });
+  });
+
+  it("never refuses a call that names no timeout, even with ten seconds left: the push must run and the loop's end bounds it", () => {
+    const lastSeconds = { ...ctx, loopEndsIn: () => 10_000 };
+    expect(judgeToolCall("bash", { command: "git push origin load-pi/test-gap-1" }, lastSeconds)).toEqual({
+      verdict: "allowed",
+    });
+    expect(timed("git push origin load-pi/test-gap-1", 30, lastSeconds)).toEqual({
+      verdict: "refused",
+      reason: commandPastLoopEndRefusal(30, 10),
+    });
+  });
+
+  it("a non-numeric, non-finite or non-positive timeout is not this rule's business (pi refuses it in its own words), nor is any timeout when no loop clock was handed over", () => {
+    expect(timed("npm run verify", "600")).toEqual({ verdict: "allowed" });
+    expect(timed("npm run verify", Number.NaN)).toEqual({ verdict: "allowed" });
+    expect(timed("npm run verify", Number.POSITIVE_INFINITY)).toEqual({ verdict: "allowed" });
+    expect(timed("npm run verify", 0)).toEqual({ verdict: "allowed" });
+    expect(timed("npm run verify", -5)).toEqual({ verdict: "allowed" });
+    expect(timed("npm run verify", 600, ctx)).toEqual({ verdict: "allowed" });
+  });
+
+  it("with the loop already past its end every explicit timeout is refused naming 0 s left, and the other rules still speak first", () => {
+    const past = { ...ctx, loopEndsIn: () => -2_000 };
+    expect(timed("npm test -- one.test.ts", 1, past)).toEqual({
+      verdict: "refused",
+      reason: commandPastLoopEndRefusal(1, 0),
+    });
+    expect(timed("cat .git/github-credentials", 600)).toEqual({
+      verdict: "refused",
+      reason: "credential — reads the executor's credential store",
+    });
+    expect(timed("git push origin main", 600)).toEqual({
+      verdict: "refused",
+      reason: "repo:use — push to `main`, not the run's branch load-pi/test-gap-1",
+    });
   });
 });

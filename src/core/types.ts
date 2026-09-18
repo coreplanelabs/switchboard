@@ -149,6 +149,9 @@ export interface HistoryItem {
   images?: ImageAttachment[];
   /** Non-image files attached to this turn, if any (user turns only in practice). */
   documents?: DocumentAttachment[];
+  /** The platform-namespaced id of the author (e.g. `slack:U…`); absent for
+   *  bot turns and channels that do not stamp user ids (record 0057). */
+  user?: string;
 }
 
 /** What the run is doing right now, typed so each channel draws it in its
@@ -244,6 +247,11 @@ export interface ConfirmationOffer {
   risk: string;
   footer: string;
   expiresAt: number;
+  /** Present on a question's offer (record 0054): the refusal's sentence,
+   *  shown above the line, and the evidence naming the match, shown under it.
+   *  A channel that offers labels the same two actions Yes and No instead of
+   *  Run and Cancel; Yes redispatches the stored proposal, No cancels. */
+  question?: { text: string; evidence: string };
 }
 
 export interface ChannelIO {

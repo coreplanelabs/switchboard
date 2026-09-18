@@ -22,10 +22,23 @@ export interface AttrDomain {
   caughtUp: boolean;
   files: number;
   dedupe: "fresh" | "duplicate";
-  /** How the requester was found (slack-channel.md item 13): the sender, the relay footer's thread, the thread's parent, or the app itself. */
-  requester: "message" | "relay-footer" | "thread-parent" | "bot";
+  /** How the requester was found (slack-channel.md item 13): the sender, the configured relay app's footer, or the app itself. */
+  requester: "message" | "relay-footer" | "bot";
+  /** The intake verdict on an unmentioned thread reply (routing-and-config.md
+   *  item 27, record 0058); the reason is free text and lives on the receipt
+   *  row and the log line, never on a span. */
+  intake: "addressed" | "silent";
+  /** How the verdict was reached (`IntakeSource`). */
+  intakeSource: "model" | "mode" | "error" | "timeout";
+  /** What became of the receipt (`IntakeReceiptOutcome`). */
+  intakeReceipt: "inserted" | "existing" | "failed" | "absent";
   // dispatch.* / run.* / post.*
   outcome: string;
+  /** The refusal's code (src/core/refusal.ts) — on the `dispatch.refuse` span
+   *  and the request's root, so refusals are countable from the trace alone. */
+  refusal: string;
+  /** The refusal's cause, from the one code→cause table in src/core/refusal.ts. */
+  cause: "request" | "policy" | "system";
   count: number;
   backend: Backend;
   // run.command
@@ -114,6 +127,8 @@ export type SpanAttrs = { readonly [K in SpanAttrKey]?: AttrDomain[K] };
 const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
   "runId",
   "outcome",
+  "refusal",
+  "cause",
   "command",
   "route",
   "host",
@@ -162,7 +177,12 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   files: "number",
   dedupe: "string",
   requester: "string",
+  intake: "string",
+  intakeSource: "string",
+  intakeReceipt: "string",
   outcome: "string",
+  refusal: "string",
+  cause: "string",
   count: "number",
   backend: "string",
   command: "string",

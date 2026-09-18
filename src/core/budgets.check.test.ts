@@ -39,8 +39,8 @@ import {
 const SHIP_DEFAULT = { maxMinutes: ASKS.ship, maxRounds: 3 };
 
 describe("the budgets module — one table every wall clock derives from (docs/decisions/0046)", () => {
-  it("the asks: coding 45, review 25, research 8, general 5, explore 120, conductor 120, ship 120", () => {
-    expect(ASKS).toEqual({ general: 5, coding: 45, review: 25, ship: 120, research: 8, explore: 120, conductor: 120 });
+  it("the asks: coding 90, review 25, research 8, general 5, explore 120, conductor 120, ship 240", () => {
+    expect(ASKS).toEqual({ general: 5, coding: 90, review: 25, ship: 240, research: 8, explore: 120, conductor: 120 });
   });
 
   it("every floor is at most its round's ask, and the merge wait has an ask and a floor of its own", () => {
@@ -66,9 +66,9 @@ describe("the budgets module — one table every wall clock derives from (docs/d
     expect(loopRounds(loop)[loopPosition(loop, "merge")]).toBe("merge");
   });
 
-  it("the floors are the presets': coding 10, review 5, research 3, general 2, explore and conductor 15 — the round floors derive from them, and the ship waits are rows", () => {
-    expect(PRESET_FLOORS).toEqual({ general: 2, coding: 10, review: 5, research: 3, explore: 15, conductor: 15 });
-    expect(FLOORS).toEqual({ coding: 10, fix: 10, review: 5, merge: 10 });
+  it("the floors are the presets': coding 15, review 5, research 3, general 2, explore and conductor 15 — the round floors derive from them (a fix round under 15 cannot run the suite its contract requires), and the ship waits are rows", () => {
+    expect(PRESET_FLOORS).toEqual({ general: 2, coding: 15, review: 5, research: 3, explore: 15, conductor: 15 });
+    expect(FLOORS).toEqual({ coding: 15, fix: 15, review: 5, merge: 10 });
     expect(SHIP_WAIT).toEqual({ marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes: 5, busyRetryMinutes: 2 });
   });
 });
@@ -78,14 +78,21 @@ describe("the reserve — derived over the rounds that must follow, never tabled
     const expected =
       3 * (FLOORS.review + ALLOWANCES.provision) + 2 * (FLOORS.fix + ALLOWANCES.provision) + FLOORS.merge;
     expect(reserveMinutes({ kind: "coding", index: 0 }, SHIP_DEFAULT)).toBe(expected);
-    expect(expected).toBe(60);
+    expect(expected).toBe(70);
   });
 
-  it("before each later round the reserve is what follows it: 52 before the first review, 39 before the first fix, 31, 18, 10, then 0 before the merge", () => {
+  it("before the coding round at 4 rounds: four reviews and three fixes with their provisioning, plus the merge floor, 96", () => {
+    const expected =
+      4 * (FLOORS.review + ALLOWANCES.provision) + 3 * (FLOORS.fix + ALLOWANCES.provision) + FLOORS.merge;
+    expect(reserveMinutes({ kind: "coding", index: 0 }, { maxRounds: 4 })).toBe(expected);
+    expect(expected).toBe(96);
+  });
+
+  it("before each later round the reserve is what follows it: 62 before the first review, 44 before the first fix, 36, 18, 10, then 0 before the merge", () => {
     const loop = SHIP_DEFAULT;
-    expect(reserveMinutes({ kind: "review", index: 1 }, loop)).toBe(52);
-    expect(reserveMinutes({ kind: "fix", index: 2 }, loop)).toBe(39);
-    expect(reserveMinutes({ kind: "review", index: 3 }, loop)).toBe(31);
+    expect(reserveMinutes({ kind: "review", index: 1 }, loop)).toBe(62);
+    expect(reserveMinutes({ kind: "fix", index: 2 }, loop)).toBe(44);
+    expect(reserveMinutes({ kind: "review", index: 3 }, loop)).toBe(36);
     expect(reserveMinutes({ kind: "fix", index: 4 }, loop)).toBe(18);
     expect(reserveMinutes({ kind: "review", index: 5 }, loop)).toBe(10);
     expect(reserveMinutes({ kind: "merge", index: 6 }, loop)).toBe(0);
@@ -99,26 +106,26 @@ describe("the reserve — derived over the rounds that must follow, never tabled
 });
 
 describe("carve — a round's minutes from the parent's remainder, refused under the floor", () => {
-  it("the coding round from 118 minutes at 3 rounds is 45, bounded by its ask, holding 60", () => {
-    expect(carve(118 * MINUTE_MS, { kind: "coding", index: 0 }, SHIP_DEFAULT)).toEqual({
+  it("the coding round from 238 minutes at 3 rounds is 90, bounded by its ask, holding 70", () => {
+    expect(carve(238 * MINUTE_MS, { kind: "coding", index: 0 }, SHIP_DEFAULT)).toEqual({
       kind: "carved",
-      minutes: 45,
+      minutes: 90,
       boundedBy: "ask",
-      holds: 60,
+      holds: 70,
     });
   });
 
-  it("a fix round from 46 minutes is refused under its floor of 10", () => {
-    expect(carve(46 * MINUTE_MS, { kind: "fix", index: 2 }, SHIP_DEFAULT)).toEqual({
+  it("a fix round from 50 minutes is refused under its floor of 15: 50 − 44 leaves 6", () => {
+    expect(carve(50 * MINUTE_MS, { kind: "fix", index: 2 }, SHIP_DEFAULT)).toEqual({
       kind: "refused",
       reason: "under floor",
-      minutes: 7,
-      floor: 10,
-      holds: 39,
+      minutes: 6,
+      floor: 15,
+      holds: 44,
     });
   });
 
-  it("the last review from 35 minutes is 25 holding 10; the first review from 35 is refused, since 35 − 52 is under its floor", () => {
+  it("the last review from 35 minutes is 25 holding 10; the first review from 35 is refused, since 35 − 62 is under its floor", () => {
     expect(carve(35 * MINUTE_MS, { kind: "review", index: 5 }, SHIP_DEFAULT)).toEqual({
       kind: "carved",
       minutes: 25,
@@ -132,19 +139,19 @@ describe("carve — a round's minutes from the parent's remainder, refused under
     });
   });
 
-  it("a round bounded by the parent says so: a fix from 30 minutes is refused reporting 0, not −9; from 60 it gets 21 bounded by the parent", () => {
+  it("a round bounded by the parent says so: a fix from 30 minutes is refused reporting 0, not −14; from 60 it gets 16 bounded by the parent", () => {
     expect(carve(30 * MINUTE_MS, { kind: "fix", index: 2 }, SHIP_DEFAULT)).toEqual({
       kind: "refused",
       reason: "under floor",
       minutes: 0,
-      floor: 10,
-      holds: 39,
+      floor: 15,
+      holds: 44,
     });
     expect(carve(60 * MINUTE_MS, { kind: "fix", index: 2 }, SHIP_DEFAULT)).toEqual({
       kind: "carved",
-      minutes: 21,
+      minutes: 16,
       boundedBy: "parent",
-      holds: 39,
+      holds: 44,
     });
   });
 
@@ -172,31 +179,37 @@ describe("carve — a round's minutes from the parent's remainder, refused under
     expect(carveChildOfParent(0, "explore")).toEqual({ kind: "refused", reason: "under floor", minutes: 0, floor: 15 });
   });
 
-  it("a child with no loop (a conductor's) takes only the floor and the parent: 30 minutes carve 30, 7 are refused", () => {
+  it("a child with no loop (a conductor's) takes only the floor and the parent: 30 minutes carve 30, 14 are refused", () => {
     expect(carve(30 * MINUTE_MS, { kind: "coding", index: 0 }, undefined)).toEqual({
       kind: "carved",
       minutes: 30,
       boundedBy: "parent",
       holds: 0,
     });
-    expect(carve(7 * MINUTE_MS, { kind: "coding", index: 0 }, undefined)).toMatchObject({ kind: "refused", floor: 10 });
+    expect(carve(14 * MINUTE_MS, { kind: "coding", index: 0 }, undefined)).toMatchObject({
+      kind: "refused",
+      floor: 15,
+    });
   });
 });
 
 describe("the fit — a pipeline holds its first child at its ask and every later round at its floor", () => {
-  it("the longest loop the config allows fits inside the pipeline's ask: ship at 3 rounds needs 108 of 120", () => {
-    expect(fit(SHIP_DEFAULT)).toEqual({ ok: true, need: 108, have: 120 });
+  it("the loop the config allows by default fits inside the pipeline's ask with room for fix rounds at their ask: ship at 3 rounds needs 163 of 240", () => {
+    expect(fit(SHIP_DEFAULT)).toEqual({ ok: true, need: 163, have: 240 });
+    expect(fit(SHIP_DEFAULT).need).toBe(ALLOWANCES.provision + ASKS.coding + 70);
   });
 
-  it("a fourth round does not fit, and the refusal names the sum: 129 against 120", () => {
-    expect(fit({ maxMinutes: 120, maxRounds: 4 })).toEqual({ ok: false, need: 129, have: 120 });
+  it("a fourth round needs 189: it fits the ask's 240, and a deployment at 180 is refused naming the sum", () => {
+    expect(fit({ maxMinutes: 240, maxRounds: 4 })).toEqual({ ok: true, need: 189, have: 240 });
+    expect(fit({ maxMinutes: 180, maxRounds: 4 })).toEqual({ ok: false, need: 189, have: 180 });
   });
 
-  it("the deployment that lost twelve children in a day fails the fit: 40 against 108", () => {
-    expect(fit({ maxMinutes: 40, maxRounds: 3 })).toEqual({ ok: false, need: 108, have: 40 });
+  it("the deployment that lost twelve children in a day fails the fit: 40 against 163", () => {
+    expect(fit({ maxMinutes: 40, maxRounds: 3 })).toEqual({ ok: false, need: 163, have: 40 });
   });
 
-  it("the conductor runs no fixed loop; its ask holds a provisioned coding child", () => {
+  it("the conductor runs no fixed loop; its ask holds a provisioned coding child: 3 + 90 = 93 of 120", () => {
+    expect(ALLOWANCES.provision + ASKS.coding).toBe(93);
     expect(ASKS.conductor).toBeGreaterThanOrEqual(ALLOWANCES.provision + ASKS.coding);
   });
 });
@@ -260,13 +273,13 @@ describe("the derivations the registry reads from the module", () => {
 
 describe("the loop's clocks — the loop ends inside the lease, so the write-up and the post-step fit", () => {
   const T0 = 1_700_000_000_000;
-  it("a coding lease of 45 minutes ends its loop at 37: the write-up's 3 and the post-step's 5 are held back; the warning lands 3 minutes before the loop's end; the write-up is bounded by its allowance", () => {
-    const c = loopClock(T0, 45 * MINUTE_MS, "coding");
+  it("a coding lease of 90 minutes ends its loop at 82: the write-up's 3 and the post-step's 5 are held back; the warning lands 3 minutes before the loop's end; the write-up is bounded by its allowance", () => {
+    const c = loopClock(T0, 90 * MINUTE_MS, "coding");
     expect(c).toEqual({
       startedAt: T0,
-      deadline: T0 + 45 * MINUTE_MS,
-      loopEnd: T0 + 37 * MINUTE_MS,
-      warnAt: T0 + 34 * MINUTE_MS,
+      deadline: T0 + 90 * MINUTE_MS,
+      loopEnd: T0 + 82 * MINUTE_MS,
+      warnAt: T0 + 79 * MINUTE_MS,
       finaleMs: ALLOWANCES.writeUp * MINUTE_MS,
     });
     expect(c.deadline - c.loopEnd).toBe((ALLOWANCES.writeUp + POST_STEP_MINUTES.coding) * MINUTE_MS);
@@ -305,8 +318,8 @@ describe("the loop's clocks — the loop ends inside the lease, so the write-up 
     expect(turnLeaseMs(25, -MINUTE_MS)).toBe(MINUTE_MS);
   });
   it("the bearer outlives the lease by its grace of one minute; the mint at provisioning is provisional — the provisioning allowance, the lease and the grace — until the lease starts", () => {
-    expect(bearerExpiresAt(T0 + 45 * MINUTE_MS)).toBe(T0 + 46 * MINUTE_MS);
-    expect(provisionalBearerExpiresAt(T0, 45)).toBe(T0 + (3 + 45 + 1) * MINUTE_MS);
+    expect(bearerExpiresAt(T0 + 90 * MINUTE_MS)).toBe(T0 + 91 * MINUTE_MS);
+    expect(provisionalBearerExpiresAt(T0, 90)).toBe(T0 + (3 + 90 + 1) * MINUTE_MS);
     expect(ALLOWANCES.bearerGrace).toBe(1);
   });
 });
@@ -317,8 +330,8 @@ describe("the grant — what the request authorizes beyond one lease, sized by t
     expect(DEFAULT_GRANT.costCapUsd).toBeUndefined();
   });
 
-  it("bounds the renewals one request may carry: with the ship lease at its ask, a day of segments", () => {
+  it("bounds the renewals one request may carry: with the ship lease at its ask, thirteen segments are two days", () => {
     expect(GRANT_RENEWALS_MAX).toBe(12);
-    expect((GRANT_RENEWALS_MAX + 1) * ASKS.ship).toBeGreaterThanOrEqual(24 * 60);
+    expect((GRANT_RENEWALS_MAX + 1) * ASKS.ship).toBe(2 * 24 * 60 + 240);
   });
 });

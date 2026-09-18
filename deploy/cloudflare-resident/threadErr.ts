@@ -11,8 +11,10 @@ import {
   isRuntimeUnreachableSignal,
   selfAndCauses,
 } from "../../src/execution/residentRefresh.js";
+import { isRuntimeBusyError, RUNTIME_BUSY_REASON } from "../../src/execution/sandboxErrors.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 import type { ResidentStep } from "../../src/execution/residentStepTrace.js";
+import type { RefusalCause } from "../../src/core/refusal.js";
 
 // The cause-chain walker has one home, beside the wording lists; the Worker
 // takes it from here with the rest of the thread data plane's shapes.
@@ -52,6 +54,12 @@ export interface ThreadErr {
   defaultRef?: string;
   state?: ResidentLifecycleState;
   reason?: string;
+  /** Why the route refused, in the seam's three classes (record 0054), so the
+   *  caller reads a field instead of the words: a bad ref or a missing binding
+   *  is `request`, a repository the App cannot see is `policy`, and the
+   *  machinery's own failure is `system`. The words stay for the person; the
+   *  cause is what the bot's command surfaces render by. */
+  cause?: RefusalCause;
 }
 
 /** Where a replacement or a reset was met: the command's spawn or its collect
@@ -143,7 +151,7 @@ export class ControlResetError extends Error {
  *  as an `/exec` script). Gating them would trade a spare re-attach for a read
  *  that fails outright while the container starts. */
 export function runtimeReplacedErr(err: RuntimeReplacedError): ThreadErr {
-  return { error: err.message, status: 409, reason: "runtime-replaced" };
+  return { error: err.message, status: 409, reason: "runtime-replaced", cause: "system" };
 }
 
 /** The named ThreadErr a DO code-update reset answers with — its own `reason`
@@ -152,7 +160,7 @@ export function runtimeReplacedErr(err: RuntimeReplacedError): ThreadErr {
  *  idempotent op or resolves a write by echo (harness-pi item 16), never the
  *  replaced verdict. */
 export function controlResetErr(err: ControlResetError): ThreadErr {
-  return { error: err.message, status: 409, reason: "control-reset" };
+  return { error: err.message, status: 409, reason: "control-reset", cause: "system" };
 }
 
 /** The platform's transient sentences the pinned SDK's own predicate does not
@@ -280,6 +288,9 @@ export function threadErrBuilders(p: ThrowPredicates): ThreadErrBuilders {
     // `isRuntimeUnreachableReason`) — and the remainder sentences.
     for (const link of selfAndCauses(err)) {
       if (isRuntimeUnreachableSignal(link)) return true;
+      // The DO's own word for a refused connect (`runtime-busy:`, item 68):
+      // the container accepts again in moments, so a re-probe clears it.
+      if (isRuntimeBusyError(link)) return true;
       const message = messageOf(link);
       if (isRuntimeUnreachableReason(message) || TRANSIENT_PLATFORM_WORDING.test(message)) return true;
     }
@@ -291,6 +302,8 @@ export function threadErrBuilders(p: ThrowPredicates): ThreadErrBuilders {
       error: prefix ? `${prefix}: ${words}` : words,
       status: 500,
       transient: isTransientPlatformThrow(err, known),
+      // A throw no route named is the machinery's own: system.
+      cause: "system",
     };
   };
   const threadRejectionErr = (err: unknown, route: ThreadDataRoute): ThreadErr => {
@@ -299,14 +312,29 @@ export function threadErrBuilders(p: ThrowPredicates): ThreadErrBuilders {
     const runtimeReplacement = p.isRuntimeReplacement(err);
     if (runtimeReplacement) {
       const vouched = p.sdkVouchesRuntimeMoved(err);
-      if (route === "/exec" && !vouched) return { error: messageOf(err), status: 409 };
+      if (route === "/exec" && !vouched) return { error: messageOf(err), status: 409, cause: "system" };
       return runtimeReplacedErr(new RuntimeReplacedError("call", err, vouched));
     }
+    // The DO's own word for a refused connect, thrown out of a method before
+    // the stub answered (item 68): the same 503 the method answers inside, so
+    // the client re-sends on the token wherever the throw was met.
+    if (isRuntimeBusyError(err)) return runtimeBusyErr(err instanceof Error ? err : new Error(messageOf(err)));
     // The two verdicts just settled ride into the typed 500, so its walk of the
     // cause chain is for the transient alone.
     return catchAllErr(err, undefined, { controlReset, runtimeReplacement });
   };
   return { isTransientPlatformThrow, catchAllErr, threadRejectionErr };
+}
+
+/** A container that did not accept the connection
+ *  (docs/reference/specs/resident-repos.md item 68; execution.md item 28): the
+ *  platform's accept refusal met at the exec choke point's SPAWN — nothing
+ *  ran, the worktree is as it was — named with the wait token the client
+ *  re-sends on, as a 503 like the mirror held. `err` is the DO's typed error
+ *  (`SandboxRuntimeBusyError`, its message starting with the token), or the
+ *  same error after the stub boundary. */
+export function runtimeBusyErr(err: Error): ThreadErr {
+  return { error: err.message, status: 503, reason: RUNTIME_BUSY_REASON, cause: "system" };
 }
 
 /** /exec's failure document, in the item-3 dual shape (`error` beside
@@ -328,6 +356,7 @@ export function execFailureDocument(failure: ThreadErr): object {
     ...(failure.state ? { state: failure.state } : {}),
     ...(typeof failure.stateReason === "string" ? { stateReason: failure.stateReason } : {}),
     ...(failure.reason ? { reason: failure.reason } : {}),
+    ...(failure.cause ? { cause: failure.cause } : {}),
     status: failure.status,
     ...(typeof failure.transient === "boolean" ? { transient: failure.transient } : {}),
     stdout: "",

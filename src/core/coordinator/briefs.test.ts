@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GUARDS, parsePlanUnit, renderContract } from "../ship/contract.js";
+import { GUARDS, parsePlanUnit, PLAN_MAX_CHARS, renderContract } from "../ship/contract.js";
 import type { Brief } from "../ship/coordinator.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 import { composeChild, contractFor, type BriefReaders, type ChildRunFacts } from "./briefs.js";
@@ -81,7 +81,7 @@ function readers(
   const r: BriefReaders = {
     readRepoFile: async (path) => {
       reads.push(path);
-      return files[path];
+      return files[path] === undefined ? undefined : { content: files[path], truncated: false };
     },
     readRunFacts: async (runId) => over.runs?.[runId],
     readShipRequest: async () => "agent:ship in acme/api: fix the login redirect",
@@ -116,7 +116,8 @@ describe("contractFor — the unit's contract from the repository at the base re
   it("CLAUDE.md is read when AGENTS.md is not there; neither leaves the rules absent; an unreadable plan throws naming it", async () => {
     /** Readers over the given files alone. */
     const over = (files: Record<string, string>): BriefReaders => ({
-      readRepoFile: async (path) => files[path],
+      readRepoFile: async (path) =>
+        files[path] === undefined ? undefined : { content: files[path], truncated: false },
       readRunFacts: async () => undefined,
       readShipRequest: async () => undefined,
     });
@@ -128,6 +129,23 @@ describe("contractFor — the unit's contract from the repository at the base re
     await expect(contractFor(instance, unit, over({}))).rejects.toThrow(
       /docs\/plans\/fixture\.md is not readable at main in acme\/api/,
     );
+  });
+
+  it("the plan is asked for whole, up to PLAN_MAX_CHARS, and a plan the read still cut is refused by name — a unit briefed from a clipped plan would be briefed short", async () => {
+    const asked: Array<{ path: string; maxChars?: number }> = [];
+    const cut: BriefReaders = {
+      readRepoFile: async (path, opts) => {
+        asked.push({ path, ...(opts?.maxChars !== undefined ? { maxChars: opts.maxChars } : {}) });
+        if (path === "docs/plans/fixture.md") return { content: PLAN.slice(0, 40), truncated: true };
+        return undefined;
+      },
+      readRunFacts: async () => undefined,
+      readShipRequest: async () => undefined,
+    };
+    await expect(contractFor(instance, unit, cut)).rejects.toThrow(
+      /docs\/plans\/fixture\.md is longer than 2,000,000 characters at main in acme\/api; a unit read from a cut plan could be briefed short, so none is/,
+    );
+    expect(asked).toEqual([{ path: "docs/plans/fixture.md", maxChars: PLAN_MAX_CHARS }]);
   });
 
   it("a generated instance (a `plan` with no `path`): the section is the request text read from the ship run's record with the directive and the repository stripped, no spec rows and every guard — no `agent:ship` turn in the thread needed; an unreadable record falls back to naming the thread", async () => {

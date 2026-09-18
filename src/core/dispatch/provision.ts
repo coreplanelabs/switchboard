@@ -29,7 +29,7 @@ import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { memoryContextBlock, type MemoryStore } from "../memory/index.js";
 import { provisionalBearerExpiresAt } from "../budgets.js";
 import type { RunBearerStore } from "../modelProxy/runBearers.js";
-import { parseModelRef } from "../provider.js";
+import { parseModelRef, wireOf } from "../provider.js";
 import { skillGuidanceBlock, type SkillStore } from "../../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource, type McpToolsForRun } from "../../mcp/source.js";
 import { configAwarenessBlock } from "../configAwareness.js";
@@ -39,6 +39,8 @@ import type { ResidentFleetFacts } from "../residentFleet.js";
 import { attachRoundWorkspace, makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
 import { ownPrOf, type RepoContext } from "../repoContext.js";
 import { redactSecrets, type AgentSource, type RunEvent } from "../runEvents.js";
+import { oneLine } from "../redact.js";
+import type { ControlDecision, ModelCard } from "../modelCard.js";
 import { MAX_EVENT_BYTES, utf8ByteLength, type RunSeed } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
@@ -54,7 +56,15 @@ import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, ty
 import type { AdmissionDeps, DispatchFollowUp, RestartContext, ResumeContext, RunHooks } from "./admission.js";
 import type { AuthorizeDeps, GateCard, GateContext } from "./authorize.js";
 import { channelVisibilityOf, type RecordDeps } from "./record.js";
-import { attachmentSuffix, composeRunLabel, humanizeMessageText, isMrkdwnChannel, liveViewLink } from "./reply.js";
+import {
+  attachmentSuffix,
+  composeRunLabel,
+  humanizeMessageText,
+  isMrkdwnChannel,
+  liveViewLink,
+  REFUSAL_SENTENCES,
+} from "./reply.js";
+import { refusalOf } from "../refusal.js";
 import { contextMessageTexts, type TextTurn } from "./messages.js";
 import { ROUTED_CARD_FOOTER, routedLabel, routedPartLines, type RouteDecided } from "./route.js";
 import type { HarnessProcessDeps } from "./run.js";
@@ -235,7 +245,7 @@ export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Pro
 /**
  * The card's budget line (docs/reference/specs/routing-and-config.md item 4):
  * what clipped the run's budget below the preset's own — `budget 45 min
- * (channel boundary; preset asks 120)`, `budget 30 min (budget directive;
+ * (channel boundary; preset asks 90)`, `budget 30 min (budget directive;
  * preset asks 120)` — and, when the request carried a `budget:` directive that
  * did not win, that it narrowed nothing: `budget:200 narrowed nothing (preset
  * asks 120)` alone, or appended to the clip of the boundary that was tighter.
@@ -319,6 +329,12 @@ export interface RegisterRunContext {
   seedTurns?: TextTurn[];
   /** How the preset was chosen (`run_meta.agentSource`). */
   agentSource: AgentSource;
+  /** The model card resolved before the first call (record 0052) and
+   *  every control's decision against it (record 0052); the degraded decisions become
+   *  `control_degraded` notes before the first turn. A hand-built context (a
+   *  test) may carry none. */
+  modelCard?: ModelCard;
+  cardDecisions?: ControlDecision[];
   /** The conversations the request pointed at and the step quoted (record
    *  0037): one `reference` event each, right after `input`. Absent or empty
    *  when the request carried none or the step is off. */
@@ -360,6 +376,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     seed,
     seedTurns,
     agentSource,
+    modelCard,
+    cardDecisions,
     route,
   } = ctx;
   // The reservation (item 42): the run's row BEFORE the workspace attach —
@@ -535,6 +553,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
           }
         : {}),
       ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+      ...(modelCard ? { card: modelCard } : {}),
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
       ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
       ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
@@ -542,6 +561,26 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       at: clock(),
     });
   if (!resume) publishMeta(repoCtx);
+  // The card's degradations, one typed note each, before the first turn
+  // (record 0052): a control the card cannot vouch for is never a silent
+  // downgrade. A refusal never reaches here — the resolve stage refused it.
+  if (!resume)
+    for (const d of cardDecisions ?? []) {
+      if (d.outcome !== "degraded") continue;
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "control_degraded",
+        summary: oneLine(
+          `${d.control}${d.asked !== undefined ? ` ${d.asked}` : ""} → ${d.applied ?? "?"} (${d.vouched ? "fallback" : "unvouched"}): ${d.why}`,
+        ),
+        control: d.control,
+        ...(d.asked !== undefined ? { asked: d.asked } : {}),
+        ...(d.applied !== undefined ? { applied: d.applied } : {}),
+        vouched: d.vouched,
+        why: d.why,
+        at: clock(),
+      });
+    }
   // The router's decision (routing-and-config item 21), right after the meta
   // it explains: the preset, the reason the card carries, the model that
   // decided, a compound's parts — or the rejection that left the run on the default.
@@ -833,7 +872,7 @@ export async function attachWorkspace(
   deps: ProvisionDeps,
   ctx: GateContext & GateCard & Omit<AttachContext, "threadKey">,
 ): Promise<WorkspaceAttach> {
-  const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach, stopSignal } = ctx;
+  const { msg, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach, stopSignal } = ctx;
   const { remainingMs } = ctx;
   let round: RoundWorkspace;
   try {
@@ -859,15 +898,11 @@ export async function attachWorkspace(
     // next message and re-attach binds it.
     if (err instanceof ResidentNeedsRefError) {
       const repo = repoCtx.repo;
-      await refuse("which_branch", async () => {
-        await card.done(
+      await refuse(refusalOf("which_branch", REFUSAL_SENTENCES.which_branch({ repo })), () =>
+        card.done(
           shell.close({ kind: "not_started", icon: "🌿", reason: "which branch?", ...closeLines(clock(), false) }),
-        );
-        await io.reply(
-          `🌿 Which branch of \`${repo}\` should this thread work on? ` +
-            `No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I'll pick it up from there.`,
-        );
-      });
+        ),
+      );
       return { kind: "refused", reason: "which_branch" };
     }
     // A resumed run's workspace is where its row says or nowhere (item 54):
@@ -921,7 +956,7 @@ export function mintRunBearer(deps: ProvisionDeps, ctx: MintBearerContext): stri
     runId,
     modelRef: resolved.modelRef,
     providerName,
-    providerType: providerCfg.type,
+    providerWire: wireOf(providerCfg),
     model,
     maxTokens: agent.maxTokens,
     maxTurns: agent.maxTurns,

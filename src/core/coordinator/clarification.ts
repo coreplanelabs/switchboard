@@ -55,7 +55,7 @@ export async function coordinatorClarificationFor(input: {
     throw new CoordinatorClarificationRefusal("The coordinator round could not be verified.");
   const unitId = unitOfIdempotencyKey(run.idempotencyKey);
   const unit = (await instances.listUnits(instance.id)).find((row) => row.unit === unitId);
-  const thread = run.agent === "review" ? unit?.reviewThread?.threadKey : unit?.threadKey;
+  const thread = run.agent === "review" ? (unit?.reviewThread?.threadKey ?? unit?.threadKey) : unit?.threadKey;
   if (!unit || unit.ending || thread !== msg.threadKey)
     throw new CoordinatorClarificationRefusal("This coordinator question no longer belongs to an active unit.");
   const remainingMinutes =
@@ -92,9 +92,10 @@ export async function coordinatorClarificationContract(
 ) {
   const { instance, unit } = context;
   return contractFor(instance, unit, {
-    readRepoFile: async (path) => {
+    readRepoFile: async (path, opts) => {
       try {
-        return (await deps.github.readFile(instance.repo, path, instance.base ?? "main")).content;
+        const file = await deps.github.readFile(instance.repo, path, instance.base ?? "main", opts);
+        return { content: file.content, truncated: file.truncated };
       } catch {
         return undefined;
       }

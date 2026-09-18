@@ -97,8 +97,8 @@ const OUTCOME_TONE: Record<"ok" | "bad" | "warn", string> = {
               }}</span>
               <template v-if="r.last.runId">
                 <span class="mx-1.5 text-accented max-sm:mx-0" aria-hidden="true">·</span>
-                <a v-if="r.last.runHref" class="text-primary hover:underline" :href="r.last.runHref"
-                  >run {{ r.last.runId.slice(0, 8) }}</a
+                <RouterLink v-if="r.last.runHref" class="text-primary hover:underline" :to="r.last.runHref"
+                  >run {{ r.last.runId.slice(0, 8) }}</RouterLink
                 >
                 <template v-else>run {{ r.last.runId.slice(0, 8) }}</template>
               </template>

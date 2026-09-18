@@ -2,17 +2,23 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BASH_TIMEOUT_MAX_MS,
+  ExecCapacityError,
   ExecControlResetError,
   ExecInfraError,
   ExecSandboxRestartedError,
   infraMayClear,
 } from "./executor.js";
+import { RUNTIME_BUSY_WAIT_MAX_MS, runtimeBusyMessage } from "./sandboxErrors.js";
 import {
   ResidentExecutor,
   ResidentLeaseSpentError,
   ResidentNeedsRefError,
   ResidentOperations,
   ResidentReuseRefusedError,
+  DRAIN_LEASE_RESERVE_MS,
+  DRAIN_POLL_MS,
+  ResidentDrainingError,
+  isDrainingRefusal,
 } from "./resident.js";
 import { classificationOf } from "../core/trace/classify.js";
 import { BASH_TIMEOUT_MS } from "./bashTimeout.js";
@@ -1148,10 +1154,40 @@ describe("ResidentExecutor.probeStatus", () => {
     expect(probe).toEqual({ kind: "status", state: "not-onboarded", reason: "" });
   });
 
-  it("a network failure is an unreachable marker flagged as transport-level", async () => {
+  it("a network failure is an unreachable marker flagged as transport-level, and NOT as a deadline miss", async () => {
     stubFetch({ reject: "fetch failed" });
     const probe = await ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 2000);
     expect(probe).toMatchObject({ kind: "unreachable", transport: true });
+    expect(probe).not.toHaveProperty("timedOut");
+  });
+
+  // resident-repos.md item 25: the host answered nothing inside the probe's own
+  // deadline. Reachable but slow is not an outage, so the marker says which it
+  // was and the factory arms no breaker on it.
+  it("a probe whose deadline passes is an unreachable marker flagged transport-level AND `timedOut`, naming the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          (_url: unknown, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+            }),
+        ),
+      );
+      const pending = ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 8_000);
+      await vi.advanceTimersByTimeAsync(8_000);
+      const probe = await pending;
+      expect(probe).toEqual({
+        kind: "unreachable",
+        error: "the 8s call deadline passed",
+        transport: true,
+        timedOut: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("an HTTP-level probe failure is unreachable but NOT transport (never negative-cached)", async () => {
@@ -2351,5 +2387,222 @@ describe("ResidentExecutor.probeStatus — the seed handle", () => {
     expect(await ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 2000)).not.toHaveProperty(
       "seed",
     );
+  });
+});
+
+// Feature: docs/reference/specs/resident-repos.md item 68 — a container that
+// did not accept the connection is waited out: the identical request is
+// re-sent on the token, inside the command's own budget.
+describe("ResidentExecutor waits out a refused connect (item 68)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const MESSAGE = runtimeBusyMessage({
+    containerId: "c1",
+    cause: "Container is taking too long to accept the connection; the application could be overwhelmed with load",
+  });
+  /** The /exec stream's failure document for the word, as `execFailureDocument` renders `runtimeBusyErr`. */
+  const BUSY_EXEC = {
+    error: MESSAGE,
+    reason: "runtime-busy",
+    cause: "system",
+    status: 503,
+    stdout: "",
+    stderr: MESSAGE,
+    exitCode: 127,
+  };
+  const OK = { stdout: "alive", stderr: "", exitCode: 0, truncated: false };
+
+  /** A fetch stub whose LAST canned answer repeats: a container that keeps refusing the connect. */
+  function repeatingFetch(responses: Array<{ status?: number; body: unknown }>) {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      const r = responses[Math.min(calls.length - 1, responses.length - 1)];
+      return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
+    });
+    vi.stubGlobal("fetch", fn);
+    return { fn, calls };
+  }
+
+  it("re-sends the SAME /exec request after 3 s, 5 s, then 10 s while the container refuses the connect, and returns the eventual result", async () => {
+    const { calls } = repeatingFetch([{ body: BUSY_EXEC }, { body: BUSY_EXEC }, { body: BUSY_EXEC }, { body: OK }]);
+    const p = new ResidentExecutor(OPTS).exec("kill -0 44 && echo alive", { timeoutMs: 60_000 });
+    void p.then(
+      () => undefined,
+      () => undefined,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls).toHaveLength(4);
+    await expect(p).resolves.toBe("alive");
+    expect(calls.map(route)).toEqual(["/exec", "/exec", "/exec", "/exec"]);
+    for (const c of calls) expect(String(c.init.body)).toBe(String(calls[0].init.body));
+    expect(sentBody(calls[3])).toMatchObject({ command: "kill -0 44 && echo alive", timeoutMs: 60_000 });
+  });
+
+  it("gives up once the wait reaches the command's own budget with ExecCapacityError naming the refusal — never ExecInfraError, never a re-attach", async () => {
+    const { calls } = repeatingFetch([{ body: BUSY_EXEC }]);
+    const outcome = new ResidentExecutor(OPTS).exec("tail -c +1 log", { timeoutMs: 60_000 }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecCapacityError);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe(
+      "sandbox busy — the thread's container did not accept a connection within 60s (the platform refused every connect of the wait; a command saturating its cores is one cause, an idle container has met it too); retry",
+    );
+    // 3 + 5 + 10×5 + 2 (clipped to the budget) = 60 s → 8 waits, 9 sends, then no more
+    expect(calls).toHaveLength(9);
+    expect(new Set(calls.map(route))).toEqual(new Set(["/exec"]));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toHaveLength(9);
+  });
+
+  it("never waits longer than RUNTIME_BUSY_WAIT_MAX_MS (5 min) even for a 20-minute command", async () => {
+    const { calls } = repeatingFetch([{ body: BUSY_EXEC }]);
+    const outcome = new ResidentExecutor(OPTS)
+      .exec("npm run verify", { timeoutMs: 20 * 60_000 })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(RUNTIME_BUSY_WAIT_MAX_MS);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecCapacityError);
+    expect((err as Error).message).toContain("within 300s");
+    const sends = calls.length;
+    await vi.advanceTimersByTimeAsync(15 * 60_000);
+    expect(calls).toHaveLength(sends);
+  });
+
+  it("a /read answered HTTP 503 with the token is the same wait, and the eventual answer is returned", async () => {
+    const { calls } = repeatingFetch([
+      { status: 503, body: { error: MESSAGE, reason: "runtime-busy", cause: "system" } },
+      { body: { content: "hello", truncated: false } },
+    ]);
+    const p = new ResidentExecutor(OPTS).readFile("a.txt");
+    void p.then(
+      () => undefined,
+      () => undefined,
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(p).resolves.toBe("hello");
+    expect(calls.map(route)).toEqual(["/read", "/read"]);
+  });
+
+  it("a hard stop during the pause ends the wait at once with the run's one typed `aborted` error, and nothing is re-sent", async () => {
+    const { calls } = repeatingFetch([{ body: BUSY_EXEC }]);
+    const control = new AbortController();
+    const outcome = new ResidentExecutor(OPTS)
+      .exec("true", { timeoutMs: 60_000, signal: control.signal })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(calls).toHaveLength(1);
+    control.abort();
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("aborted");
+    expect((err as Error).message).toContain("stopped waiting for the container to accept the connection");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("an OLD Worker's bare platform words — the typed 500 with no token — are still infra after exactly one send: the token decides, never the words", async () => {
+    const bare =
+      "Container is taking too long to accept the connection; the application could be overwhelmed with load";
+    const { calls } = repeatingFetch([
+      {
+        body: { error: bare, status: 500, transient: false, cause: "system", stdout: "", stderr: bare, exitCode: 127 },
+      },
+    ]);
+    const outcome = new ResidentExecutor(OPTS).exec("echo hi", { timeoutMs: 60_000 }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("answered");
+    expect(calls).toHaveLength(1);
+  });
+});
+
+// Feature: docs/reference/specs/resident-repos.md item 69 — the fleet drain: a
+// deploy closed `/attach` to new runs; the client waits at its attach for the
+// fleet to reopen, one re-attach per poll, under the run's own lease, and the
+// binding carries the wait so the card says the run started late and why.
+describe("ResidentExecutor.attach during a fleet drain (item 69)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const DRAIN = {
+    since: "2026-09-18T05:00:00.000Z",
+    until: "2026-09-18T06:00:00.000Z",
+    by: "deploy all",
+    reason: "deploy 62e4e9a",
+  };
+  const draining = {
+    status: 503,
+    body: {
+      error:
+        "draining: the resident fleet is closed to new runs for deploy 62e4e9a (asked by deploy all at …, ends by …) — the run waits at its attach and starts when the fleet reopens",
+      status: 503,
+      draining: DRAIN,
+    },
+  };
+
+  it("isDrainingRefusal keys on the 503 with a `draining` record — never on the words; a 503 without the record, or the record on a 200, is not a drain", () => {
+    expect(isDrainingRefusal({ status: 503, data: { error: "x", draining: DRAIN } })).toBe(true);
+    expect(isDrainingRefusal({ status: 503, data: { error: "draining: fleet closed" } })).toBe(false);
+    expect(isDrainingRefusal({ status: 200, data: { draining: DRAIN } })).toBe(false);
+    expect(isDrainingRefusal({ status: 503, data: { draining: { since: "x" } } })).toBe(false);
+  });
+
+  it("a drained fleet is waited for: one re-attach per poll until admitted, the binding carrying the wait; no other route is touched", async () => {
+    const { calls } = stubFetch(draining, draining, { raw: "\n" + JSON.stringify(ATTACH_OK) });
+    const ex = new ResidentExecutor(OPTS);
+    const p = ex.attach();
+    await vi.advanceTimersByTimeAsync(DRAIN_POLL_MS);
+    await vi.advanceTimersByTimeAsync(DRAIN_POLL_MS);
+    const binding = await p;
+    expect(binding).toMatchObject({ ref: "master", sha: "1220b9c4", wokeAfterMs: 2 * DRAIN_POLL_MS });
+    expect(calls.map(route)).toEqual(["/attach", "/attach", "/attach"]);
+  });
+
+  it("the wait is bounded by the run's lease less the reserve: a run with 20 min left waits 10 min, then the typed ResidentDrainingError names the wait and the drain's end", async () => {
+    const polls = (10 * 60_000) / DRAIN_POLL_MS;
+    stubFetch(...Array.from({ length: polls + 2 }, () => draining));
+    const ex = new ResidentExecutor({ ...OPTS, remainingMs: () => 20 * 60_000 });
+    const p = ex.attach().catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(20 * 60_000 - DRAIN_LEASE_RESERVE_MS + 1_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ResidentDrainingError);
+    expect((err as ResidentDrainingError).reason).toBe("refused");
+    expect((err as Error).message).toContain("did not reopen within the 600s this run could wait");
+    expect((err as Error).message).toContain("(the drain ends by 2026-09-18T06:00:00.000Z)");
+    expect((err as Error).message).toContain("draining: the resident fleet is closed to new runs");
+  });
+
+  it("an answer that is no longer the drain is judged as a first answer would be: the attach's own refusal ends the wait at once", async () => {
+    stubFetch(draining, { status: 404, body: { error: "not onboarded" } });
+    const ex = new ResidentExecutor(OPTS);
+    const p = ex.attach().catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(DRAIN_POLL_MS);
+    const err = await p;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("is not onboarded");
+  });
+
+  it("the run's stop ends the wait at once — no re-attach follows the stop", async () => {
+    const { calls } = stubFetch(draining, draining);
+    const ex = new ResidentExecutor(OPTS);
+    const ac = new AbortController();
+    const p = ex.attach(undefined, { signal: ac.signal }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_000);
+    ac.abort(new Error("stopped"));
+    const err = await p;
+    expect(err).toBeInstanceOf(Error);
+    expect(calls).toHaveLength(1);
   });
 });

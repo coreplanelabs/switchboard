@@ -15,10 +15,12 @@ import {
   piRunPaths,
   piRunPathsAt,
   piThinkingLevel,
+  piThinkingLevelMap,
   takesAdaptiveThinking,
   type PiLaunchSpec,
 } from "./process.js";
 import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
+import type { ModelCard } from "../../modelCard.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 4 — how a run's pi is
 // launched: RPC mode with every discovery off but the harness's extension,
@@ -181,6 +183,22 @@ describe("piLaunchEnv", () => {
   });
 });
 
+/** A card fixture (record 0052): the wire-default card, overridable per test. */
+const cardOf = (over: Partial<ModelCard>): ModelCard => ({
+  ref: "openrouter/acme/m1",
+  block: "openrouter",
+  model: "acme/m1",
+  vendor: "acme",
+  wire: "openai-chat",
+  levels: "unknown",
+  capField: "max_completion_tokens",
+  window: 128_000,
+  inputs: { image: "unknown", document: "unknown" },
+  cache: "unknown",
+  provenance: { levels: "wire", capField: "wire", window: "wire", inputs: "wire", cache: "wire", price: "wire" },
+  ...over,
+});
+
 describe("piModelsJson", () => {
   it("names the proxy as the one provider on the Anthropic shape, the key interpolated from the bearer's variable, a zero rate card", () => {
     const models = JSON.parse(piModelsJson(spec)) as {
@@ -245,6 +263,112 @@ describe("piModelsJson", () => {
       providers: Record<string, { models: Array<Record<string, unknown>> }>;
     };
     expect(models.providers[PROXY_PROVIDER].models[0]).not.toHaveProperty("compat");
+  });
+
+  // The card written into the file (record 0052): the word on the wire is the
+  // card's, never one pi chose — pi clamps nothing, prices nothing, invents no window.
+  const modelOf = (s: PiLaunchSpec) =>
+    (JSON.parse(piModelsJson(s)) as { providers: Record<string, { models: Array<Record<string, unknown>> }> })
+      .providers[PROXY_PROVIDER].models[0];
+
+  it("a known card writes its level map, its cap field and its window into the run's entry", () => {
+    const card = cardOf({
+      levels: {
+        low: { word: "low", named: true },
+        medium: { word: "medium", named: true },
+        high: { word: "high", named: true },
+        xhigh: { word: "high", named: false },
+        max: "refused",
+      },
+      capField: "max_tokens",
+      window: 131_072,
+      provenance: {
+        levels: "registry",
+        capField: "registry",
+        window: "registry",
+        inputs: "wire",
+        cache: "wire",
+        price: "wire",
+      },
+    });
+    const entry = modelOf({ ...spec, model: { ...spec.model, providerType: "openai-compatible" }, card });
+    expect(entry.thinkingLevelMap).toEqual({ low: "low", medium: "medium", high: "high", xhigh: "high", max: null });
+    expect(entry.compat).toEqual({ maxTokensField: "max_tokens" });
+    expect(entry.contextWindow).toBe(131_072);
+  });
+
+  it("an unknown card writes the identity map — pi clamps nothing — pi's unknown window and the wire's cap field", () => {
+    const entry = modelOf({ ...spec, model: { ...spec.model, providerType: "openai-compatible" }, card: cardOf({}) });
+    expect(entry.thinkingLevelMap).toEqual({ low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" });
+    expect(entry.contextWindow).toBe(128_000);
+    expect(entry.compat).toEqual({ maxTokensField: "max_completion_tokens" });
+  });
+
+  it("a markers card asks for Anthropic-style cache_control on the completions shape — an Anthropic vendor through an aggregator", () => {
+    const card = cardOf({ vendor: "anthropic", cache: "markers" });
+    const entry = modelOf({ ...spec, model: { ...spec.model, providerType: "openai-compatible" }, card });
+    expect((entry.compat as Record<string, unknown>).cacheControlFormat).toBe("anthropic");
+  });
+
+  it("the Anthropic shape keeps its own compat beside the card: the window and the map are the card's, the cap field and the markers are the shape's own", () => {
+    const card = cardOf({ wire: "anthropic-messages", cache: "markers", window: 200_000 });
+    const entry = modelOf({ ...spec, card });
+    expect(entry.compat).toEqual({ forceAdaptiveThinking: true });
+    expect(entry.contextWindow).toBe(200_000);
+    expect(entry.thinkingLevelMap).toEqual({ low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" });
+  });
+
+  it("an openai-responses card puts pi on the Responses API under the proxy's /v1, with no completions compat — max_output_tokens is that adapter's own spelling", () => {
+    const card = cardOf({
+      ref: "openai/gpt-5.4",
+      block: "openai",
+      model: "gpt-5.4",
+      wire: "openai-responses",
+      capField: "max_output_tokens",
+    });
+    const models = JSON.parse(
+      piModelsJson({ ...spec, model: { ...spec.model, id: "gpt-5.4", providerType: "openai-compatible" }, card }),
+    ) as { providers: Record<string, { baseUrl: string; api: string; models: Array<Record<string, unknown>> }> };
+    const p = models.providers[PROXY_PROVIDER];
+    expect(p.baseUrl).toBe("https://bot.example.com/v1");
+    expect(p.api).toBe("openai-responses");
+    expect(p.models[0]).not.toHaveProperty("compat");
+  });
+
+  it("a markers card on the Responses wire asks for no cache_control format — the compat knob is the completions shape's alone", () => {
+    const card = cardOf({ wire: "openai-responses", vendor: "anthropic", cache: "markers" });
+    const entry = modelOf({ ...spec, model: { ...spec.model, providerType: "openai-compatible" }, card });
+    expect(entry).not.toHaveProperty("compat");
+  });
+
+  it("a card that says no images narrows the entry's input to text", () => {
+    const entry = modelOf({
+      ...spec,
+      model: { ...spec.model, providerType: "openai-compatible" },
+      card: cardOf({ inputs: { image: false, document: "unknown" } }),
+    });
+    expect(entry.input).toEqual(["text"]);
+  });
+});
+
+describe("piThinkingLevelMap", () => {
+  it("unknown levels are the identity map; a refused tier is null; a fallback's word is the card's, not pi's", () => {
+    expect(piThinkingLevelMap("unknown")).toEqual({
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+    });
+    expect(
+      piThinkingLevelMap({
+        low: { word: "LOW", named: true },
+        medium: { word: "medium", named: true },
+        high: { word: "high", named: true },
+        xhigh: { word: "high", named: false },
+        max: "refused",
+      }),
+    ).toEqual({ low: "LOW", medium: "medium", high: "high", xhigh: "high", max: null });
   });
 });
 

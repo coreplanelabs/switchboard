@@ -30,7 +30,7 @@
 // arrive in the input rather than from the agent registry.
 
 import type { ShipRoundOutcome } from "../runEvents.js";
-import type { Handoff } from "./handoff.js";
+import type { Handoff, HandoffLanded } from "./handoff.js";
 import { progressOf, renderRenewal, renewalDecision, type PushedHeadFact, type RenewalDecision } from "./renewal.js";
 import type { RunStatus } from "../runRecord.js";
 import { normalizeHead, sameCommit } from "../reviewedHead.js";
@@ -507,8 +507,21 @@ export type PrCheck =
        *  the base and the head) or `no_base` (the instance names no base to
        *  open against, so no create was tried). Absent on a plain check. */
       unrecovered?: "no_commits" | "no_base";
+      /** On a plain check: the branch's commits over the base as GitHub
+       *  compares them, when the bot could read them. Zero beside a handoff
+       *  naming where the scope landed is the `already_landed` ending
+       *  (agent-ship item 12); absent, the fact is unknown and never claimed. */
+      aheadOfBase?: number;
     }
-  | { state: "open"; prNumber: number; url: string; headSha?: string; autoMergeEnabled?: boolean }
+  | {
+      state: "open";
+      prNumber: number;
+      url: string;
+      headSha?: string;
+      autoMergeEnabled?: boolean;
+      /** The check runs at the head, when the read asked for them (the ending's facts). */
+      checks?: CommitChecksFacts;
+    }
   | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string };
 
 /** What a step answered. Every bot answer carries `at`, the bot's clock — the machine's time. */
@@ -539,6 +552,11 @@ export type StepReturn =
 export type UnitEnding =
   | { kind: "merged"; by: "runner"; pr: PrRef; sha: string; reviewRounds: number }
   | { kind: "merged"; by: "other"; pr: PrRef; sha: string; mergedAt: string; reviewRounds: number }
+  /** Round 0 found the unit's scope already on the base (agent-ship item 12):
+   *  the coding child's handoff names where it landed and the branch has no
+   *  commits over the base, so there is no pull request to open or review.
+   *  The unit is done and its dependents start on a base that carries it. */
+  | { kind: "already_landed"; landed: HandoffLanded[]; round: RoundRef; runId: string; reviewRounds: number }
   | { kind: "merge_ready"; pr: PrRef; reviewRounds: number }
   | { kind: "merge_refused"; pr: PrRef; reason: string; reviewRounds: number }
   | { kind: "round_cap"; maxRounds: number; reviewRounds: number }
@@ -759,7 +777,7 @@ export const WAIT_MARGIN_MS = SHIP_WAIT.marginMinutes * MIN;
  *  one chunk of the runner's time, not the child's whole budget. Five minutes
  *  is the machine's one cadence for asking the bot what it cannot be told (the
  *  margin and the merge poll are the same number), and it keeps a round to a
- *  few steps: a coding child's 45 minutes are ten waits and ten reads. */
+ *  few steps: a coding child's 90 minutes are eighteen waits and eighteen reads. */
 export const WAIT_CHUNK_MS = SHIP_WAIT.chunkMinutes * MIN;
 /** The merge wait is a round of its own: its minutes are carved from the
  *  pipeline's remainder when the door is first asked (the merge wait's ask and
@@ -1275,15 +1293,26 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
         [roundNote(round, "aborted")],
       );
     }
-    // Round 0 ended without a pull request: the segment is over with the unit
-    // unfinished, and the grant decides whether the next opens (decision
-    // 0046, Renewal). Progress is read off the child's record — a head pushed
-    // to the unit's branch since the segment started, or a handoff that moved —
-    // never off its words; the decision then asks the grant's count, the cap
-    // and the fit, in that order, and a refusal names the clause. A plain
-    // abort keeps its old shape when nothing was pushed under a grant of zero:
-    // a clarifying question is not a stop to explain.
     if (round.index === 0) {
+      // The scope already landed (agent-ship item 12): the child's handoff
+      // names where, and the branch carries no commits over the base — two
+      // facts off the record and GitHub, never the child's prose alone. There
+      // is nothing to open, review or renew: the unit is done. Either fact
+      // missing (a handoff that names no landing, commits on the branch, a
+      // compare the bot could not read) leaves the round-0 ending below.
+      const landed = phase.childHandoff?.landed ?? [];
+      if (landed.length > 0 && pr.aheadOfBase === 0)
+        return end(s, { kind: "already_landed", landed, round, runId: phase.runId, reviewRounds: s.reviewRounds }, [
+          roundNote(round, "completed"),
+        ]);
+      // Round 0 ended without a pull request: the segment is over with the unit
+      // unfinished, and the grant decides whether the next opens (decision
+      // 0046, Renewal). Progress is read off the child's record — a head pushed
+      // to the unit's branch since the segment started, or a handoff that moved —
+      // never off its words; the decision then asks the grant's count, the cap
+      // and the fit, in that order, and a refusal names the clause. A plain
+      // abort keeps its old shape when nothing was pushed under a grant of zero:
+      // a clarifying question is not a stop to explain.
       const grant = s.input.grant ?? DEFAULT_GRANT;
       const session = s.input.session;
       const progress = progressOf({
@@ -1695,6 +1724,30 @@ function splitReport(s: UnitPipelineState): string {
 export interface MergeReadyFacts {
   autoMergeEnabled?: boolean;
   merged?: { sha: string; mergedAt: string };
+  /** The check runs at the approved head as the merge door reads them (record 0055). */
+  checks?: CommitChecksFacts;
+}
+
+/** The check runs at one commit: how many, which still run, which failed. */
+export interface CommitChecksFacts {
+  total: number;
+  pending: string[];
+  failed: string[];
+}
+
+/** The merge-ready report's headline is a claim about the approved head
+ *  (record 0055): a failed check is never called merge-ready, a pending one
+ *  is named, green is said, and without the fact the line is unchanged. */
+function mergeReadyHeadline(rounds: string, url: string, checks: CommitChecksFacts | undefined): string {
+  if (checks === undefined) return `✅ Merge-ready after ${rounds}: ${url}`;
+  if (checks.failed.length > 0) {
+    const pending = checks.pending.length > 0 ? `; pending: ${checks.pending.join(", ")}` : "";
+    return `⚠️ Approved but not merge-ready after ${rounds}: ${url} — CI is red at the approved head: ${checks.failed.join(", ")}${pending}. Fix it and re-review, or rerun a flake; the runner calls a head merge-ready only over green checks.`;
+  }
+  if (checks.pending.length > 0)
+    return `✅ Approved after ${rounds}: ${url} — checks pending at the approved head: ${checks.pending.join(", ")}; merge-ready once they pass.`;
+  if (checks.total === 0) return `✅ Merge-ready after ${rounds}: ${url} — no check reported at the approved head.`;
+  return `✅ Merge-ready after ${rounds}: ${url} — ${checks.total} check${checks.total === 1 ? "" : "s"} green at the approved head.`;
 }
 
 export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts): string {
@@ -1742,9 +1795,16 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
         ...(skippedLine ? [skippedLine] : []),
         declinedLine,
       ].join("\n");
+    case "already_landed":
+      // No compare link, no renewal line, no re-issue prompt: there was
+      // nothing to ship, so none of them has a question to answer.
+      return `✅ Already on \`${s.input.base}\`: the unit's scope landed before this attempt — ${e.landed.map((l) => `${l.what} (${l.where})`).join("; ")}. The coding child (run ${e.runId}) found it there and pushed nothing of its own: \`${s.input.unit.branch}\` has no commits over \`${s.input.base}\`, so there is no pull request to open or review. The unit is done and its dependents start on a base that carries it.`;
     case "merge_ready":
       return [
-        `✅ Merge-ready after ${rounds}: ${e.pr.url}`,
+        // A merge that already happened outranks the checks: there is no head left to gate.
+        facts?.merged
+          ? `✅ Merge-ready after ${rounds}: ${e.pr.url}`
+          : mergeReadyHeadline(rounds, e.pr.url, facts?.checks),
         verdictLine,
         levelLine,
         grantLine,
@@ -1760,9 +1820,17 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
             : "Remaining gate: a person's merge — the runner merges only when the instance's `merge` field says runner, and ship never approves.",
       ].join("\n");
     case "merge_refused":
+      // The approved work is on the branch, so the remedy is a person's hand
+      // merge, never a re-run: a seeded plan re-issued afterwards finds the
+      // merged pull request (the pre-check's `merged` by other, or
+      // `already_landed`) and moves on to the dependents. The generated
+      // plan's line already says to re-issue with the PR URL, which takes the
+      // same recognition path.
       return join([
         `⚠️ The review approved ${e.pr.url} but the runner did not merge it: ${e.reason}. A person decides what becomes of the pull request.`,
-        reissue,
+        s.input.generated
+          ? reissue
+          : `The approved work is on the branch: rebase or fix it, push, and merge it by hand. Then re-issue the plan naming the remaining units — a unit whose pull request has merged is recognized and not run again, and its dependents start from there.`,
       ]);
     case "round_cap":
       return join([

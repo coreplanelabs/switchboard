@@ -13,7 +13,8 @@
 // line, as they would have before the button existed.
 import type { Actor } from "../authz/types.js";
 import type { ChatCommandResult } from "../commandChat.js";
-import type { ConfirmationRefusal } from "../confirmations.js";
+import type { Confirmation, ConfirmationRefusal, RedispatchConfirmation } from "../confirmations.js";
+import type { DispatchOutcome } from "./outcome.js";
 import { COMMAND_RUN_AGENT } from "../runOwner.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RequestTrace } from "../requestTrace.js";
@@ -31,6 +32,10 @@ export const OFFER_CANCELLED_LINE = "Cancelled; nothing ran";
 /** The reason a confirmed run's `route` event gives: the click's counterpart
  *  of the paste's `pasted after hand-back`. */
 export const CONFIRMED_REASON = "confirmed after offer";
+
+/** The reason a refused click's record gives (record 0054; [run-history.md](../../../docs/reference/specs/run-history.md)
+ *  item 2): the door's no about the command the row had bound. */
+export const REFUSED_REASON = "refused after offer";
 
 /** The one line for each refusal the store names. */
 export function refusalLine(refused: ConfirmationRefusal): string {
@@ -57,9 +62,15 @@ export type ClickRefusal =
   "confirmation_used" | "confirmation_expired" | "confirmation_foreign" | "confirmation_unreadable";
 
 export type ClickResult =
-  | { kind: "refused"; refusal: ClickRefusal; text: string }
+  /** `row` when the store's refusal still named one (`expired`, `foreign`), so
+   *  the refusal can be recorded against the command that was bound. */
+  | { kind: "refused"; refusal: ClickRefusal; text: string; row?: Confirmation }
   /** The row ran: the command's result, and the reply — the receipt line first, the command's own text under it. */
-  | { kind: "ran"; result: ChatCommandResult; text: string };
+  | { kind: "ran"; result: ChatCommandResult; text: string }
+  /** A question's Yes (record 0054): the consumed `redispatch` row went back
+   *  through `dispatch()` as the requester — the caller's `redispatch` ran it
+   *  and this is how it ended. The reply is the redispatched request's own. */
+  | { kind: "redispatched"; row: RedispatchConfirmation; outcome: DispatchOutcome };
 
 export type CancelResult =
   { kind: "cancelled"; text: string } | { kind: "refused"; refusal: ClickRefusal; text: string };
@@ -70,8 +81,11 @@ export interface Click {
   actorIds: readonly string[];
 }
 
-function refused(r: ConfirmationRefusal): { kind: "refused"; refusal: ClickRefusal; text: string } {
-  return { kind: "refused", refusal: `confirmation_${r}`, text: refusalLine(r) };
+function refused(
+  r: ConfirmationRefusal,
+  row?: Confirmation,
+): { kind: "refused"; refusal: ClickRefusal; text: string; row?: Confirmation } {
+  return { kind: "refused", refusal: `confirmation_${r}`, text: refusalLine(r), ...(row ? { row } : {}) };
 }
 
 const UNREADABLE = { kind: "refused", refusal: "confirmation_unreadable", text: OFFER_UNREADABLE_LINE } as const;
@@ -91,6 +105,7 @@ export async function consumeAndRun(
   io: ChannelIO,
   ending: RunEnding,
   trace: RequestTrace,
+  redispatch: (row: RedispatchConfirmation) => Promise<DispatchOutcome>,
 ): Promise<ClickResult> {
   const store = deps.confirmations;
   if (!store) return UNREADABLE;
@@ -103,8 +118,14 @@ export async function consumeAndRun(
     );
     return UNREADABLE;
   }
-  if (!consumed.ok) return refused(consumed.refused);
+  if (!consumed.ok) return refused(consumed.refused, consumed.row);
   const row = consumed.row;
+  // A question's Yes (record 0054): the row holds no bound command — it holds
+  // the proposal, the person's message with the fix applied — so the click
+  // hands it back to `dispatch()` whole, as the requester, through the
+  // caller's `redispatch`. The store already judged the requester and the
+  // expiry, exactly as it judges record 0044's Run.
+  if (row.kind === "redispatch") return { kind: "redispatched", row, outcome: await redispatch(row) };
   const result = await runChatCommand(
     deps,
     row.message,

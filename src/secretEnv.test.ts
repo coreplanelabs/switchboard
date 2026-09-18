@@ -1,6 +1,6 @@
 import { ESLint, Linter } from "eslint";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   CREDENTIAL_FALLBACKS as RULE_FALLBACKS,
   isPublicEnvName,
@@ -98,25 +98,34 @@ describe("no-raw-env — the rule", () => {
 });
 
 describe("no-raw-env — wired into eslint.config.mjs", () => {
+  // The first lint loads the flat config — typescript-eslint with type
+  // information, so the tree's program — and that cold load is paid by
+  // whichever test runs first: under half a second on an idle machine, over
+  // the default 5 s test timeout on a CI shard whose workers share the runner.
+  // The hook pays it once, under a bound of ten times the slowest cold load
+  // measured (the 5 s a shard lost to, rounded up to the minute); the lint
+  // tests then run warm — a few milliseconds a call — and carry the same bound
+  // for the day the hook is skipped.
   const eslint = new ESLint({ cwd: ROOT, overrideConfigFile: resolve(ROOT, "eslint.config.mjs") });
   const lintAs = async (filePath: string, code: string) => {
     const [result] = await eslint.lintText(code, { filePath: resolve(ROOT, filePath) });
     return result.messages.filter((m) => m.ruleId === "secrets/no-raw-env").map((m) => m.message);
   };
+  beforeAll(() => lintAs("src/index.ts", "export {};\n"), 60_000);
 
   it("a planted `process.env.SLACK_BOT_TOKEN` in a production file fails the repo's own lint", async () => {
     const planted = "export const token = process.env.SLACK_BOT_TOKEN;\n";
     for (const file of ["src/channels/planted.ts", "src/core/dispatch/planted.ts", "src/index.ts"]) {
       expect(await lintAs(file, planted)).toEqual([expect.stringMatching(/SLACK_BOT_TOKEN is a credential/)]);
     }
-  });
+  }, 60_000);
 
   it("the same line in a host-tooling file fails too; a bare process.env there does not", async () => {
     expect(await lintAs("src/deploy/planted.ts", "export const t = process.env.SLACK_BOT_TOKEN;\n")).toEqual([
       expect.stringMatching(/SLACK_BOT_TOKEN is a credential/),
     ]);
     expect(await lintAs("src/deploy/planted.ts", "export const e = { ...process.env };\n")).toEqual([]);
-  });
+  }, 60_000);
 
   it("src/secrets.ts, src/loadEnv.ts and the tests are exempt — they are where the environment is read", async () => {
     const read = "export const t = process.env.SLACK_BOT_TOKEN;\n";
@@ -124,7 +133,7 @@ describe("no-raw-env — wired into eslint.config.mjs", () => {
     expect(await lintAs("src/loadEnv.ts", read)).toEqual([]);
     expect(await lintAs("src/channels/slack.test.ts", read)).toEqual([]);
     expect(await lintAs("src/core/testing/fixture.ts", read)).toEqual([]);
-  });
+  }, 60_000);
 
   it("the tree passes: no production file under src/ reads a credential from process.env", async () => {
     const results = await eslint.lintFiles(["src/**/*.ts"]);

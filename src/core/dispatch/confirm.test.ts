@@ -7,7 +7,13 @@ import { ConfigStore } from "../../config.js";
 import { CONFIRMATION_TTL_MS } from "../budgets.js";
 import { buildCoreCommands } from "../commandCatalogue.js";
 import type { AuditEntry } from "../commandRegistry.js";
-import { InMemoryConfirmationStore, type ConfirmationStore, type PendingConfirmation } from "../confirmations.js";
+import {
+  InMemoryConfirmationStore,
+  type ConfirmationStore,
+  type PendingConfirmation,
+  type RedispatchConfirmation,
+} from "../confirmations.js";
+import type { DispatchOutcome } from "./outcome.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { isSpanRecord, type RunEvent } from "../runEvents.js";
@@ -85,7 +91,14 @@ const message = (user = "slack:UADMIN"): IncomingMessage => ({
   text: "use opus for coding in this channel",
 });
 
+/** A `run` row's `dispatch()` stand-in for tests where no redispatch may
+ *  happen: a `run` row must never reach it. */
+const noRedispatch = async (): Promise<DispatchOutcome> => {
+  throw new Error("a run row must not redispatch");
+};
+
 const pending = (id: string, user = "slack:UADMIN"): PendingConfirmation => ({
+  kind: "run",
   id,
   message: message(user),
   command: "config.set",
@@ -136,9 +149,10 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     const d = deps();
     await d.store.put(pending("c1"), CONFIRMATION_TTL_MS);
     const { io, ending, trace } = request(d);
-    const res = await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace);
+    const res = await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch);
     await ending.sealAfterReply(async () => {});
     expect(res.kind).toBe("ran");
+    if (res.kind !== "ran") throw new Error("unreachable");
     const [first, ...rest] = res.text.split("\n");
     expect(first).toBe("routed: config set channel --models.coding anthropic/claude-opus-5");
     expect(rest.join("\n")).toBe('Updated channel scope. Now: {"models":{"coding":"anthropic/claude-opus-5"}}');
@@ -172,8 +186,8 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     const d = deps();
     await d.store.put(pending("c1"), CONFIRMATION_TTL_MS);
     const { io, ending, trace } = request(d);
-    await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace);
-    const again = await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace);
+    await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch);
+    const again = await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch);
     expect(again).toEqual({ kind: "refused", refusal: "confirmation_used", text: OFFER_USED_LINE });
     expect(d.audits).toHaveLength(1);
   });
@@ -183,12 +197,17 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     await d.store.put(pending("c1"), CONFIRMATION_TTL_MS);
     tick(CONFIRMATION_TTL_MS);
     const { io, ending, trace } = request(d);
-    expect(await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace)).toEqual({
+    // The store's expired refusal still names the row it deleted, so the
+    // result carries it for the refused record (record 0054).
+    expect(await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch)).toEqual({
       kind: "refused",
       refusal: "confirmation_expired",
       text: OFFER_EXPIRED_LINE,
+      row: expect.objectContaining({ id: "c1", command: "config.set" }),
     });
-    expect(await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace)).toMatchObject({
+    expect(
+      await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch),
+    ).toMatchObject({
       refusal: "confirmation_used",
     });
     expect(d.audits).toEqual([]);
@@ -200,17 +219,39 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     await d.store.put(pending("c1"), CONFIRMATION_TTL_MS);
     const { io, ending, trace } = request(d);
     expect(
-      await consumeAndRun(d, { id: "c1", actorIds: ["slack:UOTHER", "access:someone-else"] }, io, ending, trace),
-    ).toEqual({ kind: "refused", refusal: "confirmation_foreign", text: OFFER_FOREIGN_LINE });
+      await consumeAndRun(
+        d,
+        { id: "c1", actorIds: ["slack:UOTHER", "access:someone-else"] },
+        io,
+        ending,
+        trace,
+        noRedispatch,
+      ),
+    ).toEqual({
+      kind: "refused",
+      refusal: "confirmation_foreign",
+      text: OFFER_FOREIGN_LINE,
+      // The kept row rides the refusal so the click can be recorded (record 0054).
+      row: expect.objectContaining({ id: "c1", command: "config.set" }),
+    });
     expect(d.audits).toEqual([]);
-    expect((await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace)).kind).toBe("ran");
+    expect(
+      (await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch)).kind,
+    ).toBe("ran");
   });
 
   it("a clicker whose `self` holds the requester runs it from another surface's id, and the command still runs as the requester", async () => {
     const d = deps();
     await d.store.put(pending("c1"), CONFIRMATION_TTL_MS);
     const { io, ending, trace } = request(d);
-    const res = await consumeAndRun(d, { id: "c1", actorIds: ["access:sub-1", "slack:UADMIN"] }, io, ending, trace);
+    const res = await consumeAndRun(
+      d,
+      { id: "c1", actorIds: ["access:sub-1", "slack:UADMIN"] },
+      io,
+      ending,
+      trace,
+      noRedispatch,
+    );
     expect(res.kind).toBe("ran");
     expect(d.audits[0]).toMatchObject({ callerId: "slack:UADMIN", source: "confirm", outcome: "ok" });
   });
@@ -219,7 +260,7 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     const d = deps();
     await d.store.put(pending("c1", "slack:UX"), CONFIRMATION_TTL_MS);
     const { io, ending, trace } = request(d);
-    const res = await consumeAndRun(d, { id: "c1", actorIds: ["slack:UX"] }, io, ending, trace);
+    const res = await consumeAndRun(d, { id: "c1", actorIds: ["slack:UX"] }, io, ending, trace, noRedispatch);
     await ending.sealAfterReply(async () => {});
     expect(res.kind).toBe("ran");
     if (res.kind !== "ran") throw new Error("unreachable");
@@ -247,6 +288,7 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     const throwing: ConfirmationStore = {
       put: (row, ttl) => d.store.put(row, ttl),
       cancel: (id, ids) => d.store.cancel(id, ids),
+      cancelByThread: (key, ids) => d.store.cancelByThread(key, ids),
       describe: () => "throwing",
       consume: async () => {
         throw new Error("store down");
@@ -261,6 +303,7 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
           io,
           ending,
           trace,
+          noRedispatch,
         ),
       ).toEqual({ kind: "refused", refusal: "confirmation_unreadable", text: OFFER_UNREADABLE_LINE });
       expect(warn.mock.calls.some((c) => String(c[0]).includes("store down"))).toBe(true);
@@ -268,12 +311,84 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
       warn.mockRestore();
     }
     const { confirmations: _none, ...without } = d;
-    expect(await consumeAndRun(without, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace)).toEqual({
+    expect(
+      await consumeAndRun(without, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch),
+    ).toEqual({
       kind: "refused",
       refusal: "confirmation_unreadable",
       text: OFFER_UNREADABLE_LINE,
     });
     expect(d.audits).toEqual([]);
+  });
+});
+
+describe("consumeAndRun — a question's Yes hands the stored proposal to dispatch as the requester (record 0054)", () => {
+  const redispatchRow = (id: string, user = "slack:UADMIN"): PendingConfirmation => ({
+    kind: "redispatch",
+    id,
+    message: { ...message(user), text: "agent:ship repo:acme/api fix the flaky test" },
+    line: "agent:ship repo:acme/api fix the flaky test",
+    evidence: "acme/api is one edit away from acme/apj, which is onboarded",
+    code: "repo_not_onboarded",
+  });
+
+  it("Yes on a redispatch row calls the callback once with the row — the proposal, the code — and answers `redispatched` with the dispatch's outcome; the row is consumed", async () => {
+    const d = deps();
+    await d.store.put(redispatchRow("c1"), CONFIRMATION_TTL_MS);
+    const { io, ending, trace } = request(d);
+    const seen: RedispatchConfirmation[] = [];
+    const redispatch = async (row: RedispatchConfirmation): Promise<DispatchOutcome> => {
+      seen.push(row);
+      return { status: "completed" };
+    };
+    const res = await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, redispatch);
+    expect(res).toMatchObject({ kind: "redispatched", outcome: { status: "completed" } });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      kind: "redispatch",
+      message: expect.objectContaining({ userId: "slack:UADMIN", text: "agent:ship repo:acme/api fix the flaky test" }),
+      code: "repo_not_onboarded",
+    });
+    // Consumed: a second Yes reads `used` and redispatches nothing.
+    expect(await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, redispatch)).toEqual({
+      kind: "refused",
+      refusal: "confirmation_used",
+      text: OFFER_USED_LINE,
+    });
+    expect(seen).toHaveLength(1);
+    // No typed-path command ran: the outcome is the redispatched request's own.
+    expect(d.audits).toEqual([]);
+  });
+
+  it("a foreign Yes is refused with the requester line and the row stays for the requester", async () => {
+    const d = deps();
+    await d.store.put(redispatchRow("c1"), CONFIRMATION_TTL_MS);
+    const { io, ending, trace } = request(d);
+    expect(await consumeAndRun(d, { id: "c1", actorIds: ["slack:UOTHER"] }, io, ending, trace, noRedispatch)).toEqual({
+      kind: "refused",
+      refusal: "confirmation_foreign",
+      text: OFFER_FOREIGN_LINE,
+      row: expect.objectContaining({ id: "c1", kind: "redispatch" }),
+    });
+    const ran = await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, async () => ({
+      status: "completed" as const,
+    }));
+    expect(ran.kind).toBe("redispatched");
+  });
+
+  it("No on a redispatch row cancels it: `Cancelled; nothing ran`, and the row is gone", async () => {
+    const d = deps();
+    await d.store.put(redispatchRow("c1"), CONFIRMATION_TTL_MS);
+    expect(await cancelPending(d, { id: "c1", actorIds: ["slack:UADMIN"] })).toEqual({
+      kind: "cancelled",
+      text: OFFER_CANCELLED_LINE,
+    });
+    const { io, ending, trace } = request(d);
+    expect(await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch)).toEqual({
+      kind: "refused",
+      refusal: "confirmation_used",
+      text: OFFER_USED_LINE,
+    });
   });
 });
 
@@ -286,7 +401,9 @@ describe("cancelPending — the other button", () => {
       text: OFFER_CANCELLED_LINE,
     });
     const { io, ending, trace } = request(d);
-    expect(await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace)).toMatchObject({
+    expect(
+      await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch),
+    ).toMatchObject({
       refusal: "confirmation_used",
     });
     expect(d.audits).toEqual([]);
@@ -301,7 +418,9 @@ describe("cancelPending — the other button", () => {
       text: OFFER_FOREIGN_LINE,
     });
     const { io, ending, trace } = request(d);
-    expect((await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace)).kind).toBe("ran");
+    expect(
+      (await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch)).kind,
+    ).toBe("ran");
     expect(await cancelPending(d, { id: "c1", actorIds: ["slack:UADMIN"] })).toEqual({
       kind: "refused",
       refusal: "confirmation_used",
@@ -312,6 +431,7 @@ describe("cancelPending — the other button", () => {
       const throwing: ConfirmationStore = {
         put: (row, ttl) => d.store.put(row, ttl),
         consume: (id, ids) => d.store.consume(id, ids),
+        cancelByThread: (key, ids) => d.store.cancelByThread(key, ids),
         describe: () => "throwing",
         cancel: async () => {
           throw new Error("store down");

@@ -50,8 +50,8 @@ export interface RunsIndexSeed {
    *  its `access:<sub>` (record 0043), and the toggle says so. */
   asUser?: { id: string; name?: string };
   /** Present when the viewer may view the dashboard as another person (record 0053: a session
-   *  holding `all`): the people the page can name — the requesters of its rows — for the picker;
-   *  a typed id is offered too. Absent, the picker is not drawn. */
+   *  holding `all`): the installation's known people and the page's requesters, by name, for the
+   *  picker; a typed id is offered too. Absent, the picker is not drawn. */
   viewAs?: { people: ViewablePerson[] };
   /** Configured run-history retention; null when history is off. */
   retentionDays: number | null;
@@ -429,11 +429,15 @@ export type PageSeed =
   | SettingsSeed
   | HomeSeed;
 
-/** What the island holds: the page's seed plus what is on in this process
- *  (src/core/capabilities.ts) — stamped by the shell renderer (webShell.ts),
+/** What the island holds — and what the page sender answers as JSON to the web
+ *  app's own request for a page (webShell.ts): the page's seed plus what is on
+ *  in this process (src/core/capabilities.ts) — stamped by the page sender,
  *  never by a view — so the nav, the tabs and the meta lines paint only the
  *  surfaces that exist in this installation. */
 export type WebSeed = PageSeed & {
+  /** The document title the view chose — the shell's `<title>` on a full load,
+   *  what the app sets on an in-app navigation. */
+  title: string;
   capabilities: Capabilities;
   /** The person this session is viewing the page as (record 0053), stamped by the shell renderer
    *  from the viewer's actor — the banner and every write control read it. Absent otherwise. */

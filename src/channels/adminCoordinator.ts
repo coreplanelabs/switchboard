@@ -60,7 +60,9 @@ import {
   type CoordinatorInstance,
   type CoordinatorTag,
   type CoordinatorUnit,
+  type ThreadEvent,
 } from "../core/coordinator/contract.js";
+import { foldThreadAttachments, foldThreadEvents } from "../core/dispatch/admission.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
@@ -127,7 +129,7 @@ export interface AdminCoordinatorDeps {
   dispatch: (
     msg: IncomingMessage,
     io: ChannelIO,
-    opts: Pick<DispatchOptions, "coordinator" | "contract"> & { coordinator: CoordinatorTag },
+    opts?: Pick<DispatchOptions, "coordinator" | "contract"> & { coordinator: CoordinatorTag },
   ) => Promise<DispatchOutcome>;
   /** The channel handle for a thread (the resume's `resumeSlackIO` from the
    *  row's parts — the card's ts when the handle must redraw it); undefined for
@@ -143,6 +145,11 @@ export interface AdminCoordinatorDeps {
    *  the branch — the pr-check opens the pull request from the branch itself
    *  instead of answering `none` over stranded work (agent-ship item 15). */
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /** The branch's commits over the base (githubPulls.commitsOverBase): read on a
+   *  plain pr-check that found no pull request, so the machine can end a unit
+   *  whose scope already landed `already_landed` instead of aborting it
+   *  (agent-ship item 12). Undefined, or a throw, leaves the fact out of the answer. */
+  commitsOverBase: (repo: string, base: string, branch: string) => Promise<number | undefined>;
   /** The target repository at the base ref (the plan, the specs, the rules), its
    *  issues (a unit's board issue) and the comment a unit's ending leaves there
    *  — the App's GitHub reads and the one write beside the merge. */
@@ -376,7 +383,7 @@ const isGenerated = (instance: CoordinatorInstance): boolean => instance.plan?.p
 
 /** The thread a unit's coding children run in, and where its findings are
  *  dispatched: the unit's own once opened, the requesting thread for a
- *  generated plan's unit. The review child's thread is `ensureReviewThread`. */
+ *  generated plan's unit — the thread every child of the unit runs in (record 0055). */
 function unitThread(instance: CoordinatorInstance, row: CoordinatorUnit | undefined) {
   const threadKey = row?.threadKey ?? (row === undefined || isGenerated(instance) ? instance.threadKey : undefined);
   const sourceUrl = row?.sourceUrl ?? (threadKey === instance.threadKey ? instance.sourceUrl : undefined);
@@ -411,25 +418,6 @@ async function openThreadFromRequester(
   } catch (err) {
     return { ok: false, response: json(502, { ok: false, error: "thread_failed", message: describe(err), at }) };
   }
-}
-
-/** The unit's review thread (run-history item 50's `reviewThread`), opened once
- *  beside the unit's thread and written on the row: by `unit-start`, or by the
- *  first review spawn of a row written before the field existed. Every review
- *  round runs there, so the review child's worktree is its own and readonly
- *  and no round wipes the coding thread's (record 0034). */
-async function ensureReviewThread(
-  deps: AdminCoordinatorDeps,
-  instance: CoordinatorInstance,
-  row: CoordinatorUnit,
-  at: number,
-): Promise<{ ok: true; row: CoordinatorUnit; thread: OpenedThreadRef } | { ok: false; response: IngressResponse }> {
-  if (row.reviewThread !== undefined) return { ok: true, row, thread: row.reviewThread };
-  const opened = await openThreadFromRequester(deps, instance, reviewLead(instance, row), at);
-  if (!opened.ok) return opened;
-  const updated: CoordinatorUnit = { ...row, reviewThread: opened.thread };
-  await deps.instances.putUnits([updated]);
-  return { ok: true, row: updated, thread: opened.thread };
 }
 
 /** The whole door: WHO (the bearer in the token map — 401/503) and WHETHER (the
@@ -561,21 +549,19 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // thread to run in — a passing condition (the runner asks again), stamped
   // like every answer.
   if (own.threadKey === undefined) return json(409, { ok: false, error: "unit_not_started", unit: req.unit, at });
-  // The thread the child runs in: a review child's is the unit's review thread,
-  // opened here for a row written before the field existed; a coding child and
-  // the findings step's run share the unit's own thread, whose coding session
-  // the findings continue.
-  let row = unit.row;
-  let thread: OpenedThreadRef = {
+  // The thread the child runs in: the unit's own, for every child (record
+  // 0055) — the review child seeds from its own session (`<thread>:review`)
+  // and attaches a tree of its own life, so nothing needs a second thread; a
+  // coding child and the findings step's run continue the coding session
+  // there. A row a bot wrote before record 0055 names a review thread; its
+  // review rounds stay there, so a unit in flight across the release keeps
+  // its review session where it began.
+  const row = unit.row;
+  const legacy = req.preset === "review" ? row?.reviewThread : undefined;
+  const thread: OpenedThreadRef = legacy ?? {
     threadKey: own.threadKey,
     ...(own.sourceUrl !== undefined ? { sourceUrl: own.sourceUrl } : {}),
   };
-  if (req.preset === "review" && row !== undefined) {
-    const review = await ensureReviewThread(deps, instance, row, at);
-    if (!review.ok) return review.response;
-    row = review.row;
-    thread = review.thread;
-  }
   const threadKey = thread.threadKey;
   const key = idempotencyKeyFor(instance.id, req.step);
   // Retry-safe before anything starts: the step's child, live or finished, or
@@ -604,6 +590,22 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   } else {
     turn = { prompt: req.prompt! };
   }
+  // The fold (record 0051's fold rule): every coding spawn carries the unit's
+  // unconsumed thread events — in arrival order, each text attributed to its
+  // sender, appended after the brief's own text — and marks them consumed by
+  // this spawn's step once the child registers; a review spawn leaves them
+  // (the review reads the diff, not the thread), and a replayed spawn answers
+  // `alreadySpawned` above before this read, so nothing folds twice.
+  let folded: ThreadEvent[] = [];
+  if (req.preset === "coding" && row !== undefined) {
+    folded = await deps.instances.listEvents({ instanceId: instance.id, unit: row.unit }, true).catch(() => []);
+    if (folded.length > 0)
+      turn = { ...turn, prompt: `${turn.prompt}\n\nThe thread since the last step:\n\n${foldThreadEvents(folded)}` };
+  }
+  // The events' stored attachments ride the child's message as its own images
+  // and documents (`foldThreadAttachments`): what the append kept under the cap
+  // has a reader, as the ack promised.
+  const carried = foldThreadAttachments(folded);
   // The child's message is the one the requester would have typed, in the
   // child's thread, as the requester the parent record names. The directive is
   // the message's own (`childRequestText`), so the findings step's `agent:coding`
@@ -625,6 +627,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       ...(turn.ref !== undefined ? { ref: turn.ref } : {}),
       ...(req.budget !== undefined ? { budget: req.budget } : {}),
     }),
+    ...carried,
     receivedAt: at,
   };
   let startedId: string | undefined;
@@ -668,6 +671,22 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const first = await Promise.race([started.then((id) => ({ kind: "started" as const, id })), settled]);
   if (first.kind === "started" || startedId !== undefined) {
     const runId = first.kind === "started" ? first.id : startedId!;
+    if (folded.length > 0) {
+      // Consumed by the spawn's step (record 0051's fold rule): the same identity a
+      // replay carries, so the marks and the retry answer agree. A failed mark
+      // is a log line — the next coding spawn folds the rows again rather than
+      // losing them.
+      await deps.instances
+        .markConsumed(
+          { instanceId: instance.id, unit: row!.unit },
+          folded.map((e) => e.seq),
+          req.step,
+        )
+        .catch((err) => log(`[coordinator] ${instance.id} ${req.step}: the consumed marks failed: ${describe(err)}`));
+      log(
+        `[coordinator] ${instance.id} ${req.step}: folded ${folded.length} thread event(s) into the ${req.preset} child`,
+      );
+    }
     log(`[coordinator] ${instance.id} ${req.step}: spawned ${req.preset} run ${runId} in ${threadKey}`);
     return json(200, { ok: true, runId, threadKey, at });
   }
@@ -1024,6 +1043,14 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     const open = await deps.findOpenPrByHead(instance.repo, branch);
     if (open) {
       await remember({ number: open.number, url: open.htmlUrl });
+      // The check runs at the head, as the merge door reads them, only when
+      // the caller asks (`checks: true`: the ending's facts read, agent-ship
+      // item 9; record 0055): a merge-ready report is a claim about the head,
+      // so it names the checks it read. GitHub unreadable leaves the field out.
+      const checks =
+        body.checks === true && open.headSha !== undefined
+          ? await deps.fetchCommitChecks(instance.repo, open.headSha).catch(() => undefined)
+          : undefined;
       return json(200, {
         ok: true,
         state: "open",
@@ -1033,6 +1060,7 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         // The pull request's own auto-merge fact (agent-ship item 9), so a
         // merge_ready ending can name it at the approved head.
         ...(open.autoMergeEnabled !== undefined ? { autoMergeEnabled: open.autoMergeEnabled } : {}),
+        ...(checks !== undefined ? { checks } : {}),
         at,
       });
     }
@@ -1045,7 +1073,22 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       // A dead coding child's pushed work is recovered here: the pull request
       // is opened from the branch itself rather than the round ending aborted
       // with the work stranded (agent-ship items 10 and 15).
-      if (recover === undefined) return json(200, { ok: true, state: "none", at });
+      if (recover === undefined) {
+        // A plain check carries the branch's commits over the base when it can
+        // read them (issue 1699): zero, beside a handoff that names where the
+        // scope landed, is the machine's `already_landed` ending. A fact that
+        // cannot be read is left out, never guessed — the check still answers.
+        const ahead =
+          instance.base === undefined
+            ? undefined
+            : await deps.commitsOverBase(instance.repo, instance.base, branch).catch((err: unknown) => {
+                (deps.log ?? console.log)(
+                  `[coordinator] ${instance.id} pr-check: the compare of ${branch} over ${instance.base} could not be read: ${describe(err)}`,
+                );
+                return undefined;
+              });
+        return json(200, { ok: true, state: "none", ...(ahead !== undefined ? { aheadOfBase: ahead } : {}), at });
+      }
       const recovered = await recoverPushedBranch(deps, instance, unit.row, branch, recover.runId);
       if (recovered.kind === "opened") {
         await remember({ number: recovered.pr.number, url: recovered.pr.htmlUrl });
@@ -1114,10 +1157,9 @@ async function unitIssueOf(deps: AdminCoordinatorDeps, repo: string, unit: strin
 }
 
 /** A unit starts: its thread is opened by the requesting thread's channel (a
- *  task's is the requesting thread itself), its review thread beside it, its
- *  board issue looked up, and the row says so. Idempotent: a unit with its
- *  threads answers them again. A review thread whose open fails leaves the
- *  unit thread on the row, so the retry opens the review thread alone. */
+ *  task's is the requesting thread itself), its board issue looked up, and the
+ *  row says so. Idempotent: a started unit answers its thread again. No review
+ *  thread is opened (record 0055): every child of the unit runs in this one. */
 async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -1142,28 +1184,16 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
       row = { ...row, ...opened.thread };
     }
   }
-  if (row.reviewThread === undefined) {
-    const review = await ensureReviewThread(deps, instance, row, at);
-    if (!review.ok) {
-      // The unit thread stands: written, so the retry does not open a second one.
-      if (row !== unit.row) await deps.instances.putUnits([row]);
-      return review.response;
-    }
-    row = review.row;
-  }
   if (row.issue === undefined && !isGenerated(instance)) {
     const issue = await unitIssueOf(deps, instance.repo, row.unit);
     if (issue !== undefined) row = { ...row, issue };
   }
   row = { ...row, startedAt: row.startedAt ?? at };
   await deps.instances.putUnits([row]);
-  (deps.log ?? console.log)(
-    `[coordinator] ${instance.id} ${row.unit}: started in ${row.threadKey}, review in ${row.reviewThread?.threadKey}`,
-  );
+  (deps.log ?? console.log)(`[coordinator] ${instance.id} ${row.unit}: started in ${row.threadKey}`);
   return json(200, {
     ok: true,
     threadKey: row.threadKey,
-    reviewThreadKey: row.reviewThread?.threadKey,
     branch: row.branch,
     base: instance.base ?? "main",
     ...(row.issue !== undefined ? { issue: row.issue } : {}),
@@ -1176,14 +1206,6 @@ function unitLead(instance: CoordinatorInstance, row: CoordinatorUnit): string {
   const who = instance.userName ?? instance.userId;
   const from = instance.sourceUrl !== undefined ? `[the *ship* run](${instance.sourceUrl})` : "the *ship* run";
   return `↳ *ship* unit ${row.unit}${row.title ? ` — ${row.title}` : ""} for ${who}, from ${from}: \`${row.branch}\` in ${instance.repo}`;
-}
-
-/** The lead of a unit's review thread: the same reader, told this thread holds the unit's review rounds. */
-function reviewLead(instance: CoordinatorInstance, row: CoordinatorUnit): string {
-  const who = instance.userName ?? instance.userId;
-  const from = instance.sourceUrl !== undefined ? `[the *ship* run](${instance.sourceUrl})` : "the *ship* run";
-  const what = isGenerated(instance) ? "the task" : `unit ${row.unit}${row.title ? ` — ${row.title}` : ""}`;
-  return `↳ *ship* review of ${what} for ${who}, from ${from}: \`${row.branch}\` in ${instance.repo}`;
 }
 
 /** Round 0's pipeline branch: `refs/heads/<branch>` at the base's tip, on
@@ -1396,6 +1418,61 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const thread = unitThread(instance, updated);
   const io =
     thread.threadKey !== undefined ? deps.ioFor({ threadKey: thread.threadKey, userId: instance.userId }) : undefined;
+  // The leftovers (record 0051's fold rule): events still unconsumed when the unit ends
+  // run as ONE fresh turn in the unit's thread — as a run's unconsumed
+  // follow-ups do at the settle — dispatched as the requester with each text
+  // attributed to its sender. Marked consumed BEFORE the dispatch under this
+  // ending's identity, so a replayed unit-end finds nothing and never runs
+  // them twice; the row's ending is already written, so the fresh turn routes
+  // as an unowned thread's message, never back onto this list. With no channel
+  // handle to run the turn in, the events stay unconsumed on the ended row and
+  // the log says so by count — a loss the operator can read, never a silent one.
+  if (segment === undefined) {
+    const leftovers = await deps.instances
+      .listEvents({ instanceId: instance.id, unit: row.unit }, true)
+      .catch(() => [] as ThreadEvent[]);
+    if (leftovers.length > 0 && io === undefined) {
+      (deps.log ?? console.warn)(
+        `[coordinator] ${instance.id} ${row.unit}: ${leftovers.length} leftover thread event(s) stay unconsumed — ` +
+          `no channel handle for the unit's thread${thread.threadKey !== undefined ? ` ${thread.threadKey}` : ""}, so no fresh turn ran`,
+      );
+    } else if (leftovers.length > 0 && io !== undefined) {
+      await deps.instances
+        .markConsumed(
+          { instanceId: instance.id, unit: row.unit },
+          leftovers.map((e) => e.seq),
+          `unit-end:${row.unit}`,
+        )
+        .catch((err) =>
+          (deps.log ?? console.warn)(
+            `[coordinator] ${instance.id} ${row.unit}: the leftover marks failed: ${describe(err)}`,
+          ),
+        );
+      const freshTurn: IncomingMessage = {
+        channelId: instance.channelId,
+        userId: instance.userId,
+        ...(instance.userName !== undefined ? { userName: instance.userName } : {}),
+        ...(instance.authenticatedAs !== undefined ? { authenticatedAs: instance.authenticatedAs } : {}),
+        ...(instance.postedBy !== undefined ? { postedBy: instance.postedBy } : {}),
+        ...(instance.channelName !== undefined ? { channelName: instance.channelName } : {}),
+        threadKey: thread.threadKey!,
+        ...(thread.sourceUrl !== undefined ? { sourceUrl: thread.sourceUrl } : {}),
+        text: foldThreadEvents(leftovers),
+        ...foldThreadAttachments(leftovers),
+        receivedAt: at,
+      };
+      void deps
+        .dispatch(freshTurn, io)
+        .catch((err) =>
+          (deps.log ?? console.warn)(
+            `[coordinator] ${instance.id} ${row.unit}: the leftovers' fresh turn threw: ${describe(err)}`,
+          ),
+        );
+      (deps.log ?? console.log)(
+        `[coordinator] ${instance.id} ${row.unit}: ${leftovers.length} leftover thread event(s) run as one fresh turn`,
+      );
+    }
+  }
   let told = false;
   if (io) {
     try {
@@ -1550,11 +1627,16 @@ async function merge(
   // A conflicting pull request is refused at once, BEFORE the checks are read
   // (spec item 9): zero checks stays pending only on a mergeable pull request.
   // The refusal names the pull request's own base — a stacked unit rebases
-  // onto its parent, not onto the default branch.
-  if (facts.mergeableState === "dirty")
+  // onto its parent, not onto the default branch — and the remedy it offers
+  // is the two-minute one: rebase, push, merge by hand. It never says
+  // "re-issue", because a re-issue reads as "run the unit again" and the
+  // approved work is already on the branch.
+  if (facts.mergeableState === "dirty") {
+    const base = facts.baseRef ?? "its base";
     return refused(
-      `${where} conflicts with \`${facts.baseRef ?? "its base"}\` at \`${headSha.slice(0, 7)}\`, rebase and re-issue`,
+      `${where} conflicts with \`${base}\` at \`${headSha.slice(0, 7)}\` — rebase onto \`${base}\`, push, and merge it by hand once the checks are green; the approved work stands`,
     );
+  }
   const approved = await reviewPostedAt(deps, pr, "approve", headSha);
   if (approved === undefined)
     return json(502, {
@@ -1615,7 +1697,12 @@ async function merge(
   return json(200, { ok: true, outcome: "merged", sha: merged.sha, at });
 }
 
-const ENDING_ICON: Readonly<Record<string, string>> = { merged: "✅", merge_ready: "✅", done: "✅" };
+const ENDING_ICON: Readonly<Record<string, string>> = {
+  merged: "✅",
+  merge_ready: "✅",
+  already_landed: "✅",
+  done: "✅",
+};
 
 /** The parent's one record, assembled from the instance and its unit rows
  *  when the instance ends: the round boundaries every unit drew, in order, and
@@ -1719,9 +1806,10 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
 function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance): BriefReaders {
   const ref = instance.base ?? "main";
   return {
-    readRepoFile: async (path) => {
+    readRepoFile: async (path, opts) => {
       try {
-        return (await deps.github.readFile(instance.repo, path, ref)).content;
+        const file = await deps.github.readFile(instance.repo, path, ref, opts);
+        return { content: file.content, truncated: file.truncated };
       } catch {
         return undefined;
       }

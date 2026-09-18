@@ -19,6 +19,7 @@ import {
   type CommandShape,
   type GrammarRejection,
 } from "./commandSurface.js";
+import { commandRefusalCode, refusalLine, refusalOf, type CommandGuessHint } from "./refusal.js";
 import type { IncomingMessage } from "./types.js";
 import type { Span } from "./trace/types.js";
 
@@ -193,6 +194,12 @@ export interface ChatCommandResult {
   /** The error code when the invocation failed — the registry's, or the
    *  grammar's `invalid_input` for a malformed tail (a help reply has none). */
   error?: InvokeErrorCode;
+  /** The bot's best guess at what the person meant (record 0054): set when the
+   *  handler threw a `CommandError` with a `guess`. The caller hands this to
+   *  `renderRefusal` so the channel can show the corrected line and, with `offer`,
+   *  Yes and No. Only for handler-decided refusals — registry refusals carry no
+   *  guess. */
+  guess?: CommandGuessHint;
   /** Present when the command succeeded AND has a deferred outcome
    *  (`CommandDef.settle`): awaiting it yields the follow-up to post in the
    *  same thread once the effect has settled (undefined = nothing to add). The
@@ -219,16 +226,23 @@ export function chatErrorLine(
   decidedBy: "registry" | "handler" = "registry",
 ): string {
   const name = chatForm(id);
-  switch (error) {
-    case "unauthorized":
-      return decidedBy === "handler"
-        ? `🚫 \`${name}\`: ${message} Ask ${config.adminsHint()}.`
-        : `🚫 \`${name}\` is restricted. Ask ${config.adminsHint()}.`;
-    case "internal":
-      return `⚠️ \`${name}\` failed: ${message}`;
-    default:
-      return `⚠️ \`${name}\`: ${message}`;
-  }
+  const text = (() => {
+    switch (error) {
+      case "unauthorized":
+        return decidedBy === "handler"
+          ? `🚫 \`${name}\`: ${message} Ask ${config.adminsHint()}.`
+          : `🚫 \`${name}\` is restricted. Ask ${config.adminsHint()}.`;
+      case "internal":
+        return `⚠️ \`${name}\` failed: ${message}`;
+      default:
+        return `⚠️ \`${name}\`: ${message}`;
+    }
+  })();
+  // The line is a `Refusal` rendered through the seam's one line shape
+  // (record 0054): the code's cause comes from the closed table, and the
+  // renderer adds nothing — the sentence stays byte-identical to what this
+  // function returned before the seam.
+  return refusalLine(refusalOf(commandRefusalCode(error), text));
 }
 
 /** Invoke a parsed chat command as the message's user (a help or rejected parse is replied as-is, `ok: false`, with its code). */
@@ -262,7 +276,12 @@ export async function invokeChatCommand({
       ...(typeof value.residentMs === "number" ? { residentMs: value.residentMs } : {}),
     };
   }
-  return { ok: false, error: res.error, text: chatErrorLine(parsed.id, res.error, res.message, config, res.decidedBy) };
+  return {
+    ok: false,
+    error: res.error,
+    text: chatErrorLine(parsed.id, res.error, res.message, config, res.decidedBy),
+    ...(res.guess ? { guess: res.guess } : {}),
+  };
 }
 
 /** Text-only view of `invokeChatCommand` for callers that need just the reply. */

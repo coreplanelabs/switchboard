@@ -16,7 +16,7 @@ import { originAllowed } from "./commandHttp.js";
 import { HttpIO, MAX_BODY_BYTES, readBody, type DispatchFn } from "./http.js";
 import { readableRuns } from "./liveView/viewer.js";
 import type { HomeCommandSeed, HomeConversationRowSeed, HomeSeed, HomeTurnSeed } from "./webSeed.js";
-import { WEB_HTML_HEADERS, type ShellRenderer } from "./webShell.js";
+import type { PageSender } from "./webShell.js";
 import { viewingRefusal } from "../core/authz/viewAs.js";
 
 // The web channel — adapter #5 (docs/decisions/0043, docs/reference/specs/web-chat.md
@@ -285,7 +285,7 @@ export interface WebChatDeps {
   registry: Pick<RunRegistry, "getById">;
   /** The catalogue the palette lists from. */
   commands: Pick<CommandInvoker, "list">;
-  shell: ShellRenderer;
+  page: PageSender;
   capabilities: Capabilities;
   /** Display names for the rail's channels (src/core/names.ts); absent → ids only. */
   names?: NameDirectory;
@@ -555,10 +555,7 @@ export function createWebChatHandler(
       plain(405, "method not allowed", { allow: "GET" });
       return true;
     }
-    const render = (title: string, seed: HomeSeed) => {
-      res.writeHead(200, WEB_HTML_HEADERS);
-      res.end(deps.shell(ctx.actor, title, seed));
-    };
+    const render = (title: string, seed: HomeSeed) => deps.page(req, res, 200, ctx.actor, title, seed);
     const sub = subOf(ctx.actor);
     if (route.kind === "new") {
       const conversation = mintId();
@@ -574,8 +571,7 @@ export function createWebChatHandler(
         // same 404 an unknown run gives (live-view item 19): existence is never
         // revealed. The viewer's own lane is theirs to open empty.
         if (open.runs.length === 0 && !ownLane(sub, threadKey)) {
-          res.writeHead(404, WEB_HTML_HEADERS);
-          res.end(deps.shell(ctx.actor, "Run not found", { page: "runNotFound", retentionDays }));
+          deps.page(req, res, 404, ctx.actor, "Run not found", { page: "runNotFound", retentionDays });
           return;
         }
         const seed = await seedFor(ctx, route.id, threadKey, open);

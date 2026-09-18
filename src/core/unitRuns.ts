@@ -4,7 +4,7 @@ import type { RunView } from "./runsService.js";
 // The unit is the reading unit (docs/reference/specs/agent-ship.md item 17;
 // docs/decisions/0034-one-agent-per-unit-a-run-continues-a-transcript.md, "The
 // unit is the reading unit"): a ship unit's story is the runs of its coding
-// thread and the runs of its review thread, cut at the round boundaries the
+// thread (and, on a row written before record 0055, its review thread), cut at the round boundaries the
 // runner reported on the unit's row and laid out in time order. This module is
 // the pure half — no store, no clock: given the row and the two threads'
 // listings it says which run belongs to which round. `RunsService.listUnitRuns`
@@ -140,9 +140,12 @@ const isPipelineRecord = (run: RunView): boolean => run.agent === "ship";
 const THREAD_ORDER: Readonly<Record<UnitThread, number>> = { coding: 0, review: 1 };
 
 /** A unit's runs in time order — coding 0, review 1, coding 1, review 2 … as
- *  they started — each with its round and thread. A thread the row does not
- *  name contributes nothing whatever it is handed; a run that started before
- *  the thread's first round, and the pipeline's own record, are left out. */
+ *  they started — each with its round and thread. A unit has one thread
+ *  (record 0055): its runs are cut by agent, the review agent's at the review
+ *  rounds and the rest at the coding rounds; a row a bot wrote before that
+ *  names a review thread, whose runs are the review's. A thread the row does
+ *  not name contributes nothing whatever it is handed; a run that started
+ *  before the thread's first round, and the pipeline's own record, are left out. */
 export function unitRunsOf(unit: CoordinatorUnit, threads: { coding: RunView[]; review: RunView[] }): UnitRun[] {
   const out: UnitRun[] = [];
   const cut = (thread: UnitThread, runs: RunView[]): void => {
@@ -153,8 +156,21 @@ export function unitRunsOf(unit: CoordinatorUnit, threads: { coding: RunView[]; 
       if (round !== undefined) out.push({ ...run, round, thread });
     }
   };
-  if (unit.threadKey !== undefined) cut("coding", threads.coding);
-  if (unit.reviewThread !== undefined) cut("review", threads.review);
+  if (unit.threadKey !== undefined) {
+    if (unit.reviewThread !== undefined) {
+      cut("coding", threads.coding);
+      cut("review", threads.review);
+    } else {
+      cut(
+        "coding",
+        threads.coding.filter((r) => r.agent !== "review"),
+      );
+      cut(
+        "review",
+        threads.coding.filter((r) => r.agent === "review"),
+      );
+    }
+  }
   return out.sort(
     (a, b) =>
       a.startedAt - b.startedAt ||

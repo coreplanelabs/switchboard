@@ -2,16 +2,16 @@
 
 Switchboard is an agent gateway: a message arrives over a channel (Slack, the CLI, HTTP, MCP), a dispatcher routes it to an agent, the agent runs on a model provider and executes tools through an executor it never touches directly. Slack is one channel, not the architecture.
 
-Every agent here reads this first, as does a person asking how we work: how a change is made, the invariants, where things are, the commands that are the repo's whole interface, and the rules. Detail is a link away: [README.md](README.md) (the front door), [docs/](docs/README.md) (the human-facing tree, published at <https://openswitchboard.dev>), [docs/reference/specs/](docs/reference/specs/README.md) (the behavioral contract).
+Every agent here reads this first. Detail is a link away: [README.md](README.md) (the front door), [docs/](docs/README.md) (the human-facing tree, at <https://openswitchboard.dev>), [docs/reference/specs/](docs/reference/specs/README.md) (the behavioral contract).
 
 ## How a change is made
 
 1. **The spec says what should be true.** Every behavior has a row in a spec under `docs/reference/specs/`: the criterion and its proof — a `file::describe::it` test, a procedure an agent runs live, or a `[gap]` still to be proven. A change starts with that row, in the same PR as the code. A spec describing code that no longer exists is a bug — and the review agent reads the specs a PR touches (`specs:coverage`) and files a contradiction as a finding.
 2. **A failing test, then the code.** Unit tests are the default proof. `npx vitest run --changed origin/main` is the loop; `npm test` before pushing.
 3. **`npm run fix`, then `npm run verify`.** `fix` regenerates every generated artifact and repairs lint and formatting. `verify` is the whole gate and exactly what CI runs — nothing lives only in CI; a unit test over the workflow files keeps it so.
-4. **A PR written for the reader.** The title is the changelog line, 72 characters at most: `type(scope): what a reader can now do or expect`, scope from the code map's Areas, `!` plus a migration note when it breaks ([the rule](CONTRIBUTING.md#the-pr-title-is-the-changelog-line)); a required check refuses the rest. Body: a fixed-size map — two sentences a stranger can act on, the why, up to seven pointers at the pushed head, the risk, the verification; decisions and receipts fold below. Docs for changed behavior change in the same PR.
+4. **A PR written for the reader.** The title is the changelog line, 72 characters at most: `type(scope): what a reader can now do or expect`, scope from the code map's Areas, `!` plus a migration note when it breaks ([the rule](CONTRIBUTING.md#the-pr-title-is-the-changelog-line)); a required check refuses the rest. Body: the fixed-size map of [pr-description.md](docs/reference/specs/pr-description.md); decisions and receipts fold below. Docs for changed behavior change in the same PR.
 5. **Switchboard reviews it, in the open.** The PR is posted to `agent:review`; findings are addressed or declined with a reason, the branch rewritten into reviewable commits, review re-requested at the new head. `LGTM:` auto-approves where the repo has opted in; a person merges.
-6. **Squash-merge, release, deploy.** The title is the commit. release-please accumulates a release PR; merging it tags the version and CI deploys only the Workers whose inputs changed. Why this shape: [How we work](docs/explanation/how-we-work.md).
+6. **Squash-merge, release, deploy.** The title is the commit. release-please accumulates a release PR; merging it tags the version and CI deploys only the Workers whose inputs changed.
 
 ## Invariants
 
@@ -25,7 +25,7 @@ Every agent here reads this first, as does a person asking how we work: how a ch
 
 ## Where things are
 
-Area by area and module by module: the [Code map](docs/reference/code-map.md). The behavior each area must keep: its spec under [`docs/reference/specs/`](docs/reference/specs/README.md). Why it is shaped that way: the [decision records](docs/explanation/design-decisions.md). Nothing here duplicates those three; when they disagree with the code, the code is wrong or the doc is, and the checks (`specs:check`, `decisions:check`, `docs:check`) say which.
+Area by area, module by module: the [Code map](docs/reference/code-map.md). The behavior each area must keep: its spec under [`docs/reference/specs/`](docs/reference/specs/README.md). Why it is shaped that way: the [decision records](docs/explanation/design-decisions.md). When they disagree with the code, one of them is wrong, and the checks (`specs:check`, `decisions:check`, `docs:check`) say which.
 
 ## Commands
 
@@ -50,8 +50,11 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run deploy:check` | The rendered `wrangler.jsonc` files match `deploy:gen`. | When one looks hand-edited; change the template. |
 | `npm run check:lockfile` | Native packages carry Linux x64 and macOS arm64 variants; records mirror their `package.json`. | After a manifest edit or `npm install`; failures name the fix. |
 | `npm run check:sandbox-pair` | Each Worker on the `cloudflare/sandbox` image pins `@cloudflare/sandbox` to exactly its Dockerfile tag. | After bumping either half of a pair. |
-| `npm run check:pr-title` | Judges one PR title as the changelog line it becomes: grammar, type, scope, the migration note behind `!`. | `-- "feat(scope): …"` before opening a PR; CI's `title` check runs it. |
+| `npm run check:pr-title` | Judges one PR title as the changelog line: grammar, type, scope, the `!` migration note. | `-- "feat(scope): …"` before opening a PR; CI's `title` check. |
+| `npm run pr-title:gen` | Writes the title gate's types and scopes from the release config and the code map. | Part of `fix`. |
+| `npm run pr-title:check` | The committed title vocabulary equals its two sources. | Part of `check:consistency`. |
 | `npm run check:project-facts` | Every copy of the project's names, repository, docs URL and contact address equals `project.json`; its description, topics and npm package fit their rules. | After editing `project.json` or a community file; part of `check:consistency`. |
+| `npm run check:registry-drift` | Every example-config model ref still resolves against the pinned pi registry. | After a pi bump; part of `check:consistency`. |
 | `npm run agents:gen` | Writes the Commands table in AGENTS.md from `package.json` and this file. | After adding or changing a script; part of `fix`. |
 | `npm run clock:gen` | Regenerates both clock allowlists from the tree: wall-clock reads (empty) and duration literals outside `src/core/budgets.ts`. | Part of `fix`. |
 | `npm run clock:check` | No production file reads the wall clock directly or gained a duration literal outside `src/core/budgets.ts`; both allowlists match the tree. | Part of `check:consistency`. |
@@ -100,7 +103,7 @@ Each workspace has its own `verify` (`-w web|docs|deploy/<worker>|packages/switc
 
 ## Switchboard develops Switchboard
 
-The product's own agents follow these rules: `agent:review` reviews every PR (read-only, one verdict, never a merge), `agent:coding` implements issues in the vendored skills' house style, `agent:ship` runs the loop end to end, every run has a page, `friction propose` files the process's own improvement issues. Details: [How we work](docs/explanation/how-we-work.md#switchboard-develops-switchboard).
+The product's own agents follow these rules: `agent:review` reviews every PR (read-only, never a merge), `agent:coding` implements issues, `agent:ship` runs the loop end to end, `friction propose` files the process's improvement issues. Details: [How we work](docs/explanation/how-we-work.md#switchboard-develops-switchboard).
 
 ## Working locally
 

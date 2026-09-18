@@ -48,7 +48,18 @@ import type { PrSize } from "./digestCoverage.js";
 // request — `in owner/name` anywhere in the message, or a bare `in name` in
 // the DIRECTIVE position only (`agent:coding in web, …`: nothing but
 // directives or mentions before it — "the crash is in api, see the logs" is
-// prose even when a repo is called `api`). Once the registry vets it, it is
+// prose even when a repo is called `api`). A determiner between `in` and the
+// target (`in the web repo`, `in our web repository`) is skipped and is never
+// itself a candidate — before this, `in the web repo, …` addressed `the`,
+// the registry knew no such name, and ship refused with "no repository" while
+// the router's own reason line named the repo. The compose position is also
+// the START OF A LINE: a request that opens with a sentence of prose and then
+// heads its next paragraph `*On the web repo:* …` names its target as plainly
+// as `agent:coding in web` does, and refusing it sent a person back to retype
+// the whole task behind `in owner/name:`. `on` is the ref keyword (`on main`,
+// `on branch x`), so `on [the] <name>` is an address only when the word `repo`
+// or `repository` follows; `on <name>` alone stays the ref position. Once the
+// registry vets it, it is
 // STRONG: it binds a fresh thread and rebinds a bound one, like a URL. The
 // vetting is what keeps the strong-binding guard intact — `in docs/reference/specs/memory.md` is
 // refused by the probe and changes nothing, and a merely-mentioned onboarded
@@ -201,6 +212,9 @@ const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
 // pattern, shared with residentAdmin.ts) so a hostile or malformed phrase
 // never becomes a refHint.
 const WELL_KNOWN_REFS = new Set(["main", "master", "develop", "trunk"]);
+// Words a person puts between `in` and the target ("in the web repo", "in our
+// web repository"): skipped by the address scan, never themselves an address.
+const DETERMINERS = new Set(["the", "a", "an", "our", "my", "this"]);
 // Code: fenced blocks (```…```, multi-line) and inline spans (`…` on one line) —
 // Slack and Markdown both render these as code.
 const CODE_SPAN = /```[\s\S]*?```|`[^`\n]*`/g;
@@ -248,7 +262,8 @@ interface Signals {
    *  original case kept; resolved against repo presence by the caller */
   onSlug?: string;
   /** The request's addressed target: the first token after the word `in`
-   *  (outside code) — a lowercase `owner/name` slug, or a bare lowercase name
+   *  (or after `on` when `repo`/`repository` follows it), past one determiner,
+   *  outside code — a lowercase `owner/name` slug, or a bare lowercase name
    *  the caller resolves through the registry listing. */
   addressed?: Addressed;
 }
@@ -310,20 +325,37 @@ function extractSignals(rawText: string): Signals {
     .split(/\s+/)
     .filter(Boolean)
     .map((tok) => tok.includes("\u0000"));
+  // True for the first token of the message and for every token that follows
+  // a line break: the start of a line is a compose position (see the header).
+  const lineStart: boolean[] = [];
+  let cursor = 0;
+  for (const m of text.matchAll(/\S+/g)) {
+    lineStart.push(m.index === 0 || text.slice(cursor, m.index).includes("\n"));
+    cursor = m.index + m[0].length;
+  }
+  const composePosition = (at: number) => lineStart[at] || tokens.slice(0, at).every(isDirectiveOrMention);
+  const word = (j: number) => (j >= 0 && j < tokens.length ? stripPunct(tokens[j]).toLowerCase() : "");
   for (let i = 0; i < tokens.length; i++) {
     const t = stripPunct(tokens[i]);
     if (!t || t.includes("://") || t.toLowerCase().startsWith("github.com/")) continue;
-    const prev = i > 0 ? stripPunct(tokens[i - 1]).toLowerCase() : "";
+    const prev = word(i - 1);
     if (prev === "branch") continue; // keyword form, handled above
-    // "in X": the addressed target — a slug anywhere, or a bare name for the
-    // registry to resolve when nothing but directives/mentions precede the
-    // `in` (the compose position; a bare word deeper in prose is prose).
-    // Recorded beside the weak-slug scan below (the slug still lands in
-    // `repo` as before); code spans are paths being talked about.
-    if (prev === "in" && !inCode[i] && !out.addressed) {
+    // "in X" / "in the X" / "on the X repo": the addressed target — a slug
+    // anywhere, or a bare name for the registry to resolve when the keyword
+    // sits in a compose position (the message head, past directives and
+    // mentions, or the start of a line; a bare word deeper in prose is
+    // prose). One determiner may sit between the keyword and the target; it
+    // is never the target. `on` addresses only with `repo`/`repository` right
+    // after the target — `on X` alone is the ref phrasing below. Recorded
+    // beside the weak-slug scan (the slug still lands in `repo` as before);
+    // code spans are paths being talked about.
+    const keywordAt =
+      prev === "in" || prev === "on" ? i - 1 : DETERMINERS.has(prev) && /^(in|on)$/.test(word(i - 2)) ? i - 2 : -1;
+    const addresses = keywordAt >= 0 && (word(keywordAt) === "in" || /^(repo|repository)$/.test(word(i + 1)));
+    if (addresses && !inCode[i] && !out.addressed && !DETERMINERS.has(t.toLowerCase())) {
       const slug = slugOf(t);
       if (slug) out.addressed = { slug };
-      else if (!t.includes("/") && NAME_RE.test(t) && tokens.slice(0, i - 1).every(isDirectiveOrMention))
+      else if (!t.includes("/") && NAME_RE.test(t) && composePosition(keywordAt))
         out.addressed = { name: t.toLowerCase() };
     }
     if (prev === "on") {

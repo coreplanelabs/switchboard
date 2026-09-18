@@ -71,25 +71,35 @@ import {
   checkFence,
   decideClaim,
   decideClaimWrite,
+  decideIntakeInsert,
   phaseTransition,
   reclaimPhase,
   selectReclaim,
 } from "../../src/core/runLedger/decisions.ts";
+import { intakeReceiptRetentionMs } from "../../src/core/budgets.ts";
 import {
   IDEMPOTENCY_KEY_PATTERN,
+  capThreadEvent,
   INSTANCE_ID_PATTERN,
   isCoordinatorInstance,
   isCoordinatorUnit,
+  isThreadEvent,
   sendRunFinished,
+  UNIT_PATTERN,
   type CoordinatorInstance,
   type CoordinatorUnit,
   type RunFinishedSend,
+  type ThreadEvent,
 } from "../../src/core/coordinator/contract.ts";
 import {
   GEN_PATTERN,
+  isIntakeReceipt,
   type ClaimRequest,
   type ClaimResult,
   type FenceResult,
+  type IntakeQuery,
+  type IntakeReceipt,
+  type IntakeWriteResult,
   type LivePhase,
   type LiveRunRow,
   type ReclaimedRun,
@@ -641,8 +651,18 @@ interface ConfirmationRow extends ConfirmationInput {
 }
 /** Why a consume or a cancel refused: the row is gone (`used`), past its expiry (`expired`), or someone else's (`foreign`). */
 type ConfirmationRefusal = "used" | "expired" | "foreign";
-type ConfirmationOutcome = { row: ConfirmationRow } | { refused: ConfirmationRefusal };
+/** A refusal names the row where one still exists — `expired` (deleted here)
+ *  and `foreign` (kept) — so the bot can record the click's refusal against
+ *  the command that was bound (record 0054); `used` has no row to name. */
+type ConfirmationOutcome = { row: ConfirmationRow } | { refused: ConfirmationRefusal; row?: ConfirmationRow };
 type ConfirmationCancelOutcome = { ok: true } | { refused: Exclude<ConfirmationRefusal, "expired"> };
+/** The consume log's word: a refusal may carry the row it names (expired,
+ *  foreign), so the refusal is the discriminant, never the row's presence. The
+ *  parameter is the declared union, where the narrowing holds; the stub's
+ *  return type narrows to `never` across `in`. */
+function consumeWord(outcome: ConfirmationOutcome): string {
+  return "refused" in outcome ? outcome.refused : "consumed";
+}
 
 function isJsonObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -718,9 +738,9 @@ export class ConfigDO extends DurableObject<Env> {
       if (!stored) return { refused: "used" };
       if (stored.expiresAt <= now) {
         this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
-        return { refused: "expired" };
+        return { refused: "expired", row: stored };
       }
-      if (!actorIds.includes(stored.requester)) return { refused: "foreign" };
+      if (!actorIds.includes(stored.requester)) return { refused: "foreign", row: stored };
       this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
       return { row: stored };
     });
@@ -735,6 +755,26 @@ export class ConfigDO extends DurableObject<Env> {
       if (!stored) return { refused: "used" };
       if (!actorIds.includes(stored.requester)) return { refused: "foreign" };
       this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
+      return { ok: true };
+    });
+  }
+
+  /** Delete the thread's pending row under the same requester check (record
+   *  0054: a typed answer supersedes the button, so a click cannot follow
+   *  it). At most one row per thread exists (`putConfirmation` replaces); a
+   *  thread with none is `used`. The body stays opaque here — a row stored
+   *  before the bot's union gained `kind` cancels the same way. */
+  async cancelConfirmationByThread(threadKey: string, actorIds: readonly string[]): Promise<ConfirmationCancelOutcome> {
+    return this.ctx.storage.transactionSync(() => {
+      const stored = this.sql
+        .exec<{ id: string; requester: string }>(
+          `SELECT id, requester FROM confirmations WHERE thread_key = ?`,
+          threadKey,
+        )
+        .toArray()[0];
+      if (!stored) return { refused: "used" };
+      if (!actorIds.includes(stored.requester)) return { refused: "foreign" };
+      this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, stored.id);
       return { ok: true };
     });
   }
@@ -1158,6 +1198,7 @@ const CONFIG_ROUTES = new Set([
   "/config/confirmations/put",
   "/config/confirmations/consume",
   "/config/confirmations/cancel",
+  "/config/confirmations/cancel-by-thread",
 ]);
 const TICKET_STATES: ReadonlySet<string> = new Set<McpTicketState>(MCP_TICKET_STATES);
 /** A confirmation id as the bot mints it (a UUID) — one token, no whitespace, bounded. */
@@ -1233,7 +1274,7 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
       const click = confirmationClickOf(b);
       if (click instanceof Response) return click;
       const outcome = await dO.consumeConfirmation(click.id, click.actorIds, systemClock());
-      console.log(`[config/confirmations/consume] ${click.id} ${"row" in outcome ? "consumed" : outcome.refused}`);
+      console.log(`[config/confirmations/consume] ${click.id} ${consumeWord(outcome)}`);
       return json(outcome);
     }
     case "/config/confirmations/cancel": {
@@ -1241,6 +1282,16 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
       if (click instanceof Response) return click;
       const outcome = await dO.cancelConfirmation(click.id, click.actorIds);
       console.log(`[config/confirmations/cancel] ${click.id} ${"ok" in outcome ? "cancelled" : outcome.refused}`);
+      return json(outcome);
+    }
+    case "/config/confirmations/cancel-by-thread": {
+      if (typeof b.threadKey !== "string" || !b.threadKey) return json({ error: "threadKey required" }, 400);
+      if (!Array.isArray(b.actorIds) || !b.actorIds.every((a): a is string => typeof a === "string"))
+        return json({ error: "actorIds must be a list of actor ids" }, 400);
+      const outcome = await dO.cancelConfirmationByThread(b.threadKey, b.actorIds);
+      console.log(
+        `[config/confirmations/cancel-by-thread] ${b.threadKey} ${"ok" in outcome ? "cancelled" : outcome.refused}`,
+      );
       return json(outcome);
     }
     default:
@@ -1474,6 +1525,22 @@ export class RunHistoryDO extends DurableObject<Env> {
         PRIMARY KEY (run_id, kind)
       );
     `);
+    // The intake receipts (run-history item 59): one verdict per message key,
+    // first writer wins, beside the live rows because the reconnect catch-up
+    // reads them through the same store key. `prune_after` is stamped at the
+    // insert (the bound is the writer's window through
+    // `intakeReceiptRetentionMs`) and the alarm sweeps by it.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS intake_receipts (
+        key TEXT PRIMARY KEY,
+        thread_key TEXT NOT NULL,
+        decided_at INTEGER NOT NULL,
+        prune_after INTEGER NOT NULL,
+        json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS intake_thread ON intake_receipts(thread_key, decided_at);
+      CREATE INDEX IF NOT EXISTS intake_prune ON intake_receipts(prune_after);
+    `);
     // The coordinator's parent records (run-history item 49): one row per
     // instance, written by the bot at the instance's creation and read by the
     // spawn route for the requester, channel and thread every child acts as.
@@ -1494,6 +1561,20 @@ export class RunHistoryDO extends DurableObject<Env> {
         json TEXT NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (instance_id, unit)
+      );
+    `);
+    // The thread events of a unit-owned thread (record 0051's reply-as-event rule): a
+    // sibling table of the unit rows, never a field on them — `putUnits`
+    // replaces a row whole, so an append landing between a route's read and
+    // its put would be lost. Consumption is a column of its own, set once.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS coordinator_unit_events (
+        instance_id TEXT NOT NULL,
+        unit TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        json TEXT NOT NULL,
+        consumed_by TEXT,
+        PRIMARY KEY (instance_id, unit, seq)
       );
     `);
   }
@@ -1570,6 +1651,68 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ? ORDER BY rowid`, instanceId)
       .toArray()
       .map((r) => JSON.parse(r.json) as CoordinatorUnit);
+  }
+
+  // ---- the thread events of a unit-owned thread (record 0051's reply-as-event rule) --------------
+
+  /** The next sequence assigned in one transaction, the per-event cap applied
+   *  (attachments dropped whole, the row saying how many). */
+  async appendUnitEvent(
+    instanceId: string,
+    unit: string,
+    event: Omit<ThreadEvent, "seq">,
+  ): Promise<{ ok: true; seq: number }> {
+    let seq = 1;
+    this.ctx.storage.transactionSync(() => {
+      const max = this.sql
+        .exec<{
+          m: number | null;
+        }>(`SELECT MAX(seq) AS m FROM coordinator_unit_events WHERE instance_id = ? AND unit = ?`, instanceId, unit)
+        .toArray()[0];
+      seq = (max?.m ?? 0) + 1;
+      const capped = capThreadEvent({ ...event, seq });
+      this.sql.exec(
+        `INSERT INTO coordinator_unit_events (instance_id, unit, seq, json) VALUES (?, ?, ?, ?)`,
+        instanceId,
+        unit,
+        seq,
+        JSON.stringify(capped),
+      );
+    });
+    return { ok: true, seq };
+  }
+
+  /** The unit's events in sequence order; `unconsumedOnly` filters to the rows nothing has consumed. */
+  async listUnitEvents(instanceId: string, unit: string, unconsumedOnly: boolean): Promise<ThreadEvent[]> {
+    return this.sql
+      .exec<{ json: string; consumed_by: string | null }>(
+        `SELECT json, consumed_by FROM coordinator_unit_events WHERE instance_id = ? AND unit = ?${
+          unconsumedOnly ? " AND consumed_by IS NULL" : ""
+        } ORDER BY seq ASC`,
+        instanceId,
+        unit,
+      )
+      .toArray()
+      .map((r) => {
+        const e = JSON.parse(r.json) as ThreadEvent;
+        return r.consumed_by !== null ? { ...e, consumedBy: r.consumed_by } : e;
+      });
+  }
+
+  /** Consumption set once — idempotent: a row already consumed keeps its first consumer. */
+  async markUnitEventsConsumed(instanceId: string, unit: string, seqs: number[], by: string): Promise<{ ok: true }> {
+    this.ctx.storage.transactionSync(() => {
+      for (const seq of seqs) {
+        this.sql.exec(
+          `UPDATE coordinator_unit_events SET consumed_by = ? WHERE instance_id = ? AND unit = ? AND seq = ? AND consumed_by IS NULL`,
+          by,
+          instanceId,
+          unit,
+          seq,
+        );
+      }
+    });
+    return { ok: true };
   }
 
   // ---- the live-run ledger (run-history items 28–34) --------------------------
@@ -1952,6 +2095,59 @@ export class RunHistoryDO extends DurableObject<Env> {
     return parseEventRows(this.eventRows(runId, 0, Number.MAX_SAFE_INTEGER));
   }
 
+  // ---- the intake receipts (run-history item 59) -------------------------------
+
+  private intakeRow(key: string): IntakeReceipt | undefined {
+    const r = this.sql.exec<{ json: string }>(`SELECT json FROM intake_receipts WHERE key = ?`, key).toArray()[0];
+    return r ? (JSON.parse(r.json) as IntakeReceipt) : undefined;
+  }
+
+  /** Insert-if-absent inside one transaction: the first writer's row stands
+   *  and every caller acts on `stored` (`decideIntakeInsert`). `windowMs` is
+   *  the writer's reconnect catch-up window; the retention bound is stamped on
+   *  the row so the alarm's sweep is one indexed delete. */
+  async recordIntake(key: string, receipt: IntakeReceipt, windowMs: number): Promise<IntakeWriteResult> {
+    let out: IntakeWriteResult = { inserted: false, stored: receipt };
+    this.ctx.storage.transactionSync(() => {
+      out = decideIntakeInsert(this.intakeRow(key), receipt);
+      if (!out.inserted) return;
+      this.sql.exec(
+        `INSERT INTO intake_receipts (key, thread_key, decided_at, prune_after, json) VALUES (?, ?, ?, ?, ?)`,
+        key,
+        receipt.threadKey,
+        receipt.decidedAt,
+        receipt.decidedAt + intakeReceiptRetentionMs(windowMs),
+        JSON.stringify(receipt),
+      );
+    });
+    if ((await this.ctx.storage.getAlarm()) === null)
+      await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
+    return out;
+  }
+
+  async readIntake(key: string): Promise<IntakeReceipt | null> {
+    return this.intakeRow(key) ?? null;
+  }
+
+  /** A thread's receipts, or the receipts since an instant, oldest first. */
+  async listIntake(query: IntakeQuery): Promise<IntakeReceipt[]> {
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+    if (query.threadKey !== undefined) {
+      clauses.push("thread_key = ?");
+      params.push(query.threadKey);
+    }
+    if (query.since !== undefined) {
+      clauses.push("decided_at >= ?");
+      params.push(query.since);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return this.sql
+      .exec<{ json: string }>(`SELECT json FROM intake_receipts${where} ORDER BY decided_at ASC`, ...params)
+      .toArray()
+      .map((r) => JSON.parse(r.json) as IntakeReceipt);
+  }
+
   // ---- policy ---------------------------------------------------------------
 
   /** The persisted policy (defaults until the first proposal lands). */
@@ -2233,12 +2429,19 @@ export class RunHistoryDO extends DurableObject<Env> {
       const now = systemClock();
       const { policy } = this.policyState();
       let deleted = 0;
+      let receipts = 0;
       let candidates: { key: string; threadKey: string }[] = [];
       this.ctx.storage.transactionSync(() => {
         deleted = this.trim(policy, now, undefined).deleted;
         // Orphan sweep: events whose run is gone (defensive — `deleteRuns` pairs
         // the two deletes, so this is a periodic check, not a per-put cost).
         this.sql.exec(`DELETE FROM run_events WHERE run_id NOT IN (SELECT run_id FROM runs)`);
+        // Intake receipts past their bound (item 59): each row carries its own
+        // `prune_after`, stamped at the insert from the writer's window.
+        receipts = this.sql
+          .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM intake_receipts WHERE prune_after <= ?`, now)
+          .one().n;
+        this.sql.exec(`DELETE FROM intake_receipts WHERE prune_after <= ?`, now);
         // The sessions no kept run names any more (session-log item 7): decided
         // here, on the rows this transaction leaves; dropped after it.
         candidates = this.sql
@@ -2250,7 +2453,9 @@ export class RunHistoryDO extends DurableObject<Env> {
           .map((r) => ({ key: r.key, threadKey: r.thread_key }));
       });
       const dropped = await this.sweepSessions(candidates);
-      console.log(`[runs/alarm] swept ${deleted} rows outside policy, dropped ${dropped} session log(s)`);
+      console.log(
+        `[runs/alarm] swept ${deleted} rows outside policy, pruned ${receipts} intake receipt(s), dropped ${dropped} session log(s)`,
+      );
       await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
       root.end("ok", { swept: deleted });
     } catch (err) {
@@ -3497,6 +3702,9 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/get",
   "/runs/coordinator/units/put",
   "/runs/coordinator/units/list",
+  "/runs/coordinator/events/append",
+  "/runs/coordinator/events/list",
+  "/runs/coordinator/events/mark-consumed",
   "/runs/claim",
   "/runs/heartbeat",
   "/runs/append",
@@ -3512,6 +3720,9 @@ const LEDGER_ROUTES = new Set([
   "/runs/reclaim",
   "/runs/live",
   "/runs/live-events",
+  "/runs/intake",
+  "/runs/intake/read",
+  "/runs/intake/list",
   "/runs/transcript/owner",
   "/runs/transcript/write",
   "/runs/transcript/read",
@@ -3884,6 +4095,64 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))
       return json({ error: "instanceId must be a Workflow instance id" }, 400);
     return json({ units: await stub.listUnits(b.instanceId) });
+  }
+  // The thread events of a unit-owned thread (record 0051's reply-as-event rule): append assigns
+  // the sequence, list filters unconsumed, mark-consumed is idempotent.
+  if (pathname.startsWith("/runs/coordinator/events/")) {
+    if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))
+      return json({ error: "instanceId must be a Workflow instance id" }, 400);
+    if (typeof b.unit !== "string" || !UNIT_PATTERN.test(b.unit)) return json({ error: "unit must be a unit id" }, 400);
+    if (pathname === "/runs/coordinator/events/append") {
+      if (!isThreadEvent({ ...(b.event as Record<string, unknown>), seq: 1 }))
+        return json({ error: "event must be a thread event (without its seq)" }, 400);
+      // The store assigns the sequence and the consumer: a caller's `seq` or
+      // `consumedBy` is dropped, so no row is born consumed in its JSON while
+      // its column still lists it unconsumed.
+      const { seq: _ignored, consumedBy: _fresh, ...event } = b.event as ThreadEvent;
+      const r = await stub.appendUnitEvent(b.instanceId, b.unit, event as Omit<ThreadEvent, "seq" | "consumedBy">);
+      console.log(`[runs/coordinator/events/append] ${key.value} ${b.instanceId}:${b.unit} seq ${r.seq}`);
+      return json(r);
+    }
+    if (pathname === "/runs/coordinator/events/list") {
+      return json({ events: await stub.listUnitEvents(b.instanceId, b.unit, b.unconsumedOnly === true) });
+    }
+    if (pathname === "/runs/coordinator/events/mark-consumed") {
+      if (!Array.isArray(b.seqs) || !b.seqs.every((s) => typeof s === "number" && Number.isInteger(s) && s >= 1))
+        return json({ error: "seqs must be an array of sequence numbers" }, 400);
+      if (typeof b.by !== "string" || b.by.length === 0 || b.by.length > 200)
+        return json({ error: "by must name the consumer" }, 400);
+      const r = await stub.markUnitEventsConsumed(b.instanceId, b.unit, b.seqs as number[], b.by);
+      console.log(
+        `[runs/coordinator/events/mark-consumed] ${key.value} ${b.instanceId}:${b.unit} ${b.seqs.length} row(s) by ${b.by}`,
+      );
+      return json(r);
+    }
+  }
+
+  // The intake receipts (run-history item 59): keyed by the message, not a run.
+  if (pathname === "/runs/intake" || pathname === "/runs/intake/read") {
+    const receiptKey = b.key;
+    if (typeof receiptKey !== "string" || receiptKey.length === 0 || receiptKey.length > 256)
+      return json({ error: "key must be a non-empty string of at most 256 characters" }, 400);
+    if (pathname === "/runs/intake/read") return json({ receipt: await stub.readIntake(receiptKey) });
+    if (!isIntakeReceipt(b.receipt)) return json({ error: "receipt must be an intake receipt" }, 400);
+    if (b.windowMs !== undefined && (typeof b.windowMs !== "number" || !Number.isFinite(b.windowMs) || b.windowMs < 0))
+      return json({ error: "windowMs must be a non-negative number" }, 400);
+    const r = await stub.recordIntake(receiptKey, b.receipt, typeof b.windowMs === "number" ? b.windowMs : 0);
+    console.log(`[runs/intake] ${key.value} ${receiptKey} → ${r.inserted ? "inserted" : "existing"}`);
+    return json(r);
+  }
+  if (pathname === "/runs/intake/list") {
+    if (b.threadKey !== undefined && (typeof b.threadKey !== "string" || b.threadKey.length === 0))
+      return json({ error: "threadKey must be a non-empty string" }, 400);
+    if (b.since !== undefined && (typeof b.since !== "number" || !Number.isFinite(b.since)))
+      return json({ error: "since must be a number" }, 400);
+    return json({
+      receipts: await stub.listIntake({
+        ...(b.threadKey !== undefined ? { threadKey: b.threadKey } : {}),
+        ...(b.since !== undefined ? { since: b.since } : {}),
+      }),
+    });
   }
 
   const runId = parseRunId(b.runId);

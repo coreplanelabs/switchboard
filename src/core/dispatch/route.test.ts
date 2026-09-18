@@ -14,6 +14,7 @@ import { BUILT_IN_CONFIRM, CONFIRM_CLASSES } from "../../config/profile.js";
 import type { CompletionRequest, CompletionResult, Provider, ToolDef } from "../provider.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { IncomingMessage } from "../types.js";
+import type { ConversationReader } from "../references/types.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
 import {
   buildRoutePrompt,
@@ -716,6 +717,69 @@ describe("routeRequest — the stage: when it runs, what always wins", () => {
     expect(model.prompts).toHaveLength(0);
   });
 
+  // Record 0037: the references step quotes a linked thread after admission,
+  // and the router picks the agent from the requester's text alone — so the
+  // stage hands it what that text settles by parse: how many conversations the
+  // request links that a reader owns. No reader is asked anything.
+  it("with references on and a reader registered, a permalink the reader parses is counted onto the user turn — the parse alone, no classify or read — and a plain URL, the flag off or no reader puts no line", async () => {
+    const calls = { classify: 0, read: 0 };
+    const reader: ConversationReader = {
+      platform: "slack",
+      parseConversationUrl(u) {
+        const m = /^https:\/\/acme\.slack\.com\/archives\/([A-Z0-9]+)\/p(\d+)$/.exec(u);
+        if (!m) return undefined;
+        return { channelId: `slack:${m[1]}`, threadKey: `slack:${m[1]}:${m[2]}`, url: u };
+      },
+      async classifyConversation() {
+        calls.classify++;
+        return { visibility: "public", botIsMember: true };
+      },
+      async readConversation() {
+        calls.read++;
+        return {
+          kind: "reference",
+          ref: { channelId: "", threadKey: "", url: "" },
+          channelName: "x",
+          permalink: "",
+          messages: [],
+        };
+      },
+      async requesterIsFullMember() {
+        return true;
+      },
+    };
+    const REFS_ON = YAML + "references:\n  enabled: true\n";
+    const linked =
+      "in acme ship https://acme.slack.com/archives/C1ABCDEF/p1700000000000000 - this, (read the whole thread)";
+    const model = scripted(answer("review"));
+    const out = await routeRequest({ ...deps(REFS_ON, model), conversationReaders: [reader] }, ctx("default", linked));
+    expect(out.kind).toBe("routed");
+    expect(model.prompts[0].user).toContain("The request links 1 conversation this bot can read");
+    expect(calls).toEqual({ classify: 0, read: 0 });
+    // The same thread linked twice is one conversation, as the step counts it.
+    const twice = scripted(answer("review"));
+    await routeRequest(
+      { ...deps(REFS_ON, twice), conversationReaders: [reader] },
+      ctx("default", `${linked} https://acme.slack.com/archives/C1ABCDEF/p1700000000000000`),
+    );
+    expect(twice.prompts[0].user).toContain("The request links 1 conversation this bot can read");
+    // A URL the reader does not parse is plain text.
+    const web = scripted(answer("general"));
+    await routeRequest(
+      { ...deps(REFS_ON, web), conversationReaders: [reader] },
+      ctx("default", "what is https://example.com/a about?"),
+    );
+    expect(web.prompts[0].user).not.toContain("this bot can read");
+    // The flag off (the default): the step will quote nothing, so the router is told nothing.
+    const off = scripted(answer("review"));
+    await routeRequest({ ...deps(YAML, off), conversationReaders: [reader] }, ctx("default", linked));
+    expect(off.prompts[0].user).not.toContain("this bot can read");
+    // No reader registered: the URL is nobody's.
+    const none = scripted(answer("review"));
+    await routeRequest(deps(REFS_ON, none), ctx("default", linked));
+    expect(none.prompts[0].user).not.toContain("this bot can read");
+  });
+
   it("on by default: with no `routing` block a plain message routes, on `defaults.models.general`; a block naming only the model routes on that model", async () => {
     const model = scripted(answer("review"));
     const out = await routeRequest(deps(YAML, model), ctx("default"));
@@ -1014,6 +1078,70 @@ describe("buildRoutePrompt — the imperative rule, stated for the write preset 
     const two = [...presets, { ...presets.find((x) => x.name === "ship")!, name: "patcher" }];
     const p = buildRoutePrompt({ ...base, presets: two });
     expect(p.system).toContain("answer `ship` or `patcher`");
+  });
+
+  // Two production misses, one message each: a spec-shaped ask ("I need you to
+  // do this for me … the screen should show …") routed to explore because it
+  // named no verb of change; "in <repo> ship <thread link>" routed to general
+  // because the link read as something to read before anything could ship.
+  it("states the two shapes beyond the terse order in the same rule: a spec-shaped ask on a named repository is the order it describes (screenshots are its proof, not an investigation), and a request pointing at a linked conversation classifies by its own verb — the quoted thread carries the task for the preset that runs", () => {
+    const p = buildRoutePrompt(base);
+    expect(p.system).toMatch(/"I need you to do this for me"/);
+    expect(p.system).toMatch(/should show/);
+    expect(p.system).toMatch(/screenshots or a recording of the result is the proof it wants/);
+    expect(p.system).toMatch(/never covers it/);
+    expect(p.system).toMatch(/"ship this", "do the above"/);
+    expect(p.system).toMatch(/quoted in full to the preset that runs/);
+    expect(p.system).toMatch(/"summarize this thread", "what did we decide here\?"/);
+    // One rule paragraph: the imperative rule names the write preset once per clause, never a paragraph of its own.
+    expect(p.system.split("Short imperatives:")).toHaveLength(2);
+    // Without a write preset the shapes go with the rule: nothing names ship.
+    const none = buildRoutePrompt({ ...base, presets: presets.filter((x) => x.identity !== "write") });
+    expect(none.system).not.toMatch(/do this for me/);
+    expect(none.system).not.toMatch(/quoted in full/);
+  });
+
+  it("the count of linked conversations rides the user turn as a fact, only when the request links one: singular and plural, never the quote", () => {
+    const one = buildRoutePrompt({
+      ...base,
+      text: "in acme ship https://acme.slack.com/archives/C1ABCDEF/p1 - this",
+      references: 1,
+    });
+    expect(one.user).toContain(
+      "The request links 1 conversation this bot can read; it is quoted in full to the preset that runs.",
+    );
+    expect(one.user.indexOf("The request links")).toBeLessThan(one.user.indexOf("<request>"));
+    const two = buildRoutePrompt({ ...base, references: 2 });
+    expect(two.user).toContain(
+      "The request links 2 conversations this bot can read; they are quoted in full to the preset that runs.",
+    );
+    expect(buildRoutePrompt(base).user).not.toContain("conversation this bot can read");
+    expect(buildRoutePrompt({ ...base, references: 0 }).user).not.toContain("conversation this bot can read");
+    // The fact is per message: nothing of it in the cached system half.
+    expect(one.system).not.toContain("The request links");
+  });
+
+  // A live harness probe routed to ship because "probe", "measure" and "execute"
+  // read as verbs of change, while two near-identical asks without those words
+  // routed correctly to explore. The rule names "run and report" as a read-only
+  // sandbox ask and says those words do not make it a code change.
+  it("states that a run-and-report ask — run a command and report the result, nothing to change — routes to the sandbox preset and that probe, measure and execute do not make it a code change", () => {
+    const p = buildRoutePrompt(base);
+    expect(p.system).toMatch(/run.*sandbox.*report.*result|run.*report.*sandbox/i);
+    expect(p.system).toMatch(/probe, measure and execute do not make it a code change/);
+    // The sandbox preset name is derived from the offered table (the repo-cold read-identity
+    // preset), never typed: `explore` appears because that is what the registry offers today.
+    expect(p.system).toMatch(/routes to the sandbox preset.*`explore`/);
+    // The clause ends with "never `ship`" (derived), not a hand-typed name.
+    expect(p.system).toMatch(/never `ship`/);
+    // Without a write preset the clause goes with the rule.
+    const none = buildRoutePrompt({ ...base, presets: presets.filter((x) => x.identity !== "write") });
+    expect(none.system).not.toMatch(/probe, measure and execute/);
+    // When the table has a write preset but no repo-cold preset, the sandbox clause is absent:
+    // a requester who may not run any sandbox preset is not shown a name to steer to.
+    const noSandbox = buildRoutePrompt({ ...base, presets: presets.filter((x) => x.machine !== "repo-cold") });
+    expect(noSandbox.system).toMatch(/fix it/); // write preset still present → rule is present
+    expect(noSandbox.system).not.toMatch(/probe, measure and execute do not make it a code change/);
   });
 
   it("without a write preset in the table the rule is absent: a requester who may not run ship is never told to pick it", () => {
@@ -1582,6 +1710,16 @@ describe("the command menu — every chat command as a tool beside route (record
     // The rule rides the prompt alone: the tools offered are the menu's, the route tool the table's.
     expect(withMenu.tools).toEqual(menu.map((c) => c.tool));
     expect(withMenu.tool).toEqual(routeTool(presets, undefined));
+    expect(buildRoutePrompt(base).system).not.toContain(sentence);
+  });
+
+  it("the rule tells the model a thing to be made, shown or attached is never a command call: one sentence, once, only with a menu", () => {
+    const withMenu = buildRoutePrompt({ ...base, commands: menu });
+    const sentence = "A request for something to be made, shown or attached";
+    expect(withMenu.system.split(sentence)).toHaveLength(2);
+    expect(withMenu.system).toContain("is work for a preset, never a command call");
+    // The example names no command: the tools carry their own names.
+    expect(withMenu.system).not.toMatch(/help_show|help\.show/);
     expect(buildRoutePrompt(base).system).not.toContain(sentence);
   });
 

@@ -14,6 +14,7 @@ import { TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import type { DrivenRun, RunScript } from "../testing/scenarios.js";
 import { readStoreSince, type OpenCodeFeedRecord } from "./client.js";
 import {
+  InboxFate,
   judgeOpenCodeAsk,
   openCodeToolNameWord,
   OpenCodeBridge,
@@ -96,7 +97,7 @@ describe("OPENCODE_EVENT_DISPOSITION — every event the server streams is decid
     expect(new Set(Object.keys(OPENCODE_EVENT_DISPOSITION))).toEqual(expected);
   });
 
-  it("classifies the record's kinds as the clause needs: the tool call mapped, the deltas folded, the step boundaries structure, the asks and failures notes, the reverts and shell features impossible; an rpc event is folded and an unknown kind is undecided", () => {
+  it("classifies the record's kinds as the clause needs: the tool call mapped, the deltas folded, the step boundaries and the shell tool's own process structure, the asks and failures notes, the reverts and the session's shell messages impossible; an rpc event is folded and an unknown kind is undecided", () => {
     expect(openCodeDispositionOf("session.tool.called")).toBe("mapped");
     expect(openCodeDispositionOf("session.tool.success")).toBe("mapped");
     expect(openCodeDispositionOf("session.compaction.ended")).toBe("mapped");
@@ -112,7 +113,20 @@ describe("OPENCODE_EVENT_DISPOSITION — every event the server streams is decid
     expect(openCodeDispositionOf("permission.asked")).toBe("note");
     expect(openCodeDispositionOf("session.execution.failed")).toBe("note");
     expect(openCodeDispositionOf("session.revert.staged")).toBe("impossible");
+    // The `shell` tool's own process lifecycle — the server's Shell service
+    // says it for every shell call the model makes — lands nowhere of its
+    // own: the call's rows already carry the command and the exit.
+    expect(openCodeDispositionOf("shell.created")).toBe("structure");
+    expect(openCodeDispositionOf("shell.exited")).toBe("structure");
+    expect(openCodeDispositionOf("shell.deleted")).toBe("structure");
+    // The server's provider catalogue changing is its own shape, denied tool or not.
+    expect(openCodeDispositionOf("websearch.updated")).toBe("structure");
+    // A shell command a client posts INTO the session as a message of its own
+    // is something no one does under the run; the ptys stay off too.
     expect(openCodeDispositionOf("session.shell.started")).toBe("impossible");
+    expect(openCodeDispositionOf("session.shell.ended")).toBe("impossible");
+    expect(openCodeDispositionOf("pty.created")).toBe("impossible");
+    expect(openCodeDispositionOf("persistent-pty.added")).toBe("impossible");
     expect(openCodeDispositionOf("rpc.some.plugin.call")).toBe("folded");
     expect(openCodeDispositionOf("session.made.up.kind")).toBeUndefined();
   });
@@ -262,8 +276,41 @@ describe("the gate's honest cannot, the compaction row, the budget stop, the unk
   it("the bot's own reply — decided at the ask, the same effect, the first echo — is not a bypass", () => {
     const { bridge } = harness();
     const ask = bridge.observe(asked("per_1", "c1", "shell", "ls"));
-    expect(ask.replies).toEqual([{ requestID: "per_1", callId: "c1", reply: "once" }]);
+    expect(ask.replies).toEqual([{ requestID: "per_1", callId: "c1", stepID: "msg_a0", reply: "once" }]);
     expect(bridge.observe(replied("per_1", "once")).bypass).toBeUndefined();
+  });
+
+  it("the refusals held for a step — what a withdrawn sibling's note is explained by — are dropped when the step ends or fails, so the map never grows over a long run", () => {
+    const ended = harness();
+    ended.bridge.observe(asked("per_1", "c1", "shell", "git push origin main"));
+    expect(ended.bridge.stepsWithHeldRefusals()).toEqual(["msg_a0"]);
+    ended.bridge.observe(ev("session.step.ended", { sessionID: "ses_c", assistantMessageID: "msg_a0" }));
+    expect(ended.bridge.stepsWithHeldRefusals()).toEqual([]);
+
+    const failed = harness();
+    failed.bridge.observe(asked("per_2", "c2", "shell", "git push origin main"));
+    expect(failed.bridge.stepsWithHeldRefusals()).toEqual(["msg_a0"]);
+    failed.bridge.observe(
+      ev("session.step.failed", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_a0",
+        error: { type: "aborted", message: "Step interrupted" },
+      }),
+    );
+    expect(failed.bridge.stepsWithHeldRefusals()).toEqual([]);
+  });
+
+  it("two withdrawn calls in one cascaded step accumulate: the one re-prompt names both, consumed once", () => {
+    const { bridge } = harness();
+    // The gate refuses c1 (a push to a protected branch); the server then
+    // withdraws the step's other two asks — the cascade.
+    bridge.observe(asked("per_1", "c1", "shell", "git push origin main"));
+    bridge.askWithdrawn({ requestID: "per_2", callId: "c2", stepID: "msg_a0", reply: "once" });
+    bridge.askWithdrawn({ requestID: "per_3", callId: "c3", stepID: "msg_a0", reply: "once" });
+    const prompt = bridge.takeCascadeRePrompt();
+    expect(prompt).toMatch(/refused/);
+    expect(prompt).toMatch(/\(call c2\) and \S+ \(call c3\) were declined with it — the step ended/);
+    expect(bridge.takeCascadeRePrompt()).toBeUndefined();
   });
 
   it("a forged `once` for an ask the bot rejected — the effect differs from the bot's recorded decision — is a bypass", () => {
@@ -332,13 +379,31 @@ describe("the gate's honest cannot, the compaction row, the budget stop, the unk
     expect(mentions.providerError).toMatch(/upstream/);
   });
 
-  it("an event kind the table does not name is a harness_error note naming it; an impossible kind is one too", () => {
+  it("an event kind the table does not name is a harness_error note naming it; an impossible kind is one too — each said once per kind, however often the kind arrives", () => {
     const { bridge, events } = harness();
     bridge.observe(ev("session.made.up.kind"));
     bridge.observe(ev("session.revert.staged", { sessionID: "ses_c" }));
-    const errs = notes(events).filter((n) => n.kind === "harness_error");
-    expect(errs.some((n) => n.summary.includes("session.made.up.kind"))).toBe(true);
-    expect(errs.some((n) => n.summary.includes("session.revert.staged"))).toBe(true);
+    // The same kinds again: the first arrival was the finding; a flood of one
+    // wrong table entry is not one note per event (measured live: two notes
+    // per shell call while `shell.created`/`shell.exited` sat as impossible).
+    bridge.observe(ev("session.made.up.kind"));
+    bridge.observe(ev("session.revert.staged", { sessionID: "ses_c" }));
+    bridge.observe(ev("session.made.up.kind"));
+    const errs = () => notes(events).filter((n) => n.kind === "harness_error");
+    expect(errs().map((n) => n.summary)).toEqual([
+      "OpenCode emitted an event kind this build does not know: session.made.up.kind (said once: later events of this kind are not noted)",
+      "OpenCode emitted session.revert.staged, which this run's configuration turns off (said once: later events of this kind are not noted)",
+    ]);
+    // Another kind of each class is its own first arrival, said once too.
+    bridge.observe(ev("session.forked", { sessionID: "ses_c" }));
+    bridge.observe(ev("session.other.made.up.kind"));
+    bridge.observe(ev("session.forked", { sessionID: "ses_c" }));
+    expect(errs().map((n) => n.summary.replace(/ \(said once.*$/, ""))).toEqual([
+      "OpenCode emitted an event kind this build does not know: session.made.up.kind",
+      "OpenCode emitted session.revert.staged, which this run's configuration turns off",
+      "OpenCode emitted session.forked, which this run's configuration turns off",
+      "OpenCode emitted an event kind this build does not know: session.other.made.up.kind",
+    ]);
   });
 });
 
@@ -600,6 +665,97 @@ describe("the loop — a reply that cannot be posted, and the narration's timing
     expect(r.killed.length).toBeGreaterThan(0);
   });
 
+  // Feature: docs/reference/specs/harness.md item 2 — a reply the server
+  // answers 404 is read against its pending asks: the ask gone is the server's
+  // withdrawal (the reject cascade after a sibling's refusal), said once and
+  // continued; the ask still pending is a reply that failed, fail closed.
+  const twoCalls: RunScript = {
+    turns: [
+      {
+        content: [
+          { type: "tool_use", id: "c1", name: "bash", input: { command: "git push origin main" } },
+          { type: "tool_use", id: "c2", name: "bash", input: { command: "echo sibling" } },
+        ],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "done" }], stopReason: "end_turn" },
+    ],
+  };
+  const replyPosts = (r: DrivenRun) => r.requests.filter((q) => /\/permission\/[^/]+\/reply$/.test(q.path));
+  const pendingLists = (r: DrivenRun) => r.requests.filter((q) => q.method === "GET" && /\/permission$/.test(q.path));
+
+  it("a permission-reply POST the server answers 404 for an ask its pending list no longer carries — the reject cascade after a sibling's refusal — is the ask withdrawn: one ask_withdrawn note naming the sibling's refusal, no reply-failed error, the server's own reject echo no bypass, the sibling settled by the server's aborted failure; the step.failed {aborted} is not a harness_error; the loop re-prompts the model with the refusal (a decline_cascade note) so the model continues — the run answers with the next step, not answerless", async () => {
+    const r = await openCodeDriver({ declineCascade: true }).run(twoCalls);
+    expect(r.outcome.kind).toBe("answered");
+    if (r.outcome.kind === "answered") expect(r.outcome.answer).toBe("done");
+    const withdrawn = notes(r.events).filter((n) => n.kind === "ask_withdrawn");
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0].summary).toMatch(
+      /withdrew the ask for bash \(call c2\) before the gate's reply \(once\) landed/,
+    );
+    expect(withdrawn[0].summary).toMatch(/the gate refused bash \(call c1\) in the same step/);
+    expect(notes(r.events).filter((n) => n.kind === "tool_refused")).toHaveLength(1);
+    // The cascade step's aborted failure is not a harness_error: it is the server's expected end.
+    expect(
+      notes(r.events).filter(
+        (n) => n.kind === "harness_error" && /Step interrupted|could not be posted|bypassed/.test(n.summary),
+      ),
+    ).toEqual([]);
+    // A decline_cascade note says the loop re-prompted the model.
+    const cascade = notes(r.events).filter((n) => n.kind === "decline_cascade");
+    expect(cascade).toHaveLength(1);
+    expect(cascade[0].summary).toMatch(/re-prompting the model with the refusal/);
+    // Two replies posted, one listing after the 404 — never a blind re-send.
+    expect(replyPosts(r)).toHaveLength(2);
+    expect(pendingLists(r)).toHaveLength(1);
+    // The sibling settled by the server's own word: its result on the record, not ok, the call never run.
+    const sibling = r.events.find(
+      (e): e is Extract<RunEvent, { type: "tool_result" }> => e.type === "tool_result" && e.callId === "c2",
+    );
+    expect(sibling).toMatchObject({ ok: false });
+    expect(sibling?.summary).toMatch(/declined this tool call/);
+    // The step ended interrupted by the binary, not by a loop-posted interrupt.
+    expect(r.requests.filter((q) => q.method === "POST" && /\/interrupt$/.test(q.path))).toHaveLength(0);
+  });
+
+  it("a permission-reply POST the server answers 404 for an ask its pending list no longer carries, with no refusal of the bot's in the step to explain it, is still withdrawn and not a fatal reply — the note says no refusal is on the record — but the server's own reject echo is judged as any reply is: a reject where the bot decided once is a bypass, fail closed", async () => {
+    const r = await openCodeDriver({ replyRefusedAskDropped: true }).run(oneCall);
+    expect(r.outcome.kind).toBe("failed");
+    if (r.outcome.kind === "failed") {
+      expect(r.outcome.error.name).toBe("OpenCodeGateBypassedError");
+      expect(r.outcome.error.message).toMatch(/answering `reject` where the bot decided `once` \(request per_c1\)/);
+    }
+    const withdrawn = notes(r.events).filter((n) => n.kind === "ask_withdrawn");
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0].summary).toMatch(
+      /withdrew the ask for bash \(call c1\) before the gate's reply \(once\) landed/,
+    );
+    expect(withdrawn[0].summary).toMatch(/no refusal of the same step is on the record/);
+    expect(notes(r.events).filter((n) => n.kind === "harness_error" && /could not be posted/.test(n.summary))).toEqual(
+      [],
+    );
+    expect(notes(r.events).some((n) => n.kind === "harness_error" && /bypassed/.test(n.summary))).toBe(true);
+    expect(replyPosts(r)).toHaveLength(1);
+    expect(pendingLists(r)).toHaveLength(1);
+    expect(r.killed.length).toBeGreaterThan(0);
+  });
+
+  it("a permission-reply POST the server answers 404 while its pending list still carries the ask stops the run by name, as any reply that did not land — fail closed, no ask_withdrawn note", async () => {
+    const r = await openCodeDriver({ replyRefusedWhilePending: true }).run(oneCall);
+    expect(r.outcome.kind).toBe("failed");
+    if (r.outcome.kind === "failed") {
+      expect(r.outcome.error.name).toBe("OpenCodeReplyFailedError");
+      expect(r.outcome.error.message).toMatch(/per_c1/);
+      expect(r.outcome.error.message).toMatch(/answered 404/);
+    }
+    expect(notes(r.events).filter((n) => n.kind === "ask_withdrawn")).toEqual([]);
+    expect(notes(r.events).some((n) => n.kind === "harness_error" && /could not be posted/.test(n.summary))).toBe(true);
+    // One POST and one listing: the 404 is read against the pending asks, never retried blind.
+    expect(replyPosts(r)).toHaveLength(1);
+    expect(pendingLists(r)).toHaveLength(1);
+    expect(r.killed.length).toBeGreaterThan(0);
+  });
+
   it("narration beside a call is emitted before that turn's tool_call — for every tool turn, the last included — and a final text-only turn is the answer, never narration", async () => {
     const r = await run({
       turns: [
@@ -805,6 +961,24 @@ describe("the loop — a refused request, a silent server, and a hung turn", () 
     expect(harnessErrors(r)).toEqual([]);
   });
 
+  it("the refill the execution's end owed fails in the tailer: the loop settles on the tailer's failure note for that reason, not on the event and not never — the run ends on what landed, the failure on the card", async () => {
+    const r = await openCodeDriver({ terminalRefillFails: true }).run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "g1", name: "grep", input: { pattern: "needle" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "the last word" }], stopReason: "end_turn" },
+      ],
+    });
+    // The last step's own refill still landed (after the terminal event), so the answer is read;
+    // the terminal reason's refill is the one the tailer failed, and its note is the settle.
+    expect(r.outcome.kind).toBe("answered");
+    expect(answered(r)).toBe("the last word");
+    expect(r.stopRequested).toBeUndefined();
+    expect(r.progress.some((p) => p.includes("message refill failed"))).toBe(true);
+  });
+
   it("a model call that fails outside the wind-down fails the run by the provider's words at once — the execution settled on the failure, nothing awaited past it, the process ended", async () => {
     const r = await run({ ...oneTurn, failModelCall: 1 });
     expect(r.outcome.kind).toBe("failed");
@@ -968,6 +1142,27 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
     expect(dead.bypass).toBeUndefined();
     expect(events.filter((e) => e.type === "tool_result").map((e) => e.callId)).toEqual(["c-dead"]);
     expect(notes(events)).toEqual([]);
+  });
+
+  it("the dead generation's end, replayed while catching up, owes this loop no refill: a later refill of the same terminal kind settles nothing, and only the loop's own end is paid by its refill", () => {
+    const { bridge } = harness();
+    const refill = (reason: string): OpenCodeFeedRecord => ({
+      feed: "messages",
+      at: NOW,
+      sessionID: "ses_c",
+      reason,
+      data: [],
+    });
+    bridge.observing = "catching-up";
+    const replayed = bridge.observe(ev("session.execution.succeeded", { sessionID: "ses_c" }));
+    // Catching up, the end is history: the loop discards its `settled`, and nothing dangles from it.
+    expect(replayed.settled).toBe(true);
+    bridge.observing = "own";
+    expect(bridge.observe(refill("session.execution.succeeded")).settled).toBe(false);
+    // The loop's own end owes its refill; the event alone settles nothing, the refill does.
+    expect(bridge.observe(ev("session.execution.succeeded", { sessionID: "ses_c" })).settled).toBe(false);
+    expect(bridge.observe(refill("session.step.ended")).settled).toBe(false);
+    expect(bridge.observe(refill("session.execution.succeeded")).settled).toBe(true);
   });
 
   it("a settle whose step this loop never saw start — an earlier execution's, landing however late, no hand-over needed — is set aside in own mode under a settle_set_aside note naming the call and the step, while a settle of the loop's own step with no decision is still the bypass it always was", () => {
@@ -1687,6 +1882,42 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
       "a model call failed while the bot was away (the proxy answered 400); continuing",
       "the execution reached the proxy's turn budget while the bot was away (403 turn_budget_exhausted: the run is past its 60-turn guard); continuing",
     ]);
+  });
+});
+
+// Feature: docs/reference/specs/harness.md item 13 — a steer's fate is the
+// server's own events, and only the loop's leaving closes the tracker: an
+// interrupt drops the steers waiting at that moment, never one posted after it.
+describe("InboxFate — delivery confirmed by event, an interrupt drops only what waits, close latches", () => {
+  it("a delivery before or after the wait resolves it true", async () => {
+    const fate = new InboxFate();
+    fate.deliver("i1");
+    await expect(fate.wait("i1")).resolves.toBe(true);
+    const later = fate.wait("i2");
+    fate.deliver("i2");
+    await expect(later).resolves.toBe(true);
+  });
+
+  it("interruptAll drops the waiters pending at that moment — and no others: a steer posted after the interrupt (the write-up's execution) is still delivered true", async () => {
+    const fate = new InboxFate();
+    const dropped = fate.wait("i1");
+    fate.interruptAll();
+    await expect(dropped).resolves.toBe(false);
+    // F2: the tracker stays open — the loop-end cut's interrupted end must not
+    // latch a follow-up steered into the write-up's execution as dropped.
+    const afterCut = fate.wait("i2");
+    fate.deliver("i2");
+    await expect(afterCut).resolves.toBe(true);
+  });
+
+  it("close resolves every pending waiter false and answers every later wait false on the spot — idempotent", async () => {
+    const fate = new InboxFate();
+    const pending = fate.wait("i1");
+    fate.close();
+    await expect(pending).resolves.toBe(false);
+    await expect(fate.wait("i2")).resolves.toBe(false);
+    fate.close();
+    await expect(fate.wait("i3")).resolves.toBe(false);
   });
 });
 

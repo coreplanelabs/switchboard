@@ -192,6 +192,11 @@ export interface RunRecord {
    *  item 48), stored at the claim so a retried spawn finds its run. Present
    *  exactly when `parentInstanceId` is — both or neither, never one alone. */
   idempotencyKey?: string;
+  /** The plan runner instance this run's hand-off created (record 0051 R2;
+   *  item 2): the last `ship_handoff` event, folded at the assembly like the
+   *  coordinator tag. Present only on a ship run whose hand-off succeeded;
+   *  a record written before the event has none. */
+  instanceId?: string;
   /** Where the run's conversation started (item 52): `channel` — its own
    *  thread's history, as for every run a person, a schedule or a coordinator
    *  started — or `parent` — a spawned child seeded from its parent's text
@@ -266,6 +271,16 @@ export function leaseOfEvents(events: readonly RunEvent[]): RunLease | undefined
     if (e.type === "lease") return { startedAt: e.startedAt, endsAt: e.endsAt, loopEndsAt: e.loopEndsAt };
   }
   return undefined;
+}
+
+/** The plan runner instance a ship run's events say its hand-off created —
+ *  the last `ship_handoff` wins — or nothing (record 0051 R2): projected onto
+ *  `RunRecord.instanceId` the way `coordinator_tag` rides the record, so the
+ *  thread's owner rule finds the instance from the page's ship run. */
+export function instanceIdOfEvents(events: readonly RunEvent[]): string | undefined {
+  let id: string | undefined;
+  for (const e of events) if (e.type === "ship_handoff") id = e.instanceId;
+  return id;
 }
 
 /** The pull request a run's events say it opened or edited — the last
@@ -909,6 +924,9 @@ export function isRunRecord(v: unknown): v is RunRecord {
     r.idempotencyKey !== undefined &&
     (typeof r.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(r.idempotencyKey))
   )
+    return false;
+  // The instance a ship run's hand-off created (record 0051 R2; item 2).
+  if (r.instanceId !== undefined && (typeof r.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(r.instanceId)))
     return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   if (r.relayedBy !== undefined && typeof r.relayedBy !== "string") return false;

@@ -13,11 +13,13 @@ import {
   TRANSIENT_PLATFORM_WORDING,
   controlResetErr,
   execFailureDocument,
+  runtimeBusyErr,
   runtimeReplacedErr,
   threadErrBuilders,
   type ThreadDataRoute,
   type ThrowPredicates,
 } from "./threadErr";
+import { SandboxRuntimeBusyError } from "../../src/execution/sandboxErrors";
 
 // Feature: docs/reference/specs/execution.md item 9 — a throw no route named is
 // one typed 500 wherever the resident catches it, and a thread data-plane call
@@ -87,6 +89,7 @@ describe("threadRejectionErr answers a rejected stub call as the Durable Object 
         error: `control-reset: the resident's Durable Object was reset (a deploy) while this request was pending at the Worker; the container and its processes are as they were; the request's outcome is unknown (${RESET})`,
         status: 409,
         reason: "control-reset",
+        cause: "system",
       });
       expect(answer).not.toHaveProperty("transient");
     }
@@ -101,6 +104,7 @@ describe("threadRejectionErr answers a rejected stub call as the Durable Object 
         error: `runtime-replaced: the resident runtime was replaced (a deploy) while this request was pending at the Worker; its outcome is unknown (${MOVED})`,
         status: 409,
         reason: "runtime-replaced",
+        cause: "system",
       });
     }
     // Wrapped one link down, the same verdict.
@@ -110,17 +114,19 @@ describe("threadRejectionErr answers a rejected stub call as the Durable Object 
   });
 
   it("the stopped-container sentence, which only the DO's restore knowledge could vouch for, is WITHHELD on /exec — the SDK's words on a bare 409, no reason, no transient, for the harness seam's one more command to judge — and SAID on /read and /write, where the word drives the client's one re-attach-and-retry and never a verdict", () => {
-    expect(threadRejectionErr(new Error(STOPPED), "/exec")).toEqual({ error: STOPPED, status: 409 });
+    expect(threadRejectionErr(new Error(STOPPED), "/exec")).toEqual({ error: STOPPED, status: 409, cause: "system" });
     for (const route of ["/read", "/write"] as const) {
       expect(threadRejectionErr(new Error(STOPPED), route), route).toEqual({
         error: `runtime-replaced: the resident runtime was replaced (a deploy) while this request was pending at the Worker; its outcome is unknown (${STOPPED})`,
         status: 409,
         reason: "runtime-replaced",
+        cause: "system",
       });
     }
     expect(threadRejectionErr(new Error("Process supervisor is closed"), "/exec")).toEqual({
       error: "Process supervisor is closed",
       status: 409,
+      cause: "system",
     });
   });
 
@@ -148,6 +154,7 @@ describe("threadRejectionErr answers a rejected stub call as the Durable Object 
           error: messageOf(err),
           status: 500,
           transient: true,
+          cause: "system",
         });
       }
     }
@@ -173,7 +180,12 @@ describe("threadRejectionErr answers a rejected stub call as the Durable Object 
     ];
     for (const [what, err] of deterministic) {
       expect(isTransientPlatformThrow(err), what).toBe(false);
-      expect(threadRejectionErr(err, "/exec"), what).toEqual({ error: messageOf(err), status: 500, transient: false });
+      expect(threadRejectionErr(err, "/exec"), what).toEqual({
+        error: messageOf(err),
+        status: 500,
+        transient: false,
+        cause: "system",
+      });
     }
   });
 });
@@ -184,13 +196,20 @@ describe("catchAllErr is the one shape of the 500 for a throw no route named", (
       error: `attach-failed: ${CONNECTION_LOST}`,
       status: 500,
       transient: true,
+      cause: "system",
     });
     expect(catchAllErr(new TypeError("boom"), "op-failed")).toEqual({
       error: "op-failed: boom",
       status: 500,
       transient: false,
+      cause: "system",
     });
-    expect(catchAllErr("a string was thrown")).toEqual({ error: "a string was thrown", status: 500, transient: false });
+    expect(catchAllErr("a string was thrown")).toEqual({
+      error: "a string was thrown",
+      status: 500,
+      transient: false,
+      cause: "system",
+    });
     // The typed predicates count here too: a reset or a replacement the fetch handler's catch-all meets is transient.
     expect(catchAllErr(new Error(RESET)).transient).toBe(true);
     expect(catchAllErr(new Error(STOPPED)).transient).toBe(true);
@@ -240,6 +259,7 @@ describe("the fallback hands its verdicts on", () => {
       error: "boom",
       status: 500,
       transient: false,
+      cause: "system",
     });
     expect(counts).toEqual({ reset: 1, replaced: 1 });
     counts.reset = 0;
@@ -287,11 +307,13 @@ describe("the error classes and their builders", () => {
       error: new RuntimeReplacedError("collect", cause, true).message,
       status: 409,
       reason: "runtime-replaced",
+      cause: "system",
     });
     expect(controlResetErr(new ControlResetError("collect", cause))).toEqual({
       error: new ControlResetError("collect", cause).message,
       status: 409,
       reason: "control-reset",
+      cause: "system",
     });
   });
 });
@@ -331,6 +353,7 @@ describe("execFailureDocument is the /exec stream's one failure document", () =>
       error: CONNECTION_LOST,
       status: 500,
       transient: true,
+      cause: "system",
       stdout: "",
       stderr: CONNECTION_LOST,
       exitCode: 127,
@@ -343,9 +366,66 @@ describe("execFailureDocument is the /exec stream's one failure document", () =>
     expect(execFailureDocument(threadRejectionErr(new Error(STOPPED), "/exec"))).toEqual({
       error: STOPPED,
       status: 409,
+      cause: "system",
       stdout: "",
       stderr: STOPPED,
       exitCode: 127,
     });
+  });
+});
+
+describe("every named refusal carries the seam's cause beside its words (record 0054)", () => {
+  it("a throw no route named, a replaced runtime and a reset DO are `system`: the machinery's own, never the person's", () => {
+    expect(catchAllErr(new Error("boom")).cause).toBe("system");
+    expect(runtimeReplacedErr(new RuntimeReplacedError("spawn", new Error("moved"), true)).cause).toBe("system");
+    expect(controlResetErr(new ControlResetError("call", new Error(RESET))).cause).toBe("system");
+    // The withheld replacement word on /exec is the platform's too.
+    expect(threadRejectionErr(new Error(STOPPED), "/exec").cause).toBe("system");
+  });
+
+  it("the cause rides the /exec failure document beside the words, so a streamed failure is read by a field", () => {
+    const doc = execFailureDocument(catchAllErr(new Error("boom"), "attach-failed")) as Record<string, unknown>;
+    expect(doc.cause).toBe("system");
+    expect(doc.error).toBe("attach-failed: boom");
+  });
+});
+
+// Feature: docs/reference/specs/resident-repos.md item 68 — a container that
+// did not accept the connection is a wait on the resident too: the DO's
+// typed word at the spawn becomes the 503 with the token, wherever the throw
+// was met, and the platform's bare words never are the token by themselves.
+describe("a refused connect (runtime-busy)", () => {
+  const PLATFORM =
+    "Container is taking too long to accept the connection; the application could be overwhelmed with load";
+  const busy = () => new SandboxRuntimeBusyError({ containerId: "c1", cause: PLATFORM });
+
+  it("runtimeBusyErr is the 503 with the token and the machinery's own cause, the DO's words kept", () => {
+    const err = busy();
+    expect(runtimeBusyErr(err)).toEqual({ error: err.message, status: 503, reason: "runtime-busy", cause: "system" });
+    expect(err.message.startsWith("runtime-busy: ")).toBe(true);
+    expect(err.message).toContain(PLATFORM);
+  });
+
+  it("a rejected stub call carrying the DO's word is answered the same on every route — the client re-sends on the token — after the reset and the replacement, which it is neither", () => {
+    for (const route of ROUTES) {
+      const typed = threadRejectionErr(busy(), route);
+      expect(typed).toEqual({ error: busy().message, status: 503, reason: "runtime-busy", cause: "system" });
+      // After the stub boundary only the name and the message survive.
+      const crossed = Object.assign(new Error(busy().message), { name: "SandboxRuntimeBusyError" });
+      expect(threadRejectionErr(crossed, route)).toEqual(typed);
+    }
+  });
+
+  it("the word is the platform's transient for the catch-all — a re-probe clears it — while the platform's bare words on their own are not the token: the DO names it at the spawn, nothing else does", () => {
+    expect(isTransientPlatformThrow(busy())).toBe(true);
+    expect(catchAllErr(busy(), "attach-failed")).toMatchObject({ status: 500, transient: true });
+    const bare = new Error(PLATFORM);
+    expect(threadRejectionErr(bare, "/exec")).toEqual({
+      error: PLATFORM,
+      status: 500,
+      transient: false,
+      cause: "system",
+    });
+    expect(isTransientPlatformThrow(bare)).toBe(false);
   });
 });

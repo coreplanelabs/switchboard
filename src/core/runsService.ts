@@ -138,6 +138,10 @@ export interface RunView {
    *  live on another generation, or persisted; absent on every other run. */
   parentInstanceId?: string;
   idempotencyKey?: string;
+  /** The plan runner instance a ship run's hand-off created (record 0051 R2;
+   *  `RunRecord.instanceId`): what the thread's owner rule reads off the page's
+   *  ship run. Persisted rows only — a record written before the event has none. */
+  instanceId?: string;
   /** The typed artifacts a finished run's record carries (run-history item 2) —
    *  the review's verdict, reviewed head and post, the fix round's dispositions,
    *  the coding child's handoff. A live view has none yet; a finished row the

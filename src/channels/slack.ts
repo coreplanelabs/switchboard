@@ -390,11 +390,17 @@ async function handle(deps: CoreDeps, { client, statusClient }: SlackClients, ev
   const trace = startRequestRoot(deps, { channel: "slack", receivedAt, originAt: tsMs(ev.ts) });
   try {
     const received = await trace.root.span("slack.receive", (span) =>
-      receiveSlackMessage(client, ev, span, {
-        staging: deps.artifacts !== undefined,
-        maxBytesPerMessage:
-          deps.config.config.artifacts?.inbound?.maxBytesPerMessage ?? ARTIFACT_DEFAULTS.maxBytesPerMessage,
-      }),
+      receiveSlackMessage(
+        client,
+        ev,
+        span,
+        {
+          staging: deps.artifacts !== undefined,
+          maxBytesPerMessage:
+            deps.config.config.artifacts?.inbound?.maxBytesPerMessage ?? ARTIFACT_DEFAULTS.maxBytesPerMessage,
+        },
+        relayAppsOf(deps),
+      ),
     );
     if (!received) {
       trace.root.end("ok", { status: "refused" });
@@ -425,11 +431,18 @@ export interface StagingPolicy {
   maxBytesPerMessage: number;
 }
 
+/** The operator's `slack.relayApps` — the bot ids whose relay footer names the
+ *  requester (item 13); none configured means no footer is honoured. */
+function relayAppsOf(deps: CoreDeps): readonly string[] {
+  return deps.config.config.slack?.relayApps ?? [];
+}
+
 async function receiveSlackMessage(
   client: SlackClient,
   ev: SlackEvent,
   span: Span,
   policy: StagingPolicy,
+  relayApps: readonly string[],
 ): Promise<Omit<IncomingMessage, "receivedAt" | "originAt"> | undefined> {
   // Redelivery guard: claim (channel, ts) and drop the event when it
   // demonstrably ran already — in this process, or (for a stale delivery)
@@ -477,18 +490,22 @@ async function receiveSlackMessage(
   // lookup leaves the field undefined (the label falls back to the raw id) and
   // never fails the dispatch. Resolved in parallel so the two lookups don't add
   // up on the first message for a new channel/user.
-  // Who asked (item 13): the sender, or the person an app relayed for — read
-  // before the name lookups, which take the resolved person. A person's post
-  // resolves without a call; a relay costs one `conversations.replies`.
-  const requester = await resolveSlackRequester(client, {
-    channel: ev.channel,
-    ts: ev.ts,
-    threadTs: ev.threadTs,
-    ...(ev.user !== undefined ? { user: ev.user } : {}),
-    text: ev.rawText ?? ev.text,
-    ...(ev.poster !== undefined ? { poster: ev.poster } : {}),
-    ...(ev.thread !== undefined ? { thread: ev.thread } : {}),
-  });
+  // Who asked (item 13): the sender, or the person the configured relay app
+  // posted for — read before the name lookups, which take the resolved person.
+  // A person's post resolves without a call; an older relay footer costs one
+  // `conversations.replies`.
+  const requester = await resolveSlackRequester(
+    client,
+    {
+      channel: ev.channel,
+      ts: ev.ts,
+      threadTs: ev.threadTs,
+      ...(ev.user !== undefined ? { user: ev.user } : {}),
+      text: ev.rawText ?? ev.text,
+      ...(ev.poster !== undefined ? { poster: ev.poster } : {}),
+    },
+    relayApps,
+  );
   span.setAttrs({ requester: requester.resolvedBy });
   const [channelName, userName, team] = await Promise.all([
     resolveChannelName(client, ev.channel),
@@ -582,9 +599,16 @@ export type ConfirmClick = Pick<SlackActionMiddlewareArgs<BlockAction<ButtonActi
 
 /** The note the taken offer carries while the core works (item 14): which
  *  button, who pressed it, and that it is in hand — as mrkdwn for the context
- *  block and as plain text for the fallback. */
-export function takenOfferNote(kind: "confirm" | "cancel", userId: string): { mrkdwn: string; plain: string } {
-  const button = kind === "confirm" ? "Run" : "Cancel";
+ *  block and as plain text for the fallback. The label is the pressed
+ *  button's own (the payload carries it), so a question's Yes reads “Yes
+ *  clicked by …” (record 0054) and a bare payload falls back to the offer's
+ *  Run and Cancel. */
+export function takenOfferNote(
+  kind: "confirm" | "cancel",
+  userId: string,
+  label?: string,
+): { mrkdwn: string; plain: string } {
+  const button = label ?? (kind === "confirm" ? "Run" : "Cancel");
   const doing = kind === "confirm" ? "running…" : "cancelling…";
   return { mrkdwn: `*${button}* clicked by <@${userId}> · ${doing}`, plain: `${button} clicked · ${doing}` };
 }
@@ -597,10 +621,11 @@ export function takenOfferBlocks(
   blocks: readonly SlackBlockKit[],
   kind: "confirm" | "cancel",
   userId: string,
+  label?: string,
 ): SlackBlockKit[] {
   return [
     ...blocks.filter((b) => b.type !== "actions"),
-    { type: "context", elements: [{ type: "mrkdwn", text: takenOfferNote(kind, userId).mrkdwn }] },
+    { type: "context", elements: [{ type: "mrkdwn", text: takenOfferNote(kind, userId, label).mrkdwn }] },
   ];
 }
 
@@ -648,11 +673,12 @@ export async function handleConfirmClick(
   // is replaced by the answer. A take that fails is logged and the click
   // proceeds — the core's consume is single-use whatever the message shows.
   try {
+    const label = action.text?.text;
     await client.chat.update({
       channel,
       ts: message.ts,
-      text: `${message.text ?? ""}\n${takenOfferNote(kind, body.user.id).plain}`,
-      blocks: takenOfferBlocks(message.blocks ?? [], kind, body.user.id),
+      text: `${message.text ?? ""}\n${takenOfferNote(kind, body.user.id, label).plain}`,
+      blocks: takenOfferBlocks(message.blocks ?? [], kind, body.user.id, label),
     });
   } catch (err) {
     console.error(
@@ -661,13 +687,11 @@ export async function handleConfirmClick(
   }
   let io: SlackIO | undefined;
   try {
-    const requester = await resolveSlackRequester(client, {
-      channel,
-      ts: message.ts,
-      threadTs,
-      user: body.user.id,
-      text: "",
-    });
+    const requester = await resolveSlackRequester(
+      client,
+      { channel, ts: message.ts, threadTs, user: body.user.id, text: "" },
+      relayAppsOf(deps),
+    );
     const actor = chatActorOf(deps.config, {
       userId: requester.userId,
       channelId: `${PLATFORM}:${channel}`,
@@ -1036,12 +1060,21 @@ export class SlackIO implements ChannelIO {
         }
       }
       for (let i = 0; i < kept.length; i++) {
-        const { role, text, at } = kept[i];
+        const { role, text, at, user } = kept[i];
         const images = imagesByIndex[i];
         const documents = documentsByIndex[i];
         // attachment-only turn whose downloads all failed
         if (!text && !images && !documents) continue;
-        items.push({ role, text, ...(at !== undefined ? { at } : {}), images, documents });
+        items.push({
+          role,
+          text,
+          ...(at !== undefined ? { at } : {}),
+          // The author's platform-namespaced id (session-log item 12): the
+          // seed stores it on the rows this turn produces; a bot turn has none.
+          ...(role === "user" && user !== undefined ? { user: `slack:${user}` } : {}),
+          images,
+          documents,
+        });
       }
     } catch {
       // best-effort; the dispatcher still has the current message
@@ -1071,6 +1104,30 @@ function chunkText(text: string, limit: number): string[] {
 function offerBlocks(offer: ConfirmationOffer): slackTypes.KnownBlock[] {
   const line = escapeMrkdwn(offer.line);
   const code = line.includes("`") ? `\`\`\`\n${line}\n\`\`\`` : `\`${line}\``;
+  // A question's offer (record 0054): the refusal's sentence above the line —
+  // the marker's `Did you mean:` leading the code — the evidence as context,
+  // and Yes and No on the same two actions the confirmation uses, so one
+  // intake serves both and Yes consumes the row exactly as Run does.
+  if (offer.question) {
+    return [
+      { type: "section", text: { type: "mrkdwn", text: escapeMrkdwn(offer.question.text) } },
+      { type: "section", text: { type: "mrkdwn", text: `Did you mean:\n${code}` } },
+      { type: "context", elements: [{ type: "mrkdwn", text: escapeMrkdwn(offer.question.evidence) }] },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            action_id: "confirm.run",
+            text: { type: "plain_text", text: "Yes" },
+            style: "primary",
+            value: offer.id,
+          },
+          { type: "button", action_id: "confirm.cancel", text: { type: "plain_text", text: "No" }, value: offer.id },
+        ],
+      },
+    ];
+  }
   const context: slackTypes.ContextBlockElement[] = [
     ...(offer.risk ? [{ type: "mrkdwn" as const, text: escapeMrkdwn(offer.risk) }] : []),
     { type: "mrkdwn", text: escapeMrkdwn(offer.footer) },

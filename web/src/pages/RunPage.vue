@@ -467,7 +467,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
 <template>
   <AppShell :title="title" nav="runs">
     <template #leading>
-      <a class="back text-sm text-primary no-underline hover:underline" href="/runs">← All runs</a>
+      <RouterLink class="back text-sm text-primary no-underline hover:underline" to="/runs">← All runs</RouterLink>
     </template>
     <template #status>
       <span class="conn flex items-center gap-2 font-mono">
@@ -598,12 +598,12 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
         </a>
         <!-- The pull request's findings ledger (agent-ship item 18): a link to the
              unit page's block, present exactly when the seed names where it lives. -->
-        <a
+        <RouterLink
           v-if="findingsHref && findingsLedger"
           class="findings whitespace-nowrap text-primary no-underline hover:underline"
-          :href="findingsHref"
+          :to="findingsHref"
           title="the pull request's findings ledger on its unit's page"
-          >Findings · {{ findingsLedger.rows }}</a
+          >Findings · {{ findingsLedger.rows }}</RouterLink
         >
         <!-- The review's reading diff (docs/reference/specs/reading-diff.md item 12):
              present exactly when the run published reading-diff artifacts —

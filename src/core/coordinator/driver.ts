@@ -145,7 +145,7 @@ export function readBotAnswer(
 
 /** The answers the bot itself calls a passing condition — the step is asked
  *  again, under the policy. Everything else, refusals included, is the machine's. */
-const TRANSIENT = new Set(["github_unavailable", "no_channel", "thread_failed", "unit_not_started"]);
+const TRANSIENT = new Set(["github_unavailable", "no_channel", "thread_failed", "unit_not_started", "not_host"]);
 export function transientRefusal(answer: BotAnswer): string | undefined {
   const { ok, error, message } = answer.body;
   if (ok !== false || typeof error !== "string" || !TRANSIENT.has(error)) return undefined;
@@ -310,16 +310,27 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
   };
 }
 
+/** The check runs a pr-check answer carries at the head (agent-ship item 9), shape-checked. */
+function isCommitChecks(v: unknown): v is { total: number; pending: string[]; failed: string[] } {
+  if (typeof v !== "object" || v === null) return false;
+  const c = v as Record<string, unknown>;
+  const names = (x: unknown) => Array.isArray(x) && x.every((n) => typeof n === "string");
+  return typeof c.total === "number" && names(c.pending) && names(c.failed);
+}
+
 function prCheckReturn(step: string, a: BotAnswer): StepReturn {
   const { ok, state, prNumber, url, headSha, sha, mergedAt, at } = a.body;
   if (ok === true && state === "none") {
-    const { unrecovered } = a.body;
+    const { unrecovered, aheadOfBase } = a.body;
     return {
       type: "pr-check",
       step,
       pr: {
         state: "none",
         ...(unrecovered === "no_commits" || unrecovered === "no_base" ? { unrecovered } : {}),
+        // The branch's commits over the base, when the bot could read them
+        // (agent-ship item 12): zero is the `already_landed` ending's fact.
+        ...(typeof aheadOfBase === "number" ? { aheadOfBase } : {}),
       },
       at,
     };
@@ -334,6 +345,7 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
         url,
         ...(typeof headSha === "string" ? { headSha } : {}),
         ...(typeof a.body.autoMergeEnabled === "boolean" ? { autoMergeEnabled: a.body.autoMergeEnabled } : {}),
+        ...(isCommitChecks(a.body.checks) ? { checks: a.body.checks } : {}),
       },
       at,
     };
@@ -564,13 +576,20 @@ async function runUnit(
               `${prefix}/end/pr-facts`,
               answerOf(
                 "pr-check",
-                await step.do(`${prefix}/end/pr-facts`, STEP_CONFIG, () => call(bot, "pr-check", tag)),
+                await step.do(`${prefix}/end/pr-facts`, STEP_CONFIG, () =>
+                  call(bot, "pr-check", { ...tag, checks: true }),
+                ),
               ),
             );
             if (check.type === "pr-check" && check.pr.state === "merged")
               endFacts = { merged: { sha: check.pr.sha, mergedAt: check.pr.mergedAt } };
-            else if (check.type === "pr-check" && check.pr.state === "open" && check.pr.autoMergeEnabled !== undefined)
-              endFacts = { autoMergeEnabled: check.pr.autoMergeEnabled };
+            else if (check.type === "pr-check" && check.pr.state === "open")
+              endFacts = {
+                ...(check.pr.autoMergeEnabled !== undefined ? { autoMergeEnabled: check.pr.autoMergeEnabled } : {}),
+                // The checks at the approved head (record 0055): the report's
+                // headline is a claim about them, never "merge-ready" over a red one.
+                ...(check.pr.checks !== undefined ? { checks: check.pr.checks } : {}),
+              };
           } catch {
             // the report simply omits the fact
           }
@@ -653,7 +672,9 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
       });
     }
     endings[next] = ending.kind;
-    cursor = settleUnit(graph, cursor, next, ending.kind === "merged" ? "done" : "failed");
+    // A unit is done for its dependents when the base carries its scope: the
+    // runner's merge, or a scope that had already landed before the attempt.
+    cursor = settleUnit(graph, cursor, next, isSettledDone(ending.kind) ? "done" : "failed");
   }
   // Blocked units, in the plan's order: each told its own ending, so the rows
   // and the summary say why it never ran. Every blocked unit's ending is known
@@ -672,13 +693,25 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
     await step.do(`${id}/end`, STEP_CONFIG, () => call(bot, "unit-end", body));
   }
   if (!cursorFinished(cursor)) throw new Error(`the plan's cursor did not finish: ${JSON.stringify(cursor.status)}`);
-  const settled = (kind: string) => kind === "merged" || kind === "merge_ready";
   return {
     instance: instanceId,
     ...(plan.planId !== undefined ? { planId: plan.planId } : {}),
     units: endings,
-    outcome: cursor.order.every((id) => settled(endings[id] ?? "")) ? "completed" : "failed",
+    outcome: cursor.order.every((id) => isSettledOutcome(endings[id] ?? "")) ? "completed" : "failed",
   };
+}
+
+/** The endings whose unit's scope is on the base, so its dependents run on a
+ *  base that carries it (agent-ship item 12): the runner's merge, a merge found
+ *  already made, or a scope that had landed before the attempt. */
+function isSettledDone(kind: string): boolean {
+  return kind === "merged" || kind === "already_landed";
+}
+
+/** The endings a plan closes ✅ over: every `isSettledDone` one, plus
+ *  merge-ready — the work stands and a person's merge is the only gate left. */
+function isSettledOutcome(kind: string): boolean {
+  return isSettledDone(kind) || kind === "merge_ready";
 }
 
 /** The Workflow's body. The finish is asked on every path — as `failed`, best

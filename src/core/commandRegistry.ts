@@ -4,6 +4,7 @@ import { systemClock } from "./trace/clock.js";
 import type { Span, TraceOptions } from "./trace/types.js";
 import { formatDuration } from "./time/formatDuration.js";
 import { authorize } from "./authz/authorize.js";
+import { causeOf, commandRefusalCode, type CommandGuessHint, type RefusalCause } from "./refusal.js";
 import { viewingRefusal } from "./authz/viewAs.js";
 import type { Actor, Resource } from "./authz/types.js";
 import { ALL_CAPABILITIES, type Capabilities } from "./capabilities.js";
@@ -314,12 +315,30 @@ export function acceptsUndefined(schema: z.ZodType): boolean {
  *  org scope of `memory forget`, a repo the caller may not use). Any other
  *  throw is an `internal` 500 whose message is logged, never returned. */
 export class CommandError extends Error {
+  /** Why the command refused, in record 0054's three classes — defaulted from
+   *  the code's one row in the cause table (`commandRefusalCode`/`causeOf`); a
+   *  site whose sentence masks the true cause on purpose (an authorization
+   *  denial that answers "not found" so a run's existence is not revealed)
+   *  overrides it so the span tells the truth while the mask holds. */
+  readonly cause: RefusalCause;
+  /** The bot's best guess at what the person meant (record 0054): when set,
+   *  the refusal renders as a question with the corrected line and, on a channel
+   *  with `offer`, Yes and No. The repo sites set this when a near match exists
+   *  so the routed and typed command paths hand it to `renderRefusal`. */
+  readonly guess?: CommandGuessHint;
   constructor(
     readonly code: "not_found" | "conflict" | "unavailable" | "busy" | "invalid_input" | "unauthorized",
     message: string,
+    causeOrOpts?: RefusalCause | { cause?: RefusalCause; guess?: CommandGuessHint },
   ) {
     super(message);
     this.name = "CommandError";
+    if (typeof causeOrOpts === "string" || causeOrOpts === undefined) {
+      this.cause = causeOrOpts ?? causeOf(commandRefusalCode(code));
+    } else {
+      this.cause = causeOrOpts.cause ?? causeOf(commandRefusalCode(code));
+      this.guess = causeOrOpts.guess;
+    }
   }
 }
 
@@ -347,7 +366,14 @@ export const ERROR_STATUS: Readonly<Record<InvokeErrorCode, number>> = {
  *  the shared "is restricted" line and a handler refusal with its message. */
 export type InvokeResult =
   | { ok: true; value: JsonValue }
-  | { ok: false; error: InvokeErrorCode; status: number; message: string; decidedBy: "registry" | "handler" };
+  | {
+      ok: false;
+      error: InvokeErrorCode;
+      status: number;
+      message: string;
+      decidedBy: "registry" | "handler";
+      guess?: CommandGuessHint;
+    };
 
 /** The one structured line per invocation — identity and outcome, never the payload. */
 export interface AuditEntry {
@@ -459,7 +485,7 @@ export class CommandRegistry<D> {
       });
       return fail("not_found", `unknown command: ${id}`);
     }
-    const done = (res: InvokeResult, reason?: string): InvokeResult => {
+    const done = (res: InvokeResult, reason?: string, cause?: RefusalCause): InvokeResult => {
       this.audit({
         commandId: cmd.id,
         callerKind: caller.kind,
@@ -471,6 +497,15 @@ export class CommandRegistry<D> {
         ...(reason === undefined ? {} : { reason }),
         ...(trace?.source === undefined ? {} : { source: trace.source }),
       });
+      // A refused command stamps the seam's pair on the request's span (record
+      // 0054): the closed table's code for the registry's own refusals, the
+      // error's cause when the handler's `CommandError` carried one — so a
+      // masked sentence (a "not found" that is really a denial) still tells
+      // the trace the truth.
+      if (!res.ok && trace?.span) {
+        const code = commandRefusalCode(res.error);
+        trace.span.setAttrs({ refusal: code, cause: cause ?? causeOf(code) });
+      }
       return res;
     };
 
@@ -495,7 +530,8 @@ export class CommandRegistry<D> {
       });
       return done({ ok: true, value });
     } catch (err) {
-      if (err instanceof CommandError) return done(fail(err.code, err.message, "handler"));
+      if (err instanceof CommandError)
+        return done(fail(err.code, err.message, "handler", err.guess), undefined, err.cause);
       this.logError(cmd.id, err);
       return done(fail("internal", "internal error", "handler"));
     }
@@ -546,8 +582,13 @@ export function bindCommands<D>(registry: CommandRegistry<D>, deps: D): CommandI
   };
 }
 
-function fail(error: InvokeErrorCode, message: string, decidedBy: "registry" | "handler" = "registry"): InvokeResult {
-  return { ok: false, error, status: ERROR_STATUS[error], message, decidedBy };
+function fail(
+  error: InvokeErrorCode,
+  message: string,
+  decidedBy: "registry" | "handler" = "registry",
+  guess?: CommandGuessHint,
+): InvokeResult {
+  return { ok: false, error, status: ERROR_STATUS[error], message, decidedBy, ...(guess ? { guess } : {}) };
 }
 
 /** The RAW input as a resolver sees it: a malformed half is empty, never a throw. */

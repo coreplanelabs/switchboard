@@ -1,5 +1,8 @@
 import { z } from "zod";
+import { checkPrTitle, TITLE_MAX_LENGTH, titleCapProblem } from "./prTitle.mjs";
+import PR_TITLE_VOCABULARY from "./prTitleVocabulary.json" with { type: "json" };
 import { redactSecrets } from "./redact.js";
+import { SWITCHBOARD_REPO } from "./selfDescription.js";
 
 // The PR description as DATA (docs/reference/specs/pr-description.md; the
 // shape is docs/decisions/0050). One typed object carries everything a reader
@@ -23,9 +26,9 @@ import { redactSecrets } from "./redact.js";
  *  schema, the prompt and the tool descriptions. */
 export const PR_DESCRIPTION_CAPS = {
   /** The squash subject and the changelog line, the whole line counted: the
-   *  number the title gate (`scripts/check-pr-title.mjs`, `TITLE_MAX_LENGTH`)
-   *  holds it to; a test keeps the two equal. */
-  title: 72,
+   *  title gate's own number (`src/core/prTitle.mjs`), read from it so the
+   *  two cannot drift. */
+  title: TITLE_MAX_LENGTH,
   tldr: 300,
   why: 400,
   pointers: 7,
@@ -50,6 +53,39 @@ export function visibleLength(s: string): number {
   return s.replace(/\]\([^)\s]*\)/g, "]").length;
 }
 
+/** A markdown link as `visibleLength` reads one — the label with its target —
+ *  kept whole by `fitToCap`, so a cut never lands inside `[label](target)`. */
+const LINK_RE = /\[[^\]\n]*\]\([^)\s]*\)/;
+/** A word for the cut: a maximal run of links and non-space characters, so
+ *  `([#1](url)),` is one word and the cut falls only on whitespace. */
+const WORD_RE = new RegExp(`(?:${LINK_RE.source}|\\S)+`, "g");
+/** What a cut leaves behind at its end: the whitespace before the word that
+ *  did not fit and a separator that belonged to that word's clause — a comma,
+ *  a semicolon, a colon, a dash, an opening bracket. A period stays: it ends
+ *  the sentence before the cut. */
+const ORPHANS_RE = /[\s,;:—–([{]+$/u;
+
+/**
+ * The longest prefix of `s` whose length under `measure` (`visibleLength` by
+ * default: a link's target counts for nothing; the title passes its raw count)
+ * is at most `max`, cut at a word boundary — never inside a word and never
+ * inside a link: a link that does not fit whole is dropped whole — with the
+ * whitespace and the separator the cut orphaned trimmed off. Already-fitting
+ * text comes back unchanged. When not even the first word fits the answer is
+ * the empty string: a cut inside a word is a worse suggestion than none, and
+ * the caps are sixty characters and up, so it takes a sixty-character word.
+ */
+export function fitToCap(s: string, max: number, measure: (s: string) => number = visibleLength): string {
+  if (measure(s) <= max) return s;
+  let end = 0;
+  for (const m of s.matchAll(WORD_RE)) {
+    const candidate = m.index + m[0].length;
+    if (measure(s.slice(0, candidate)) > max) break;
+    end = candidate;
+  }
+  return s.slice(0, end).replace(ORPHANS_RE, "");
+}
+
 // `line` is single-line by contract: a title, a label or a pointer's sentence
 // with an embedded newline would split the renderer's numbered rows — and the
 // PR title goes verbatim into POST /pulls. `prose` may span lines.
@@ -60,24 +96,74 @@ const line = z
   .refine((s) => !/[\r\n]/.test(s), "must be a single line (no embedded newlines)");
 const prose = z.string().trim().min(1);
 
+/** What a cap issue carries beside its message, on the zod issue's `params`:
+ *  the cap, the count and the rule that counted — so a refusal can say how
+ *  much to remove and quote the prefix that fits without parsing its own
+ *  sentence back. */
+interface CapIssueParams {
+  cap: number;
+  got: number;
+  counted: "visible" | "raw";
+}
+
+const capIssue = (params: CapIssueParams, message: string) => ({ code: z.ZodIssueCode.custom, message, params });
+
 /** `line`/`prose` with a visible-character cap; the message names the cap and
  *  the count so the author knows how much to cut. */
 function capped<T extends z.ZodType<string>>(base: T, max: number) {
   return base.superRefine((s, ctx) => {
     const n = visibleLength(s);
-    if (n > max) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `at most ${max} visible characters (got ${n})` });
+    if (n > max)
+      ctx.addIssue(capIssue({ cap: max, got: n, counted: "visible" }, `at most ${max} visible characters (got ${n})`));
   });
 }
 
 /** `line` with a raw-character cap — for the title, which GitHub never
  *  renders as markdown, so a link's target is characters the reader sees.
- *  Counts exactly what the title gate (`scripts/check-pr-title.mjs`) counts. */
+ *  Counts exactly what the title gate counts; holds on every repository. */
 function cappedRaw<T extends z.ZodType<string>>(base: T, max: number) {
   return base.superRefine((s, ctx) => {
     const n = s.length;
-    if (n > max) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `at most ${max} characters (got ${n})` });
+    if (n > max) ctx.addIssue(capIssue({ cap: max, got: n, counted: "raw" }, `at most ${max} characters (got ${n})`));
   });
 }
+
+/** The repository whose CI carries the title gate — this project's own. Its
+ *  vocabulary (the code map's Areas, the release config's types) is the house
+ *  convention of one repository, so only a description bound for it is judged
+ *  by it; every other repository keeps the cap alone, as before the gate. */
+export const TITLE_GATE_REPOSITORY = SWITCHBOARD_REPO;
+
+/** Whether a description bound for `repo` (`owner/name`, as the dispatcher
+ *  resolved it; undefined for a no-repo run) is judged by the title gate. */
+export function titleGateApplies(repo: string | undefined): boolean {
+  return repo !== undefined && repo.toLowerCase() === TITLE_GATE_REPOSITORY;
+}
+
+/** `line` judged as the CI title gate judges it (`checkPrTitle`, the one
+ *  predicate `scripts/check-pr-title.mjs` runs, against the generated
+ *  vocabulary): the grammar, the type, the scope from the code map's Areas,
+ *  no trailing period, and the 72-character cap counted raw with the bots'
+ *  scopes and a revert exempt. One issue per problem, in the gate's own
+ *  sentence, so a run cuts and resubmits inside its turn instead of learning
+ *  from a red `title` check once the PR is open — the last tool call of a
+ *  run whose loop was cut has no shell left to ask the gate itself. The
+ *  migration note behind `!` needs files only the gate can read, so the gate
+ *  alone judges that. An empty title is already `line`'s issue. */
+const gatedTitle = line.superRefine((s, ctx) => {
+  if (s === "") return;
+  const verdict = checkPrTitle(s, PR_TITLE_VOCABULARY);
+  if (verdict.ok) return;
+  // The gate's cap problem is a cap issue like `cappedRaw`'s — same numbers,
+  // the gate's sentence — so the refusal answers it with the cut too.
+  const cap = titleCapProblem(s.length);
+  for (const message of verdict.problems)
+    ctx.addIssue(
+      message === cap
+        ? capIssue({ cap: TITLE_MAX_LENGTH, got: s.length, counted: "raw" }, message)
+        : { code: z.ZodIssueCode.custom, message },
+    );
+});
 
 /** Between a pointer's text and its risk on the rendered row. */
 export const RISK_SEPARATOR = " ⚠ ";
@@ -126,7 +212,9 @@ function boundedArray<T extends z.ZodTypeAny>(item: T, min: number, max: number,
 export const PrDescriptionSchema = z.object({
   /** The PR title's single source. Metadata for the PR's own title field —
    *  never rendered into the body (GitHub shows the title itself) — and the
-   *  squash subject, so it is capped like every other field. */
+   *  squash subject, so it is capped like every other field; on the
+   *  repository that carries the title gate, `prDescriptionSchemaFor` judges
+   *  it as the gate does. */
   title: cappedRaw(line, PR_DESCRIPTION_CAPS.title),
   tldr: capped(prose, PR_DESCRIPTION_CAPS.tldr),
   why: capped(prose, PR_DESCRIPTION_CAPS.why),
@@ -158,13 +246,124 @@ export const PrDescriptionSchema = z.object({
 // needs it without this module's zod dependency); re-exported here so schema
 // consumers keep one import. The annotated return below is what pins the zod
 // output to that shape — drift either way is a compile error.
-import type { PrAnchor, PrDescription, RenderedPointer } from "./prDescriptionTypes.js";
-export type { PrAnchor, Pointer, PrDescription, RenderedPrAnchor, RenderedPointer } from "./prDescriptionTypes.js";
+import type { DescriptionIssue, PrAnchor, PrDescription, RecordedJson, RenderedPointer } from "./prDescriptionTypes.js";
+export type {
+  DescriptionIssue,
+  PrAnchor,
+  Pointer,
+  PrDescription,
+  RecordedJson,
+  RenderedPrAnchor,
+  RenderedPointer,
+} from "./prDescriptionTypes.js";
 
 /** Validate untrusted input (a tool call, a JSON file) into a PrDescription.
  *  Throws a zod error naming the offending path — callers surface it. */
-export function parsePrDescription(input: unknown): PrDescription {
-  return PrDescriptionSchema.parse(input);
+/** The schema for a description bound for `repo`: the universal one, with the
+ *  title judged as the CI title gate judges it on the repository that carries
+ *  the gate (`titleGateApplies`). The gated schema replaces the cap's message
+ *  with the gate's own count sentence — one wording per repository, never two. */
+export function prDescriptionSchemaFor(repo: string | undefined): typeof PrDescriptionSchema {
+  return titleGateApplies(repo) ? PrDescriptionSchema.extend({ title: gatedTitle }) : PrDescriptionSchema;
+}
+
+/** The one validating entry point. `target.repo` is the repository the
+ *  description is bound for (`ToolContext.repo`); absent, no repository
+ *  carries the gate and the universal schema judges. */
+export function parsePrDescription(input: unknown, target: { repo?: string } = {}): PrDescription {
+  return prDescriptionSchemaFor(target.repo).parse(input);
+}
+
+/** The value a zod path names in `input`, when it is a string — the field a
+ *  cap issue is about. The schema trims before it counts, so the cut is over
+ *  the trimmed text: what the count was taken on. */
+function stringAt(input: unknown, path: ReadonlyArray<PropertyKey>): string | undefined {
+  let v: unknown = input;
+  for (const key of path) {
+    if (typeof v !== "object" || v === null || typeof key === "symbol") return undefined;
+    v = (v as Record<string | number, unknown>)[key];
+  }
+  return typeof v === "string" ? v.trim() : undefined;
+}
+
+/** The cap params a zod issue carries, when it is one of `capped`'s. */
+function capParamsOf(issue: z.ZodIssue): CapIssueParams | undefined {
+  if (issue.code !== z.ZodIssueCode.custom) return undefined;
+  const p = issue.params as Partial<CapIssueParams> | undefined;
+  return p && typeof p.cap === "number" && typeof p.got === "number" && (p.counted === "visible" || p.counted === "raw")
+    ? { cap: p.cap, got: p.got, counted: p.counted }
+    : undefined;
+}
+
+/**
+ * Every issue a refused submit had, as the refusal and the record carry them
+ * (docs/reference/specs/pr-description.md item 5): the path and the schema's
+ * message for each, and for each cap issue the count to remove and the
+ * longest prefix that fits (`fitToCap` under the cap's own count — visible
+ * for prose, raw for the title), so the next submit can be a copy. One list,
+ * every field: zod reports them all at once and the refusal names them all.
+ */
+export function describeDescriptionIssues(input: unknown, error: z.ZodError): DescriptionIssue[] {
+  return error.issues.map((issue) => {
+    const path = issue.path.join(".") || "(root)";
+    const cap = capParamsOf(issue);
+    const value = cap && stringAt(input, issue.path);
+    if (!cap || value === undefined) return { path, message: issue.message };
+    const prefix = fitToCap(value, cap.cap, cap.counted === "raw" ? (s) => s.length : visibleLength);
+    return {
+      path,
+      message: issue.message,
+      remove: cap.got - cap.cap,
+      ...(prefix !== "" ? { prefix } : {}),
+    };
+  });
+}
+
+/** One issue as the refusal states it: the schema's own sentence, and for a
+ *  cap the count to remove — visible characters, so a shorter URL is not a cut
+ *  — and the prefix that fits, quoted whole for the model to take as is. */
+export function describeIssueLine(issue: DescriptionIssue): string {
+  if (issue.remove === undefined) return `${issue.path}: ${issue.message}`;
+  // The title is the one field counted raw (`cappedRaw`, and the gate's cap):
+  // every other cap counts visible characters, and the unit says so.
+  const unit = issue.path === "title" ? "characters" : "visible characters";
+  const cut = issue.prefix === undefined ? "" : `; a prefix that fits: "${issue.prefix}"`;
+  return `${issue.path}: ${issue.message} — remove at least ${issue.remove} ${unit}${cut}`;
+}
+
+/** How many objects deep `recordedJson` keeps a value: `RecordedJson`'s
+ *  levels, one more than a description needs. */
+const RECORDED_JSON_DEPTH = 4;
+
+/** `value` as the record can carry it (`RecordedJson`): what survives a JSON
+ *  round trip (an `undefined` field is dropped, as the wire would), objects
+ *  nested past the fourth level stored as their JSON text — redact BEFORE
+ *  this, so that text is already clean. */
+export function recordedJson(value: unknown): RecordedJson {
+  const clip = (v: unknown, depth: number): unknown => {
+    if (v === null || typeof v === "string" || typeof v === "number" || typeof v === "boolean") return v;
+    if (Array.isArray(v)) return v.map((item) => clip(item, depth));
+    if (typeof v !== "object") return undefined;
+    if (depth === 0) return JSON.stringify(v);
+    return Object.fromEntries(
+      Object.entries(v)
+        .map(([key, item]) => [key, clip(item, depth - 1)] as const)
+        .filter(([, item]) => item !== undefined),
+    );
+  };
+  return clip(JSON.parse(JSON.stringify(value ?? null)), RECORDED_JSON_DEPTH) as RecordedJson;
+}
+
+/** The `description_refused` note's one line: how many fields are over their
+ *  cap and which — the incident's shape — or, when none is, how many issues. */
+export function describeRefusalSummary(issues: DescriptionIssue[]): string {
+  const over = issues.filter((i) => i.remove !== undefined).map((i) => i.path);
+  if (over.length === 0)
+    return `description refused: ${issues.length} issue${issues.length === 1 ? "" : "s"} — ${issues.map((i) => i.path).join(", ")}`;
+  const others = issues.length - over.length;
+  const fields = over.length === 1 ? "1 field over its cap" : `${over.length} fields over their cap`;
+  const rest = others === 0 ? "" : `; ${others} other issue${others === 1 ? "" : "s"}`;
+  return `description refused: ${fields} — ${over.join(", ")}${rest}`;
 }
 
 /** The `pr_description` event's payload: every string LEAF passed through

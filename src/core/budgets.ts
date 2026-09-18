@@ -18,6 +18,10 @@
 
 export const MINUTE_MS = 60_000;
 
+/** Minutes → milliseconds, for a duration a request names in minutes (a drain's
+ *  length): the multiplication lives here so no other file holds it. */
+export const minutesToMs = (minutes: number): number => minutes * MINUTE_MS;
+
 /** One calendar day in milliseconds: the unit the daily cost and delivery ranges
  *  step by (`dayOf`, the day count of a range). A day is not a lease, but it is
  *  a duration, and every duration is read from this table rather than written
@@ -77,6 +81,39 @@ export const ATTACH_REQUEST_MIN_MS = 30_000;
  *  that opened the question stands. */
 export const HARNESS_PROBE_WAIT_MS = 5 * MINUTE_MS;
 
+/** The resident fleet drain (docs/decisions/0059; docs/reference/specs/resident-repos.md
+ *  item 69; docs/reference/specs/release-and-deploy.md item 31). A deploy closes
+ *  the fleet to new runs and waits for the runs in flight to end: `deployWaitMaxMs`
+ *  is that wait, past a coding child's whole lease (its ask plus its write-up),
+ *  the longest a run in flight can outlive the drain's start; the drain itself
+ *  lasts the wait plus `marginMinutes`, and the registry caps any drain at
+ *  `maxMinutes` so one nobody lifted is an hour and a half, not a day. A run
+ *  asked during a drain waits at its attach one `pollMs` at a time under its
+ *  own lease less `leaseReserveMs` (what the attach and the work after it
+ *  need), `waitMaxMs` with no lease to clip it. */
+export const DRAIN = {
+  pollMs: 30_000,
+  waitMaxMs: 60 * MINUTE_MS,
+  leaseReserveMs: 10 * MINUTE_MS,
+  deployWaitMaxMs: 60 * MINUTE_MS,
+  marginMinutes: 5,
+  maxMinutes: 90,
+  defaultMinutes: 60,
+} as const;
+
+/** How long an intake receipt row is kept on the run history object
+ *  (docs/reference/specs/run-history.md item 59; docs/decisions/0058): the larger of one day
+ *  and the reconnect catch-up window the write named plus the drain deadline
+ *  (`DRAIN.maxMinutes`, the longest a fleet drain may last), so a catch-up
+ *  that runs after the longest allowed drain still reads the verdict instead
+ *  of deciding the reply again. The window is clamped to a month so a
+ *  misconfigured writer cannot make retention unbounded. */
+export const INTAKE_WINDOW_MAX_MS = 30 * DAY_MS;
+export function intakeReceiptRetentionMs(catchUpWindowMs: number): number {
+  const window = Math.min(Math.max(0, catchUpWindowMs), INTAKE_WINDOW_MAX_MS);
+  return Math.max(DAY_MS, window + minutesToMs(DRAIN.maxMinutes));
+}
+
 /** The presets that run the tool loop, and the one pipeline preset. */
 export const LOOP_PRESETS = ["general", "coding", "review", "research", "explore", "conductor"] as const;
 export type LoopPreset = (typeof LOOP_PRESETS)[number];
@@ -84,12 +121,18 @@ export type Preset = LoopPreset | "ship";
 
 /** What each preset asks for when nothing above it is tighter, in minutes. The
  *  pipeline's (`ship`) is the wall clock one segment of its loop runs under;
- *  a deployment's `ship.maxMinutes` replaces it, held to `fit` below. */
+ *  a deployment's `ship.maxMinutes` replaces it, held to `fit` below. Coding's
+ *  is sized by the ledger's ship children, not its standalone runs: a child
+ *  that pushes at minute 29 and then runs the repo's whole gate (seven to ten
+ *  minutes on a resident) was cut at 45 one run in twelve, so the ask is
+ *  double the 90th percentile (31.5) with the gate inside it. Ship's holds
+ *  its own loop at the default rounds with a fix round at that ask, not at
+ *  its floor (`fit` proves the floor case; the ask leaves room above it). */
 export const ASKS: Readonly<Record<Preset, number>> = {
   general: 5,
-  coding: 45,
+  coding: 90,
   review: 25,
-  ship: 120,
+  ship: 240,
   research: 8,
   explore: 120,
   conductor: 120,
@@ -103,10 +146,13 @@ export type RoundKind = "coding" | "review" | "fix" | "merge";
  *  falls under the floor is refused rather than dispatched: a two-minute
  *  review or fix costs an attach and a model turn and finishes nothing.
  *  Review's is the ledger's 90th percentile of completed reviews (5.1 min over
- *  181); coding's and the merge wait's are guesses until the ledger says. */
+ *  181); coding's is the least a fix round can run the repo's gate in — the
+ *  gate alone takes seven to ten minutes on a resident, and a fix that cannot
+ *  run it finishes nothing its contract asks; the merge wait's is a guess
+ *  until the ledger says. */
 export const PRESET_FLOORS: Readonly<Record<LoopPreset, number>> = {
   general: 2,
-  coding: 10,
+  coding: 15,
   review: 5,
   research: 3,
   explore: 15,
@@ -403,6 +449,9 @@ export type GrantSource = "org" | "channel" | "user" | "run";
 export const DEFAULT_GRANT: Grant = { renewals: 0 };
 
 /** The most renewals one request may carry: thirteen segments of the ship
- *  preset's ask are a day, the longest problem a person hands over in one
- *  message before a plan should carry it. */
+ *  preset's ask are two days. The cap bounds a COUNT a person types
+ *  (`renewals:`) or a scope holds; it did not halve when the ask doubled,
+ *  since every grant already configured is a count of segments and a day's
+ *  hand-over is now `renewals: 5` — the longest problem a person hands over
+ *  in one message before a plan should carry it. */
 export const GRANT_RENEWALS_MAX = 12;

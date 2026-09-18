@@ -112,6 +112,13 @@ describe("RestGithubApi — reads use the read token", () => {
     const huge = await gh.readFile("acme/api", "huge");
     expect(huge.truncated).toBe(true);
     expect(huge.content).toHaveLength(MAX_FILE_CHARS);
+    // The caller's own bound: a reader that needs the whole document (the plan
+    // runner) passes one and gets every character; a bound below the clip clips there.
+    const whole = await gh.readFile("acme/api", "huge", undefined, { maxChars: big.length });
+    expect(whole.truncated).toBe(false);
+    expect(whole.content).toBe(big);
+    const short = await gh.readFile("acme/api", "huge", undefined, { maxChars: 10 });
+    expect(short).toMatchObject({ truncated: true, content: "xxxxxxxxxx" });
     expect((await gh.readFile("acme/api", "bin")).content).toBe("(binary file, 3 bytes — not shown)");
   });
 

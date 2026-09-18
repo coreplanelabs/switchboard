@@ -12,6 +12,10 @@ import { doorReport, renderDoor } from "./doorReport.js";
 // store's command records and prints, per day and per command, the hand-backs
 // the door recorded, the pastes that followed and the paste-through rate. It
 // invokes nothing; the store's list and per-run events are its only inputs.
+// Refusals count off the same store (record 0054, as amended: every refusal is
+// a run record): the dispatcher's `door` records and the refused route
+// outcomes together, per day, cause and code — no footer pointing at a
+// telemetry query remains, because no refusal is recordless.
 
 const DAY = 24 * 60 * 60 * 1000;
 /** Two days a while back: the store keeps rows by age against the clock it is given. */
@@ -94,6 +98,50 @@ const FIXTURE: RunRecord[] = [
   commandRecord("agent-1", DAY_TWO + 300_000, undefined, { agent: "review", label: "review · #ops" }),
 ];
 
+/** A `door` record as `recordRefusal` writes it: the redacted request as its
+ *  `input` event and one `refusal` event carrying the code, the cause and the
+ *  capped sentence. */
+function doorRecord(id: string, finishedAt: number, code: string, cause = "policy"): RunRecord {
+  const events: RunEvent[] = [
+    { type: "input", messageId: id, text: `request of ${id}`, seq: 1 },
+    { type: "refusal", code, cause, text: `refused: ${code}`, seq: 2 },
+  ];
+  return {
+    ...commandRecord(id, finishedAt),
+    agent: "door",
+    label: `${code} · #ops · someone · request of ${id}`,
+    events,
+    eventCount: events.length,
+    storedEventCount: events.length,
+    diagnosis: analyzeRunFriction(events),
+  };
+}
+
+/** Refused records over two days, three codes, two causes (record 0054). */
+const REFUSED: RunRecord[] = [
+  commandRecord("r-1", DAY_ONE, decision("config.set", { outcome: "refused", refusalCode: "confirmation_expired" })),
+  commandRecord(
+    "r-2",
+    DAY_ONE + 30_000,
+    decision("config.set", { outcome: "refused", refusalCode: "confirmation_expired" }),
+  ),
+  commandRecord(
+    "r-3",
+    DAY_ONE + 60_000,
+    decision("mcp.add", { outcome: "refused", refusalCode: "confirmation_foreign" }),
+  ),
+  commandRecord("r-4", DAY_TWO, decision("repo.offboard", { outcome: "refused", refusalCode: "confirmation_used" })),
+];
+
+/** Gate refusals as `door` records (record 0054, as amended), beside REFUSED:
+ *  two more on day one — one sharing a refused route's code — and one whose
+ *  code the table does not know. */
+const DOOR: RunRecord[] = [
+  doorRecord("d-1", DAY_ONE + 90_000, "agent_allowlist"),
+  doorRecord("d-2", DAY_ONE + 120_000, "confirmation_foreign"),
+  doorRecord("d-3", DAY_TWO + 30_000, "code_from_a_newer_bot"),
+];
+
 describe("doorReport — hand-backs, the pastes that followed and the rate, per day and per command", () => {
   it("counts a hand-back under its day and command, joins a paste to its hand-back by id (the hand-back's bucket, whatever day the paste landed), keeps a paste whose hand-back is outside the window apart, and ignores a routed read and a typed run", async () => {
     const report = await doorReport(await serviceOver(FIXTURE));
@@ -102,7 +150,9 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
       pastes: 1,
       unmatchedPastes: 1,
       commandRuns: 7,
+      doorRuns: 0,
       storeUnavailable: false,
+      refusals: [],
       rows: [
         { day: "1999-01-03", command: "config.set", handBacks: 1, pastes: 1 },
         { day: "1999-01-03", command: "mcp.add", handBacks: 1, pastes: 0 },
@@ -114,7 +164,7 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
   it("renders the totals with the rate, then each day with its commands — a rate over zero hand-backs prints as a dash, never a division error", async () => {
     const lines = renderDoor(await doorReport(await serviceOver(FIXTURE)));
     expect(lines).toEqual([
-      "door: 3 hand-back(s), 1 paste(s) joined (33.3% pasted), 1 paste(s) whose hand-back is outside the window; 7 command run(s) read",
+      "door: 3 hand-back(s), 1 paste(s) joined (33.3% pasted), 1 paste(s) whose hand-back is outside the window; 7 command run(s) and 0 door record(s) read",
       "- 1999-01-03: hand-backs 2, pastes 1 (50%)",
       "  - config.set: hand-backs 1, pastes 1 (100%)",
       "  - mcp.add: hand-backs 1, pastes 0 (0%)",
@@ -123,9 +173,44 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
     ]);
     const nothing = renderDoor(await doorReport(await serviceOver([])));
     expect(nothing).toEqual([
-      "door: 0 hand-back(s), 0 paste(s) joined (— pasted), 0 paste(s) whose hand-back is outside the window; 0 command run(s) read",
+      "door: 0 hand-back(s), 0 paste(s) joined (— pasted), 0 paste(s) whose hand-back is outside the window; 0 command run(s) and 0 door record(s) read",
     ]);
     expect(nothing.join("\n")).not.toMatch(/NaN|Infinity/);
+  });
+
+  it("counts refused records per day, per cause and per code (record 0054) — two days, three codes, two causes — and an empty store prints zero refusal lines", async () => {
+    const report = await doorReport(await serviceOver(REFUSED));
+    expect(report.refusals).toEqual([
+      { day: "1999-01-03", cause: "policy", code: "confirmation_foreign", count: 1 },
+      { day: "1999-01-03", cause: "request", code: "confirmation_expired", count: 2 },
+      { day: "1999-01-04", cause: "request", code: "confirmation_used", count: 1 },
+    ]);
+    const lines = renderDoor(report);
+    expect(lines).toContain("refusals recorded: 4");
+    expect(lines).toContain("- 1999-01-03: 3 refusal(s)");
+    expect(lines).toContain("  - policy/confirmation_foreign: 1");
+    expect(lines).toContain("  - request/confirmation_expired: 2");
+    expect(lines).toContain("- 1999-01-04: 1 refusal(s)");
+    expect(lines).toContain("  - request/confirmation_used: 1");
+    const empty = renderDoor(await doorReport(await serviceOver([])));
+    expect(empty.filter((l) => l.includes("refusal(s)") || l.startsWith("refusals recorded"))).toEqual([]);
+  });
+
+  it("counts `door` records and refused route outcomes together — a gate refusal before any bind counts by its day, cause and code, a code the table does not know counts as `unknown`, and no footer names a telemetry query", async () => {
+    const report = await doorReport(await serviceOver([...REFUSED, ...DOOR]));
+    expect(report.doorRuns).toBe(3);
+    expect(report.refusals).toEqual([
+      { day: "1999-01-03", cause: "policy", code: "agent_allowlist", count: 1 },
+      { day: "1999-01-03", cause: "policy", code: "confirmation_foreign", count: 2 },
+      { day: "1999-01-03", cause: "request", code: "confirmation_expired", count: 2 },
+      { day: "1999-01-04", cause: "request", code: "confirmation_used", count: 1 },
+      { day: "1999-01-04", cause: "unknown", code: "code_from_a_newer_bot", count: 1 },
+    ]);
+    const lines = renderDoor(report);
+    expect(lines).toContain("refusals recorded: 7");
+    expect(lines).toContain("  - unknown/code_from_a_newer_bot: 1");
+    expect(lines.at(-1)).not.toContain("telemetry");
+    expect(lines.join("\n")).not.toContain("gate refusals (no record)");
   });
 
   it("`sinceMs` bounds the window: a hand-back before it is not read, so its later paste is the unmatched kind", async () => {

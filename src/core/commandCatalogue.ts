@@ -26,6 +26,7 @@ import type { IssueTracker } from "../execution/githubIssues.js";
 import { resolveGithubIdentity } from "../execution/githubApp.js";
 import { GithubDeliverySource } from "../execution/githubDelivery.js";
 import { ResidentOperations } from "../execution/resident.js";
+import { RestGithubApi } from "../execution/githubApi.js";
 import { parseCostsConfig } from "./costs.js";
 import { costsFromConfig, NullCostsService, type CostsService } from "./costsService.js";
 import { createDeliveryService, NullDeliveryService, parseDeliveryConfig, type DeliveryService } from "./delivery.js";
@@ -45,6 +46,8 @@ import {
 import type { Capabilities } from "./capabilities.js";
 import { publicEnv, type Secrets } from "../secrets.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
+import { configuredModelRefs } from "./commands/providers.js";
+import { installedModelRegistry } from "./installedModelRegistry.js";
 import type { StatusSnapshot } from "./commands/status.js";
 import { packageVersion } from "../packageRoot.js";
 import { selectFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
@@ -327,6 +330,16 @@ export function buildCoreCommands(
         wiring.operations ? wiring.operations(caller) : defaultOperations(await cfg(), wiring.secrets, caller),
       canUseRepo: async (callerId, slug) => (await cfg()).canUseRepo(callerId, slug),
       inspect: wiring.repoInspector ?? githubRepoInspector(),
+      // Record 0054: the installation's repository list, read before an onboard
+      // mints so a name the App cannot see asks its own question instead of
+      // reaching GitHub's 422. A failed read is undefined and changes nothing.
+      installationRepos: async () => {
+        try {
+          return (await new RestGithubApi().listRepos()).map((r) => r.fullName.toLowerCase());
+        } catch {
+          return undefined;
+        }
+      },
     },
     memory: {
       config: async () => (await cfg()).config.memory,
@@ -367,6 +380,16 @@ export function buildCoreCommands(
     contract: { readFile: readOptionalFile },
     delivery: { service: delivery },
     costs: { service: costs },
+    // `providers check`: the loaded blocks and refs, the installed pi registry
+    // (the very catalog the dispatcher resolves cards against), the real fetch.
+    providers: {
+      configured: async () => {
+        const config = (await cfg()).config;
+        return { blocks: config.providers, refs: configuredModelRefs(config) };
+      },
+      registry: () => installedModelRegistry,
+      fetch: (url) => fetch(url),
+    },
   };
   return bindCommands(registry, deps);
 }

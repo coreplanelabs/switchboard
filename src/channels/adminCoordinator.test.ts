@@ -103,7 +103,7 @@ function record(id: string, over: Partial<RunRecord> = {}): RunRecord {
   };
 }
 
-type Script = (msg: IncomingMessage, io: ChannelIO, opts: { coordinator: CoordinatorTag }) => Promise<DispatchOutcome>;
+type Script = (msg: IncomingMessage, io: ChannelIO, opts?: { coordinator: CoordinatorTag }) => Promise<DispatchOutcome>;
 
 /** The child registers, then its dispatch completes: the common path. */
 const registers =
@@ -131,6 +131,8 @@ function harness(
     ioFor?: (thread: { threadKey: string; userId: string; cardTs?: string }) => ChannelIO | undefined;
     /** The recover path's open-or-edit: the opened pull request, or the refusal (nothing pushed). */
     openPr?: { number: number; htmlUrl: string; created: boolean } | Error;
+    /** The branch's commits over the base (githubPulls.commitsOverBase): a count, or unread. */
+    ahead?: number | Error;
     /** The merge step's GitHub: the pull request's facts, the checks at the head, the squash's answer. */
     prFacts?: PullRequestFacts | Error;
     /** The operator's model prices: the runs service prices each child, and `read-record` answers the dollars. */
@@ -151,7 +153,7 @@ function harness(
     ...(over.prices !== undefined ? { prices: over.prices } : {}),
   });
   const instances = new InMemoryCoordinatorInstanceStore();
-  const dispatched: Array<{ msg: IncomingMessage; opts: { coordinator: CoordinatorTag } }> = [];
+  const dispatched: Array<{ msg: IncomingMessage; opts?: { coordinator: CoordinatorTag } }> = [];
   const replies: string[] = [];
   const io: ChannelIO = {
     reply: async (t) => void replies.push(t),
@@ -166,6 +168,7 @@ function harness(
   const written: RunRecord[] = [];
   const merges: Array<{ pr: { repo: string; number: number }; opts: { sha: string; title: string } }> = [];
   const opens: Array<{ repo: string; headBranch: string; base: string; title: string; body: string }> = [];
+  const compares: Array<[string, string, string]> = [];
   const sleeps: number[] = [];
   let reviewFetches = 0;
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
@@ -196,6 +199,11 @@ function harness(
       opens.push(target);
       if (over.openPr instanceof Error) throw over.openPr;
       return over.openPr ?? { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", created: true };
+    },
+    commitsOverBase: async (repo, base, branch) => {
+      compares.push([repo, base, branch]);
+      if (over.ahead instanceof Error) throw over.ahead;
+      return over.ahead;
     },
     github,
     createBranchRef: async (repo, branch, fromRef) => {
@@ -234,6 +242,7 @@ function harness(
   return {
     deps,
     sleeps,
+    compares,
     reviewFetches: () => reviewFetches,
     registry,
     store,
@@ -351,13 +360,13 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     const h = harness();
     await h.instances.put(INSTANCE);
     await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
-    expect(h.dispatched[0].opts.coordinator.base).toBe("main");
+    expect(h.dispatched[0].opts!.coordinator.base).toBe("main");
     const { base: _base, ...baseless } = INSTANCE;
     const noBase = harness();
     await noBase.instances.put(baseless);
     await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), noBase.deps);
-    expect(noBase.dispatched[0].opts.coordinator).toEqual({ parentInstanceId: INSTANCE.id, idempotencyKey: KEY });
-    expect("base" in noBase.dispatched[0].opts.coordinator).toBe(false);
+    expect(noBase.dispatched[0].opts!.coordinator).toEqual({ parentInstanceId: INSTANCE.id, idempotencyKey: KEY });
+    expect("base" in noBase.dispatched[0].opts!.coordinator).toBe(false);
   });
 
   it("an unknown parentInstanceId is refused 404 and nothing is dispatched", async () => {
@@ -854,6 +863,53 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
   });
 });
 
+describe("pr-check none — the branch's commits over the base ride the answer (issue 1699)", () => {
+  const check = (deps: Parameters<typeof handleCoordinatorRequest>[1], body: Record<string, unknown> = {}) =>
+    handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id, ...body }),
+      deps,
+    );
+
+  it("a plain check that finds no pull request compares the branch with the instance's base and answers `aheadOfBase` — zero for a branch at the base's head, the count otherwise", async () => {
+    const zero = harness({ ahead: 0 });
+    await zero.instances.put(INSTANCE);
+    expect((await check(zero.deps)).body).toEqual({ ok: true, state: "none", aheadOfBase: 0, at: NOW });
+    expect(zero.compares).toEqual([["acme/api", "main", "plan/orchestration/u12"]]);
+    const two = harness({ ahead: 2 });
+    await two.instances.put(INSTANCE);
+    expect((await check(two.deps)).body).toEqual({ ok: true, state: "none", aheadOfBase: 2, at: NOW });
+  });
+
+  it("a compare that could not be read leaves the field out — the fact is never claimed — and the check still answers none", async () => {
+    const unread = harness();
+    await unread.instances.put(INSTANCE);
+    expect((await check(unread.deps)).body).toEqual({ ok: true, state: "none", at: NOW });
+    const thrown = harness({ ahead: new Error("compare failed: HTTP 502") });
+    await thrown.instances.put(INSTANCE);
+    expect((await check(thrown.deps)).body).toEqual({ ok: true, state: "none", at: NOW });
+  });
+
+  it("an instance with no base has nothing to compare against, and a recover check never compares — its `none` carries the recover's own reason", async () => {
+    const h = harness({ ahead: 0 });
+    const { base: _base, ...withoutBase } = INSTANCE;
+    await h.instances.put(withoutBase as typeof INSTANCE);
+    expect((await check(h.deps)).body).toEqual({ ok: true, state: "none", at: NOW });
+    expect(h.compares).toEqual([]);
+    const recover = harness({
+      ahead: 0,
+      openPr: new Error("PR create failed: HTTP 422 No commits between main and plan/orchestration/u12"),
+    });
+    await recover.instances.put(INSTANCE);
+    expect((await check(recover.deps, { recover: { runId: "11111111-1111-4111-8111-111111111111" } })).body).toEqual({
+      ok: true,
+      state: "none",
+      unrecovered: "no_commits",
+      at: NOW,
+    });
+    expect(recover.compares).toEqual([]);
+  });
+});
+
 describe("pr-check recover — the answer says why nothing was recovered, and GitHub being down is never none", () => {
   const RUN = "11111111-1111-4111-8111-111111111111";
   const recoverCheck = (deps: Parameters<typeof handleCoordinatorRequest>[1]) =>
@@ -1053,7 +1109,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       merge: "person",
       // No `plan.path` on the record: the mark of a generated plan, answered for the machine's report.
       generated: true,
-      caps: { maxRounds: 3, maxMinutes: 120 },
+      caps: { maxRounds: 3, maxMinutes: 240 },
       units: [],
     });
     expect("planId" in body).toBe(false);
@@ -1093,12 +1149,12 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(openThread).not.toHaveBeenCalled();
     checkAccess.mockResolvedValue(true);
     expect((await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).status).toBe(200);
-    expect(openThread).toHaveBeenCalledTimes(2);
+    expect(openThread).toHaveBeenCalledTimes(1);
     for (const [lead, options] of openThread.mock.calls)
       expect(options).toEqual({ idempotencyKey: `${PLAN_INSTANCE.id}:${lead}` });
   });
 
-  it("unit-start opens a plan unit's thread and, beside it, the unit's review thread through the requesting thread's channel, finds the board issue titled by the unit id, and writes both threads on the row; a second start answers the same threads and opens none; a task unit runs in the requesting thread with a review thread of its own; an unknown unit is 404", async () => {
+  it("unit-start opens a plan unit's thread through the requesting thread's channel and no review thread, finds the board issue titled by the unit id, and writes the thread on the row; a generated plan's unit runs in the requesting thread and opens nothing", async () => {
     const opened: string[] = [];
     const h = await planHarness({
       ioFor: () => openingIo(opened),
@@ -1110,55 +1166,56 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       body: {
         ok: true,
         threadKey: "slack:C1:2.0",
-        reviewThreadKey: "slack:C1:3.0",
         branch: "plan/fixture/u10",
         base: "main",
         issue: 834,
         at: NOW,
       },
     });
-    expect(opened).toHaveLength(2);
+    // One thread per unit (record 0055): no review thread is opened beside it.
+    expect(opened).toHaveLength(1);
     expect(opened[0]).toContain("↳ *ship* unit U10 — Warm the cache on wake for alice");
     expect(opened[0]).toContain("`plan/fixture/u10` in acme/api");
-    expect(opened[1]).toContain("↳ *ship* review of unit U10 — Warm the cache on wake for alice");
-    expect(opened[1]).toContain("`plan/fixture/u10` in acme/api");
     expect(h.threadsAsked[0]).toEqual({ threadKey: INSTANCE.threadKey, userId: INSTANCE.userId });
     const rows = await h.instances.listUnits(PLAN_INSTANCE.id);
     expect(rows[0]).toEqual(
       unitRow("U10", {
         threadKey: "slack:C1:2.0",
         sourceUrl: "https://acme.slack.com/archives/C1/p2",
-        reviewThread: { threadKey: "slack:C1:3.0", sourceUrl: "https://acme.slack.com/archives/C1/p3" },
         issue: 834,
         startedAt: NOW,
       }),
     );
-    // Idempotent: the same threads, no further lead.
+    // Idempotent: the same thread, no further lead.
     expect((await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).body).toMatchObject({
       threadKey: "slack:C1:2.0",
-      reviewThreadKey: "slack:C1:3.0",
     });
-    expect(opened).toHaveLength(2);
+    expect(opened).toHaveLength(1);
     expect((await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U99" })).status).toBe(404);
 
-    // A row written before the review thread existed: its start opens the review thread alone.
+    // A row a bot wrote before record 0055 carries a review thread: its start
+    // opens nothing more and leaves the row as it stands.
     const older = await planHarness({ ioFor: () => openingIo(opened) });
     await older.instances.putUnits([
-      unitRow("U10", { threadKey: "slack:C1:2.0", sourceUrl: "https://acme.slack.com/archives/C1/p2", startedAt: 5 }),
+      unitRow("U10", {
+        threadKey: "slack:C1:2.0",
+        sourceUrl: "https://acme.slack.com/archives/C1/p2",
+        reviewThread: { threadKey: "slack:C1:3.0" },
+        startedAt: 5,
+      }),
     ]);
     const resumed = await call(older, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
-    expect(resumed.body).toMatchObject({ threadKey: "slack:C1:2.0", reviewThreadKey: "slack:C1:4.0" });
-    expect(opened).toHaveLength(3);
-    expect(opened[2]).toContain("↳ *ship* review of unit U10");
+    expect(resumed.body).toMatchObject({ threadKey: "slack:C1:2.0" });
+    expect(resumed.body).not.toHaveProperty("reviewThreadKey");
+    expect(opened).toHaveLength(1);
     expect((await older.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
       threadKey: "slack:C1:2.0",
-      reviewThread: { threadKey: "slack:C1:4.0" },
+      reviewThread: { threadKey: "slack:C1:3.0" },
       startedAt: 5,
     });
 
     // A generated plan's unit (the instance's `plan` has no `path`) runs in the
-    // requesting thread: no unit thread is opened, no board issue is looked up,
-    // and the review lead carries the task wording.
+    // requesting thread: no thread is opened at all and no board issue is looked up.
     const taskOpened: string[] = [];
     const task = harness({
       ioFor: () => openingIo(taskOpened),
@@ -1179,24 +1236,19 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       body: {
         ok: true,
         threadKey: INSTANCE.threadKey,
-        reviewThreadKey: "slack:C1:2.0",
         branch: generated.branch,
         base: "main",
         at: NOW,
       },
     });
-    expect(taskOpened).toHaveLength(1);
-    expect(taskOpened[0]).toContain("↳ *ship* review of the task for alice");
+    expect(taskOpened).toHaveLength(0);
     const genRow = (await task.instances.listUnits(INSTANCE.id))[0]!;
-    expect(genRow).toMatchObject({
-      threadKey: INSTANCE.threadKey,
-      sourceUrl: INSTANCE.sourceUrl,
-      reviewThread: { threadKey: "slack:C1:2.0", sourceUrl: "https://acme.slack.com/archives/C1/p2" },
-    });
+    expect(genRow).toMatchObject({ threadKey: INSTANCE.threadKey, sourceUrl: INSTANCE.sourceUrl });
+    expect(genRow.reviewThread).toBeUndefined();
     expect(genRow.issue).toBeUndefined();
   });
 
-  it("unit-start without a channel that can open a thread is 503; a channel whose open fails is 502 and the row is unchanged; a review thread whose open fails leaves the unit thread on the row, so the retry opens the review thread alone", async () => {
+  it("unit-start without a channel that can open a thread is 503; a channel whose open fails is 502 and the row is unchanged", async () => {
     const noThread = await planHarness({ ioFor: () => undefined });
     expect((await call(noThread, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).status).toBe(503);
     const failing = await planHarness({
@@ -1215,41 +1267,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       body: { ok: false, error: "thread_failed", message: "chat.postMessage answered without a ts", at: NOW },
     });
     expect((await failing.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(unitRow("U10"));
-
-    let opens = 0;
-    const secondFails = await planHarness({
-      ioFor: () => ({
-        reply: async () => {},
-        status: async () => ({ update: () => {}, done: async () => {} }),
-        history: async () => [],
-        openThread: async () => {
-          opens++;
-          if (opens === 2) throw new Error("rate limited");
-          return {
-            thread: { threadKey: `slack:C1:${opens + 1}.0` },
-            io: {
-              reply: async () => {},
-              status: async () => ({ update: () => {}, done: async () => {} }),
-              history: async () => [],
-            },
-          };
-        },
-      }),
-    });
-    const half = await call(secondFails, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
-    expect(half).toEqual({
-      status: 502,
-      body: { ok: false, error: "thread_failed", message: "rate limited", at: NOW },
-    });
-    expect((await secondFails.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(
-      unitRow("U10", { threadKey: "slack:C1:2.0" }),
-    );
-    const retried = await call(secondFails, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
-    expect(retried.body).toMatchObject({ ok: true, threadKey: "slack:C1:2.0", reviewThreadKey: "slack:C1:4.0" });
-    expect(opens).toBe(3);
   });
 
-  it("spawn with a review brief dispatches the review child into the unit's review thread, never the unit thread: a run live in the unit thread does not make it busy, one live in the review thread does, and the child is the review preset, whose read identity gives it a readonly worktree of its own; a row without a review thread has one opened at the first review spawn and stored", async () => {
+  it("spawn with a review brief dispatches the review child into the unit's thread, where a live run makes it busy; the child is the review preset, whose read identity gives it a readonly worktree of its own; a row written before record 0055 keeps its review thread", async () => {
     const review = (step: string) => ({
       parentInstanceId: PLAN_INSTANCE.id,
       step,
@@ -1261,66 +1281,59 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       unitRow("U10", {
         threadKey: "slack:C1:2.0",
         sourceUrl: "https://acme.slack.com/archives/C1/p2",
-        reviewThread: { threadKey: "slack:C1:3.0", sourceUrl: "https://acme.slack.com/archives/C1/p3" },
         pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
       }),
     ]);
-    // A person's run in the unit thread: the review still runs, in its own thread.
-    h.registry.create("coding · person", {
-      agent: "coding",
-      channelId: PLAN_INSTANCE.channelId,
-      userId: PLAN_INSTANCE.userId,
-      threadKey: "slack:C1:2.0",
-    });
+    // One thread per unit (record 0055): the review child runs in the unit's thread.
     const res = await call(h, "spawn", review("U10/1/review"));
-    expect(res).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:3.0", at: NOW } });
+    expect(res).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW } });
     expect(h.dispatched).toHaveLength(1);
     const { msg, opts } = h.dispatched[0];
-    expect(msg.threadKey).toBe("slack:C1:3.0");
-    expect(msg.sourceUrl).toBe("https://acme.slack.com/archives/C1/p3");
+    expect(msg.threadKey).toBe("slack:C1:2.0");
+    expect(msg.sourceUrl).toBe("https://acme.slack.com/archives/C1/p2");
     expect(msg.text.startsWith("agent:review in acme/api: https://github.com/acme/api/pull/7 severity:minor\n\n")).toBe(
       true,
     );
     expect(msg.text).toContain(`Review pull request acme/api#7 at head \`${"a".repeat(40)}\``);
-    expect(opts.coordinator).toEqual({
+    expect(opts!.coordinator).toEqual({
       parentInstanceId: PLAN_INSTANCE.id,
       idempotencyKey: "plan-fixture:U10/1/review",
       base: "main",
     });
     expect(AGENTS.review.identity).toBe("read");
-    expect(h.threadsAsked.at(-1)).toEqual({ threadKey: "slack:C1:3.0", userId: PLAN_INSTANCE.userId });
+    expect(h.threadsAsked.at(-1)).toEqual({ threadKey: "slack:C1:2.0", userId: PLAN_INSTANCE.userId });
 
-    // A run live in the review thread is what makes a review spawn busy.
+    // A run live in the unit's thread (a person's, since the runner awaited its
+    // own child) is what makes a review spawn busy.
     const busy = await planHarness();
-    await busy.instances.putUnits([
-      unitRow("U10", { threadKey: "slack:C1:2.0", reviewThread: { threadKey: "slack:C1:3.0" } }),
-    ]);
-    const other = busy.registry.create("review · person", {
-      agent: "review",
+    await busy.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    const other = busy.registry.create("coding · person", {
+      agent: "coding",
       channelId: PLAN_INSTANCE.channelId,
       userId: PLAN_INSTANCE.userId,
-      threadKey: "slack:C1:3.0",
+      threadKey: "slack:C1:2.0",
     });
     expect(await call(busy, "spawn", review("U10/1/review"))).toEqual({
       status: 409,
-      body: { ok: false, error: "busy", runId: other.id, agent: "review", at: NOW },
+      body: { ok: false, error: "busy", runId: other.id, agent: "coding", at: NOW },
     });
     expect(busy.dispatched).toEqual([]);
 
-    // A row written before the review thread existed: the first review spawn opens it and stores it.
+    // A row a bot wrote before record 0055 names a review thread: its review
+    // rounds stay there, and nothing is opened.
     const opened: string[] = [];
     const older = await planHarness({ ioFor: () => openingIo(opened) });
-    await older.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:9.0" })]);
+    await older.instances.putUnits([
+      unitRow("U10", {
+        threadKey: "slack:C1:9.0",
+        reviewThread: { threadKey: "slack:C1:3.0", sourceUrl: "https://acme.slack.com/archives/C1/p3" },
+      }),
+    ]);
     const late = await call(older, "spawn", review("U10/1/review"));
-    expect(late).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:2.0", at: NOW } });
-    expect(opened).toHaveLength(1);
-    expect(opened[0]).toContain("↳ *ship* review of unit U10");
-    expect(older.threadsAsked[0]).toEqual({ threadKey: INSTANCE.threadKey, userId: INSTANCE.userId });
-    expect(older.dispatched[0].msg.threadKey).toBe("slack:C1:2.0");
-    expect((await older.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
-      threadKey: "slack:C1:9.0",
-      reviewThread: { threadKey: "slack:C1:2.0", sourceUrl: "https://acme.slack.com/archives/C1/p2" },
-    });
+    expect(late).toEqual({ status: 200, body: { ok: true, runId: "run-child", threadKey: "slack:C1:3.0", at: NOW } });
+    expect(opened).toHaveLength(0);
+    expect(older.dispatched[0].msg.threadKey).toBe("slack:C1:3.0");
+    expect(older.dispatched[0].msg.sourceUrl).toBe("https://acme.slack.com/archives/C1/p3");
   });
 
   it("spawn with a findings brief is refused busy while a run is live in the unit thread (a person's, since the runner awaited its own child) and dispatched into it when none is; a run that takes the unit thread between the read and the claim is answered from that run", async () => {
@@ -1432,7 +1445,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(msg.text.startsWith("agent:coding in acme/api on branch plan/fixture/u10: Implement unit U10")).toBe(true);
     // The child runs AT the unit branch; the tag says which branch its pull
     // request targets — the plan's base — since the thread cannot.
-    expect(opts.coordinator).toEqual({
+    expect(opts!.coordinator).toEqual({
       parentInstanceId: PLAN_INSTANCE.id,
       idempotencyKey: "plan-fixture:U10/0/coding",
       base: "main",
@@ -1486,7 +1499,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
     // No dispatch of this route carries a finding-id tag: the tool records what the run submits and the
     // runner matches the ids.
-    for (const d of h.dispatched) expect("fixRound" in d.opts).toBe(false);
+    for (const d of h.dispatched) expect("fixRound" in d.opts!).toBe(false);
 
     const noThread = await planHarness();
     expect(
@@ -1916,6 +1929,32 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       url: "https://github.com/acme/api/pull/12",
     });
     expect((await call(h, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U99" })).status).toBe(404);
+
+    // `checks: true` (the ending's facts read, record 0055) adds the check runs
+    // at the head as the merge door reads them; an unreadable GitHub leaves the
+    // field out rather than failing the read; without the flag nothing is asked.
+    const withChecks = await planHarness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },
+      checks: { total: 3, pending: ["ci / web"], failed: ["ci / package"] },
+    });
+    expect(
+      (await call(withChecks, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", checks: true })).body,
+    ).toMatchObject({
+      state: "open",
+      headSha: "abc123",
+      checks: { total: 3, pending: ["ci / web"], failed: ["ci / package"] },
+    });
+    const unreadable = await planHarness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },
+      checks: new Error("GitHub 502"),
+    });
+    const noChecks = await call(unreadable, "pr-check", {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      checks: true,
+    });
+    expect(noChecks.status).toBe(200);
+    expect(noChecks.body).not.toHaveProperty("checks");
   });
 
   it("pr-check for a unit whose branch only a merged pull request heads answers merged and remembers that pull request on the row, so the row reads like a unit the runner merged", async () => {
@@ -2486,7 +2525,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       body: {
         ok: true,
         outcome: "refused",
-        reason: `acme/api#7 conflicts with \`main\` at \`${HEAD.slice(0, 7)}\`, rebase and re-issue`,
+        reason: `acme/api#7 conflicts with \`main\` at \`${HEAD.slice(0, 7)}\` — rebase onto \`main\`, push, and merge it by hand once the checks are green; the approved work stands`,
         at: NOW,
       },
     });
@@ -2499,7 +2538,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     });
     expect((await merge(stacked)).body).toMatchObject({
       outcome: "refused",
-      reason: `acme/api#7 conflicts with \`plan/fixture/u9\` at \`${HEAD.slice(0, 7)}\`, rebase and re-issue`,
+      reason: `acme/api#7 conflicts with \`plan/fixture/u9\` at \`${HEAD.slice(0, 7)}\` — rebase onto \`plan/fixture/u9\`, push, and merge it by hand once the checks are green; the approved work stands`,
     });
     // A mergeable pull request with zero checks still answers pending.
     const clean = await mergeHarness({
@@ -2778,5 +2817,156 @@ describe("coordinator question records", () => {
     expect(run.verdict).toBeUndefined();
     expect(run.pr).toBeUndefined();
     expect(run.reviewPosted).toBeUndefined();
+  });
+});
+
+// Feature: record 0051's fold rule (thread-admission items 4 and 5) — the fold: every
+// coding spawn carries the unit's unconsumed thread events, attributed and in
+// arrival order, and marks them consumed by the spawn's step; a review spawn
+// leaves them; leftovers at a final ending run once as one fresh turn.
+describe("the fold — a unit's thread events reach the pipeline's next step (record 0051's fold rule)", () => {
+  const call = (h: ReturnType<typeof harness>, step: string, body: Record<string, unknown>) =>
+    handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${step}`, body), h.deps);
+  const key = { instanceId: INSTANCE.id, unit: "u12" };
+  const row: CoordinatorUnit = {
+    instanceId: INSTANCE.id,
+    unit: "u12",
+    slug: "u12",
+    branch: "plan/orchestration/u12",
+    dependsOn: [],
+    rounds: [],
+    threadKey: INSTANCE.threadKey,
+  };
+  const event = (seq: number, text: string, sender = "slack:UBOB", senderName?: string) => ({
+    sender,
+    ...(senderName !== undefined ? { senderName } : {}),
+    text,
+    mode: "steer" as const,
+    at: NOW - 5_000 + seq,
+  });
+  const shot = { mediaType: "image/png", data: "aGk=", name: "shot.png" };
+  const note = { mediaType: "text/plain", data: "bm90ZQ==" };
+
+  async function foldHarness(over: Parameters<typeof harness>[0] = {}) {
+    const h = harness(over);
+    await h.instances.put(INSTANCE);
+    await h.instances.putUnits([row]);
+    return h;
+  }
+
+  it("a coding spawn folds two senders' unconsumed events into the child's request in arrival order, attributed, and marks them consumed by the spawn's step", async () => {
+    const h = await foldHarness();
+    await h.instances.appendEvent(key, {
+      ...event(1, "also update the readme", "slack:UBOB", "bob"),
+      attachments: [shot],
+    });
+    await h.instances.appendEvent(key, {
+      ...event(2, "and bump the version", "slack:UCARA", "cara"),
+      attachments: [note],
+    });
+    const res = await call(h, "spawn", {
+      parentInstanceId: INSTANCE.id,
+      step: "u12/1/fix",
+      preset: "coding",
+      prompt: "Address the findings.",
+      unit: "u12",
+    });
+    expect(res.status).toBe(200);
+    expect(h.dispatched).toHaveLength(1);
+    const text = h.dispatched[0]!.msg.text;
+    expect(text).toContain("Address the findings.");
+    expect(text.indexOf("bob: also update the readme")).toBeGreaterThan(text.indexOf("Address the findings."));
+    expect(text.indexOf("cara: and bump the version")).toBeGreaterThan(text.indexOf("bob: also update the readme"));
+    // The stored attachments ride the child's message as its own images and documents.
+    expect(h.dispatched[0]!.msg.images).toEqual([shot]);
+    expect(h.dispatched[0]!.msg.documents).toEqual([note]);
+    expect((await h.instances.listEvents(key)).map((e) => e.consumedBy)).toEqual(["u12/1/fix", "u12/1/fix"]);
+    expect(await h.instances.listEvents(key, true)).toEqual([]);
+  });
+
+  it("a review spawn leaves the events unconsumed and folds nothing", async () => {
+    const h = await foldHarness();
+    await h.instances.appendEvent(key, event(1, "also update the readme"));
+    const res = await call(h, "spawn", {
+      parentInstanceId: INSTANCE.id,
+      step: "u12/1/review",
+      preset: "review",
+      prompt: "Review the pull request.",
+      unit: "u12",
+    });
+    expect(res.status).toBe(200);
+    expect(h.dispatched[0]!.msg.text).not.toContain("also update the readme");
+    expect(h.dispatched[0]!.msg.images).toBeUndefined();
+    expect(await h.instances.listEvents(key, true)).toHaveLength(1);
+  });
+
+  it("leftovers at a final ending run once as one fresh turn in the unit's thread, attributed, their attachments carried, marked consumed — and a replayed unit-end runs nothing twice", async () => {
+    const h = await foldHarness();
+    await h.instances.appendEvent(key, {
+      ...event(1, "also update the readme", "slack:UBOB", "bob"),
+      attachments: [shot],
+    });
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      unit: "u12",
+      ending: { kind: "merge_ready", report: "the unit is merge-ready" },
+    };
+    const res = await call(h, "unit-end", body);
+    expect(res.status).toBe(200);
+    // One fresh turn as the requester, no coordinator tag, no preset directive.
+    expect(h.dispatched).toHaveLength(1);
+    const { msg, opts } = h.dispatched[0]!;
+    expect(opts).toBeUndefined();
+    expect(msg.threadKey).toBe(INSTANCE.threadKey);
+    expect(msg.userId).toBe(INSTANCE.userId);
+    expect(msg.text).toBe("bob: also update the readme");
+    expect(msg.images).toEqual([shot]);
+    expect(msg.documents).toBeUndefined();
+    expect((await h.instances.listEvents(key)).map((e) => e.consumedBy)).toEqual(["unit-end:u12"]);
+    // Replayed: nothing unconsumed, nothing runs twice.
+    const again = await call(h, "unit-end", body);
+    expect(again.status).toBe(200);
+    expect(h.dispatched).toHaveLength(1);
+  });
+
+  it("leftovers at a final ending with no channel handle stay unconsumed, run no fresh turn, and the log says how many were left where", async () => {
+    const h = await foldHarness({ ioFor: () => undefined });
+    await h.instances.appendEvent(key, event(1, "also update the readme", "slack:UBOB", "bob"));
+    const res = await call(h, "unit-end", {
+      parentInstanceId: INSTANCE.id,
+      unit: "u12",
+      ending: { kind: "merge_ready", report: "the unit is merge-ready" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, told: false });
+    expect(h.dispatched).toHaveLength(0);
+    expect((await h.instances.listEvents(key, true)).map((e) => e.seq)).toEqual([1]);
+    expect(h.logs.some((l) => l.includes("1 leftover thread event(s) stay unconsumed") && l.includes("u12"))).toBe(
+      true,
+    );
+  });
+
+  it("a spawn replayed after a reclaim answers alreadySpawned before the events are read and folds nothing twice", async () => {
+    const h = await foldHarness();
+    h.registry.create("coding · child", {
+      agent: "coding",
+      channelId: INSTANCE.channelId,
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      parentInstanceId: INSTANCE.id,
+      idempotencyKey: `${INSTANCE.id}:u12/1/fix`,
+    });
+    await h.instances.appendEvent(key, event(1, "also update the readme"));
+    const res = await call(h, "spawn", {
+      parentInstanceId: INSTANCE.id,
+      step: "u12/1/fix",
+      preset: "coding",
+      prompt: "Address the findings.",
+      unit: "u12",
+    });
+    expect(res.status).toBe(200);
+    expect((res.body as { alreadySpawned?: boolean }).alreadySpawned).toBe(true);
+    expect(h.dispatched).toHaveLength(0);
+    expect(await h.instances.listEvents(key, true)).toHaveLength(1);
   });
 });

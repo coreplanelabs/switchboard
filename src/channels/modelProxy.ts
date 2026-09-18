@@ -1,6 +1,7 @@
-// The per-run model-credential proxy (docs/reference/specs/model-proxy.md): two
-// routes on the bot's HTTP server, `/v1/messages` (Anthropic-shaped) and
-// `/v1/chat/completions` (OpenAI-shaped), that a run's harness calls in place
+// The per-run model-credential proxy (docs/reference/specs/model-proxy.md):
+// three routes on the bot's HTTP server, `/v1/messages` (Anthropic-shaped),
+// `/v1/chat/completions` (Chat-Completions-shaped) and `/v1/responses`
+// (Responses-shaped), that a run's harness calls in place
 // of the provider, presenting the run's bearer as its API key. The proxy
 // authenticates the bearer (this run, unexpired, unrevoked), pins the request
 // to the preset's model and `max_tokens` whatever the body named, refuses a
@@ -19,25 +20,32 @@ import { once } from "node:events";
 import type { RunBearerGrant, RunBearerStore, RunMarks } from "../core/modelProxy/runBearers.js";
 import type { SpanAttrs } from "../core/trace/attrs.js";
 import type { Clock } from "../core/trace/types.js";
-import { usageFromAnthropic, usageFromOpenAI } from "../core/modelProxy/usage.js";
-import { ANTHROPIC_API_KEY_ENV, type ProviderConfig, type TokenUsage } from "../core/provider.js";
+import { usageFromAnthropic, usageFromOpenAI, usageFromResponses } from "../core/modelProxy/usage.js";
+import { ANTHROPIC_API_KEY_ENV, wireOf, type ProviderConfig, type TokenUsage, type Wire } from "../core/provider.js";
 import type { Secrets } from "../secrets.js";
 import { readBody } from "./http.js";
 
 export const ANTHROPIC_MESSAGES_PATH = "/v1/messages";
 export const OPENAI_CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
-/** The wire shape a route speaks — the same word the provider config uses for its type. */
-export type ProxyShape = ProviderConfig["type"];
+export const OPENAI_RESPONSES_PATH = "/v1/responses";
+/** The wire shape a route speaks — the same word the provider block's `wire` declares. */
+export type ProxyShape = Wire;
 export const PROXY_PATHS: Readonly<Record<ProxyShape, string>> = {
-  anthropic: ANTHROPIC_MESSAGES_PATH,
-  "openai-compatible": OPENAI_CHAT_COMPLETIONS_PATH,
+  "anthropic-messages": ANTHROPIC_MESSAGES_PATH,
+  "openai-chat": OPENAI_CHAT_COMPLETIONS_PATH,
+  "openai-responses": OPENAI_RESPONSES_PATH,
 };
 
 export function proxyShapeOf(path: string): ProxyShape | undefined {
-  if (path === ANTHROPIC_MESSAGES_PATH) return "anthropic";
-  if (path === OPENAI_CHAT_COMPLETIONS_PATH) return "openai-compatible";
+  if (path === ANTHROPIC_MESSAGES_PATH) return "anthropic-messages";
+  if (path === OPENAI_CHAT_COMPLETIONS_PATH) return "openai-chat";
+  if (path === OPENAI_RESPONSES_PATH) return "openai-responses";
   return undefined;
 }
+
+/** The Responses API's own floor for `max_output_tokens`: a pin below it would
+ *  be refused upstream, so the grant's cap is raised to it and never under. */
+export const RESPONSES_MIN_OUTPUT_TOKENS = 16;
 
 export function isModelProxyPath(path: string): boolean {
   return proxyShapeOf(path) !== undefined;
@@ -109,7 +117,7 @@ export type Door =
 
 /** A refusal in the shape of the route, so the client's SDK reads it as the
  *  provider's own error: `{ type: "error", error: { type, message } }` on the
- *  Anthropic route, `{ error: { type, message } }` on the OpenAI one. */
+ *  Anthropic route, `{ error: { type, message } }` on the two OpenAI ones. */
 export function refusalResponse(
   shape: ProxyShape | undefined,
   status: number,
@@ -117,7 +125,7 @@ export function refusalResponse(
   message: string,
 ): ProxyResponse {
   const error = { type: code, message };
-  const body = shape === "anthropic" ? { type: "error", error } : { error };
+  const body = shape === "anthropic-messages" ? { type: "error", error } : { error };
   return { status, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
 }
 
@@ -188,15 +196,19 @@ export function decideDoor(
 
 /** The request as the wire carries it: the preset's model and output cap in
  *  place of whatever the body named, every other field untouched. On the
- *  OpenAI shape a body that caps with `max_completion_tokens` is pinned on
- *  that key (and loses a stray `max_tokens`), any other on `max_tokens`. Pure. */
+ *  chat shape a body that caps with `max_completion_tokens` is pinned on
+ *  that key (and loses a stray `max_tokens`), any other on `max_tokens`; the
+ *  Responses shape caps with `max_output_tokens` alone, never below the API's
+ *  own floor of 16. Pure. */
 export function pinRequest(
   shape: ProxyShape,
   body: Record<string, unknown>,
   grant: Pick<RunBearerGrant, "model" | "maxTokens">,
 ): Record<string, unknown> {
   const pinned: Record<string, unknown> = { ...body, model: grant.model };
-  if (shape === "openai-compatible" && "max_completion_tokens" in pinned) {
+  if (shape === "openai-responses") {
+    pinned.max_output_tokens = Math.max(grant.maxTokens, RESPONSES_MIN_OUTPUT_TOKENS);
+  } else if (shape === "openai-chat" && "max_completion_tokens" in pinned) {
     pinned.max_completion_tokens = grant.maxTokens;
     delete pinned.max_tokens;
   } else {
@@ -211,9 +223,11 @@ export type UpstreamTarget =
 
 /** Where the call goes and what it carries: the provider's base URL and the
  *  real key — `x-api-key` on the Anthropic shape (with the API version the
- *  client sent, else the default), `Authorization: Bearer` on the OpenAI shape
- *  when the provider names a key variable, nothing when it does not (a local
- *  endpoint). The allowlisted request headers ride along; the run bearer never does. */
+ *  client sent, else the default), `Authorization: Bearer` on the two OpenAI
+ *  shapes when the provider names a key variable, nothing when it does not (a
+ *  local endpoint); the chat shape posts `<baseUrl>/chat/completions`, the
+ *  Responses shape `<baseUrl>/responses`. The allowlisted request headers ride
+ *  along; the run bearer never does. */
 export function upstreamFor(
   shape: ProxyShape,
   providerName: string,
@@ -221,7 +235,7 @@ export function upstreamFor(
   secrets: Secrets,
   requestHeaders: IncomingHttpHeaders,
 ): UpstreamTarget {
-  if (!cfg || cfg.type !== shape) {
+  if (!cfg || wireOf(cfg) !== shape) {
     return {
       ok: false,
       code: "provider_unconfigured",
@@ -233,7 +247,7 @@ export function upstreamFor(
     const value = header(requestHeaders, name);
     if (value !== undefined) headers[name] = value;
   }
-  if (shape === "anthropic") {
+  if (shape === "anthropic-messages") {
     const keyEnv = cfg.apiKeyEnv ?? ANTHROPIC_API_KEY_ENV;
     const key = secrets.named(keyEnv);
     if (!key)
@@ -256,7 +270,8 @@ export function upstreamFor(
       };
     headers.authorization = `Bearer ${key.reveal()}`;
   }
-  return { ok: true, url: `${cfg.baseUrl.replace(/\/+$/, "")}/chat/completions`, headers };
+  const route = shape === "openai-responses" ? "/responses" : "/chat/completions";
+  return { ok: true, url: `${cfg.baseUrl.replace(/\/+$/, "")}${route}`, headers };
 }
 
 // ---- the meter: the runner's attrs read off the provider's answer ------------------------------
@@ -324,12 +339,41 @@ export function meterOpenAiCompletion(json: unknown): TurnMeter {
   };
 }
 
+/** The Responses API's stop reason off the response object itself — it has no
+ *  `finish_reason`: a completed answer whose output carries a `function_call`
+ *  item is a `tool_use`, any other completed answer an `end_turn`; an
+ *  incomplete one stopped at `max_output_tokens` is a `max_tokens`; anything
+ *  else (`failed`, an unknown status, a content filter) is `other`. */
+export function responsesStopReason(response: Record<string, unknown>): StopReasonAttr {
+  const output = Array.isArray(response.output) ? response.output : [];
+  if (response.status === "completed") {
+    return output.some((item) => record(item)?.type === "function_call") ? "tool_use" : "end_turn";
+  }
+  if (response.status === "incomplete") {
+    return record(response.incomplete_details)?.reason === "max_output_tokens" ? "max_tokens" : "other";
+  }
+  return "other";
+}
+
+/** One buffered Responses answer → its usage and the status mapped as a stop reason. */
+export function meterResponses(json: unknown): TurnMeter {
+  const body = record(json);
+  if (!body) return {};
+  const usage = usageFromResponses(body.usage);
+  return {
+    ...(usage ? { usage } : {}),
+    ...(typeof body.status === "string" ? { stopReason: responsesStopReason(body) } : {}),
+  };
+}
+
 /** The meter over a server-sent-event stream, fed the bytes as they pass
  *  through: `data:` lines are parsed as they complete (a line may span chunks;
  *  CRLF framing is accepted; anything that is not JSON, and `[DONE]`, is
  *  skipped). Anthropic: `message_start` carries the input and cache counts,
- *  `message_delta` the stop reason and the final output count. OpenAI: a
- *  choice's `finish_reason`, and the `usage` frame when the client asked for one. */
+ *  `message_delta` the stop reason and the final output count. Chat: a
+ *  choice's `finish_reason`, and the `usage` frame when the client asked for
+ *  one. Responses: the closing `response.completed` / `response.incomplete` /
+ *  `response.failed` event carries the whole response with its usage and status. */
 export class SseMeter {
   private readonly decoder = new TextDecoder();
   private buffer = "";
@@ -374,7 +418,19 @@ export class SseMeter {
   private apply(json: unknown): void {
     const event = record(json);
     if (!event) return;
-    if (this.shape === "anthropic") {
+    if (this.shape === "openai-responses") {
+      if (
+        event.type !== "response.completed" &&
+        event.type !== "response.incomplete" &&
+        event.type !== "response.failed"
+      )
+        return;
+      const meter = meterResponses(event.response);
+      if (meter.usage) this.usage = { ...this.usage, ...meter.usage };
+      if (meter.stopReason) this.stopReason = meter.stopReason;
+      return;
+    }
+    if (this.shape === "anthropic-messages") {
       if (event.type === "message_start") {
         const usage = usageFromAnthropic(record(event.message)?.usage);
         if (usage) this.usage = { ...this.usage, ...usage };
@@ -436,14 +492,13 @@ export function shapeTools(
   if (marks.turn !== undefined && marks.turn.tools === null) return { body, toolChoice: offered.toolChoice };
   if (marks.turn === undefined) {
     if (!marks.loopEnded) return { body, toolChoice: offered.toolChoice };
-    const none = shape === "anthropic" ? { type: "none" } : "none";
+    const none = shape === "anthropic-messages" ? { type: "none" } : "none";
     return { body: { ...body, tool_choice: none }, toolChoice: "none" };
   }
   const allowed = new Set(marks.turn.tools);
   const table = Array.isArray(body.tools) ? body.tools : [];
   const kept = table.filter((t) => {
-    const r = record(t);
-    const name = r === undefined ? undefined : shape === "anthropic" ? r.name : record(r.function)?.name;
+    const name = toolNameOf(shape, record(t));
     return typeof name === "string" && allowed.has(name);
   });
   const { tool_choice: _choice, ...rest } = body;
@@ -451,13 +506,19 @@ export function shapeTools(
   return { body: shaped, toolChoice: toolChoiceWord(shape, undefined, kept.length) };
 }
 
+/** A tool definition's name in the route's dialect: Anthropic's and the flat
+ *  Responses shape's ride at the top (`{ name }`), the chat shape's inside the
+ *  function object (`{ function: { name } }`). */
+function toolNameOf(shape: ProxyShape, tool: Record<string, unknown> | undefined): unknown {
+  if (tool === undefined) return undefined;
+  return shape === "openai-chat" ? record(tool.function)?.name : tool.name;
+}
+
 export function toolsOffered(shape: ProxyShape, body: Record<string, unknown>): ToolsOffered {
   const table = Array.isArray(body.tools) ? body.tools : [];
   const names: string[] = [];
   for (const t of table) {
-    const r = record(t);
-    if (!r) continue;
-    const name = shape === "anthropic" ? r.name : record(r.function)?.name;
+    const name = toolNameOf(shape, record(t));
     if (typeof name === "string") names.push(name);
   }
   names.sort();
@@ -470,13 +531,16 @@ export function toolsOffered(shape: ProxyShape, body: Record<string, unknown>): 
 
 function toolChoiceWord(shape: ProxyShape, choice: unknown, tools: number): ToolsOffered["toolChoice"] {
   if (choice === undefined || choice === null) return tools > 0 ? "auto" : "none";
-  if (shape === "anthropic") {
+  if (shape === "anthropic-messages") {
     const type = record(choice)?.type;
     if (type === "none" || type === "any" || type === "tool") return type;
     // an explicit `auto` with no tools reads as none, like an absent choice
     if (type === "auto") return tools > 0 ? "auto" : "none";
     return tools > 0 ? "auto" : "none";
   }
+  // The two OpenAI dialects spell the words the same; only the named-tool
+  // object differs (the chat shape's function object, the Responses shape's
+  // flat `{ type: "function", name }`), and either reads as `tool`.
   if (choice === "none") return "none";
   if (choice === "required") return "any";
   if (choice === "auto") return tools > 0 ? "auto" : "none";
@@ -565,12 +629,12 @@ export async function handleAdmitted(
 ): Promise<ProxyResponse> {
   const log = deps.log ?? ((line: string) => console.log(line));
   const { shape, grant } = door;
-  if (grant.providerType !== shape) {
+  if (grant.providerWire !== shape) {
     return refusalResponse(
       shape,
       400,
       "wrong_shape",
-      `this run's provider "${grant.providerName}" speaks ${PROXY_PATHS[grant.providerType]}, not ${PROXY_PATHS[shape]}`,
+      `this run's provider "${grant.providerName}" speaks ${PROXY_PATHS[grant.providerWire]}, not ${PROXY_PATHS[shape]}`,
     );
   }
   const read = await readBody(req.body, deps.maxBodyBytes ?? MAX_PROXY_BODY_BYTES);
@@ -682,7 +746,12 @@ export async function handleAdmitted(
   let meter: TurnMeter = {};
   try {
     const json: unknown = JSON.parse(text);
-    meter = shape === "anthropic" ? meterAnthropicMessage(json) : meterOpenAiCompletion(json);
+    meter =
+      shape === "anthropic-messages"
+        ? meterAnthropicMessage(json)
+        : shape === "openai-responses"
+          ? meterResponses(json)
+          : meterOpenAiCompletion(json);
   } catch {
     // not JSON: forwarded as it came, metered as nothing
   }

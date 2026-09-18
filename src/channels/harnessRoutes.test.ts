@@ -7,9 +7,11 @@ import type { RunEvent } from "../core/runEvents.js";
 import { LedgerTakeover, type TakeoverFacts } from "../core/runLedger/takeover.js";
 import { createTracer } from "../core/trace/tracer.js";
 import type { RunnableTool } from "../tools/runnableTool.js";
+import { POINTER_SUMMARY_PREFIX, pointerSummary } from "../core/harness/pi/compactionFallback.js";
 import {
   DOOR_HOLD_MS,
   HARNESS_AUTHORIZE_PATH,
+  HARNESS_COMPACTION_PATH,
   HARNESS_TOOLS_PATH,
   HARNESS_TOOL_PATH,
   createHarnessRoutesHandler,
@@ -17,10 +19,11 @@ import {
   isHarnessPath,
 } from "./harnessRoutes.js";
 
-// Feature: docs/reference/specs/harness-pi.md item 7 — the three harness
+// Feature: docs/reference/specs/harness-pi.md item 7 — the four harness
 // routes: the run bearer is the whole door, decided from the headers before
 // the body; a run that is not on the harness answers nothing; then the tool
-// definitions, the gate's verdict, or a relayed tool's result. During a
+// definitions, the gate's verdict, a relayed tool's result, or the bot's word
+// on how a compaction is written. During a
 // generation's boot the door holds and answers retryably for a run the
 // ledger still lists as live and not yet resumed here.
 
@@ -89,7 +92,7 @@ function world(takeover: TakeoverFacts = settledTakeover()) {
     runId,
     modelRef: "anthropic/m",
     providerName: "anthropic",
-    providerType: "anthropic" as const,
+    providerWire: "anthropic-messages" as const,
     model: "m",
     maxTokens: 1000,
     maxTurns: 10,
@@ -133,8 +136,10 @@ function slowTool() {
 }
 
 describe("handleHarnessRequest", () => {
-  it("names the three paths and nothing else", () => {
-    expect([HARNESS_TOOLS_PATH, HARNESS_AUTHORIZE_PATH, HARNESS_TOOL_PATH].every(isHarnessPath)).toBe(true);
+  it("names the four paths and nothing else", () => {
+    expect(
+      [HARNESS_TOOLS_PATH, HARNESS_AUTHORIZE_PATH, HARNESS_TOOL_PATH, HARNESS_COMPACTION_PATH].every(isHarnessPath),
+    ).toBe(true);
     expect(isHarnessPath("/harness/other")).toBe(false);
   });
 
@@ -227,6 +232,35 @@ describe("handleHarnessRequest", () => {
       body: { content: [{ type: "text", text: "finally" }], isError: false },
     });
     expect(slow.runs()).toBe(1);
+  });
+
+  it("POST /harness/compaction answers nothing while pi's own summary stands, and the bot's pointer summary once the run's last compaction failed for good — taken once; a malformed ask is 400, a GET 405", async () => {
+    const { deps, headers, harness } = world();
+    let failure: string | undefined = undefined;
+    harness.takeCompactionFailure = () => {
+      const f = failure;
+      failure = undefined;
+      return f;
+    };
+    const ask = (body: unknown) =>
+      handleHarnessRequest(deps, { method: "POST", path: HARNESS_COMPACTION_PATH, headers: headers(), body });
+    const body = { reason: "threshold", tokensBefore: 187_000, readFiles: ["src/a.ts"], modifiedFiles: ["src/b.ts"] };
+    expect(await ask(body)).toEqual({ status: 200, body: {} });
+    const refusal =
+      "Auto-compaction failed: Turn prefix summarization failed: refused under the provider's usage policy";
+    failure = refusal;
+    const pointer = await ask({ ...body, previousSummary: "so far: two tests fail" });
+    expect(pointer.status).toBe(200);
+    expect(pointer.body.summary).toEqual(
+      pointerSummary({ ...body, previousSummary: "so far: two tests fail" }, refusal),
+    );
+    expect(String(pointer.body.summary).startsWith(POINTER_SUMMARY_PREFIX)).toBe(true);
+    // Taken once: the compaction after tries pi's own summary again.
+    expect(await ask(body)).toEqual({ status: 200, body: {} });
+    expect(await ask({ tokensBefore: 1 })).toEqual({ status: 400, body: { error: "invalid_body" } });
+    expect(
+      (await handleHarnessRequest(deps, { method: "GET", path: HARNESS_COMPACTION_PATH, headers: headers() })).status,
+    ).toBe(405);
   });
 
   it("an unknown path is 404", async () => {

@@ -62,7 +62,7 @@ The first live receipts found two gaps, and both were closed rather than papered
 
 ## What this deleted
 
-The fix child and its brief, the fix round's disposition sink, the conductor's hand-written preset list, and the rule that a re-review "sees none of this thread": each was a summary handed between agents or a special case the transcript makes unnecessary. A review still runs in a review thread of its own — the wall between author and reviewer is deliberate — and a unit's story is two threads read in round order.
+The fix child and its brief, the fix round's disposition sink, the conductor's hand-written preset list, and the rule that a re-review "sees none of this thread": each was a summary handed between agents or a special case the transcript makes unnecessary. A review runs in the unit's thread on a session of its own — the wall between author and reviewer is the session, never the thread — and a unit's story is one thread read in round order.
 
 ## Read next
 

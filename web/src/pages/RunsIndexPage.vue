@@ -239,11 +239,11 @@ onUnmounted(() => {
       aria-label="Completed runs pages"
     >
       <template v-if="seed?.olderThan !== undefined">
-        <a class="text-primary hover:underline" :href="viewHref(true, showMine)">← Newest runs</a>
+        <RouterLink class="text-primary hover:underline" :to="viewHref(true, showMine)">← Newest runs</RouterLink>
         <span class="range font-mono tabular-nums text-dimmed">· runs finished before {{ olderThanLabel }}</span>
       </template>
-      <a v-if="seed?.olderHref" class="older ml-auto text-primary hover:underline" :href="seed.olderHref"
-        >Older runs →</a
+      <RouterLink v-if="seed?.olderHref" class="older ml-auto text-primary hover:underline" :to="seed.olderHref"
+        >Older runs →</RouterLink
       >
     </nav>
   </AppShell>

@@ -17,7 +17,8 @@ import { redactSecrets, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import type { LiveThread } from "./threadAdmission.js";
 import type { RecordDeps } from "./dispatch/record.js";
-import { cardLines, errorReply } from "./dispatch/reply.js";
+import { cardLines, errorReply, renderRefusal } from "./dispatch/reply.js";
+import { causeOf, refusalOf, RefusalError, type Refusal, type RefusalCause, type RefusalCode } from "./refusal.js";
 import {
   admit,
   adoptCarriedRun,
@@ -32,10 +33,18 @@ import {
 } from "./dispatch/admission.js";
 import { checkChannelAccess } from "./dispatch/channelAccess.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
-import { actorIdsOf, cancelPending, consumeAndRun } from "./dispatch/confirm.js";
-import { postSettledOutcome } from "./dispatch/commandRun.js";
+import { actorIdsOf, cancelPending, consumeAndRun, REFUSED_REASON } from "./dispatch/confirm.js";
+import { postSettledOutcome, recordRefusal, recordRoutedDecision } from "./dispatch/commandRun.js";
+import { COMMAND_RUN_AGENT, DOOR_RUN_AGENT } from "./runOwner.js";
+import { redactedInput } from "./dispatch/route.js";
 import type { Actor } from "./authz/types.js";
-import { NO_REFERENCES, readReferences, REFERENCE_REFUSAL, type ReferenceDeps } from "./dispatch/references.js";
+import {
+  NO_REFERENCES,
+  readReferences,
+  REFERENCE_REFUSAL,
+  referenceRefusalCode,
+  type ReferenceDeps,
+} from "./dispatch/references.js";
 import { chatActorOf, resolveChatActor } from "./authz/actor.js";
 import { referencesOn } from "../config.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
@@ -49,7 +58,7 @@ import {
   authorizeRepo,
   type AuthorizeDeps,
 } from "./dispatch/authorize.js";
-import { buildMessages, textTurnsOf, type TextTurn } from "./dispatch/messages.js";
+import { buildConversation, textTurnsOf, type TextTurn } from "./dispatch/messages.js";
 import {
   attachmentsLine,
   copyStaged,
@@ -78,6 +87,7 @@ import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
+import { fetchInstanceStatusViaShim, processShimOptions } from "./coordinator/instancesClient.js";
 import { shipPresetFor } from "./shipPipeline.js";
 import { resolveAddressSeverity } from "./reviewVerdict.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
@@ -93,12 +103,12 @@ import { workspaceBindingFor } from "../execution/factory.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
-import { readThread, stickyAgentOf, threadPrOf, threadRouteOf } from "./dispatch/thread.js";
+import { ownerOf, readThread, stickyAgentOf, threadPrOf, threadRouteOf } from "./dispatch/thread.js";
 import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import { createRunsService, type RunsService } from "./runsService.js";
-import type { CoordinatorTag } from "./coordinator/contract.js";
+import { unitKeyOf, unitNudgeEventType, type CoordinatorTag, type CoordinatorUnit } from "./coordinator/contract.js";
 import type { DispatchOutcome } from "./dispatch/outcome.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
@@ -145,6 +155,116 @@ export interface CoreDeps
    * because `CoreDeps` is the one place a process declares what it runs with.
    */
   issueTracker?: IssueTracker;
+}
+
+/** A plain reply into a thread an unfinished unit owns (record 0051's reply-as-event and gone-instance rules):
+ *  the message becomes one thread event on the unit's list — the mode read
+ *  off the owner's state, `steer` between rounds — the instance is nudged
+ *  through the shim's event relay, and the sender is acked with where the
+ *  message went; the router is never called. `route-fresh` when the instance
+ *  is gone — the relay's "no such instance", or a status of complete, errored
+ *  or terminated — with the row ended `terminated` and the thread told, or
+ *  when no durable store could hold the event: the request runs on as if the
+ *  thread were unowned. Any other send failure keeps the event appended and
+ *  acks it as queued for the pipeline's next step (which reads the unconsumed
+ *  list whether or not a nudge arrived), and nothing routes fresh. */
+async function answerUnitOwnedThread(
+  deps: CoreDeps,
+  ctx: {
+    msg: IncomingMessage;
+    io: ChannelIO;
+    /** The directive-free text — what the pipeline's next step folds in. */
+    text: string;
+    owner: { instanceId: string; unit: CoordinatorUnit };
+    clock: () => number;
+  },
+): Promise<"acked" | "route-fresh"> {
+  const { msg, io, owner } = ctx;
+  const store = deps.coordinatorInstances!;
+  const key = { instanceId: owner.instanceId, unit: owner.unit.unit };
+  const unitKey = unitKeyOf(key);
+  const at = ctx.clock();
+  // No run exists here, so the event's id is the platform's own message id when the channel gave one.
+  const messageId = msg.messageId;
+  // The mode is a receipt of the owner's state at append (record 0051), never the
+  // text's: no live run and no idle mark on the row — the pipeline is between
+  // rounds — so the event is a `steer`. The store's append enforces the
+  // per-event cap: attachments over it are dropped whole and the row says how many.
+  const attachments = [...(msg.images ?? []), ...(msg.documents ?? [])].map((a) => ({
+    mediaType: a.mediaType,
+    data: a.data,
+    ...(a.name !== undefined ? { name: a.name } : {}),
+  }));
+  // No durable store to hold the event — the null store's `unavailable`, or
+  // the Worker store's throw on a failed call (a 5xx, a timeout, a body it
+  // cannot read): the thread cannot be owned durably, so the request runs as
+  // today rather than vanish, unacked and unrouted, into the adapter's error path.
+  const appended = await store
+    .appendEvent(key, {
+      ...(messageId !== undefined ? { id: messageId } : {}),
+      sender: msg.userId,
+      ...(msg.userName !== undefined ? { senderName: msg.userName } : {}),
+      text: ctx.text,
+      ...(attachments.length > 0 ? { attachments } : {}),
+      mode: "steer",
+      at,
+    })
+    .catch((err: unknown) => {
+      console.warn(
+        `[dispatch] ${msg.threadKey}: unit ${unitKey} event append failed (${err instanceof Error ? err.message : String(err)}) — routing fresh`,
+      );
+      return { ok: false as const, reason: "unavailable" as const };
+    });
+  if (!appended.ok) return "route-fresh";
+  // The nudge (record 0051): every append nudges, so the send doubles as the liveness probe.
+  try {
+    if (deps.workflow === undefined) throw new Error("no workflow sender in this process");
+    const handle = await deps.workflow.get(owner.instanceId);
+    await handle.sendEvent({ type: unitNudgeEventType(key), payload: {} });
+  } catch (err) {
+    // The gone instance (record 0051): the relay's "no such instance", or an instance that already ended,
+    // ends the row `terminated` — the thread is unowned from then on — and
+    // the message routes fresh. The engine's refusal texts vary, so the
+    // instance's own status route decides, fail-safe: unanswered is a send
+    // failure, never an absence. The reader is the injected one when a test
+    // wires it, else the process's own shim — the same address the ship
+    // branch creates and reads instances at — so production reaches the route.
+    const readStatus =
+      deps.fetchCoordinatorInstanceStatus ?? ((id: string) => fetchInstanceStatusViaShim(processShimOptions(), id));
+    const status = await readStatus(owner.instanceId);
+    const gone =
+      status.kind === "absent" ||
+      (status.kind === "status" && ["complete", "errored", "terminated"].includes(status.status));
+    if (gone) {
+      const why = status.kind === "absent" ? "no such instance" : status.status;
+      await store.putUnits([
+        {
+          ...owner.unit,
+          ending: {
+            kind: "terminated",
+            report: `the plan runner instance is gone (${why}) — the thread is unowned from here`,
+            at,
+          },
+        },
+      ]);
+      console.log(`[dispatch] ${msg.threadKey}: unit ${unitKey} ended terminated (${why}) — routing fresh`);
+      await io.reply(
+        `⚠️ Unit ${owner.unit.unit}'s plan runner instance \`${owner.instanceId}\` is gone (${why}) — the unit's row is closed and this message runs fresh.`,
+      );
+      return "route-fresh";
+    }
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[dispatch] ${msg.threadKey}: unit ${unitKey} nudge failed (${reason}) — event ${appended.seq} stays queued`,
+    );
+    await io.reply(
+      `📌 Noted for unit ${owner.unit.unit} (\`${unitKey}\`): the pipeline could not be nudged — your message is queued for its next step.`,
+    );
+    return "acked";
+  }
+  console.log(`[dispatch] ${msg.threadKey}: event ${appended.seq} appended to unit ${unitKey}, instance nudged`);
+  await io.reply(`📌 Noted for unit ${owner.unit.unit} (\`${unitKey}\`) — the pipeline folds it into its next step.`);
+  return "acked";
 }
 
 // In-flight run tracking so the process can drain before exiting (restarts
@@ -201,6 +321,12 @@ export interface DispatchOptions {
    *  after the REVIEW TARGET block — so both children hold one object. Absent
    *  for every other request. */
   contract?: ChildContract;
+  /** Set by `dispatchClick` alone, for a Yes on a question's `redispatch` row
+   *  (record 0054): the question's refusal code — the run's record names it
+   *  in a `run_note` ([run-history.md](../../docs/reference/specs/run-history.md) item 2)
+   *  — and the click's one drain slot is handed over: this dispatch counts no
+   *  second one. Absent for every other request. */
+  redispatch?: { code: string };
 }
 
 /** How a request ended, for whoever started it (dispatch/outcome.ts): the
@@ -248,10 +374,62 @@ export async function dispatch(
   // A refusal — a close and a reply that end the request without a run — is
   // one `dispatch.refuse` span naming why.
   let refused = false;
-  const refuse = <T>(outcome: string, fn: () => Promise<T>) => {
+  // The count's first home (record 0054): the code and its cause on the
+  // refuse span AND the request's root, so the telemetry query the forensics
+  // recipe uses can count refusals from root spans alone.
+  const stampRefusal = (outcome: RefusalCode): RefusalCause => {
     refused = true;
+    const cause = causeOf(outcome);
     ended.refusal ??= outcome;
-    return root.span("dispatch.refuse", fn, { attrs: { outcome } });
+    ended.cause ??= cause;
+    root.setAttrs({ refusal: outcome, cause });
+    return cause;
+  };
+  // Every refusal is a run record (record 0054, as amended): one `door` record
+  // per request — written after the sentence on the same `dispatch.refuse`
+  // span, and never twice when the catch-all follows a gate that already
+  // recorded (a setup failure's silent close, then its error reply).
+  let refusalRecorded = false;
+  const recordRefusalOnce = async (refusal: Refusal) => {
+    if (refusalRecorded) return;
+    refusalRecorded = true;
+    await recordRefusal(deps, msg, io, refusal, ending, trace);
+  };
+  // A gate refusal is the site's `Refusal` — its own sentence, the cause from
+  // the one table — stamped, the side work (a card close, a release) run
+  // inside the span, the sentence rendered by the ONE renderer, and the
+  // decision recorded as a `door` run.
+  const refuse = async (refusal: Refusal, side?: () => Promise<void>, replyIo: ChannelIO = io) => {
+    const cause = stampRefusal(refusal.code);
+    await root.span(
+      "dispatch.refuse",
+      async () => {
+        await side?.();
+        // The store rides along so a question with a guess can mint its Yes
+        // (record 0054): the renderer offers Yes and No where the channel can
+        // show them, and the line to type everywhere else.
+        await renderRefusal(refusal, replyIo, { confirmations: deps.confirmations });
+        await recordRefusalOnce(refusal);
+      },
+      { attrs: { outcome: refusal.code, refusal: refusal.code, cause } },
+    );
+  };
+  // A refusal nothing is said for — a coordinator spawn (the thread must not
+  // hear a bot-to-bot retry), a lost workspace whose card says it, the
+  // catch-all's card close (the error reply follows on its own path): stamped,
+  // recorded and counted like any other, rendered by nobody — the record's
+  // refusal event carries no sentence because none was said.
+  const refuseSilently = <T>(outcome: RefusalCode, side: () => Promise<T>) => {
+    const cause = stampRefusal(outcome);
+    return root.span(
+      "dispatch.refuse",
+      async () => {
+        const result = await side();
+        await recordRefusalOnce(refusalOf(outcome, ""));
+        return result;
+      },
+      { attrs: { outcome, refusal: outcome, cause } },
+    );
   };
   // The card's shape and queued lines at a close (docs/reference/specs/tracing.md item 5):
   // a runless close reads the root's children so far over a live window; a
@@ -272,8 +450,11 @@ export async function dispatch(
   // that lands between the channel's 👀 ack and the first status card used to
   // see "0 run(s) in flight" and exit at once, abandoning an acked run.
   // Config commands and refusals hold the slot for their few hundred
-  // milliseconds too — cheaper than a second gap.
-  activeRuns++;
+  // milliseconds too — cheaper than a second gap. A redispatched request
+  // (record 0054's Yes) arrives holding the click's slot: `dispatchClick`
+  // counted it and decrements it after this dispatch returns, so counting it
+  // again would read one click as two runs in flight.
+  if (!opts.redispatch) activeRuns++;
   // How this dispatch's runs end (runEnding.ts; docs/reference/specs/tracing.md): a run is
   // SEALED once its first reply attempt has completed, and its record — its
   // inputs (the registry snapshot, the diagnosis) captured synchronously at
@@ -368,8 +549,11 @@ export async function dispatch(
         return ended;
       }
       if (access === "deny") {
-        await refuse("channel_access", () =>
-          io.reply("I can’t start work here because your access to this conversation could not be verified."),
+        await refuse(
+          refusalOf(
+            "channel_access",
+            "I can’t start work here because your access to this conversation could not be verified.",
+          ),
         );
         return ended;
       }
@@ -399,7 +583,7 @@ export async function dispatch(
     let clarification: CoordinatorClarification | undefined;
     try {
       clarification = await coordinatorClarificationFor({
-        newest: thread?.[0],
+        newest: thread?.find((run) => run.agent !== DOOR_RUN_AGENT),
         msg,
         directives,
         instances: deps.coordinatorInstances,
@@ -413,8 +597,10 @@ export async function dispatch(
         return ended;
       }
       // A refused reply must not close another person's waiting Linear session.
-      await refuse("coordinator_clarification", () =>
-        io.question ? io.question(error.message) : io.reply(error.message),
+      await refuse(
+        refusalOf("coordinator_clarification", error.message),
+        undefined,
+        io.question ? { ...io, reply: (text) => io.question!(text) } : io,
       );
       return ended;
     }
@@ -474,6 +660,39 @@ export async function dispatch(
     const threadLive =
       admission.get(msg.threadKey) !== undefined ||
       (!resume && !restart && deps.threadsElsewhere.get(msg.threadKey) !== undefined);
+    // The thread's owner (record 0051's owner rule): computed here, where the
+    // dispatcher already decides `threadLive`, from the page it already read
+    // plus at most one read of the instance's unit rows. A plain reply into a
+    // thread owned by an unfinished unit with no live run is one thread event
+    // on that unit — appended with the mode read off the row, the instance
+    // nudged, the sender acked — and the router never runs (the gate does).
+    // A directive naming an agent falls through to today's path: `agent:review
+    // <url>` in a pipeline thread still means what it says. A live thread is
+    // the live run's (admission steers below); a session or no owner is the
+    // sticky path and the router, exactly as before.
+    if (
+      thread &&
+      !clarification &&
+      !threadLive &&
+      directives.agent === undefined &&
+      deps.coordinatorInstances !== undefined
+    ) {
+      const owner = await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey);
+      if (owner.kind === "unit") {
+        // The same gate a live steer passes (admission's allowlist check): the
+        // event is read by the unit's next coding child — a write-identity run
+        // — so its sender must be allowed to run `coding`, refused the same
+        // named way, before anything is appended. "Run" includes "is heard by".
+        if ((await authorizeAgent(deps, { msg, io, refuse, agentName: "coding" })).kind === "refused") return ended;
+        const answer = await root.span("dispatch.unit_owned_thread", () =>
+          answerUnitOwnedThread(deps, { msg, io, text: directives.text, owner, clock }),
+        );
+        if (answer === "acked") return ended;
+        // `route-fresh`: the instance is gone — the row was ended `terminated`
+        // and the thread told — so the request runs on as if the thread were
+        // unowned by any unit.
+      }
+    }
     const routing = await routeRequest(deps, {
       msg,
       directives,
@@ -568,6 +787,7 @@ export async function dispatch(
       clock,
       root,
       refuse,
+      refuseSilently,
       admission,
       hooks: {
         reservation: reservationHooks,
@@ -621,7 +841,12 @@ export async function dispatch(
     // The provider behind the model ref, and the target repo/ref/PR resolution
     // STARTED here (dispatch/resolve.ts) so the GitHub round trip overlaps the
     // memory read below; awaited after the ack.
-    const { needsRepo, repoCtxP } = resolveTarget(deps, {
+    const {
+      needsRepo,
+      repoCtxP,
+      modelCard,
+      decisions: cardDecisions,
+    } = resolveTarget(deps, {
       msg: clarification ? { ...msg, text: clarification.targetText } : msg,
       history: clarification ? [] : history,
       agent,
@@ -658,7 +883,11 @@ export async function dispatch(
     // run, not a reply to nothing. Nothing between the step and the
     // ack ends the dispatch, so it posts exactly once whenever anything was
     // refused; the `[references]` log lines were written by the step itself.
-    if (references.refused.length > 0) await io.reply(REFERENCE_REFUSAL);
+    // Rendered through the seam with the first refused token's code (record
+    // 0054): the sentence stays record 0037's one line; the code and the
+    // cause live on the span alone.
+    if (references.refused.length > 0)
+      await renderRefusal(refusalOf(referenceRefusalCode(references.refused[0]), REFERENCE_REFUSAL), io);
 
     // The repo/ref resolution started above (before the ack) lands here; the
     // gate below runs against it exactly as before.
@@ -771,6 +1000,7 @@ export async function dispatch(
               ...(msg.images ? { images: msg.images } : {}),
               ...(msg.documents ? { documents: msg.documents } : {}),
               ...(references.blocks.length > 0 ? { references: references.blocks } : {}),
+              actor: msg.userId,
             },
           })
         : undefined,
@@ -781,9 +1011,14 @@ export async function dispatch(
     const seed: RunSeed = opts.seed ? "parent" : session ? "session" : "channel";
     const seedTurns: TextTurn[] | undefined =
       opts.seed ?? (session ? textTurnsOf(session.messages.slice(0, -1)) : undefined);
-    const built = session
-      ? session.messages
-      : buildMessages(opts.seed ?? history, requestText, msg.images, msg.documents, references.blocks);
+    // The channel (and parent) seed keeps its authors too (session-log item 12):
+    // a thread's first run stores each history line's author and the request row
+    // the requester's, exactly as the session path does through SessionSeed.actors.
+    const channelBuilt = session
+      ? undefined
+      : buildConversation(opts.seed ?? history, requestText, msg.images, msg.documents, references.blocks, msg.userId);
+    const built = session ? session.messages : channelBuilt!.messages;
+    const seedActors = session ? session.actors : channelBuilt?.actors;
     const messages = resume
       ? resume.plan.messages
       : contractBlock !== undefined && agent.name !== "review"
@@ -847,6 +1082,8 @@ export async function dispatch(
       seed,
       ...(seedTurns ? { seedTurns } : {}),
       agentSource,
+      modelCard,
+      cardDecisions,
       ...(routeEvent ? { route: routeEvent } : {}),
       ...(references.conversations.length > 0 ? { references } : {}),
     });
@@ -856,6 +1093,16 @@ export async function dispatch(
     // before the first turn — the run is not changed by it.
     for (const summary of seedNotes)
       registry.publish(run.id, { type: "run_note", kind: "seed", summary: oneLine(summary), at: clock() });
+    // A redispatched request's record names the question it answered
+    // (record 0054; run-history item 2): the code the refusal carried, so the
+    // Yes-run is traceable to the question whose proposal it ran.
+    if (opts.redispatch)
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "redispatch",
+        summary: `confirmed after question ${opts.redispatch.code}`,
+        at: clock(),
+      });
     // A new run of a spawned thread's child has its row: its parent hears the
     // reply now, with the run that answers it named.
     await tellLineage({ kind: "started", runId });
@@ -1020,7 +1267,7 @@ export async function dispatch(
         const request = await abandonLostWorkspace({
           msg,
           io,
-          refuse,
+          refuse: refuseSilently,
           card,
           shell,
           closeLines,
@@ -1269,6 +1516,10 @@ export async function dispatch(
       coordinator,
       seed,
       ...(session ? { seedLog: session.log } : {}),
+      // A promotion gone untracked marks the card as the reserve-time path
+      // above does — the label, not the bot log alone, says the run's row is gone.
+      markUntracked: () => shell.setLabel(`${shell.label} · untracked by the ledger`),
+      ...(seedActors !== undefined ? { seedActors } : {}),
     });
     // The run's reach into its own session log (session-log item 10): the
     // `recall` and `notes` tools over the row's place in the log, once the
@@ -1360,6 +1611,7 @@ export async function dispatch(
       coordinator,
       seed,
       ...(bearer !== undefined ? { bearer } : {}),
+      ...(modelCard ? { modelCard } : {}),
     });
     if (ran.kind === "interrupted") {
       // The run was interrupted, not failed (harness.md item 7): the harness's
@@ -1438,6 +1690,17 @@ export async function dispatch(
     return ended;
   } catch (err) {
     caught = true;
+    // The catch-all is the last line (record 0054): an uncaught throw is a
+    // `system`/`uncaught` refusal on the trace, counted like any other —
+    // unless the throw carried its own `Refusal` (a `RefusalError` from the
+    // directive or resolve parsers, a resident attach), whose code and cause
+    // stamp the trace instead. The sentence is the error's message either way.
+    const thrown = err instanceof RefusalError ? err.refusal : undefined;
+    ended.refusal ??= thrown?.code ?? "uncaught";
+    ended.cause ??= thrown?.cause ?? "system";
+    // A throw inside a gate's own refusal must not overwrite the root's
+    // already-stamped code: the root and the outcome tell the same story.
+    if (!refused) root.setAttrs({ refusal: thrown?.code ?? "uncaught", cause: thrown?.cause ?? "system" });
     const errMsg = err instanceof Error ? err.message : String(err);
     // A card left spinning after a setup failure looks like a hang; close it.
     // Only a card still in setup — a run failure was already closed by the run
@@ -1446,7 +1709,7 @@ export async function dispatch(
     // body) — one redacted line on the card, a redacted reply in the thread.
     if (setupCard && setupShell) {
       const [failedCard, failedShell] = [setupCard, setupShell];
-      await refuse("setup_failed", () =>
+      await refuseSilently("setup_failed", () =>
         failedCard.done(
           failedShell.close({
             kind: "setup_failed",
@@ -1463,18 +1726,36 @@ export async function dispatch(
     // already sealed and written by its own wrap; this is a no-op for it.
     // A run's failure reply is a `post.reply`; a setup failure's is the refusal.
     const replyName = root.record().attrs.runId !== undefined ? "post.reply" : "dispatch.refuse";
+    const replyAttrs =
+      replyName === "dispatch.refuse"
+        ? {
+            attrs: {
+              outcome: thrown?.code ?? "uncaught",
+              refusal: thrown?.code ?? "uncaught",
+              cause: thrown?.cause ?? "system",
+            },
+          }
+        : undefined;
     await ending
       .sealAfterReply(
         async () => {},
         () =>
-          root.span(replyName, () => {
-            // The failure reply carries the run link when a run started: the
-            // card scrolls away, and a failed run's transcript should be one
-            // click from the thread.
-            const line = redactSecrets(stripAnsi(errorReply(err)));
-            const link = admitted?.runLink;
-            return io.reply(link ? `${line}\n\n[Live run](${link})` : line);
-          }),
+          root.span(
+            replyName,
+            async () => {
+              // The failure reply carries the run link when a run started: the
+              // card scrolls away, and a failed run's transcript should be one
+              // click from the thread.
+              const line = redactSecrets(stripAnsi(errorReply(err)));
+              const link = admitted?.runLink;
+              await io.reply(link ? `${line}\n\n[Live run](${link})` : line);
+              // The catch-all's refusal is a record too (record 0054, as
+              // amended) — after the reply, on the same span, and once: a
+              // setup failure's silent close already recorded this request's.
+              if (replyName === "dispatch.refuse") await recordRefusalOnce(thrown ?? refusalOf("uncaught", errMsg));
+            },
+            replyAttrs,
+          ),
       )
       .catch(() => {});
   } finally {
@@ -1590,7 +1871,7 @@ export async function dispatch(
     // The ledger heartbeat stops with the run (the finish write, in flight
     // through the writer, closes the row itself).
     void ledgerRun?.close();
-    activeRuns--;
+    if (!opts.redispatch) activeRuns--;
   }
   // Reached from the catch alone (every path in the try returns): the failed
   // request's outcome, its status stamped by the finally above.
@@ -1636,6 +1917,9 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
   const actorIds = actorIdsOf(click.actor);
   let caught = false;
   let refused = false;
+  // A Yes that redispatched: the click's outcome is the redispatched
+  // request's own, stamped in the finally over the click's default.
+  let redispatched: DispatchOutcome | undefined;
   // Counted in flight from the first line to the reply, like a dispatch: a
   // SIGTERM between the click and the command's run must not abandon it.
   activeRuns++;
@@ -1643,10 +1927,16 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     registry: deps.runRegistry ?? defaultRunRegistry,
     onFinished: (id) => void deps.runBearers?.revoke(id),
   });
-  const refuse = (outcome: string, text: string) => {
+  const refuse = (refusal: Refusal) => {
     refused = true;
-    ended.refusal = outcome;
-    return root.span("dispatch.refuse", () => io.reply(text), { attrs: { outcome } });
+    ended.refusal = refusal.code;
+    ended.cause = refusal.cause;
+    root.setAttrs({ refusal: refusal.code, cause: refusal.cause });
+    // The one renderer (record 0054): the click's named line goes out as a
+    // `Refusal`, byte-identical to the line the store named.
+    return root.span("dispatch.refuse", () => renderRefusal(refusal, io), {
+      attrs: { outcome: refusal.code, refusal: refusal.code, cause: refusal.cause },
+    });
   };
   try {
     if (click.kind === "cancel") {
@@ -1654,7 +1944,7 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
       if (res.kind === "refused")
         await ending.sealAfterReply(
           async () => {},
-          () => refuse(res.refusal, res.text),
+          () => refuse(refusalOf(res.refusal, res.text)),
         );
       else
         await ending.sealAfterReply(
@@ -1663,11 +1953,58 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
         );
       return ended;
     }
-    const res = await consumeAndRun(deps, { id: click.id, actorIds }, io, ending, trace);
+    // A question's Yes (record 0054): the consumed `redispatch` row goes back
+    // through `dispatch()` whole — the proposal as the requester's own message,
+    // the click's drain slot handed over, the question's code on the record.
+    const res = await consumeAndRun(deps, { id: click.id, actorIds }, io, ending, trace, (row) =>
+      dispatch(deps, row.message, io, { redispatch: { code: row.code } }),
+    );
+    if (res.kind === "redispatched") {
+      redispatched = res.outcome;
+      if (res.outcome.refusal !== undefined) ended.refusal = res.outcome.refusal;
+      if (res.outcome.cause !== undefined) ended.cause = res.outcome.cause;
+      return ended;
+    }
     if (res.kind === "refused") {
+      const refusal = refusalOf(res.refusal, res.text);
+      // A refusal after a command was bound is a run record (record 0054;
+      // run-history item 2): when the store's refusal still named the row
+      // (`expired`, `foreign`), the decision is written like a hand-back's —
+      // nothing invoked, no surface told — with `outcome: "refused"` and the
+      // code, so the door report counts it. `used` and an unreadable store
+      // name no row and are counted from the trace alone.
+      const clickRow = res.row;
+      if (clickRow && clickRow.kind === "run") {
+        const row = clickRow;
+        await recordRoutedDecision(
+          deps,
+          row.message,
+          io,
+          { id: row.command },
+          {
+            preset: COMMAND_RUN_AGENT,
+            reason: REFUSED_REASON,
+            model: row.model,
+            command: row.command,
+            input: redactedInput(row.input),
+            receipt: row.receipt,
+            outcome: "refused",
+            refusalCode: refusal.code,
+          },
+          res.text,
+          ending,
+          trace,
+        );
+      } else if (clickRow && clickRow.kind === "redispatch") {
+        // A question's refused click is a record too (record 0054, as amended:
+        // every refusal is a run record): the stored proposal is the request
+        // the door refused, so the `door` record carries it. A `used` click and
+        // an unreadable store name no row — there is no message to record.
+        await recordRefusal(deps, clickRow.message, io, refusal, ending, trace);
+      }
       await ending.sealAfterReply(
         async () => {},
-        () => refuse(res.refusal, res.text),
+        () => refuse(refusal),
       );
       return ended;
     }
@@ -1691,7 +2028,7 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
   } finally {
     // The backstop, as in dispatch(): a finished run no reply reached is sealed and written.
     ending.drain(undefined);
-    ended.status = caught ? "failed" : refused ? "refused" : "completed";
+    ended.status = caught ? "failed" : refused ? "refused" : (redispatched?.status ?? "completed");
     root.end(caught ? "error" : "ok", { status: ended.status });
     activeRuns--;
   }

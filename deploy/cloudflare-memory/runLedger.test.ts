@@ -1,4 +1,4 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
@@ -792,6 +792,126 @@ describe("run ledger — the coordinator's unit rows (item 50)", () => {
   });
 });
 
+// Feature: docs/reference/specs/run-history.md item 50 and record 0051's reply-as-event rule —
+// the thread events of a unit-owned thread: a sibling table of the unit rows,
+// appended in arrival order under the per-event cap, consumed once.
+describe("run ledger — the coordinator's unit events (record 0051's reply-as-event rule)", () => {
+  const INSTANCE_ID = "ship_acme_api_1";
+  const event = (text: string, over: Record<string, unknown> = {}) => ({
+    sender: "slack:UALICE",
+    text,
+    mode: "steer",
+    at: 5_000,
+    ...over,
+  });
+
+  it("append assigns sequences in order and caps per event; list filters unconsumed; mark-consumed is idempotent; a put of the unit row leaves the events untouched", async () => {
+    const key = storeKey();
+    const body = { storeKey: key, instanceId: INSTANCE_ID, unit: "U12" };
+    expect(await post("/runs/coordinator/events/append", { ...body, event: event("first") })).toEqual({
+      status: 200,
+      data: { ok: true, seq: 1 },
+    });
+    expect(await post("/runs/coordinator/events/append", { ...body, event: event("second") })).toEqual({
+      status: 200,
+      data: { ok: true, seq: 2 },
+    });
+    // Over the durable cap (400 KiB): the attachments are dropped whole and the row says how many.
+    const heavy = event("third", { attachments: [{ mediaType: "image/png", data: "x".repeat(500 * 1024) }] });
+    expect((await post("/runs/coordinator/events/append", { ...body, event: heavy })).data).toEqual({
+      ok: true,
+      seq: 3,
+    });
+    const all = await post("/runs/coordinator/events/list", body);
+    const rows = all.data.events as Array<Record<string, unknown>>;
+    expect(rows.map((e) => [e.seq, e.text])).toEqual([
+      [1, "first"],
+      [2, "second"],
+      [3, "third"],
+    ]);
+    expect(rows[2]!.attachments).toBeUndefined();
+    expect(rows[2]!.attachmentsDropped).toBe(1);
+    // Consumed once: a second mark keeps the first consumer; list filters unconsumed.
+    expect(
+      (await post("/runs/coordinator/events/mark-consumed", { ...body, seqs: [1, 2], by: "spawn:U12/1/fix" })).data,
+    ).toEqual({ ok: true });
+    expect(
+      (await post("/runs/coordinator/events/mark-consumed", { ...body, seqs: [1], by: "spawn:U12/2/fix" })).data,
+    ).toEqual({ ok: true });
+    const unconsumed = await post("/runs/coordinator/events/list", { ...body, unconsumedOnly: true });
+    expect((unconsumed.data.events as Array<{ seq: number }>).map((e) => e.seq)).toEqual([3]);
+    const after = await post("/runs/coordinator/events/list", body);
+    expect((after.data.events as Array<{ consumedBy?: string }>).map((e) => e.consumedBy)).toEqual([
+      "spawn:U12/1/fix",
+      "spawn:U12/1/fix",
+      undefined,
+    ]);
+    // A put of the unit row — the whole-row upsert — leaves the events untouched (record 0051).
+    const row: CoordinatorUnit = {
+      instanceId: INSTANCE_ID,
+      unit: "U12",
+      slug: "u12",
+      branch: "plan/orchestration/u12",
+      dependsOn: [],
+      rounds: [],
+      threadKey: "slack:C1:2.0",
+    };
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [row] })).status).toBe(200);
+    const kept = await post("/runs/coordinator/events/list", body);
+    expect((kept.data.events as Array<{ seq: number }>).map((e) => e.seq)).toEqual([1, 2, 3]);
+    // Another unit's list is its own.
+    expect((await post("/runs/coordinator/events/list", { ...body, unit: "U13" })).data).toEqual({ events: [] });
+    // A text alone over the cap is cut to fit and the row says how many characters went.
+    const wordy = event("w".repeat(500 * 1024));
+    expect((await post("/runs/coordinator/events/append", { ...body, event: wordy })).data).toEqual({
+      ok: true,
+      seq: 4,
+    });
+    const events = async () =>
+      (await post("/runs/coordinator/events/list", body)).data.events as Array<Record<string, unknown>>;
+    const fourth = (await events())[3]!;
+    expect((fourth.text as string).length).toBeLessThan(500 * 1024);
+    expect(fourth.textDropped).toBe(500 * 1024 - (fourth.text as string).length);
+    // A caller's `consumedBy` never rides the append: the row is born unconsumed in its JSON as in its column.
+    const presumptuous = event("fifth", { consumedBy: "spawn:U12/9/fix" });
+    expect((await post("/runs/coordinator/events/append", { ...body, event: presumptuous })).data).toEqual({
+      ok: true,
+      seq: 5,
+    });
+    expect((await events())[4]!.consumedBy).toBeUndefined();
+    const stillOpen = await post("/runs/coordinator/events/list", { ...body, unconsumedOnly: true });
+    expect((stillOpen.data.events as Array<{ seq: number }>).map((e) => e.seq)).toEqual([3, 4, 5]);
+  });
+
+  it("validates: a malformed event, unit, instance id, seqs or consumer is 400", async () => {
+    const key = storeKey();
+    const body = { storeKey: key, instanceId: INSTANCE_ID, unit: "U12" };
+    expect((await post("/runs/coordinator/events/append", { ...body, event: { text: "x" } })).status).toBe(400);
+    expect(
+      (
+        await post("/runs/coordinator/events/append", {
+          storeKey: key,
+          instanceId: "has:colon",
+          unit: "U12",
+          event: event("x"),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await post("/runs/coordinator/events/append", {
+          storeKey: key,
+          instanceId: INSTANCE_ID,
+          unit: "u/12",
+          event: event("x"),
+        })
+      ).status,
+    ).toBe(400);
+    expect((await post("/runs/coordinator/events/mark-consumed", { ...body, seqs: [0], by: "r" })).status).toBe(400);
+    expect((await post("/runs/coordinator/events/mark-consumed", { ...body, seqs: [1], by: "" })).status).toBe(400);
+  });
+});
+
 // Feature: docs/reference/specs/session-log.md item 7 — the sessions registry
 // on RunHistoryDO and the sweep's drop: a session object goes only when every
 // kept run of the session is gone and no live run holds its thread, owner row
@@ -1006,5 +1126,112 @@ describe("the sessions registry and the sweep's drop of a session log", () => {
     expect(await runInDurableObject(stub, (inst: RunHistoryDO) => inst.sweepSessions(candidates))).toBe(2);
     expect((await post("/runs/session/tail", { key: sA })).data).toEqual({ next: 0 });
     expect(await sql(key, `SELECT key FROM sessions`)).toEqual([]);
+  });
+});
+
+describe("run ledger — intake receipts (item 59)", () => {
+  const HOUR = 3_600_000;
+  const intakeReceipt = (threadKey: string, over: Record<string, unknown> = {}) => ({
+    verdict: "silent",
+    reason: "answering a colleague",
+    source: "model",
+    mode: "classify",
+    model: "prov/mini",
+    gen: 3,
+    threadKey,
+    decidedAt: 5_000,
+    ...over,
+  });
+
+  it("the insert is if-absent inside the transaction: the first write answers inserted with the row, a second on the key answers the first stored row; read answers the row or null", async () => {
+    const key = storeKey();
+    expect((await post("/runs/intake/read", { storeKey: key, key: "slack:C1:2.0" })).data).toEqual({ receipt: null });
+    const first = intakeReceipt("slack:C1:1.0");
+    expect(await post("/runs/intake", { storeKey: key, key: "slack:C1:2.0", receipt: first })).toMatchObject({
+      status: 200,
+      data: { inserted: true, stored: first },
+    });
+    const second = intakeReceipt("slack:C1:1.0", { verdict: "addressed", decidedAt: 6_000, gen: 9 });
+    expect((await post("/runs/intake", { storeKey: key, key: "slack:C1:2.0", receipt: second })).data).toEqual({
+      inserted: false,
+      stored: first,
+    });
+    expect((await post("/runs/intake/read", { storeKey: key, key: "slack:C1:2.0" })).data).toEqual({
+      receipt: first,
+    });
+  });
+
+  it("list answers a thread's rows and rows since an instant, oldest first", async () => {
+    const key = storeKey();
+    const a = intakeReceipt("slack:C1:1.0", { decidedAt: 1_000 });
+    const b = intakeReceipt("slack:C1:1.0", { decidedAt: 3_000, verdict: "addressed" });
+    const other = intakeReceipt("slack:C2:9.0", { decidedAt: 2_000 });
+    await post("/runs/intake", { storeKey: key, key: "slack:C1:3.0", receipt: b });
+    await post("/runs/intake", { storeKey: key, key: "slack:C1:2.0", receipt: a });
+    await post("/runs/intake", { storeKey: key, key: "slack:C2:9.5", receipt: other });
+    expect((await post("/runs/intake/list", { storeKey: key, threadKey: "slack:C1:1.0" })).data).toEqual({
+      receipts: [a, b],
+    });
+    expect((await post("/runs/intake/list", { storeKey: key, since: 2_000 })).data).toEqual({
+      receipts: [other, b],
+    });
+    expect((await post("/runs/intake/list", { storeKey: key, threadKey: "slack:C1:1.0", since: 2_000 })).data).toEqual({
+      receipts: [b],
+    });
+    expect((await post("/runs/intake/list", { storeKey: key })).data).toEqual({ receipts: [a, other, b] });
+  });
+
+  it("the alarm prunes by both arms of the bound: a 30 minute window keeps a row 24 hours, a two day window keeps it the window plus the drain deadline", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    const min30 = 30 * 60_000;
+    const twoDays = 48 * HOUR;
+    const at = (hoursAgo: number) => intakeReceipt("slack:C1:1.0", { decidedAt: now - hoursAgo * HOUR });
+    // The 24-hour arm: a 30 minute window keeps rows 24 hours, no more.
+    await post("/runs/intake", { storeKey: key, key: "k:24h-out", receipt: at(25), windowMs: min30 });
+    await post("/runs/intake", { storeKey: key, key: "k:24h-kept", receipt: at(23), windowMs: min30 });
+    // The window arm: a two-day window keeps rows the window plus the drain (90 min).
+    await post("/runs/intake", { storeKey: key, key: "k:win-out", receipt: at(50), windowMs: twoDays });
+    await post("/runs/intake", { storeKey: key, key: "k:win-kept", receipt: at(49), windowMs: twoDays });
+    expect(await runDurableObjectAlarm(env.RUNS.get(env.RUNS.idFromName(key)))).toBe(true); // armed by the first insert
+    const read = async (k: string) =>
+      (await post("/runs/intake/read", { storeKey: key, key: k })).data.receipt as unknown;
+    expect(await read("k:24h-out")).toBeNull();
+    expect(await read("k:24h-kept")).not.toBeNull();
+    expect(await read("k:win-out")).toBeNull();
+    expect(await read("k:win-kept")).not.toBeNull();
+  });
+
+  it("validates: a missing or overlong key, a malformed receipt or windowMs is 400; no bearer is 401", async () => {
+    const key = storeKey();
+    expect((await post("/runs/intake", { storeKey: key, receipt: intakeReceipt("slack:C1:1.0") })).status).toBe(400);
+    expect(
+      (await post("/runs/intake", { storeKey: key, key: "k".repeat(300), receipt: intakeReceipt("slack:C1:1.0") }))
+        .status,
+    ).toBe(400);
+    expect(
+      (await post("/runs/intake", { storeKey: key, key: "slack:C1:2.0", receipt: { verdict: "maybe" } })).status,
+    ).toBe(400);
+    expect(
+      (
+        await post("/runs/intake", {
+          storeKey: key,
+          key: "slack:C1:2.0",
+          receipt: intakeReceipt("slack:C1:1.0"),
+          windowMs: -5,
+        })
+      ).status,
+    ).toBe(400);
+    expect((await post("/runs/intake/read", { storeKey: key })).status).toBe(400);
+    expect((await post("/runs/intake/list", { storeKey: key, since: "yesterday" })).status).toBe(400);
+    expect(
+      (
+        await post(
+          "/runs/intake",
+          { storeKey: key, key: "k", receipt: intakeReceipt("slack:C1:1.0") },
+          { "content-type": "application/json" },
+        )
+      ).status,
+    ).toBe(401);
   });
 });

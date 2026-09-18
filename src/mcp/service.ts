@@ -1,3 +1,4 @@
+import type { RefusalCause } from "../core/refusal.js";
 import { AGENTS } from "../agents/registry.js";
 import type { ConfigStore, ResolvedMcpServer, Scope } from "../config.js";
 import { assertUrlAllowed, BlockedUrlError, type FetchLike } from "../tools/web.js";
@@ -67,13 +68,29 @@ import type { McpClientFactory, McpServerSpec } from "./types.js";
 export const MCP_OFF_MESSAGE =
   "External MCP servers are not enabled in this deployment (no `mcp` block in config.yaml).";
 
+/** One cause per service code (record 0054): the service's `conflict` and
+ *  `not_found` are the person's to fix — pick another name, see `mcp list` —
+ *  so they are `request`, unlike the command table's `conflict` (a stale tree
+ *  or a lost race, `system`). */
+const MCP_ERROR_CAUSE = {
+  invalid_input: "request",
+  unauthorized: "policy",
+  not_found: "request",
+  conflict: "request",
+  unavailable: "system",
+} as const satisfies Record<string, RefusalCause>;
+
 export class McpServiceError extends Error {
+  /** Why the service refused, in record 0054's three classes — one row per
+   *  code, so the relay (`mcp.ts`) and the span carry the same cause. */
+  readonly cause: RefusalCause;
   constructor(
     public readonly code: "invalid_input" | "unauthorized" | "not_found" | "conflict" | "unavailable",
     message: string,
   ) {
     super(message);
     this.name = "McpServiceError";
+    this.cause = MCP_ERROR_CAUSE[code];
   }
 }
 

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { PR_DESCRIPTION_CAPS } from "./core/prDescription.js";
 import {
   allowedScopes,
   allowedTypes,
@@ -8,9 +9,11 @@ import {
   checkPrTitle,
   migrationNoteProblems,
   nextMajor,
+  renderPrTitleVocabulary,
   TITLE_MAX_LENGTH,
-} from "../scripts/check-pr-title.mjs";
-import { PR_DESCRIPTION_CAPS } from "./core/prDescription.js";
+  VOCABULARY_PATH,
+} from "./core/prTitle.mjs";
+import PR_TITLE_VOCABULARY from "./core/prTitleVocabulary.json" with { type: "json" };
 
 // The title gate's decision. A PR title is the squash commit's subject and the
 // changelog line a reader gets, so the grammar is Conventional Commits, the
@@ -81,6 +84,26 @@ describe("allowedScopes", () => {
       /Scope column/,
     );
     expect(() => allowedScopes("# Code map\n")).toThrow(/Areas/);
+  });
+});
+
+describe("the generated vocabulary (src/core/prTitleVocabulary.json)", () => {
+  // The bot's image ships src/ and neither source file, so the submit tool
+  // judges against this generated copy; `pr-title:check` is the CI gate for
+  // drift, this test the unit proof that the committed file IS the tree's.
+  it("is the render of the release config and the code map, byte for byte, and what the tool judges against", () => {
+    expect(readRoot(VOCABULARY_PATH)).toBe(renderPrTitleVocabulary(config, readRoot("docs/reference/code-map.md")));
+    expect(PR_TITLE_VOCABULARY.types).toEqual(TYPES);
+    expect(PR_TITLE_VOCABULARY.scopes).toEqual(SCOPES);
+  });
+
+  it("names its generator first, so a reader never edits it by hand", () => {
+    const rendered = JSON.parse(renderPrTitleVocabulary(config, readRoot("docs/reference/code-map.md"))) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(rendered)).toEqual(["$generated", "types", "scopes"]);
+    expect(rendered.$generated).toMatch(/npm run pr-title:gen/);
   });
 });
 

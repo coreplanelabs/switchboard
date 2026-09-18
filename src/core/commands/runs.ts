@@ -327,7 +327,10 @@ function renderRuns(
 const unitHeader = (o: JsonObject): string => {
   const threads = isObject(o.threads) ? o.threads : {};
   const named = (k: "coding" | "review") => (typeof threads[k] === "string" ? threads[k] : "not opened yet");
-  return `unit ${String(o.unit)} — coding thread ${named("coding")}, review thread ${named("review")}`;
+  // One thread per unit (record 0055); a row written before that names its review thread too.
+  return typeof threads.review === "string"
+    ? `unit ${String(o.unit)} — coding thread ${named("coding")}, review thread ${named("review")}`
+    : `unit ${String(o.unit)} — thread ${named("coding")}`;
 };
 const childrenHeader = (o: JsonObject): string => `children of ${String(o.parentRunId)}`;
 

@@ -55,6 +55,16 @@ export const timeBudgetNote = (doing?: string): string =>
  *  command out; `doing` is the bridge's `running <tools>`. */
 export const toolCutNote = (doing: string): string =>
   `the loop's end cut the command in flight (${doing}) so the write-up keeps its allowance`;
+/** The gate's refusal of a bash call whose explicit timeout reaches past the
+ *  loop's end (harness-pi item 7; the loop's end cuts what still runs, decision
+ *  0046 unit seven): said before the command runs, in whole seconds, with the
+ *  two ways forward — instead of the minutes a command that could never finish
+ *  would spend before the cut told the model. `askedSecs` is the timeout the
+ *  call named, `leftSecs` what remains before the loop ends. */
+export const commandPastLoopEndRefusal = (askedSecs: number, leftSecs: number): string =>
+  `budget — this command asked for a ${askedSecs} s timeout and the loop ends in ${leftSecs} s, so it could never finish: ` +
+  `re-issue it with a timeout inside the ${leftSecs} s left if it finishes sooner, or push what you have and write up — ` +
+  `the full verification is CI's.`;
 export const turnGuardNote = (pace: string): string =>
   `turn guard fired: ${pace}, a pace that looks like a loop — writing up findings so far`;
 export const softStopNote = (): string => "soft stop — no further steps, writing up findings so far";
@@ -64,6 +74,19 @@ export const hardStopNote = (): string => "hard stop — run aborted, no summary
  *  ending: the write-up's answer stands, and this says what failed under it. */
 export const windDownFailureNote = (error: string, closes: "run" | "turn" = "run"): string =>
   `the model call failed during the wind-down (${error}); the ${closes} closes with its findings so far`;
+/** The finale bound ending a wait that was not on a model call (harness.md
+ *  items 5 and 13, OpenCode): a tool call open when the bound fell — the
+ *  loop-end cut's tool with its interrupt still unanswered
+ *  (`interruptUnanswered`), or a tool the write-up's own execution made —
+ *  said as the wait it was, never as a model call that failed. `doing` is
+ *  what the run was at (`doingWords`), `reason` the bound's own words. */
+export const finaleWaitNote = (
+  reason: string,
+  doing: string | undefined,
+  interruptUnanswered: boolean,
+  closes: "run" | "turn" = "run",
+): string =>
+  `the finale bound ended the wait${doing ? ` while ${doing}` : ""}${interruptUnanswered ? ", the loop-end interrupt unanswered" : ""} (${reason}); the ${closes} closes with its findings so far`;
 /** The card's line when the finale bound ends a write-up that never came. */
 export const finaleTimedOutNote = (closes: "run" | "turn" = "run"): string =>
   `finale timed out — closing the ${closes} without a write-up`;
@@ -176,18 +199,161 @@ export const finaleAbortReason = (boundMs: number): string =>
 const noWriteUp = (failed: string | undefined): string =>
   failed ? `; the model call failed during the wind-down (${failed}), so no write-up came` : "";
 
+// ---- what the ending established (item 6) -----------------------------------
+//
+// The harness composes its answer when its loop ends, before the run loop's
+// salvage, description turn and PR post-step have run — so the harness cannot
+// know what the tree held or where it went. It hands the loop its ending
+// instead (`WindDownEnding`, on `HarnessSession.ending`) and the loop composes
+// the thread's answer from it once those steps have established the facts
+// (`EndingFacts`), through the one composer below (`windDownAnswer`). The
+// harness's own answer is the same composer with no facts, so a run whose tail
+// never runs ends by the same words it always did.
+
+/** What the run's tail established about its workspace, in the words the
+ *  answer may use — never a guess where a measure was taken. */
+export type WorkspaceAtEnd =
+  /** The run had no workspace (machine class `none`). */
+  | { kind: "none" }
+  /** The tree was not read: the run observes no tree, or its tail was skipped. */
+  | { kind: "unread" }
+  /** A measure the observation could not take, so nothing is read as clean. */
+  | { kind: "unmeasured" }
+  /** Measured clean with nothing unpushed; `head` the tip when it was read —
+   *  on the remote, since no commit of the branch is unpushed. */
+  | { kind: "clean"; branch?: string; head?: string }
+  /** The budget salvage pushed what the tree held to `branch`, at `head`. */
+  | { kind: "salvaged"; branch: string; head?: string }
+  /** Work measured in the tree that nothing pushed, and its fate: `kept` for
+   *  the thread by a cold workspace's if-idle release, `discarded` at the
+   *  run's end by a resident's (a run starts from a clean tree), `torn_down`
+   *  when the ending may have left a command running in it. */
+  | { kind: "left"; uncommitted: number; unpushed: number; fate: "kept" | "discarded" | "torn_down" };
+
+/** The facts the run loop hands the composer once the post-steps have run, in
+ *  the answer's precedence: the tree, then the description. Absent fields are
+ *  facts the loop could not establish, and the words say only what is known. */
+export interface EndingFacts {
+  workspace?: WorkspaceAtEnd;
+  /** Whether a PR description was submitted by the run's end — by the loop or
+   *  by the description turn; absent for a run that submits none. */
+  description?: "submitted" | "not_submitted";
+}
+
+/** A wind-down's ending as the harness hands it to the run loop: the label's
+ *  kind, the text the model settled on (empty when no write-up came) and the
+ *  failed call when that is why. */
+export type WindDownEnding =
+  | { kind: "time"; text: string; writeUpFailed?: string }
+  | { kind: "turns"; pace: string; text: string; writeUpFailed?: string }
+  | { kind: "soft"; text: string; writeUpFailed?: string }
+  /** No wind-down label applies (the wrap-up never reached the model) but a
+   *  failure ended the wait: what ended it is said (`unlabelledAnswer`). */
+  | { kind: "unlabelled"; text: string; writeUpFailed: string; ended: "failed" | "finale" };
+
+/** The ending a harness hands over beside its answer: the wind-down that
+ *  labelled it, with the text and the failed call; the unlabelled ending when a
+ *  failure ended a wait no label owns; nothing when the answer is the model's
+ *  own. Each harness reads its wind-down state into this one shape. */
+export function windDownEndingOf(
+  writeUp: { kind: "time" } | { kind: "turns"; pace: string } | { kind: "soft" } | undefined,
+  text: string,
+  writeUpFailed: string | undefined,
+  ended: "failed" | "finale" = "failed",
+): WindDownEnding | undefined {
+  const failed = writeUpFailed !== undefined ? { writeUpFailed } : {};
+  if (writeUp?.kind === "time") return { kind: "time", text, ...failed };
+  if (writeUp?.kind === "turns") return { kind: "turns", pace: writeUp.pace, text, ...failed };
+  if (writeUp?.kind === "soft") return { kind: "soft", text, ...failed };
+  if (writeUpFailed !== undefined) return { kind: "unlabelled", text, writeUpFailed, ended };
+  return undefined;
+}
+
+/** The thread's answer for an ending, with the facts the run loop established
+ *  (none: the harness's own words, before the tail ran). */
+export function windDownAnswer(ending: WindDownEnding, maxMinutes: number, facts?: EndingFacts): string {
+  switch (ending.kind) {
+    case "time":
+      return timeBudgetAnswer(ending.text, maxMinutes, ending.writeUpFailed, facts);
+    case "turns":
+      return turnGuardAnswer(ending.text, ending.pace, ending.writeUpFailed, facts);
+    case "soft":
+      return softStopAnswer(ending.text, ending.writeUpFailed, facts);
+    case "unlabelled":
+      return unlabelledAnswer(ending.text, ending.writeUpFailed, ending.ended, facts);
+  }
+}
+
+const TIME_ADVICE = "narrow the task and try again";
+const TURN_ADVICE = "look for a retry loop in the run's events before trying again";
+const shortSha = (sha: string): string => sha.slice(0, 7);
+const counted = (w: { uncommitted: number; unpushed: number }): string =>
+  `${w.uncommitted} uncommitted change(s) and ${w.unpushed} unpushed commit(s)`;
+
+/** The sentences of what was established, in the answer's precedence — the
+ *  tree, then the description — or nothing when nothing was measured (no
+ *  facts, `unread`, `none`). `advice` is the wind-down's own next step, said
+ *  only where the work did not land anywhere a follow-up can start from. */
+function established(facts: EndingFacts | undefined, advice: string | undefined): string {
+  const then = advice ? ` — ${advice}` : "";
+  const w = facts?.workspace;
+  let tree = "";
+  if (w?.kind === "unmeasured") tree = `The workspace could not be measured, so work may sit unpushed there${then}.`;
+  else if (w?.kind === "clean")
+    tree = `The tree was clean${w.branch ? ` and \`${w.branch}\` held no unpushed commits` : " with no unpushed commits"}${w.head ? ` — its head \`${shortSha(w.head)}\` is on the remote` : ""}.`;
+  else if (w?.kind === "salvaged")
+    tree = `What the tree held was pushed to \`${w.branch}\`${w.head ? ` at \`${shortSha(w.head)}\`` : ""} by the budget salvage, unreviewed — a follow-up starts from it.`;
+  else if (w?.kind === "left")
+    tree =
+      w.fate === "kept"
+        ? `${counted(w)} sit in the workspace, kept for this thread until it idles out — a follow-up here reuses them.`
+        : w.fate === "discarded"
+          ? `${counted(w)} were left in the tree and discarded at the run's end${then}.`
+          : `${counted(w)} were left in the tree, which is torn down since a command may still be running in it${then}.`;
+  const description =
+    facts?.description === "submitted"
+      ? "The PR description was submitted."
+      : facts?.description === "not_submitted"
+        ? "No PR description was submitted."
+        : "";
+  return [tree, description].filter((s) => s !== "").join(" ");
+}
+
+/** The empty write-up's second sentence: what was established; else, with
+ *  nothing measured, that work may exist where there is a workspace to hold
+ *  it, and the advice. */
+function nothingWritten(facts: EndingFacts | undefined, advice: string | undefined): string {
+  const known = established(facts, advice);
+  if (known) return ` ${known}`;
+  if (facts?.workspace?.kind === "none") return advice ? ` ${advice.charAt(0).toUpperCase()}${advice.slice(1)}.` : "";
+  return ` Partial work may exist in the workspace${advice ? ` — ${advice}` : ""}.`;
+}
+
+/** The label's join before the write-up: the facts as sentences when there
+ *  are any, else the dash the label always had. */
+function beforeFindings(facts: EndingFacts | undefined): string {
+  const known = established(facts, undefined);
+  return known ? `. ${known} Findings so far:` : " — findings so far:";
+}
+
 /** The thread's answer when the wall clock ran out: the write-up under its
  *  label, or the reason alone — naming the failed model call when that is why
- *  no write-up came (`writeUpFailed`). */
-export const timeBudgetAnswer = (text: string, maxMinutes: number, writeUpFailed?: string): string =>
+ *  no write-up came (`writeUpFailed`) — and what the ending established
+ *  (`facts`) where the run loop has it. */
+export const timeBudgetAnswer = (
+  text: string,
+  maxMinutes: number,
+  writeUpFailed?: string,
+  facts?: EndingFacts,
+): string =>
   text
-    ? `⚠️ _Hit the ${maxMinutes}-minute budget before finishing — findings so far:_\n\n${text}`
-    : `Stopped at the ${maxMinutes}-minute budget without finishing${noWriteUp(writeUpFailed)}. Partial work may exist in the workspace — narrow the task and try again.`;
+    ? `⚠️ _Hit the ${maxMinutes}-minute budget before finishing${beforeFindings(facts)}_\n\n${text}`
+    : `Stopped at the ${maxMinutes}-minute budget without finishing${noWriteUp(writeUpFailed)}.${nothingWritten(facts, TIME_ADVICE)}`;
 /** The thread's answer when the turn guard fired. */
-export const turnGuardAnswer = (text: string, pace: string, writeUpFailed?: string): string =>
+export const turnGuardAnswer = (text: string, pace: string, writeUpFailed?: string, facts?: EndingFacts): string =>
   text
-    ? `⚠️ _Stopped after ${pace} — that pace looks like a loop; findings so far:_\n\n${text}`
-    : `Stopped after ${pace} — that pace looks like a loop — without finishing${noWriteUp(writeUpFailed)}. Partial work may exist in the workspace — look for a retry loop in the run's events before trying again.`;
+    ? `⚠️ _Stopped after ${pace} — that pace looks like a loop${established(facts, undefined) ? beforeFindings(facts) : "; findings so far:"}_\n\n${text}`
+    : `Stopped after ${pace} — that pace looks like a loop — without finishing${noWriteUp(writeUpFailed)}.${nothingWritten(facts, TURN_ADVICE)}`;
 
 /** The thread's answer when no wind-down label applies — the wrap-up never
  *  reached the model (OpenCode's never-posted prompt) — with what ended the
@@ -195,26 +361,27 @@ export const turnGuardAnswer = (text: string, pace: string, writeUpFailed?: stri
  *  that failed under the wind-down, or the finale bound ending a wait on an
  *  interrupt never answered (`ended`) — so what the record holds reaches the
  *  thread too: after the model's own last text when there is one, alone when
- *  there is none. */
+ *  there is none, then what the ending established. */
 export const unlabelledAnswer = (
   text: string,
   writeUpFailed?: string,
   ended: "failed" | "finale" = "failed",
+  facts?: EndingFacts,
 ): string => {
   if (!writeUpFailed) return text || "_(no response)_";
   if (ended === "finale")
     return text
       ? `${text}\n\n⚠️ _The write-up never started: the loop-end interrupt went unanswered and the finale bound ended the wait (${writeUpFailed}); this is the last answer before it._`
-      : `⚠️ The write-up never started: the loop-end interrupt went unanswered and the finale bound ended the wait (${writeUpFailed}). Partial work may exist in the workspace.`;
+      : `⚠️ The write-up never started: the loop-end interrupt went unanswered and the finale bound ended the wait (${writeUpFailed}).${nothingWritten(facts, undefined)}`;
   return text
     ? `${text}\n\n⚠️ _The model call that followed failed (${writeUpFailed}); this is the last answer before it._`
-    : `⚠️ The model call failed (${writeUpFailed}) and no answer came. Partial work may exist in the workspace.`;
+    : `⚠️ The model call failed (${writeUpFailed}) and no answer came.${nothingWritten(facts, undefined)}`;
 };
 /** The thread's answer after a soft stop. */
-export const softStopAnswer = (text: string, writeUpFailed?: string): string =>
+export const softStopAnswer = (text: string, writeUpFailed?: string, facts?: EndingFacts): string =>
   text
-    ? `⏹ _Stopped early by an operator (soft stop) — findings so far:_\n\n${text}`
-    : `⏹ Stopped early by an operator (soft stop) before any findings were written${noWriteUp(writeUpFailed)}. Partial work may exist in the workspace.`;
+    ? `⏹ _Stopped early by an operator (soft stop)${beforeFindings(facts)}_\n\n${text}`
+    : `⏹ Stopped early by an operator (soft stop) before any findings were written${noWriteUp(writeUpFailed)}.${nothingWritten(facts, undefined)}`;
 
 function elapsedMinutes(ms: number): string {
   const minutes = Math.round(ms / 60_000);

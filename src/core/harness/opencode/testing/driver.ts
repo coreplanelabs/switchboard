@@ -43,7 +43,7 @@ import type { AgentDef, Identity } from "../../../../agents/registry.js";
 import type { Executor } from "../../../../execution/executor.js";
 import { updateStatusTool } from "../../../../tools/status.js";
 import type { ChatMessage, ContentPart } from "../../../chatMessage.js";
-import type { CompletionRequest, ProviderConfig, ToolDef } from "../../../provider.js";
+import { parseModelRef, type CompletionRequest, type ProviderConfig, type ToolDef } from "../../../provider.js";
 import type { RunEvent } from "../../../runEvents.js";
 import type { StepReport } from "../../../runLedger/stepReport.js";
 import { RunControl } from "../../../runRegistry/runControl.js";
@@ -63,6 +63,7 @@ import { FakeHarnessContainer } from "../../testing/fakeContainer.js";
 import {
   CONFORMANCE_MAX_MINUTES,
   FAILED_MODEL_CALL_ERROR,
+  NEAR_LOOP_END_SECONDS,
   type DrivenRun,
   type HarnessDriver,
   type ModelTurn,
@@ -156,7 +157,9 @@ export function feedByteLength(records: readonly unknown[]): number {
  *  duration: what a harness that forwarded the bot's key would leak, derived
  *  from the run's provider dialect so a new dialect brings its own variable. */
 function providerKeyEnvs(providerType: ProviderConfig["type"]): string[] {
-  return openCodeProviderPackage(providerType).includes("anthropic")
+  return openCodeProviderPackage(providerType === "anthropic" ? "anthropic-messages" : "openai-chat").includes(
+    "anthropic",
+  )
     ? ["ANTHROPIC_API_KEY"]
     : ["OPENAI_API_KEY", "OPENAI_API_BASE"];
 }
@@ -229,10 +232,39 @@ export interface FakeServeOptions {
   failReplyPosts?: number;
   /** Every permission-reply POST throws (the container gone under the request), the ask left pending. */
   replyPostThrows?: boolean;
+  /** Every permission-reply POST answers 404 while the ask stays pending — a
+   *  server that lists an ask and refuses its reply, the contradiction the
+   *  harness fails closed on. */
+  replyRefusedWhilePending?: boolean;
+  /** Every permission-reply POST answers 404 with the ask already gone — the
+   *  server dropped and declined it by itself, with no refusal of the bot's in
+   *  the step to explain it — and the server's own `reject` echo and the
+   *  tool's failure follow: the withdrawal is not a fatal reply, and the echo
+   *  is judged as any reply is. */
+  replyRefusedAskDropped?: boolean;
+  /** A `reject` reply declines every other ask the session has pending, as the
+   *  pinned binary's `Permission.reply` does (`packages/core/src/permission.ts:203-220`
+   *  at v2.0.3, each declined ask published as a `permission.replied` `reject`):
+   *  the next tool call of the same turn finds its ask declined the moment it is
+   *  raised — the ask on the stream for the bot to decide, no waiter and not
+   *  listed pending, so the bot's reply answers 404 (`:198-201`) — the server's
+   *  own `reject` echo and the tool's `aborted` failure (`The user declined this
+   *  tool call`) follow, and a step with a declined call ends as the binary's
+   *  processor ends it: `session.step.failed` `aborted` (`Step interrupted`),
+   *  then `session.execution.interrupted`. The fake plays a turn's calls one
+   *  after another, so the sibling's ask is raised after the refusal where the
+   *  binary raises both before it; what the bridge reads — the ask, the 404,
+   *  the listing, the echo, the settle, the end — is the measured shape
+   *  (`realDriver.test.ts`, the two-call row). */
+  declineCascade?: boolean;
   /** Every steer POST (a follow-up) answers 500: the server never takes the follow-up. */
   steerPostFails?: boolean;
   /** The session's prime — its import or its create — answers 500. */
   primePostFails?: boolean;
+  /** The store refill the terminal transition causes fails in the tailer: its
+   *  failure note is written in the refill's place, as the real tailer writes
+   *  it when the store's read is refused. */
+  terminalRefillFails?: boolean;
   /** The `queue` prompt POST of this 1-based number (1 the run's request or a
    *  resume's continue, 2 the first post-turn's) answers 500: nothing starts. */
   promptPostFails?: number;
@@ -324,6 +356,13 @@ export interface FakeServeOptions {
    *  and the interrupt answers `interrupted: true` at once — so the stop is on
    *  the control, unread by the loop's next check, when the answer lands. */
   hardStopBeforeCutAnswer?: boolean;
+  /** The wall clock passes the finale bound while the loop-end cut's interrupt
+   *  is in flight: moved on the interrupt's request itself — the write-up's
+   *  clock is stamped before the post — as the hung model call's hang moves
+   *  it, so the loop's next tick finds the finale with the interrupt still
+   *  unanswered (pair it with `interruptAnswersAfterKill`). Deterministic: no
+   *  real-time delay decides when the clock moves. */
+  finaleDuringCutInterrupt?: boolean;
   /** The hung tool (`hangToolCall`) completes on its own while the loop-end
    *  interrupt is in flight, the execution moves on to its NEXT step — a model
    *  call, begun after the interrupt was posted — and the interrupt lands on
@@ -406,7 +445,13 @@ export interface FakeServeOptions {
    *  POST: `landed`, the server took the reply (the ask gone, the tool run);
    *  `lost`, the ask still pending; `unlistable`, lost, and the pending-asks
    *  GET the resolution reads meets the reset too. */
-  controlResetOnReply?: "landed" | "lost" | "unlistable";
+  controlResetOnReply?: "landed" | "lost" | "unlistable" | "lost-then-dropped" | "lost-then-refused";
+  /** `lost-then-dropped` and `lost-then-refused` lose the first reply to the
+   *  reset as `lost` does, and answer the re-issue 404: `dropped`, the server
+   *  dropped the ask meanwhile — gone from the listing, the tool failing
+   *  `aborted` with no `permission.replied`, the interrupt's measured shape —
+   *  and the run goes on; `refused`, the ask stays listed and the reply is
+   *  refused all the same, the contradiction the harness fails closed on. */
   /** The interrupt POST answers 500: the server refused it — its word, whenever it comes. */
   interruptPostFails?: boolean;
   /** The interrupt POST answers only when the container kills the server —
@@ -497,6 +542,8 @@ interface ServeDeps {
   /** Moves the run's clock past its deadline (`budgetBeforeModelCall`): the
    *  serve has no clock of its own, the driver that built the run does. */
   spendBudget?: () => void;
+  /** Sets the run's clock `NEAR_LOOP_END_SECONDS` short of the loop's end (`nearLoopEndBeforeModelCall`). */
+  nearLoopEnd?: () => void;
   /** Moves the run's clock forward by `ms`: past the finale bound once a
    *  write-up's steer has landed on a hung turn, past the first-event bound
    *  after a prompt the serve stays silent on. */
@@ -532,8 +579,20 @@ class ScriptedServe {
   private ordinal = 0;
   private replyFailuresLeft: number;
   private readonly replyPostThrows: boolean;
+  private readonly replyRefusedWhilePending: boolean;
+  private readonly replyRefusedAskDropped: boolean;
+  private readonly declineCascade: boolean;
+  /** A `reject` landed in the turn under play (`declineCascade`): the turn's next asks are declined as raised. */
+  private cascadeArmed = false;
+  /** The calls of the turn under play the cascade declined: any makes the step end interrupted. */
+  private declinedInTurn = 0;
   private readonly steerPostFails: boolean;
   private readonly primePostFails: boolean;
+  private readonly terminalRefillFails: boolean;
+  /** The last step's store refill, owed to the terminal transition: the real
+   *  tailer's GET for that step answers after the server has ended the
+   *  execution, so the refill lands after the terminal event. */
+  private owedStepRefill = false;
   private readonly promptPostFails: number | undefined;
   private readonly promptPostThrows: number | undefined;
   private readonly budgetRefusalAtModelCall: number | undefined;
@@ -542,7 +601,10 @@ class ScriptedServe {
   private readonly interruptSettlesLate: "interrupted" | "failed" | "budget" | undefined;
   private readonly lateTailNoise: boolean;
   private readonly controlResetOnPrompt: "landed" | "lost" | "again" | undefined;
-  private readonly controlResetOnReply: "landed" | "lost" | "unlistable" | undefined;
+  private readonly controlResetOnReply:
+    "landed" | "lost" | "unlistable" | "lost-then-dropped" | "lost-then-refused" | undefined;
+  /** How the re-issue after a lost reply answers (`controlResetOnReply: "lost-then-*"`). */
+  private reissueAnswers: "lost-then-dropped" | "lost-then-refused" | undefined;
   /** How many prompt POSTs the control plane has reset under (`controlResetOnPrompt`). */
   private promptResets = 0;
   /** The first reply POST met the reset (`controlResetOnReply`). */
@@ -570,6 +632,7 @@ class ScriptedServe {
   private readonly owedEndNeverSerialized: boolean;
   private readonly hangAtAsk: number | undefined;
   private readonly hardStopBeforeCutAnswer: boolean;
+  private readonly finaleDuringCutInterrupt: boolean;
   /** The step the run's first play hung in (`hangModelCall`, `hangToolCall`, `hangAtAsk`): the late tail's aborted step is that step's, as the binary's is. */
   private hungStep: string | undefined;
   private readonly hungToolSettlesInTail: boolean;
@@ -662,8 +725,12 @@ class ScriptedServe {
   ) {
     this.replyFailuresLeft = options.failReplyPosts ?? 0;
     this.replyPostThrows = options.replyPostThrows === true;
+    this.replyRefusedWhilePending = options.replyRefusedWhilePending === true;
+    this.replyRefusedAskDropped = options.replyRefusedAskDropped === true;
+    this.declineCascade = options.declineCascade === true;
     this.steerPostFails = options.steerPostFails === true;
     this.primePostFails = options.primePostFails === true;
+    this.terminalRefillFails = options.terminalRefillFails === true;
     this.promptPostFails = options.promptPostFails;
     this.promptPostThrows = options.promptPostThrows;
     this.budgetRefusalAtModelCall = options.budgetRefusalAtModelCall;
@@ -689,6 +756,7 @@ class ScriptedServe {
     this.owedEndNeverSerialized = options.owedEndNeverSerialized === true;
     this.hangAtAsk = options.hangAtAsk;
     this.hardStopBeforeCutAnswer = options.hardStopBeforeCutAnswer === true;
+    this.finaleDuringCutInterrupt = options.finaleDuringCutInterrupt === true;
     this.hungToolSettlesInTail = options.hungToolSettlesInTail === true;
     this.bypassGateAtTurn = options.bypassGateAtTurn;
     this.dropStreamAtSettle = options.dropStreamAtSettle;
@@ -934,23 +1002,41 @@ class ScriptedServe {
       event: { id: `evt_${type}_${this.ordinal++}`, type, created: NOW, data },
     });
   }
-  private emitPermissions(pending: unknown[]): void {
+  /** Waits until the harness's poll has read every record emitted so far
+   *  (`FakeHarnessContainer.drained`). The transport hands a record it read to
+   *  the bridge before the loop's next tick can run its checks, so a clock
+   *  moved after this wait falls on what the play last wrote — the step's
+   *  start, so the wind-down's note names the model call in flight, not the
+   *  tool settled before it. A count of ticks left that to the poll timer
+   *  racing the tick timer, which a starved worker loses. */
+  private async awaitFeedRead(): Promise<void> {
+    for (let i = 0; i < 2000 && !this.container.drained; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+  }
+  /** The refills the tailer writes after an event it refills on, stamped with
+   *  that event's type as their `reason` — the pending asks, then the store. */
+  private emitPermissions(pending: unknown[], reason = "session.step.ended"): void {
     this.container.emit({
       feed: "permissions",
       at: NOW,
       sessionID: this.sessionID,
-      reason: "session.step.ended",
+      reason,
       data: pending,
     });
   }
-  private emitMessages(): void {
+  private emitMessages(reason = "session.step.ended"): void {
     this.container.emit({
       feed: "messages",
       at: NOW,
       sessionID: this.sessionID,
-      reason: "session.step.ended",
+      reason,
       data: [...this.store],
     });
+  }
+  /** The last step's refill, owed to the terminal transition, written now. */
+  private flushOwedRefill(): void {
+    if (!this.owedStepRefill) return;
+    this.owedStepRefill = false;
+    this.emitMessages("session.step.ended");
   }
 
   /** Route one of the harness's writes: the readiness probes, the session
@@ -1029,6 +1115,14 @@ class ScriptedServe {
     if (req.method === "POST" && req.path === "/api/session/import") {
       if (this.primePostFails) return j(500, { error: "the store hiccuped" });
       const body = parseBody(req.body);
+      // The binary decodes the body against its session-message schema before
+      // it stores a row, and a tool content in `state: error` must carry
+      // `error: { type, message }` (`Session.StructuredError`); the first key
+      // missing is refused as the binary words it, path and all — so a body
+      // the fake takes is one the binary takes.
+      const missing = importMissingKey(body.messages);
+      if (missing !== undefined)
+        return j(400, { _tag: "InvalidRequestError", message: `Missing key\n  at ${missing}`, kind: "Payload" });
       this.sessionModel = (body.info as { model?: unknown } | undefined)?.model;
       // The conversation clause switched off: the seed is never imported, so the
       // model's first call does not see the thread's earlier turns.
@@ -1189,6 +1283,21 @@ class ScriptedServe {
         this.replyFailuresLeft--;
         return j(500, { error: "the store hiccuped" });
       }
+      // The ask stays pending — listed, its waiter kept — and the reply is
+      // refused all the same (`replyRefusedWhilePending`).
+      if (this.replyRefusedWhilePending) return j(404, { error: "permission not found" });
+      // The server dropped the ask by itself and declines it (`replyRefusedAskDropped`):
+      // gone from the listing before the 404 answers, the waiter resolved with the
+      // server's own reject, so the echo and the tool's failure follow on the feed.
+      if (this.replyRefusedAskDropped) {
+        const dropped = this.replies.get(reply[1]);
+        if (dropped !== undefined) {
+          this.liveAsks.delete(reply[1]);
+          this.replies.delete(reply[1]);
+          dropped({ reply: "reject" });
+        }
+        return j(404, { error: "permission not found" });
+      }
       const body = parseBody(req.body);
       const decision: Decision = {
         reply: body.reply === "reject" ? "reject" : "once",
@@ -1201,9 +1310,29 @@ class ScriptedServe {
       const replyReset =
         this.controlResetOnReply !== undefined && !this.replyReset ? this.controlResetOnReply : undefined;
       if (replyReset !== undefined) this.replyReset = true;
+      if (replyReset === "lost-then-dropped" || replyReset === "lost-then-refused") {
+        this.reissueAnswers = replyReset;
+        throw controlReset("request");
+      }
       if (replyReset === "lost" || replyReset === "unlistable") {
         this.permissionListResets = replyReset === "unlistable";
         throw controlReset("request");
+      }
+      // The re-issue after a lost reply (`lost-then-*`) answers 404: the ask
+      // dropped meanwhile — gone from the listing, its waiter failed as the
+      // interrupt fails one (`interruptedAsks`: the tool `aborted`, no echo) —
+      // or still listed and refused all the same.
+      if (this.reissueAnswers !== undefined) {
+        if (this.reissueAnswers === "lost-then-dropped") {
+          const waiter = this.replies.get(reply[1]);
+          if (waiter !== undefined) {
+            this.liveAsks.delete(reply[1]);
+            this.replies.delete(reply[1]);
+            this.interruptedAsks.add(reply[1]);
+            waiter({ reply: "reject" });
+          }
+        }
+        return j(404, { error: "permission not found" });
       }
       const taken = (): HarnessResponse => {
         if (replyReset === "landed") throw controlReset("request");
@@ -1286,6 +1415,15 @@ class ScriptedServe {
       // (`hardStopBeforeCutAnswer`): the loop's next check has not read it when
       // the answer lands.
       if (this.hanging && this.hardStopBeforeCutAnswer) this.run.control?.requestStop("hard");
+      // The finale bound passes with this interrupt in flight
+      // (`finaleDuringCutInterrupt`): the clock moves here, on the request.
+      if (this.hanging && this.finaleDuringCutInterrupt) {
+        if (this.deps.advanceClock === undefined || this.deps.finaleMs === undefined)
+          throw new Error(
+            "finaleDuringCutInterrupt needs the driver's clock: hand the serve `advanceClock` and `finaleMs`",
+          );
+        this.deps.advanceClock(this.deps.finaleMs + 1);
+      }
       const stopFirst = this.hanging && this.hardStopOnCutInterrupt && this.run.control !== undefined;
       if (stopFirst) {
         this.run.control?.requestStop("hard");
@@ -1477,10 +1615,20 @@ class ScriptedServe {
   /** Any steers posted during the step just ended whose rows are not in the
    *  store yet (a steer into a running execution: delivered at the step
    *  boundary, measured), injected as user turns there — before the store's
-   *  refill for the step — so the model's next call sees them. */
+   *  refill for the step — so the model's next call sees them.
+   *
+   *  The real binary emits `session.inbox.delivered` right after the step's
+   *  `session.step.ended` for each steer it delivers (measured), which is what
+   *  the harness's `InboxFate` waits on. The fake emits it here, in the same
+   *  order, so the drainer's `inboxFate.wait` resolves correctly for running-
+   *  execution steers. A steer dropped by an interrupt (`pendingSteers.splice(0)`
+   *  at the interrupted end) never reaches here, and `inboxFate.interruptAll` is
+   *  called by the `session.execution.interrupted` observation instead. */
   private flushSteers(): void {
-    for (const steer of this.pendingSteers.splice(0))
+    for (const steer of this.pendingSteers.splice(0)) {
       if (!steer.inStore) this.store.push({ id: steer.id, type: "user", text: steer.text, time: { created: NOW } });
+      this.emitEvent("session.inbox.delivered", { sessionID: this.sessionID, inboxID: steer.id });
+    }
   }
 
   /** The store the model saw, as the completion request the proxy would carry. */
@@ -1588,9 +1736,17 @@ class ScriptedServe {
         });
         // The step's start is read off the feed before the clock moves, so the
         // budget note finds the model call in flight and not the tool before it.
-        for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+        await this.awaitFeedRead();
         this.deps.spendBudget();
         for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      }
+      if (this.script.nearLoopEndBeforeModelCall === t + 1) {
+        // The clock sits inside the loop, short of its end by the script's
+        // distance, as pi's driver places it: what a gate makes of a bash
+        // timeout from here is the row's question.
+        if (this.deps.nearLoopEnd === undefined)
+          throw new Error("nearLoopEndBeforeModelCall needs the driver's clock: hand the serve `nearLoopEnd`");
+        this.deps.nearLoopEnd();
       }
       if (this.script.softStopBeforeModelCall === t + 1) {
         // An operator's soft stop before this model call: requested, then the
@@ -1630,10 +1786,14 @@ class ScriptedServe {
           assistantMessageID: this.stepId(t),
           agent: "switchboard",
         });
+        // The step's start is on the bridge's books before either clock move
+        // below — the budget's, or the soft stop's straight to the finale
+        // bound — so the wind-down finds the hung model call, not the tool the
+        // turn before settled.
+        await this.awaitFeedRead();
         if (this.script.softStopBeforeModelCall !== t + 1) {
           if (this.deps.spendBudget === undefined)
             throw new Error("hangModelCall needs the driver's clock: hand the serve `spendBudget`");
-          for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
           // The write-up's steer: the one posted after the budget is spent (a
           // follow-up's steer may already be pending into this execution).
           const steersBefore = this.pendingSteers.length;
@@ -1667,7 +1827,11 @@ class ScriptedServe {
       }
       this.recordModelCall();
       await this.playTurn(this.script.turns[t], t, play);
-      if (this.hungTool !== undefined || this.cutPlay === play) return;
+      if (this.hungTool !== undefined || this.cutPlay === play) {
+        // No terminal transition follows here: the step's refill it was owed to lands now, as before the cut.
+        this.flushOwedRefill();
+        return;
+      }
       if (this.replaced) {
         // The container was replaced with this turn's call in flight: rename the
         // container (so the verdict's was → now are two words) and arm the next
@@ -1723,15 +1887,27 @@ class ScriptedServe {
       outcome: this.interrupted ? "interrupted" : "succeeded",
       time: { created: NOW },
     });
-    // An interrupted execution's terminal transition causes its refills after
-    // the end, in the tailer's order: the pending asks (none now), then the
-    // store. A steer enqueued into the interrupted execution is dropped with it
+    // The terminal transition's refills, after the end and in the tailer's
+    // order (measured): first the last step's own refill, whose GET answered
+    // only once the execution had ended, then the pending asks (none now) and
+    // the store for the terminal reason — or, with `terminalRefillFails`, the
+    // tailer's note that the store's read was refused, in the refill's place.
+    // A steer enqueued into an interrupted execution is dropped with it
     // (measured: no `session.inbox.delivered`, no row, no new execution).
-    if (this.interrupted) {
-      this.pendingSteers.splice(0);
-      this.emitPermissions([]);
-      this.emitMessages();
-    }
+    const terminal = this.interrupted ? "session.execution.interrupted" : "session.execution.succeeded";
+    if (this.interrupted) this.pendingSteers.splice(0);
+    this.flushOwedRefill();
+    this.emitPermissions([], terminal);
+    if (this.terminalRefillFails)
+      this.container.emit({
+        feed: "tailer",
+        at: NOW,
+        note: "message refill failed",
+        sessionID: this.sessionID,
+        reason: terminal,
+        detail: `GET /api/session/${this.sessionID}/message?order=asc&limit=200 answered 500`,
+      });
+    else this.emitMessages(terminal);
   }
 
   private async playTurn(turn: ModelTurn, index: number, play: number): Promise<void> {
@@ -1742,6 +1918,8 @@ class ScriptedServe {
     if (dropped) this.container.emit({ feed: "tailer", at: NOW, note: "stream closed" });
     else
       this.emitEvent("session.step.started", { sessionID: this.sessionID, assistantMessageID, agent: "switchboard" });
+    this.cascadeArmed = false;
+    this.declinedInTurn = 0;
     const content: Record<string, unknown>[] = [];
     for (const part of turn.content) {
       if (part.type === "text") {
@@ -1754,6 +1932,31 @@ class ScriptedServe {
         if (this.hungTool !== undefined || this.cutPlay === play) return;
         if (this.interrupted || this.replaced) break;
       }
+    }
+    // A step with a call the cascade declined ends as the binary's processor
+    // ends it (`declineCascade`): the assistant message fails `aborted` (`Step
+    // interrupted`) and the execution ends `interrupted` (`play`), no next turn.
+    // The loop re-prompts after the cascade, and the next play continues from
+    // the turn AFTER the cascaded one (`resumeTurn`).
+    if (this.declinedInTurn > 0) {
+      this.emitEvent("session.step.failed", {
+        sessionID: this.sessionID,
+        assistantMessageID,
+        error: { type: "aborted", message: "Step interrupted" },
+      });
+      this.store.push({
+        id: assistantMessageID,
+        type: "assistant",
+        agent: "switchboard",
+        model: { providerID: "switchboard", id: this.run.model.id },
+        content,
+        error: { type: "aborted", message: "Step interrupted" },
+        time: { created: NOW, completed: NOW },
+      });
+      this.interrupted = true;
+      this.resumeTurn = index + 1;
+      this.emitMessages();
+      return;
     }
     this.emitEvent("session.step.ended", {
       sessionID: this.sessionID,
@@ -1778,7 +1981,13 @@ class ScriptedServe {
     // margin modelled: a server committing the row later than the boundary is
     // not what was measured, so the fake does not pretend one.
     this.flushSteers();
-    this.emitMessages();
+    // The refill this step's end causes lands after the terminal event when
+    // the step is the play's last — measured against the binary: the tailer's
+    // GET for the step answers after the server has ended the execution, so
+    // the row carrying the answer reaches the feed only past `succeeded`. The
+    // last turn's refill is owed to the terminal transition, not written here.
+    if (index === this.script.turns.length - 1) this.owedStepRefill = true;
+    else this.emitMessages();
   }
 
   private toolContent(
@@ -1886,6 +2095,26 @@ class ScriptedServe {
       resources: ask.resources,
       source: { type: "tool", messageID: assistantMessageID, id: callId },
     };
+    // The reject cascade (`declineCascade`): a reject earlier in this turn
+    // declined this ask the moment the server raised it. The ask is on the
+    // stream for the bot to decide, with no waiter and never listed pending, so
+    // the bot's reply meets 404 and the listing shows it gone; the server's own
+    // `reject` echo and the tool's `aborted` failure follow, and the step ends
+    // as an interruption (`playTurn`).
+    if (this.declineCascade && this.cascadeArmed) {
+      this.declinedInTurn++;
+      this.emitEvent("permission.asked", request);
+      this.emitEvent("permission.replied", { sessionID: this.sessionID, requestID, reply: "reject" });
+      const declined = "The user declined this tool call";
+      this.emitEvent("session.tool.failed", {
+        sessionID: this.sessionID,
+        assistantMessageID,
+        id: callId,
+        executed: false,
+        error: { type: "aborted", message: declined },
+      });
+      return this.toolContent(callId, ask.name, input, "error", declined, "aborted");
+    }
     // The ask pending at the cut (`hangAtAsk`): never on the feed — no event, no
     // refill — so the bot decides nothing; the clock passes the loop's end and
     // the play waits for the interrupt, which drops the ask below.
@@ -1951,6 +2180,7 @@ class ScriptedServe {
       });
     }
     const decision = await this.waitReply(requestID);
+    if (decision.reply === "reject" && this.declineCascade) this.cascadeArmed = true;
     // The execution stays under way until the drainer's steer for THAT follow-up
     // has been posted — one more steer than the serve had seen when it was
     // pushed — so the steer meets a running execution, as the option says.
@@ -1991,7 +2221,7 @@ class ScriptedServe {
         throw new Error(
           "hangToolCall needs the driver's clock: hand the serve `advanceClock`, `spendBudget` and `finaleMs`",
         );
-      for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      await this.awaitFeedRead();
       // Owed before the wait: the interrupt's late tail may be read at the next
       // prompt before this play has ticked on.
       this.hungTool = { callId, assistantMessageID, turn: turnIndex };
@@ -2198,6 +2428,28 @@ function parseBody(body: string | undefined): Record<string, unknown> {
   }
 }
 
+/** The path of the first key an import body's tool contents lack that the
+ *  binary's session-message schema requires — `Session.Message.ToolState.Error`
+ *  is `{ status, input, error: { type, message }, content? }` — in the words
+ *  the binary's decoder refuses it with (`["messages"][i]["content"][k]…`);
+ *  `undefined` when every tool content decodes. */
+function importMissingKey(messages: unknown): string | undefined {
+  if (!Array.isArray(messages)) return undefined;
+  const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+  for (const [i, message] of messages.entries()) {
+    if (!isRecord(message) || !Array.isArray(message.content)) continue;
+    for (const [k, part] of message.content.entries()) {
+      if (!isRecord(part) || part.type !== "tool" || !isRecord(part.state) || part.state.status !== "error") continue;
+      const at = `["messages"][${i}]["content"][${k}]["state"]["error"]`;
+      const error = part.state.error;
+      if (!isRecord(error)) return at;
+      if (typeof error.type !== "string") return `${at}["type"]`;
+      if (typeof error.message !== "string") return `${at}["message"]`;
+    }
+  }
+  return undefined;
+}
+
 /** The container's loopback as the harness sees it: this generation's launch
  *  answers on the free port; the port a row recorded for a dead generation's
  *  server answers as that server only when the script says it is still up
@@ -2262,6 +2514,8 @@ export function openCodeDriver(options: FakeServeOptions = {}): HarnessDriver {
     cannot: {
       "gate-approval-unforgeable":
         "OpenCode's approval lives in its server, whose password the model's shell shares, so an effect the bot did not decide — a call with no ask, a reply the bot did not send, a reply that differs from the bot's, a success after the bot's refusal — is caught by detection and fails the run closed, never prevented by construction",
+      "budget-refuses-a-command-past-the-loop-end":
+        "OpenCode's permission ask hands the bot the command alone — no timeout rides on `permission.asked` — and its bash timeout is its server's own, so the gate cannot judge a timeout against the loop's end; a command past it runs and the loop's end cuts it as today",
     },
     facts: (partial) => ({
       harness: "opencode",
@@ -2379,6 +2633,7 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     ...(deps.tickMs !== undefined ? { tickMs: deps.tickMs } : {}),
     // The clock lands past the LOOP's end, inside the lease (pi's driver does the same).
     spendBudget: () => void (clock.now = lease.loopEnd + 1),
+    nearLoopEnd: () => void (clock.now = lease.loopEnd - NEAR_LOOP_END_SECONDS * 1000),
     advanceClock: (ms) => void (clock.now += ms),
     finaleMs: lease.finaleMs,
     inbox,
@@ -2394,7 +2649,7 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
   let outcome: DrivenRun["outcome"];
   try {
     const session = await openThroughSeam(harness, deps, run);
-    outcome = { kind: "answered", answer: session.answer };
+    outcome = { kind: "answered", answer: session.answer, ...(session.ending ? { ending: session.ending } : {}) };
     await session.end();
   } catch (err) {
     outcome = { kind: "failed", error: err instanceof Error ? err : new Error(String(err)) };
@@ -2469,7 +2724,7 @@ export function scriptOpenCodeServe(
       agents?: Record<string, { system?: string }>;
     };
     const modelRef = config.model ?? "";
-    const id = modelRef.slice(modelRef.indexOf("/") + 1);
+    const id = modelRef.includes("/") ? parseModelRef(modelRef).model : modelRef;
     const provider = Object.values(config.providers ?? {})[0];
     return {
       runId,

@@ -12,6 +12,8 @@ import type {
 import type { HistoryItem, IncomingMessage } from "../types.js";
 import {
   extractUrls,
+  parseReferences,
+  quotableReferences,
   quotedBlock,
   readReferences,
   REFERENCE_MAX_BYTES,
@@ -305,6 +307,26 @@ describe("readReferences — the references step", () => {
     const capped = await readReferences({ conversationReaders: [big] }, { msg: msgOf(url(OTHER)), actor: requester });
     expect(Buffer.byteLength(capped.blocks[0], "utf8")).toBeLessThanOrEqual(REFERENCE_MAX_BYTES + 512);
     expect(capped.conversations[0].messages.at(-1)?.text.startsWith("m39")).toBe(true);
+  });
+});
+
+describe("parseReferences and quotableReferences — what the request's own text settles before any adapter call", () => {
+  it("parses every URL a reader owns, in order, the same thread once; a URL no reader parses is nobody's; the count the route stage is handed is the parsed references under the per-request cap", () => {
+    const { reader, calls } = fakeReader({ channels: { [OTHER]: PUBLIC_OTHER } });
+    const parsed = parseReferences(
+      `${url(OTHER)} again ${url(OTHER)} and https://web.example/page and ${url(ORIGIN)}`,
+      [reader],
+    );
+    expect(parsed.map((p) => p.ref.threadKey)).toEqual([`${OTHER}:1700000000000100`, `${ORIGIN}:1700000000000100`]);
+    expect(parsed.every((p) => p.reader === reader)).toBe(true);
+    expect(quotableReferences(`${url(OTHER)} and ${url(ORIGIN)}`, [reader])).toBe(2);
+    expect(quotableReferences("no links, https://web.example/page", [reader])).toBe(0);
+    expect(quotableReferences(url(OTHER), [])).toBe(0);
+    // Four linked threads: the step quotes three and refuses the fourth, so three is the count.
+    const four = ["A", "B", "C", "D"].map((c) => `https://team.example/archives/C_${c}/p1`).join(" ");
+    expect(quotableReferences(four, [reader])).toBe(REFERENCE_MAX_PER_REQUEST);
+    // A parse asks the reader nothing beyond the URL grammar.
+    expect(calls).toEqual({ classify: 0, read: 0, member: 0 });
   });
 });
 

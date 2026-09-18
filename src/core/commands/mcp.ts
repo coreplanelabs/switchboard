@@ -118,7 +118,7 @@ async function via<T>(fn: () => Promise<T> | T): Promise<T> {
   try {
     return await fn();
   } catch (err) {
-    if (err instanceof McpServiceError) throw new CommandError(err.code, err.message);
+    if (err instanceof McpServiceError) throw new CommandError(err.code, err.message, err.cause);
     throw new CommandError("unavailable", err instanceof Error ? err.message : String(err));
   }
 }

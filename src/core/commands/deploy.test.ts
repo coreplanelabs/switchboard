@@ -455,7 +455,7 @@ describe("deploy.all", () => {
     ).toMatchObject({ ok: false, error: "invalid_input" });
   });
 
-  it("a step whose preflight was still refusing at the end of the wait budget is `unavailable` like any stopped run: what a refusal names now is a rollout still settling, a real anomaly past the budget (runs in flight no longer refuse — run-history item 39)", async () => {
+  it("a step whose preflight was still refusing at the end of the wait budget is `unavailable` like any stopped run: runs still in flight or a rollout still settling past the budget fail the deploy by name, never a roll over them", async () => {
     const stuck = bind(async () => ({
       kind: "ran",
       ok: false,

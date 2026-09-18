@@ -18,6 +18,7 @@ import type { ChatMessage, ContentPart } from "../../chatMessage.js";
 import type { CompletionRequest, CompletionResult } from "../../provider.js";
 import type { RunEvent, StopMode } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
+import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { identityChangedCondition, type HarnessRequest, type HarnessStart } from "../container.js";
 import { WORD_ALIVE_REATTACH_NOTE } from "../reattach.js";
 import {
@@ -32,6 +33,7 @@ import {
 } from "../contract.js";
 import { ALLOWANCES, MINUTE_MS } from "../../budgets.js";
 import {
+  commandPastLoopEndRefusal,
   finaleTimedOutNote,
   HARD_STOP_MESSAGE,
   MODEL_CALL_IN_FLIGHT,
@@ -40,6 +42,9 @@ import {
   timeBudgetAnswer,
   timeBudgetNote,
   toolCutNote,
+  windDownAnswer,
+  type EndingFacts,
+  type WindDownEnding,
 } from "../windDown.js";
 import { TRANSPORT_LOST_TEXT } from "./fakeContainer.js";
 
@@ -47,6 +52,12 @@ import { TRANSPORT_LOST_TEXT } from "./fakeContainer.js";
 export const CONFORMANCE_MAX_MINUTES = 10;
 /** The provider's words when a scripted model call fails (`RunScript.failModelCall`), on every driver. */
 export const FAILED_MODEL_CALL_ERROR = "the provider closed the stream before the answer";
+/** Where a script's clock sits before the loop's end (`RunScript.nearLoopEndBeforeModelCall`):
+ *  inside the loop, ahead of the wrap-up warning, with room for a short command. */
+export const NEAR_LOOP_END_SECONDS = 150;
+/** A bash timeout that reaches past the loop's end from there, and one that does not. */
+export const TIMEOUT_PAST_LOOP_END_SECONDS = 600;
+export const TIMEOUT_INSIDE_LOOP_END_SECONDS = 60;
 
 /** One answer of the scripted model: the content parts and how it stopped. */
 export interface ModelTurn {
@@ -111,6 +122,12 @@ export interface RunScript {
    *  harness winds the run down — the budget note, the write-up steered — and
    *  that call is the one the wind-down waits on. */
   budgetBeforeModelCall?: number;
+  /** The run's clock sits `NEAR_LOOP_END_SECONDS` before the loop's end from
+   *  the model call of this 1-based number on: inside the loop, so nothing
+   *  winds down, and close enough that a bash timeout of
+   *  `TIMEOUT_PAST_LOOP_END_SECONDS` reaches past the end while one of
+   *  `TIMEOUT_INSIDE_LOOP_END_SECONDS` does not. */
+  nearLoopEndBeforeModelCall?: number;
   /** The model call of this 1-based number fails with a provider error
    *  (`FAILED_MODEL_CALL_ERROR`) instead of answering its turn. */
   failModelCall?: number;
@@ -181,7 +198,15 @@ export interface RunScript {
 /** What the driver hands back: the run's outcome and everything the harness wrote or was seen to do. */
 export interface DrivenRun {
   harness: HarnessName;
-  outcome: { kind: "answered"; answer: string } | { kind: "failed"; error: Error };
+  outcome:
+    | {
+        kind: "answered";
+        answer: string;
+        /** The wind-down's ending the harness handed the run loop beside its
+         *  answer (`HarnessSession.ending`), when one labelled it. */
+        ending?: WindDownEnding;
+      }
+    | { kind: "failed"; error: Error };
   /** What the run's follow-up inbox still holds once the run has ended: the follow-ups handed back. */
   inboxLeft: { text: string }[];
   /** The stop the run's control was asked for, if any — what the dispatcher's settlement reads to drop the run's follow-ups; a run failing by name asks for none. */
@@ -255,6 +280,117 @@ const call = (id: string, name: string, input: Record<string, unknown>): ModelTu
 
 /** A header name that carries a credential: on a request into the container it belongs in `secretHeaders`. */
 const AUTH_HEADER = /^(authorization|proxy-authorization|x-api-key|cookie)$/i;
+
+/** The wind-down's ending the harness handed over on an answered run, or none. */
+const endingOf = (run: DrivenRun): WindDownEnding | undefined =>
+  run.outcome.kind === "answered" ? run.outcome.ending : undefined;
+
+const ENDING_HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+const ENDING_BRANCH = "plan/p/u1";
+/** The budget rows of the finale answer (harness-pi item 6), one per branch
+ *  the run loop can establish once the post-steps have run. Each row's run is
+ *  a budget ending on the harness — the write-up hung (`hangModelCall`) for
+ *  the empty write-up's rows, written for the last — whose structured ending
+ *  the row reads off the run; the facts are what the loop would have measured,
+ *  and `established` the sentence the composed answer must close on. */
+const BUDGET_ENDING_ROWS: ScenarioRow[] = (
+  [
+    {
+      id: "budget-ending-clean-pushed",
+      branch: "a clean tree with a pushed head",
+      facts: {
+        workspace: { kind: "clean", branch: ENDING_BRANCH, head: ENDING_HEAD },
+        description: "submitted",
+      },
+      established: `The tree was clean and \`${ENDING_BRANCH}\` held no unpushed commits — its head \`${ENDING_HEAD.slice(0, 7)}\` is on the remote. The PR description was submitted.`,
+    },
+    {
+      id: "budget-ending-salvaged",
+      branch: "a tree the budget salvage pushed",
+      facts: {
+        workspace: { kind: "salvaged", branch: ENDING_BRANCH, head: ENDING_HEAD },
+        description: "not_submitted",
+      },
+      established: `What the tree held was pushed to \`${ENDING_BRANCH}\` at \`${ENDING_HEAD.slice(0, 7)}\` by the budget salvage, unreviewed — a follow-up starts from it. No PR description was submitted.`,
+    },
+    {
+      id: "budget-ending-left-kept",
+      branch: "unpushed work in a workspace the thread keeps",
+      facts: { workspace: { kind: "left", uncommitted: 2, unpushed: 1, fate: "kept" } },
+      established:
+        "2 uncommitted change(s) and 1 unpushed commit(s) sit in the workspace, kept for this thread until it idles out — a follow-up here reuses them.",
+    },
+    {
+      id: "budget-ending-left-torn-down",
+      branch: "unpushed work in a workspace that is torn down",
+      facts: { workspace: { kind: "left", uncommitted: 2, unpushed: 1, fate: "torn_down" } },
+      established:
+        "2 uncommitted change(s) and 1 unpushed commit(s) were left in the tree, which is torn down since a command may still be running in it — narrow the task and try again.",
+    },
+  ] satisfies Array<{ id: string; branch: string; facts: EndingFacts; established: string }>
+).map(({ id, branch, facts, established }): ScenarioRow => ({
+  id,
+  clause: "conversation",
+  title: `the budget's ending is handed to the run loop as a structured ending, so the thread's answer is composed once the post-steps have established the tree — ${branch}: the same words on every harness`,
+  script: { turns: [call("c1", "bash", { command: "echo hi" }), text("never")], hangModelCall: 2 },
+  check: (run) => {
+    const ending = endingOf(run);
+    assert.ok(
+      ending?.kind === "time" && ending.text === "",
+      `the harness handed no structured budget ending: ${JSON.stringify(ending)}`,
+    );
+    // The harness's own answer is the composer with no facts. With the
+    // loop's facts the same ending opens on the budget's words — the hung
+    // write-up's failed-call clause between, in each harness's own words —
+    // and closes on what was established, never on the guess.
+    assert.equal(answered(run), windDownAnswer(ending, CONFORMANCE_MAX_MINUTES));
+    const composed = windDownAnswer(ending, CONFORMANCE_MAX_MINUTES, facts);
+    assert.ok(
+      composed.startsWith(`Stopped at the ${CONFORMANCE_MAX_MINUTES}-minute budget without finishing`),
+      `the answer does not open with the budget's words: ${composed}`,
+    );
+    assert.ok(composed.endsWith(`. ${established}`), `the answer does not close on what was established: ${composed}`);
+    assert.ok(!composed.includes("Partial work may exist"), `the answer guesses at the tree: ${composed}`);
+    assert.deepEqual(
+      notes(run)
+        .filter((n) => n.kind === "time_budget_exhausted")
+        .map((n) => n.summary),
+      [timeBudgetNote(MODEL_CALL_IN_FLIGHT)],
+    );
+  },
+}));
+BUDGET_ENDING_ROWS.push({
+  id: "budget-ending-written-up",
+  clause: "conversation",
+  title:
+    "the budget's ending carries the write-up's text to the run loop, so the label reads the tree's facts before the findings: the same words on every harness",
+  script: {
+    turns: [call("c1", "bash", { command: "echo hi" }), text("findings so far: hi")],
+    budgetBeforeModelCall: 2,
+  },
+  check: (run) => {
+    const ending = endingOf(run);
+    assert.deepEqual(
+      ending,
+      { kind: "time", text: "findings so far: hi" },
+      "the harness handed no structured budget ending",
+    );
+    assert.equal(answered(run), timeBudgetAnswer("findings so far: hi", CONFORMANCE_MAX_MINUTES));
+    assert.equal(
+      windDownAnswer(ending!, CONFORMANCE_MAX_MINUTES, {
+        workspace: { kind: "clean", branch: ENDING_BRANCH, head: ENDING_HEAD },
+        description: "submitted",
+      }),
+      `⚠️ _Hit the ${CONFORMANCE_MAX_MINUTES}-minute budget before finishing. The tree was clean and \`${ENDING_BRANCH}\` held no unpushed commits — its head \`${ENDING_HEAD.slice(0, 7)}\` is on the remote. The PR description was submitted. Findings so far:_\n\nfindings so far: hi`,
+    );
+    assert.deepEqual(
+      notes(run)
+        .filter((n) => n.kind === "time_budget_exhausted")
+        .map((n) => n.summary),
+      [timeBudgetNote(MODEL_CALL_IN_FLIGHT)],
+    );
+  },
+});
 
 const notes = (run: DrivenRun) =>
   run.events.filter((e): e is Extract<RunEvent, { type: "run_note" }> => e.type === "run_note");
@@ -516,6 +652,50 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     },
   },
   {
+    id: "budget-refuses-a-command-past-the-loop-end",
+    clause: "gate",
+    title:
+      "a bash call whose explicit timeout reaches past the loop's end is refused at the gate before it runs — the refusal names the seconds asked and the seconds left, is the call's result and a tool_refused note — and the next call, its timeout inside the end, runs",
+    script: {
+      turns: [
+        call("c1", "bash", { command: "npm run verify", timeout: TIMEOUT_PAST_LOOP_END_SECONDS }),
+        call("c2", "bash", { command: "npm test -- one.test.ts", timeout: TIMEOUT_INSIDE_LOOP_END_SECONDS }),
+        text("pushed what there was and wrote up"),
+      ],
+      nearLoopEndBeforeModelCall: 1,
+    },
+    check: (run) => {
+      assert.equal(answered(run), "pushed what there was and wrote up");
+      const results = toolResults(run);
+      assert.deepEqual(
+        results.map((r) => [r.callId, r.ok]),
+        [
+          ["c1", false],
+          ["c2", true],
+        ],
+        "the call past the end was not the one refused, or the one inside it did not run",
+      );
+      const refused = notes(run).filter((n) => n.kind === "tool_refused");
+      assert.equal(refused.length, 1, "one tool_refused note for the timeout past the end");
+      // The seconds left are the clock's at the ask: at most the script's distance from the end, above zero.
+      const left = Number(/the loop ends in (\d+) s/.exec(refused[0].summary)?.[1]);
+      assert.ok(left > 0 && left <= NEAR_LOOP_END_SECONDS, `the note names ${left} s left: ${refused[0].summary}`);
+      assert.equal(
+        refused[0].summary,
+        `bash refused: ${commandPastLoopEndRefusal(TIMEOUT_PAST_LOOP_END_SECONDS, left)}`,
+        "the note is not the wind-down's sentence",
+      );
+      // The refusal is the call's result, whole, and the model's next turn read it as that result.
+      const sentence = commandPastLoopEndRefusal(TIMEOUT_PAST_LOOP_END_SECONDS, left);
+      assert.equal(results[0].output, sentence, "the refused call's result is not the sentence");
+      const read = JSON.stringify(run.modelCalls[1]?.messages.at(-1) ?? null);
+      assert.ok(read.includes(sentence), `the model's next call did not carry the refusal: ${read}`);
+      // No budget wind-down ran: the loop never reached its end, the run answered on its own.
+      assert.equal(notes(run).filter((n) => n.kind === "time_budget_exhausted").length, 0);
+      assert.equal(notes(run).filter((n) => n.kind === "tool_cut").length, 0);
+    },
+  },
+  {
     id: "gate-bypass-fails-closed",
     clause: "gate",
     title:
@@ -634,6 +814,24 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       assert.deepEqual(userTexts(seen[0]), ["earlier question"]);
       assert.deepEqual(userTexts(seen[2]), ["and now this"]);
       assert.equal(run.steps[0].firstIdx, 3, "the first step counts from the seed's end");
+    },
+  },
+  {
+    id: "conversation-answer-in-terminal-refill",
+    clause: "conversation",
+    title:
+      "the answer is the store row the execution's end promises: a text-only last step's row reaches the record only in the refill written after the terminal event, and the loop reads that refill before it settles — the run's answer is the text and the ledger's last step carries it, never `_(no response)_`",
+    script: {
+      request: "say the last word",
+      turns: [call("c-1", "grep", { pattern: "needle" }), text("the last word")],
+    },
+    check: (run) => {
+      assert.equal(answered(run), "the last word");
+      const last = run.steps.at(-1);
+      assert.ok(last !== undefined, "no step was written");
+      const answer = last.turns.at(-1);
+      assert.equal(answer?.role, "assistant");
+      assert.deepEqual(answer?.content, [{ type: "text", text: "the last word" }]);
     },
   },
   {
@@ -775,6 +973,16 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       assert.ok(last > lease.loopEndsAt, "the clock never passed the loop's cut");
     },
   },
+  // The finale answer reads what the ending established (harness-pi item 6):
+  // the harness hands the run loop its ending beside the answer — the label's
+  // kind, the text the model settled on, the failed call — and the loop
+  // composes the thread's answer once the salvage and the post-steps have run,
+  // through the one composer in windDown.ts. One row per branch the loop can
+  // establish: the harness half is the structured ending the row reads off
+  // the run, the facts are the loop's, and the words are the same on every
+  // harness — a torn-down tree is never said to hold work, a pushed head is
+  // named. The harness's own answer is the same composer with no facts.
+  ...BUDGET_ENDING_ROWS,
   {
     id: "budget-cuts-the-tool-in-flight",
     clause: "conversation",
@@ -919,38 +1127,97 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     },
   },
   {
+    id: "survival-rebuild-after-failed-call",
+    clause: "survival",
+    title:
+      "a re-attach after a failed tool call imports: a process rebuilt from a record whose history holds a tool call that ran and failed (its result marked an error) and a call in flight rebuilds a session holding both — the failed result as the record wrote it, the call in flight settled — and continues: the next step's rows are the settlement turn at the seed index then the answer, and the model's view is the record's rows",
+    script: (driver) => ({
+      turns: [text("carried on")],
+      resume: {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "carry on" }] },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "c-failed", name: "bash", input: { command: "make" } }],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", toolUseId: "c-failed", content: "make: *** [all] Error 2", isError: true },
+            ],
+          },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "c-flight", name: "bash", input: { command: "make clean all" } }],
+          },
+        ],
+        settlements: [
+          {
+            toolUse: { type: "tool_use", id: "c-flight", name: "bash", input: { command: "make clean all" } },
+            action: "synthetic",
+            text: "The container was replaced while this bash call was in flight; its result was lost.",
+          },
+        ],
+        remainingMs: 5 * 60_000,
+        turn: 2,
+        inboxConsumedSeq: 0,
+        facts: driver.facts({ pid: 999, container: "vm-old" }),
+      },
+    }),
+    check: (run) => {
+      assert.equal(answered(run), "carried on");
+      assert.ok(run.steps.length > 0, "no step was written after the rebuild");
+      const step = run.steps[0];
+      assert.equal(step.firstIdx, 4, "the settlement turn does not land at the seed index");
+      const [settled, answer] = step.turns;
+      assert.equal(settled.role, "user");
+      assert.deepEqual(settled.content[0], {
+        type: "tool_result",
+        toolUseId: "c-flight",
+        content: "The container was replaced while this bash call was in flight; its result was lost.",
+        isError: true,
+      });
+      assert.equal(answer.role, "assistant");
+      // The model saw the record's rows: the failed call and its error result
+      // as the record held them, then the settlement turn.
+      assert.ok(run.modelCalls.length > 0, "the model was never asked");
+      const view = run.modelCalls[0].messages;
+      assert.deepEqual(view[2], {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "c-failed", content: "make: *** [all] Error 2", isError: true }],
+      });
+      assert.deepEqual(view[4], settled, "the model's view of the settlement turn is not the ledger's row");
+      assert.equal(view.length, 5);
+    },
+  },
+  {
     id: "survival-alive-here",
     clause: "survival",
     title:
-      "a resume whose facts name this same container reconciles with the process still alive here before a fresh one is placed: the run answers, and the one resumed note says which honest path was taken — re-attached to the live process (no second process, the live one ended only at the session's end, its session continued) or ended it for a fresh start (one fresh process, the live one ended first)",
+      "a resume whose facts name this same container and carry the bearer hash re-attaches to the live process: no second process started, the live one ended only at the session's end, and the one resumed note says pi still runs in the container continuing its session",
     script: (driver) => ({
       turns: [text("resumed here")],
       processAliveOnResume: true,
-      resume: resumeOf(driver.facts({ pid: 999, container: driver.containerWord })),
+      resume: resumeOf(
+        driver.facts({ pid: 999, container: driver.containerWord, bearerHash: bearerHashOf(driver.bearer) }),
+      ),
     }),
     check: (run) => {
       assert.equal(answered(run), "resumed here");
       const resumed = notes(run).filter((n) => n.kind === "resumed");
       assert.equal(resumed.length, 1, "not exactly one resumed note");
-      // Two honest reconciliations. The row here carries no bearer hash, so a
-      // harness whose re-attach needs one ends the process instead; a row that
-      // carries it is the harness's own re-attach test. Demanding the re-attach
-      // of every driver needs a double that plays an already-running pi — the
-      // follow-up.
-      const reAttached = run.starts.length === 0;
-      if (reAttached) {
-        assert.deepEqual(
-          run.killed.filter((pid) => pid === 999),
-          [999],
-          "the live process is ended once, at the session's end, never for a fresh start",
-        );
-        assert.match(resumed[0].summary, /still runs in the container \(pid 999/);
-        assert.match(resumed[0].summary, /continuing its session/);
-      } else {
-        assert.equal(run.starts.length, 1, "one fresh process was started on the record");
-        assert.equal(run.killed[0], 999, "the live process was not ended before the fresh start");
-        assert.match(resumed[0].summary, /ended/);
-      }
+      // Both drivers now take the re-attach branch: the bearer hash in the
+      // facts lets pi honour it, and OpenCode's fake serve answers the row's
+      // port with the right password. No second process is started; the live
+      // one is ended once, at the session's end.
+      assert.equal(run.starts.length, 0, "a second process was started: the row must re-attach to the live one");
+      assert.deepEqual(
+        run.killed.filter((pid) => pid === 999),
+        [999],
+        "the live process is ended once, at the session's end, never for a fresh start",
+      );
+      assert.match(resumed[0].summary, /still runs in the container \(pid 999/);
+      assert.match(resumed[0].summary, /continuing its session/);
       assert.ok(!notes(run).some((n) => n.kind === "harness_error"), "a harness_error on a clean resume");
     },
   },

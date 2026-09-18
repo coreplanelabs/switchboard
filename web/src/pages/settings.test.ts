@@ -55,6 +55,7 @@ const base = (over: Partial<SettingsSeed>): SettingsSeed => ({
 
 const island = (seed: SettingsSeed, caps: Partial<typeof ALL_ON> = {}): WebSeed => ({
   ...seed,
+  title: "Settings",
   capabilities: { ...ALL_ON, ...caps },
 });
 

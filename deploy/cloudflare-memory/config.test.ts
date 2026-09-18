@@ -217,26 +217,32 @@ describe("ConfigDO confirmations (docs/reference/specs/routing-and-config.md ite
     });
   });
 
-  it("a row past its expiry is refused `expired` on touch and deleted — the object's clock decides, never the caller's", async () => {
+  it("a row past its expiry is refused `expired` on touch and deleted — the refusal names the row, the object's clock decides, never the caller's", async () => {
     const id = `c-${key()}`;
-    await post("/config/confirmations/put", { ...row(id, `slack:CX:${key()}`), ttlMs: 0 });
+    const thread = `slack:CX:${key()}`;
+    await post("/config/confirmations/put", { ...row(id, thread), ttlMs: 0 });
+    // The deleted row rides the refusal so the bot can record the click (record 0054).
     expect((await post("/config/confirmations/consume", { id, actorIds: [requester] })).data).toEqual({
       refused: "expired",
+      row: { id, threadKey: thread, requester, expiresAt: expect.any(Number), body: { command: "config.set" } },
     });
     expect((await post("/config/confirmations/consume", { id, actorIds: [requester] })).data).toEqual({
       refused: "used",
     });
   });
 
-  it("an actor whose ids miss the requester is refused `foreign` and the row is kept; the requester's own id, or a list holding it, consumes", async () => {
+  it("an actor whose ids miss the requester is refused `foreign` — the refusal names the kept row; the requester's own id, or a list holding it, consumes", async () => {
     const id = `c-${key()}`;
-    await post("/config/confirmations/put", row(id, `slack:CX:${key()}`));
+    const thread = `slack:CX:${key()}`;
+    await post("/config/confirmations/put", row(id, thread));
+    const kept = { id, threadKey: thread, requester, expiresAt: expect.any(Number), body: { command: "config.set" } };
     expect((await post("/config/confirmations/consume", { id, actorIds: ["slack:UOTHER"] })).data).toEqual({
       refused: "foreign",
+      row: kept,
     });
     expect(
       (await post("/config/confirmations/consume", { id, actorIds: ["access:sub-1", "slack:UOTHER"] })).data,
-    ).toEqual({ refused: "foreign" });
+    ).toEqual({ refused: "foreign", row: kept });
     const consumed = await post("/config/confirmations/consume", { id, actorIds: ["access:sub-1", requester] });
     expect((consumed.data.row as { id: string }).id).toBe(id);
   });
@@ -280,6 +286,37 @@ describe("ConfigDO confirmations (docs/reference/specs/routing-and-config.md ite
     });
   });
 
+  it("cancel-by-thread deletes the thread's row for the requester, refuses a stranger, and reads `used` on a thread with none; another thread's row stays; the body stays opaque, a row stored before the bot's union included", async () => {
+    const thread = `slack:CX:${key()}`;
+    const other = `slack:CY:${key()}`;
+    const id = `c-${key()}`;
+    const elsewhere = `c-${key()}`;
+    expect(
+      (await post("/config/confirmations/cancel-by-thread", { threadKey: thread, actorIds: [requester] })).data,
+    ).toEqual({
+      refused: "used",
+    });
+    // The stored body is yesterday's shape — no `kind` — and cancels the same way.
+    await post("/config/confirmations/put", row(id, thread, { command: "config.set", input: { args: [] } }));
+    await post("/config/confirmations/put", row(elsewhere, other));
+    expect(
+      (await post("/config/confirmations/cancel-by-thread", { threadKey: thread, actorIds: ["slack:UOTHER"] })).data,
+    ).toEqual({ refused: "foreign" });
+    expect(
+      (await post("/config/confirmations/cancel-by-thread", { threadKey: thread, actorIds: [requester] })).data,
+    ).toEqual({ ok: true });
+    expect((await post("/config/confirmations/consume", { id, actorIds: [requester] })).data).toEqual({
+      refused: "used",
+    });
+    expect(
+      (
+        (await post("/config/confirmations/consume", { id: elsewhere, actorIds: [requester] })).data.row as {
+          id: string;
+        }
+      ).id,
+    ).toBe(elsewhere);
+  });
+
   it("validates: a malformed id, an empty threadKey or requester, a non-object body, a bad ttl and a non-list actorIds are 400", async () => {
     const good = row(`c-${key()}`, `slack:CX:${key()}`);
     expect((await post("/config/confirmations/put", { ...good, id: "no spaces allowed" })).status).toBe(400);
@@ -291,5 +328,11 @@ describe("ConfigDO confirmations (docs/reference/specs/routing-and-config.md ite
     expect((await post("/config/confirmations/consume", { id: "no spaces", actorIds: [requester] })).status).toBe(400);
     expect((await post("/config/confirmations/consume", { id: good.id, actorIds: requester })).status).toBe(400);
     expect((await post("/config/confirmations/cancel", { id: good.id, actorIds: [1] })).status).toBe(400);
+    expect(
+      (await post("/config/confirmations/cancel-by-thread", { threadKey: "", actorIds: [requester] })).status,
+    ).toBe(400);
+    expect(
+      (await post("/config/confirmations/cancel-by-thread", { threadKey: `slack:CX:${key()}`, actorIds: 7 })).status,
+    ).toBe(400);
   });
 });

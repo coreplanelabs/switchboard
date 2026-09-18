@@ -47,7 +47,9 @@ const td = "border-b border-muted px-2.5 py-1.5";
         <template v-for="(n, i) in ranges" :key="n">
           <template v-if="i > 0"> · </template>
           <b v-if="n === report.range.weeks" class="text-highlighted">{{ n }}w</b>
-          <a v-else class="text-primary hover:underline" :href="`/delivery/${report.repo}?weeks=${n}`">{{ n }}w</a>
+          <RouterLink v-else class="text-primary hover:underline" :to="`/delivery/${report.repo}?weeks=${n}`"
+            >{{ n }}w</RouterLink
+          >
         </template>
       </span>
     </template>
@@ -63,11 +65,11 @@ const td = "border-b border-muted px-2.5 py-1.5";
             aria-current="page"
             >{{ r }}</span
           >
-          <a
+          <RouterLink
             v-else
             class="rounded-md px-2.5 py-1 text-xs text-muted no-underline hover:bg-elevated hover:text-highlighted"
-            :href="`/delivery/${r}`"
-            >{{ r }}</a
+            :to="`/delivery/${r}`"
+            >{{ r }}</RouterLink
           >
         </template>
       </nav>
@@ -203,7 +205,9 @@ const td = "border-b border-muted px-2.5 py-1.5";
     <footer class="border-t border-default pt-3.5 text-xs text-dimmed">
       <p v-if="report.snapshotAt" class="mb-2 font-mono tabular-nums text-muted">
         As of {{ snapshotTime(report.snapshotAt) }}, {{ snapshotAgeText(report.snapshotAt, now) }} ·
-        <a class="text-primary hover:underline" :href="freshHref(search)">read GitHub now</a>
+        <RouterLink class="text-primary hover:underline" :to="`/delivery/${report.repo}${freshHref(search)}`"
+          >read GitHub now</RouterLink
+        >
       </p>
       <details>
         <summary class="cursor-pointer text-muted">How these numbers are computed</summary>

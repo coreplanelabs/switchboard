@@ -38,6 +38,8 @@ export class FakeHarnessContainer implements HarnessContainer {
   /** Every request the harness made into the container, in order. */
   readonly requests: HarnessRequest[] = [];
   private log = Buffer.alloc(0);
+  /** The furthest byte any `readLog` has reached (`drained`). */
+  private readEnd = 0;
   private live = false;
   /** Where the started process's log and FIFO are. A read or a write at
    *  another path fails as the real container's would (`tail` or `printf` on
@@ -106,6 +108,17 @@ export class FakeHarnessContainer implements HarnessContainer {
   /** Bytes as the process's stdout would carry them — a record still being written has no newline yet. */
   emitRaw(text: string): void {
     this.log = Buffer.concat([this.log, Buffer.from(text, "utf8")]);
+  }
+
+  /** Every byte the process has written so far has been read: the harness's
+   *  poll is caught up with the log. A scripted play that moves the run's
+   *  clock waits on this rather than on a count of ticks — the transport hands
+   *  a record it read to the bridge before the loop's next tick can run its
+   *  checks, so a clock moved after this wait falls on what the play last
+   *  wrote (a step's start), never on the tool settled before it, whatever the
+   *  poll timer and the tick timer make of a starved worker. */
+  get drained(): boolean {
+    return this.readEnd >= this.log.length;
   }
 
   /** The process exited: the log is what it is, `alive` answers no from here. */
@@ -225,6 +238,7 @@ export class FakeHarnessContainer implements HarnessContainer {
     if (this.logPath !== undefined && path !== this.logPath)
       throw new HarnessContainerError("read", `tail: cannot open '${path}' for reading: No such file or directory`);
     const chunk = this.log.subarray(offset, Math.min(this.log.length, offset + maxBytes));
+    this.readEnd = Math.max(this.readEnd, offset + chunk.length);
     // The resident's control plane keeps resetting over the unchanged container:
     // every drained read fails with a control reset, so the loop re-attaches
     // with no progress until the runaway bound closes the run by name.

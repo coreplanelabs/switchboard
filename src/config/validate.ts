@@ -4,6 +4,8 @@
 
 import { TRACING_LOG_LEVELS } from "../core/trace/sinks.js";
 import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
+import { WIRES, WIRE_ALIASES, parseModelRef, type ProviderConfig } from "../core/provider.js";
+import { catalogExists } from "../core/installedModelRegistry.js";
 import type { SelfImprovementConfig } from "../core/selfImprovement.js";
 import type { RunHistoryConfig } from "../core/runStore.js";
 import {
@@ -34,6 +36,7 @@ import {
 } from "../mcp/registry.js";
 import type {
   AppConfig,
+  IntakeConfig,
   OpenCodeConfig,
   PiCompactionConfig,
   PiConfig,
@@ -41,6 +44,7 @@ import type {
   ReviewConfig,
   RoutingConfig,
   Scope,
+  SlackConfig,
   TracingConfig,
 } from "../config.js";
 
@@ -72,6 +76,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   ship: true,
   spawn: true,
   routing: true,
+  intake: true,
   references: true,
   harness: true,
   pi: true,
@@ -316,6 +321,7 @@ export function validateConfig(cfg: AppConfig): void {
   if (!cfg.providers || Object.keys(cfg.providers).length === 0) {
     throw new Error("config.yaml must define at least one provider");
   }
+  validateProviders(cfg, "config.yaml");
   if (!cfg.defaults?.agent || !cfg.defaults?.models) {
     throw new Error("config.yaml must define defaults.agent and defaults.models");
   }
@@ -336,11 +342,35 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.ship !== undefined) validateShip(cfg.ship);
   if (cfg.spawn !== undefined) validateSpawn(cfg.spawn);
   if (cfg.routing !== undefined) validateRouting(cfg.routing, cfg.providers);
+  validateIntake(cfg);
   if (cfg.references !== undefined) validateReferences(cfg.references);
   if (cfg.artifacts !== undefined) validateArtifacts(cfg.artifacts);
   if (cfg.pi !== undefined) validatePi(cfg.pi);
   if (cfg.opencode !== undefined) validateOpenCode(cfg.opencode);
   validateDashboardConfig(cfg.dashboard);
+  validateSlack(cfg.slack);
+}
+
+/** A Slack bot id as the `bot_id` field carries it: `B` and the upper-case alphanumerics Slack mints. */
+const SLACK_BOT_ID = /^B[A-Z0-9]+$/;
+
+/** `slack` (docs/reference/specs/slack-channel.md item 13): `relayApps`, when
+ *  present, is a list of Slack bot ids — the apps whose relay footer names the
+ *  requester. Held to the id's shape at load: an entry spelled as the actor id
+ *  (`slack:bot:B…`) or a display name would match no poster, and every request
+ *  the relay posts would be billed to the app while the operator believed the
+ *  footer was read. Exported for tests. */
+export function validateSlack(slack: unknown): void {
+  if (slack === undefined) return;
+  if (typeof slack !== "object" || slack === null || Array.isArray(slack))
+    throw new Error("config.yaml: slack must be a mapping");
+  const { relayApps } = slack as SlackConfig;
+  if (relayApps === undefined) return;
+  if (!Array.isArray(relayApps)) throw new Error("config.yaml: slack.relayApps must be a list of Slack bot ids (B…)");
+  relayApps.forEach((id, i) => {
+    if (typeof id !== "string" || !SLACK_BOT_ID.test(id))
+      throw new Error(`config.yaml: slack.relayApps[${i}] is "${String(id)}" — a Slack bot id looks like B0ABC123`);
+  });
 }
 
 /** The `pi` block's keys and its `compaction` block's, held equal to the types the way the top-level keys are. */
@@ -479,6 +509,144 @@ function validateReferences(references: ReferencesConfig): void {
     throw new Error("config.yaml: references.enabled must be true or false");
 }
 
+/** The `providers` block's keys, held equal to `ProviderConfig` the way the
+ *  top-level keys are. */
+const PROVIDER_KEYS: Record<keyof ProviderConfig, true> = {
+  type: true,
+  wire: true,
+  vendor: true,
+  catalog: true,
+  models: true,
+  passthrough: true,
+  apiKeyEnv: true,
+  baseUrl: true,
+};
+
+/** A `models.<id>` override's keys, and the shapes they are held to. */
+const MODEL_OVERRIDE_KEYS: Record<string, true> = {
+  levels: true,
+  capField: true,
+  window: true,
+  inputs: true,
+  cache: true,
+  price: true,
+  answers: true,
+};
+const INPUT_KINDS: Record<string, true> = { image: true, document: true };
+const PRICE_KINDS: Record<string, true> = { input: true, output: true, cacheRead: true, cacheWrite: true };
+export const CACHE_RULES = ["automatic", "markers", "none", "unknown"] as const;
+
+/** One `models.<id>` override held to its shape: a malformed `levels` (an
+ *  unknown tier, a non-word), a bad cap field, window, input kind, cache rule
+ *  or price kind is refused by name, never read as absent. */
+export function validateModelOverride(path: string, raw: unknown): void {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error(`${path} must be a mapping`);
+  const m = raw as Record<string, unknown>;
+  for (const key of unknownKeys(m, MODEL_OVERRIDE_KEYS)) throw new Error(`${path}.${key} is not a known key`);
+  if (m.levels !== undefined) {
+    if (typeof m.levels !== "object" || m.levels === null || Array.isArray(m.levels))
+      throw new Error(`${path}.levels must be a mapping of effort → wire word or null`);
+    for (const [tier, word] of Object.entries(m.levels as Record<string, unknown>)) {
+      if (!isEffort(tier))
+        throw new Error(`${path}.levels.${tier} is not an effort — valid efforts: ${EFFORT_LEVELS_HINT}`);
+      if (word !== null && (typeof word !== "string" || word === ""))
+        throw new Error(`${path}.levels.${tier} must be a wire word or null`);
+    }
+  }
+  if (m.capField !== undefined && (typeof m.capField !== "string" || m.capField === ""))
+    throw new Error(`${path}.capField must be the body field the output cap is spelled with`);
+  if (m.window !== undefined && (!Number.isInteger(m.window) || (m.window as number) <= 0))
+    throw new Error(`${path}.window must be a positive integer of tokens`);
+  if (m.inputs !== undefined) {
+    if (typeof m.inputs !== "object" || m.inputs === null || Array.isArray(m.inputs))
+      throw new Error(`${path}.inputs must be a mapping of input kind → true or false`);
+    for (const [kind, v] of Object.entries(m.inputs as Record<string, unknown>)) {
+      if (!Object.hasOwn(INPUT_KINDS, kind))
+        throw new Error(`${path}.inputs.${kind} is not a known input kind (image, document)`);
+      if (typeof v !== "boolean") throw new Error(`${path}.inputs.${kind} must be true or false`);
+    }
+  }
+  if (m.cache !== undefined && !(CACHE_RULES as readonly unknown[]).includes(m.cache))
+    throw new Error(`${path}.cache must be ${CACHE_RULES.join(", ")}`);
+  if (m.answers !== undefined) {
+    if (!Array.isArray(m.answers))
+      throw new Error(`${path}.answers must be a list of answer shapes (${ROUTE_ANSWER_MODES.join(", ")})`);
+    for (const shape of m.answers as unknown[]) {
+      if (!(ROUTE_ANSWER_MODES as readonly unknown[]).includes(shape))
+        throw new Error(
+          `${path}.answers carries ${JSON.stringify(shape)}, which is not an answer shape (${ROUTE_ANSWER_MODES.join(", ")})`,
+        );
+    }
+  }
+  if (m.price !== undefined) {
+    if (typeof m.price !== "object" || m.price === null || Array.isArray(m.price))
+      throw new Error(`${path}.price must be a mapping of kind → USD per million tokens`);
+    for (const [kind, v] of Object.entries(m.price as Record<string, unknown>)) {
+      if (!Object.hasOwn(PRICE_KINDS, kind))
+        throw new Error(`${path}.price.${kind} is not a known kind (input, output, cacheRead, cacheWrite)`);
+      if (typeof v !== "number" || !Number.isFinite(v) || v < 0)
+        throw new Error(`${path}.price.${kind} must be a finite number of USD per million tokens, 0 or more`);
+    }
+  }
+}
+
+/**
+ * Every provider block held to the new grammar (record 0052): `wire`
+ * declared (with `type` still loading as its alias for one release, but not
+ * beside it), a vendor that is a name or `model`, a `catalog` naming a file
+ * the pi registry ships or `none`, and every `models.<id>` override well
+ * formed. The legacy `type` is derived for the consumers that still read it,
+ * so nothing downstream changes in this slice.
+ */
+export function validateProviders(cfg: AppConfig, source: string): void {
+  for (const [name, block] of Object.entries(cfg.providers ?? {})) {
+    const path = `${source}: providers.${name}`;
+    if (typeof block !== "object" || block === null || Array.isArray(block))
+      throw new Error(`${path} must be a mapping`);
+    const b = block as unknown as Record<string, unknown>;
+    for (const key of unknownKeys(b, PROVIDER_KEYS)) throw new Error(`${path}.${key} is not a known key`);
+    if (b.type === undefined && b.wire === undefined)
+      throw new Error(`${path} must declare wire (${WIRES.join(", ")}); type is its legacy alias for one release`);
+    if (b.type !== undefined && b.wire !== undefined)
+      throw new Error(
+        `${path} declares both type and wire; declare wire alone (type: ${String(b.type)} loads as its alias for one release)`,
+      );
+    if (b.type !== undefined && b.type !== "anthropic" && b.type !== "openai-compatible")
+      throw new Error(`${path}.type must be anthropic or openai-compatible; wire is the new spelling`);
+    if (b.wire !== undefined && !(WIRES as readonly unknown[]).includes(b.wire))
+      throw new Error(`${path}.wire must be ${WIRES.join(", ")}`);
+    if (b.vendor !== undefined && (typeof b.vendor !== "string" || b.vendor === ""))
+      throw new Error(`${path}.vendor must be a vendor name or "model"`);
+    if (b.catalog !== undefined) {
+      if (typeof b.catalog !== "string" || b.catalog === "")
+        throw new Error(`${path}.catalog must be a registry file name or "none"`);
+      if (!catalogExists(b.catalog))
+        throw new Error(`${path}.catalog names "${b.catalog}", which the pi registry does not ship (or "none")`);
+    }
+    if (
+      b.passthrough !== undefined &&
+      (typeof b.passthrough !== "object" || b.passthrough === null || Array.isArray(b.passthrough))
+    )
+      throw new Error(`${path}.passthrough must be a mapping of body fields`);
+    if (b.apiKeyEnv !== undefined && typeof b.apiKeyEnv !== "string")
+      throw new Error(`${path}.apiKeyEnv must be a string`);
+    if (b.baseUrl !== undefined && typeof b.baseUrl !== "string") throw new Error(`${path}.baseUrl must be a string`);
+    if (b.models !== undefined) {
+      if (typeof b.models !== "object" || b.models === null || Array.isArray(b.models))
+        throw new Error(`${path}.models must be a mapping of model id → overrides`);
+      for (const [id, raw] of Object.entries(b.models as Record<string, unknown>)) {
+        if (b.vendor === "model" && !id.includes("/"))
+          throw new Error(`${path}.models.${id}: a vendor: model block names its models <vendor>/<id>`);
+        validateModelOverride(`${path}.models.${id}`, raw);
+      }
+    }
+    // Derive the legacy word for every consumer that still reads `type` (the
+    // proxy's shape, the harness card) — this slice changes no run's outcome.
+    const derived = b.wire ?? WIRE_ALIASES[String(b.type)];
+    (block as ProviderConfig).type = derived === "anthropic-messages" ? "anthropic" : "openai-compatible";
+  }
+}
+
 /** The `routing` block's keys, held equal to `RoutingConfig` the way the top-level keys are. */
 const ROUTING_KEYS: Record<keyof RoutingConfig, true> = { auto: true, model: true, answer: true };
 
@@ -499,10 +667,77 @@ function validateRouting(routing: RoutingConfig, providers: Record<string, unkno
   if (routing.model !== undefined) {
     if (typeof routing.model !== "string" || !routing.model.includes("/"))
       throw new Error("config.yaml: routing.model must be a <provider>/<model> ref");
-    const provider = routing.model.slice(0, routing.model.indexOf("/"));
+    const provider = parseModelRef(routing.model).provider;
     if (!providers || !Object.hasOwn(providers, provider))
       throw new Error(`config.yaml: routing.model names provider "${provider}", which providers does not define`);
   }
+}
+
+/** The `intake` block's keys, held equal to `IntakeConfig` the way the top-level keys are. */
+const INTAKE_KEYS: Record<keyof IntakeConfig, true> = { threadReplies: true, model: true };
+
+/** The thread-reply gate's modes (routing-and-config item 27, record 0058). */
+export const INTAKE_MODES = ["mention", "classify", "always"] as const;
+export type IntakeMode = (typeof INTAKE_MODES)[number];
+
+/** The gate's default mode (routing-and-config item 27): `intake.threadReplies`
+ *  where the block sets it, else `classify` — the one place the default lives;
+ *  callers ask this, never the field. Defined beside the validator that checks
+ *  the card under it, re-exported by `src/config.ts` for every other caller. */
+export function defaultIntakeMode(config: AppConfig): IntakeMode {
+  return config.intake?.threadReplies ?? "classify";
+}
+
+/** The verdict's model ref, resolved as the router's is: `intake.model`, else
+ *  `routing.model`, else `defaults.models.general`; undefined when the config
+ *  names none — the gate then cannot classify and says so at its caller. The
+ *  one resolver: `validateIntake` checks the card of the ref it returns, and
+ *  `decideIntake` calls the same ref at runtime (`src/config.ts` re-exports it). */
+export function intakeModelRef(config: AppConfig): string | undefined {
+  return config.intake?.model ?? config.routing?.model ?? config.defaults?.models?.["general"];
+}
+
+/** `intake` (docs/reference/specs/routing-and-config.md item 27): the mode is
+ *  one of the three words and nothing else, `model` is a `<provider>/<model>`
+ *  ref whose provider the config declares — the routing block's own check —
+ *  and, when the effective default mode is `classify` (the code's default, so
+ *  an absent block counts), the effective model's operator card must support
+ *  at least one answer shape: a card declaring `answers: []` can neither take
+ *  the forced tool call nor the text contract, so it is refused at load,
+ *  never silenced at runtime. Any other key is refused by name. */
+function validateIntake(cfg: AppConfig): void {
+  const intake = cfg.intake;
+  if (intake !== undefined) {
+    if (typeof intake !== "object" || intake === null || Array.isArray(intake))
+      throw new Error("config.yaml: intake must be a mapping");
+    for (const key of unknownKeys(intake, INTAKE_KEYS))
+      throw new Error(`config.yaml: intake.${key} is not a known key`);
+    if (intake.threadReplies !== undefined && !(INTAKE_MODES as readonly unknown[]).includes(intake.threadReplies))
+      throw new Error(
+        `config.yaml: intake.threadReplies must be ${INTAKE_MODES.join(", ").replace(/, (\w+)$/, " or $1")}`,
+      );
+    if (intake.model !== undefined) {
+      if (typeof intake.model !== "string" || !intake.model.includes("/"))
+        throw new Error("config.yaml: intake.model must be a <provider>/<model> ref");
+      const provider = parseModelRef(intake.model).provider;
+      if (!cfg.providers || !Object.hasOwn(cfg.providers, provider))
+        throw new Error(`config.yaml: intake.model names provider "${provider}", which providers does not define`);
+    }
+  }
+  // The classify card check: under the default mode intake will make a model
+  // call, so a card the operator declared unable to answer either shape must
+  // fail here by name rather than fall silent on every unmentioned reply.
+  if (defaultIntakeMode(cfg) !== "classify") return;
+  const ref = intakeModelRef(cfg);
+  if (typeof ref !== "string" || !ref.includes("/")) return;
+  const { provider, model } = parseModelRef(ref);
+  const answers = (cfg.providers?.[provider] as ProviderConfig | undefined)?.models?.[model]?.answers;
+  if (answers !== undefined && !answers.includes("tool") && !answers.includes("text"))
+    throw new Error(
+      `config.yaml: intake defaults to classify, and its model ${ref} supports neither a forced tool call nor the ` +
+        `text contract (providers.${provider}.models.${model}.answers) — set intake.threadReplies to mention or ` +
+        `always, or pick a model that answers one`,
+    );
 }
 
 /** `grants`: every finding names the actor id and axis it is about —
@@ -591,6 +826,20 @@ export function validateScopeBlocks(
     for (const [id, scope] of Object.entries(scopes ?? {})) {
       const level = addressSeverityProblem(`${kind}.${id}.review.addressSeverity`, scope.review?.addressSeverity);
       if (level) throw new Error(`${source}: ${level}`);
+      // The intake gate's scope field (routing-and-config item 27): the mode
+      // alone — the model is the defaults layer's — refused by name so a typo
+      // never reads as "the default".
+      if (scope.intake !== undefined) {
+        if (typeof scope.intake !== "object" || scope.intake === null || Array.isArray(scope.intake))
+          throw new Error(`${source}: ${kind}.${id}.intake must be a mapping`);
+        for (const key of unknownKeys(scope.intake, { threadReplies: true }))
+          throw new Error(`${source}: ${kind}.${id}.intake.${key} is not a known key`);
+        const mode = scope.intake.threadReplies;
+        if (mode !== undefined && !(INTAKE_MODES as readonly unknown[]).includes(mode))
+          throw new Error(
+            `${source}: ${kind}.${id}.intake.threadReplies must be ${INTAKE_MODES.join(", ").replace(/, (\w+)$/, " or $1")}`,
+          );
+      }
       // A scope written before the key moved (`config set … --ship.addressSeverity`)
       // is named, never silently ignored into "no gate".
       if (scope.ship !== undefined && "addressSeverity" in scope.ship)

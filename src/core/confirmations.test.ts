@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,11 +9,14 @@ import {
   FileConfirmationStore,
   InMemoryConfirmationStore,
   isConfirmation,
+  parseConfirmation,
+  parsePendingConfirmation,
   renderOffer,
   WorkerConfirmationStore,
   type Confirmation,
   type ConfirmationStore,
   type PendingConfirmation,
+  type RunConfirmation,
 } from "./confirmations.js";
 
 // Feature: docs/reference/specs/routing-and-config.md item 25 — where the
@@ -28,7 +31,8 @@ const message: IncomingMessage = {
   userName: "requester",
 };
 
-const pending = (id: string, over: Partial<PendingConfirmation> = {}): PendingConfirmation => ({
+const pending = (id: string, over: Partial<Omit<RunConfirmation, "expiresAt">> = {}): PendingConfirmation => ({
+  kind: "run",
   id,
   message,
   command: "config.set",
@@ -56,22 +60,22 @@ function contract(name: string, make: () => { store: ConfirmationStore; tick: (m
       expect(typeof store.describe()).toBe("string");
     });
 
-    it("a row past its expiry is `expired` on touch and gone afterwards", async () => {
+    it("a row past its expiry is `expired` on touch — the refusal names the row it deleted — and gone afterwards", async () => {
       const { store, tick } = make();
       const row = await store.put(pending("c2"), TTL);
       tick(TTL - 1);
       expect((await store.consume("c2", ["slack:UOTHER"])).ok).toBe(false); // still pending: foreign, not expired
       tick(1);
-      expect(await store.consume("c2", ["slack:UREQ"])).toEqual({ ok: false, refused: "expired" });
+      expect(await store.consume("c2", ["slack:UREQ"])).toEqual({ ok: false, refused: "expired", row });
       expect(await store.consume("c2", ["slack:UREQ"])).toEqual({ ok: false, refused: "used" });
       expect(row.expiresAt).toBeGreaterThan(0);
     });
 
-    it("an actor whose ids miss the requester is `foreign` and the row stays; the requester's id anywhere in the list consumes", async () => {
+    it("an actor whose ids miss the requester is `foreign` — the refusal names the row — and the row stays; the requester's id anywhere in the list consumes", async () => {
       const { store } = make();
-      await store.put(pending("c3"), TTL);
-      expect(await store.consume("c3", ["slack:UOTHER"])).toEqual({ ok: false, refused: "foreign" });
-      expect(await store.consume("c3", ["access:sub-1"])).toEqual({ ok: false, refused: "foreign" });
+      const row = await store.put(pending("c3"), TTL);
+      expect(await store.consume("c3", ["slack:UOTHER"])).toEqual({ ok: false, refused: "foreign", row });
+      expect(await store.consume("c3", ["access:sub-1"])).toEqual({ ok: false, refused: "foreign", row });
       expect((await store.consume("c3", ["access:sub-1", "slack:UREQ"])).ok).toBe(true);
     });
 
@@ -95,6 +99,36 @@ function contract(name: string, make: () => { store: ConfirmationStore; tick: (m
       await store.put(pending("c6"), TTL);
       expect((await store.consume("c6", ["slack:UREQ"])).ok).toBe(true);
       expect(await store.cancel("c6", ["slack:UREQ"])).toEqual({ ok: false, refused: "used" });
+    });
+
+    it("cancelByThread deletes the thread's pending row under the requester check; a thread with none is `used` and another thread's row stays", async () => {
+      const { store } = make();
+      expect(await store.cancelByThread("slack:CX:1.0", ["slack:UREQ"])).toEqual({ ok: false, refused: "used" });
+      await store.put(pending("other", { message: { ...message, threadKey: "slack:CY:2.0" } }), TTL);
+      await store.put(pending("c7"), TTL);
+      expect(await store.cancelByThread("slack:CX:1.0", ["slack:UOTHER"])).toEqual({ ok: false, refused: "foreign" });
+      expect(await store.cancelByThread("slack:CX:1.0", ["slack:UREQ"])).toEqual({ ok: true });
+      expect(await store.consume("c7", ["slack:UREQ"])).toEqual({ ok: false, refused: "used" });
+      expect((await store.consume("other", ["slack:UREQ"])).ok).toBe(true);
+    });
+
+    it("a question's redispatch row round-trips whole: put, consume for the requester, the same fields back", async () => {
+      const { store } = make();
+      const row = await store.put(
+        {
+          kind: "redispatch",
+          id: "q1",
+          message: { ...message, text: "agent:ship repo:acme/api fix the flaky test" },
+          line: "agent:ship repo:acme/api fix the flaky test",
+          evidence: "acme/api is one edit away from acme/apj, which is onboarded",
+          code: "repo_not_onboarded",
+        },
+        TTL,
+      );
+      expect(row.kind).toBe("redispatch");
+      const consumed = await store.consume("q1", ["slack:UREQ"]);
+      expect(consumed).toEqual({ ok: true, row });
+      expect(await store.consume("q1", ["slack:UREQ"])).toEqual({ ok: false, refused: "used" });
     });
   });
 }
@@ -136,17 +170,26 @@ contract("WorkerConfirmationStore over a scripted object", () => {
       });
       return answer({ ok: true, expiresAt });
     }
-    const id = b.id as string;
     const actorIds = b.actorIds as string[];
-    const stored = rows.get(id);
-    if (!stored) return answer({ refused: "used" });
+    // The cancel-by-thread route: the thread's row under the same requester check.
+    const id =
+      path === "/config/confirmations/cancel-by-thread"
+        ? [...rows.entries()].find(([, r]) => r.threadKey === b.threadKey)?.[0]
+        : (b.id as string);
+    const stored = id === undefined ? undefined : rows.get(id);
+    if (id === undefined || !stored) return answer({ refused: "used" });
     if (path === "/config/confirmations/consume" && stored.expiresAt <= clock()) {
       rows.delete(id);
-      return answer({ refused: "expired" });
+      return answer({ refused: "expired", row: { id, ...stored } });
     }
-    if (!actorIds.includes(stored.requester)) return answer({ refused: "foreign" });
+    if (!actorIds.includes(stored.requester))
+      return answer(
+        path === "/config/confirmations/consume"
+          ? { refused: "foreign", row: { id, ...stored } }
+          : { refused: "foreign" },
+      );
     rows.delete(id);
-    return answer(path === "/config/confirmations/cancel" ? { ok: true } : { row: { id, ...stored } });
+    return answer(path === "/config/confirmations/consume" ? { row: { id, ...stored } } : { ok: true });
   };
   return {
     store: new WorkerConfirmationStore({ baseUrl: "https://memory.test/", token: "tok", fetch: fetchImpl }),
@@ -213,6 +256,33 @@ describe("WorkerConfirmationStore (the ConfigDO confirmations client)", () => {
     });
     expect(await refusing.store.consume("c1", ["slack:UOTHER"])).toEqual({ ok: false, refused: "foreign" });
     expect(await refusing.store.cancel("c1", ["slack:UOTHER"])).toEqual({ ok: false, refused: "used" });
+    // A refusal beside which the object still names the row (expired, foreign)
+    // answers the row too, so the click's refusal can be recorded; a malformed
+    // row beside a refusal is dropped, never a thrown consume.
+    const refusingWithRow = fake({
+      "/config/confirmations/consume": (b) => ({
+        refused: "expired",
+        row: {
+          id: b.id,
+          threadKey: "slack:CX:1.0",
+          requester: "slack:UREQ",
+          expiresAt: 4_200_000,
+          body: pending("c1"),
+        },
+      }),
+    });
+    expect(await refusingWithRow.store.consume("c1", ["slack:UREQ"])).toEqual({
+      ok: false,
+      refused: "expired",
+      row: { ...pending("c1"), expiresAt: 4_200_000 },
+    });
+    const refusingMalformedRow = fake({
+      "/config/confirmations/consume": () => ({ refused: "foreign", row: { body: { command: 7 } } }),
+    });
+    expect(await refusingMalformedRow.store.consume("c1", ["slack:UOTHER"])).toEqual({
+      ok: false,
+      refused: "foreign",
+    });
     const malformed = fake({
       "/config/confirmations/consume": () => ({ row: { id: "c1", body: { command: 7 } } }),
       "/config/confirmations/put": () => ({ ok: true }),
@@ -255,6 +325,24 @@ describe("the offer's words and the stored message", () => {
     );
   });
 
+  it("renderOffer on a question's offer reads as the question the renderer would have typed: the sentence, the marker, the line as code, the evidence", () => {
+    expect(
+      renderOffer({
+        id: "q1",
+        line: "agent:ship repo:acme/api fix it",
+        risk: "",
+        footer: "",
+        expiresAt: 1,
+        question: {
+          text: "acme/api is not onboarded here.",
+          evidence: "acme/api is one edit away from acme/apj, which is onboarded",
+        },
+      }),
+    ).toBe(
+      "acme/api is not onboarded here.\nDid you mean:\n`agent:ship repo:acme/api fix it`\n\nacme/api is one edit away from acme/apj, which is onboarded",
+    );
+  });
+
   it("confirmationMessageOf keeps the identity, thread and relay fields the typed path reads and drops the sentence's attachments", () => {
     const full: IncomingMessage = {
       ...message,
@@ -284,5 +372,31 @@ describe("the offer's words and the stored message", () => {
     expect(isConfirmation({ ...row, message: { userId: "slack:U" } })).toBe(false);
     expect(isConfirmation({ ...row, expiresAt: "soon" })).toBe(false);
     expect(isConfirmation(null)).toBe(false);
+  });
+
+  it("a row stored before the union existed — no `kind` — still parses, as the routed write it was, with the kind stamped", () => {
+    // The pre-change fixture: yesterday's stored shape, byte for byte.
+    const { kind: _kind, ...old } = pending("c1");
+    expect(parsePendingConfirmation(old)).toEqual(pending("c1"));
+    expect(parseConfirmation({ ...old, expiresAt: 5 })).toEqual({ ...pending("c1"), expiresAt: 5 });
+    // A kind no store writes is refused, never misread as either shape.
+    expect(parsePendingConfirmation({ ...old, kind: "other" })).toBeUndefined();
+    // A redispatch row needs its own fields, not the routed write's.
+    expect(parsePendingConfirmation({ ...old, kind: "redispatch" })).toBeUndefined();
+    expect(
+      parsePendingConfirmation({ kind: "redispatch", id: "q1", message, line: "l", evidence: "e", code: "c" }),
+    ).toEqual({ kind: "redispatch", id: "q1", message, line: "l", evidence: "e", code: "c" });
+  });
+});
+
+describe("a store written before the union existed", () => {
+  it("FileConfirmationStore reads a file whose rows carry no `kind` and answers them as routed writes", async () => {
+    const { clock } = withClock();
+    const path = join(mkdtempSync(join(tmpdir(), "swb-confirmations-old-")), "confirmations.json");
+    const { kind: _kind, ...old } = pending("c1");
+    writeFileSync(path, JSON.stringify({ confirmations: [{ ...old, expiresAt: clock() + TTL }] }));
+    const store = new FileConfirmationStore(path, { clock });
+    const consumed = await store.consume("c1", ["slack:UREQ"]);
+    expect(consumed).toEqual({ ok: true, row: { ...pending("c1"), expiresAt: clock() + TTL } });
   });
 });

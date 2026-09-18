@@ -9,37 +9,66 @@ organization: acme
 
 providers:
   anthropic:
-    type: anthropic
+    wire: anthropic-messages
     apiKeyEnv: ANTHROPIC_API_KEY
-  # OpenAI itself runs on the same compatible adapter: any preset's model may
-  # be openai/<model-id> anywhere a model is accepted. The adapter speaks Chat
-  # Completions, not the Responses API, sends no reasoning control (our effort
-  # tiers do not reach these models), and meters tokens without pricing them.
-  # A first-class OpenAI block is a plan's business, not this file's.
+  # OpenAI itself runs on its Responses API (record 0052): every first-party
+  # OpenAI card in pi's registry is `openai-responses`, OpenAI recommends the
+  # wire for new projects, and its chat route loses tool calling with any
+  # effort above `none` from GPT-5.4. The proxy serves the wire at
+  # `/v1/responses` — a run on this block is pinned and metered like any other.
+  # `type: openai-compatible` keeps loading as `wire: openai-chat` for one release.
   openai:
-    type: openai-compatible
+    wire: openai-responses
     baseUrl: https://api.openai.com/v1
     apiKeyEnv: OPENAI_API_KEY
   # groq:
-  #   type: openai-compatible
+  #   wire: openai-chat
   #   baseUrl: https://api.groq.com/openai/v1
   #   apiKeyEnv: GROQ_API_KEY
-  # OpenRouter: one key, many vendors' models, on the same compatible adapter.
-  # Its model ids already carry the vendor, so any preset's model may be
-  # openrouter/<vendor>/<model> — e.g. openrouter/anthropic/claude-sonnet-4:
+  # OpenRouter: one key, many vendors' models, an aggregator (`vendor: model`
+  # reads the vendor off the model id's first segment, so the card is per block
+  # AND vendor: a tier the OpenRouter file refuses may be native direct).
+  # `catalog: openrouter` names the pi registry file its cards come from; a
+  # block named unlike its catalog still reads that file. Any preset's model
+  # may be openrouter/<vendor>/<model> — e.g. openrouter/anthropic/claude-sonnet-4:
   # the first slash names this block, the rest is the model id passed through.
   # OPENROUTER_API_KEY is read at the first model call, never at load, so
   # without it every other block runs as today and only a run on this one
-  # fails, by that name. Effort tiers, documents and prompt caching ride the
-  # compatible adapter as far as it carries them: pi applies its OpenRouter
-  # rules (prompt-cache markers included); a document becomes a text note.
-  # `switchboard init` keeps this block only with --openrouter-key.
+  # fails, by that name. `switchboard init` keeps this block only with
+  # --openrouter-key.
   openrouter:
-    type: openai-compatible
+    wire: openai-chat
+    vendor: model
+    catalog: openrouter
     baseUrl: https://openrouter.ai/api/v1
     apiKeyEnv: OPENROUTER_API_KEY
+    # The operator's layer over the registry card: what a run needs that no
+    # layer names goes out unvouched (and a note says so on the record) until
+    # an override like this pins it. `providers check` (a later unit) reads the
+    # provider's own endpoint to fill these in.
+    # models:
+    #   deepseek/deepseek-v4.1-flash:
+    #     window: 1048576
+    #     capField: max_tokens
+    #     levels:
+    #       high: high
+    #       xhigh: xhigh
+    #     inputs:
+    #       image: true
+    #     cache: automatic
+    #     # The answer shapes the card takes — a forced tool call, the one-JSON-
+    #     # object text contract, or both (absent assumes both). The intake gate
+    #     # refuses at load a card declaring neither under its classify default.
+    #     answers: ["tool", "text"]
+    # A passthrough is merged into the request body on the wires whose adapter
+    # takes one — a vendor-only feature such as OpenRouter's routing, never a
+    # control: it is not decided, not noted and not in the matrix, and a wrong
+    # one surfaces as the provider's own error on the first turn.
+    # passthrough:
+    #   provider:
+    #     sort: throughput
   # local:
-  #   type: openai-compatible
+  #   wire: openai-chat
   #   baseUrl: http://localhost:11434/v1   # Ollama
 
 defaults:
@@ -238,7 +267,7 @@ execution:
   #   baseUrl: https://switchboard-resident.<account>.workers.dev
   #   tokenEnv: RESIDENT_OPERATOR_TOKEN  # operator bearer secret (default)
   #   adminTokenEnv: RESIDENT_ADMIN_TOKEN # admin bearer for `repo ...` commands (default)
-  #   probeTimeoutMs: 2000               # /status probe budget; timeout = not warm
+  #   probeTimeoutMs: 8000               # /status probe deadline; a miss = not warm for that dispatch, never an outage
 
 # Where per-conversation agent workspaces are created (local execution only).
 # Under docker compose this directory is a named volume, so checkouts survive a restart.
@@ -349,7 +378,7 @@ workspaceDir: ./workspaces
 # `ship` fails the load by name.
 # ship:
 #   maxRounds: 3      # review rounds per unit
-#   maxMinutes: 120   # the ship preset's wall-clock budget in minutes (the registry's default)
+#   maxMinutes: 240   # the ship preset's wall-clock budget in minutes (the registry's default)
 
 # Which harness each preset's runs are driven by, deployment-wide
 # (docs/reference/specs/harness.md item 8): a mapping of preset to a harness's
@@ -420,6 +449,26 @@ workspaceDir: ./workspaces
 #   auto: false
 #   model: anthropic/claude-haiku-4-5
 #   answer: text
+
+# The thread-reply intake gate (docs/decisions/0058-a-thread-reply-is-read-before-it-is-answered-intake-decides-whether-the-bot-was-addressed.md;
+# docs/reference/specs/routing-and-config.md item 27). How an unmentioned reply
+# in a channel thread the bot is part of is treated — NOTHING CALLS THE GATE
+# YET; the Slack wiring lands in a later release, and until then behavior is
+# unchanged whatever this block says. `threadReplies`: `classify` (the code's
+# default — one cheap model turn decides whether the bot was addressed; a
+# silent reply then gets no reaction, no card and no run), `mention` (only a
+# mention is answered; an unmentioned reply is silent with a receipt and no
+# model call) or `always` (today's answer-every-reply path, byte for byte).
+# Also settable per channel and per user: `intake: { threadReplies: <mode> }`
+# on a `channels.<id>` or `users.<id>` scope, user over channel over here.
+# `model` is the verdict's model; default `routing.model`, else
+# `defaults.models.general`. A mention, a DM and a top-level post never pass
+# through the gate in any mode. A model whose operator card (`providers.<p>.
+# models.<id>.answers`) declares it answers neither a forced tool call nor the
+# text contract is refused at load when the default mode is `classify`.
+# intake:
+#   threadReplies: classify
+#   model: anthropic/claude-haiku-4-5
 
 # Linked threads (docs/decisions/0037-a-linked-thread-is-quoted-not-joined.md;
 # docs/reference/specs/routing-and-config.md item 22). Off by default. On, a
@@ -511,6 +560,16 @@ workspaceDir: ./workspaces
 #   catchUp:
 #     enabled: true
 #     windowMinutes: 30
+#   # The apps whose relay footer — `Sent by Claude in <#C…> on behalf of <@U…> ·
+#   # <permalink>`, appended by the Claude Slack app to a post it makes from a
+#   # Claude Code session — names the person the run is for and billed to
+#   # (docs/reference/specs/slack-channel.md item 13). By Slack bot id: the
+#   # `bot_id` on the app's messages, the `B…` a run record's `postedBy:
+#   # slack:bot:B…` carries. The footer is message text any app can write, so
+#   # it is read only from an app listed here; from any other app the app itself
+#   # is the requester, footer or not. Absent or empty: no footer is honoured.
+#   relayApps:
+#     - B0123ABCDE
 
 # Where chat-set runtime overrides (`config set`, `config instructions`, `config clear`)
 # persist (docs/reference/specs/routing-and-config.md item 12). Without this block they go to

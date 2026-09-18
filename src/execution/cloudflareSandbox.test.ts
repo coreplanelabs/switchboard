@@ -7,7 +7,11 @@ import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ExecCapacityError, ExecInfraError } from "./executor.js";
 import {
   FLEET_BUSY_WAIT_MAX_MS,
+  RUNTIME_BUSY_WAIT_MAX_MS,
   SANDBOX_START_WAIT_MAX_MS,
+  runtimeBusyAnswer,
+  runtimeBusyExecAnswer,
+  runtimeBusyMessage,
   runtimeUnreachableAnswer,
   runtimeUnreachableExecAnswer,
   runtimeUnreachableMessage,
@@ -831,5 +835,133 @@ describe("CloudflareSandboxExecutor seed", () => {
   it("an answer without a verdict is infra", async () => {
     stubFetch({ ok: true });
     await expect(new CloudflareSandboxExecutor(OPTS).seed(seed)).rejects.toThrow(/\/seed answered without a verdict/);
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 28 — a container that did not
+// accept the connection is waited on like a full fleet: the identical request
+// re-sent on a denser ladder, inside the operation's own budget.
+describe("CloudflareSandboxExecutor runtime-busy wait", () => {
+  const BUSY_EXEC = runtimeBusyExecAnswer(
+    runtimeBusyMessage({
+      containerId: "c1",
+      cause: "Container is taking too long to accept the connection; the application could be overwhelmed with load",
+    }),
+  );
+  const OK = { stdout: "alive", stderr: "", exitCode: 0 };
+
+  function scriptedFetch(responses: Array<{ status?: number; body: unknown }>) {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      const r = responses[Math.min(calls.length - 1, responses.length - 1)];
+      return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
+    });
+    vi.stubGlobal("fetch", fn);
+    return { fn, calls };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("re-sends the SAME request after 3 s, 5 s, then 10 s while the container refuses the connect, and returns the eventual result", async () => {
+    const { calls } = scriptedFetch([{ body: BUSY_EXEC }, { body: BUSY_EXEC }, { body: BUSY_EXEC }, { body: OK }]);
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs: async () => ({ GH_TOKEN: "ghs_x" }) });
+    const p = ex.exec("kill -0 44 && echo alive", { timeoutMs: 60_000 });
+    void p.then(
+      () => undefined,
+      () => undefined,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(calls).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(calls).toHaveLength(4);
+    await expect(p).resolves.toBe("alive");
+    for (const c of calls) {
+      expect(String(c.init.body)).toBe(String(calls[0].init.body));
+      expect(c.init.headers).toEqual(calls[0].init.headers);
+    }
+    expect(sentBody(calls[3])).toEqual({
+      command: "kill -0 44 && echo alive",
+      timeoutMs: 60_000,
+      env: { GH_TOKEN: "ghs_x" },
+    });
+  });
+
+  it("gives up once the wait reaches the command's own budget with ExecCapacityError naming the refusal, never ExecInfraError", async () => {
+    const { calls } = scriptedFetch([{ body: BUSY_EXEC }]);
+    const outcome = new CloudflareSandboxExecutor(OPTS)
+      .exec("tail -c +1 log", { timeoutMs: 60_000 })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecCapacityError);
+    expect(err).not.toBeInstanceOf(ExecInfraError);
+    expect((err as Error).message).toBe(
+      "sandbox busy — the thread's container did not accept a connection within 60s (the platform refused every connect of the wait; a command saturating its cores is one cause, an idle container has met it too); retry",
+    );
+    // 3 + 5 + 10×5 + 2 (clipped to the budget) = 60 s → 8 waits, 9 sends, then no more
+    expect(calls).toHaveLength(9);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toHaveLength(9);
+  });
+
+  it("never waits longer than RUNTIME_BUSY_WAIT_MAX_MS (5 min) even for a 20-minute command", async () => {
+    const { calls } = scriptedFetch([{ body: BUSY_EXEC }]);
+    const outcome = new CloudflareSandboxExecutor(OPTS)
+      .exec("npm run verify", { timeoutMs: 20 * 60_000 })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(RUNTIME_BUSY_WAIT_MAX_MS);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecCapacityError);
+    expect((err as Error).message).toContain("within 300s");
+    const sends = calls.length;
+    await vi.advanceTimersByTimeAsync(15 * 60_000);
+    expect(calls).toHaveLength(sends);
+  });
+
+  it("a /read answered HTTP 503 with reason runtime-busy is the same wait", async () => {
+    const { calls } = scriptedFetch([
+      { status: 503, body: runtimeBusyAnswer(runtimeBusyMessage({ containerId: "c1", cause: "x" })) },
+      { body: { content: "hello" } },
+    ]);
+    const p = new CloudflareSandboxExecutor(OPTS).readFile("a.txt");
+    void p.then(
+      () => undefined,
+      () => undefined,
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(p).resolves.toBe("hello");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("an OLD Worker's bare platform text (no reason) is still ExecInfraError after exactly one send — the token decides, never the words", async () => {
+    const { calls } = scriptedFetch([
+      {
+        body: {
+          error:
+            "Container is taking too long to accept the connection; the application could be overwhelmed with load",
+          stdout: "",
+          stderr: "…",
+          exitCode: 127,
+        },
+      },
+    ]);
+    const outcome = new CloudflareSandboxExecutor(OPTS).exec("echo hi", { timeoutMs: 60_000 }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const err = await outcome;
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("answered");
+    expect(calls).toHaveLength(1);
   });
 });

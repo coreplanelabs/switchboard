@@ -62,7 +62,7 @@ const planAnswer = (
       merge,
       repo: "acme/api",
       base: "main",
-      caps: { maxRounds: 2, maxMinutes: 120 },
+      caps: { maxRounds: 2, maxMinutes: 240 },
       units,
       ...extra,
     },
@@ -236,9 +236,9 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
         unit: "U10",
         step: "U10/0/coding",
         preset: "coding",
-        // The coding preset's 45 clipped to the 45-minute wall clock minus the
-        // loop's reserve (two review rounds and the merge poll, 11 min).
-        budget: 45,
+        // The coding preset's whole 90: the plan's 240-minute wall clock minus
+        // the loop's reserve (two reviews, a fix and the merge, 44 min) holds it.
+        budget: 90,
         brief: { kind: "contract", unit: "U10", rebase: { branch: "plan/fixture/u10", onto: "main" } },
       },
       {
@@ -495,6 +495,63 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(end.ending.report).toContain("names no base branch");
   });
 
+  it("a unit whose scope already landed ends already_landed through the parse — the pr-check's `aheadOfBase` and the record's `landed` list reach the machine — the unit-end carries the report naming the landing, its dependents run on the base that carries it, and the plan finishes completed", async () => {
+    const LANDED = { what: "the empty state", where: "https://github.com/acme/api/pull/3377" };
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U11/0/coding/wait/1": "event",
+      "U11/1/review/wait/1": "event",
+    });
+    const b = bot({
+      plan: [planAnswer([row("U10"), row("U11", { dependsOn: ["U10"] })])],
+      "unit-start": [started("U10"), started("U11", T0 + 8 * MIN)],
+      branch: [branched("U10"), branched("U11", T0 + 8 * MIN)],
+      spawn: [spawned("run-c0"), spawned("run-c1", T0 + 8 * MIN), spawned("run-r1", T0 + 18 * MIN)],
+      "read-record": [
+        record(
+          {
+            id: "run-c0",
+            finished: true,
+            status: "completed",
+            finalReply: "Already on main via pull request 3377.",
+            handoff: true,
+            pushed: [{ ref: "plan/fixture/u10", sha: HEAD }],
+            handoffLists: { deviations: [], followUps: [], unproven: [], landed: [LANDED] },
+          },
+          T0 + 8 * MIN,
+        ),
+        codingDone("run-c1", T0 + 18 * MIN),
+        reviewApproved("run-r1", T0 + 28 * MIN),
+      ],
+      "pr-check": [
+        prNone(),
+        ok({ ok: true, state: "none", aheadOfBase: 0 }, T0 + 8 * MIN),
+        prNone(T0 + 8 * MIN),
+        prOpen(T0 + 18 * MIN),
+      ],
+      round: Array.from({ length: 8 }, () => acked()),
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 29 * MIN)],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 8 * MIN), ok({ ok: true, told: true }, T0 + 29 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 29 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "already_landed", U11: "merged" });
+    expect(summary.outcome).toBe("completed");
+    const [end] = b.of("unit-end") as Array<{
+      unit: string;
+      ending: { kind: string; report: string };
+      codingRunId?: string;
+    }>;
+    expect(end.unit).toBe("U10");
+    expect(end.ending.kind).toBe("already_landed");
+    expect(end.ending.report).toContain(LANDED.where);
+    expect(end.ending.report).not.toContain("compare");
+    expect(end.codingRunId).toBe("run-c0");
+    // No renewal segment was written for a unit with nothing to do.
+    expect(end).not.toHaveProperty("segment");
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
+  });
+
   it("the merge's pending wait: checks still running answer pending, the runner waits on the checks-settled event at the approved head under a bounded timeout and asks again under the next step name, and a merge GitHub refuses ends the unit merge_refused with the refusal in its report; a task string's ship branch is a person's merge — the machine ends merge-ready and never asks", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({
@@ -562,7 +619,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
         merge: "person",
         repo: "acme/api",
         base: "main",
-        caps: { maxRounds: 2, maxMinutes: 120 },
+        caps: { maxRounds: 2, maxMinutes: 240 },
         units,
       };
       return bot({
@@ -611,7 +668,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
               planId: "fixture",
               repo: "acme/api",
               base: "main",
-              caps: { maxRounds: 2, maxMinutes: 120 },
+              caps: { maxRounds: 2, maxMinutes: 240 },
               units,
             })
           : planAnswer(units, T0, merge);
@@ -893,16 +950,15 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     ]);
     expect(s.names().some((n) => /\/fix\b/.test(n))).toBe(false);
     expect(b.of("unit-start")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10" }]);
-    // The budgets are the presets' own clipped to the plan's 45-minute wall clock:
-    // 25 left at the findings step (T0 + 20) minus the fix reserve (the re-review
-    // and the merge poll, 8 min — never the round-0 child's 11), 15 at the
-    // re-review (T0 + 30).
+    // The budgets are the presets' own: at the findings step (T0 + 20) the plan's
+    // 240 leaves 220 minus the fix reserve (the re-review and the merge, 18 min —
+    // never the round-0 child's 44), so the whole 90; the re-review its whole 25.
     expect(b.of("spawn")[2]).toEqual({
       parentInstanceId: INSTANCE,
       unit: "U10",
       step: "U10/1/findings",
       preset: "coding",
-      budget: 45,
+      budget: 90,
       brief: { kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-r1" },
     });
     expect(b.of("spawn")[3]).toEqual({
@@ -1052,13 +1108,13 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
         ok: true,
         repo: "acme/api",
         base: "main",
-        caps: { maxRounds: 2, maxMinutes: 120 },
+        caps: { maxRounds: 2, maxMinutes: 240 },
       },
       {
         ok: true,
         repo: "acme/api",
         base: "main",
-        caps: { maxRounds: 2, maxMinutes: 120 },
+        caps: { maxRounds: 2, maxMinutes: 240 },
         units: [{ unit: "U10" }],
       },
       { ok: true, repo: "acme/api", base: "main", units: [row("U10")] },
@@ -1092,7 +1148,48 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(readBotAnswer(500, "x".repeat(400))).toEqual({ ok: false, reason: `HTTP 500 — ${"x".repeat(200)}…` });
   });
 
-  it("transientRefusal: the answers the bot itself calls a passing condition — GitHub unavailable, no channel to rebuild the thread on, a unit not yet started — are a reason to retry the step; every other answer, refusals included, is the machine's to judge", () => {
+  it("a 409 not_host on unit-start, round, unit-end and finish — a bot generation that no longer hosts the parent — is a transient refusal the step re-asks under its policy, and the plan completes once the host answers; a 409 busy stays the machine's answer, not a retry", async () => {
+    const notHost = (at = T0): BotReply => ok({ ok: false, error: "not_host" }, at, 409);
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [notHost(), started("U10")],
+      "pr-check": [prNone(), prMerged(T0 + 10 * MIN)],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [
+        record(
+          {
+            id: "run-c0",
+            finished: true,
+            status: "completed",
+            finalReply: "Unit U10 is already done — nothing to ship this run.",
+            handoff: true,
+          },
+          T0 + 10 * MIN,
+        ),
+      ],
+      round: [notHost(), acked(), notHost(T0 + 10 * MIN), acked(T0 + 10 * MIN)],
+      "unit-end": [notHost(T0 + 10 * MIN), acked(T0 + 10 * MIN)],
+      finish: [notHost(T0 + 10 * MIN), acked(T0 + 10 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merged" });
+    expect(summary.outcome).toBe("completed");
+    // Each refused step was asked again under its own policy, not failed.
+    expect(s.attempts["U10/start"]).toBe(2);
+    expect(s.attempts["U10/note/1"]).toBe(2);
+    expect(s.attempts["U10/note/2"]).toBe(2);
+    expect(s.attempts["U10/end"]).toBe(2);
+    expect(s.attempts.finish).toBe(2);
+    // The same body without the bot's clock is not the bot's answer, as today.
+    expect(readBotAnswer(409, JSON.stringify({ ok: false, error: "not_host" }))).toEqual({
+      ok: false,
+      reason: "HTTP 409 — not_host",
+    });
+  });
+
+  it("transientRefusal: the answers the bot itself calls a passing condition — GitHub unavailable, no channel to rebuild the thread on, a unit not yet started, a bot that is not the host — are a reason to retry the step; every other answer, refusals included, is the machine's to judge", () => {
     expect(transientRefusal(answer({ ok: false, error: "github_unavailable", message: "HTTP 502" }, T0, 502))).toBe(
       "the bot answered github_unavailable: HTTP 502",
     );
@@ -1101,6 +1198,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "thread_failed",
     );
     expect(transientRefusal(answer({ ok: false, error: "unit_not_started" }, T0, 409))).toContain("unit_not_started");
+    expect(transientRefusal(answer({ ok: false, error: "not_host" }, T0, 409))).toBe("the bot answered not_host");
     expect(transientRefusal(answer({ ok: false, error: "busy" }, T0, 409))).toBeUndefined();
     expect(transientRefusal(answer({ ok: false, error: "agent_allowlist" }, T0, 403))).toBeUndefined();
     expect(transientRefusal(answer({ ok: false, error: "spawn_failed", message: "x" }, T0, 502))).toBeUndefined();
@@ -1120,25 +1218,25 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
           merge: "person",
           repo: "acme/api",
           base: "main",
-          caps: { maxRounds: 2, maxMinutes: 120 },
+          caps: { maxRounds: 2, maxMinutes: 240 },
           units: [row("U10")],
         }),
       ],
       "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0" })],
       branch: [ok({ ok: true })],
       spawn: [spawned("run-c0")],
-      "read-record": [codingDone("run-c0", T0 + 85 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 205 * MIN)],
       // The pre-check, then the round's check: the pull request is open at the child's head with 35 minutes
-      // left — the review holds 31 for the fix, the re-review and the merge, so it falls under its floor of 5.
-      "pr-check": [prNone(), prOpen(T0 + 85 * MIN)],
+      // left — the review holds 36 for the fix, the re-review and the merge, so it falls under its floor of 5.
+      "pr-check": [prNone(), prOpen(T0 + 205 * MIN)],
       round: [acked(), acked()],
       "unit-end": [acked()],
       finish: [acked()],
     });
     const summary = await runPlan(s.runner, b.client, INSTANCE);
     expect(summary.units).toEqual({ U10: "review_pending" });
-    // The coding child's directive is its carve: 120 minus the 39 held for two reviews, a fix and the merge leaves room for its whole 45.
-    expect(b.of("spawn")[0]).toMatchObject({ step: "U10/0/coding", preset: "coding", budget: 45 });
+    // The coding child's directive is its carve: 240 minus the 44 held for two reviews, a fix and the merge leaves room for its whole 90.
+    expect(b.of("spawn")[0]).toMatchObject({ step: "U10/0/coding", preset: "coding", budget: 90 });
     const [end] = b.of("unit-end") as Array<{
       ending: { kind: string; report: string };
       pr: unknown;
@@ -1148,7 +1246,7 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
     expect(end.pr).toEqual({ number: 7, url: PR_URL });
     expect(end.headSha).toBe(HEAD);
     expect(end.ending.report).toContain("⏳ Review pending");
-    expect(end.ending.report).toContain("Budget split (120 min):");
+    expect(end.ending.report).toContain("Budget split (240 min):");
   });
 
   it("a unit row carrying lastPush starts the attempt at the review round when the pre-check finds the open pull request still at that head: no branch and no coding child run again on the shipped pull request", async () => {
@@ -1161,7 +1259,7 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
           merge: "person",
           repo: "acme/api",
           base: "main",
-          caps: { maxRounds: 2, maxMinutes: 120 },
+          caps: { maxRounds: 2, maxMinutes: 240 },
           units: [row("U10", { lastPush: HEAD })],
         }),
       ],
@@ -1200,7 +1298,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
           ok: true,
           repo: "acme/api",
           base: "main",
-          caps: { maxRounds: 2, maxMinutes: 120 },
+          caps: { maxRounds: 2, maxMinutes: 240 },
           units: [
             row("task", {
               slug: "task",
@@ -1215,7 +1313,9 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
       // The merge_ready ending reads the facts once more AT THE APPROVED HEAD
       // (agent-ship item 9): auto-merge was off at entry and is on now.
-      "pr-check": [prOpen(T0 + 5 * MIN, { autoMergeEnabled: true })],
+      "pr-check": [
+        prOpen(T0 + 5 * MIN, { autoMergeEnabled: true, checks: { total: 2, pending: [], failed: ["ci / package"] } }),
+      ],
       round: [acked(), acked()],
       "unit-end": [ok({ ok: true, told: true }, T0 + 5 * MIN)],
       finish: [ok({ ok: true, runId: "run-parent" }, T0 + 5 * MIN)],
@@ -1236,7 +1336,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     ]);
     // The one pr-check is the ending's facts read at the approved head — no
     // pre-check ran (the resume path skips it).
-    expect(b.of("pr-check")).toEqual([{ parentInstanceId: "ship-run-s", unit: "task" }]);
+    expect(b.of("pr-check")).toEqual([{ parentInstanceId: "ship-run-s", unit: "task", checks: true }]);
     expect(b.of("branch")).toEqual([]);
     expect(b.of("spawn")).toEqual([
       {
@@ -1254,7 +1354,12 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       codingRunId?: string;
     }>;
     expect(end.ending.kind).toBe("merge_ready");
-    expect(end.ending.report).toContain(`✅ Merge-ready after 1 review round: ${PR_URL}`);
+    // The facts read asked for the checks at the approved head and one is red
+    // (record 0055): the report never calls the head merge-ready, while
+    // the machine's ending kind is unchanged and the auto-merge fact still rides.
+    expect(end.ending.report).toContain(`⚠️ Approved but not merge-ready after 1 review round: ${PR_URL}`);
+    expect(end.ending.report).toContain("CI is red at the approved head: ci / package");
+    expect(end.ending.report).not.toContain("✅ Merge-ready");
     expect(end.ending.report).toContain(
       "Auto-merge is on for this pull request: the approval merges it once checks pass.",
     );
@@ -1271,7 +1376,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
           ok: true,
           repo: "acme/api",
           base: "main",
-          caps: { maxRounds: 2, maxMinutes: 120 },
+          caps: { maxRounds: 2, maxMinutes: 240 },
           units: [
             row("task", {
               slug: "task",

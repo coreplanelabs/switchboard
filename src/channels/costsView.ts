@@ -7,8 +7,7 @@ import { NO_NAMES, namesOf, type NameDirectory } from "../core/names.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import { COSTS_OFF_MESSAGE, NoCostsSnapshotError, type CostsService, type CostsViewer } from "../core/costsService.js";
 import { nodeSseSink, SSE_HEADERS, SSE_PRELUDE, startSseHeartbeat, type SseSink } from "./liveView/sse.js";
-import type { ShellRenderer } from "./webShell.js";
-import { WEB_HTML_HEADERS } from "./webShell.js";
+import type { PageSender } from "./webShell.js";
 
 // Costs dash: an Access-gated, read-only browser view of what a group of
 // deployed pieces costs per day — `GET /costs` (first group), `/costs/<group>`,
@@ -173,7 +172,7 @@ const orNone = <T>(read: Promise<T>): Promise<T | null> =>
  */
 export function createCostsViewHandler(
   service: CostsService,
-  shell: ShellRenderer,
+  page: PageSender,
   opts: {
     /** Display names for the user and channel dimensions' keys (src/core/names.ts); absent → ids. */
     names?: NameDirectory;
@@ -241,19 +240,16 @@ export function createCostsViewHandler(
     const by = route.view === "daily" ? Promise.resolve(null) : orNone(byReport(route.view));
     Promise.all([orNone(service.report(group, days)), by])
       .then(([report, byReport]) => {
-        res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(
-          shell(ctx.actor, `${report?.label ?? group} spend`, {
-            page: "costs",
-            group,
-            report,
-            groups,
-            view: route.view,
-            ...(byReport ? { by: byReport } : {}),
-            snapshot: service.status(),
-            canSnapshot: canSnapshot(ctx.actor),
-          }),
-        );
+        page(req, res, 200, ctx.actor, `${report?.label ?? group} spend`, {
+          page: "costs",
+          group,
+          report,
+          groups,
+          view: route.view,
+          ...(byReport ? { by: byReport } : {}),
+          snapshot: service.status(),
+          canSnapshot: canSnapshot(ctx.actor),
+        });
       })
       .catch(failed);
     return true;

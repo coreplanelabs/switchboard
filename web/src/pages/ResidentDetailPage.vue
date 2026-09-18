@@ -113,7 +113,9 @@ const diskParts = computed(() => {
 <template>
   <AppShell :title="slug || 'Resident'" nav="residents">
     <template #leading>
-      <a class="back text-sm text-muted no-underline hover:text-primary" href="/residents">← All residents</a>
+      <RouterLink class="back text-sm text-muted no-underline hover:text-primary" to="/residents"
+        >← All residents</RouterLink
+      >
     </template>
 
     <section class="mt-4 first:mt-0">

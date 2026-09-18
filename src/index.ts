@@ -22,7 +22,7 @@ import { createMcpHandler } from "./channels/mcp.js";
 import { FAVICON_ICO_SVG, createLiveViewHandler } from "./channels/liveView.js";
 import { loadWebAssets, webDistDir } from "./channels/webAssets.js";
 import { PACKAGE_ROOT, packageVersion } from "./packageRoot.js";
-import { makeShellRenderer } from "./channels/webShell.js";
+import { makePageSender } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createWebChatHandler } from "./channels/web.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
@@ -45,7 +45,8 @@ import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
 import { buildConfirmationStore } from "./core/confirmations.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
-import { createViewAsHandler, viewAsFromCookie } from "./channels/viewAs.js";
+import { createViewAsHandler, peopleSource, viewAsFromCookie } from "./channels/viewAs.js";
+import { RUN_LIST_MAX_LIMIT } from "./core/runRecord.js";
 import { resolvePersonByEmail, resolveUserEmail, resolveUserName } from "./channels/slack/lookups.js";
 import { slackNames } from "./channels/slackNames.js";
 import { NO_NAMES, type NameDirectory } from "./core/names.js";
@@ -80,6 +81,7 @@ import {
   createModelProxyHandler,
   isModelProxyPath,
   OPENAI_CHAT_COMPLETIONS_PATH,
+  OPENAI_RESPONSES_PATH,
 } from "./channels/modelProxy.js";
 import { RunBearerStore } from "./core/modelProxy/runBearers.js";
 import { PiHarness } from "./core/harness/pi/piHarness.js";
@@ -101,9 +103,10 @@ import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { createAdminCoordinatorHandler, isCoordinatorAdminPath } from "./channels/adminCoordinator.js";
 import { createGithubWebhookHandler, GITHUB_WEBHOOK_PATH } from "./channels/githubWebhook.js";
 import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
-import { shimWorkflowSender } from "./core/coordinator/instancesClient.js";
+import { processShimOptions, shimWorkflowSender } from "./core/coordinator/instancesClient.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
 import {
+  commitsOverBase,
   createBranchRef,
   fetchCommitChecks,
   fetchPullRequestFacts,
@@ -447,6 +450,10 @@ export async function runBot(): Promise<void> {
       config.config.opencode?.compaction ? { compaction: config.config.opencode.compaction } : {},
     ),
   };
+  // The Workflow sender over the shim's event relay (http-ingress item 12,
+  // record 0051's nudge): built once — the check-run intake's checks-settled send
+  // and the dispatcher's unit nudge go through the same door.
+  const workflowSender = shimWorkflowSender(processShimOptions());
   const deps: CoreDeps = {
     config,
     completions,
@@ -469,6 +476,7 @@ export async function runBot(): Promise<void> {
     runHistoryWriter,
     // The coordinator's instance records and unit rows (run-history items 49 and 50): what the ship branch writes when it hands an `agent:ship` request to the plan runner.
     coordinatorInstances,
+    workflow: workflowSender,
     runStore,
     threadsElsewhere,
     runLedger,
@@ -784,10 +792,7 @@ export async function runBot(): Promise<void> {
     // in-memory on purpose — a restart loses it and the driver's bounded merge
     // wait re-asks the door on its own cadence.
     const mergeWaits = createMergeWaitRegistry();
-    const checksWorkflow = shimWorkflowSender({
-      baseUrl: process.env.PUBLIC_BASE_URL,
-      tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
-    });
+    const checksWorkflow = workflowSender;
     const githubWebhook = createGithubWebhookHandler({
       secret: processSecrets.get("GITHUB_WEBHOOK_SECRET")?.reveal(),
       checksSettled: async (repo, headSha) => {
@@ -810,6 +815,10 @@ export async function runBot(): Promise<void> {
       // The recover path (agent-ship item 15): a coding child that pushed and
       // then died has its pull request opened from the branch itself.
       openPullRequest,
+      // The round-0 fact (agent-ship item 12): a branch with no commits over
+      // the base, beside a handoff naming where the scope landed, ends the
+      // unit already_landed instead of aborting it.
+      commitsOverBase,
       // The App's GitHub reads for the plan, the specs, the rules and a unit's
       // board issue; the branch create; the reviews and the identity the merge
       // gate's "the verdict stands" question is answered from.
@@ -845,7 +854,7 @@ export async function runBot(): Promise<void> {
     // build it; local dev runs `npm run build` in web/ once, or points
     // SWITCHBOARD_WEB_DIST elsewhere).
     const webAssets = loadWebAssets(webDistDir(publicEnv(), PACKAGE_ROOT));
-    const shell = makeShellRenderer(webAssets.entry, capabilities);
+    const page = makePageSender(webAssets.entry, capabilities);
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin
     // /residents route live on every request with the same bearer the chat
@@ -857,7 +866,7 @@ export async function runBot(): Promise<void> {
     // live rows seed it and its `?stream=1` feed keeps it current.
     const residentsView = createResidentsViewHandler({
       client: residentAdminClient,
-      shell,
+      page,
       runs: defaultRunRegistry,
       trace: { config, spanLog },
     });
@@ -868,7 +877,7 @@ export async function runBot(): Promise<void> {
     // Costs dash: GET /costs (first group) + /costs/<group> (+ .json twins),
     // served from the snapshot built above. Access-gated below alongside /runs
     // and /residents.
-    const costsView = createCostsViewHandler(costsService, shell, { names });
+    const costsView = createCostsViewHandler(costsService, page, { names });
     const costsState = costs
       ? `GET /costs (${costsService.groups().join(",")}; LLM ${costs.llmOn ? "on" : "off"}; snapshot every ${costsCfg?.snapshot.everyHours ?? "?"} h)`
       : costsCfg
@@ -877,7 +886,7 @@ export async function runBot(): Promise<void> {
     // Delivery page: GET /delivery (first repository) + /delivery/<owner>/<name>
     // (+ .json twin). Reads GitHub and the viewer's own runs live per request;
     // gated below alongside /runs, /residents and /costs.
-    const deliveryView = createDeliveryViewHandler({ service: deliveryService, runs: runsService }, shell);
+    const deliveryView = createDeliveryViewHandler({ service: deliveryService, runs: runsService }, page);
     // Settings page: GET /settings and its tabs (record 0041). Every tab's seed
     // is the registry's answer to the same commands the CLI would run, invoked
     // as the viewer; the Installation tab projects the running config by allow-list.
@@ -896,7 +905,7 @@ export async function runBot(): Promise<void> {
         },
         capabilities,
       },
-      shell,
+      page,
     );
     // The web chat (record 0043, docs/reference/specs/web-chat.md): channel
     // adapter #5 at `/threads`. `POST /threads/<id>/send` dispatches the body as
@@ -909,7 +918,7 @@ export async function runBot(): Promise<void> {
       service: runsService,
       registry: defaultRunRegistry,
       commands,
-      shell,
+      page,
       capabilities,
       names,
       retention:
@@ -956,10 +965,22 @@ export async function runBot(): Promise<void> {
     // /docs* sends every caller to the project's published docs
     // (src/core/docsLink.ts): the site is the project's, not a feature an
     // installation deploys a copy of.
+    // The view-as picker's people (record 0053): everyone the grants table names and every
+    // requester in run history, named through the directory — computed off the request behind a
+    // cache the index reads, primed now so the first admin paint after startup already has them.
+    const viewAsPeople = peopleSource({
+      granted: () => config.grantedPeople(),
+      requesters: async () =>
+        (await runsService.listRuns({ status: "all", visibleTo: { kind: "all" }, limit: RUN_LIST_MAX_LIMIT })).runs,
+      name: personName,
+    });
+    void viewAsPeople.refresh();
     const liveView = createLiveViewHandler({
-      shell,
+      page,
       service: runsService,
       index: defaultRunRegistry,
+      // The view-as picker's people (record 0053): the cache `viewAsPeople` keeps.
+      people: () => viewAsPeople.current(),
       retention:
         capabilities.runHistory && runHistoryCfg
           ? { retentionDays: retentionPolicyOf(runHistoryCfg).retentionDays }
@@ -1244,7 +1265,7 @@ export async function runBot(): Promise<void> {
       // (~seconds) for an external prober to land inside the window itself.
       httpListeningAt = systemClock();
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + model proxy (POST ${ANTHROPIC_MESSAGES_PATH}, POST ${OPENAI_CHAT_COMPLETIONS_PATH}) + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${deliveryState} + GET /settings + GET /threads (+ POST /threads/<id>/send) + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + model proxy (POST ${ANTHROPIC_MESSAGES_PATH}, POST ${OPENAI_CHAT_COMPLETIONS_PATH}, POST ${OPENAI_RESPONSES_PATH}) + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${deliveryState} + GET /settings + GET /threads (+ POST /threads/<id>/send) + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       );
     });

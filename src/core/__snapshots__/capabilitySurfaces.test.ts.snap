@@ -86,7 +86,7 @@ exports[`capability surfaces — cloud-full > CLI catalogue 1`] = `
        switchboard help
 
 commands:
-  help show            — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+  help show            — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
   help commands        — Every chat command by group, the grammar, and the per-request directives.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
@@ -126,7 +126,7 @@ commands:
   schedule list        — Every scheduled job (cron, UTC), which Worker fires it, its next firing, and what its last firing did.
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. In \`registry\` mode it first copies the release's images its Workers lack into the account registry (what \`deploy images\` does). --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
-  deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
+  deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): refused while runs are in flight (waited out, then failed by name); done once /healthz answers with a later startedAt.
   deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
@@ -137,6 +137,7 @@ commands:
   delivery report      — Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written.
   costs by             — What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written.
   costs snapshot       — Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on.
+  providers check      — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each.
   artifacts lifecycle  — Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after \`artifacts.retentionDays\` (default 30), incomplete multipart uploads abort after one day — and read them back; \`--dry-run\` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token.
   artifacts check      — Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token."
 `;
@@ -165,6 +166,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "mcp.show",
   "memory.forget",
   "memory.list",
+  "providers.check",
   "repo.build",
   "repo.list",
   "repo.offboard",
@@ -212,6 +214,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "mcp_show",
   "memory_forget",
   "memory_list",
+  "providers_check",
   "repo_build",
   "repo_list",
   "repo_offboard",
@@ -240,7 +243,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
-• \`help show\` — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+• \`help show\` — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
 • \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
@@ -288,7 +291,9 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`delivery report\` — Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written.
 *costs*
 • \`costs by\` — What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written.
-• \`costs snapshot\` — Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on."
+• \`costs snapshot\` — Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on.
+*providers*
+• \`providers check\` — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each."
 `;
 
 exports[`capability surfaces — cloud-full > self-description block (the resident cap is the Worker's answer — 6 where there is a fleet) 1`] = `
@@ -339,7 +344,7 @@ exports[`capability surfaces — local-full > CLI catalogue 1`] = `
        switchboard help
 
 commands:
-  help show            — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+  help show            — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
   help commands        — Every chat command by group, the grammar, and the per-request directives.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
@@ -372,7 +377,7 @@ commands:
   mcp promote          — Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. In \`registry\` mode it first copies the release's images its Workers lack into the account registry (what \`deploy images\` does). --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
-  deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
+  deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): refused while runs are in flight (waited out, then failed by name); done once /healthz answers with a later startedAt.
   deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
@@ -381,6 +386,7 @@ commands:
   setup init           — The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run writes nothing and previews with secrets masked, existing files or not.
   contract render      — Render one plan unit's child contract — its section, the spec rows it names with their proof bindings, the repository's agent rules, the guards — as the \`## Contract\` block a coding prompt carries, and measure it.
   delivery report      — Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written.
+  providers check      — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each.
   artifacts lifecycle  — Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after \`artifacts.retentionDays\` (default 30), incomplete multipart uploads abort after one day — and read them back; \`--dry-run\` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token.
   artifacts check      — Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token."
 `;
@@ -407,6 +413,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "mcp.show",
   "memory.forget",
   "memory.list",
+  "providers.check",
   "repo.build",
   "repo.test",
   "runs.children",
@@ -445,6 +452,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "mcp_show",
   "memory_forget",
   "memory_list",
+  "providers_check",
   "repo_build",
   "repo_test",
   "runs_children",
@@ -466,7 +474,7 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
-• \`help show\` — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+• \`help show\` — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
 • \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
@@ -502,7 +510,9 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 *deploy*
 • \`deploy plan\` — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
 *delivery*
-• \`delivery report\` — Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written."
+• \`delivery report\` — Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written.
+*providers*
+• \`providers check\` — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each."
 `;
 
 exports[`capability surfaces — local-full > self-description block (the resident cap is the Worker's answer — 6 where there is a fleet) 1`] = `
@@ -553,7 +563,7 @@ exports[`capability surfaces — minimal > CLI catalogue 1`] = `
        switchboard help
 
 commands:
-  help show            — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+  help show            — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
   help commands        — Every chat command by group, the grammar, and the per-request directives.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
@@ -575,7 +585,7 @@ commands:
   repo build           — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
   deploy plan          — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
   deploy all           — Deploy production in the one supported order (memory → bot → resident → sandbox), waiting out preflights and each live gate — the bot's drain, the sandbox's image rollout and an \`echo ok\` probe — until the new containers are live. In \`registry\` mode it first copies the release's images its Workers lack into the account registry (what \`deploy images\` does). --affected deploys only the Workers whose inputs changed since what they serve — the release deploy.
-  deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.
+  deploy restart       — Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): refused while runs are in flight (waited out, then failed by name); done once /healthz answers with a later startedAt.
   deploy init          — Render every Worker's wrangler.jsonc from the wrangler.template.jsonc beside it and the deployment profile, and the project's docs site's from project.json — generated files, never hand-edited. --check compares without writing (the \`deploy:check\` gate).
   deploy secrets       — Put a Worker's secrets from the deployment profile's secretsSource (a directory of <NAME> files, or an op://Vault/Item): every name deploy/secrets.manifest.json lists for it, refused before any upload when a required value is absent. Values ride stdin into \`wrangler secret put\`; none is ever printed.
   deploy config        — Push the bot's config to the state Worker as the \`base\` document the bot reads at startup — from the profile's configSource (or --source), validated first. The running container keeps its config until \`deploy restart\`.
@@ -583,6 +593,7 @@ commands:
   env bootstrap        — Populate the agent's execution environment with a downstream service's UAT env vars from 1Password (dry-run unless --apply).
   setup init           — The one-command installer: write .env (mode 600) and config/config.yaml from the checked-in examples with the values given — flags first, prompts only on a terminal — and, with --cloudflare and --zone, deploy/profile.json plus every Worker's wrangler.jsonc; then load the config and say what is on and what to run next. Refuses to overwrite without --force; --dry-run writes nothing and previews with secrets masked, existing files or not.
   contract render      — Render one plan unit's child contract — its section, the spec rows it names with their proof bindings, the repository's agent rules, the guards — as the \`## Contract\` block a coding prompt carries, and measure it.
+  providers check      — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each.
   artifacts lifecycle  — Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after \`artifacts.retentionDays\` (default 30), incomplete multipart uploads abort after one day — and read them back; \`--dry-run\` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token.
   artifacts check      — Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token."
 `;
@@ -598,6 +609,7 @@ exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes 
   "deploy.plan",
   "help.commands",
   "help.show",
+  "providers.check",
   "repo.build",
   "repo.test",
   "runs.children",
@@ -624,6 +636,7 @@ exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
   "dispatch",
   "help_commands",
   "help_show",
+  "providers_check",
   "repo_build",
   "repo_test",
   "runs_children",
@@ -644,7 +657,7 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
-• \`help show\` — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+• \`help show\` — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
 • \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
@@ -664,7 +677,9 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 • \`repo test\` — Run the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
 • \`repo build\` — Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
 *deploy*
-• \`deploy plan\` — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why."
+• \`deploy plan\` — The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why.
+*providers*
+• \`providers check\` — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each."
 `;
 
 exports[`capability surfaces — minimal > self-description block (the resident cap is the Worker's answer — 6 where there is a fleet) 1`] = `
@@ -730,7 +745,7 @@ Steps:
   2. bot (switchboard) — deploy/cloudflare: npm run deploy — preflight (retry every 60s up to 10 min) — credential must pass \`wrangler containers list --json\` (Containers: Edit) — then wait until live (https://switchboard.example.com/healthz not draining + build.commit == HEAD)
      container shim — preflight refuses while runs are in flight; done only when the new container is live. A rotated bot secret needs no build: \`wrangler secret put\` alone leaves the running container on its old env — \`deploy restart\` restarts it on the current env
   3. resident (switchboard-resident) — deploy/cloudflare-resident: npm run deploy — preflight (retry every 60s up to 30 min) — needs one of RESIDENT_ADMIN_TOKEN / RESIDENT_OPERATOR_TOKEN / RESIDENT_READ_TOKEN — credential must pass \`wrangler containers list --json\` (Containers: Edit) and \`wrangler r2 bucket list\` (Workers R2 Storage: Edit)
-     per-repo DOs — preflight refuses while a resident has a run in flight or is provisioning (a refresh or restore mid-cycle only warns: it resumes after the swap)
+     per-repo DOs — the fleet is drained for the deploy when the drain bearer is present (new runs wait at their attach; the runs in flight finish), and the preflight refuses while a resident has a run in flight or is provisioning (a refresh or restore mid-cycle only warns: it resumes after the swap)
   4. sandbox (switchboard-sandbox) — deploy/cloudflare-sandbox: npm run deploy — needs SANDBOX_TOKEN — credential must pass \`wrangler containers list --json\` (Containers: Edit) — then wait until live (https://switchboard-sandbox.example.com/healthz build.commit == HEAD + every running switchboard-sandbox-switchboardsandbox instance on the app version + an /exec probe answers ok from one)
      per-thread exec proxy — stateless per run; done only when the Worker serves the commit, every running container is on the new image and an \`echo ok\` probe answers from one
 (dry run — nothing executed)"

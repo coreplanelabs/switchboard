@@ -29,6 +29,8 @@ import {
   DURABLE_INBOX_MAX_BYTES,
   durableInboxMessage,
   foldCarriedInbox,
+  foldThreadAttachments,
+  foldThreadEvents,
   followUpFromInbox,
   steerRun,
   type AdmissionContext,
@@ -178,9 +180,14 @@ function setup(
     ...(over.restartOf !== undefined ? { restartOf: over.restartOf } : {}),
     clock: () => NOW,
     root: trace.root,
-    refuse: async (outcome, fn) => {
+    refuse: async (refusal, side) => {
+      refusals.push(refusal.code);
+      await side?.();
+      await io.reply(refusal.text);
+    },
+    refuseSilently: async (outcome, side) => {
       refusals.push(outcome);
-      return fn();
+      return side();
     },
     admission,
     hooks,
@@ -930,5 +937,44 @@ describe("steerRun — a run steers a live run through the inbox a thread reply 
       await steerRun(deps, relayed, { runId: "run-open", threadKey: "slack:CX:10.0", agent: "general" }, "go on"),
     ).toMatchObject({ kind: "steered", where: "here" });
     expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UADMIN", postedBy: "slack:bot:B0CLAUDE" });
+  });
+});
+
+// Feature: record 0051's fold rule — the attributed join reused for a unit's thread
+// events: `<sender>: <text>` in arrival order, a dropped-attachments note kept.
+describe("foldThreadAttachments — the stored attachments as one message's images and documents", () => {
+  it("splits by media type in arrival order and adds neither key when there is nothing to carry", () => {
+    expect(
+      foldThreadAttachments([
+        { attachments: [{ mediaType: "image/png", data: "aGk=", name: "shot.png" }] },
+        {},
+        {
+          attachments: [
+            { mediaType: "text/plain", data: "bm90ZQ==" },
+            { mediaType: "image/jpeg", data: "eA==" },
+          ],
+        },
+      ]),
+    ).toEqual({
+      images: [
+        { mediaType: "image/png", data: "aGk=", name: "shot.png" },
+        { mediaType: "image/jpeg", data: "eA==" },
+      ],
+      documents: [{ mediaType: "text/plain", data: "bm90ZQ==" }],
+    });
+    expect(foldThreadAttachments([{ text: "x" } as { attachments?: never }])).toEqual({});
+  });
+});
+
+describe("foldThreadEvents — the attributed join of a unit's thread events", () => {
+  it("attributes each text to its sender (display name first), in the order given, and notes dropped attachments", () => {
+    expect(
+      foldThreadEvents([
+        { sender: "slack:UBOB", senderName: "bob", text: "also update the readme" },
+        { sender: "slack:UCARA", text: "and bump the version", attachmentsDropped: 2 },
+      ]),
+    ).toBe(
+      "bob: also update the readme\n\nslack:UCARA: and bump the version\n(2 attachments could not be carried and are not attached.)",
+    );
   });
 });

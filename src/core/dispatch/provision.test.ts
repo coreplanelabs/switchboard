@@ -196,9 +196,13 @@ function request(d: ProvisionDeps, text: string, agentName = "general") {
   });
   const admitted = new ThreadAdmission<DispatchFollowUp>().claim(THREAD, { agent: agent.name }).live;
   const refusals: string[] = [];
-  const refuse = async <T>(outcome: string, fn: () => Promise<T>) => {
-    refusals.push(outcome);
-    return fn();
+  const refusalTexts: string[] = [];
+  // The production wrap's shape (record 0054): the side work first, then the
+  // Refusal's sentence — captured here instead of rendered.
+  const refuse = async (refusal: { code: string; text: string }, side?: () => Promise<void>) => {
+    refusals.push(refusal.code);
+    await side?.();
+    refusalTexts.push(refusal.text);
   };
   return {
     message,
@@ -213,6 +217,7 @@ function request(d: ProvisionDeps, text: string, agentName = "general") {
     shell,
     admitted,
     refusals,
+    refusalTexts,
     refuse,
   };
 }
@@ -685,7 +690,7 @@ describe("budgetClipLabel — the card's budget line", () => {
   it("names the source when the plan runner hands a coding child a budget directive under the preset's own — the ship child's card line", () => {
     const coding = getAgent("coding");
     expect(budgetClipLabel(coding, { ...declaredProfile(coding), minutes: 28, boundedBy: "directive" }, 28)).toBe(
-      "budget 28 min (budget directive; preset asks 45)",
+      "budget 28 min (budget directive; preset asks 90)",
     );
   });
 
@@ -701,16 +706,16 @@ describe("budgetClipLabel — the card's budget line", () => {
     const coding = getAgent("coding");
     const clipped = { ...declaredProfile(coding), minutes: 45, boundedBy: "directive" as const };
     expect(budgetClipLabel(coding, clipped, 45, { coordinator: true })).toBe(
-      "budget 45 min (carved by the plan runner from the pipeline's remaining clock; preset asks 45)",
+      "budget 45 min (carved by the plan runner from the pipeline's remaining clock; preset asks 90)",
     );
     expect(budgetClipLabel(coding, clipped, 45, { coordinator: false })).toBe(
-      "budget 45 min (budget directive; preset asks 45)",
+      "budget 45 min (budget directive; preset asks 90)",
     );
     expect(
       budgetClipLabel(coding, { ...declaredProfile(coding), minutes: 30, boundedBy: "channel" }, undefined, {
         coordinator: true,
       }),
-    ).toBe("budget 30 min (channel boundary; preset asks 45)");
+    ).toBe("budget 30 min (channel boundary; preset asks 90)");
   });
 
   it("says when a directive narrowed nothing — alone against the preset, or beside the boundary that clipped tighter", () => {
@@ -769,7 +774,8 @@ describe("attachWorkspace — the workspace attach and the ask-once refusal", ()
     expect(out).toEqual({ kind: "refused", reason: "which_branch" });
     expect(r.refusals).toEqual(["which_branch"]);
     expect(JSON.stringify(closes)).toContain("which branch?");
-    expect(replies[0]).toMatch(/^🌿 Which branch of `acme\/api` should this thread work on\?/);
+    expect(r.refusalTexts[0]).toMatch(/^🌿 Which branch of `acme\/api` should this thread work on\?/);
+    expect(replies).toEqual([]);
   });
 });
 
@@ -1110,7 +1116,7 @@ describe("mintRunBearer — the run's model-proxy bearer", () => {
       runId: run.id,
       modelRef: "anthropic/coding-model",
       providerName: "anthropic",
-      providerType: "anthropic",
+      providerWire: "anthropic-messages",
       model: "coding-model",
       maxTokens: agent.maxTokens,
       maxTurns: agent.maxTurns,

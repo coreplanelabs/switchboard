@@ -12,6 +12,7 @@ import { CLOCK_BAN_EXEMPT, CLOCK_BAN_FILES, CLOCK_READS } from "./src/core/trace
 import { DURATION_BAN_EXEMPT, DURATION_BAN_FILES, DURATION_READS } from "./src/core/trace/durationReads.mjs";
 import DURATION_ALLOWLIST from "./src/core/trace/durationAllowlist.json" with { type: "json" };
 import { HOST_TOOLING_FILES, SECRET_ENV_EXEMPT, SECRET_ENV_FILES, secretEnvPlugin } from "./src/secretEnv.mjs";
+import { REFUSAL_FENCE_EXEMPT, REFUSAL_FENCE_FILES, refusalFencePlugin } from "./src/refusalFence.mjs";
 
 // The clock ratchet (docs/reference/specs/tracing.md item 8): production code reads the wall
 // clock only through the injected `clock()` — `src/core/trace/clock.ts` and the
@@ -118,6 +119,14 @@ export default tseslint.config(
     ignores: [...SECRET_ENV_EXEMPT],
     plugins: { secrets: secretEnvPlugin },
     rules: { "secrets/no-raw-env": ["error", { hostTooling: true }] },
+  },
+  {
+    // no-raw-refusal (record 0054, routing-and-config item 21): a producing
+    // module refuses through the seam — a Refusal, never a raw reply or throw.
+    files: [...REFUSAL_FENCE_FILES],
+    ignores: [...REFUSAL_FENCE_EXEMPT],
+    plugins: { refusals: refusalFencePlugin },
+    rules: { "refusals/no-raw-refusal": "error" },
   },
   prettier,
 );

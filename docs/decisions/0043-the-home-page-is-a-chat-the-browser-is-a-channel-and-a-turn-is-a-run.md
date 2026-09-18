@@ -163,6 +163,8 @@ Four PRs. (1) This record, `proposed`. (2) The page over fixtures: `web/src/page
 | Question | Owner | Resolves it | Before |
 |---|---|---|---|
 | Is a conversation switch a page load (house shape) or a client-side swap? | the maintainer | the fixture preview: if the reload reads as a flash, (4) adds the swap | PR 4 |
+
+*Amended 2026-09-17 (while proposed): the first question is resolved by [record 0056](0056-the-dashboard-navigates-in-place-a-page-is-one-view-one-seed-two-encodings.md), for every page at once rather than for this one: the maintainer asked for a single-page dashboard, so a conversation switch — like every section, tab and row — is an in-place navigation whose seed the router loads from the same `/threads/<conversation>` route, answered as JSON. The page itself is unchanged: it still mounts once per address from its seed, so nothing this record says about the transcript, the rail or the composer moves.*
 | Does the user tier resolve over the `self` set for every channel, or for `web:` alone? | record 0042's series | its second PR, where `self` reaches the config resolver | PR 3 |
 | Do 20 message reads fit the 200 ms seed budget on the state Worker (one read is unmeasured today)? | PR 3's author | the first live conversation past 20 runs, timed | PR 3 |
 

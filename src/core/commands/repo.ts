@@ -11,6 +11,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../commandRegistry.js";
+import type { CommandGuessHint } from "../refusal.js";
 import type { OperationResult, Operations, OpName } from "../operations.js";
 import {
   parseSlug,
@@ -22,6 +23,7 @@ import {
 import { NO_OP_COMMAND, NPM_FALLBACK_COMMANDS, detectCommands, type DetectedCommands } from "../repoToolchain.js";
 import { formatDiskGauge } from "../../execution/residentDiskBudget.js";
 import type { RepoInspector } from "../../execution/githubRepoInspect.js";
+import { nearMatch, type NearMatch } from "../nearMatch.js";
 import type { Span } from "../trace/types.js";
 
 // The `repo.*` registrations: the whole repo surface on
@@ -67,6 +69,12 @@ export interface RepoCommandDeps {
     inspect?: RepoInspector;
     /** The provisioning follow-up's clock (tests inject a no-op). */
     sleep?: (ms: number) => Promise<void>;
+    /** The installation's repositories, lowercased (`RestGithubApi.listRepos()`),
+     *  read before an onboard mints (record 0054) so a name the App cannot see
+     *  asks its own question instead of reaching GitHub's 422. Undefined when
+     *  the list cannot be read: the onboard proceeds to the mint as today.
+     *  Injectable so tests assert the guess without a network call. */
+    installationRepos?: () => Promise<string[] | undefined>;
   };
 }
 
@@ -117,10 +125,19 @@ async function call<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** A non-success from the resident, as a registry error: 404 → `not_found`,
- *  409/429 → `conflict`, 400 → `invalid_input`, anything else → `unavailable`;
- *  the message carries the status and the resident's own `error` text. */
+/** A non-success from the resident, as a registry error. The Worker's own
+ *  `cause` decides when it carries one (record 0054): a repository the App
+ *  cannot see is `policy` — the admin's to fix — a bad ref or name is
+ *  `request`, and the machinery's own failure is `system`. A body without a
+ *  `cause` keeps today's status mapping (404 → `not_found`, 409/429 →
+ *  `conflict`, 400 → `invalid_input`, anything else → `unavailable`); the
+ *  message carries the status and the resident's own `error` text. */
 function residentFailure(r: ResidentAdminResponse, extra: string[] = []): CommandError {
+  const message = [`HTTP ${r.status}: ${String(r.data.error ?? "unknown error")}`, ...extra].join("\n");
+  const cause = r.data.cause;
+  if (cause === "policy") return new CommandError("unauthorized", message, "policy");
+  if (cause === "request") return new CommandError("invalid_input", message, "request");
+  if (cause === "system") return new CommandError("unavailable", message, "system");
   const code =
     r.status === 404
       ? "not_found"
@@ -129,7 +146,68 @@ function residentFailure(r: ResidentAdminResponse, extra: string[] = []): Comman
         : r.status === 400
           ? "invalid_input"
           : "unavailable";
-  return new CommandError(code, [`HTTP ${r.status}: ${String(r.data.error ?? "unknown error")}`, ...extra].join("\n"));
+  return new CommandError(code, message);
+}
+
+/** The installation's repositories, lowercased — one read before an onboard
+ *  mints (record 0054). Wired in production (`commandCatalogue`, over
+ *  `RestGithubApi.listRepos()`) and injected in tests; undefined when it is
+ *  not wired or the list cannot be read, and the onboard then proceeds to the
+ *  mint as today, where any 422 renders as it always did. */
+async function installationRepos(deps: RepoCommandDeps): Promise<string[] | undefined> {
+  if (!deps.repo.installationRepos) return undefined;
+  try {
+    return await deps.repo.installationRepos();
+  } catch {
+    return undefined;
+  }
+}
+
+/** The onboarded residents' slugs from the live registry — the list the
+ *  not-onboarded command sites guess against. Undefined when the registry
+ *  cannot answer: the sentence then stands without a guess. */
+async function onboardedSlugs(deps: RepoCommandDeps, span?: Span): Promise<string[] | undefined> {
+  try {
+    const api = await deps.repo.admin();
+    if ("unavailable" in api) return undefined;
+    const list = await (span && api.withSpan ? api.withSpan(span) : api).residents();
+    if (list.status !== 200) return undefined;
+    const residents = (list.data.residents as Array<Record<string, unknown>> | undefined) ?? [];
+    return residents
+      .map((rec) =>
+        String(rec.resource ?? "")
+          .replace(/^repo:/, "")
+          .toLowerCase(),
+      )
+      .filter(Boolean);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The one question a not-onboarded site renders when a near match exists
+ *  (record 0054): the marker, the corrected line to type, the evidence — or
+ *  the candidates when two tie, and nothing when none matched. `fix` builds
+ *  the line the person would type for this site. */
+export function nearMatchLine(typed: string, near: NearMatch, fix: (match: string) => string): string | undefined {
+  if (near.guess)
+    return `Did you mean:\n\`${fix(near.guess)}\`\n\n${near.reason ?? `\`${near.guess}\``}, which is onboarded`;
+  if (near.candidates)
+    return `Onboarded repositories close to \`${typed}\`: ${near.candidates.map((c) => `\`${c}\``).join(", ")}.`;
+  return undefined;
+}
+
+/** Build a `CommandGuessHint` for a not-onboarded site that has a unique near
+ *  match (record 0054): the corrected chat form the renderer shows and the
+ *  evidence that names the match. `undefined` when the near-match pass found no
+ *  unique candidate — the question still stands without a guess. `fix` builds
+ *  the corrected line (the same function as `nearMatchLine`'s). */
+export function nearMatchGuessHint(near: NearMatch, fix: (match: string) => string): CommandGuessHint | undefined {
+  if (!near.guess) return undefined;
+  return {
+    line: fix(near.guess),
+    evidence: `${near.reason ?? `\`${near.guess}\``}, which is onboarded`,
+  };
 }
 
 const n = (v: unknown): string => String(typeof v === "number" ? v : (v ?? "?"));
@@ -274,6 +352,31 @@ export const repoOnboard = defineCommand({
       ...(options.build !== undefined ? { build: options.build } : {}),
       ...(options.install !== undefined ? { install: options.install } : {}),
     };
+    // Record 0054: read the installation's repository list before minting. A
+    // name the App can see is left to the mint — the repo-scoped token API is
+    // the membership proof — and a name it cannot see with ONE near match asks
+    // the question here instead of spending a mint on a 422 paragraph. A list
+    // that cannot be read changes nothing.
+    const repos = await installationRepos(deps);
+    if (repos && repos.length > 0 && !repos.includes(args.slug)) {
+      const near = nearMatch(args.slug, repos);
+      const guess = nearMatchGuessHint(near, (match) => `repo onboard ${match}`);
+      if (guess) {
+        // The guess carries the corrected line; `renderRefusal` renders the
+        // "Did you mean:" question — don't append nearMatchLine to the sentence.
+        throw new CommandError(
+          "not_found",
+          `\`${args.slug}\` is not in the GitHub App installation's repository list.`,
+          { guess },
+        );
+      }
+      const line = nearMatchLine(args.slug, near, (match) => `repo onboard ${match}`);
+      if (line)
+        throw new CommandError(
+          "not_found",
+          `\`${args.slug}\` is not in the GitHub App installation's repository list.\n${line}`,
+        );
+    }
     const r = await call(async () =>
       (await adminOf(deps, span)).onboard({
         resource: repoResourceId(args.slug),
@@ -529,8 +632,32 @@ export const repoReconfigure = defineCommand({
       if (list.status !== 200) throw residentFailure(list);
       const residents = (list.data.residents as Array<Record<string, unknown>> | undefined) ?? [];
       const record = residents.find((rec) => rec.resource === repoResourceId(args.slug));
-      if (!record)
-        throw new CommandError("not_found", `\`${args.slug}\` is not onboarded — \`repo onboard ${args.slug}\` first.`);
+      if (!record) {
+        // Record 0054: the list is already in hand — one near-match pass asks
+        // the question rather than naming only the wrong repo.
+        const slugs = residents
+          .map((rec) =>
+            String(rec.resource ?? "")
+              .replace(/^repo:/, "")
+              .toLowerCase(),
+          )
+          .filter(Boolean);
+        const near = nearMatch(args.slug, slugs);
+        const guess = nearMatchGuessHint(near, (m) => `repo reconfigure ${m}`);
+        if (guess) {
+          // The guess carries the corrected line; don't append nearMatchLine.
+          throw new CommandError(
+            "not_found",
+            `\`${args.slug}\` is not onboarded — \`repo onboard ${args.slug}\` first.`,
+            { guess },
+          );
+        }
+        const line = nearMatchLine(args.slug, near, (m) => `repo reconfigure ${m}`);
+        throw new CommandError(
+          "not_found",
+          `\`${args.slug}\` is not onboarded — \`repo onboard ${args.slug}\` first.${line ? `\n${line}` : ""}`,
+        );
+      }
       body.commands = { ...obj(record.commands), ...commands };
     }
     if (options.ref !== undefined) body.defaultRef = options.ref;
@@ -575,7 +702,7 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
     effect: "write",
     describe: `Run the repo's onboarded ${op} command with zero model turns (needs coding-agent access; the ref must be a plausible branch).`,
     render: renderOp,
-    handler: async ({ args, caller, deps }) => {
+    handler: async ({ args, caller, deps, span }) => {
       // The same per-repo allowlist a coding run against this repo passes.
       if (!(await deps.repo.canUseRepo(caller.id, args.slug)))
         throw new CommandError(
@@ -606,11 +733,25 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
           };
         case "refused":
           throw new CommandError("conflict", result.reason);
-        case "not-onboarded":
-          throw new CommandError(
-            "not_found",
-            `\`${args.slug}\` is not onboarded as a resident, so \`repo ${op}\` has nothing to run against — \`repo onboard ${args.slug}\` first, or ask the coding agent directly.`,
-          );
+        case "not-onboarded": {
+          // Record 0054: the live registry names the resident they probably
+          // meant; one bounded read, and the sentence stands without it.
+          const slugs = await onboardedSlugs(deps, span);
+          const near = slugs ? nearMatch(args.slug, slugs) : undefined;
+          // The corrected line includes the ref when one was given so the
+          // person can paste it and the corrected command runs at once.
+          const fixOp = (m: string): string =>
+            args.ref !== undefined ? `repo ${op} ${m} ${args.ref}` : `repo ${op} ${m}`;
+          const guess = near ? nearMatchGuessHint(near, fixOp) : undefined;
+          const baseMsg = `\`${args.slug}\` is not onboarded as a resident, so \`repo ${op}\` has nothing to run against — \`repo onboard ${args.slug}\` first, or ask the coding agent directly.`;
+          if (guess) {
+            // The guess carries the corrected line; `renderRefusal` renders the
+            // "Did you mean:" question — don't append nearMatchLine to the sentence.
+            throw new CommandError("not_found", baseMsg, { guess });
+          }
+          const line = near ? nearMatchLine(args.slug, near, fixOp) : undefined;
+          throw new CommandError("not_found", `${baseMsg}${line ? `\n${line}` : ""}`);
+        }
         case "error":
           // The backend's one signal for a platform blip is the field; the
           // words are this reader's, so a resident unavailable for a moment is
