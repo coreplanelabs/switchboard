@@ -256,172 +256,179 @@ export async function runShipBranch(
     ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
   });
   io.runStarted?.({ id: run.id });
-  const publishText = (
-    type: "input" | "context" | "answer",
-    text: string,
-    source?: { url?: string; channel?: string; user?: string },
-  ) => {
-    const redacted = redactSecrets(text);
-    const body = { text: redacted, ...(source ? { source } : {}), at: clock() };
-    registry.publish(
-      run.id,
-      type === "input" ? { type, messageId: messageIdOf(msg, run.id), ...body } : { type, ...body },
-    );
-    console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
-  };
-  const humanize = isMrkdwnChannel(msg.channelId);
-  const attachments = attachmentSuffix(msg.images, msg.documents);
-  const source = {
-    ...(msg.sourceUrl ? { url: msg.sourceUrl } : {}),
-    ...(msg.channelName ? { channel: msg.channelName } : {}),
-    ...(msg.userName ? { user: msg.userName } : {}),
-  };
-  const request = humanize ? humanizeMessageText(directives.text) : directives.text;
-  publishText(
-    "input",
-    attachments ? `${request} ${attachments}` : request,
-    Object.keys(source).length > 0 ? source : undefined,
-  );
-  registry.publish(run.id, {
-    type: "run_meta",
-    agent: agent.name,
-    agentSource: ctx.agentSource,
-    model: ctx.modelRef,
-    traceId: root.traceId,
-    ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-    ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
-    at: clock(),
-  });
-  if (ctx.route) registry.publish(run.id, { type: "route", ...ctx.route, at: clock() });
-  if (deps.config.config.runHistory?.includeContext !== false) {
-    for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
-  }
-  // Tombstone-first, like the main path: the provisional terminal record
-  // stands until the hand-off answers, so a kill between the two still leaves
-  // a record that says the request never reached the runner.
-  const startSnap = registry.snapshot(run.id, run.token);
-  if (startSnap) {
-    deps.runHistoryWriter.write(
-      assembleRunRecord({
-        run,
-        snap: startSnap,
-        agent: agent.name,
-        model: ctx.modelRef,
-        msg,
-        channelVisibility,
-        repo: repoCtx.repo,
-        finishedAt: startSnap.startedAt,
-        status: "interrupted",
-        diagnosis: analyzeRunFriction(startSnap.events, {
-          finished: false,
-          truncated: startSnap.truncated,
-        }),
-        profile: profileRecordOf(agent, profile),
-      }),
-      { provisional: true },
-    );
-  }
-  // The ledger claim (run-history item 35) for the live index and the finish,
-  // under the HOST KEY (record 0060; run-history item 29): the thread key plus
-  // `#host`, while the row's metadata names the thread itself — the ledger's
-  // occupancy check never sees the parent, every listing and record files it
-  // under its conversation, and a second pipeline in the thread is the one
-  // claim the host key refuses. The request has no model loop of its own — the
-  // runner's children each run `runAgent` as runs of their own — so it is
-  // claimed without a seed or step records (and registers no session) and
-  // closes `interrupted` at a reclaim. Untracked for any reason but
-  // `thread-live` (a process without a ledger, missing routes) → the hand-off
-  // runs as before; `thread-live` on the host key is refused below by name.
-  const hostKey = (() => {
-    try {
-      return hostKeyOf(msg.threadKey);
-    } catch (err) {
-      // A thread key the suffix cannot ride (over the ledger's cap, or already
-      // suffixed): the claim the ledger would refuse anyway is never made, and
-      // the run goes on untracked, as any refused claim leaves it.
-      console.warn(`[ship] ${msg.threadKey} not tracked: ${err instanceof Error ? err.message : String(err)}`);
-      return undefined;
-    }
-  })();
-  const opened: OpenOutcome = !hostKey
-    ? { kind: "untracked", why: "the thread key cannot carry the host suffix" }
-    : await root.span("dispatch.ledger_claim", () =>
-        deps.runLedger.open({
-          runId: run.id,
-          threadKey: hostKey,
-          startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? clock(),
-          meta: {
-            hosted: true,
-            label: runLabel,
-            agent: agent.name,
-            model: ctx.modelRef,
-            channelId: msg.channelId,
-            userId: msg.userId,
-            threadKey: msg.threadKey,
-            channelVisibility,
-            ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-            ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-            ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-            ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
-            ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
-            ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
-            profile,
-          },
-          card: card.handle ?? null,
-          system: "",
-          tools: [],
-          onStop: (mode) => void run.control.requestStop(mode),
-          onFenced: () => void run.control.requestStop("hard"),
-        }),
-      );
-  const ledgerRun: LedgerRun | undefined = opened.kind === "tracked" ? opened.run : undefined;
-  if (ledgerRun) {
-    const tracked = ledgerRun;
-    registry.subscribe(run.id, run.token, {
-      onEvent: (event, seq) => tracked.event(event, seq),
-      ...REPLAY_EVERYTHING,
-    });
-  }
-  // One pipeline per thread (record 0060; agent-ship item 16): the host key's
-  // claim answering `thread-live` means another pipeline is hosted in this
-  // thread right now — refused by name, never run untracked beside it. Every
-  // other non-tracked answer hands off as before.
-  const hostRefused = opened.kind === "untracked" && opened.why === "thread-live";
-
-  const liveUrl = liveViewLink(run.id, run.token);
-  ctx.live.runId = run.id;
-  if (liveUrl) ctx.live.runLink = liveUrl;
-  trace.bindRun(run.id, (e) => registry.publish(run.id, e));
-
-  console.log(
-    `[run] ${msg.threadKey} user=${msg.userId} agent=ship model=${ctx.modelRef} entry=${entry.resume ? `resume ${entry.repo}#${entry.resume.pr}` : `round0 ${entry.branch}`}`,
-  );
-  card.update(shell.live({ notice: shutdownNotice() }));
-  shell.setLink(liveUrl ? { url: liveUrl, label: "Live run" } : undefined);
+  let ledgerRun: LedgerRun | undefined;
   let outcome: HandOffOutcome | undefined;
   let shipDiagnosis: FrictionDiagnosis | undefined;
-  // The severity to address, resolved once here — the request's
-  // `severity:` directive over the user's scope over the channel's over the
-  // org's — and handed to the runner on the instance beside `merge`.
-  const scopes = deps.config.scopes(msg.channelId, msg.userId);
-  const addressSeverity = resolveAddressSeverity({
-    org: deps.config.config.review?.addressSeverity,
-    channel: scopes.channel.review?.addressSeverity,
-    user: scopes.user.review?.addressSeverity,
-    run: directives.severity,
-  });
-  // The grant (decision 0046, the renewable lease), resolved once here the
-  // same way — the request's `renewals:` count over the user's scope over the
-  // channel's over the org's `ship.grant` — and written on the instance beside
-  // `merge`. Zero renewals by default: nothing renews until someone says so.
-  const grant = resolveGrant({
-    org: deps.config.config.ship?.grant,
-    channel: scopes.channel.ship?.grant,
-    user: scopes.user.ship?.grant,
-    run: directives.renewals,
-  });
-  const shim = processShimOptions;
+  // From the registry row on, everything runs inside the try whose finally
+  // finishes the run: a throw before the hand-off — the ledger claim with the
+  // state Worker down — ends like a throw inside it, a finished `failed` run
+  // with its record and a closed card. A registry row left `running` with no
+  // runner behind it cannot be stopped (a stop is a request to the runner) and
+  // holds the process's drain to its deadline, so no path leaves one.
   try {
+    const publishText = (
+      type: "input" | "context" | "answer",
+      text: string,
+      source?: { url?: string; channel?: string; user?: string },
+    ) => {
+      const redacted = redactSecrets(text);
+      const body = { text: redacted, ...(source ? { source } : {}), at: clock() };
+      registry.publish(
+        run.id,
+        type === "input" ? { type, messageId: messageIdOf(msg, run.id), ...body } : { type, ...body },
+      );
+      console.log(`[event] ${msg.threadKey} type=${type} bytes=${utf8ByteLength(redacted)}`);
+    };
+    const humanize = isMrkdwnChannel(msg.channelId);
+    const attachments = attachmentSuffix(msg.images, msg.documents);
+    const source = {
+      ...(msg.sourceUrl ? { url: msg.sourceUrl } : {}),
+      ...(msg.channelName ? { channel: msg.channelName } : {}),
+      ...(msg.userName ? { user: msg.userName } : {}),
+    };
+    const request = humanize ? humanizeMessageText(directives.text) : directives.text;
+    publishText(
+      "input",
+      attachments ? `${request} ${attachments}` : request,
+      Object.keys(source).length > 0 ? source : undefined,
+    );
+    registry.publish(run.id, {
+      type: "run_meta",
+      agent: agent.name,
+      agentSource: ctx.agentSource,
+      model: ctx.modelRef,
+      traceId: root.traceId,
+      ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+      ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
+      at: clock(),
+    });
+    if (ctx.route) registry.publish(run.id, { type: "route", ...ctx.route, at: clock() });
+    if (deps.config.config.runHistory?.includeContext !== false) {
+      for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
+    }
+    // Tombstone-first, like the main path: the provisional terminal record
+    // stands until the hand-off answers, so a kill between the two still leaves
+    // a record that says the request never reached the runner.
+    const startSnap = registry.snapshot(run.id, run.token);
+    if (startSnap) {
+      deps.runHistoryWriter.write(
+        assembleRunRecord({
+          run,
+          snap: startSnap,
+          agent: agent.name,
+          model: ctx.modelRef,
+          msg,
+          channelVisibility,
+          repo: repoCtx.repo,
+          finishedAt: startSnap.startedAt,
+          status: "interrupted",
+          diagnosis: analyzeRunFriction(startSnap.events, {
+            finished: false,
+            truncated: startSnap.truncated,
+          }),
+          profile: profileRecordOf(agent, profile),
+        }),
+        { provisional: true },
+      );
+    }
+    // The ledger claim (run-history item 35) for the live index and the finish,
+    // under the HOST KEY (record 0060; run-history item 29): the thread key plus
+    // `#host`, while the row's metadata names the thread itself — the ledger's
+    // occupancy check never sees the parent, every listing and record files it
+    // under its conversation, and a second pipeline in the thread is the one
+    // claim the host key refuses. The request has no model loop of its own — the
+    // runner's children each run `runAgent` as runs of their own — so it is
+    // claimed without a seed or step records (and registers no session) and
+    // closes `interrupted` at a reclaim. Untracked for any reason but
+    // `thread-live` (a process without a ledger, missing routes) → the hand-off
+    // runs as before; `thread-live` on the host key is refused below by name.
+    const hostKey = (() => {
+      try {
+        return hostKeyOf(msg.threadKey);
+      } catch (err) {
+        // A thread key the suffix cannot ride (over the ledger's cap, or already
+        // suffixed): the claim the ledger would refuse anyway is never made, and
+        // the run goes on untracked, as any refused claim leaves it.
+        console.warn(`[ship] ${msg.threadKey} not tracked: ${err instanceof Error ? err.message : String(err)}`);
+        return undefined;
+      }
+    })();
+    const opened: OpenOutcome = !hostKey
+      ? { kind: "untracked", why: "the thread key cannot carry the host suffix" }
+      : await root.span("dispatch.ledger_claim", () =>
+          deps.runLedger.open({
+            runId: run.id,
+            threadKey: hostKey,
+            startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? clock(),
+            meta: {
+              hosted: true,
+              label: runLabel,
+              agent: agent.name,
+              model: ctx.modelRef,
+              channelId: msg.channelId,
+              userId: msg.userId,
+              threadKey: msg.threadKey,
+              channelVisibility,
+              ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+              ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+              ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+              ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+              ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+              ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
+              profile,
+            },
+            card: card.handle ?? null,
+            system: "",
+            tools: [],
+            onStop: (mode) => void run.control.requestStop(mode),
+            onFenced: () => void run.control.requestStop("hard"),
+          }),
+        );
+    ledgerRun = opened.kind === "tracked" ? opened.run : undefined;
+    if (ledgerRun) {
+      const tracked = ledgerRun;
+      registry.subscribe(run.id, run.token, {
+        onEvent: (event, seq) => tracked.event(event, seq),
+        ...REPLAY_EVERYTHING,
+      });
+    }
+    // One pipeline per thread (record 0060; agent-ship item 16): the host key's
+    // claim answering `thread-live` means another pipeline is hosted in this
+    // thread right now — refused by name, never run untracked beside it. Every
+    // other non-tracked answer hands off as before.
+    const hostRefused = opened.kind === "untracked" && opened.why === "thread-live";
+
+    const liveUrl = liveViewLink(run.id, run.token);
+    ctx.live.runId = run.id;
+    if (liveUrl) ctx.live.runLink = liveUrl;
+    trace.bindRun(run.id, (e) => registry.publish(run.id, e));
+
+    console.log(
+      `[run] ${msg.threadKey} user=${msg.userId} agent=ship model=${ctx.modelRef} entry=${entry.resume ? `resume ${entry.repo}#${entry.resume.pr}` : `round0 ${entry.branch}`}`,
+    );
+    card.update(shell.live({ notice: shutdownNotice() }));
+    shell.setLink(liveUrl ? { url: liveUrl, label: "Live run" } : undefined);
+    // The severity to address, resolved once here — the request's
+    // `severity:` directive over the user's scope over the channel's over the
+    // org's — and handed to the runner on the instance beside `merge`.
+    const scopes = deps.config.scopes(msg.channelId, msg.userId);
+    const addressSeverity = resolveAddressSeverity({
+      org: deps.config.config.review?.addressSeverity,
+      channel: scopes.channel.review?.addressSeverity,
+      user: scopes.user.review?.addressSeverity,
+      run: directives.severity,
+    });
+    // The grant (decision 0046, the renewable lease), resolved once here the
+    // same way — the request's `renewals:` count over the user's scope over the
+    // channel's over the org's `ship.grant` — and written on the instance beside
+    // `merge`. Zero renewals by default: nothing renews until someone says so.
+    const grant = resolveGrant({
+      org: deps.config.config.ship?.grant,
+      channel: scopes.channel.ship?.grant,
+      user: scopes.user.ship?.grant,
+      run: directives.renewals,
+    });
+    const shim = processShimOptions;
     // The hand-off (agent-ship.md item 16): the request — a plan, a task, or a
     // resume at review — becomes a plan runner instance; the bot writes the
     // records, asks its shim for the Workflow, and this run ends with where the

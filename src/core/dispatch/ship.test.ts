@@ -359,6 +359,26 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect((await s.store.get("run-s"))!.status).toBe("failed");
   });
 
+  it("a ledger claim that threw: the error propagates, the registry is finished `failed` — never left `running` with no runner behind it — the card closes ❌, nothing is replied, and the drain writes the failed record", async () => {
+    const s = setup("slack:UADMIN");
+    s.deps.runLedger = {
+      ...s.deps.runLedger,
+      open: async () => {
+        throw new Error("state Worker down at the claim");
+      },
+    } as unknown as ShipDeps["runLedger"];
+    await expect(runShipBranch(s.deps, s.msg, s.io, s.ctx)).rejects.toThrow("state Worker down at the claim");
+    expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.registry.listActive().filter((r) => !r.finished)).toEqual([]);
+    expect(s.closes).toHaveLength(1);
+    expect(JSON.stringify(s.closes[0])).toContain("❌");
+    expect(s.replies).toEqual([]);
+    expect(s.created).toEqual([]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect((await s.store.get("run-s"))!.status).toBe("failed");
+  });
+
   it("at quiet (the default) the hand-off posts no ack: the card closes, the run completes, the thread hears from the unit's own thread; at debug the ack ends with the runner instance's id (item 28)", async () => {
     const quiet = setup("slack:UADMIN", { verbosity: "quiet" });
     await runShipBranch(quiet.deps, quiet.msg, quiet.io, quiet.ctx);
