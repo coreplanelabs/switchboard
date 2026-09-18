@@ -170,6 +170,14 @@ export interface RunDeps
    */
   updatePullRequest?: (repo: string, number: number, patch: { title: string; body: string }) => Promise<void>;
   /**
+   * The branch's commits over the base (githubPulls.commitsOverBase): the
+   * post-step asks it when a proven-pushed branch comes with no description
+   * and no open pull request, so a branch with nothing over the base is
+   * reported as nothing to open instead of a compare link over an empty diff
+   * (docs/reference/specs/agent-ship.md item 12). Injectable for the same reason.
+   */
+  commitsOverBase?: (repo: string, base: string, branch: string) => Promise<number | undefined>;
+  /**
    * Repo facts for the agent:ship entry (docs/reference/specs/agent-ship.md items 9
    * and 10): the repo's default branch, the PR base of last resort — a failed
    * lookup proceeds with none; auto-merge is the pull request's own fact, read

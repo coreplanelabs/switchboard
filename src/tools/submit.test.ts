@@ -335,6 +335,27 @@ describe("submit_handoff tool", () => {
     expect(String(out)).toMatch(/^handoff recorded: 0 deviations, 0 follow-ups, 0 unproven/);
   });
 
+  it("the landed list (issue 1699) is an optional fourth list in the schema — what of the unit was already on the base, and where — forwarded and counted when given, absent when not", async () => {
+    const props = submitHandoffTool.inputSchema.properties as Record<string, { items?: { required?: string[] } }>;
+    expect(props.landed?.items?.required).toEqual(["what", "where"]);
+    expect(submitHandoffTool.inputSchema.required).toEqual(["deviations", "followUps", "unproven"]);
+    expect(submitHandoffTool.description).toMatch(/`landed`: what of the unit was already on the base/);
+    const got: Handoff[] = [];
+    const landed = [{ what: "the empty state", where: "https://github.com/acme/api/pull/3377" }];
+    const out = await submitHandoffTool.run(
+      { deviations: [], followUps: [], unproven: [], landed },
+      ctxWith((h) => got.push(h)),
+    );
+    expect(got).toEqual([{ deviations: [], followUps: [], unproven: [], landed }]);
+    expect(String(out)).toMatch(/^handoff recorded: 0 deviations, 0 follow-ups, 0 unproven, 1 landed;/);
+    const without = await submitHandoffTool.run(
+      valid(),
+      ctxWith((h) => got.push(h)),
+    );
+    expect("landed" in got[1]!).toBe(false);
+    expect(String(without)).not.toMatch(/landed/);
+  });
+
   it("a malformed handoff is a string error naming the path — no throw, the sink untouched", async () => {
     const got: Handoff[] = [];
     const out = await submitHandoffTool.run(

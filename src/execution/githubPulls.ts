@@ -420,6 +420,35 @@ function encodeGithubRef(branch: string): string {
   return branch.split("/").map(encodeURIComponent).join("/");
 }
 
+/**
+ * How many commits `branch` carries over `base` — GitHub's compare
+ * (`GET /repos/{repo}/compare/{base}...{branch}`, `ahead_by`). Zero is a
+ * branch with nothing to ship: the fact the plan runner's round-0 `pr-check`
+ * answers so a unit whose scope already landed ends `already_landed`
+ * (docs/reference/specs/agent-ship.md item 12), and the coding post-step reads
+ * before offering a compare link over an empty diff. Undefined when the fact
+ * could not be read — no credential, a non-2xx answer, a body without the
+ * count, a network failure — never a throw: a reader that cannot know says
+ * nothing rather than claiming the branch is empty.
+ */
+export async function commitsOverBase(repo: string, base: string, branch: string): Promise<number | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  if (!token) return undefined;
+  let res: Response;
+  try {
+    res = await fetch(
+      `https://api.github.com/repos/${repo}/compare/${encodeGithubRef(base)}...${encodeGithubRef(branch)}`,
+      { headers: apiHeaders(token), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+    );
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as { ahead_by?: unknown } | null;
+  const ahead = data?.ahead_by;
+  return typeof ahead === "number" && Number.isInteger(ahead) && ahead >= 0 ? ahead : undefined;
+}
+
 /** GET /repos/{repo}/pulls/{n} → the entry-check facts, or undefined when the
  *  fetch fails or the state is unrecognizable. The head sha is the head REF's
  *  tip when that can be read and the head lives on the base repo (see

@@ -20,6 +20,7 @@ import {
 // disk, the network or a clock.
 
 const PR = { number: 7, url: "https://github.com/acme/api/pull/7" };
+const LANDED = { what: "the topology page's empty state", where: "https://github.com/acme/api/pull/3377" };
 
 const FULL: Handoff = {
   deviations: [
@@ -54,6 +55,41 @@ describe("parseHandoff — the validator the submit_handoff tool answers with", 
     expect(parseHandoff({ deviations: [], followUps: [], unproven: [] })).toEqual({
       ok: true,
       handoff: emptyHandoff(),
+    });
+  });
+
+  it("the landed list (issue 1699) is optional: absent it stays absent, present it is validated like the others (what, where) — a blank field or a non-array refused by path", () => {
+    expect(
+      parseHandoff({ deviations: [], followUps: [], unproven: [] }).ok &&
+        "landed" in (parseHandoff({ deviations: [], followUps: [], unproven: [] }) as { handoff: Handoff }).handoff,
+    ).toBe(false);
+    expect(
+      parseHandoff({
+        deviations: [],
+        followUps: [],
+        unproven: [],
+        landed: [{ what: " the empty state ", where: "https://github.com/acme/api/pull/3377", extra: true }],
+      }),
+    ).toEqual({
+      ok: true,
+      handoff: {
+        deviations: [],
+        followUps: [],
+        unproven: [],
+        landed: [{ what: "the empty state", where: "https://github.com/acme/api/pull/3377" }],
+      },
+    });
+    expect(parseHandoff({ deviations: [], followUps: [], unproven: [], landed: [] })).toEqual({
+      ok: true,
+      handoff: { deviations: [], followUps: [], unproven: [], landed: [] },
+    });
+    expect(parseHandoff({ deviations: [], followUps: [], unproven: [], landed: [{ what: "x", where: "" }] })).toEqual({
+      ok: false,
+      error: "landed.0.where: must be a non-empty string of at most 500 characters",
+    });
+    expect(parseHandoff({ deviations: [], followUps: [], unproven: [], landed: "no" })).toEqual({
+      ok: false,
+      error: "landed: must be an array (empty when there is nothing to say)",
     });
   });
 
@@ -117,9 +153,19 @@ describe("isHandoffShape — the structural check a stored record runs", () => {
     expect(isHandoffShape({ ...FULL, followUps: [{ what: "w", where: 2 }] })).toBe(false);
   });
 
-  it("isEmptyHandoff: true only when every list is empty", () => {
+  it("the landed list may be absent (a record from before it existed) and is checked like the others when present", () => {
+    expect(isHandoffShape({ ...FULL, landed: [LANDED] })).toBe(true);
+    expect(isHandoffShape({ ...FULL, landed: [] })).toBe(true);
+    expect(isHandoffShape({ ...FULL, landed: {} })).toBe(false);
+    expect(isHandoffShape({ ...FULL, landed: [{ what: "w" }] })).toBe(false);
+    expect(isHandoffShape({ ...FULL, landed: [{ what: "w", where: 2 }] })).toBe(false);
+  });
+
+  it("isEmptyHandoff: true only when every list is empty — a landed row alone is not empty", () => {
     expect(isEmptyHandoff(emptyHandoff())).toBe(true);
     expect(isEmptyHandoff({ ...emptyHandoff(), unproven: FULL.unproven })).toBe(false);
+    expect(isEmptyHandoff({ ...emptyHandoff(), landed: [LANDED] })).toBe(false);
+    expect(isEmptyHandoff({ ...emptyHandoff(), landed: [] })).toBe(true);
   });
 });
 
@@ -141,6 +187,11 @@ describe("redactHandoff — every string leaf through the redaction seam", () =>
       what: "[the review child posts its own handoff]",
       where: "[src/core/ship/reviewChild.ts]",
     });
+    // The landed list goes through the seam too, and an absent one stays absent.
+    expect(redactHandoff({ ...FULL, landed: [LANDED] }, (s) => `[${s}]`).landed).toEqual([
+      { what: `[${LANDED.what}]`, where: `[${LANDED.where}]` },
+    ]);
+    expect("landed" in redactHandoff(FULL)).toBe(false);
   });
 });
 
@@ -170,6 +221,17 @@ describe("renderHandoffLedgerRows — rows in the plan's follow-ups ledger shape
     );
     expect(rows).toBe("| a \\| b\\\\c — line one line two | U30 handoff | open |");
     expect(rows.split("\n")).toHaveLength(1);
+  });
+
+  it("a landed row reads `Landed: what — where` after the other lists, for the person to retire the unit in the plan", () => {
+    const rows = renderHandoffLedgerRows(
+      { ...emptyHandoff(), unproven: FULL.unproven, landed: [LANDED] },
+      { unitId: "U30" },
+    );
+    expect(rows.split("\n")).toEqual([
+      "| Unproven: the board comment appears on a live unit issue — no plan runner exists to post it yet | U30 handoff | open |",
+      `| Landed: ${LANDED.what} — ${LANDED.where} | U30 handoff | open |`,
+    ]);
   });
 });
 
@@ -221,6 +283,16 @@ describe("renderHandoffComment — the unit's board-issue comment", () => {
 
   it("an entirely empty handoff renders nothing", () => {
     expect(renderHandoffComment(emptyHandoff(), { unitId: "U17", pr: PR })).toBeUndefined();
+  });
+
+  it("a landed list renders under `### Already landed` after the other lists, with its ledger row", () => {
+    const out = renderHandoffComment({ ...emptyHandoff(), landed: [LANDED] }, { unitId: "U30" })!;
+    expect(out.split("\n")[0]).toBe("**Handoff — U30** · no pull request");
+    expect(out).toContain(`### Already landed\n\n- ${LANDED.what} — ${LANDED.where}`);
+    expect(out).toContain(`| Landed: ${LANDED.what} — ${LANDED.where} | U30 handoff | open |`);
+    const both = renderHandoffComment({ ...FULL, landed: [LANDED] }, { unitId: "U17", pr: PR })!;
+    expect(both.indexOf("### Already landed")).toBeGreaterThan(both.indexOf("### Unproven"));
+    expect(both.indexOf("### Already landed")).toBeLessThan(both.indexOf("### Ledger rows"));
   });
 
   it("a newline inside a field is flattened so a bullet stays one list item", () => {

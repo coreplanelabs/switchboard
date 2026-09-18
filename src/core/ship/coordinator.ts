@@ -30,7 +30,7 @@
 // arrive in the input rather than from the agent registry.
 
 import type { ShipRoundOutcome } from "../runEvents.js";
-import type { Handoff } from "./handoff.js";
+import type { Handoff, HandoffLanded } from "./handoff.js";
 import { progressOf, renderRenewal, renewalDecision, type PushedHeadFact, type RenewalDecision } from "./renewal.js";
 import type { RunStatus } from "../runRecord.js";
 import { normalizeHead, sameCommit } from "../reviewedHead.js";
@@ -504,6 +504,11 @@ export type PrCheck =
        *  the base and the head) or `no_base` (the instance names no base to
        *  open against, so no create was tried). Absent on a plain check. */
       unrecovered?: "no_commits" | "no_base";
+      /** On a plain check: the branch's commits over the base as GitHub
+       *  compares them, when the bot could read them. Zero beside a handoff
+       *  naming where the scope landed is the `already_landed` ending
+       *  (agent-ship item 12); absent, the fact is unknown and never claimed. */
+      aheadOfBase?: number;
     }
   | { state: "open"; prNumber: number; url: string; headSha?: string; autoMergeEnabled?: boolean }
   | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string };
@@ -536,6 +541,11 @@ export type StepReturn =
 export type UnitEnding =
   | { kind: "merged"; by: "runner"; pr: PrRef; sha: string; reviewRounds: number }
   | { kind: "merged"; by: "other"; pr: PrRef; sha: string; mergedAt: string; reviewRounds: number }
+  /** Round 0 found the unit's scope already on the base (agent-ship item 12):
+   *  the coding child's handoff names where it landed and the branch has no
+   *  commits over the base, so there is no pull request to open or review.
+   *  The unit is done and its dependents start on a base that carries it. */
+  | { kind: "already_landed"; landed: HandoffLanded[]; round: RoundRef; runId: string; reviewRounds: number }
   | { kind: "merge_ready"; pr: PrRef; reviewRounds: number }
   | { kind: "merge_refused"; pr: PrRef; reason: string; reviewRounds: number }
   | { kind: "round_cap"; maxRounds: number; reviewRounds: number }
@@ -1268,15 +1278,26 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
         [roundNote(round, "aborted")],
       );
     }
-    // Round 0 ended without a pull request: the segment is over with the unit
-    // unfinished, and the grant decides whether the next opens (decision
-    // 0046, Renewal). Progress is read off the child's record — a head pushed
-    // to the unit's branch since the segment started, or a handoff that moved —
-    // never off its words; the decision then asks the grant's count, the cap
-    // and the fit, in that order, and a refusal names the clause. A plain
-    // abort keeps its old shape when nothing was pushed under a grant of zero:
-    // a clarifying question is not a stop to explain.
     if (round.index === 0) {
+      // The scope already landed (agent-ship item 12): the child's handoff
+      // names where, and the branch carries no commits over the base — two
+      // facts off the record and GitHub, never the child's prose alone. There
+      // is nothing to open, review or renew: the unit is done. Either fact
+      // missing (a handoff that names no landing, commits on the branch, a
+      // compare the bot could not read) leaves the round-0 ending below.
+      const landed = phase.childHandoff?.landed ?? [];
+      if (landed.length > 0 && pr.aheadOfBase === 0)
+        return end(s, { kind: "already_landed", landed, round, runId: phase.runId, reviewRounds: s.reviewRounds }, [
+          roundNote(round, "completed"),
+        ]);
+      // Round 0 ended without a pull request: the segment is over with the unit
+      // unfinished, and the grant decides whether the next opens (decision
+      // 0046, Renewal). Progress is read off the child's record — a head pushed
+      // to the unit's branch since the segment started, or a handoff that moved —
+      // never off its words; the decision then asks the grant's count, the cap
+      // and the fit, in that order, and a refusal names the clause. A plain
+      // abort keeps its old shape when nothing was pushed under a grant of zero:
+      // a clarifying question is not a stop to explain.
       const grant = s.input.grant ?? DEFAULT_GRANT;
       const session = s.input.session;
       const progress = progressOf({
@@ -1703,6 +1724,10 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
         ...(skippedLine ? [skippedLine] : []),
         declinedLine,
       ].join("\n");
+    case "already_landed":
+      // No compare link, no renewal line, no re-issue prompt: there was
+      // nothing to ship, so none of them has a question to answer.
+      return `✅ Already on \`${s.input.base}\`: the unit's scope landed before this attempt — ${e.landed.map((l) => `${l.what} (${l.where})`).join("; ")}. The coding child (run ${e.runId}) found it there and pushed nothing of its own: \`${s.input.unit.branch}\` has no commits over \`${s.input.base}\`, so there is no pull request to open or review. The unit is done and its dependents start on a base that carries it.`;
     case "merge_ready":
       return [
         `✅ Merge-ready after ${rounds}: ${e.pr.url}`,

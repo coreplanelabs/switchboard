@@ -310,13 +310,16 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
 function prCheckReturn(step: string, a: BotAnswer): StepReturn {
   const { ok, state, prNumber, url, headSha, sha, mergedAt, at } = a.body;
   if (ok === true && state === "none") {
-    const { unrecovered } = a.body;
+    const { unrecovered, aheadOfBase } = a.body;
     return {
       type: "pr-check",
       step,
       pr: {
         state: "none",
         ...(unrecovered === "no_commits" || unrecovered === "no_base" ? { unrecovered } : {}),
+        // The branch's commits over the base, when the bot could read them
+        // (agent-ship item 12): zero is the `already_landed` ending's fact.
+        ...(typeof aheadOfBase === "number" ? { aheadOfBase } : {}),
       },
       at,
     };
@@ -650,7 +653,9 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
       });
     }
     endings[next] = ending.kind;
-    cursor = settleUnit(graph, cursor, next, ending.kind === "merged" ? "done" : "failed");
+    // A unit is done for its dependents when the base carries its scope: the
+    // runner's merge, or a scope that had already landed before the attempt.
+    cursor = settleUnit(graph, cursor, next, isSettledDone(ending.kind) ? "done" : "failed");
   }
   // Blocked units, in the plan's order: each told its own ending, so the rows
   // and the summary say why it never ran. Every blocked unit's ending is known
@@ -669,13 +674,25 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
     await step.do(`${id}/end`, STEP_CONFIG, () => call(bot, "unit-end", body));
   }
   if (!cursorFinished(cursor)) throw new Error(`the plan's cursor did not finish: ${JSON.stringify(cursor.status)}`);
-  const settled = (kind: string) => kind === "merged" || kind === "merge_ready";
   return {
     instance: instanceId,
     ...(plan.planId !== undefined ? { planId: plan.planId } : {}),
     units: endings,
-    outcome: cursor.order.every((id) => settled(endings[id] ?? "")) ? "completed" : "failed",
+    outcome: cursor.order.every((id) => isSettledOutcome(endings[id] ?? "")) ? "completed" : "failed",
   };
+}
+
+/** The endings whose unit's scope is on the base, so its dependents run on a
+ *  base that carries it (agent-ship item 12): the runner's merge, a merge found
+ *  already made, or a scope that had landed before the attempt. */
+function isSettledDone(kind: string): boolean {
+  return kind === "merged" || kind === "already_landed";
+}
+
+/** The endings a plan closes ✅ over: every `isSettledDone` one, plus
+ *  merge-ready — the work stands and a person's merge is the only gate left. */
+function isSettledOutcome(kind: string): boolean {
+  return isSettledDone(kind) || kind === "merge_ready";
 }
 
 /** The Workflow's body. The finish is asked on every path — as `failed`, best

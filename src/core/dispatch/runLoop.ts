@@ -43,6 +43,7 @@ import {
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
 import type { RouteDecided } from "./route.js";
 import {
+  commitsOverBase,
   fetchRepoShipInfo,
   findOpenPrByHead,
   openPullRequest,
@@ -1487,6 +1488,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           findOpenPr: deps.findOpenPrByHead ?? findOpenPrByHead,
           updatePullRequest: deps.updatePullRequest ?? updatePullRequest,
           fetchRepoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
+          commitsOverBase: deps.commitsOverBase ?? commitsOverBase,
           descriptionTurnRan,
           publish: (e) => registry.publish(run.id, e),
           logKey: msg.threadKey,

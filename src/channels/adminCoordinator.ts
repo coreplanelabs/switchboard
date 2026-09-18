@@ -143,6 +143,11 @@ export interface AdminCoordinatorDeps {
    *  the branch — the pr-check opens the pull request from the branch itself
    *  instead of answering `none` over stranded work (agent-ship item 15). */
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /** The branch's commits over the base (githubPulls.commitsOverBase): read on a
+   *  plain pr-check that found no pull request, so the machine can end a unit
+   *  whose scope already landed `already_landed` instead of aborting it
+   *  (agent-ship item 12). Undefined, or a throw, leaves the fact out of the answer. */
+  commitsOverBase: (repo: string, base: string, branch: string) => Promise<number | undefined>;
   /** The target repository at the base ref (the plan, the specs, the rules), its
    *  issues (a unit's board issue) and the comment a unit's ending leaves there
    *  — the App's GitHub reads and the one write beside the merge. */
@@ -978,7 +983,22 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       // A dead coding child's pushed work is recovered here: the pull request
       // is opened from the branch itself rather than the round ending aborted
       // with the work stranded (agent-ship items 10 and 15).
-      if (recover === undefined) return json(200, { ok: true, state: "none", at });
+      if (recover === undefined) {
+        // A plain check carries the branch's commits over the base when it can
+        // read them (issue 1699): zero, beside a handoff that names where the
+        // scope landed, is the machine's `already_landed` ending. A fact that
+        // cannot be read is left out, never guessed — the check still answers.
+        const ahead =
+          instance.base === undefined
+            ? undefined
+            : await deps.commitsOverBase(instance.repo, instance.base, branch).catch((err: unknown) => {
+                (deps.log ?? console.log)(
+                  `[coordinator] ${instance.id} pr-check: the compare of ${branch} over ${instance.base} could not be read: ${describe(err)}`,
+                );
+                return undefined;
+              });
+        return json(200, { ok: true, state: "none", ...(ahead !== undefined ? { aheadOfBase: ahead } : {}), at });
+      }
       const recovered = await recoverPushedBranch(deps, instance, unit.row, branch, recover.runId);
       if (recovered.kind === "opened") {
         await remember({ number: recovered.pr.number, url: recovered.pr.htmlUrl });
@@ -1548,7 +1568,12 @@ async function merge(
   return json(200, { ok: true, outcome: "merged", sha: merged.sha, at });
 }
 
-const ENDING_ICON: Readonly<Record<string, string>> = { merged: "✅", merge_ready: "✅", done: "✅" };
+const ENDING_ICON: Readonly<Record<string, string>> = {
+  merged: "✅",
+  merge_ready: "✅",
+  already_landed: "✅",
+  done: "✅",
+};
 
 /** The parent's one record, assembled from the instance and its unit rows
  *  when the instance ends: the round boundaries every unit drew, in order, and

@@ -273,7 +273,9 @@ export const submitHandoffTool: RunnableTool = {
     "Submit the unit handoff as a typed object — REQUIRED when your first user turn carries a `## Contract` block: once, " +
     "after submit_pr_description and before your final message. `deviations`: where you departed from the unit as written " +
     "(from, to, why); `followUps`: what you found and did not do, and where it belongs (what, where); `unproven`: which of " +
-    "the unit's test scenarios or criteria you could not prove, and why (criterion, why). Switchboard records it on the run " +
+    "the unit's test scenarios or criteria you could not prove, and why (criterion, why); `landed`: what of the unit was already on the base " +
+    "when you began, and the pull request or commit that carries it (what, where) — optional, and when the whole unit is there " +
+    "you push nothing of your own and open no pull request. Switchboard records it on the run " +
     "and posts it to the unit's board issue, where a person decides each row. Submit empty lists when there is nothing to " +
     "say — never skip it. A later call replaces the earlier one; an invalid object returns an error naming the field to fix.",
   inputSchema: {
@@ -301,6 +303,15 @@ export const submitHandoffTool: RunnableTool = {
           why: "Why it is unproven",
         }),
       },
+      landed: {
+        type: "array",
+        description:
+          "What of the unit was already on the base when you began, and where it landed (optional; omit when nothing was)",
+        items: handoffEntry({
+          what: "The part of the unit that was already there",
+          where: "The pull request or commit that carries it",
+        }),
+      },
     },
     required: ["deviations", "followUps", "unproven"],
   },
@@ -314,7 +325,8 @@ export const submitHandoffTool: RunnableTool = {
     const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
     return (
       `handoff recorded: ${count(h.deviations.length, "deviation", "deviations")}, ` +
-      `${count(h.followUps.length, "follow-up", "follow-ups")}, ${h.unproven.length} unproven; a later call replaces this one`
+      `${count(h.followUps.length, "follow-up", "follow-ups")}, ${h.unproven.length} unproven` +
+      `${h.landed !== undefined ? `, ${h.landed.length} landed` : ""}; a later call replaces this one`
     );
   },
 };

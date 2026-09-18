@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  commitsOverBase,
   createBranchRef,
   fetchPullRequestFacts,
   fetchCommitChecks,
@@ -337,6 +338,41 @@ describe("githubPulls", () => {
       const calls = stubRefPath();
       await createBranchRef("acme/api", "ship/x", "release/1.x");
       expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/release/1.x");
+    });
+  });
+
+  // The fact the round-0 ending reads (docs/reference/specs/agent-ship.md
+  // item 12, issue 1699): how many commits the unit's branch has over the
+  // base, from GitHub's compare — zero is a branch with nothing to ship.
+  describe("commitsOverBase (the branch's commits over the base)", () => {
+    it("GETs the compare of base...branch (each ref's segments encoded) and answers `ahead_by`", async () => {
+      stubToken();
+      const calls = stubFetch(() => new Response(JSON.stringify({ ahead_by: 0, behind_by: 3, status: "behind" })));
+      expect(await commitsOverBase("acme/api", "main", "plan/the-topology-page-s-empt-da4299/u1")).toBe(0);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe(
+        "https://api.github.com/repos/acme/api/compare/main...plan/the-topology-page-s-empt-da4299/u1",
+      );
+      expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer ghtok");
+      stubFetch(() => new Response(JSON.stringify({ ahead_by: 2, behind_by: 0 })));
+      expect(await commitsOverBase("acme/api", "main", "feat/x")).toBe(2);
+    });
+
+    it("a non-2xx answer, a body without a count, a network failure or no credential is unread (undefined), never a throw", async () => {
+      stubToken();
+      stubFetch(() => new Response("{}", { status: 404 }));
+      expect(await commitsOverBase("acme/api", "main", "gone")).toBeUndefined();
+      stubFetch(() => new Response(JSON.stringify({ status: "identical" })));
+      expect(await commitsOverBase("acme/api", "main", "feat/x")).toBeUndefined();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new Error("ECONNRESET");
+        }),
+      );
+      expect(await commitsOverBase("acme/api", "main", "feat/x")).toBeUndefined();
+      vi.stubEnv("GH_TOKEN", "");
+      expect(await commitsOverBase("acme/api", "main", "feat/x")).toBeUndefined();
     });
   });
 
