@@ -390,11 +390,17 @@ async function handle(deps: CoreDeps, { client, statusClient }: SlackClients, ev
   const trace = startRequestRoot(deps, { channel: "slack", receivedAt, originAt: tsMs(ev.ts) });
   try {
     const received = await trace.root.span("slack.receive", (span) =>
-      receiveSlackMessage(client, ev, span, {
-        staging: deps.artifacts !== undefined,
-        maxBytesPerMessage:
-          deps.config.config.artifacts?.inbound?.maxBytesPerMessage ?? ARTIFACT_DEFAULTS.maxBytesPerMessage,
-      }),
+      receiveSlackMessage(
+        client,
+        ev,
+        span,
+        {
+          staging: deps.artifacts !== undefined,
+          maxBytesPerMessage:
+            deps.config.config.artifacts?.inbound?.maxBytesPerMessage ?? ARTIFACT_DEFAULTS.maxBytesPerMessage,
+        },
+        relayAppsOf(deps),
+      ),
     );
     if (!received) {
       trace.root.end("ok", { status: "refused" });
@@ -425,11 +431,18 @@ export interface StagingPolicy {
   maxBytesPerMessage: number;
 }
 
+/** The operator's `slack.relayApps` — the bot ids whose relay footer names the
+ *  requester (item 13); none configured means no footer is honoured. */
+function relayAppsOf(deps: CoreDeps): readonly string[] {
+  return deps.config.config.slack?.relayApps ?? [];
+}
+
 async function receiveSlackMessage(
   client: SlackClient,
   ev: SlackEvent,
   span: Span,
   policy: StagingPolicy,
+  relayApps: readonly string[],
 ): Promise<Omit<IncomingMessage, "receivedAt" | "originAt"> | undefined> {
   // Redelivery guard: claim (channel, ts) and drop the event when it
   // demonstrably ran already — in this process, or (for a stale delivery)
@@ -477,18 +490,22 @@ async function receiveSlackMessage(
   // lookup leaves the field undefined (the label falls back to the raw id) and
   // never fails the dispatch. Resolved in parallel so the two lookups don't add
   // up on the first message for a new channel/user.
-  // Who asked (item 13): the sender, or the person an app relayed for — read
-  // before the name lookups, which take the resolved person. A person's post
-  // resolves without a call; a relay costs one `conversations.replies`.
-  const requester = await resolveSlackRequester(client, {
-    channel: ev.channel,
-    ts: ev.ts,
-    threadTs: ev.threadTs,
-    ...(ev.user !== undefined ? { user: ev.user } : {}),
-    text: ev.rawText ?? ev.text,
-    ...(ev.poster !== undefined ? { poster: ev.poster } : {}),
-    ...(ev.thread !== undefined ? { thread: ev.thread } : {}),
-  });
+  // Who asked (item 13): the sender, or the person the configured relay app
+  // posted for — read before the name lookups, which take the resolved person.
+  // A person's post resolves without a call; an older relay footer costs one
+  // `conversations.replies`.
+  const requester = await resolveSlackRequester(
+    client,
+    {
+      channel: ev.channel,
+      ts: ev.ts,
+      threadTs: ev.threadTs,
+      ...(ev.user !== undefined ? { user: ev.user } : {}),
+      text: ev.rawText ?? ev.text,
+      ...(ev.poster !== undefined ? { poster: ev.poster } : {}),
+    },
+    relayApps,
+  );
   span.setAttrs({ requester: requester.resolvedBy });
   const [channelName, userName, team] = await Promise.all([
     resolveChannelName(client, ev.channel),
@@ -670,13 +687,11 @@ export async function handleConfirmClick(
   }
   let io: SlackIO | undefined;
   try {
-    const requester = await resolveSlackRequester(client, {
-      channel,
-      ts: message.ts,
-      threadTs,
-      user: body.user.id,
-      text: "",
-    });
+    const requester = await resolveSlackRequester(
+      client,
+      { channel, ts: message.ts, threadTs, user: body.user.id, text: "" },
+      relayAppsOf(deps),
+    );
     const actor = chatActorOf(deps.config, {
       userId: requester.userId,
       channelId: `${PLATFORM}:${channel}`,

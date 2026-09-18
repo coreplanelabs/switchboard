@@ -22,8 +22,8 @@ export interface AttrDomain {
   caughtUp: boolean;
   files: number;
   dedupe: "fresh" | "duplicate";
-  /** How the requester was found (slack-channel.md item 13): the sender, the relay footer's thread, the thread's parent, or the app itself. */
-  requester: "message" | "relay-footer" | "thread-parent" | "bot";
+  /** How the requester was found (slack-channel.md item 13): the sender, the configured relay app's footer, or the app itself. */
+  requester: "message" | "relay-footer" | "bot";
   // dispatch.* / run.* / post.*
   outcome: string;
   /** The refusal's code (src/core/refusal.ts) — on the `dispatch.refuse` span

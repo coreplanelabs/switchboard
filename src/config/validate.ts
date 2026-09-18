@@ -43,6 +43,7 @@ import type {
   ReviewConfig,
   RoutingConfig,
   Scope,
+  SlackConfig,
   TracingConfig,
 } from "../config.js";
 
@@ -344,6 +345,29 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.pi !== undefined) validatePi(cfg.pi);
   if (cfg.opencode !== undefined) validateOpenCode(cfg.opencode);
   validateDashboardConfig(cfg.dashboard);
+  validateSlack(cfg.slack);
+}
+
+/** A Slack bot id as the `bot_id` field carries it: `B` and the upper-case alphanumerics Slack mints. */
+const SLACK_BOT_ID = /^B[A-Z0-9]+$/;
+
+/** `slack` (docs/reference/specs/slack-channel.md item 13): `relayApps`, when
+ *  present, is a list of Slack bot ids — the apps whose relay footer names the
+ *  requester. Held to the id's shape at load: an entry spelled as the actor id
+ *  (`slack:bot:B…`) or a display name would match no poster, and every request
+ *  the relay posts would be billed to the app while the operator believed the
+ *  footer was read. Exported for tests. */
+export function validateSlack(slack: unknown): void {
+  if (slack === undefined) return;
+  if (typeof slack !== "object" || slack === null || Array.isArray(slack))
+    throw new Error("config.yaml: slack must be a mapping");
+  const { relayApps } = slack as SlackConfig;
+  if (relayApps === undefined) return;
+  if (!Array.isArray(relayApps)) throw new Error("config.yaml: slack.relayApps must be a list of Slack bot ids (B…)");
+  relayApps.forEach((id, i) => {
+    if (typeof id !== "string" || !SLACK_BOT_ID.test(id))
+      throw new Error(`config.yaml: slack.relayApps[${i}] is "${String(id)}" — a Slack bot id looks like B0ABC123`);
+  });
 }
 
 /** The `pi` block's keys and its `compaction` block's, held equal to the types the way the top-level keys are. */

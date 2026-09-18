@@ -8,15 +8,21 @@
 // in this order —
 //
 //   1. the message's own `user` (a person typed it);
-//   2. the relay footer an app appends when it posts for someone —
-//      `Sent by Claude in <#C…|name> · <permalink|thread>` — whose permalink is
-//      the person's own thread: its parent's `user` is the requester;
-//   3. a bot's reply inside a thread a person started: that person;
-//   4. the app itself, named (`slack:bot:<bot_id>`, the app's display name) —
+//   2. the relay footer the CONFIGURED relay app (`slack.relayApps`, by
+//      `bot_id`) appends when it posts for someone —
+//      `Sent by Claude in <#C…|name> on behalf of <@U…> · <permalink|thread>` —
+//      names the person outright; an older footer without the person names
+//      their own thread, whose parent's `user` is the requester;
+//   3. the app itself, named (`slack:bot:<bot_id>`, the app's display name) —
 //      never `unknown`.
 //
-// A resolved relay keeps the poster as `relayedBy`, so a record can say
-// "alice, via Claude [fixing the build]" without lying about either.
+// The footer is message text and any app can write one, so it is read only
+// from the app the operator named: from any other app — footer or not, inside
+// a person's thread or not — the app is the requester. A thread's parent is
+// never read for an app's reply: the person who started a thread did not ask
+// what an app posted into it. With no relay app configured, no footer is
+// honoured. A resolved relay keeps the poster as `relayedBy`, so a record can
+// say "alice, via Claude [fixing the build]" without lying about either.
 
 import { RELAY_FOOTER_RE, type SlackThreadMessage } from "./threadTurns.js";
 
@@ -132,7 +138,7 @@ export function parseRelayFooter(text: string): RelayFooter | undefined {
 
 /** How the requester was found — on the record's span for forensics, and so a
  *  test can say which rule fired. */
-export type RequesterResolution = "message" | "relay-footer" | "thread-parent" | "bot";
+export type RequesterResolution = "message" | "relay-footer" | "bot";
 
 export interface SlackRequester {
   /** Platform-namespaced (`slack:U…` for a person, `slack:bot:B…` for an app nobody could be found behind). */
@@ -163,8 +169,6 @@ export interface RequesterEvent {
   /** The raw text, footer included — the relay footer is read before the mention stripper removes it. */
   text: string;
   poster?: SlackPoster;
-  /** The thread's page when the handler already fetched it (a follow-up); its first message is the parent. */
-  thread?: SlackThreadMessage[];
 }
 
 // The person behind a relay thread, remembered: one Claude Code session posts
@@ -193,18 +197,15 @@ async function threadParentUser(
   client: RequesterClient,
   channel: string,
   threadTs: string,
-  prefetched?: SlackThreadMessage[],
 ): Promise<string | undefined> {
   const key = `${channel}:${threadTs}`;
   const hit = relayParentCache.get(key);
   if (hit !== undefined) return hit;
-  let parent: SlackThreadMessage | undefined = prefetched?.find((m) => m.ts === threadTs);
-  if (!parent) {
-    try {
-      parent = (await client.conversations.replies({ channel, ts: threadTs, limit: 1 })).messages?.[0];
-    } catch {
-      return undefined;
-    }
+  let parent: SlackThreadMessage | undefined;
+  try {
+    parent = (await client.conversations.replies({ channel, ts: threadTs, limit: 1 })).messages?.[0];
+  } catch {
+    return undefined;
   }
   if (!parent || parent.ts !== threadTs || parent.bot_id || !parent.user) return undefined;
   rememberParent(key, parent.user);
@@ -220,23 +221,25 @@ const personRequester = (user: string, resolvedBy: RequesterResolution, relay?: 
   resolvedBy,
 });
 
-/** The requester of a Slack message, by the rules above. Never throws and never
+/** The requester of a Slack message, by the rules above. `relayApps` is the
+ *  operator's `slack.relayApps` — the `bot_id`s whose footer is read for the
+ *  person; empty means no footer is ever honoured. Never throws and never
  *  answers `unknown`: an app nobody can be found behind is the requester under
  *  its own name. */
-export async function resolveSlackRequester(client: RequesterClient, ev: RequesterEvent): Promise<SlackRequester> {
+export async function resolveSlackRequester(
+  client: RequesterClient,
+  ev: RequesterEvent,
+  relayApps: readonly string[],
+): Promise<SlackRequester> {
   if (ev.user) return personRequester(ev.user, "message");
   const poster: SlackPoster = ev.poster ?? {};
-  const relay = parseRelayFooter(ev.text);
+  const relay = poster.botId !== undefined && relayApps.includes(poster.botId) ? parseRelayFooter(ev.text) : undefined;
   if (relay) {
     // The footer names the person outright on current posts; older posts name
     // only their thread, whose parent the person started.
     if (relay.onBehalfOf) return personRequester(relay.onBehalfOf, "relay-footer", poster);
     const user = await threadParentUser(client, relay.channel, relay.threadTs);
     if (user) return personRequester(user, "relay-footer", poster);
-  }
-  if (ev.threadTs !== ev.ts) {
-    const user = await threadParentUser(client, ev.channel, ev.threadTs, ev.thread);
-    if (user) return personRequester(user, "thread-parent", poster);
   }
   return {
     userId: botActorId(poster),
