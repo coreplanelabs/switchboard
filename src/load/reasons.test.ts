@@ -45,6 +45,18 @@ describe("reasonOf — the machine token inside a client's error", () => {
     expect(reasonOf(new Error("something odd"))).toBe("unknown");
     expect(reasonOf("string error")).toBe("unknown");
   });
+
+  it("a non-Error value that coerces to a string naming a known token is recognised", () => {
+    // String(value) path: the token is found even when no Error object is thrown
+    expect(reasonOf("runtime-replaced: a newer runtime took over")).toBe("runtime-replaced");
+    expect(reasonOf({ toString: () => "needs-ref: branch was not supplied" })).toBe("needs-ref");
+  });
+
+  it("a known token beats the timeout rule when both appear in the same message", () => {
+    // KNOWN_REASONS scan runs before the /TimeoutError|timed out|timeout/i branch;
+    // `not-attached` wins even though the message also reads as a timeout
+    expect(reasonOf(new Error("not-attached: sandbox timed out waiting for attach"))).toBe("not-attached");
+  });
 });
 
 describe("timed", () => {
