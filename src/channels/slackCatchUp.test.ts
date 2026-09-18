@@ -42,7 +42,9 @@ describe("findMissed (pure selection over fetched history)", () => {
   it("picks an un-acked top-level mention inside the window, threaded to itself", () => {
     const m = mention();
     const out = findMissed({ ...base, channel: "C1", parents: [m], threads: new Map() });
-    expect(out).toEqual([{ channel: "C1", user: "U0USER", text: m.text, ts: m.ts, threadTs: m.ts, files: undefined }]);
+    expect(out).toEqual([
+      { channel: "C1", user: "U0USER", text: m.text, ts: m.ts, threadTs: m.ts, files: undefined, thread: [] },
+    ]);
   });
 
   it("skips a 👀-acked mention younger than ACK_GRACE_MS — its card is on the way", () => {
@@ -141,8 +143,49 @@ describe("findMissed (pure selection over fetched history)", () => {
     ]);
     const out = findMissed({ ...base, channel: "C1", parents: [parent], threads });
     expect(out).toEqual([
-      { channel: "C1", user: "U0USER", text: follow.text, ts: follow.ts, threadTs: parent.ts, files: undefined },
+      {
+        channel: "C1",
+        user: "U0USER",
+        text: follow.text,
+        ts: follow.ts,
+        threadTs: parent.ts,
+        files: undefined,
+        thread: threads.get(parent.ts),
+      },
     ]);
+  });
+
+  // The act phase's verdict (docs/reference/specs/slack-channel.md item 7) judges over the
+  // thread the scan already paged — carried on the candidate, so the act
+  // re-fetches nothing and `findMissed` stays pure.
+  it("carries the paged thread (parent first) on every candidate — empty for a top-level message without replies", () => {
+    const parent = mention({ ts: ts(3000), reply_count: 2, latest_reply: ts(40) });
+    const botReply = { type: "message", user: BOT, bot_id: "B1", text: "done", ts: ts(2000), thread_ts: parent.ts };
+    const follow = { type: "message", user: "U0USER", text: "and the other?", ts: ts(40), thread_ts: parent.ts };
+    const page = [parent, botReply, follow];
+    const threads = new Map([[parent.ts, page]]);
+    const top = mention({ ts: ts(50, "000002") });
+    const out = findMissed({ ...base, channel: "C1", parents: [parent, top], threads });
+    expect(out.map((m) => [m.ts, m.thread])).toEqual([
+      [top.ts, []],
+      [follow.ts, page],
+    ]);
+  });
+
+  it("a thread_broadcast reply is never a candidate — mentioned or not, in the thread or echoed top-level", () => {
+    const parent = mention({ ts: ts(3000), reply_count: 2, latest_reply: ts(40) });
+    const broadcast = {
+      type: "message",
+      subtype: "thread_broadcast",
+      user: "U0USER",
+      text: `<@${BOT}> also sent to the channel`,
+      ts: ts(40),
+      thread_ts: parent.ts,
+    };
+    const threads = new Map([[parent.ts, [parent, broadcast]]]);
+    // In its thread (a non-file_share subtype) and echoed in the channel's
+    // history (thread_ts ≠ ts): neither path selects it.
+    expect(findMissed({ ...base, channel: "C1", parents: [parent, broadcast], threads })).toEqual([]);
   });
 
   it("picks an un-acked, un-mentioned follow-up in a thread the bot participates in (live trigger 1c)", () => {
