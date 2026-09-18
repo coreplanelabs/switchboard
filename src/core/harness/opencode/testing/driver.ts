@@ -259,6 +259,10 @@ export interface FakeServeOptions {
   steerPostFails?: boolean;
   /** The session's prime — its import or its create — answers 500. */
   primePostFails?: boolean;
+  /** The store refill the terminal transition causes fails in the tailer: its
+   *  failure note is written in the refill's place, as the real tailer writes
+   *  it when the store's read is refused. */
+  terminalRefillFails?: boolean;
   /** The `queue` prompt POST of this 1-based number (1 the run's request or a
    *  resume's continue, 2 the first post-turn's) answers 500: nothing starts. */
   promptPostFails?: number;
@@ -582,6 +586,11 @@ class ScriptedServe {
   private declinedInTurn = 0;
   private readonly steerPostFails: boolean;
   private readonly primePostFails: boolean;
+  private readonly terminalRefillFails: boolean;
+  /** The last step's store refill, owed to the terminal transition: the real
+   *  tailer's GET for that step answers after the server has ended the
+   *  execution, so the refill lands after the terminal event. */
+  private owedStepRefill = false;
   private readonly promptPostFails: number | undefined;
   private readonly promptPostThrows: number | undefined;
   private readonly budgetRefusalAtModelCall: number | undefined;
@@ -719,6 +728,7 @@ class ScriptedServe {
     this.declineCascade = options.declineCascade === true;
     this.steerPostFails = options.steerPostFails === true;
     this.primePostFails = options.primePostFails === true;
+    this.terminalRefillFails = options.terminalRefillFails === true;
     this.promptPostFails = options.promptPostFails;
     this.promptPostThrows = options.promptPostThrows;
     this.budgetRefusalAtModelCall = options.budgetRefusalAtModelCall;
@@ -1000,23 +1010,31 @@ class ScriptedServe {
   private async awaitFeedRead(): Promise<void> {
     for (let i = 0; i < 2000 && !this.container.drained; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
   }
-  private emitPermissions(pending: unknown[]): void {
+  /** The refills the tailer writes after an event it refills on, stamped with
+   *  that event's type as their `reason` — the pending asks, then the store. */
+  private emitPermissions(pending: unknown[], reason = "session.step.ended"): void {
     this.container.emit({
       feed: "permissions",
       at: NOW,
       sessionID: this.sessionID,
-      reason: "session.step.ended",
+      reason,
       data: pending,
     });
   }
-  private emitMessages(): void {
+  private emitMessages(reason = "session.step.ended"): void {
     this.container.emit({
       feed: "messages",
       at: NOW,
       sessionID: this.sessionID,
-      reason: "session.step.ended",
+      reason,
       data: [...this.store],
     });
+  }
+  /** The last step's refill, owed to the terminal transition, written now. */
+  private flushOwedRefill(): void {
+    if (!this.owedStepRefill) return;
+    this.owedStepRefill = false;
+    this.emitMessages("session.step.ended");
   }
 
   /** Route one of the harness's writes: the readiness probes, the session
@@ -1797,7 +1815,11 @@ class ScriptedServe {
       }
       this.recordModelCall();
       await this.playTurn(this.script.turns[t], t, play);
-      if (this.hungTool !== undefined || this.cutPlay === play) return;
+      if (this.hungTool !== undefined || this.cutPlay === play) {
+        // No terminal transition follows here: the step's refill it was owed to lands now, as before the cut.
+        this.flushOwedRefill();
+        return;
+      }
       if (this.replaced) {
         // The container was replaced with this turn's call in flight: rename the
         // container (so the verdict's was → now are two words) and arm the next
@@ -1853,15 +1875,27 @@ class ScriptedServe {
       outcome: this.interrupted ? "interrupted" : "succeeded",
       time: { created: NOW },
     });
-    // An interrupted execution's terminal transition causes its refills after
-    // the end, in the tailer's order: the pending asks (none now), then the
-    // store. A steer enqueued into the interrupted execution is dropped with it
+    // The terminal transition's refills, after the end and in the tailer's
+    // order (measured): first the last step's own refill, whose GET answered
+    // only once the execution had ended, then the pending asks (none now) and
+    // the store for the terminal reason — or, with `terminalRefillFails`, the
+    // tailer's note that the store's read was refused, in the refill's place.
+    // A steer enqueued into an interrupted execution is dropped with it
     // (measured: no `session.inbox.delivered`, no row, no new execution).
-    if (this.interrupted) {
-      this.pendingSteers.splice(0);
-      this.emitPermissions([]);
-      this.emitMessages();
-    }
+    const terminal = this.interrupted ? "session.execution.interrupted" : "session.execution.succeeded";
+    if (this.interrupted) this.pendingSteers.splice(0);
+    this.flushOwedRefill();
+    this.emitPermissions([], terminal);
+    if (this.terminalRefillFails)
+      this.container.emit({
+        feed: "tailer",
+        at: NOW,
+        note: "message refill failed",
+        sessionID: this.sessionID,
+        reason: terminal,
+        detail: `GET /api/session/${this.sessionID}/message?order=asc&limit=200 answered 500`,
+      });
+    else this.emitMessages(terminal);
   }
 
   private async playTurn(turn: ModelTurn, index: number, play: number): Promise<void> {
@@ -1932,7 +1966,13 @@ class ScriptedServe {
     // margin modelled: a server committing the row later than the boundary is
     // not what was measured, so the fake does not pretend one.
     this.flushSteers();
-    this.emitMessages();
+    // The refill this step's end causes lands after the terminal event when
+    // the step is the play's last — measured against the binary: the tailer's
+    // GET for the step answers after the server has ended the execution, so
+    // the row carrying the answer reaches the feed only past `succeeded`. The
+    // last turn's refill is owed to the terminal transition, not written here.
+    if (index === this.script.turns.length - 1) this.owedStepRefill = true;
+    else this.emitMessages();
   }
 
   private toolContent(

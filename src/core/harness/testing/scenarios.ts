@@ -816,6 +816,24 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     },
   },
   {
+    id: "conversation-answer-in-terminal-refill",
+    clause: "conversation",
+    title:
+      "the answer is the store row the execution's end promises: a text-only last step's row reaches the record only in the refill written after the terminal event, and the loop reads that refill before it settles — the run's answer is the text and the ledger's last step carries it, never `_(no response)_`",
+    script: {
+      request: "say the last word",
+      turns: [call("c-1", "grep", { pattern: "needle" }), text("the last word")],
+    },
+    check: (run) => {
+      assert.equal(answered(run), "the last word");
+      const last = run.steps.at(-1);
+      assert.ok(last !== undefined, "no step was written");
+      const answer = last.turns.at(-1);
+      assert.equal(answer?.role, "assistant");
+      assert.deepEqual(answer?.content, [{ type: "text", text: "the last word" }]);
+    },
+  },
+  {
     id: "conversation-steer",
     clause: "conversation",
     title:
