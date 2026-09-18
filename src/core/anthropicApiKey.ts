@@ -11,10 +11,10 @@
 // key (the model proxy forwards them with it, src/channels/modelProxy.ts).
 
 import type { Secret, Secrets } from "../secrets.js";
-import { ANTHROPIC_API_KEY_ENV, type ProviderConfig } from "./provider.js";
+import { ANTHROPIC_API_KEY_ENV, wireOf, type ProviderConfig } from "./provider.js";
 
 export function anthropicApiKey(providers: Record<string, ProviderConfig>, secrets: Secrets): Secret | undefined {
-  const cfg = Object.values(providers).find((p) => p.type === "anthropic");
+  const cfg = Object.values(providers).find((p) => wireOf(p) === "anthropic-messages");
   if (!cfg) return undefined;
   return secrets.named(cfg.apiKeyEnv ?? ANTHROPIC_API_KEY_ENV);
 }

@@ -17,6 +17,8 @@ import {
   type ThreadDirectives,
 } from "../../directives.js";
 import { parseModelRef } from "../provider.js";
+import { decideControls, resolveModelCard, type ControlDecision, type ModelCard } from "../modelCard.js";
+import { installedModelRegistry } from "../installedModelRegistry.js";
 import {
   githubTokenScopeFor,
   residentOnboardedProbe,
@@ -182,11 +184,17 @@ export function resolveProfile(ctx: {
   return resolution;
 }
 
-/** Whether the run's machine class carries a repository, and the target's
- *  resolution in flight. */
+/** Whether the run's machine class carries a repository, the target's
+ *  resolution in flight, and the model card resolved beside the block check
+ *  (record 0052) with every control decided against it. */
 export interface ResolvedTarget {
   needsRepo: boolean;
   repoCtxP: Promise<RepoContext>;
+  /** The card resolved before the first call; the run records it. */
+  modelCard: ModelCard;
+  /** Every control's decision — the degraded ones become notes on the record
+   *  before the first turn; a refused one throws above. */
+  decisions: ControlDecision[];
 }
 
 /** What `resolveTarget` reads off the dispatch. */
@@ -227,6 +235,26 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
     );
   }
 
+  // The model card (record 0052): resolved once, here, where the block is
+  // checked, and decided before any card or span opens. A control the card
+  // refuses ends the run with a reply naming the model and what it takes, the
+  // same shape as the unknown-provider refusal above.
+  const modelCard = resolveModelCard(resolved.modelRef, providers, installedModelRegistry);
+  const decisions = decideControls(modelCard, {
+    ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+    ...(msg.images ? { images: msg.images.length } : {}),
+    ...(msg.documents ? { documents: msg.documents.length } : {}),
+  });
+  const refused = decisions.find((d) => d.outcome === "refused");
+  if (refused) {
+    throw new RefusalError(
+      refusalOf(
+        "model_card_refused",
+        `Model "${resolved.modelRef}" refuses ${refused.control}${refused.asked !== undefined ? ` "${refused.asked}"` : ""}: ${refused.why}`,
+      ),
+    );
+  }
+
   // Target repo/ref for resident environments, resolved BEFORE the model
   // turn: explicit signals in the message, else the repo this thread
   // already established (from history — restart-safe, never stored). The
@@ -257,7 +285,7 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
         : Promise.resolve({}),
   );
   repoCtxP.catch(() => {});
-  return { needsRepo, repoCtxP };
+  return { needsRepo, repoCtxP, modelCard, decisions };
 }
 
 /**

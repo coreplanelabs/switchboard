@@ -396,6 +396,9 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       "directive_severity",
       "directive_renewals",
       "provider_unknown",
+      // resolve.test.ts proves the card's refusal sentence — the model, the
+      // refused control and the card's why (record 0052).
+      "model_card_refused",
       "command_unauthorized",
       "command_invalid_input",
       "command_not_found",

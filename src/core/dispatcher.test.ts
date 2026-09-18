@@ -4980,6 +4980,8 @@ describe("live run-view wiring (Area 2)", () => {
       "+request",
       "input",
       "run_meta",
+      "run_note", // control_degraded: the fixture model has no card, so the cap goes out unvouched (record 0052)
+      "run_note", // control_degraded: no layer names the window
       "+run.agent",
       "lease", // the harness's clocks, published as the loop starts (harness-pi item 15)
       "+model.turn",
@@ -5131,6 +5133,10 @@ describe("live run-view wiring (Area 2)", () => {
       "+request",
       "input",
       "run_meta",
+      "run_note", // control_degraded: the fixture model has no card, so the cap goes out unvouched (record 0052)
+      "run_note", // control_degraded: the attachments' inputs, decided against the card
+      "run_note", // control_degraded: the attachments' inputs, decided against the card
+      "run_note", // control_degraded: no layer names the window
       "+run.agent",
       "lease", // the harness's clocks, published as the loop starts (harness-pi item 15)
       "+model.turn",
@@ -5184,6 +5190,7 @@ describe("live run-view wiring (Area 2)", () => {
       model: expect.stringContaining("/"),
       traceId: expect.any(String),
       harness: "pi", // the harness the process drives runs with (harness.md item 8)
+      card: expect.objectContaining({ ref: "anthropic/general-model", wire: "anthropic-messages" }), // the model card the run resolved (record 0052)
       at: expect.any(Number),
     });
   });
@@ -6603,7 +6610,7 @@ describe("self-improvement wiring", () => {
     expect(rec.runId).toBe("run-friction-1");
     expect(rec.agent).toBe("general");
     expect(rec.label).toContain("general");
-    expect(rec.diagnosis.eventCount).toBe(3); // the gate's tool_refused note, tool_call, tool_result (the narrative events are not steps)
+    expect(rec.diagnosis.eventCount).toBe(5); // two control_degraded notes (no card for the fixture model), the gate's tool_refused note, tool_call, tool_result (the narrative events are not steps)
     // The general agent has no shell: its `bash` call is an unknown tool → a failed_tool finding.
     expect(rec.diagnosis.byCategory.failed_tool.count).toBe(1);
   });
@@ -7393,7 +7400,7 @@ describe("friction diagnosis reads the registry backlog", () => {
       }),
     );
     expect(rec.diagnosis.shape).toBeDefined();
-    expect(rec.diagnosis.eventCount).toBe(3); // the gate's tool_refused note, tool_call, tool_result; the narrative events do not count
+    expect(rec.diagnosis.eventCount).toBe(5); // two control_degraded notes (no card), the gate's tool_refused note, tool_call, tool_result; the narrative events do not count
   });
 });
 
@@ -8079,7 +8086,7 @@ describe("run history write path", () => {
       const tomb = puts[0];
       expect(tomb.id).toBe("run-h");
       expect(tomb.finishedAt).toBe(tomb.startedAt); // provisional: nobody knows a crash's real death time
-      expect(runShapeOf(tomb.events)).toEqual(["+request", "input", "run_meta", "context"]);
+      expect(runShapeOf(tomb.events)).toEqual(["+request", "input", "run_meta", "run_note", "run_note", "context"]);
       expect(tomb).toMatchObject({
         agent: "general",
         model: "anthropic/general-model",
@@ -9926,7 +9933,14 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     // request and its meta. The record's first CONTENT event is still `input`,
     // and everything ahead of it is head material — the protected head runs
     // unbroken from the first event through the request.
-    expect(streamAtAttach.filter((e) => !isSpanRecord(e)).map((e) => e.type)).toEqual(["input", "run_meta", "context"]);
+    expect(streamAtAttach.filter((e) => !isSpanRecord(e)).map((e) => e.type)).toEqual([
+      "input",
+      "run_meta",
+      "run_note", // control_degraded ×3: effort unvouched, cap unvouched, window unknown (record 0052)
+      "run_note",
+      "run_note",
+      "context",
+    ]);
     // The attach span has started (its start streamed live, the mock runs inside it).
     expect(streamAtAttach.map((e) => (e.type === "span_start" ? e.name : e.type))).toEqual(
       expect.arrayContaining(["dispatch.ack_card", "input", "run_meta", "dispatch.workspace.attach"]),
@@ -11409,9 +11423,15 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       kind: string;
       summary: string;
     }>;
-    // The verdict, then the outcome — both the floor's kind; never `resumed` on a run that is not.
-    expect(notes.map((n) => n.kind)).toEqual(["sandbox_restarted", "sandbox_restarted"]);
-    expect(notes[1]!.summary).toBe(
+    // The card's degradations first (published before the first turn), then
+    // the verdict and the outcome — both the floor's kind; never `resumed` on a run that is not.
+    expect(notes.map((n) => n.kind)).toEqual([
+      "control_degraded",
+      "control_degraded",
+      "sandbox_restarted",
+      "sandbox_restarted",
+    ]);
+    expect(notes[3]!.summary).toBe(
       "the run's workspace could not be re-attached in the replacement container (the resident's worktree for this thread is /workspace/threads/t/other as worker3, not the run's recorded /workspace/threads/t/main as worker2); the run restarts from its request as a new run in this thread",
     );
     // Never a push into the closed row, no steer ack in the thread; the map forgot the run.

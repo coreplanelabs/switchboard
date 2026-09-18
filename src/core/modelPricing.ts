@@ -1,3 +1,4 @@
+import { parseModelRef } from "./provider.js";
 import type { ModelUsage, RunUsage } from "./runUsage.js";
 
 // The price of a model's tokens (docs/reference/specs/costs.md): one table
@@ -110,9 +111,14 @@ export function parseModelPrices(raw: unknown): ModelPriceTable {
     throw new Error("costs.prices must be a mapping of <provider>/<model> → rates");
   const out: Record<string, ModelPrice> = {};
   for (const [ref, value] of Object.entries(raw as Record<string, unknown>)) {
-    const slash = ref.indexOf("/");
-    if (slash <= 0 || slash === ref.length - 1)
-      throw new Error(`costs.prices.${ref} must be keyed <provider>/<model>, the ref a run's spans name`);
+    let shaped: boolean;
+    try {
+      const parsed = parseModelRef(ref);
+      shaped = parsed.provider !== "" && parsed.model !== "";
+    } catch {
+      shaped = false;
+    }
+    if (!shaped) throw new Error(`costs.prices.${ref} must be keyed <provider>/<model>, the ref a run's spans name`);
     if (typeof value !== "object" || value === null || Array.isArray(value))
       throw new Error(
         `costs.prices.${ref} must be a mapping of { input, output, cacheRead, cacheWrite } in USD per million tokens`,
@@ -160,8 +166,11 @@ export interface PricedModelUsage extends ModelUsage {
   usd: number | null;
 }
 
-/** `anthropic/claude-fable-5` → `claude-fable-5`: the spans name the provider, the price table the model. */
-export const modelIdOf = (ref: string): string => (ref.includes("/") ? ref.slice(ref.indexOf("/") + 1) : ref);
+/** `anthropic/claude-fable-5` → `claude-fable-5`: the spans name the provider, the price
+ *  table the model. The list fallback drops the provider prefix alone (costs.md item 4b),
+ *  so an aggregator's vendor-prefixed ref (`openrouter/anthropic/claude-…`) stays a list
+ *  miss — reported unpriced, never silently billed at another provider's rate. */
+export const modelIdOf = (ref: string): string => (ref.includes("/") ? parseModelRef(ref).model : ref);
 
 /** A run's dollars as every surface prints them (costs.md item 4c): cents from a
  *  dollar up (`$1.24`), a tenth of a cent below that (`$0.038`), and `<$0.001`

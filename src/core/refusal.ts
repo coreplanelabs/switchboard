@@ -96,6 +96,9 @@ const CAUSE_OF = {
   directive_severity: "request",
   directive_renewals: "request",
   provider_unknown: "request",
+  // the model card's refusal (record 0052, model-proxy item 11): a control the
+  // resolved card does not take, named before any card or model call
+  model_card_refused: "request",
   // a follow-up dropped because the run it was folded into was stopped
   follow_up_dropped: "system",
   // the typed-command codes (`InvokeErrorCode`): `chatErrorLine` renders these

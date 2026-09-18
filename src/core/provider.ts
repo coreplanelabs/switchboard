@@ -93,12 +93,115 @@ export interface Provider {
   complete(req: CompletionRequest): Promise<CompletionResult>;
 }
 
+/** The three wire shapes a provider block may declare (record 0052):
+ *  Anthropic's Messages API, OpenAI's Chat Completions and OpenAI's Responses
+ *  API. `openai-responses` is a declaration only in this slice — the proxy
+ *  still serves two routes (a later slice adds the third) — and a block that names it
+ *  keeps routing through the compatible shape until then. */
+export const WIRES = ["anthropic-messages", "openai-chat", "openai-responses"] as const;
+export type Wire = (typeof WIRES)[number];
+
+/** The legacy `type` words, as the wires they load as for one release. */
+export const WIRE_ALIASES: Readonly<Record<string, Wire>> = {
+  anthropic: "anthropic-messages",
+  "openai-compatible": "openai-chat",
+};
+
+/** One model's operator override under a block's `models.<id>` (record 0052,
+ *  the operator layer of the card). Every field is optional and wins over the
+ *  registry card and the wire defaults where it is set. */
+export interface ProviderModelOverride {
+  /** Our effort tiers → the wire's word, or null to refuse the tier. */
+  levels?: Record<string, string | null>;
+  /** The body field the output cap is spelled with on this model. */
+  capField?: string;
+  /** The model's context window in tokens. */
+  window?: number;
+  /** Which input kinds the model takes. */
+  inputs?: { image?: boolean; document?: boolean };
+  /** The model's cache rule. */
+  cache?: "automatic" | "markers" | "none" | "unknown";
+  /** USD per million tokens, by kind. */
+  price?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+}
+
 export interface ProviderConfig {
+  /** The legacy wire word: `anthropic` or `openai-compatible` (record
+   *  0052). `wire` is the new spelling; `type` keeps loading as its alias for
+   *  one release. A block may declare either; validation derives the one it
+   *  did not. */
   type: "anthropic" | "openai-compatible";
+  /** The wire the block speaks (`anthropic-messages`, `openai-chat`,
+   *  `openai-responses`). Absent → derived from `type`. */
+  wire?: Wire;
+  /** The vendor whose models this block serves: a name (default, the block's
+   *  own) or `model`, which makes the block an aggregator whose vendor is the
+   *  model id's first segment. */
+  vendor?: string;
+  /** The pi registry file consulted for this block's cards (default, the
+   *  block's own name when such a file exists; `none` otherwise). */
+  catalog?: string;
+  /** Per-model operator overrides, keyed by the model id as the ref spells it. */
+  models?: Record<string, ProviderModelOverride>;
+  /** Extra body fields merged into every request on the wires whose adapter
+   *  takes one. Never a control: not decided, not noted, not in the matrix. */
+  passthrough?: Record<string, unknown>;
   /** Env var holding the API key (never put keys in config files). */
   apiKeyEnv?: string;
   /** Base URL for openai-compatible providers (e.g. http://localhost:11434/v1). */
   baseUrl?: string;
+}
+
+/** The wire a block speaks: its `wire` when declared, else its legacy `type`. */
+export function wireOf(block: Pick<ProviderConfig, "type" | "wire">): Wire {
+  return block.wire ?? WIRE_ALIASES[block.type] ?? "openai-chat";
+}
+
+/** One `<block>/<model>` ref read for the vendor it serves (record 0052):
+ *  the block, the model id as the ref spells it, the vendor, the vendor's own
+ *  id (the model id less a vendor prefix) and which layer named the vendor. */
+export interface VendorRef {
+  block: string;
+  model: string;
+  vendor: string;
+  vendorId: string;
+  vendorSource: "declared" | "model" | "block";
+}
+
+/** The one vendor parse (record 0052): `parseModelRef` is the only other parser of a
+ *  ref. A block that declares a vendor name uses it; a block that declares
+ *  `vendor: model`, or a model id that carries its own vendor prefix
+ *  (`openrouter/anthropic/claude-sonnet-5`), reads the vendor off the id's
+ *  first segment; otherwise the block's own name is the vendor. `catalog`
+ *  never enters: a block named unlike its catalog still serves the vendor the
+ *  declaration or the id names. */
+export function vendorOf(
+  ref: string,
+  blocks: Readonly<Record<string, Pick<ProviderConfig, "vendor">>> = {},
+): VendorRef {
+  const { provider: block, model } = parseModelRef(ref);
+  const declared = blocks[block]?.vendor;
+  const slash = model.indexOf("/");
+  if (declared !== undefined && declared !== "model") {
+    const prefix = `${declared}/`;
+    return {
+      block,
+      model,
+      vendor: declared,
+      vendorId: model.startsWith(prefix) ? model.slice(prefix.length) : model,
+      vendorSource: "declared",
+    };
+  }
+  if (slash > 0 && (declared === "model" || declared === undefined)) {
+    return {
+      block,
+      model,
+      vendor: model.slice(0, slash),
+      vendorId: model.slice(slash + 1),
+      vendorSource: "model",
+    };
+  }
+  return { block, model, vendor: block, vendorId: model, vendorSource: "block" };
 }
 
 /** The env var Anthropic's own SDK reads when an `anthropic` provider block names none. */

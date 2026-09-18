@@ -39,6 +39,8 @@ import type { ResidentFleetFacts } from "../residentFleet.js";
 import { attachRoundWorkspace, makeSystemComposer, type RoundWorkspace } from "../reviewRound.js";
 import { ownPrOf, type RepoContext } from "../repoContext.js";
 import { redactSecrets, type AgentSource, type RunEvent } from "../runEvents.js";
+import { oneLine } from "../redact.js";
+import type { ControlDecision, ModelCard } from "../modelCard.js";
 import { MAX_EVENT_BYTES, utf8ByteLength, type RunSeed } from "../runRecord.js";
 import type { RunHandle, RunRegistry } from "../runRegistry.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
@@ -327,6 +329,12 @@ export interface RegisterRunContext {
   seedTurns?: TextTurn[];
   /** How the preset was chosen (`run_meta.agentSource`). */
   agentSource: AgentSource;
+  /** The model card resolved before the first call (record 0052) and
+   *  every control's decision against it (record 0052); the degraded decisions become
+   *  `control_degraded` notes before the first turn. A hand-built context (a
+   *  test) may carry none. */
+  modelCard?: ModelCard;
+  cardDecisions?: ControlDecision[];
   /** The conversations the request pointed at and the step quoted (record
    *  0037): one `reference` event each, right after `input`. Absent or empty
    *  when the request carried none or the step is off. */
@@ -368,6 +376,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     seed,
     seedTurns,
     agentSource,
+    modelCard,
+    cardDecisions,
     route,
   } = ctx;
   // The reservation (item 42): the run's row BEFORE the workspace attach —
@@ -543,6 +553,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
           }
         : {}),
       ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
+      ...(modelCard ? { card: modelCard } : {}),
       ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
       ...(repoCtx.ref !== undefined ? { ref: repoCtx.ref } : {}),
       ...(repoCtx.pr !== undefined ? { pr: repoCtx.pr } : {}),
@@ -550,6 +561,26 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       at: clock(),
     });
   if (!resume) publishMeta(repoCtx);
+  // The card's degradations, one typed note each, before the first turn
+  // (record 0052): a control the card cannot vouch for is never a silent
+  // downgrade. A refusal never reaches here — the resolve stage refused it.
+  if (!resume)
+    for (const d of cardDecisions ?? []) {
+      if (d.outcome !== "degraded") continue;
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "control_degraded",
+        summary: oneLine(
+          `${d.control}${d.asked !== undefined ? ` ${d.asked}` : ""} → ${d.applied ?? "?"} (${d.vouched ? "fallback" : "unvouched"}): ${d.why}`,
+        ),
+        control: d.control,
+        ...(d.asked !== undefined ? { asked: d.asked } : {}),
+        ...(d.applied !== undefined ? { applied: d.applied } : {}),
+        vouched: d.vouched,
+        why: d.why,
+        at: clock(),
+      });
+    }
   // The router's decision (routing-and-config item 21), right after the meta
   // it explains: the preset, the reason the card carries, the model that
   // decided, a compound's parts — or the rejection that left the run on the default.
