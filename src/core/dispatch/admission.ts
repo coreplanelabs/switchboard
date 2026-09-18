@@ -139,6 +139,39 @@ export interface RestartContext {
 
 export { DURABLE_INBOX_MAX_BYTES, durableInboxMessage } from "../runLedger/inboxMessage.js";
 
+/** The attributed join of a unit's unconsumed thread events (record 0051's fold rule):
+ *  `<sender>: <text>` in arrival order, one block per event — the shape the
+ *  durable inbox's join gives a run's carried follow-ups, reused for the fold
+ *  before a coding spawn and for the leftovers a unit's end runs as one fresh
+ *  turn. An event that lost its attachments says so on its own line. */
+export function foldThreadEvents(
+  events: ReadonlyArray<{ sender: string; senderName?: string; text: string; attachmentsDropped?: number }>,
+): string {
+  return events
+    .map((e) => {
+      const dropped =
+        e.attachmentsDropped !== undefined && e.attachmentsDropped > 0
+          ? `\n(${e.attachmentsDropped} attachment${e.attachmentsDropped === 1 ? "" : "s"} could not be carried and ${e.attachmentsDropped === 1 ? "is" : "are"} not attached.)`
+          : "";
+      return `${e.senderName ?? e.sender}: ${e.text}${dropped}`;
+    })
+    .join("\n\n");
+}
+
+/** The stored attachments of a unit's thread events as one message's images
+ *  and documents (the reader of what the append kept under the cap): an image
+ *  by its media type, anything else a document, in arrival order — so a
+ *  screenshot on a between-rounds reply reaches the child the fold feeds and
+ *  the fresh turn the leftovers run as, never only the text beside it. */
+export function foldThreadAttachments(
+  events: ReadonlyArray<{ attachments?: ReadonlyArray<{ mediaType: string; data: string; name?: string }> }>,
+): Pick<IncomingMessage, "images" | "documents"> {
+  const all = events.flatMap((e) => e.attachments ?? []);
+  const images = all.filter((a) => a.mediaType.startsWith("image/")).map((a) => ({ ...a }));
+  const documents = all.filter((a) => !a.mediaType.startsWith("image/")).map((a) => ({ ...a }));
+  return { ...(images.length > 0 ? { images } : {}), ...(documents.length > 0 ? { documents } : {}) };
+}
+
 /** A durable inbox item back as a follow-up for the resumed run, on the
  *  resume's channel handle — none for a steer a run sent, which is never run
  *  fresh; undefined when the stored shape is not one this build wrote

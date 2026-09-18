@@ -60,7 +60,9 @@ import {
   type CoordinatorInstance,
   type CoordinatorTag,
   type CoordinatorUnit,
+  type ThreadEvent,
 } from "../core/coordinator/contract.js";
+import { foldThreadAttachments, foldThreadEvents } from "../core/dispatch/admission.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
@@ -127,7 +129,7 @@ export interface AdminCoordinatorDeps {
   dispatch: (
     msg: IncomingMessage,
     io: ChannelIO,
-    opts: Pick<DispatchOptions, "coordinator" | "contract"> & { coordinator: CoordinatorTag },
+    opts?: Pick<DispatchOptions, "coordinator" | "contract"> & { coordinator: CoordinatorTag },
   ) => Promise<DispatchOutcome>;
   /** The channel handle for a thread (the resume's `resumeSlackIO` from the
    *  row's parts — the card's ts when the handle must redraw it); undefined for
@@ -580,6 +582,22 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   } else {
     turn = { prompt: req.prompt! };
   }
+  // The fold (record 0051's fold rule): every coding spawn carries the unit's
+  // unconsumed thread events — in arrival order, each text attributed to its
+  // sender, appended after the brief's own text — and marks them consumed by
+  // this spawn's step once the child registers; a review spawn leaves them
+  // (the review reads the diff, not the thread), and a replayed spawn answers
+  // `alreadySpawned` above before this read, so nothing folds twice.
+  let folded: ThreadEvent[] = [];
+  if (req.preset === "coding" && row !== undefined) {
+    folded = await deps.instances.listEvents({ instanceId: instance.id, unit: row.unit }, true).catch(() => []);
+    if (folded.length > 0)
+      turn = { ...turn, prompt: `${turn.prompt}\n\nThe thread since the last step:\n\n${foldThreadEvents(folded)}` };
+  }
+  // The events' stored attachments ride the child's message as its own images
+  // and documents (`foldThreadAttachments`): what the append kept under the cap
+  // has a reader, as the ack promised.
+  const carried = foldThreadAttachments(folded);
   // The child's message is the one the requester would have typed, in the
   // child's thread, as the requester the parent record names. The directive is
   // the message's own (`childRequestText`), so the findings step's `agent:coding`
@@ -601,6 +619,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
       ...(turn.ref !== undefined ? { ref: turn.ref } : {}),
       ...(req.budget !== undefined ? { budget: req.budget } : {}),
     }),
+    ...carried,
     receivedAt: at,
   };
   let startedId: string | undefined;
@@ -644,6 +663,22 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const first = await Promise.race([started.then((id) => ({ kind: "started" as const, id })), settled]);
   if (first.kind === "started" || startedId !== undefined) {
     const runId = first.kind === "started" ? first.id : startedId!;
+    if (folded.length > 0) {
+      // Consumed by the spawn's step (record 0051's fold rule): the same identity a
+      // replay carries, so the marks and the retry answer agree. A failed mark
+      // is a log line — the next coding spawn folds the rows again rather than
+      // losing them.
+      await deps.instances
+        .markConsumed(
+          { instanceId: instance.id, unit: row!.unit },
+          folded.map((e) => e.seq),
+          req.step,
+        )
+        .catch((err) => log(`[coordinator] ${instance.id} ${req.step}: the consumed marks failed: ${describe(err)}`));
+      log(
+        `[coordinator] ${instance.id} ${req.step}: folded ${folded.length} thread event(s) into the ${req.preset} child`,
+      );
+    }
     log(`[coordinator] ${instance.id} ${req.step}: spawned ${req.preset} run ${runId} in ${threadKey}`);
     return json(200, { ok: true, runId, threadKey, at });
   }
@@ -1316,6 +1351,61 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const thread = unitThread(instance, updated);
   const io =
     thread.threadKey !== undefined ? deps.ioFor({ threadKey: thread.threadKey, userId: instance.userId }) : undefined;
+  // The leftovers (record 0051's fold rule): events still unconsumed when the unit ends
+  // run as ONE fresh turn in the unit's thread — as a run's unconsumed
+  // follow-ups do at the settle — dispatched as the requester with each text
+  // attributed to its sender. Marked consumed BEFORE the dispatch under this
+  // ending's identity, so a replayed unit-end finds nothing and never runs
+  // them twice; the row's ending is already written, so the fresh turn routes
+  // as an unowned thread's message, never back onto this list. With no channel
+  // handle to run the turn in, the events stay unconsumed on the ended row and
+  // the log says so by count — a loss the operator can read, never a silent one.
+  if (segment === undefined) {
+    const leftovers = await deps.instances
+      .listEvents({ instanceId: instance.id, unit: row.unit }, true)
+      .catch(() => [] as ThreadEvent[]);
+    if (leftovers.length > 0 && io === undefined) {
+      (deps.log ?? console.warn)(
+        `[coordinator] ${instance.id} ${row.unit}: ${leftovers.length} leftover thread event(s) stay unconsumed — ` +
+          `no channel handle for the unit's thread${thread.threadKey !== undefined ? ` ${thread.threadKey}` : ""}, so no fresh turn ran`,
+      );
+    } else if (leftovers.length > 0 && io !== undefined) {
+      await deps.instances
+        .markConsumed(
+          { instanceId: instance.id, unit: row.unit },
+          leftovers.map((e) => e.seq),
+          `unit-end:${row.unit}`,
+        )
+        .catch((err) =>
+          (deps.log ?? console.warn)(
+            `[coordinator] ${instance.id} ${row.unit}: the leftover marks failed: ${describe(err)}`,
+          ),
+        );
+      const freshTurn: IncomingMessage = {
+        channelId: instance.channelId,
+        userId: instance.userId,
+        ...(instance.userName !== undefined ? { userName: instance.userName } : {}),
+        ...(instance.authenticatedAs !== undefined ? { authenticatedAs: instance.authenticatedAs } : {}),
+        ...(instance.postedBy !== undefined ? { postedBy: instance.postedBy } : {}),
+        ...(instance.channelName !== undefined ? { channelName: instance.channelName } : {}),
+        threadKey: thread.threadKey!,
+        ...(thread.sourceUrl !== undefined ? { sourceUrl: thread.sourceUrl } : {}),
+        text: foldThreadEvents(leftovers),
+        ...foldThreadAttachments(leftovers),
+        receivedAt: at,
+      };
+      void deps
+        .dispatch(freshTurn, io)
+        .catch((err) =>
+          (deps.log ?? console.warn)(
+            `[coordinator] ${instance.id} ${row.unit}: the leftovers' fresh turn threw: ${describe(err)}`,
+          ),
+        );
+      (deps.log ?? console.log)(
+        `[coordinator] ${instance.id} ${row.unit}: ${leftovers.length} leftover thread event(s) run as one fresh turn`,
+      );
+    }
+  }
   let told = false;
   if (io) {
     try {
