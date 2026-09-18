@@ -18,6 +18,10 @@
 
 export const MINUTE_MS = 60_000;
 
+/** Minutes → milliseconds, for a duration a request names in minutes (a drain's
+ *  length): the multiplication lives here so no other file holds it. */
+export const minutesToMs = (minutes: number): number => minutes * MINUTE_MS;
+
 /** One calendar day in milliseconds: the unit the daily cost and delivery ranges
  *  step by (`dayOf`, the day count of a range). A day is not a lease, but it is
  *  a duration, and every duration is read from this table rather than written
@@ -60,6 +64,26 @@ export const ATTACH_REQUEST_MIN_MS = 30_000;
  *  before anything ran). A wait that runs out decides nothing; the failure
  *  that opened the question stands. */
 export const HARNESS_PROBE_WAIT_MS = 5 * MINUTE_MS;
+
+/** The resident fleet drain (docs/decisions/0059; docs/reference/specs/resident-repos.md
+ *  item 69; docs/reference/specs/release-and-deploy.md item 31). A deploy closes
+ *  the fleet to new runs and waits for the runs in flight to end: `deployWaitMaxMs`
+ *  is that wait, past a coding child's whole lease (its ask plus its write-up),
+ *  the longest a run in flight can outlive the drain's start; the drain itself
+ *  lasts the wait plus `marginMinutes`, and the registry caps any drain at
+ *  `maxMinutes` so one nobody lifted is an hour and a half, not a day. A run
+ *  asked during a drain waits at its attach one `pollMs` at a time under its
+ *  own lease less `leaseReserveMs` (what the attach and the work after it
+ *  need), `waitMaxMs` with no lease to clip it. */
+export const DRAIN = {
+  pollMs: 30_000,
+  waitMaxMs: 60 * MINUTE_MS,
+  leaseReserveMs: 10 * MINUTE_MS,
+  deployWaitMaxMs: 60 * MINUTE_MS,
+  marginMinutes: 5,
+  maxMinutes: 90,
+  defaultMinutes: 60,
+} as const;
 
 /** The presets that run the tool loop, and the one pipeline preset. */
 export const LOOP_PRESETS = ["general", "coding", "review", "research", "explore", "conductor"] as const;

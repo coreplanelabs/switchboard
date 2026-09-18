@@ -15,6 +15,10 @@ import {
   ResidentNeedsRefError,
   ResidentOperations,
   ResidentReuseRefusedError,
+  DRAIN_LEASE_RESERVE_MS,
+  DRAIN_POLL_MS,
+  ResidentDrainingError,
+  isDrainingRefusal,
 } from "./resident.js";
 import { classificationOf } from "../core/trace/classify.js";
 import { BASH_TIMEOUT_MS } from "./bashTimeout.js";
@@ -2490,6 +2494,85 @@ describe("ResidentExecutor waits out a refused connect (item 68)", () => {
     const err = await outcome;
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as ExecInfraError).reason).toBe("answered");
+    expect(calls).toHaveLength(1);
+  });
+});
+
+// Feature: docs/reference/specs/resident-repos.md item 69 — the fleet drain: a
+// deploy closed `/attach` to new runs; the client waits at its attach for the
+// fleet to reopen, one re-attach per poll, under the run's own lease, and the
+// binding carries the wait so the card says the run started late and why.
+describe("ResidentExecutor.attach during a fleet drain (item 69)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const DRAIN = {
+    since: "2026-09-18T05:00:00.000Z",
+    until: "2026-09-18T06:00:00.000Z",
+    by: "deploy all",
+    reason: "deploy 62e4e9a",
+  };
+  const draining = {
+    status: 503,
+    body: {
+      error:
+        "draining: the resident fleet is closed to new runs for deploy 62e4e9a (asked by deploy all at …, ends by …) — the run waits at its attach and starts when the fleet reopens",
+      status: 503,
+      draining: DRAIN,
+    },
+  };
+
+  it("isDrainingRefusal keys on the 503 with a `draining` record — never on the words; a 503 without the record, or the record on a 200, is not a drain", () => {
+    expect(isDrainingRefusal({ status: 503, data: { error: "x", draining: DRAIN } })).toBe(true);
+    expect(isDrainingRefusal({ status: 503, data: { error: "draining: fleet closed" } })).toBe(false);
+    expect(isDrainingRefusal({ status: 200, data: { draining: DRAIN } })).toBe(false);
+    expect(isDrainingRefusal({ status: 503, data: { draining: { since: "x" } } })).toBe(false);
+  });
+
+  it("a drained fleet is waited for: one re-attach per poll until admitted, the binding carrying the wait; no other route is touched", async () => {
+    const { calls } = stubFetch(draining, draining, { raw: "\n" + JSON.stringify(ATTACH_OK) });
+    const ex = new ResidentExecutor(OPTS);
+    const p = ex.attach();
+    await vi.advanceTimersByTimeAsync(DRAIN_POLL_MS);
+    await vi.advanceTimersByTimeAsync(DRAIN_POLL_MS);
+    const binding = await p;
+    expect(binding).toMatchObject({ ref: "master", sha: "1220b9c4", wokeAfterMs: 2 * DRAIN_POLL_MS });
+    expect(calls.map(route)).toEqual(["/attach", "/attach", "/attach"]);
+  });
+
+  it("the wait is bounded by the run's lease less the reserve: a run with 20 min left waits 10 min, then the typed ResidentDrainingError names the wait and the drain's end", async () => {
+    const polls = (10 * 60_000) / DRAIN_POLL_MS;
+    stubFetch(...Array.from({ length: polls + 2 }, () => draining));
+    const ex = new ResidentExecutor({ ...OPTS, remainingMs: () => 20 * 60_000 });
+    const p = ex.attach().catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(20 * 60_000 - DRAIN_LEASE_RESERVE_MS + 1_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ResidentDrainingError);
+    expect((err as ResidentDrainingError).reason).toBe("refused");
+    expect((err as Error).message).toContain("did not reopen within the 600s this run could wait");
+    expect((err as Error).message).toContain("(the drain ends by 2026-09-18T06:00:00.000Z)");
+    expect((err as Error).message).toContain("draining: the resident fleet is closed to new runs");
+  });
+
+  it("an answer that is no longer the drain is judged as a first answer would be: the attach's own refusal ends the wait at once", async () => {
+    stubFetch(draining, { status: 404, body: { error: "not onboarded" } });
+    const ex = new ResidentExecutor(OPTS);
+    const p = ex.attach().catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(DRAIN_POLL_MS);
+    const err = await p;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("is not onboarded");
+  });
+
+  it("the run's stop ends the wait at once — no re-attach follows the stop", async () => {
+    const { calls } = stubFetch(draining, draining);
+    const ex = new ResidentExecutor(OPTS);
+    const ac = new AbortController();
+    const p = ex.attach(undefined, { signal: ac.signal }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(5_000);
+    ac.abort(new Error("stopped"));
+    const err = await p;
+    expect(err).toBeInstanceOf(Error);
     expect(calls).toHaveLength(1);
   });
 });

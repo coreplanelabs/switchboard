@@ -56,6 +56,8 @@
 #   CLOUDFLARE_API_TOKEN  fallback while CLOUDFLARE_DEPLOY_TOKEN is unset (the
 #                         docs Worker's narrower token)
 #   RESIDENT_READ_TOKEN   the resident preflight reads GET /residents with it;
+#   RESIDENT_DRAIN_TOKEN  the resident step drains the fleet with it (POST /drain, then /undrain; the bearer passes nothing else) so the
+#                         deploy lands once the runs in flight end; optional — without it the step waits without a drain and says so.
 #                         read scope is enough (any of the three bearers works)
 #   MEMORY_TOKEN          the state Worker's bearer: `deploy all` pushes the
 #                         bot's config to it as the `base` document right before
@@ -127,6 +129,9 @@ on:
       RESIDENT_READ_TOKEN:
         required: false
         description: the resident preflight's read bearer
+      RESIDENT_DRAIN_TOKEN:
+        required: false
+        description: the resident fleet's drain-only bearer (POST /drain and /undrain, nothing else) — the resident step drains the fleet with it so the deploy lands once the runs in flight end; without it the step waits for a quiet minute that steady traffic never gives
       SANDBOX_TOKEN:
         required: false
         description: the sandbox live gate's bearer
@@ -175,6 +180,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
       DEPLOY_TOKEN_SOURCE: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN && 'CLOUDFLARE_DEPLOY_TOKEN' || 'CLOUDFLARE_API_TOKEN (the docs token — fallback)' }}
       RESIDENT_READ_TOKEN: ${{ secrets.RESIDENT_READ_TOKEN }}
+      RESIDENT_DRAIN_TOKEN: ${{ secrets.RESIDENT_DRAIN_TOKEN }}
       MEMORY_TOKEN: ${{ secrets.MEMORY_TOKEN }}
       SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
       # The profile (and, through its `configSource`, the bot's config): the
@@ -291,6 +297,7 @@ jobs:
           echo "Cloudflare credential: $DEPLOY_TOKEN_SOURCE"
           if [ "${DEPLOY_TOKEN_SOURCE#CLOUDFLARE_API_TOKEN}" != "$DEPLOY_TOKEN_SOURCE" ]; then echo "::warning::deploying with the docs Worker's token — it may lack the Containers/R2 scopes; deploy all checks before touching a Worker"; fi
           if [ -z "$RESIDENT_READ_TOKEN" ]; then echo "::warning::RESIDENT_READ_TOKEN is not set — a resident step would be refused before anything deploys"; fi
+          if [ -z "$RESIDENT_DRAIN_TOKEN" ]; then echo "::warning::RESIDENT_DRAIN_TOKEN is not set — the resident step cannot drain the fleet and waits for a quiet minute instead (new runs keep landing); add the secret so a release lands once the runs in flight end"; fi
           if [ -z "$MEMORY_TOKEN" ]; then echo "::warning::MEMORY_TOKEN is not set — a bot step would be refused before anything deploys (deploy all pushes the bot's config to the state Worker with it)"; fi
           if [ -z "$SANDBOX_TOKEN" ]; then echo "::warning::SANDBOX_TOKEN is not set — a sandbox step would be refused before anything deploys, and --affected judges the sandbox against the last release tag, not what it serves"; fi
       - name: the selection

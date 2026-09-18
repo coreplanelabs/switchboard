@@ -723,10 +723,15 @@ describe("the production deploy is one reusable workflow", () => {
       "CONFIG_REPO_APP_CLIENT_ID",
       "CONFIG_REPO_APP_PRIVATE_KEY",
       "MEMORY_TOKEN",
+      "RESIDENT_DRAIN_TOKEN",
       "RESIDENT_READ_TOKEN",
       "SANDBOX_TOKEN",
     ]);
     for (const [name, s] of Object.entries(secrets)) expect(s.required, `${name} must be optional`).toBe(false);
+    // The drain (release-and-deploy item 31) is a write with its own bearer, drain and undrain only: it reaches the job's env
+    // beside the read one, and is warned about by name when absent — never required.
+    expect(job.env?.RESIDENT_DRAIN_TOKEN).toBe("${{ secrets.RESIDENT_DRAIN_TOKEN }}");
+    expect(job.env).not.toHaveProperty("RESIDENT_ADMIN_TOKEN");
     // The App that reads a `github://` profile is handed in as the two secrets — from nowhere else.
     expect(job.env).not.toHaveProperty("LOAD_APP_FROM_VAULT");
     const mint = job.steps.find((s) => s.uses?.startsWith("actions/create-github-app-token@"))!;

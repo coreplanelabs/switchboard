@@ -13,6 +13,7 @@
 //
 // Route surface (JSON in/out; every route below requires a bearer secret):
 //   admin scope     POST /onboard /offboard /reconfigure /rebuild /debug (all ops)
+//   drain scope     POST /drain /undrain (admin implied) — the deploy's bearer, nothing else
 //   read scope      GET /residents   POST /debug ops info|schedules|threads only (admin implied)
 //   operator scope  POST /attach /detach /exec /read /write /op            GET /status (state, reason, inFlight)
 //   unauthenticated GET /healthz (deploy wake ping; touches no DO)
@@ -324,6 +325,7 @@ import {
 } from "../../src/execution/residentDepsStore.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
+import { drainRefusal, liveDrain, parseDrainRequest, type DrainRecord } from "./drain";
 import {
   ControlResetError,
   RuntimeReplacedError,
@@ -419,6 +421,10 @@ export interface Env {
    *  (info, schedules, threads) — for dashboards and humans who need to look,
    *  never to change anything. Unset = no read scope exists. */
   RESIDENT_READ_TOKEN?: string;
+  /** Optional drain-only bearer (item 69): POST /drain and /undrain, nothing
+   *  else — what a release deploy holds so it can close the fleet without the
+   *  admin bearer. Unset = only admin can drain. */
+  RESIDENT_DRAIN_TOKEN?: string;
   // GitHub App identity for minting installation tokens inside residents
   // (provisioned via `npm run secrets` from deploy/secrets.manifest.json; when
   // unset, clones/fetches run anonymously —
@@ -1361,6 +1367,11 @@ const registryKey = (resource: string) => `${REGISTRY_KEY_PREFIX}${resource}`;
 /** Registry-DO key for the admin test overrides (gc.ts `StoredTestOverrides`).
  *  Deliberately OUTSIDE the `resident:` prefix so it never counts as a slot. */
 const TEST_OVERRIDES_KEY = "testOverrides";
+/** Registry-DO key for the fleet drain (drain.ts; docs/reference/specs/resident-repos.md
+ *  item 69). Outside the `resident:` prefix like the overrides, so it never
+ *  counts as a slot; it survives the isolate swap a deploy performs, which is
+ *  why the record carries its own end. */
+const DRAIN_KEY = "drain";
 
 type OnboardResult = { ok: true; record: ResidentRecord } | { ok: false; status: number; error: string };
 
@@ -1475,6 +1486,25 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 
   async remove(resource: string): Promise<boolean> {
     return this.ctx.storage.delete(registryKey(resource));
+  }
+
+  /** The stored drain record as it is — `liveDrain` (drain.ts) decides at the
+   *  caller's clock whether it is in force; the registry keeps no clock of its
+   *  own so an expired record is read the same by every route. */
+  async getDrain(): Promise<unknown> {
+    return (await this.ctx.storage.get(DRAIN_KEY)) ?? null;
+  }
+
+  /** Admin-only by construction (reached solely via POST /drain): replaces
+   *  whatever drain stood — a second deploy's drain extends the first's. */
+  async setDrain(record: DrainRecord): Promise<DrainRecord> {
+    await this.ctx.storage.put(DRAIN_KEY, record);
+    return record;
+  }
+
+  /** Admin-only by construction (POST /undrain): true when a record was there. */
+  async clearDrain(): Promise<boolean> {
+    return this.ctx.storage.delete(DRAIN_KEY);
   }
 }
 
@@ -4883,6 +4913,20 @@ export class ResidentDO extends Sandbox<Env> {
   ): Promise<AttachOk | ThreadErr> {
     try {
       await this.ensureHydrated();
+      // The fleet drain (item 69): a deploy is waiting for the runs in flight
+      // to end, and a NEW run's attach is refused with the record the bot
+      // waits on — a real 503 in the streamed document, read by the client as
+      // `draining`, never as the platform's transient. A run already in flight
+      // — registered from its attach to its release (item 44) — re-attaches
+      // through: a rolled container, an evicted worktree, a resumed run are
+      // the runs the drain waits FOR, and refusing them would hold the fleet
+      // closed on the run it is closed for. Read before the image reconcile so
+      // a refused attach never restarts a container.
+      const drain = await this.fleetDrain();
+      if (drain && !(await this.ctx.storage.get(runRegKey(threadKey)))) {
+        const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
+        return refusal;
+      }
       const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
       if (await this.reconcileImage("attach")) {
         return {
@@ -6844,6 +6888,19 @@ export class ResidentDO extends Sandbox<Env> {
     const threadOps = [...this.threadOpsInFlight.values()].reduce((a, n) => a + n, 0);
     return threadOps + this.opUsersInUse.size + this.attachesInFlight;
   }
+  /** The fleet drain in force (item 69), read from the registry at this clock;
+   *  a registry that cannot be read is NO drain: a run must never fail because
+   *  a flag could not be read, and the deploy's own preflight fails closed on
+   *  its side (an unknown fleet refuses the deploy), so the failure lands on
+   *  the deploy, never on the run. Said in the log. */
+  private async fleetDrain(): Promise<DrainRecord | null> {
+    try {
+      return liveDrain(await this.registry().getDrain(), systemClock());
+    } catch (err) {
+      console.warn(`[drain] registry unreadable at attach — treating as no drain: ${errMsg(err)}`);
+      return null;
+    }
+  }
   /** In-flight activity for the deploy preflight (GET /status, GET /residents).
    *  The in-memory counters (a fresh isolate answers 0 for them — nothing of
    *  THEIRS survived to be interrupted) plus the durable run registrations:
@@ -7897,7 +7954,7 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-type Scope = "admin" | "operator" | "read";
+type Scope = "admin" | "operator" | "read" | "drain";
 
 /** Which token a bearer is, or null. Constant-time per comparison; fail closed
  *  on unset/empty secrets. */
@@ -7906,6 +7963,7 @@ function tokenScope(env: Env, token: string | null): Scope | null {
   if (env.RESIDENT_ADMIN_TOKEN && timingSafeEqual(token, env.RESIDENT_ADMIN_TOKEN)) return "admin";
   if (env.RESIDENT_OPERATOR_TOKEN && timingSafeEqual(token, env.RESIDENT_OPERATOR_TOKEN)) return "operator";
   if (env.RESIDENT_READ_TOKEN && timingSafeEqual(token, env.RESIDENT_READ_TOKEN)) return "read";
+  if (env.RESIDENT_DRAIN_TOKEN && timingSafeEqual(token, env.RESIDENT_DRAIN_TOKEN)) return "drain";
   return null;
 }
 
@@ -8085,6 +8143,8 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/offboard": { scope: "admin", method: "POST" },
   "/reconfigure": { scope: "admin", method: "POST" },
   "/rebuild": { scope: "admin", method: "POST" },
+  "/drain": { scope: "drain", method: "POST" }, // close the fleet to new runs for a deploy (item 69; admin implied)
+  "/undrain": { scope: "drain", method: "POST" }, // reopen it
   "/residents": { scope: "read", method: "GET" }, // admin implied; read-only bearer allowed
   "/debug": { scope: "read", method: "POST" }, // per-op: READ_DEBUG_OPS for read scope, everything for admin
   "/status": { scope: "operator", method: "GET" },
@@ -8185,6 +8245,10 @@ export default {
             return await handleReconfigure(env, body);
           case "/rebuild":
             return await handleRebuild(env, body);
+          case "/drain":
+            return await handleDrain(env, body);
+          case "/undrain":
+            return await handleUndrain(env);
           case "/residents":
             return await handleResidents(env);
           case "/debug": {
@@ -8606,6 +8670,26 @@ async function handleRebuild(env: Env, body: Record<string, unknown>): Promise<R
  *  targets a different DO, so they run concurrently; a failing one degrades
  *  to {error} without touching its neighbors, and the response order follows
  *  the registry list. */
+/** POST /drain (admin): close the fleet to new runs (docs/reference/specs/resident-repos.md
+ *  item 69). The record carries its own end (`until`), so a drain nobody lifts
+ *  ends by itself; a second drain replaces the first. Runs in flight are
+ *  untouched — the deploy that asked waits for them through `/residents`. */
+async function handleDrain(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const parsed = parseDrainRequest(body, systemClock());
+  if (!parsed.ok) return json({ error: parsed.error }, 400);
+  const record = await registryStub(env).setDrain(parsed.record);
+  console.log(`[drain] fleet closed to new runs by ${record.by} for ${record.reason}: until ${record.until}`);
+  return json({ draining: record });
+}
+
+/** POST /undrain (admin): reopen the fleet. Idempotent — `cleared` says whether
+ *  a drain stood. */
+async function handleUndrain(env: Env): Promise<Response> {
+  const cleared = await registryStub(env).clearDrain();
+  console.log(`[drain] fleet reopened (${cleared ? "a drain stood" : "no drain stood"})`);
+  return json({ draining: null, cleared });
+}
+
 async function handleResidents(env: Env): Promise<Response> {
   const residents = await registryStub(env).list();
   const settled = await Promise.allSettled(
@@ -8641,6 +8725,9 @@ async function handleResidents(env: Env): Promise<Response> {
     count: residents.length,
     inFlight,
     inFlightUnknown,
+    // The drain in force, or null (item 69): the deploy runner and the
+    // dashboard read it here; the attach route reads the same record.
+    draining: liveDrain(await registryStub(env).getDrain(), systemClock()),
     residents: enriched,
   });
 }

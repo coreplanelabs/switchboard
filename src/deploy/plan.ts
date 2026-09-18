@@ -27,6 +27,7 @@
 // functions.
 
 import { formatAffectedText, type AffectedReport } from "./affected.js";
+import { RESIDENT_DRAIN_TOKEN_ENV } from "./residentDrain.js";
 import { BASE_CONFIG_DOCUMENT_KEY } from "../configDocument.js";
 import {
   accountRegistryImage,
@@ -143,6 +144,10 @@ export interface WorkerSpec {
   capabilities?: readonly CapabilityCheck[];
   /** A wait budget of this step's own for a preflight refusal, when the plan's default does not fit what it refuses for. */
   waitMaxMs?: number;
+  /** Present when the Worker's fleet can be drained for the deploy (resident-repos item 69): the
+   *  env var holding the drain-only bearer the runner posts `/drain` and `/undrain` with. Absent from
+   *  the env → the step waits without a drain and says so. */
+  drain?: { tokenEnv: string };
   why: string;
 }
 
@@ -254,7 +259,8 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
     // R2 binding wrangler validates on deploy.
     capabilities: [CONTAINERS_CAPABILITY, R2_CAPABILITY],
     waitMaxMs: RESIDENT_WAIT_MAX_MS,
-    why: "per-repo DOs — preflight refuses while a resident has a run in flight or is provisioning (a refresh or restore mid-cycle only warns: it resumes after the swap)",
+    drain: { tokenEnv: RESIDENT_DRAIN_TOKEN_ENV },
+    why: "per-repo DOs — the fleet is drained for the deploy when the drain bearer is present (new runs wait at their attach; the runs in flight finish), and the preflight refuses while a resident has a run in flight or is provisioning (a refresh or restore mid-cycle only warns: it resumes after the swap)",
   },
   {
     name: "sandbox",
@@ -358,6 +364,9 @@ export interface DeployStep {
   waitMaxMs?: number;
   /** `/healthz` to read for the wait heartbeat (preflighted steps with a health URL). */
   healthUrl?: string;
+  /** The fleet drain (resident-repos item 69): the Worker's origin to post `/drain` and `/undrain` at,
+   *  and the env var holding the drain-only bearer. Present only for a Worker whose spec can drain. */
+  drain?: { url: string; tokenEnv: string };
   /** After the deploy, wait until the step's gate holds (the bot's drain; the sandbox's rollout + probe). */
   liveGate?: LiveGate;
   why: string;
@@ -489,6 +498,7 @@ export function planDeploy(
     retryOnPreflightRefusal: !!w.preflight && !opts.force,
     ...(w.waitMaxMs !== undefined ? { waitMaxMs: w.waitMaxMs } : {}),
     ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
+    ...(w.drain ? { drain: { url: w.baseUrl, tokenEnv: w.drain.tokenEnv } } : {}),
     ...(w.liveGate ? { liveGate: w.liveGate } : {}),
     ...(!w.liveGate && !w.healthBearerEnv ? { wakeUrl: w.healthUrl } : {}),
     why: w.why,
