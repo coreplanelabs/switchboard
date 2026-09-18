@@ -286,6 +286,10 @@ export function activityLine(e: RunEvent): string {
       return `⬆ pushed ${e.ref} @ ${e.sha.slice(0, 7)}`;
     case "coordinator_tag":
       return "coordinator tag recorded"; // published straight to the registry — never arrives here
+    case "child_interrupted":
+      return `🔁 interrupted by a deploy roll: ${e.reason}`; // published straight to the registry — never arrives here
+    case "child_resumed":
+      return `🔁 ${e.summary}`; // published straight to the registry — never arrives here
     case "review_posted":
       return "review posted"; // published straight to the registry — never arrives here
     case "ship_round":

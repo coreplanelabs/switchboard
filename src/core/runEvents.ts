@@ -865,6 +865,23 @@ export type RunEvent =
    *  `coordinator_tag` is — so the thread's owner rule can find the instance
    *  from the page's ship run. Additive: unknown → ignored. */
   | { type: "ship_handoff"; instanceId: string; seq?: number; at?: number }
+  /** A coordinator child interrupted under a deploy roll (docs/reference/specs/run-history.md
+   *  item 47a): the run closes `interrupted` for a restart from its request —
+   *  a workspace lost across a bot roll, the resident's container replaced
+   *  with the relaunch refused — and the record says so as a typed fact
+   *  beside the `resumed`/`sandbox_restarted` notes, `reason` the refusal or
+   *  note in one line. Published straight to the registry by the reattach
+   *  path and the run loop's interruption; the parent's wait settles on its
+   *  Workflow twin (`child-interrupted-<runId>`) beside `run-finished-<runId>`
+   *  and confirms by `read-record`. Additive: unknown → ignored. */
+  | { type: "child_interrupted"; parentInstanceId: string; reason: string; seq?: number; at?: number }
+  /** A coordinator child resumed across a deploy roll (run-history item 47a):
+   *  the same run re-attached its workspace and carries on under its record,
+   *  tag and budget. Published straight to the registry by the reattach path;
+   *  the Workflow twin (`child-resumed-<runId>`) tells the parent's wait to
+   *  keep waiting rather than walk out the chunk asking. Additive: unknown →
+   *  ignored. */
+  | { type: "child_resumed"; parentInstanceId: string; summary: string; seq?: number; at?: number }
   /** The review post-step's outcome when the verdict landed
    *  (docs/reference/specs/agent-review.md item 18): the pull request it was
    *  posted to, the head it was pinned to (the carried head after a rebase,

@@ -5,7 +5,7 @@
 // says why, and its request is dispatched again as a new run in the thread,
 // never migrated silently onto another backend.
 import { workspaceBindingOf, type WorkspaceBinding } from "../../execution/factory.js";
-import type { CoordinatorTag } from "../coordinator/contract.js";
+import { sendChildSignal, type CoordinatorTag, type WorkflowSender } from "../coordinator/contract.js";
 import type { RunEvent } from "../runEvents.js";
 import { messageFromInbox } from "../runLedger/inboxMessage.js";
 import type { LiveRunRow } from "../runLedger/types.js";
@@ -75,6 +75,48 @@ export interface LostWorkspaceContext extends Omit<GateContext, "refuse">, GateC
   ledgerRun: LedgerRun | undefined;
   /** The factory's refusal, one line. */
   why: string;
+  /** The coordinator tag the resumed run carried (run-history item 48a):
+   *  present, the interruption is said to the parent too — the typed
+   *  `child_interrupted` event on the child's record and its Workflow twin. */
+  coordinator?: CoordinatorTag;
+  /** The Workflow sender the twin rides (the shim's event relay); absent in a
+   *  process without one, and the parent's wait falls back to `read-record`. */
+  workflow?: WorkflowSender;
+}
+
+/** What a resumed coordinator child's roll outcome says to its parent
+ *  (run-history item 47a): the typed event on the child's own record — read
+ *  back by the parent's `read-record` and the run page alike — and its
+ *  Workflow twin (`child-interrupted-<runId>` / `child-resumed-<runId>`), sent
+ *  best effort so the parent's wait settles (interrupted) or keeps waiting
+ *  (resumed) instead of walking out the chunk. Returns the published event so
+ *  a closing row can append it to its record past the highest replayed seq. */
+export async function announceChildRoll(ctx: {
+  registry: RunRegistry;
+  runId: string;
+  coordinator: CoordinatorTag;
+  kind: "interrupted" | "resumed";
+  reason: string;
+  clock: Clock;
+  workflow?: WorkflowSender;
+}): Promise<Extract<RunEvent, { type: "child_interrupted" | "child_resumed" }>> {
+  const { registry, runId, coordinator, kind, reason, clock, workflow } = ctx;
+  const at = clock();
+  const event: Extract<RunEvent, { type: "child_interrupted" | "child_resumed" }> =
+    kind === "interrupted"
+      ? { type: "child_interrupted", parentInstanceId: coordinator.parentInstanceId, reason, at }
+      : { type: "child_resumed", parentInstanceId: coordinator.parentInstanceId, summary: reason, at };
+  registry.publish(runId, event);
+  const sent = await sendChildSignal(workflow, {
+    runId,
+    parentInstanceId: coordinator.parentInstanceId,
+    kind,
+    reason,
+    at,
+  });
+  if (sent.kind === "failed")
+    console.warn(`[resume] ${runId} → ${sent.type} not delivered to ${sent.instance}: ${sent.reason}`);
+  return event;
 }
 
 /**
@@ -88,12 +130,27 @@ export interface LostWorkspaceContext extends Omit<GateContext, "refuse">, GateC
  * here, the note and the card say so.
  */
 export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<IncomingMessage | undefined> {
-  const { refuse, card, shell, closeLines, clock, run, registry, resume, ledgerRun, why } = ctx;
+  const { refuse, card, shell, closeLines, clock, run, registry, resume, ledgerRun, why, coordinator, workflow } = ctx;
   const restored = messageFromInbox(resume.row.meta.request ?? {}, resume.row.startedAt);
   const summary = lostWorkspaceNote(why, restored !== undefined);
   const note = { type: "run_note" as const, kind: "resumed" as const, summary, at: clock() };
   await refuse("workspace_lost", async () => {
     registry.publish(run.id, note);
+    // A coordinator's child says the interruption to its parent too
+    // (run-history item 47a): the typed event on its own record and the
+    // Workflow twin, so the parent's wait settles at once with the reason
+    // instead of walking out the child's budget.
+    const rollEvent = coordinator
+      ? await announceChildRoll({
+          registry,
+          runId: run.id,
+          coordinator,
+          kind: "interrupted",
+          reason: summary,
+          clock,
+          ...(workflow ? { workflow } : {}),
+        })
+      : undefined;
     await card.done(
       shell.close({
         kind: "not_started",
@@ -108,7 +165,14 @@ export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<I
     if (ledgerRun)
       await closeResumedRow(
         ledgerRun,
-        { ...resume, events: [...resume.events, { ...note, seq: resume.lastSeq + 1 }] },
+        {
+          ...resume,
+          events: [
+            ...resume.events,
+            { ...note, seq: resume.lastSeq + 1 },
+            ...(rollEvent ? [{ ...rollEvent, seq: resume.lastSeq + 2 }] : []),
+          ],
+        },
         "the run's workspace could not be re-attached",
       );
   });

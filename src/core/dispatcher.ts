@@ -89,6 +89,7 @@ import { withContractInFirstUserTurn } from "./ship/codingChild.js";
 import { prepareFreshTurn, settleThread, tellDropped } from "./dispatch/settle.js";
 import {
   abandonLostWorkspace,
+  announceChildRoll,
   carriedCoordinatorTag,
   carriedWorkspaceBinding,
   prepareRestartTurn,
@@ -1224,6 +1225,8 @@ export async function dispatch(
           resume,
           ledgerRun,
           why: attach.why,
+          ...(coordinator !== undefined ? { coordinator } : {}),
+          ...(deps.workflow !== undefined ? { workflow: deps.workflow } : {}),
         });
         // The restart is the same instance's child (run-history item 48a): the
         // tag rebuilt from the row and its event rides along, as the run loop's
@@ -1245,6 +1248,20 @@ export async function dispatch(
       const rebound = workspaceBindingFor(round.selection, profile.machine);
       if (rebound !== undefined) ledgerRun.setState({ binding: rebound });
     }
+    // A coordinator's child resumed across a bot roll says so to its parent
+    // (run-history item 47a): the typed `child_resumed` event on its record
+    // and the Workflow twin, so the parent's wait keeps waiting for the same
+    // run instead of reading a roll as a lost round.
+    if (resume && coordinator !== undefined)
+      await announceChildRoll({
+        registry,
+        runId: run.id,
+        coordinator,
+        kind: "resumed",
+        reason: "resumed after a restart: the run's workspace was re-attached and the run carries on",
+        clock,
+        ...(deps.workflow !== undefined ? { workflow: deps.workflow } : {}),
+      });
     const { executor, note, resident } = round.selection;
     if (fencedWhileAttaching) {
       // The reservation's lease lapsed during the attach and another generation
