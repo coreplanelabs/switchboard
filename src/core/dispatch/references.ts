@@ -99,6 +99,45 @@ export function extractUrls(text: string): string[] {
   return out;
 }
 
+/** One reference as parsed: the reader whose grammar owns the URL and the
+ *  conversation it names. */
+export interface ParsedReference {
+  reader: ConversationReader;
+  ref: ConversationRef;
+}
+
+/** Every reference in `text`, in order, the same conversation once: each URL
+ *  offered to the readers, the first whose `parseConversationUrl` answers owns
+ *  it, and a URL no reader parses is plain text. The URL grammar alone — no
+ *  reader is asked anything else, so this is what the request's own text
+ *  settles before any adapter call, the half of the step the route stage may
+ *  read (record 0037 keeps the quote itself after admission). */
+export function parseReferences(text: string, readers: readonly ConversationReader[]): ParsedReference[] {
+  const refs: ParsedReference[] = [];
+  const seen = new Set<string>();
+  if (readers.length === 0) return refs;
+  for (const url of extractUrls(text)) {
+    for (const reader of readers) {
+      const ref = reader.parseConversationUrl(url);
+      if (!ref) continue;
+      const key = `${ref.threadKey}#${ref.messageId ?? ""}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        refs.push({ reader, ref });
+      }
+      break;
+    }
+  }
+  return refs;
+}
+
+/** How many conversations the step would quote for `text`: the parsed
+ *  references under the per-request cap (a fourth is refused, never quoted).
+ *  The fact the route stage puts on the router's user turn. */
+export function quotableReferences(text: string, readers: readonly ConversationReader[]): number {
+  return Math.min(parseReferences(text, readers).length, REFERENCE_MAX_PER_REQUEST);
+}
+
 // ---- the per-user window ----------------------------------------------------
 
 const perUser = new Map<string, number[]>();
@@ -176,20 +215,7 @@ export async function readReferences(deps: ReferenceDeps, input: ReadReferencesI
   const timeoutMs = deps.referenceTimeoutMs ?? REFERENCE_TIMEOUT_MS;
 
   // Parse first: a URL no reader owns is not a reference and costs nothing.
-  const refs: { reader: ConversationReader; ref: ConversationRef }[] = [];
-  const seen = new Set<string>();
-  for (const url of extractUrls(msg.text)) {
-    for (const reader of readers) {
-      const ref = reader.parseConversationUrl(url);
-      if (!ref) continue;
-      const key = `${ref.threadKey}#${ref.messageId ?? ""}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        refs.push({ reader, ref });
-      }
-      break;
-    }
-  }
+  const refs = parseReferences(msg.text, readers);
   if (refs.length === 0) return NO_REFERENCES;
 
   const conversations: ReferencedConversation[] = [];

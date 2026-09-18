@@ -41,18 +41,23 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.coding.effort).toBeUndefined();
   });
 
-  it("general's prompt names its GitHub tools and redirects code/PR/web-research asks to the other agents", () => {
+  it("general's prompt names its GitHub tools and redirects code/PR/web-research asks to the other agents in plain words, never as a directive line to type", () => {
     // The general agent points at the agents that can act — it never invents a
     // repo URL or tells the user to run git themselves. It holds the issue tools
     // itself (docs/reference/specs/github-tools.md), so "open an issue on the app" is
     // answered here rather than bounced to a coding run, and the prompt must
     // say what it can do, never that it has no tools. A code change is pointed
-    // at `agent:ship`, the routed write door (routing-and-config.md item 21) —
-    // never at `agent:coding`, the directive-only bare run.
-    expect(AGENTS.general.system).toContain("agent:ship");
-    expect(AGENTS.general.system).not.toContain("agent:coding");
-    expect(AGENTS.general.system).toContain("agent:review");
-    expect(AGENTS.general.system).toContain("agent:research");
+    // at the routed write door in the person's own words (routing-and-config.md
+    // item 21: a plain message routes by itself) — never at `agent:ship` or
+    // `agent:coding` as a line to paste (agent-general.md item 3): a general
+    // answer that ends in a command to type is the router's miss turned into
+    // the person's chore.
+    expect(AGENTS.general.system).toMatch(/asking for it in plain words in a new message/);
+    expect(AGENTS.general.system).toContain('"in acme/api: fix the failing login test"');
+    expect(AGENTS.general.system).toMatch(/Never hand back a command or an `agent:…` line/);
+    expect(AGENTS.general.system).not.toMatch(/agent:(ship|coding|review|research)\b/);
+    expect(AGENTS.general.system).toMatch(/review <PR URL>/);
+    expect(AGENTS.general.system).toMatch(/web-research question/);
     for (const tool of [
       "github_repos",
       "github_file",
@@ -1035,10 +1040,12 @@ describe("explore agent (docs/reference/specs/agent-explore.md)", () => {
     expect(sys).toMatch(/20 minutes/);
     expect(sys).not.toMatch(/nohup/); // the wrong tool is not named, so it cannot be copied
     expect(sys).toMatch(/NEVER open a pull request/);
-    // agent-explore.md item 6: a change the investigation calls for is handed to the routed
-    // write door, `agent:ship` — never to the directive-only bare coding run.
-    expect(sys).toMatch(/point the user at `agent:ship`/);
-    expect(sys).not.toMatch(/point the user at `agent:coding`/);
+    // agent-explore.md item 6: a change the investigation calls for is described and pointed
+    // at the routed write door in plain words — never as an `agent:ship` (or `agent:coding`)
+    // line for the person to paste.
+    expect(sys).toMatch(/asking for it in plain words in a new message/);
+    expect(sys).toMatch(/never hand back a command or an `agent:…` line to type/);
+    expect(sys).not.toMatch(/agent:(ship|coding)\b/);
     // agent-explore.md item 2: no attach_file in the toolset, so the prompt says so — a reply
     // that promised "attached below" with nothing attached is the failure this line prevents.
     expect(sys).toMatch(/cannot attach or post files/);

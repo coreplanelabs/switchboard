@@ -44,7 +44,7 @@ import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../..
 import { HAND_BACK_PREFIX } from "./handBack.js";
 import { chatActorOf } from "../authz/actor.js";
 import { TOOLSETS } from "../../tools/toolsets.js";
-import { routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
+import { referencesOn, routingOn, type ConfigStore, type ResolvedRequest } from "../../config.js";
 import { CONFIRM_ORDER, effectiveConfirm, type ConfirmClass, type EffectiveConfirm } from "../../config/profile.js";
 import type { RouteAnswerMode } from "../../config/validate.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
@@ -87,6 +87,8 @@ import {
   type Confirmation,
 } from "../confirmations.js";
 import { repoFromThread } from "../repoContext.js";
+import type { ConversationReader } from "../references/types.js";
+import { quotableReferences } from "./references.js";
 import { postSettledOutcome, recordRoutedDecision, runChatCommand, type RouteEventFields } from "./commandRun.js";
 import { renderConfirmationOffer } from "./reply.js";
 import type { FastPathDeps } from "./fastPath.js";
@@ -279,6 +281,12 @@ export interface RouteInput {
    *  repository binds the thread's when the request names none ("run the
    *  tests on main" in a repository's thread). */
   threadRepo?: string;
+  /** How many conversations the request links that this bot can quote (record
+   *  0037: a thread permalink a registered reader parses; the step quotes it
+   *  to the preset that runs, after admission). A fact in the user turn, so a
+   *  request whose task is in the linked thread ("in acme/api ship <link>")
+   *  is not read as something to read first. Absent or 0: no line. */
+  references?: number;
 }
 
 /** One connected data source as the router reads it: the server, the least
@@ -503,6 +511,7 @@ export function buildRoutePrompt(input: Omit<RouteInput, "allowed">): RoutePromp
   const user = [
     `Earlier directives in this thread: ${directivesLine(input.recentDirectives)}`,
     ...(input.threadRepo ? [`The thread's repository: ${input.threadRepo}`] : []),
+    ...(input.references ? [referencesLine(input.references)] : []),
     ...(input.sources !== undefined ? ["", ...sourcesBlock(input.sources)] : []),
     "",
     "<request>",
@@ -641,21 +650,37 @@ function writeAskClause(writers: readonly string[]): string {
   return `An ask that needs ${names} is never a part either: a part runs as a child that only reads, and ${names} pushes, so when any part of the request would need ${names}, do not split it: answer ${names} alone for the whole request as typed, and it reads what it must before it changes anything ("review PR 7 and fix what it finds" is one ${names} request; "research X and open a PR for Y" is one ${names} request).`;
 }
 
+/** The per-message fact for the linked conversations (record 0037): the count
+ *  the route stage settled by parse, never the quote — the step reads the
+ *  thread after admission and hands it to the preset that runs. */
+function referencesLine(n: number): string {
+  return n === 1
+    ? "The request links 1 conversation this bot can read; it is quoted in full to the preset that runs."
+    : `The request links ${n} conversations this bot can read; they are quoted in full to the preset that runs.`;
+}
+
 /** The imperative rule, stated only when the table offers a preset that
  *  implements changes (identity `write` — named off the table, never typed):
  *  one terse order to change something or to make a failure go away is a
  *  request to change code even when it names no file, repository or cause,
- *  since the channel or thread it arrives in is bound to a repository; a
- *  question or a read-only ask about the same failure changes nothing; a pull
- *  request named with a note about the request's own history (a retry at a
- *  head) is a review — the one read-to-write misroute the replay found once
- *  `ship` held the write seat read the note as an order to change the
- *  pipeline. A rule
- *  in the prompt's static half, never keyword matching in code — the parse and
- *  the allowlist are untouched by it. */
+ *  since the channel or thread it arrives in is bound to a repository; so is
+ *  the same order in the shape of a specification — how something should
+ *  behave, on a named repository, "do this for me" — which a live router once
+ *  read as an investigation because it named no verb of change and asked for
+ *  screenshots; and so is a request that points at a conversation and asks
+ *  for what it holds to be done — "in <repo> ship <thread link>" — which a
+ *  live router once sent to a reader because the link read as something to
+ *  read before anything could ship, though the quoted thread reaches whichever
+ *  preset runs. A question or a read-only ask about the same failure, screen or
+ *  thread changes nothing; a pull request named with a note about the
+ *  request's own history (a retry at a head) is a review — the one
+ *  read-to-write misroute the replay found once `ship` held the write seat
+ *  read the note as an order to change the pipeline. A rule in the prompt's
+ *  static half, never keyword matching in code — the parse and the allowlist
+ *  are untouched by it. */
 function imperativeRule(writers: readonly string[]): string {
   const names = writers.map((w) => `\`${w}\``).join(" or ");
-  return `Short imperatives: one terse order to change something or to make a failure go away — "fix it", "make it pass", "make the tests green", "add X", "rename Y", "bump Z" — is a request to change code even when it names no file, repository or cause: the channel or thread it arrives in is bound to a repository, and the preset that implements changes finds the failure itself. For it, answer ${names}. A question or a read-only ask about the same failure — "why did ci fail?", "check whether ci is red", "tell me why the build failed", "list the failing tests" — changes nothing: answer a read-only preset that covers it, never ${names}. An ask to look at, check or judge a pull request — named by a link or a number, or the thread's own ("this PR") — is a review, not an order to change it, and so is a pull request named with a note about the request's own history — "(retry at head …)", "re-review at …", "the earlier run died": the note describes the ask, never an order to change the pipeline or the code; a question about a failure with no pull request in view is not a review.`;
+  return `Short imperatives: one terse order to change something or to make a failure go away — "fix it", "make it pass", "make the tests green", "add X", "rename Y", "bump Z" — is a request to change code even when it names no file, repository or cause: the channel or thread it arrives in is bound to a repository, and the preset that implements changes finds the failure itself. For it, answer ${names}. The same order in the shape of a specification is the same request: a longer ask that says how something should behave and asks for it to be done — "I need you to do this for me", "on the <name> repo: the X screen should show A when nothing is connected; when B, it should not show C" — names no verb like fix or implement, yet the "should" sentences are the change and "do this for me" is the order; a request for screenshots or a recording of the result is the proof it wants, not an investigation. Answer ${names} for it too; a preset that only investigates and cannot open a pull request never covers it. A request that points at a conversation — a thread link the user turn says this bot can read — and asks for what it holds to be done — "ship this", "do the above", "in <repo> ship <link>", "implement what we agreed there" — is an order to change code: the conversation is quoted in full to the preset that runs and the task is in it, so answer ${names} and never pick a reader because the link would have to be read first. A question or a read-only ask about the same failure, screen or thread — "why did ci fail?", "check whether ci is red", "tell me why the build failed", "list the failing tests", "does the screen show X today?", "summarize this thread", "what did we decide here?" — changes nothing: answer a read-only preset that covers it, never ${names}. An ask to look at, check or judge a pull request — named by a link or a number, or the thread's own ("this PR") — is a review, not an order to change it, and so is a pull request named with a note about the request's own history — "(retry at head …)", "re-review at …", "the earlier run died": the note describes the ask, never an order to change the pipeline or the code; a question about a failure with no pull request in view is not a review.`;
 }
 
 /** The rule for a posted file: only the presets whose toolset carries `attach_file`
@@ -1055,6 +1080,10 @@ export interface RouteDeps {
    *  a read command the router bound is invoked through. Absent, no command
    *  is offered and the route tool is the one tool. */
   commands?: ChatCommands;
+  /** The conversation readers the adapters registered (`ReferenceDeps`, record
+   *  0037): read here for their URL grammar alone, to count the conversations
+   *  the request links onto the user turn; never asked to classify or read. */
+  conversationReaders?: readonly ConversationReader[];
 }
 
 /** What the stage reads off the dispatch. */
@@ -1201,6 +1230,12 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
   // fact for a command that takes one.
   const menu = ctx.command && deps.commands ? routableCommands(deps.commands) : [];
   const threadRepo = ctx.command && menu.length > 0 ? repoFromThread(ctx.command.history) : undefined;
+  // The linked conversations (record 0037): the references step quotes them
+  // after admission, so the router is handed what the request's own text
+  // settles by parse — how many a reader owns — and never the quote. Only
+  // when the step will quote them: with the flag off the line would promise a
+  // block nobody gets.
+  const references = referencesOn(cfg) ? quotableReferences(msg.text, deps.conversationReaders ?? []) : 0;
   const decision = await root.span("dispatch.route", () =>
     route(
       {
@@ -1213,6 +1248,7 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
         ...(sources !== undefined ? { sources } : {}),
         ...(menu.length > 0 ? { commands: menu } : {}),
         ...(threadRepo ? { threadRepo } : {}),
+        ...(references > 0 ? { references } : {}),
       },
       model,
     ),
