@@ -158,7 +158,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
   it("refused at the preflight (ship allowed, coding not): one `dispatch.refuse` outcome, the card closes 🚫 naming the missing grant, the reply names it, no run exists and the runner is never asked", async () => {
     const s = setup("slack:UREV");
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
-    expect(s.refusals).toEqual(["ship_preflight"]);
+    expect(s.refusals).toEqual(["ship_preflight_permission"]);
     expect(s.closes).toHaveLength(1);
     expect(JSON.stringify(s.closes[0])).toContain("🚫");
     expect(s.replies).toHaveLength(1);

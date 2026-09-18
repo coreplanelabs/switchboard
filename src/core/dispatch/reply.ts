@@ -31,7 +31,7 @@ import type { RunEnding } from "../runEnding.js";
 import type { CardShell } from "../statusCardFrame.js";
 import type { Span } from "../trace/types.js";
 import type { HistoryItem, IncomingMessage, StatusActivity, StatusHandle } from "../types.js";
-import type { Refusal } from "../refusal.js";
+import { refusalLine, type Refusal } from "../refusal.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { RouteDeps } from "./route.js";
 
@@ -376,8 +376,17 @@ export function errorReply(err: unknown): string {
  * gains its question and offer in a later unit of record 0054.
  */
 export async function renderRefusal(refusal: Refusal, io: ChannelIO): Promise<void> {
-  if (refusal.cause === "policy" && refusal.wayForward) return io.reply(`${refusal.text} ${refusal.wayForward}`);
-  return io.reply(refusal.text);
+  return io.reply(refusalLine(refusal));
+}
+/**
+ * An acknowledgement from a producing module the fence covers (record 0054):
+ * a steered follow-up's ack, a hand-off's accepted reply — sentences that
+ * refuse nothing. The fence (`refusals/no-raw-refusal`) keeps producers off
+ * `io.reply`; what goes through here is review's to judge as an ack, never a
+ * refusal in ack's clothing.
+ */
+export async function replyAck(io: ChannelIO, text: string): Promise<void> {
+  return io.reply(text);
 }
 /**
  * The one caller of a channel's `offer` (record 0054): the Block Kit an

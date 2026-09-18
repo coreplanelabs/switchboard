@@ -19,6 +19,7 @@ import {
   type CommandShape,
   type GrammarRejection,
 } from "./commandSurface.js";
+import { commandRefusalCode, refusalLine, refusalOf } from "./refusal.js";
 import type { IncomingMessage } from "./types.js";
 import type { Span } from "./trace/types.js";
 
@@ -219,16 +220,23 @@ export function chatErrorLine(
   decidedBy: "registry" | "handler" = "registry",
 ): string {
   const name = chatForm(id);
-  switch (error) {
-    case "unauthorized":
-      return decidedBy === "handler"
-        ? `🚫 \`${name}\`: ${message} Ask ${config.adminsHint()}.`
-        : `🚫 \`${name}\` is restricted. Ask ${config.adminsHint()}.`;
-    case "internal":
-      return `⚠️ \`${name}\` failed: ${message}`;
-    default:
-      return `⚠️ \`${name}\`: ${message}`;
-  }
+  const text = (() => {
+    switch (error) {
+      case "unauthorized":
+        return decidedBy === "handler"
+          ? `🚫 \`${name}\`: ${message} Ask ${config.adminsHint()}.`
+          : `🚫 \`${name}\` is restricted. Ask ${config.adminsHint()}.`;
+      case "internal":
+        return `⚠️ \`${name}\` failed: ${message}`;
+      default:
+        return `⚠️ \`${name}\`: ${message}`;
+    }
+  })();
+  // The line is a `Refusal` rendered through the seam's one line shape
+  // (record 0054): the code's cause comes from the closed table, and the
+  // renderer adds nothing — the sentence stays byte-identical to what this
+  // function returned before the seam.
+  return refusalLine(refusalOf(commandRefusalCode(error), text));
 }
 
 /** Invoke a parsed chat command as the message's user (a help or rejected parse is replied as-is, `ok: false`, with its code). */

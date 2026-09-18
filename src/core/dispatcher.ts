@@ -12,7 +12,7 @@ import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import type { LiveThread } from "./threadAdmission.js";
 import type { RecordDeps } from "./dispatch/record.js";
 import { cardLines, errorReply, renderRefusal } from "./dispatch/reply.js";
-import { causeOf, refusalOf, type Refusal, type RefusalCause, type RefusalCode } from "./refusal.js";
+import { causeOf, refusalOf, RefusalError, type Refusal, type RefusalCause, type RefusalCode } from "./refusal.js";
 import {
   admit,
   adoptCarriedRun,
@@ -31,7 +31,13 @@ import { postSettledOutcome, recordRoutedDecision } from "./dispatch/commandRun.
 import { COMMAND_RUN_AGENT } from "./runOwner.js";
 import { redactedInput } from "./dispatch/route.js";
 import type { Actor } from "./authz/types.js";
-import { NO_REFERENCES, readReferences, REFERENCE_REFUSAL, type ReferenceDeps } from "./dispatch/references.js";
+import {
+  NO_REFERENCES,
+  readReferences,
+  REFERENCE_REFUSAL,
+  referenceRefusalCode,
+  type ReferenceDeps,
+} from "./dispatch/references.js";
 import { resolveChatActor } from "./authz/actor.js";
 import { referencesOn } from "../config.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
@@ -634,7 +640,11 @@ export async function dispatch(
     // run, not a reply to nothing. Nothing between the step and the
     // ack ends the dispatch, so it posts exactly once whenever anything was
     // refused; the `[references]` log lines were written by the step itself.
-    if (references.refused.length > 0) await io.reply(REFERENCE_REFUSAL);
+    // Rendered through the seam with the first refused token's code (record
+    // 0054): the sentence stays record 0037's one line; the code and the
+    // cause live on the span alone.
+    if (references.refused.length > 0)
+      await renderRefusal(refusalOf(referenceRefusalCode(references.refused[0]), REFERENCE_REFUSAL), io);
 
     // The repo/ref resolution started above (before the ack) lands here; the
     // gate below runs against it exactly as before.
@@ -1396,12 +1406,16 @@ export async function dispatch(
   } catch (err) {
     caught = true;
     // The catch-all is the last line (record 0054): an uncaught throw is a
-    // `system`/`uncaught` refusal on the trace, counted like any other.
-    ended.refusal ??= "uncaught";
-    ended.cause ??= "system";
+    // `system`/`uncaught` refusal on the trace, counted like any other —
+    // unless the throw carried its own `Refusal` (a `RefusalError` from the
+    // directive or resolve parsers, a resident attach), whose code and cause
+    // stamp the trace instead. The sentence is the error's message either way.
+    const thrown = err instanceof RefusalError ? err.refusal : undefined;
+    ended.refusal ??= thrown?.code ?? "uncaught";
+    ended.cause ??= thrown?.cause ?? "system";
     // A throw inside a gate's own refusal must not overwrite the root's
     // already-stamped code: the root and the outcome tell the same story.
-    if (!refused) root.setAttrs({ refusal: "uncaught", cause: "system" });
+    if (!refused) root.setAttrs({ refusal: thrown?.code ?? "uncaught", cause: thrown?.cause ?? "system" });
     const errMsg = err instanceof Error ? err.message : String(err);
     // A card left spinning after a setup failure looks like a hang; close it.
     // Only a card still in setup — a run failure was already closed by the run
@@ -1429,7 +1443,13 @@ export async function dispatch(
     const replyName = root.record().attrs.runId !== undefined ? "post.reply" : "dispatch.refuse";
     const replyAttrs =
       replyName === "dispatch.refuse"
-        ? ({ attrs: { outcome: "uncaught", refusal: "uncaught", cause: "system" } } as const)
+        ? {
+            attrs: {
+              outcome: thrown?.code ?? "uncaught",
+              refusal: thrown?.code ?? "uncaught",
+              cause: thrown?.cause ?? "system",
+            },
+          }
         : undefined;
     await ending
       .sealAfterReply(

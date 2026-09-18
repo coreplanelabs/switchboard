@@ -5,6 +5,7 @@
 // and the target repository, ref and pull request, started as a promise so the
 // GitHub round trip overlaps the memory read and lands after the ack card.
 // Pure resolution — the gates that judge the result are authorize.ts.
+import { refusalOf, RefusalError } from "../refusal.js";
 import { leaseMinimum } from "../budgets.js";
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import { machineNeedsRepo, type AgentDef } from "../../agents/registry.js";
@@ -218,7 +219,12 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
   const { provider: providerName } = parseModelRef(resolved.modelRef);
   const providers = deps.config.config.providers;
   if (!providers[providerName]) {
-    throw new Error(`Unknown provider "${providerName}". Configured providers: ${Object.keys(providers).join(", ")}`);
+    throw new RefusalError(
+      refusalOf(
+        "provider_unknown",
+        `Unknown provider "${providerName}". Configured providers: ${Object.keys(providers).join(", ")}`,
+      ),
+    );
   }
 
   // Target repo/ref for resident environments, resolved BEFORE the model

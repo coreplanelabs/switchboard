@@ -1021,3 +1021,19 @@ describe("McpService — record 0042: every tier for an admin, promotion by re-i
     expect(await h.secrets.getTicket(nonce2)).toMatchObject({ requesterEmail: "looked-up@example.com" });
   });
 });
+
+// Feature: docs/reference/specs/mcp-ingress.md — record 0054: the service's
+// error shape carries a cause in the seam's three classes, one per code.
+describe("McpServiceError — one cause per code (record 0054)", () => {
+  it("names the person's codes request, the denial policy, the outage system", () => {
+    const causes = {
+      invalid_input: "request",
+      unauthorized: "policy",
+      not_found: "request",
+      conflict: "request",
+      unavailable: "system",
+    } as const;
+    for (const [code, cause] of Object.entries(causes))
+      expect(new McpServiceError(code as keyof typeof causes, "x").cause).toBe(cause);
+  });
+});

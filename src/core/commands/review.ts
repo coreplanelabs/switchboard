@@ -136,7 +136,9 @@ async function assertVisible(deps: ReviewCommandDeps, id: string, caller: Caller
   if (!res.ok) throw new CommandError("not_found", "run not found");
   const actor: Actor = caller.actor;
   if (!authorize(actor, "runs:read", runResource(res.value)).allow)
-    throw new CommandError("not_found", "run not found");
+    // The mask holds (record 0054): the sentence answers "not found" so the
+    // run's existence is not revealed, while the cause tells the span the truth.
+    throw new CommandError("not_found", "run not found", "policy");
 }
 
 function refused(err: unknown): never {

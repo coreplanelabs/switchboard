@@ -28,6 +28,7 @@ import {
   OFFER_USED_LINE,
 } from "./confirm.js";
 import { REFERENCE_REFUSAL } from "./references.js";
+import { FOLLOW_UP_DROPPED_BY_STOP } from "./settle.js";
 import type { ChannelIO } from "../types.js";
 import { nullChannelIO } from "../nullChannelIo.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -348,10 +349,63 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
           "reference_fetch_failed",
         ] as const
       ).map((code) => ({ code, built: REFERENCE_REFUSAL, quoted: "I can't read that thread." })),
+      {
+        code: "follow_up_dropped",
+        built: FOLLOW_UP_DROPPED_BY_STOP,
+        quoted:
+          "⛔ The run this was folded into was stopped before it read this follow-up, so it was not run. Re-send it to run it fresh.",
+      },
     ];
     // Every code in the closed table is accounted for: rendered here, built by
     // another module's tested builder, or silent by design.
-    const provenElsewhere: RefusalCode[] = ["pr_head_unknown", "branch_moved", "ship_preflight"];
+    const provenElsewhere: RefusalCode[] = [
+      "pr_head_unknown",
+      "branch_moved",
+      // (record 0054): each producer's own test proves its sentences
+      // byte-identical — the ship preflight's nine (preflight.test.ts), the
+      // plan hand-off's fifteen (handOff.test.ts), the directive and resolve
+      // parsers (directives.test.ts, resolve's dispatcher coverage), the typed
+      // commands' `chatErrorLine` (commandChat.test.ts), and the resident
+      // attach errors (resident.test.ts).
+      "ship_preflight_channel",
+      "ship_preflight_permission",
+      "ship_preflight_no_repo",
+      "ship_preflight_pr_unreachable",
+      "ship_preflight_pr_facts",
+      "ship_preflight_fork_head",
+      "ship_preflight_head_unknown",
+      "ship_preflight_closed_resume",
+      "ship_preflight_no_task",
+      "plan_base_unknown",
+      "plan_routed_seed",
+      "plan_id_invalid",
+      "plan_unreadable",
+      "plan_no_units",
+      "plan_units_unknown",
+      "plan_runner_state_unknown",
+      "plan_runner_live",
+      "plan_runner_state_unread",
+      "plan_units_merged",
+      "plan_history_unavailable",
+      "plan_runner_conflict",
+      "plan_instance_orphaned",
+      "plan_start_failed",
+      "directive_agent",
+      "directive_effort",
+      "directive_budget",
+      "directive_severity",
+      "directive_renewals",
+      "provider_unknown",
+      "command_unauthorized",
+      "command_invalid_input",
+      "command_not_found",
+      "command_conflict",
+      "command_unavailable",
+      "command_busy",
+      "command_internal",
+      "resident_attach_rejected",
+      "resident_attach_failed",
+    ];
     const silent: RefusalCode[] = ["coordinator_thread_live", "workspace_lost", "setup_failed", "uncaught"];
     const covered = new Set<RefusalCode>([...table.map((r) => r.code), ...provenElsewhere, ...silent]);
     expect([...REFUSAL_CODES].filter((c) => !covered.has(c))).toEqual([]);

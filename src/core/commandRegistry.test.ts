@@ -942,6 +942,77 @@ describe("CommandRegistry.invoke — the caller's span (docs/reference/specs/tra
   });
 });
 
+// Feature: docs/reference/specs/command-registry.md item 4 (record 0054) —
+// a refused command stamps `refusal`/`cause` on the caller's span: each
+// `CommandError` code carries the closed table's cause, and a handler that
+// masks the sentence on purpose overrides the cause so the span tells the truth.
+describe("CommandRegistry.invoke — a CommandError's cause on the span (record 0054)", () => {
+  const causes = {
+    unauthorized: "policy",
+    invalid_input: "request",
+    not_found: "request",
+    conflict: "system",
+    unavailable: "system",
+    busy: "system",
+  } as const;
+
+  it("each code's CommandError defaults to the table's cause, stamped as `command_<code>`", async () => {
+    for (const [code, cause] of Object.entries(causes) as [keyof typeof causes, string][]) {
+      expect(new CommandError(code, "x").cause).toBe(cause);
+      const registry = new CommandRegistry<Deps>({ audit: () => {} });
+      registry.register(
+        define({
+          id: "demo.throws",
+          action: "runs:read",
+          effect: "read",
+          describe: "throws",
+          handler: async () => {
+            throw new CommandError(code, "x");
+          },
+        }),
+      );
+      const span = createTracer({ clock: () => 1 }).start("run.command", { sinks: [] });
+      const setAttrs = vi.spyOn(span, "setAttrs");
+      await registry.invoke("demo.throws", {}, cli, { hits: [] }, { span });
+      expect(setAttrs).toHaveBeenCalledWith({ refusal: `command_${code}`, cause });
+    }
+  });
+
+  it("a masking site's override wins — a `not_found` sentence over a `policy` cause — and internal stamps system", async () => {
+    expect(new CommandError("not_found", "run not found", "policy").cause).toBe("policy");
+    const registry = new CommandRegistry<Deps>({ audit: () => {}, logError: () => {} });
+    registry.register(
+      define({
+        id: "demo.masked",
+        action: "runs:read",
+        effect: "read",
+        describe: "masks a denial",
+        handler: async () => {
+          throw new CommandError("not_found", "run not found", "policy");
+        },
+      }),
+    );
+    registry.register(
+      define({
+        id: "demo.broken",
+        action: "runs:read",
+        effect: "read",
+        describe: "throws a plain error",
+        handler: async () => {
+          throw new Error("boom");
+        },
+      }),
+    );
+    const span = createTracer({ clock: () => 1 }).start("run.command", { sinks: [] });
+    const setAttrs = vi.spyOn(span, "setAttrs");
+    const res = await registry.invoke("demo.masked", {}, cli, { hits: [] }, { span });
+    expect(res).toMatchObject({ ok: false, error: "not_found", message: "run not found" });
+    expect(setAttrs).toHaveBeenCalledWith({ refusal: "command_not_found", cause: "policy" });
+    await registry.invoke("demo.broken", {}, cli, { hits: [] }, { span });
+    expect(setAttrs).toHaveBeenLastCalledWith({ refusal: "command_internal", cause: "system" });
+  });
+});
+
 // Feature: docs/reference/specs/command-registry.md item 28 — `enabledWhen`: a command
 // whose capability is off does not exist in this process, on any surface.
 describe("enabledWhen — a capability that is off hides the command (item 28)", () => {

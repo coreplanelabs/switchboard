@@ -44,7 +44,6 @@ const CAUSE_OF = {
   elsewhere_follow_up_refused: "request",
   which_branch: "request",
   workspace_lost: "system",
-  ship_preflight: "system",
   ship_budget: "request",
   setup_failed: "system",
   // the click on a confirmation (confirm.ts)
@@ -63,6 +62,55 @@ const CAUSE_OF = {
   reference_fetch_failed: "system",
   // the catch-all: an uncaught throw in dispatch()
   uncaught: "system",
+  // the ship preflight's nine results (record 0054's plan): the old
+  // `ship_preflight` code is kept as these codes' prefix, so a query on the
+  // old code still finds them; the sentence did not split with the code.
+  ship_preflight_channel: "system",
+  ship_preflight_permission: "policy",
+  ship_preflight_no_repo: "request",
+  ship_preflight_pr_unreachable: "system",
+  ship_preflight_pr_facts: "system",
+  ship_preflight_fork_head: "request",
+  ship_preflight_head_unknown: "system",
+  ship_preflight_closed_resume: "request",
+  ship_preflight_no_task: "request",
+  // the plan hand-off's fifteen sentences (two share `plan_history_unavailable`)
+  plan_base_unknown: "request",
+  plan_routed_seed: "request",
+  plan_id_invalid: "request",
+  plan_unreadable: "request",
+  plan_no_units: "request",
+  plan_units_unknown: "request",
+  plan_runner_state_unknown: "system",
+  plan_runner_live: "system",
+  plan_runner_state_unread: "system",
+  plan_units_merged: "request",
+  plan_history_unavailable: "system",
+  plan_runner_conflict: "system",
+  plan_instance_orphaned: "system",
+  plan_start_failed: "system",
+  // the directive and resolve parsers' thrown errors (A6 of the inventory)
+  directive_agent: "request",
+  directive_effort: "request",
+  directive_budget: "request",
+  directive_severity: "request",
+  directive_renewals: "request",
+  provider_unknown: "request",
+  // a follow-up dropped because the run it was folded into was stopped
+  follow_up_dropped: "system",
+  // the typed-command codes (`InvokeErrorCode`): `chatErrorLine` renders these
+  // through the renderer's one line shape; the cause rides `CommandError`.
+  command_unauthorized: "policy",
+  command_invalid_input: "request",
+  command_not_found: "request",
+  command_conflict: "system",
+  command_unavailable: "system",
+  command_busy: "system",
+  command_internal: "system",
+  // the resident Worker's JSON errors, at the moment the bot receives them
+  // (record 0054): the cause is read from the Worker's `error` prefix.
+  resident_attach_rejected: "request",
+  resident_attach_failed: "system",
 } as const satisfies Record<string, RefusalCause>;
 
 /** Every code a refusal may carry. A new refusal site adds its code here with
@@ -92,6 +140,31 @@ export interface Refusal {
 /** Build a `Refusal` for a code: the cause comes from the one table. */
 export function refusalOf(code: RefusalCode, text: string, extra?: Pick<Refusal, "guess" | "wayForward">): Refusal {
   return { cause: causeOf(code), code, text, ...(extra ?? {}) };
+}
+
+/** The one line a `Refusal` reads as, shared by the async renderer and the
+ *  string-shaped surfaces (`chatErrorLine`): the producer's own text, plus the
+ *  way forward when the cause is `policy` and one was set apart. */
+export function refusalLine(refusal: Refusal): string {
+  if (refusal.cause === "policy" && refusal.wayForward) return `${refusal.text} ${refusal.wayForward}`;
+  return refusal.text;
+}
+
+/** A typed command's error code as a refusal code with its one cause. */
+export function commandRefusalCode(
+  code: "unauthorized" | "invalid_input" | "not_found" | "conflict" | "unavailable" | "busy" | "internal",
+): RefusalCode {
+  return `command_${code}`;
+}
+
+/** The cause the Worker's `error` prefix names (record 0054): a wrong or missing ref is
+ *  the person's to fix (`request`); everything else is the machinery's —
+ *  `op-unavailable` included: the Worker says it when its command table has no
+ *  entry for the op the bot sent, a version skew between bot and Worker, not a
+ *  sentence the person could reword. */
+export function residentErrorCause(error: string): RefusalCause {
+  const prefix = error.split(":", 1)[0]?.trim();
+  return prefix === "needs-ref" || prefix === "unknown-ref" ? "request" : "system";
 }
 
 /** A refusal as a throwable, for producers whose call shape is a throw. */
