@@ -113,6 +113,14 @@ export function execDeadline(timeoutMs: number, signal?: AbortSignal): AbortSign
   return AbortSignal.any([deadline.signal, signal]);
 }
 
+/** Was this failure `execDeadline`'s own abort — the call's deadline passing
+ *  with nothing answered — rather than a transport failure or a caller's stop?
+ *  Read by name: the deadline aborts with a `TimeoutError`, as
+ *  `AbortSignal.timeout` does. */
+export function isDeadlineMiss(err: unknown): boolean {
+  return err instanceof Error && err.name === "TimeoutError";
+}
+
 export type ReleaseMode = "always" | "if-idle";
 export interface ReleaseResult {
   released: boolean;

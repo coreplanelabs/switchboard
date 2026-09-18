@@ -1154,10 +1154,40 @@ describe("ResidentExecutor.probeStatus", () => {
     expect(probe).toEqual({ kind: "status", state: "not-onboarded", reason: "" });
   });
 
-  it("a network failure is an unreachable marker flagged as transport-level", async () => {
+  it("a network failure is an unreachable marker flagged as transport-level, and NOT as a deadline miss", async () => {
     stubFetch({ reject: "fetch failed" });
     const probe = await ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 2000);
     expect(probe).toMatchObject({ kind: "unreachable", transport: true });
+    expect(probe).not.toHaveProperty("timedOut");
+  });
+
+  // resident-repos.md item 25: the host answered nothing inside the probe's own
+  // deadline. Reachable but slow is not an outage, so the marker says which it
+  // was and the factory arms no breaker on it.
+  it("a probe whose deadline passes is an unreachable marker flagged transport-level AND `timedOut`, naming the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          (_url: unknown, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+            }),
+        ),
+      );
+      const pending = ResidentExecutor.probeStatus("https://resident.example", "t", "repo:x/y", 8_000);
+      await vi.advanceTimersByTimeAsync(8_000);
+      const probe = await pending;
+      expect(probe).toEqual({
+        kind: "unreachable",
+        error: "the 8s call deadline passed",
+        transport: true,
+        timedOut: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("an HTTP-level probe failure is unreachable but NOT transport (never negative-cached)", async () => {
