@@ -146,6 +146,9 @@ export interface HistoryItem {
   images?: ImageAttachment[];
   /** Non-image files attached to this turn, if any (user turns only in practice). */
   documents?: DocumentAttachment[];
+  /** The platform-namespaced id of the author (e.g. `slack:U…`); absent for
+   *  bot turns and channels that do not stamp user ids (record 0057). */
+  user?: string;
 }
 
 /** What the run is doing right now, typed so each channel draws it in its

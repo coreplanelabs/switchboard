@@ -69,6 +69,11 @@ export interface SessionSeed {
   notepad?: string;
   /** What the seed could not do, one line each, for the record's notes. */
   notes: string[];
+  /** The platform-namespaced author id for each message, by index into
+   *  `messages`; absent (or the entry undefined) for machine turns and reused
+   *  tail rows. Only present when at least one new message has an actor
+   *  (record 0057). */
+  actors?: readonly (string | undefined)[];
 }
 
 const settledResult = (toolName: string): string =>
@@ -89,6 +94,10 @@ export function sessionSeed(input: {
     documents?: DocumentAttachment[];
     /** The quoted blocks of the request's referenced conversations (record 0037), text parts after the request's own. */
     references?: readonly string[];
+    /** The platform-namespaced id of the requester (e.g. `slack:U…`); stored
+     *  on the request row so a steer or verifier can tell the requester's words
+     *  from another member's (record 0057). */
+    actor?: string;
   };
   /** The log indices of the request rows the provider refused under its usage
    *  policy (`refusedRequestsOf`, off the thread's records): their words are
@@ -100,6 +109,8 @@ export function sessionSeed(input: {
   if (from === 0 && transcript.turns === 0) return undefined;
   const notes: string[] = [];
   const messages: ChatMessage[] = [];
+  /** Actor ids for new (non-reused) messages, keyed by their index in `messages`. */
+  const actorMap = new Map<number, string>();
 
   // The tail begins after the newest compaction row (its entry sits before the
   // message `before`), then at the first user turn carrying text from there.
@@ -198,18 +209,27 @@ export function sessionSeed(input: {
     const end = previous.finishedAt;
     for (const h of history) {
       if (h.role !== "user" || h.at === undefined || h.at <= end) continue;
+      const idx = messages.length;
       messages.push({ role: "user", content: turnContent(h.text, h.images, h.documents) });
+      if (h.user !== undefined) actorMap.set(idx, h.user);
     }
   }
 
+  const requestIdx = messages.length;
   messages.push({
     role: "user",
     content: requestContent(request.text, request.images, request.documents, request.references),
   });
+  if (request.actor !== undefined) actorMap.set(requestIdx, request.actor);
+
+  const actors: (string | undefined)[] | undefined =
+    actorMap.size > 0 ? Array.from({ length: messages.length }, (_, i) => actorMap.get(i)) : undefined;
+
   return {
     messages,
     log: { from: logFrom, turns: kept.length },
     ...(summary !== undefined ? { summary } : {}),
+    ...(actors !== undefined ? { actors } : {}),
     notes,
   };
 }
@@ -233,6 +253,10 @@ export async function sessionSeedFor(input: {
     documents?: DocumentAttachment[];
     /** The quoted blocks of the request's referenced conversations (record 0037), text parts after the request's own. */
     references?: readonly string[];
+    /** The platform-namespaced id of the requester (e.g. `slack:U…`); stored
+     *  on the request row so a steer or verifier can tell the requester's words
+     *  from another member's (record 0057). */
+    actor?: string;
   };
 }): Promise<{ seed?: SessionSeed; notes: string[] }> {
   const key = sessionKey(input.threadKey, input.agent);

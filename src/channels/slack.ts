@@ -1060,12 +1060,21 @@ export class SlackIO implements ChannelIO {
         }
       }
       for (let i = 0; i < kept.length; i++) {
-        const { role, text, at } = kept[i];
+        const { role, text, at, user } = kept[i];
         const images = imagesByIndex[i];
         const documents = documentsByIndex[i];
         // attachment-only turn whose downloads all failed
         if (!text && !images && !documents) continue;
-        items.push({ role, text, ...(at !== undefined ? { at } : {}), images, documents });
+        items.push({
+          role,
+          text,
+          ...(at !== undefined ? { at } : {}),
+          // The author's platform-namespaced id (session-log item 12): the
+          // seed stores it on the rows this turn produces; a bot turn has none.
+          ...(role === "user" && user !== undefined ? { user: `slack:${user}` } : {}),
+          images,
+          documents,
+        });
       }
     } catch {
       // best-effort; the dispatcher still has the current message

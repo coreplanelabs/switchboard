@@ -355,6 +355,56 @@ describe("sessionSeedFor — the seed read from the ledger, with the notepad", (
   });
 });
 
+// Record 0057: authored session rows — each row a person's turn produces
+// carries that person's actor id; a machine turn has none.
+describe("sessionSeed — actors on channel lines and the request row", () => {
+  it("two people in one thread: channel lines carry each author's actor id, the request carries the requester's id, and a bot's turn has none", () => {
+    const multiHistory: HistoryItem[] = [
+      { role: "user", text: "fix the flaky test", at: 1_000, user: "slack:UALICE" },
+      { role: "assistant", text: "fixed it", at: 4_000 },
+      { role: "user", text: "also check the lockfile", at: 6_000, user: "slack:UBOB" },
+    ];
+    const seed = sessionSeed({
+      tail: complete(tail4, 0),
+      previous,
+      history: multiHistory,
+      request: { text: "and bump the version", actor: "slack:UALICE" },
+    })!;
+    // Alice's line at 1_000 precedes the previous run's end (5_000) and is
+    // filtered out; the one line since is Bob's, at index kept.length (4).
+    const bobLine = seed.actors?.[4 + 0]; // first (and only) since-line
+    expect(bobLine).toBe("slack:UBOB");
+    // The request is the last message
+    const requestIdx = seed.messages.length - 1;
+    expect(seed.actors?.[requestIdx]).toBe("slack:UALICE");
+  });
+
+  it("a bot's turn in the tail and a settlement row carry no actor", () => {
+    const seed = sessionSeed({
+      tail: complete(tail4, 0),
+      previous,
+      history: [],
+      request: { text: "go" },
+    })!;
+    // tail4 has assistant turns — those should have no actor in actors map
+    expect(seed.actors).toBeUndefined();
+  });
+
+  it("a request without an actor leaves no actor on the request row", () => {
+    const seed = sessionSeed({
+      tail: complete(tail4, 0),
+      previous,
+      history: [{ role: "user", text: "ping", at: 6_000 }],
+      request: { text: "pong" },
+    })!;
+    // history item with no user field: no actor on the since-line
+    const sinceIdx = tail4.length; // message[4]
+    expect(seed.actors?.[sinceIdx]).toBeUndefined();
+    const requestIdx = seed.messages.length - 1;
+    expect(seed.actors?.[requestIdx]).toBeUndefined();
+  });
+});
+
 // Record 0037: on the pi harness the quoted blocks ride the request turn the
 // seed ends on, as text parts after the request's text, so `promptOf` (which
 // joins every text part of the last user turn) hands them to pi with the ask.

@@ -217,6 +217,18 @@ describe("SlackIO.history — thread reuse and concurrent attachment downloads",
     expect("at" in items[0]).toBe(false);
   });
 
+  it("a user turn carries its author's platform-namespaced id; a bot's turn carries none (session-log item 12)", async () => {
+    const client = { conversations: { replies: vi.fn() } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const thread = [
+      { user: "UALICE", text: "first ask", ts: "1.0" },
+      { bot_id: "B1", text: "an answer", ts: "2.0" },
+      { user: "UBOB", text: "another ask", ts: "2.5" },
+      { user: "UA", text: "hi", ts: "3.0" }, // the triggering message — skipped
+    ];
+    const items = await new SlackIO(client, { ...ev, thread }).history();
+    expect(items.map((i) => i.user)).toEqual(["slack:UALICE", undefined, "slack:UBOB"]);
+  });
+
   it("fetches the thread itself when no prefetched page is given (mention path)", async () => {
     const replies = vi.fn(async () => ({ messages: [{ user: "UA", text: "earlier", ts: "1.0" }] }));
     const client = { conversations: { replies } } as unknown as ConstructorParameters<typeof SlackIO>[0];

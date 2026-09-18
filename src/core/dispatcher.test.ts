@@ -16,6 +16,7 @@ import type { CompletionRequest, CompletionResult, Provider } from "./provider.j
 import { AGENTS, getAgent } from "../agents/registry.js";
 import { CONFIG_AWARENESS_HEADER } from "./configAwareness.js";
 import { planResume } from "./runLedger/resume.js";
+import { actorOfStoredRow } from "./runLedger/sessionLog.js";
 import { knownToolsFor, launchResumes, resumeMessage } from "./resumeLaunch.js";
 import { reclaimRuns } from "./boot.js";
 import { piRunPaths, RUN_BEARER_ENV } from "./harness/pi/process.js";
@@ -15569,6 +15570,77 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     const log = await t.ledger.readSession(KEY, 0);
     expect(log.messages).toEqual([...tail, user("also check the lockfile"), user("and bump the version")]);
     expect(t.warnings).toEqual([]);
+  });
+
+  // docs/reference/specs/session-log.md item 12 (record 0057): the rows a
+  // person's turns produce carry that person's actor id; machine rows carry none.
+  it("the request row and the channel line since carry their authors' actor ids in the log; the tail's reused rows carry none", async () => {
+    const t = await threadWithSession(PI_YAML);
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("bumped"));
+    const authored: HistoryItem[] = [
+      { role: "user", text: "fix the flaky test", at: NOW - 20_000, user: "slack:UALICE" },
+      { role: "assistant", text: "fixed it", at: NOW - 11_000 },
+      { role: "user", text: "also check the lockfile", at: NOW - 5_000, user: "slack:UBOB" },
+    ];
+    const { io } = fakeIO(authored);
+    await dispatch(t.deps, followUp, io);
+    await t.writer.settled();
+    const rows = t.ledger.sessions.get(KEY)!.rows;
+    const actorAt = (idx: number) => actorOfStoredRow(rows.find((r) => r.idx === idx && r.part === 0)!.json);
+    // Rows 0..3 are the reused tail (no actor); row 4 is the line written
+    // since, Bob's; row 5 the request, the requester's.
+    expect([0, 1, 2, 3].map(actorAt)).toEqual([undefined, undefined, undefined, undefined]);
+    expect(actorAt(4)).toBe("slack:UBOB");
+    expect(actorAt(5)).toBe("slack:UADMIN");
+  });
+
+  // docs/reference/specs/session-log.md item 12 (record 0057): a thread's
+  // FIRST run — an empty log, so the seed is the channel's history — stores its
+  // rows authored too: each history line its author, the request the requester.
+  it("a first run's channel seed writes authored rows: each channel line carries its author's actor id, the request row the requester's, machine rows none", async () => {
+    const t = await threadWithSession(PI_YAML);
+    t.deps.runLedger.readSessionTail = async () => ({
+      from: 0,
+      transcript: { complete: true, turns: 0, messages: [], compactions: [] },
+    });
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("done"));
+    const authored: HistoryItem[] = [
+      { role: "user", text: "fix the flaky test", at: NOW - 20_000, user: "slack:UALICE" },
+      { role: "assistant", text: "fixed it", at: NOW - 11_000 },
+      { role: "user", text: "also check the lockfile", at: NOW - 5_000, user: "slack:UBOB" },
+    ];
+    const { io } = fakeIO(authored);
+    await dispatch(t.deps, followUp, io);
+    await t.writer.settled();
+    const record = t.ledger.finished.get("run-next")!;
+    expect(record).toMatchObject({ seed: "channel", status: "completed" });
+    const rows = t.ledger.sessions.get(KEY)!.rows;
+    const actorAt = (idx: number) => actorOfStoredRow(rows.find((r) => r.idx === idx && r.part === 0)!.json);
+    // The run's own rows follow the earlier run's log (idx 0..3): row 4 Alice's
+    // line, row 5 the bot's, row 6 Bob's line merged with the requester's
+    // request — mixed authors, so the merged row stores none…
+    expect([4, 5].map(actorAt)).toEqual(["slack:UALICE", undefined]);
+    expect(actorAt(6)).toBeUndefined();
+    const again = await threadWithSession(PI_YAML);
+    again.deps.runLedger.readSessionTail = async () => ({
+      from: 0,
+      transcript: { complete: true, turns: 0, messages: [], compactions: [] },
+    });
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("done"));
+    // …and a requester whose own line is the last one keeps the merged row theirs.
+    const ownLine: HistoryItem[] = [
+      { role: "user", text: "fix the flaky test", at: NOW - 20_000, user: "slack:UALICE" },
+      { role: "assistant", text: "fixed it", at: NOW - 11_000 },
+      { role: "user", text: "also check the lockfile", at: NOW - 5_000, user: "slack:UADMIN" },
+    ];
+    await dispatch(again.deps, followUp, fakeIO(ownLine).io);
+    await again.writer.settled();
+    const ownRows = again.ledger.sessions.get(KEY)!.rows;
+    const ownActorAt = (idx: number) => actorOfStoredRow(ownRows.find((r) => r.idx === idx && r.part === 0)!.json);
+    expect([4, 5, 6].map(ownActorAt)).toEqual(["slack:UALICE", undefined, "slack:UADMIN"]);
   });
 
   // docs/reference/specs/session-log.md item 9 (record 0034 "The session", as

@@ -160,9 +160,12 @@ export class InMemoryRunLedger implements RunLedger {
     turns: TranscriptTurn[],
   ) {
     for (const turn of turns) {
+      const actor = "message" in turn ? turn.actor : undefined;
       const { rows, attachments } = turnRows(
         turn.idx,
         "message" in turn ? turn.message : { compaction: turn.compaction },
+        {},
+        actor,
       );
       for (const row of rows) {
         const at = target.rows.findIndex((r) => r.idx === row.idx && r.part === row.part);

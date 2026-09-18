@@ -1599,6 +1599,35 @@ describe("the session log — a run is a range of it", () => {
   });
 });
 
+// Record 0057: authored session rows — rows carry actor through append.
+describe("actor — rows carry the author's id through the write-through", () => {
+  const KEY = "slack:C1:1.0:review";
+
+  it("a seed with actors in its actor map writes those actors into the stored JSON for the corresponding rows", async () => {
+    const { ledger, wt } = harness();
+    const messages = [user("earlier"), assistant("sure"), user("go")];
+    const actors: (string | undefined)[] = [undefined, undefined, "slack:UALICE"];
+    const run = await wt.open(openReq({ seed: { messages, budgetMs: 600_000, actors } }));
+    expect(run?.tracked()).toBe(true);
+    const log = ledger.sessions.get(KEY)!;
+    // row idx=2 is user("go"), authored by UALICE
+    const goRow = log.rows.find((r) => r.idx === 2 && r.part === 0);
+    expect(goRow).toBeDefined();
+    const stored = JSON.parse(goRow!.json) as Record<string, unknown>;
+    expect(stored.actor).toBe("slack:UALICE");
+    // row idx=0 is user("earlier"), no actor
+    const earlierRow = log.rows.find((r) => r.idx === 0 && r.part === 0);
+    expect(earlierRow).toBeDefined();
+    const earlierStored = JSON.parse(earlierRow!.json) as Record<string, unknown>;
+    expect(earlierStored.actor).toBeUndefined();
+    // row idx=1 is assistant("sure"), no actor
+    const assistantRow = log.rows.find((r) => r.idx === 1 && r.part === 0);
+    expect(assistantRow).toBeDefined();
+    const assistantStored = JSON.parse(assistantRow!.json) as Record<string, unknown>;
+    expect(assistantStored.actor).toBeUndefined();
+  });
+});
+
 describe("NullLedgerWriteThrough — the write-through of a process without a ledger", () => {
   it("open claims nothing (undefined — the untracked answer), nothing is live, the inbox holds nothing, the handoff marks nothing, and the generation is the process's", async () => {
     const puts: RunRecord[] = [];
