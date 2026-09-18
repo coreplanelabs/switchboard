@@ -267,7 +267,7 @@ U1 first: the seam and the count are the record's own first unit, and nothing a 
 - **Files**: `src/core/dispatch/route.ts` (the `clarify` answer on the route tool; the placeholder check after `namedToInput`; the verifier prompt gains the command's description and a `clarify` outcome), `src/load/routeReplay.ts` (the clarify row and fixtures whose right answer is a question), tests `route.test.ts`, `routeReplay.test.ts`.
 - **Approach**: tests first on the placeholder check and the `clarify` rendering; add the answer; run the row; wire in production only when the row holds.
 - **Patterns to follow**: the `VERIFY_TOOL_NAME` flag and its counters; `namedToInput`.
-- **Test scenarios**: a placeholder string in a required argument becomes a question; a complete bind never does; the verifier's disagreement renders a question with the bound line.
+- **Test scenarios**: a placeholder string in a required argument becomes a question; a complete bind never does; the verifier's disagreement renders a question with the bound line; a request whose task is a referenced thread ("in `acme/product` ship this" with a link the references step quoted) binds `ship` with the task derived from the quote when the router is confident and otherwise renders a `clarify` whose proposal is the full ship line, never a route to a reader agent that ends in a line to type (the maintainer's second case of 2026-09-18, in the record's amendment under The router's own question).
 - **Verification**: the test files green; the clarify row posted on the receipts tracker; `npm run verify`.
 
 ### U8. The remaining guess sites
