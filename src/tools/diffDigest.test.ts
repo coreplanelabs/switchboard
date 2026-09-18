@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LocalExecutor, type Executor } from "../execution/executor.js";
 import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -189,40 +189,53 @@ describe("diff_digest tool on a real multi-commit branch (LocalExecutor)", () =>
       },
     }).toString();
 
-  it("covers every commit's files and states exact totals even when the unified diff exceeds the output cap", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "digest-"));
-    sh(dir, "git init -q -b main upstream");
-    const up = join(dir, "upstream");
-    writeFileSync(join(up, "README.md"), "hello\n");
-    sh(up, "git add . && git commit -qm base");
-    sh(up, "git checkout -qb feature");
-    // commit 1: a file sorted FIRST alphabetically, bigger than the 120k cap on its own
+  // The fixture is built ONCE per file: real git under a loaded CI runner is
+  // the expensive part, so the setup batches every git command into three
+  // shells, skips the clone (origin/HEAD is set directly, as a real clone
+  // would leave it), and sizes the big file to just clear the 120k executor
+  // output cap. The bound below is the fixture's, proportional to its ~10 git
+  // subprocesses — the test itself runs one `git diff` and stays at the
+  // default bound.
+  let dir: string;
+  let wt: string;
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "digest-"));
+    wt = join(dir, "wt");
+    sh(dir, "git init -q -b main wt");
+    writeFileSync(join(wt, "README.md"), "hello\n");
+    sh(wt, "git add . && git commit -qm base && git checkout -qb feature");
+    // commit 1: a file sorted FIRST alphabetically whose unified diff alone
+    // exceeds the 120k output cap (4200 lines × ~31 chars ≈ 130k)
     writeFileSync(
-      join(up, "a-huge.txt"),
-      Array.from({ length: 6000 }, (_, i) => `line ${i} ${"x".repeat(20)}`).join("\n") + "\n",
+      join(wt, "a-huge.txt"),
+      Array.from({ length: 4200 }, (_, i) => `line ${i} ${"x".repeat(20)}`).join("\n") + "\n",
     );
-    sh(up, "git add . && git commit -qm huge");
+    sh(wt, "git add . && git commit -qm huge");
     // commit 2 + 3: files sorted AFTER it — the ones a cut diff loses
-    mkdirSync(join(up, "src"), { recursive: true });
-    writeFileSync(join(up, "src/late.ts"), "export const a = 1;\nexport const b = 2;\n");
-    sh(up, "git add . && git commit -qm late");
-    writeFileSync(join(up, "zz-last.md"), "tail\n");
-    writeFileSync(join(up, "README.md"), "hello\nworld\n");
-    sh(up, "git add . && git commit -qm last");
-    sh(up, "git checkout -q main"); // the upstream's HEAD is its default branch, as GitHub's is
-    // the clone the tool runs in, with origin/HEAD → main as a real clone has
-    sh(dir, "git clone -q --branch feature upstream wt");
-    const wt = join(dir, "wt");
+    mkdirSync(join(wt, "src"), { recursive: true });
+    writeFileSync(join(wt, "src/late.ts"), "export const a = 1;\nexport const b = 2;\n");
+    writeFileSync(join(wt, "zz-last.md"), "tail\n");
+    writeFileSync(join(wt, "README.md"), "hello\nworld\n");
+    sh(
+      wt,
+      "git add src/late.ts && git commit -qm late && git add . && git commit -qm last" +
+        // origin/HEAD → main and origin/main at the base, as a real clone has,
+        // without paying for a second repository and a clone
+        " && git update-ref refs/remotes/origin/main main" +
+        " && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main",
+    );
+  }, 20_000);
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
+  it("covers every commit's files and states exact totals even when the unified diff exceeds the output cap", async () => {
     const reports: DigestReport[] = [];
     const ctx: ToolContext = { executor: new LocalExecutor(wt), onDigest: (r) => reports.push(r) };
     const out = await diffDigestTool.run({}, ctx);
-    expect(out).toContain("4 files changed, +6004 -0");
+    expect(out).toContain("4 files changed, +4204 -0");
     for (const f of ["a-huge.txt", "src/late.ts", "zz-last.md", "README.md"]) expect(out).toContain(f);
     expect(reports).toEqual([
-      { complete: true, base: "origin/HEAD", totals: { files: 4, additions: 6004, deletions: 0 } },
+      { complete: true, base: "origin/HEAD", totals: { files: 4, additions: 4204, deletions: 0 } },
     ]);
-    rmSync(dir, { recursive: true, force: true });
   });
 });
 
