@@ -87,6 +87,10 @@ describe("attrs", () => {
     expect(ATTR_KEYS).toContain("queuedBehindMs");
     // The Workers' own roots (docs/reference/specs/tracing.md item 25): counts, never names.
     expect(invalidAttrKeys({ residents: 3, swept: 120 })).toEqual([]);
+    // The catch-up root's silenced count (docs/reference/specs/slack-channel.md item 7): a number like its sibling counts.
+    expect(ATTR_KEYS).toContain("silenced");
+    expect(invalidAttrKeys({ silenced: 1 })).toEqual([]);
+    expect(invalidAttrKeys({ silenced: "1" } as never)).toEqual(["silenced"]);
     expect(invalidAttrKeys({ residents: "3" } as never)).toEqual(["residents"]);
     // A refresh instance's id is an identifier by the platform's own rule — up to 100 characters, never free text.
     expect(invalidAttrKeys({ instanceId: `refresh_${"a".repeat(84)}_2946834` })).toEqual([]);

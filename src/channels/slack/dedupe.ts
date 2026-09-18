@@ -9,7 +9,9 @@ import { botRepliedAfter, fetchReplies, type CatchUpClient, type SlackHistoryMes
 // runs once. Bounded FIFO; the durable record is Slack (👀 / bot reply).
 const HANDLED_MAX = 5000;
 const handledHere = new Set<string>();
-function markHandledHere(channel: string, ts: string): void {
+/** Claim (channel, ts) without a dispatch — the catch-up's act marks a
+ *  receipt-silenced candidate so the next scan and a live redelivery skip it. */
+export function markHandledHere(channel: string, ts: string): void {
   handledHere.add(`${channel}:${ts}`);
   if (handledHere.size > HANDLED_MAX) {
     const oldest = handledHere.values().next().value;

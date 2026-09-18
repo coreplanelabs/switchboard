@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Secret } from "../secrets.js";
 import {
+  actOnMissedMessage,
   catchUpDelayNote,
   classifyMessage,
   CLICK_FAILED_LINE,
@@ -16,6 +17,7 @@ import {
   type SlackIntakeGate,
 } from "./slack.js";
 import { decideIntake, degradedIntakeLine, type IntakeDecision, type IntakeInput } from "../core/intake.js";
+import { catchUpMissedMentions, type CatchUpClient, type MissedMessage } from "./slackCatchUp.js";
 import type { IntakeReceipt } from "../core/runLedger/types.js";
 import type { Span } from "../core/trace/types.js";
 import type { RunView } from "../core/runsService.js";
@@ -1285,13 +1287,14 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     expect(s.calls[0]).toBe("reactions.add");
   });
 
-  it("a caught-up thread reply bypasses the gate for now — the catch-up reads no receipts yet, so a replayed addressed reply whose run died must still run", async () => {
+  it("the caught-up bypass is lifted: a caught-up reply with intakeDecided proceeds without a second verdict, and one without it is gated like a live reply", async () => {
+    // The catch-up's act decided it (a stored receipt or its own verdict) — no second decision.
     const s = gateClient();
     stubDownloads(s.calls);
     const { gate, decide } = gateOf({ mode: "classify" });
     const out = await receiveSlackMessage(
       s.client,
-      followUp({ ts: (Date.now() / 1000 - 120).toFixed(6), caughtUp: true }),
+      followUp({ ts: (Date.now() / 1000 - 120).toFixed(6), caughtUp: true, intakeDecided: true }),
       spanStub().span,
       POLICY,
       [],
@@ -1300,6 +1303,20 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     expect(out).toBeDefined();
     expect(decide).not.toHaveBeenCalled();
     expect(s.calls[0]).toBe("reactions.add");
+    // Undecided (a mode flip between the scan and the act): the gate decides it fresh.
+    const s2 = gateClient();
+    stubDownloads(s2.calls);
+    const { gate: gate2, decide: decide2 } = gateOf({ mode: "classify" });
+    const out2 = await receiveSlackMessage(
+      s2.client,
+      followUp({ ts: (Date.now() / 1000 - 121).toFixed(6), caughtUp: true }),
+      spanStub().span,
+      POLICY,
+      [],
+      gate2,
+    );
+    expect(decide2).toHaveBeenCalledTimes(1);
+    expect(out2).toBeDefined();
   });
 
   it("a userless event resolves the intake mode with no user scope: intakeModeFor is handed undefined, never a made-up id", async () => {
@@ -1566,5 +1583,289 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("the catch-up reads the receipt — onMissed's act (docs/reference/specs/slack-channel.md item 7)", () => {
+  const CATCH_NOW = 1_788_040_800_000; // 2026-08-29T22:00:00Z
+  const cts = (secondsAgo: number, frac = "000100") => `${Math.floor(CATCH_NOW / 1000) - secondsAgo}.${frac}`;
+
+  /** A per-test seen-set standing in for the module-level handled-set. */
+  function seenSet() {
+    const set = new Set<string>();
+    return {
+      was: (c: string, t: string) => set.has(`${c}:${t}`),
+      mark: (c: string, t: string) => void set.add(`${c}:${t}`),
+    };
+  }
+
+  /** An in-memory receipt ledger, seedable, with spied reads and writes. */
+  function receiptLedger(rows: Record<string, "addressed" | "silent"> = {}) {
+    const map = new Map<string, IntakeReceipt>(
+      Object.entries(rows).map(([k, verdict]) => [
+        k,
+        {
+          verdict,
+          reason: "stored",
+          source: "model",
+          mode: "classify",
+          model: "anthropic/fast-model",
+          gen: 1,
+          threadKey: "slack:CCU:100.000000",
+          decidedAt: 1,
+        },
+      ]),
+    );
+    const readIntake = vi.fn(async (key: string) => map.get(key));
+    const recordIntake = vi.fn(async (key: string, receipt: IntakeReceipt) => {
+      const existing = map.get(key);
+      if (existing) return { inserted: false, stored: existing };
+      map.set(key, receipt);
+      return { inserted: true, stored: receipt };
+    });
+    return { readIntake, recordIntake };
+  }
+
+  const verdictOf = (verdict: "addressed" | "silent") =>
+    vi.fn(async (_input: IntakeInput): Promise<IntakeDecision> => ({
+      verdict,
+      reason: "r",
+      source: "model",
+      receipt: "inserted",
+    }));
+
+  function catchGate(over: {
+    mode?: "mention" | "classify" | "always";
+    ledger?: SlackIntakeGate["deps"]["ledger"];
+    decide?: ReturnType<typeof verdictOf>;
+  }) {
+    const decide = over.decide ?? verdictOf("addressed");
+    const gate: SlackIntakeGate = {
+      intakeModeFor: () => over.mode ?? "classify",
+      decideIntake: decide as unknown as typeof decideIntake,
+      deps: { model: async () => "unused", ledger: over.ledger ?? null, now: () => CATCH_NOW },
+      modelRef: "anthropic/fast-model",
+      gen: 7,
+    };
+    return { gate, decide };
+  }
+
+  type Dispatched = { trigger: "mention" | "thread-follow-up"; intakeDecided?: true };
+  const missedOf = (over: Partial<MissedMessage> = {}): MissedMessage => {
+    const parent = { user: BOT, bot_id: "B1", text: "report ready", ts: "100.000000" };
+    const reply = { user: "UASKER", text: "and the tests?", ts: "120.000100", thread_ts: "100.000000" };
+    return {
+      channel: "CCU",
+      user: "UASKER",
+      text: "and the tests?",
+      ts: "120.000100",
+      threadTs: "100.000000",
+      files: undefined,
+      thread: [parent, reply],
+      ...over,
+    };
+  };
+
+  it("the runner over a fixture: a silent receipt skips (counted silenced, marked seen), an addressed receipt dispatches with intakeDecided and no verdict, no receipt runs decideIntake over the paged tail", async () => {
+    const parent = {
+      user: BOT,
+      bot_id: "B1",
+      text: "report ready",
+      ts: cts(3000),
+      reply_count: 3,
+      latest_reply: cts(40),
+    };
+    const r1 = { user: "UA", text: "for you, colleague", ts: cts(120), thread_ts: parent.ts };
+    const r2 = { user: "UB", text: "re-run the suite", ts: cts(80), thread_ts: parent.ts };
+    const r3 = { user: "UC", text: "and the tests?", ts: cts(40), thread_ts: parent.ts };
+    const client = {
+      users: { conversations: vi.fn(async () => ({ channels: [{ id: "CCU" }] })) },
+      conversations: {
+        history: vi.fn(async () => ({ messages: [parent] })),
+        replies: vi.fn(async () => ({ messages: [parent, r1, r2, r3] })),
+      },
+    } as unknown as CatchUpClient;
+    const ledger = receiptLedger({ [`CCU:${r1.ts}`]: "silent", [`CCU:${r2.ts}`]: "addressed" });
+    const { gate, decide } = catchGate({ ledger });
+    const seen = seenSet();
+    const dispatched: Array<Dispatched & { ts: string }> = [];
+    let silenced = 0;
+    const out = await catchUpMissedMentions({
+      client,
+      botUserId: BOT,
+      now: CATCH_NOW,
+      alreadyHandled: seen.was,
+      log: () => {},
+      record: () => {},
+      onMissed: async (m) => {
+        const act = await actOnMissedMessage(m, {
+          botUserId: BOT,
+          intake: gate,
+          seen,
+          log: () => {},
+          dispatch: (extra) => dispatched.push({ ts: m.ts, ...extra }),
+        });
+        if (act === "silenced") silenced++;
+      },
+    });
+    expect(out.missed).toBe(3);
+    expect(silenced).toBe(1);
+    expect(dispatched).toEqual([
+      { ts: r2.ts, trigger: "thread-follow-up", intakeDecided: true },
+      { ts: r3.ts, trigger: "thread-follow-up", intakeDecided: true },
+    ]);
+    // The one verdict ran over the thread the scan paged: r3's key, the tail's turns.
+    expect(decide).toHaveBeenCalledTimes(1);
+    const input = decide.mock.calls[0]![0];
+    expect(input.key).toBe(`CCU:${r3.ts}`);
+    expect(input.turns.map((t) => t.text)).toEqual(["report ready", "for you, colleague", "re-run the suite"]);
+    expect(input.turns[0]!.role).toBe("bot");
+    expect(input.facts.threadStartedByBot).toBe(true);
+    // The silent receipt marked the pair seen, so the next scan skips it too.
+    expect(seen.was("CCU", r1.ts)).toBe(true);
+  });
+
+  it("a candidate whose receipt read throws is decided as receipt-less: decideIntake runs and its verdict proceeds", async () => {
+    const ledger = {
+      readIntake: vi.fn(async () => {
+        throw new Error("D1 unreachable");
+      }),
+      recordIntake: vi.fn(async (_k: string, r: IntakeReceipt) => ({ inserted: true, stored: r })),
+    };
+    const { gate, decide } = catchGate({ ledger });
+    const dispatched: Dispatched[] = [];
+    const act = await actOnMissedMessage(missedOf(), {
+      botUserId: BOT,
+      intake: gate,
+      seen: seenSet(),
+      log: () => {},
+      dispatch: (extra) => dispatched.push(extra),
+    });
+    expect(ledger.readIntake).toHaveBeenCalledTimes(1);
+    expect(decide).toHaveBeenCalledTimes(1);
+    expect(act).toBe("dispatched");
+    expect(dispatched).toEqual([{ trigger: "thread-follow-up", intakeDecided: true }]);
+  });
+
+  it("a fresh silent verdict silences the candidate: no dispatch, the pair marked seen", async () => {
+    const { gate, decide } = catchGate({ ledger: receiptLedger(), decide: verdictOf("silent") });
+    const seen = seenSet();
+    const dispatched: Dispatched[] = [];
+    const act = await actOnMissedMessage(missedOf(), {
+      botUserId: BOT,
+      intake: gate,
+      seen,
+      log: () => {},
+      dispatch: (extra) => dispatched.push(extra),
+    });
+    expect(decide).toHaveBeenCalledTimes(1);
+    expect(act).toBe("silenced");
+    expect(dispatched).toEqual([]);
+    expect(seen.was("CCU", "120.000100")).toBe(true);
+  });
+
+  it("an always thread is dispatched exactly as today: no receipt read, no verdict, no intakeDecided — and so is a replay when no gate is wired", async () => {
+    const ledger = receiptLedger({ "CCU:120.000100": "silent" });
+    const { gate, decide } = catchGate({ mode: "always", ledger });
+    const dispatched: Dispatched[] = [];
+    const act = await actOnMissedMessage(missedOf(), {
+      botUserId: BOT,
+      intake: gate,
+      seen: seenSet(),
+      log: () => {},
+      dispatch: (extra) => dispatched.push(extra),
+    });
+    expect(act).toBe("dispatched");
+    expect(ledger.readIntake).not.toHaveBeenCalled();
+    expect(decide).not.toHaveBeenCalled();
+    expect(dispatched).toEqual([{ trigger: "thread-follow-up" }]);
+    // No gate wired (degrade open): the same dispatch, byte for byte.
+    const bare: Dispatched[] = [];
+    const act2 = await actOnMissedMessage(missedOf(), {
+      botUserId: BOT,
+      seen: seenSet(),
+      log: () => {},
+      dispatch: (extra) => bare.push(extra),
+    });
+    expect(act2).toBe("dispatched");
+    expect(bare).toEqual([{ trigger: "thread-follow-up" }]);
+  });
+
+  it("a live claim that landed between the scan and the act is skipped after the read", async () => {
+    const order: string[] = [];
+    const ledger = receiptLedger({ "CCU:120.000100": "addressed" });
+    ledger.readIntake.mockImplementation(async (key: string) => {
+      order.push("read");
+      return key === "CCU:120.000100"
+        ? ({
+            verdict: "addressed",
+            reason: "r",
+            source: "model",
+            mode: "classify",
+            model: "m/f",
+            gen: 1,
+            threadKey: "t",
+            decidedAt: 1,
+          } as IntakeReceipt)
+        : undefined;
+    });
+    const { gate } = catchGate({ ledger });
+    const dispatched: Dispatched[] = [];
+    const act = await actOnMissedMessage(missedOf(), {
+      botUserId: BOT,
+      intake: gate,
+      seen: {
+        was: (c, t) => {
+          order.push("seen");
+          return c === "CCU" && t === "120.000100";
+        },
+        mark: () => {},
+      },
+      log: () => {},
+      dispatch: (extra) => dispatched.push(extra),
+    });
+    expect(act).toBe("skipped");
+    expect(order).toEqual(["read", "seen"]);
+    expect(dispatched).toEqual([]);
+  });
+
+  it("a thread of 60 replies hands the newest twelve turns to the verdict", async () => {
+    const parentTs = "100.000000";
+    const replies = Array.from({ length: 60 }, (_, i) => ({
+      user: i % 2 ? "UASKER" : BOT,
+      text: `turn ${i}`,
+      ts: `${200 + i}.000000`,
+      thread_ts: parentTs,
+    }));
+    const candidate = replies[59]!;
+    const thread = [{ user: BOT, bot_id: "B1", text: "lead", ts: parentTs }, ...replies];
+    const { gate, decide } = catchGate({ ledger: receiptLedger() });
+    await actOnMissedMessage(missedOf({ ts: candidate.ts, text: candidate.text, thread }), {
+      botUserId: BOT,
+      intake: gate,
+      seen: seenSet(),
+      log: () => {},
+      dispatch: () => {},
+    });
+    const input = decide.mock.calls[0]![0];
+    expect(input.turns).toHaveLength(12);
+    expect(input.turns.map((t) => t.text)).toEqual(Array.from({ length: 12 }, (_, i) => `turn ${47 + i}`));
+  });
+
+  it("an edited message now carrying a mention is a candidate through mentionsBot: dispatched as a mention, no receipt read, whatever a silent receipt says", async () => {
+    const ledger = receiptLedger({ "CCU:120.000100": "silent" });
+    const { gate, decide } = catchGate({ ledger });
+    const dispatched: Dispatched[] = [];
+    const act = await actOnMissedMessage(missedOf({ text: `<@${BOT}> now for you` }), {
+      botUserId: BOT,
+      intake: gate,
+      seen: seenSet(),
+      log: () => {},
+      dispatch: (extra) => dispatched.push(extra),
+    });
+    expect(act).toBe("dispatched");
+    expect(ledger.readIntake).not.toHaveBeenCalled();
+    expect(decide).not.toHaveBeenCalled();
+    expect(dispatched).toEqual([{ trigger: "mention" }]);
   });
 });

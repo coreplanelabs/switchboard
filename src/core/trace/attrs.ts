@@ -103,6 +103,8 @@ export interface AttrDomain {
   signal: "SIGTERM" | "SIGINT" | "other";
   channels: number;
   missed: number;
+  /** Catch-up candidates a receipt (or a fresh verdict) silenced — read, never re-run (slack-channel.md item 7). */
+  silenced: number;
   orphans: number;
   skipped: number;
   runs: number;
@@ -230,6 +232,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   signal: "string",
   channels: "number",
   missed: "number",
+  silenced: "number",
   orphans: "number",
   skipped: "number",
   runs: "number",

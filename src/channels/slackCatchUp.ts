@@ -99,6 +99,10 @@ export interface MissedMessage {
   ts: string;
   threadTs: string;
   files: unknown[] | undefined;
+  /** The message's whole thread as the scan paged it (parent first; empty for
+   *  a top-level message without replies) — the tail the act phase's intake
+   *  verdict judges over (slack-channel.md item 7), so it re-fetches nothing. */
+  thread: SlackHistoryMessage[];
 }
 
 /** The slice of the Slack Web API the catch-up needs — structural so the real
@@ -188,13 +192,13 @@ export function findMissed(input: FindMissedInput): MissedMessage[] {
     !alreadyHandled(channel, m.ts);
   const handled = (m: SlackHistoryMessage & { ts: string }, thread: SlackHistoryMessage[]) =>
     botRepliedAfter(thread, m, botUserId) || (isAckedByBot(m, botUserId) && nowMs - tsMs(m.ts) < ACK_GRACE_MS);
-  const push = (m: SlackHistoryMessage & { ts: string }, threadTs: string) =>
-    out.push({ channel, user: m.user ?? "unknown", text: m.text ?? "", ts: m.ts, threadTs, files: m.files });
+  const push = (m: SlackHistoryMessage & { ts: string }, threadTs: string, thread: SlackHistoryMessage[]) =>
+    out.push({ channel, user: m.user ?? "unknown", text: m.text ?? "", ts: m.ts, threadTs, files: m.files, thread });
 
   for (const p of input.parents) {
     if (!p.ts || (p.thread_ts && p.thread_ts !== p.ts)) continue; // a broadcast reply; handled via its thread
     const thread = input.threads.get(p.ts) ?? [];
-    if (eligible(p) && mentionsBot(p) && !handled(p, thread)) push(p, p.ts);
+    if (eligible(p) && mentionsBot(p) && !handled(p, thread)) push(p, p.ts, thread);
   }
   for (const [parentTs, thread] of input.threads) {
     const botInThread = threadIncludesBot(thread, botUserId);
@@ -202,7 +206,7 @@ export function findMissed(input: FindMissedInput): MissedMessage[] {
       if (r.ts === parentTs || !eligible(r)) continue;
       const decision = mentionsBot(r) ? "handle" : classifyMessage(r, botUserId);
       const wanted = decision === "handle" || (decision === "handle-if-bot-in-thread" && botInThread);
-      if (wanted && !handled(r, thread)) push(r, parentTs);
+      if (wanted && !handled(r, thread)) push(r, parentTs, thread);
     }
   }
   return out.sort((a, b) => tsNum(a.ts) - tsNum(b.ts));

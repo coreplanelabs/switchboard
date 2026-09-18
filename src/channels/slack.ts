@@ -14,6 +14,7 @@ import {
   degradedIntakeLine,
   type IntakeDeps,
   type IntakeFacts,
+  type IntakeReceipt,
   type IntakeTurn,
 } from "../core/intake.js";
 import { readThread, requesterOf } from "../core/dispatch/thread.js";
@@ -47,11 +48,11 @@ import {
   MAX_IMAGES_PER_MESSAGE,
   type SlackFile,
 } from "./slack/attachments.js";
-import { dedupeDelivery, wasHandledHere } from "./slack/dedupe.js";
+import { dedupeDelivery, markHandledHere, wasHandledHere } from "./slack/dedupe.js";
 import { resolveChannelName, resolveTeamUrl, resolveUserName, slackPermalink } from "./slack/lookups.js";
 import { rawTextOf, resolveSlackRequester, type SlackBlock, type SlackPoster } from "./slack/requester.js";
 import { isLiveCard, liveCardKey, liveCards, refreshForeignLiveCards, render } from "./slack/statusCard.js";
-import { ACK_EMOJI, catchUpMissedMentions, tsMs } from "./slackCatchUp.js";
+import { ACK_EMOJI, catchUpMissedMentions, tsMs, type MissedMessage } from "./slackCatchUp.js";
 import { processSecrets, type Secret } from "../secrets.js";
 import { ARTIFACT_DEFAULTS } from "../artifacts/config.js";
 import { missingBotScopes, recordCatchUpOutcome, recordMissingScopes } from "./slackCatchUpStatus.js";
@@ -207,6 +208,10 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
         // tracing.md item 20), its counts as attrs; a throw fails it and still
         // reaches the catch below.
         await withProcessRoot(deps, "slack.catch_up", async (root) => {
+          // Candidates a receipt (or a fresh verdict) silenced — read, never
+          // re-run — counted here so the root says why `missed` outnumbers the
+          // runs (item 7).
+          let silenced = 0;
           const result = await catchUpMissedMentions({
             client: app.client,
             botUserId: id,
@@ -219,42 +224,43 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
             onOrphanedCard: async (card, frame) => {
               await app.client.chat.update({ channel: card.channel, ts: card.ts, ...render(frame) });
             },
-            // Not awaited per message: a run takes minutes and live events run
-            // concurrently too — the runner only awaits the hand-off.
-            onMissed: (m) => {
-              // The scan's alreadyHandled check ran at scan time; a live
-              // delivery that landed between the scan and this dispatch has
-              // claimed the pair since — re-check, or both would run.
-              if (wasHandledHere(m.channel, m.ts)) {
-                console.log(`[catch-up] ${m.channel}:${m.ts}: skipped — handled live since the scan`);
-                return;
-              }
-              void handle(
-                deps,
-                { client: app.client, statusClient },
-                {
-                  channel: m.channel,
-                  user: m.user,
-                  text: stripMention(m.text, id),
-                  ts: m.ts,
-                  threadTs: m.threadTs,
-                  files: m.files as SlackFile[] | undefined,
-                  botUserId: id,
-                  caughtUp: true,
-                  // Truthful label: the scan replays mentions AND plain thread
-                  // replies in bot-participating threads (item 7,
-                  // `findMissed`). The gate deliberately skips caught-up
-                  // replays for now — see `receiveSlackMessage` — until the
-                  // catch-up reads receipts and hands `intakeDecided` over.
-                  trigger: m.text.includes(`<@${id}>`) ? "mention" : "thread-follow-up",
+            // The runner awaits only the hand-off — the receipt read and the
+            // verdict — never the run: a run takes minutes and live events run
+            // concurrently too (`actOnMissedMessage`'s dispatch fires and forgets).
+            onMissed: async (m) => {
+              const act = await actOnMissedMessage(m, {
+                botUserId: id,
+                ...(intake ? { intake } : {}),
+                dispatch: (extra) => {
+                  void handle(
+                    deps,
+                    { client: app.client, statusClient },
+                    {
+                      channel: m.channel,
+                      user: m.user,
+                      text: stripMention(m.text, id),
+                      ts: m.ts,
+                      threadTs: m.threadTs,
+                      files: m.files as SlackFile[] | undefined,
+                      botUserId: id,
+                      caughtUp: true,
+                      // Truthful label: the scan replays mentions AND plain
+                      // thread replies in bot-participating threads (item 7,
+                      // `findMissed`); a gated replay carries `intakeDecided`
+                      // so the gate never decides it twice.
+                      ...extra,
+                    },
+                    intake,
+                  ).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
                 },
-                intake,
-              ).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
+              });
+              if (act === "silenced") silenced++;
             },
           });
           root.setAttrs({
             channels: result.channels,
             missed: result.missed,
+            silenced,
             orphans: result.orphans,
             skipped: result.skippedChannels,
           });
@@ -391,9 +397,9 @@ interface SlackEvent {
    *  on an IO built without a triggering event (a resume, a click, a child
    *  thread's lead), which never passes through `receiveSlackMessage`. */
   trigger?: "mention" | "dm" | "thread-follow-up";
-  /** Set when a stored receipt already decided this message; the gate never
-   *  decides it twice. Nothing sets it yet — the catch-up's receipt read (a
-   *  later unit) will, lifting the gate's caught-up bypass. */
+  /** Set when a stored receipt — or the catch-up's own verdict over the paged
+   *  thread — already decided this message (`actOnMissedMessage`, item 7); the
+   *  gate never decides it twice. */
   intakeDecided?: true;
 }
 
@@ -407,6 +413,103 @@ export function catchUpDelayNote(messageTs: string, nowMs: number): string {
   const mins = Math.round(lateMs / 60_000);
   const late = mins < 1 ? "under a minute" : `${mins} min`;
   return `⏱ Picked up ${late} after it was posted: the bot was restarting (a deploy or platform move) and Slack does not queue events while it is down. Handling it now — no need to re-send.`;
+}
+
+/** What the catch-up's act did with one missed message (docs/reference/specs/slack-channel.md item 7). */
+export type CaughtUpAct = "dispatched" | "silenced" | "skipped";
+
+/**
+ * The catch-up's act for one missed message, before `handle()` (item 7, the
+ * catch-up half of item 15). A candidate with a mention — including an edit
+ * that gained one, which arrives as a subtype the live path skips — and one in
+ * an `always` thread are dispatched exactly as today, no receipt read. Any
+ * other unmentioned follow-up gets its stored receipt read first: a `silent`
+ * row marks the pair seen and is counted under `silenced` on the
+ * `slack.catch_up` root — read, never re-run; an `addressed` row dispatches
+ * the replay with `intakeDecided`, so the gate never decides it twice; no row
+ * (a failing read decides as if none) runs `decideIntake` over the thread's
+ * tail the scan already paged (`MissedMessage.thread`) and proceeds by the
+ * stored verdict. The seen-set is re-checked AFTER the read — the scan's
+ * `alreadyHandled` ran at scan time and the read awaited since, so a live
+ * claim that landed in between owns the message: skipped, never run twice.
+ */
+export async function actOnMissedMessage(
+  m: MissedMessage,
+  opts: {
+    botUserId: string;
+    intake?: SlackIntakeGate;
+    /** Dispatch through `handle()` — fire-and-forget, like a live event. */
+    dispatch: (extra: { trigger: "mention" | "thread-follow-up"; intakeDecided?: true }) => void;
+    /** The same-process seen-set; the module-level one unless a test injects its own. */
+    seen?: { was(channel: string, ts: string): boolean; mark(channel: string, ts: string): void };
+    log?: (line: string) => void;
+  },
+): Promise<CaughtUpAct> {
+  const log = opts.log ?? ((line: string) => console.log(line));
+  const seen = opts.seen ?? { was: wasHandledHere, mark: markHandledHere };
+  // An edit that gained a mention is a mention, whatever an older receipt says.
+  const mention = m.text.includes(`<@${opts.botUserId}>`);
+  let silent = false;
+  let decided = false;
+  if (!mention && opts.intake) {
+    const intake = opts.intake;
+    const threadKey = `${PLATFORM}:${m.channel}:${m.threadTs}`;
+    const mode = intake.intakeModeFor(threadKey, `${PLATFORM}:${m.user}`, `${PLATFORM}:${m.channel}`);
+    if (mode !== "always") {
+      const key = `${m.channel}:${m.ts}`;
+      let row: IntakeReceipt | undefined;
+      try {
+        row = await intake.deps.ledger?.readIntake(key);
+      } catch (err) {
+        log(`[catch-up] ${key}: receipt read failed — ${describeError(err)}; deciding as if none`);
+      }
+      if (row) {
+        decided = true;
+        silent = row.verdict === "silent";
+        if (silent) log(`[catch-up] ${key}: silenced by its stored receipt (${row.source}): ${row.reason}`);
+      } else {
+        const page = m.thread as SlackThreadMessage[];
+        const { turns, facts } = await intakeEvidence(
+          intake,
+          threadKey,
+          { ts: m.ts, threadTs: m.threadTs, user: m.user, botUserId: opts.botUserId, text: m.text },
+          page,
+        );
+        const decision = await intake.decideIntake(
+          {
+            key,
+            threadKey,
+            mode,
+            model: intake.modelRef,
+            gen: intake.gen,
+            message: stripMention(m.text, opts.botUserId),
+            turns,
+            facts,
+          },
+          intake.deps,
+        );
+        log(
+          `[intake] ${key} ${decision.verdict} (${decision.source}, receipt ${decision.receipt}): ${decision.reason} — decided at catch-up`,
+        );
+        decided = true;
+        silent = decision.verdict !== "addressed";
+      }
+    }
+  }
+  // Re-checked after the read: a live claim that landed since the scan owns it.
+  if (seen.was(m.channel, m.ts)) {
+    log(`[catch-up] ${m.channel}:${m.ts}: skipped — handled live since the scan`);
+    return "skipped";
+  }
+  if (silent) {
+    seen.mark(m.channel, m.ts);
+    return "silenced";
+  }
+  opts.dispatch({
+    trigger: mention ? "mention" : "thread-follow-up",
+    ...(decided ? { intakeDecided: true as const } : {}),
+  });
+  return "dispatched";
 }
 
 async function handle(
@@ -548,15 +651,14 @@ export async function receiveSlackMessage(
   // produces nothing and downloads nothing. Only this trigger passes through
   // it: a mention, a DM and a top-level post are addressed by construction,
   // and a message a stored receipt already decided (`intakeDecided`) is never
-  // decided twice. A caught-up replay bypasses the gate for now, deliberately:
-  // the catch-up does not read receipts yet, and deciding a replay fresh would
-  // refuse re-running an addressed reply whose run died (its receipt reads as
-  // another caller's row) — the silent drop the catch-up exists to prevent.
-  // The catch-up's receipt read wires `intakeDecided` and lifts this bypass.
+  // decided twice — the catch-up's act reads the receipt (or decides itself)
+  // and sets the flag on every gated replay it dispatches (item 7), so a
+  // caught-up reply reaches this gate only when it arrived undecided (a mode
+  // flip between the scan and the act), and deciding it fresh is then right.
   // `always` never reaches intake and never touches the ledger: today's path
   // byte for byte.
   let threadRuns: RunView[] | undefined;
-  if (intake && ev.trigger === "thread-follow-up" && !ev.intakeDecided && ev.caughtUp !== true) {
+  if (intake && ev.trigger === "thread-follow-up" && !ev.intakeDecided) {
     const threadKey = `${PLATFORM}:${ev.channel}:${ev.threadTs}`;
     const mode = intake.intakeModeFor(
       threadKey,
@@ -673,7 +775,6 @@ async function gateThreadReply(
   mode: "mention" | "classify",
   threadKey: string,
 ): Promise<{ proceed: boolean; thread?: RunView[] }> {
-  const now = intake.deps.now();
   // The verdict sees the thread's NEWEST turns: the page `threadIfBotInIt`
   // already fetched covers a thread of 50 replies or fewer; a full page may
   // not be the thread's end — Slack pages replies OLDEST-first (`fetchReplies`
@@ -705,9 +806,47 @@ async function gateThreadReply(
       // the tail is an improvement, not a requirement
     }
   }
-  // The two store reads only the adapter can ask for the facts — the runs page
-  // (read ONCE: it rides out to dispatch, R2) and the pending confirmation —
-  // both best-effort: a failed read leaves the fact empty, never blocks the verdict.
+  const { turns, facts, thread } = await intakeEvidence(intake, threadKey, ev, page, ev.thread ?? page);
+  const decision = await intake.decideIntake(
+    {
+      key: `${ev.channel}:${ev.ts}`,
+      threadKey,
+      mode,
+      model: intake.modelRef,
+      gen: intake.gen,
+      message: ev.text,
+      turns,
+      facts,
+    },
+    intake.deps,
+  );
+  span.setAttrs({ intake: decision.verdict, intakeSource: decision.source, intakeReceipt: decision.receipt });
+  if (decision.verdict !== "addressed" || decision.receipt === "existing") {
+    console.log(
+      `[intake] ${ev.channel}:${ev.ts} ${decision.verdict} (${decision.source}, receipt ${decision.receipt}): ${decision.reason}`,
+    );
+    return { proceed: false };
+  }
+  return { proceed: true, ...(thread ? { thread } : {}) };
+}
+
+/** What one verdict sees, assembled from a thread page: the newest turns
+ *  labelled bot/requester/person, and the facts only code can compute. The two
+ *  store reads only the adapter can ask — the runs page (read ONCE: on the
+ *  live path it rides out to dispatch, R2) and the pending confirmation — are
+ *  both best-effort: a failed read leaves the fact empty, never blocks the
+ *  verdict. `parentPage` is where the thread's parent is looked for (the live
+ *  path's prefetched page carries it even when the newest-window fetch does
+ *  not). Shared by the live gate (`gateThreadReply`) and the catch-up's act
+ *  (`actOnMissedMessage`), so both judge with the same evidence. */
+async function intakeEvidence(
+  intake: SlackIntakeGate,
+  threadKey: string,
+  ev: Pick<SlackEvent, "ts" | "threadTs" | "user" | "botUserId" | "rawText" | "text">,
+  page: SlackThreadMessage[],
+  parentPage: SlackThreadMessage[] = page,
+): Promise<{ turns: IntakeTurn[]; facts: IntakeFacts; thread?: RunView[] }> {
+  const now = intake.deps.now();
   const [thread, pending] = await Promise.all([
     intake.runs ? readThread(intake.runs, threadKey) : Promise.resolve(undefined),
     intake.confirmations
@@ -730,9 +869,7 @@ async function gateThreadReply(
   }));
   const lastBotTurn = [...kept].reverse().find((t) => t.user !== undefined && t.user === ev.botUserId);
   const live = thread?.find((r) => !r.finished);
-  // The parent is on the prefetched page (it is the page's first message);
-  // the newest-window fetch above may not carry it, so ask the original.
-  const parent = (ev.thread ?? page).find((m) => m.ts === ev.threadTs);
+  const parent = parentPage.find((m) => m.ts === ev.threadTs);
   const mentioned = [...(ev.rawText ?? ev.text).matchAll(/<@([A-Z0-9]+)>/g)].map((m) => m[1]);
   const facts: IntakeFacts = {
     ...(live
@@ -751,27 +888,7 @@ async function gateThreadReply(
     ...(pending !== undefined ? { pendingConfirmation: pending.message.userId } : {}),
     threadStartedByBot: parent !== undefined && parent.user !== undefined && parent.user === ev.botUserId,
   };
-  const decision = await intake.decideIntake(
-    {
-      key: `${ev.channel}:${ev.ts}`,
-      threadKey,
-      mode,
-      model: intake.modelRef,
-      gen: intake.gen,
-      message: ev.text,
-      turns,
-      facts,
-    },
-    intake.deps,
-  );
-  span.setAttrs({ intake: decision.verdict, intakeSource: decision.source, intakeReceipt: decision.receipt });
-  if (decision.verdict !== "addressed" || decision.receipt === "existing") {
-    console.log(
-      `[intake] ${ev.channel}:${ev.ts} ${decision.verdict} (${decision.source}, receipt ${decision.receipt}): ${decision.reason}`,
-    );
-    return { proceed: false };
-  }
-  return { proceed: true, ...(thread ? { thread } : {}) };
+  return { turns, facts, ...(thread ? { thread } : {}) };
 }
 
 /** Exported for tests. */
