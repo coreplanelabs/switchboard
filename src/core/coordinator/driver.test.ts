@@ -254,10 +254,12 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       { parentInstanceId: INSTANCE, unit: "U10", runId: "run-c0" },
       { parentInstanceId: INSTANCE, unit: "U10", runId: "run-r1" },
     ]);
-    // Twice: once before the branch (what already heads it), once after the coding child.
+    // Twice: once before the branch (what already heads it), once after the
+    // coding child — the second carrying the pull request the child's record
+    // named, for the bot to follow when nothing heads the branch (issue 1799).
     expect(b.of("pr-check")).toEqual([
       { parentInstanceId: INSTANCE, unit: "U10" },
-      { parentInstanceId: INSTANCE, unit: "U10" },
+      { parentInstanceId: INSTANCE, unit: "U10", pr: 7 },
     ]);
     expect(b.of("round")).toEqual([
       { parentInstanceId: INSTANCE, unit: "U10", index: 0, agent: "coding", outcome: "started" },
@@ -493,6 +495,29 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
     expect(end.ending.kind).toBe("aborted");
     expect(end.ending.report).toContain("names no base branch");
+  });
+
+  it("a pr-check that verified the followed pull request CLOSED carries `prClosed` through the parse: the machine never briefs a review on the record's pull request and the unit ends with round 0's own ending (issue 1799)", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [codingDone("run-c0", T0 + 5 * MIN)],
+      "pr-check": [prNone(), ok({ ok: true, state: "none", prClosed: true }, T0 + 6 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 6 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 6 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "aborted" });
+    // The check carried the record's pull request for the bot to follow.
+    expect(b.of("pr-check")).toEqual([
+      { parentInstanceId: INSTANCE, unit: "U10" },
+      { parentInstanceId: INSTANCE, unit: "U10", pr: 7 },
+    ]);
+    expect(s.names()).not.toContain("U10/1/review");
   });
 
   it("a unit whose scope already landed ends already_landed through the parse — the pr-check's `aheadOfBase` and the record's `landed` list reach the machine — the unit-end carries the report naming the landing, its dependents run on the base that carries it, and the plan finishes completed", async () => {
@@ -1403,7 +1428,8 @@ describe("the plan runner's driver — a unit whose pull request already merged 
     expect(b.of("pr-check")).toEqual([
       { parentInstanceId: INSTANCE, unit: "U10" },
       { parentInstanceId: INSTANCE, unit: "U11" },
-      { parentInstanceId: INSTANCE, unit: "U11" },
+      // The round-0 check carries the pull request the child's record named.
+      { parentInstanceId: INSTANCE, unit: "U11", pr: 7 },
     ]);
     // No round boundary is drawn for a unit that ran nothing.
     expect(b.of("round").every((r) => r.unit === "U11")).toBe(true);

@@ -123,6 +123,15 @@ export interface RepoContext {
    *  through to a fresh round 0) from the thread's own in-flight PR
    *  (inherited → still fail-closed when the PR's facts cannot be fetched). */
   prFromMessage?: boolean;
+  /** True when `pr` is the pull request the thread's own run opened or edited
+   *  (`RunRecordSignals.pr`, same repo and number) — independent of where the
+   *  reference came from: set for an in-message URL or `owner/name#N` naming it
+   *  exactly as for one inherited off the record. A re-issue that cites the
+   *  thread's own pull request by URL is addressing that pull request, never
+   *  quoting a stranger's as evidence — ship's entry checks read this beside
+   *  `prFromMessage` so such a reference adopts or resumes instead of falling
+   *  through to a fresh plan branch. */
+  prIsThreadOwn?: boolean;
   /** True when `pr` is the pull request the thread's OWN run opened — inherited
    *  off the run record (`inheritedPr`'s `record` source), not named by a
    *  person in the message or an earlier turn. With `refFromPr`, it is the one
@@ -651,6 +660,11 @@ export async function resolveRepoContext(
   if (repo && s.pr && repo === s.pr.repo) {
     out.pr = s.pr.number;
     out.prFromMessage = true;
+    // The message names the pull request the thread's own run opened or edited
+    // (the run record's `pr`): the reference is the thread's own work, not a
+    // stranger's PR cited as evidence, and ship's entry checks must not treat
+    // it as context (issue 1799's four re-issues).
+    if (isThreadOwnPr(records, repo, s.pr.number)) out.prIsThreadOwn = true;
     if (headSha) out.headSha = headSha;
     if (baseRef) out.baseRef = baseRef;
     if (prSize) out.prSize = prSize;
@@ -670,6 +684,7 @@ export async function resolveRepoContext(
         // there, so its pushes land on the PR and its description edits it
         // — on the repo default the coding post-step could only refuse. A PR
         // a person named stays as before, and a ref in the message wins.
+        if (isThreadOwnPr(records, repo, inherited.number)) out.prIsThreadOwn = true;
         if (inherited.source === "record") {
           out.prFromRecord = true;
           if (!ref && head.ref) {
@@ -694,6 +709,13 @@ export async function resolveRepoContext(
     }
   }
   return out;
+}
+
+/** Whether `number` is the pull request the thread's own run opened or edited
+ *  (`RunRecordSignals.pr`), whatever named it — the fact behind
+ *  `RepoContext.prIsThreadOwn`. */
+function isThreadOwnPr(records: RunRecordSignals | undefined, repo: string, number: number): boolean {
+  return records?.pr !== undefined && records.pr.repo === repo && records.pr.number === number;
 }
 
 /** The pull request the thread's own run opened, with the head branch the ref

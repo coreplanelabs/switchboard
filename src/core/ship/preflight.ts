@@ -98,7 +98,7 @@ export interface ShipPreflightInput {
   requestText: string;
   repoCtx: Pick<
     RepoContext,
-    "repo" | "pr" | "prFromMessage" | "ref" | "refFromPr" | "baseRef" | "headSha" | "prUnpostable"
+    "repo" | "pr" | "prFromMessage" | "prIsThreadOwn" | "ref" | "refFromPr" | "baseRef" | "headSha" | "prUnpostable"
   >;
   gates: { canRunAgent: (agent: string) => boolean; adminsHint: () => string };
   /** Repo facts: the default branch, the PR base of last resort. Undefined =
@@ -216,8 +216,12 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
     // be fetched or its head is a fork — so execution falls through to round 0
     // below, which drops the PR-derived ref (repoCtx.refFromPr) and starts a
     // fresh deterministic plan branch off the default branch; the reference
-    // stays in the task text for the coding child.
-    const contextCase = task !== "" && repoCtx.prFromMessage === true;
+    // stays in the task text for the coding child. The one exception is the
+    // thread's OWN pull request (repoCtx.prIsThreadOwn: the run record's `pr`
+    // names it too): a re-issue that cites it by URL is addressing that pull
+    // request, so it adopts (with task text) or resumes (without) like an
+    // inherited thread PR — issue 1799's "CI is red on <own PR URL>" shape.
+    const contextCase = task !== "" && repoCtx.prFromMessage === true && repoCtx.prIsThreadOwn !== true;
     if (!contextCase) {
       const facts = await input.prFacts({ repo, number: repoCtx.pr }).catch(() => undefined);
       // The adopt and resume cases must verify the PR first: an unfetchable

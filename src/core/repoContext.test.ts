@@ -294,6 +294,45 @@ describe("resolveRepoContext: PR-source flags for ship", () => {
     expect(ctx.ref).toBeUndefined();
     expect(ctx.refFromPr).toBeUndefined();
   });
+
+  it("an in-message PR that IS the thread's own (the run record's `pr`) sets prIsThreadOwn beside prFromMessage — even when its head fetch fails — and another number or no record leaves it unset", async () => {
+    const records = { pr: { repo: "acme/api", number: 508, at: 2_000 } };
+    stubFetch({ body: { state: "open", head: { ref: "feat/x", sha: SHA, repo: { full_name: "acme/api" } } } });
+    const own = await resolveRepoContext(
+      msg("CI is red on https://github.com/acme/api/pull/508 — fix the failing check"),
+      [],
+      undefined,
+      undefined,
+      records,
+    );
+    expect(own).toMatchObject({ pr: 508, prFromMessage: true, prIsThreadOwn: true });
+    stubFetch({ reject: "fetch failed" });
+    const unfetchable = await resolveRepoContext(
+      msg("CI is red on https://github.com/acme/api/pull/508 — fix the failing check"),
+      [],
+      undefined,
+      undefined,
+      records,
+    );
+    expect(unfetchable).toMatchObject({ pr: 508, prFromMessage: true, prIsThreadOwn: true });
+    stubFetch({ body: { state: "open", head: { ref: "feat/y", sha: SHA, repo: { full_name: "acme/api" } } } });
+    const other = await resolveRepoContext(
+      msg("see https://github.com/acme/api/pull/509"),
+      [],
+      undefined,
+      undefined,
+      records,
+    );
+    expect(other.pr).toBe(509);
+    expect(other.prIsThreadOwn).toBeUndefined();
+    stubFetch({ body: { state: "open", head: { ref: "feat/x", sha: SHA, repo: { full_name: "acme/api" } } } });
+    const noRecord = await resolveRepoContext(
+      msg("CI is red on https://github.com/acme/api/pull/508 — fix the failing check"),
+      [],
+    );
+    expect(noRecord.pr).toBe(508);
+    expect(noRecord.prIsThreadOwn).toBeUndefined();
+  });
 });
 
 describe("resolveRepoContext: re-review follow-ups inherit the thread's PR (fail-closed)", () => {
@@ -1254,6 +1293,7 @@ describe("resolveRepoContext: the pull request the thread's own run opened binds
       refFromPr: true,
       pr: 40,
       prFromRecord: true,
+      prIsThreadOwn: true,
       headSha: SHA,
       baseRef: "main",
     });

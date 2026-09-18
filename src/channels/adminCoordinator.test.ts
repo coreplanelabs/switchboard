@@ -940,6 +940,56 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
   });
 });
 
+describe("pr-check follows the machine's adopted pull request when nothing heads the branch (agent-ship item 10, issue 1799)", () => {
+  const followCheck = (deps: Parameters<typeof handleCoordinatorRequest>[1], body: Record<string, unknown> = {}) =>
+    handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id, pr: 7, ...body }),
+      deps,
+    );
+  const SHA = "a".repeat(40);
+
+  it("an open followed pull request answers open with ITS live head — never none over the record's minutes-old fact — and is remembered like one found by head", async () => {
+    const h = harness({
+      prFacts: { state: "open", sameRepoHead: true, headSha: SHA, htmlUrl: "https://github.com/acme/api/pull/7" },
+    });
+    await h.instances.put(INSTANCE);
+    expect(await followCheck(h.deps)).toEqual({
+      status: 200,
+      body: { ok: true, state: "open", prNumber: 7, url: "https://github.com/acme/api/pull/7", headSha: SHA, at: NOW },
+    });
+    // The by-head lookups ran first: an open pull request on the branch always wins.
+    expect(h.prLookups).toEqual([["acme/api", "plan/orchestration/u12"]]);
+  });
+
+  it("a followed pull request that merged answers merged with the merge commit and time; one verified CLOSED unmerged answers none with `prClosed` so the machine never briefs a review on it", async () => {
+    const merged = harness({
+      prFacts: { state: "closed", sameRepoHead: true, mergedAt: "2026-09-13T23:55:59Z", mergeCommitSha: SHA },
+    });
+    await merged.instances.put(INSTANCE);
+    expect((await followCheck(merged.deps)).body).toEqual({
+      ok: true,
+      state: "merged",
+      prNumber: 7,
+      url: "https://github.com/acme/api/pull/7",
+      sha: SHA,
+      mergedAt: "2026-09-13T23:55:59Z",
+      at: NOW,
+    });
+
+    const closed = harness({ prFacts: { state: "closed", sameRepoHead: true } });
+    await closed.instances.put(INSTANCE);
+    expect((await followCheck(closed.deps)).body).toEqual({ ok: true, state: "none", prClosed: true, at: NOW });
+  });
+
+  it("an unreadable follow claims nothing — the plain none answer stands — and a malformed `pr` is refused 400", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    expect((await followCheck(h.deps)).body).toEqual({ ok: true, state: "none", at: NOW });
+    expect((await followCheck(h.deps, { pr: "7" })).status).toBe(400);
+    expect((await followCheck(h.deps, { pr: 0 })).status).toBe(400);
+  });
+});
+
 describe("createAdminCoordinatorHandler — the node adapter decides the door from the headers alone (item 9)", () => {
   /** A node request: headers, method, url and a body the adapter may or may not read. */
   function nodeRequest(method: string, url: string, auth: string | null, body: string) {

@@ -453,6 +453,13 @@ export type CoordinatorAction =
        *  submitted description when the record holds one) instead of answering
        *  `none` over stranded work. */
       recover?: { runId: string };
+      /** The pull request the machine has adopted (`state.pr`), when it holds
+       *  one: the child may have worked that pull request's own head branch,
+       *  not the unit's (issue 1799), so when nothing heads the unit's branch
+       *  the bot follows this number and answers the pull request's LIVE state
+       *  — open at a fresh head, merged, or closed (`prClosed`) — never `none`
+       *  over a record fact written minutes earlier. */
+      pr?: number;
     }
   | { type: "merge"; step: string; prNumber: number; headSha: string }
   /** Wait for the intake's checks-settled event at the approved head, bounded as the fallback. */
@@ -509,6 +516,10 @@ export type PrCheck =
        *  naming where the scope landed is the `already_landed` ending
        *  (agent-ship item 12); absent, the fact is unknown and never claimed. */
       aheadOfBase?: number;
+      /** The action's followed pull request (`pr`) was verified CLOSED
+       *  unmerged: the machine must not brief a review round on it. Absent when
+       *  nothing was followed or the follow could not read the pull request. */
+      prClosed?: boolean;
     }
   | {
       state: "open";
@@ -935,6 +946,9 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         type: "pr-check",
         step: `${roundStep(s, p.round)}/pr-check`,
         ...(p.dead !== undefined ? { recover: { runId: p.runId } } : {}),
+        // The adopted pull request rides the check so the bot can follow it
+        // when nothing heads the unit's branch (issue 1799).
+        ...(s.pr !== undefined ? { pr: s.pr.number } : {}),
       };
     case "merge":
       return { type: "merge", step: `${unit}/merge/${p.n}`, prNumber: p.pr.number, headSha: p.headSha };
@@ -1286,6 +1300,22 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
         [roundNote(round, "aborted")],
       );
     }
+    // Nothing heads the unit's branch, but the machine holds the round's pull
+    // request (`pr_opened` off the child's record, or an earlier round's
+    // adoption): the child worked on that pull request's own head branch, not
+    // the unit's — a re-issued task in the thread of an existing pull request
+    // (issue 1799). The round HAS its pull request — at round 0 and after a
+    // findings step alike, since the same child keeps repushing that branch
+    // through every later round — so it carries on to the (re-)review at the
+    // head the child pushed through the shared open settle (a findings step
+    // that repushed nothing keeps its abort, item 7), instead of the unit
+    // ending "no pull request" or "closed out from under" over work that
+    // stands. Never over a followed answer that VERIFIED the pull request
+    // closed (`prClosed`): a review briefed on a closed pull request reviews
+    // nothing, so the endings below stand — and are then truthful. Dead
+    // children never reach here: their endings are above.
+    if (s.pr !== undefined && pr.prClosed !== true)
+      return roundOnOpenPr(s, phase, { prNumber: s.pr.number, url: s.pr.url });
     if (round.index === 0) {
       // The scope already landed (agent-ship item 12): the child's handoff
       // names where, and the branch carries no commits over the base — two
@@ -1370,6 +1400,18 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
       [roundNote(round, "aborted")],
     );
   }
+  return roundOnOpenPr(s, phase, pr);
+}
+
+/** The round carried on its open pull request: the pr-check's `open` answer,
+ *  or — when nothing heads the unit's branch — the pull request the machine
+ *  already holds (issue 1799), at the head the child pushed. */
+function roundOnOpenPr(
+  s: UnitPipelineState,
+  phase: Extract<Phase, { at: "pr-check" }>,
+  pr: { prNumber: number; url: string; headSha?: string },
+): Transition {
+  const { round } = phase;
   const head = pr.headSha ?? phase.childHead;
   const next: UnitPipelineState = { ...s, pr: { number: pr.prNumber, url: pr.url } };
   if (round.kind === "findings") {
