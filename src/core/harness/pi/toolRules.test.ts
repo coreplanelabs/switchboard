@@ -179,6 +179,42 @@ describe("judgeToolCall — bash", () => {
       reason: "repo:use — push to `main`, not the run's branch load-pi/test-gap-1",
     });
   });
+  it("reads a shell redirection as the shell's, never as the push's remote or refspec", () => {
+    expect(bash("git push --force-with-lease 2>&1 | tail -1")).toEqual({ verdict: "allowed" });
+    expect(bash("git push origin HEAD 2>/dev/null")).toEqual({ verdict: "allowed" });
+    expect(bash("git push origin HEAD:load-pi/test-gap-1 > push.log 2>&1")).toEqual({ verdict: "allowed" });
+    // a bare operator's target is the next word, not a refspec
+    expect(bash("git push origin 2> push.log")).toEqual({ verdict: "allowed" });
+    // a redirection never hides the push's own arguments from the rule
+    expect(bash("git push evil main | tail -1")).toEqual({
+      verdict: "refused",
+      reason: "repo:use — push to remote `evil`, not the run's repository (origin)",
+    });
+    expect(bash("git push 2>/dev/null evil main")).toEqual({
+      verdict: "refused",
+      reason: "repo:use — push to remote `evil`, not the run's repository (origin)",
+    });
+    expect(bash("git push origin main 2>&1")).toEqual({
+      verdict: "refused",
+      reason: "repo:use — push to `main`, not the run's branch load-pi/test-gap-1",
+    });
+    // a redirection's `&` never cuts the tail — the arguments after it are judged
+    for (const redirection of ["2>&1", ">&2", "1>&2", "&>push.log", "&>>push.log"]) {
+      expect(bash(`git push ${redirection} evil main`)).toEqual({
+        verdict: "refused",
+        reason: "repo:use — push to remote `evil`, not the run's repository (origin)",
+      });
+      expect(bash(`git push ${redirection} origin main`)).toEqual({
+        verdict: "refused",
+        reason: "repo:use — push to `main`, not the run's branch load-pi/test-gap-1",
+      });
+    }
+    // a control `&&` still ends the tail, and the push after it is judged too
+    expect(bash("git push origin HEAD 2>&1 && git push evil main")).toEqual({
+      verdict: "refused",
+      reason: "repo:use — push to remote `evil`, not the run's repository (origin)",
+    });
+  });
   it("refuses a push to another remote or another branch — repo:use outside the run's grant", () => {
     expect(bash("git push upstream load-pi/test-gap-1")).toEqual({
       verdict: "refused",

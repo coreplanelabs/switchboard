@@ -120,8 +120,11 @@ const MERGE_OR_APPROVE = /\bgh\s+pr\s+(merge|review)\b|\/pulls\/\d+\/(merge|revi
  *  `-C <dir>`, `--git-dir=`, `--work-tree=`, `-c key=value`, `--no-pager` —
  *  so a push aimed from another directory is the same push. */
 const GIT_THEN_PUSH = String.raw`\bgit(?:\s+(?:-C\s+\S+|--git-dir=\S+|--work-tree=\S+|-c\s+\S+|--no-pager))*\s+push\b`;
-/** Each `git push` and what follows it up to the next shell operator. */
-const GIT_PUSH = new RegExp(`${GIT_THEN_PUSH}([^;&|]*)`, "g");
+/** Each `git push` and what follows it up to the next shell operator. An
+ *  `&` that belongs to a redirection (`2>&1`, `>&2`, `&>log`, `&>>log`) is
+ *  the redirection's, not an operator: the tail runs past it, so the push's
+ *  own arguments after one are still judged (`git push 2>&1 evil main`). */
+const GIT_PUSH = new RegExp(`${GIT_THEN_PUSH}((?:[^;&|]|(?<=[<>])&|&(?=>))*)`, "g");
 /** Any `git push` at all — a read run's one answer to every one of them. */
 const ANY_PUSH = new RegExp(GIT_THEN_PUSH);
 /** A GitHub write from the shell, for a run whose identity holds no write:
@@ -246,8 +249,7 @@ function judgeBashTimeout(timeout: unknown, ctx: ToolRuleContext): ToolVerdict {
  *  is the same push as naming it. A run naming its own branch may push any but
  *  the protected ones: the base its pull request targets is never pushed to. */
 function judgePush(tail: string, ctx: ToolRuleContext): ToolVerdict {
-  const words = tail.split(/\s+/).filter((w) => w.length > 0 && !w.startsWith("-"));
-  const [remote, refspec] = words;
+  const [remote, refspec] = pushArguments(tail);
   if (remote !== undefined && remote !== "origin") {
     return refused(`repo:use — push to remote \`${remote}\`, not the run's repository (origin)`);
   }
@@ -270,6 +272,29 @@ function judgePush(tail: string, ctx: ToolRuleContext): ToolVerdict {
     );
   }
   return allowed;
+}
+
+/** A shell redirection word (`2>&1`, `>&2`, `&>log`, `>out.log`,
+ *  `2>/dev/null`, `<in`): the shell's, never one of the push's arguments. A
+ *  bare operator (`>`, `2>`, `>&`) takes the next word as its target. */
+const REDIRECTION = /^(\d*|&)(>>|>&|>\|?|<<<?|<&|<>?)(.*)$/;
+
+/** The push's own arguments out of what follows `git push` (already cut at
+ *  `|`, `;` and a control `&` by the match): flags dropped, each shell redirection and
+ *  its target skipped — skipped, not stopped at, so an argument after one
+ *  (`git push 2>/dev/null evil main`) is still judged. */
+function pushArguments(tail: string): string[] {
+  const words: string[] = [];
+  const raw = tail.split(/\s+/).filter((w) => w.length > 0);
+  for (let i = 0; i < raw.length; i++) {
+    const redirection = REDIRECTION.exec(raw[i]);
+    if (redirection) {
+      if (redirection[3] === "") i++; // a bare operator's target is the next word
+      continue;
+    }
+    if (!raw[i].startsWith("-")) words.push(raw[i]);
+  }
+  return words;
 }
 
 function judgePath(path: unknown, ctx: ToolRuleContext): ToolVerdict {
