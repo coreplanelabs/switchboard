@@ -15363,6 +15363,32 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
 // nothing and is told where the file can be worked with; a refused steer
 // copies nothing; without a store nothing is staged.
 describe("inbound staging (record 0033)", () => {
+  it("a hard stop cancels an admitted file copy before any model turn or workspace pull", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const registry = new RunRegistry({ genId: () => "staging-stop", genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.artifacts = storeWithSlack();
+    const { commands, executor } = recordingExecutor();
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
+    const { io } = fakeIO();
+    let signal: AbortSignal | undefined;
+    io.copyAttachment = (_file, _key, abort) =>
+      new Promise((_resolve, reject) => {
+        signal = abort;
+        abort?.addEventListener("abort", () => reject(new Error("copy cancelled")), { once: true });
+      });
+    const running = dispatch(deps, { ...msg("agent:coding read this", "slack:UADMIN"), staged: [clip] }, io);
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    registry.requestStop("staging-stop", "t", "hard");
+    const ended = await running;
+    expect(signal?.aborted).toBe(true);
+    expect(ended.status).toBe("stopped");
+    expect(provider.requests).toEqual([]);
+    expect(commands.some((command) => command.includes("attachments/"))).toBe(false);
+  });
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.mocked(makeExecutor).mockClear();

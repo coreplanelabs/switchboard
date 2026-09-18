@@ -74,6 +74,7 @@ export interface LinearApi {
     userId: string,
     file: StagedFile,
     key: string,
+    signal?: AbortSignal,
   ): Promise<{ key: string; size: number }>;
   canRead(sessionId: string, userId: string): Promise<boolean>;
   session(id: string): Promise<LinearSession>;
@@ -237,7 +238,7 @@ export class DirectLinearApi implements LinearApi {
     }
   }
 
-  async canRead(sessionId: string, userId: string): Promise<boolean> {
+  async canRead(sessionId: string, userId: string, signal?: AbortSignal): Promise<boolean> {
     const data = await this.query(
       `query SwitchboardSessionAccess($id: String!) {
       organization { id }
@@ -245,6 +246,7 @@ export class DirectLinearApi implements LinearApi {
         issue { team { id visibility restrictedBy { id } } } }
     }`,
       { id: sessionId },
+      signal,
     );
     const session = object(data.agentSession);
     if (
@@ -259,7 +261,11 @@ export class DirectLinearApi implements LinearApi {
     if (!string(team.id)) return false;
     try {
       const person = await linearPerson(
-        { organizationId: this.deps.organizationId, appUserId: this.deps.appUserId, query: this.query.bind(this) },
+        {
+          organizationId: this.deps.organizationId,
+          appUserId: this.deps.appUserId,
+          query: (query, variables) => this.query(query, variables, signal),
+        },
         { id: userId, actions: [] },
       );
       return linearTeamAllows(person, "conversation:read", team);
@@ -273,11 +279,12 @@ export class DirectLinearApi implements LinearApi {
     sessionId: string,
     userId: string,
     urls: string[],
+    signal?: AbortSignal,
   ): Promise<Map<string, LinearFileReference>> {
     if (!Array.isArray(urls) || urls.length > 1000 || urls.some((url) => typeof url !== "string" || url.length > 4096))
       throw new Error("linear_invalid_files");
     if (!urls.length) return new Map();
-    if (!(await this.canRead(sessionId, userId))) throw new Error("linear_file_denied");
+    if (!(await this.canRead(sessionId, userId, signal))) throw new Error("linear_file_denied");
     const requested = [...new Set(urls)];
     const wanted = new Set(requested);
     const allowed = new Map<string, LinearFileReference>();
@@ -297,6 +304,7 @@ export class DirectLinearApi implements LinearApi {
           issue { description comments(first: 100, after: $after) { nodes { body } pageInfo { hasNextPage endCursor } } } }
       }`,
         { id: sessionId, after },
+        signal,
       );
       const session = object(data.agentSession);
       if (
@@ -318,7 +326,7 @@ export class DirectLinearApi implements LinearApi {
       if (cursors.has(after)) throw new Error("linear_invalid_pagination");
       cursors.add(after);
     }
-    for (const activity of await this.activities(sessionId)) collect(activity.body);
+    for (const activity of await this.activities(sessionId, signal)) collect(activity.body);
     return allowed;
   }
 
@@ -348,7 +356,9 @@ export class DirectLinearApi implements LinearApi {
     userId: string,
     file: StagedFile,
     key: string,
+    signal?: AbortSignal,
   ): Promise<{ key: string; size: number }> {
+    signal?.throwIfAborted();
     if (!this.deps.copy) throw new Error("linear_staging_unavailable");
     const index = typeof key === "string" ? Number(/\/(\d+)-[^/]+$/.exec(key)?.[1]) : NaN;
     if (
@@ -367,9 +377,9 @@ export class DirectLinearApi implements LinearApi {
       key !== inboundKey(`linear:${this.deps.organizationId}:${sessionId}`, file.messageId, index, file.name)
     )
       throw new Error("linear_invalid_files");
-    const ref = (await this.fileContext(sessionId, userId, [file.url])).get(file.url);
+    const ref = (await this.fileContext(sessionId, userId, [file.url], signal)).get(file.url);
     if (!ref) throw new Error("linear_file_denied");
-    return copyLinearFile(ref, file, key, { ...this.deps, copy: this.deps.copy });
+    return copyLinearFile(ref, file, key, { ...this.deps, copy: this.deps.copy, signal });
   }
 
   workItems(_sessionId: string, actor: LinearWorkItemActor, input: WorkItemRequest): Promise<WorkItemResult> {
@@ -380,14 +390,21 @@ export class DirectLinearApi implements LinearApi {
     );
   }
 
-  private async query(query: string, variables: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async query(
+    query: string,
+    variables: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    signal?.throwIfAborted();
     const token = await this.deps.token();
     let response: Response;
     try {
       response = await this.deps.fetch("https://api.linear.app/graphql", {
         method: "POST",
         redirect: "error",
-        signal: AbortSignal.timeout(LINEAR_TIMING.apiTimeoutMs),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(LINEAR_TIMING.apiTimeoutMs)])
+          : AbortSignal.timeout(LINEAR_TIMING.apiTimeoutMs),
         headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
         body: JSON.stringify({ query, variables }),
       });
@@ -444,12 +461,12 @@ export class DirectLinearApi implements LinearApi {
     };
   }
 
-  async activities(sessionId: string): Promise<LinearActivity[]> {
+  async activities(sessionId: string, signal?: AbortSignal): Promise<LinearActivity[]> {
     const rows = new Map<string, LinearActivity>();
     let before: string | undefined;
     const seen = new Set<string>();
     for (let page = 0; page < 100; page++) {
-      const data = await this.query(HISTORY_QUERY, { id: sessionId, before });
+      const data = await this.query(HISTORY_QUERY, { id: sessionId, before }, signal);
       const connection = object(object(data.agentSession).activities);
       if (!Array.isArray(connection.nodes)) throw new Error("linear_invalid_response");
       for (const node of connection.nodes) {

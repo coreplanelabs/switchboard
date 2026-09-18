@@ -1122,6 +1122,7 @@ export async function dispatch(
         ? copyStaged(staged, {
             store: deps.artifacts!,
             copyAttachment: io.copyAttachment?.bind(io),
+            signal: run.control.hardSignal,
             threadKey: msg.threadKey,
             nextIndex: nextStagedIndex,
             publish: (e) => registry.publish(runId, e),
@@ -1325,6 +1326,7 @@ export async function dispatch(
           store: deps.artifacts!,
           executor,
           resident: resident !== undefined,
+          signal: run.control.hardSignal,
         });
         workspaceFiles.record(pulled);
         line = attachmentsLine(pulled);

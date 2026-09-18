@@ -106,6 +106,32 @@ describe("staging — the commands", () => {
 });
 
 describe("staging — copy then pull", () => {
+  it("passes hard cancellation into a channel copy and never publishes or pulls the cancelled file", async () => {
+    const stop = new AbortController();
+    const store = storeWithSlack();
+    const rec = recorder();
+    const events: RunEvent[] = [];
+    let received: AbortSignal | undefined;
+    const copyAttachment = vi.fn(async (_file: StagedFile, _key: string, signal?: AbortSignal) => {
+      received = signal;
+      stop.abort(new Error("stopped"));
+      signal?.throwIfAborted();
+    });
+    const { outcomes } = await stageIntoWorkspace([clip], {
+      store,
+      copyAttachment,
+      signal: stop.signal,
+      threadKey: THREAD,
+      nextIndex: stagingIndex(),
+      executor: rec.executor,
+      resident: false,
+      publish: (event) => void events.push(event),
+    });
+    expect(received).toBe(stop.signal);
+    expect(outcomes[0]?.error).toBeDefined();
+    expect(events).toEqual([]);
+    expect(store.copies).toEqual([]);
+  });
   it("uses a channel's private copy while keeping shared workspace pulls and artifact receipts", async () => {
     const store = storeWithSlack();
     const copyAttachment = vi.fn(async () => {});
@@ -120,7 +146,7 @@ describe("staging — copy then pull", () => {
       executor: rec.executor,
       resident: false,
     });
-    expect(copyAttachment).toHaveBeenCalledWith(clip, outcomes[0]!.key);
+    expect(copyAttachment).toHaveBeenCalledWith(clip, outcomes[0]!.key, undefined);
     expect(store.copies).toEqual([]);
     expect(outcomes[0]?.error).toBeUndefined();
     expect(events).toMatchObject([{ type: "artifact", direction: "in", key: outcomes[0]!.key }]);

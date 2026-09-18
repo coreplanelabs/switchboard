@@ -103,7 +103,7 @@ export interface ArtifactStore {
    *  or `unsatisfiable` with the size when the range starts past the end. */
   get(key: string, opts?: ArtifactGetOptions): Promise<ArtifactObject | ArtifactUnsatisfiable | null>;
   /** Copy `size` bytes from `url` (a Slack `url_private`) into `key` without the bot holding them. */
-  copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef>;
+  copyFromUrl(input: { url: string; size: number; key: string }, signal?: AbortSignal): Promise<ArtifactRef>;
 }
 
 export const PRESIGN_TTL_SECONDS = ARTIFACT_DEFAULTS.presignTtlSeconds;
@@ -241,12 +241,14 @@ export class R2ArtifactStore implements ArtifactStore {
     return { size, contentType, body: res.body };
   }
 
-  async copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef> {
+  async copyFromUrl(input: { url: string; size: number; key: string }, signal?: AbortSignal): Promise<ArtifactRef> {
     const res = await this.fetchImpl(`${this.copy.baseUrl.replace(/\/$/, "")}/artifacts/copy`, {
       method: "POST",
       headers: { authorization: `Bearer ${this.copy.token.reveal()}`, "content-type": "application/json" },
       body: JSON.stringify(input),
-      signal: AbortSignal.timeout(this.copy.timeoutMs),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(this.copy.timeoutMs)])
+        : AbortSignal.timeout(this.copy.timeoutMs),
     });
     const text = await res.text();
     if (!res.ok)
@@ -310,9 +312,10 @@ export class InMemoryArtifactStore implements ArtifactStore {
     return { size, contentType: o.contentType, body, ...(part ? { part } : {}) };
   }
 
-  async copyFromUrl(input: { url: string; size: number; key: string }): Promise<ArtifactRef> {
+  async copyFromUrl(input: { url: string; size: number; key: string }, signal?: AbortSignal): Promise<ArtifactRef> {
     this.copies.push(input);
-    const res = await this.fetchImpl(input.url);
+    signal?.throwIfAborted();
+    const res = await this.fetchImpl(input.url, signal ? { signal } : undefined);
     if (!res.ok) throw new Error(`artifact store: copy of ${input.key} from ${input.url} answered HTTP ${res.status}`);
     const bytes = new Uint8Array(await res.arrayBuffer());
     if (bytes.byteLength !== input.size) {
@@ -320,6 +323,7 @@ export class InMemoryArtifactStore implements ArtifactStore {
         `artifact store: copy of ${input.key} received ${bytes.byteLength} of ${input.size} bytes; nothing stored`,
       );
     }
+    signal?.throwIfAborted();
     this.put(input.key, bytes, res.headers.get("content-type") ?? "application/octet-stream");
     return { key: input.key, size: input.size };
   }

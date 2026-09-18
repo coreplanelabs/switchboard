@@ -140,6 +140,11 @@ The edge rechecks access and session context at copy time and streams directly
 into storage; the executor receives only a temporary artifact download URL.
 Agents without a workspace report that they cannot stage the file. Temporary
 failures downloading a new prompt's inline files retry before dispatch starts.
+Hard Stop aborts an admitted run's file copy and workspace pull before another
+model turn. The edge requires the `enable_request_signal` compatibility flag
+and forwards cancellation to its Durable Object. Wrangler's local development
+proxy currently drops client disconnects: the bot stops, but an edge copy can
+finish storing an unused file. Local transfer cancellation remains under test.
 
 Coding runs can return files through `attach_file`. With an artifact store,
 the executor streams the file to a private Linear upload using a short-lived

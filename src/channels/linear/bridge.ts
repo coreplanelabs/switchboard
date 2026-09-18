@@ -40,27 +40,31 @@ export interface LinearTransport {
   fetch: typeof fetch;
 }
 
-async function call<T>(transport: LinearTransport, body: Record<string, unknown>): Promise<T> {
+async function call<T>(transport: LinearTransport, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   const url = new URL(LINEAR_BRIDGE_PATH, transport.baseUrl);
   if (
     url.protocol !== "https:" &&
     !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))
   )
     throw new Error("linear_bridge_requires_https");
+  signal?.throwIfAborted();
   let response: Response;
   try {
     response = await transport.fetch(url, {
       method: "POST",
       redirect: "error",
-      signal: AbortSignal.timeout(
-        body.op === "copyAttachment"
-          ? ARTIFACT_DEFAULTS.copyTimeoutMs
-          : body.op === "files"
-            ? LINEAR_TIMING.fileBridgeTimeoutMs
-            : body.op === "openThread"
-              ? LINEAR_TIMING.childBridgeTimeoutMs
-              : LINEAR_TIMING.apiTimeoutMs,
-      ),
+      signal: AbortSignal.any([
+        ...(signal ? [signal] : []),
+        AbortSignal.timeout(
+          body.op === "copyAttachment"
+            ? ARTIFACT_DEFAULTS.copyTimeoutMs
+            : body.op === "files"
+              ? LINEAR_TIMING.fileBridgeTimeoutMs
+              : body.op === "openThread"
+                ? LINEAR_TIMING.childBridgeTimeoutMs
+                : LINEAR_TIMING.apiTimeoutMs,
+        ),
+      ]),
       headers: { "content-type": "application/json", authorization: `Bearer ${transport.token}` },
       body: JSON.stringify(body),
     });
@@ -100,15 +104,20 @@ export class RemoteLinearApi implements LinearApi {
     userId: string,
     file: StagedFile,
     key: string,
+    signal?: AbortSignal,
   ): Promise<{ key: string; size: number }> {
-    return call(this.transport, {
-      op: "copyAttachment",
-      organizationId: this.organizationId,
-      sessionId,
-      userId,
-      file,
-      key,
-    });
+    return call(
+      this.transport,
+      {
+        op: "copyAttachment",
+        organizationId: this.organizationId,
+        sessionId,
+        userId,
+        file,
+        key,
+      },
+      signal,
+    );
   }
   canRead(sessionId: string, userId: string): Promise<boolean> {
     return call(this.transport, { op: "canRead", organizationId: this.organizationId, sessionId, userId });
@@ -277,6 +286,7 @@ export async function handleLinearBridge(
           required(body.userId),
           object(body.file) as unknown as StagedFile,
           required(body.key),
+          request.signal,
         );
       } else if (op === "files")
         result = await api.files(

@@ -203,11 +203,22 @@ a successful copy receipt. The shared staging code then pulls into the workspace
 and records the artifact; follow-ups and child channels use the same capability.
 The OAuth credential and file bytes never enter the bot. Without a workspace or
 configured storage the file is named as unavailable rather than silently omitted.
+Hard Stop carries the run's abort signal through file copies and workspace pulls.
+A cancelled copy publishes no artifact receipt and cannot start a model turn.
+The edge enables incoming request cancellation and explicitly forwards the signal
+to the installation Durable Object, whose download and storage stream share it.
+Local development proxies must preserve that cancellation: the Wrangler proxy
+currently drops a client disconnect even though direct workerd requests cancel
+the copy. Proving or replacing that local transport remains an acceptance gap.
 
 ## Proof
 
 | Criterion | Proof |
 |---|---|
+| Hard Stop reaches incoming file copies and prevents cancelled file receipts and pulls | `[unit]` `src/core/dispatch/staging.test.ts::staging — copy then pull::passes hard cancellation into a channel copy and never publishes or pulls the cancelled file` |
+| A stopped initial copy cannot start the model or pull a workspace file | `[unit]` `src/core/dispatcher.test.ts::inbound staging (record 0033)::a hard stop cancels an admitted file copy before any model turn or workspace pull` |
+| The bridge forwards cancellation into the authenticated copy | `[unit]` `src/channels/linear/bridge.test.ts::Linear edge bridge::carries caller cancellation through the bridge request into the active file copy` |
+| Local development cancellation crosses the public development proxy and leaves no completed object | `[gap]` Wrangler's development proxy currently drops the caller's disconnect; direct workerd cancellation is verified separately. |
 | Staged file copies refresh access, bind session keys, and reject changed or incomplete streams | `[unit]` `src/channels/linear/api.staging.test.ts::Linear workspace file copy::*` |
 | The bridge and channel bind file copies to the checked human | `[unit]` `src/channels/linear/bridge.test.ts::Linear edge bridge::relays an attachment copy with the session and human bound separately from file metadata`, `src/channels/linear/io.test.ts::Linear channel output::binds attachment copies to the checked requester and verifies the completed copy` |
 | Shared staging retains workspace pulls and receipts for channel copies | `[unit]` `src/core/dispatch/staging.test.ts::staging — copy then pull::uses a channel's private copy while keeping shared workspace pulls and artifact receipts` |

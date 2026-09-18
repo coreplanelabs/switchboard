@@ -121,9 +121,9 @@ export class LinearChannelIO implements ChannelIO {
     await this.reply(`${file.lead}\n\n**${file.name}**\n\n${file.text}`);
   }
 
-  async copyAttachment(file: StagedFile, key: string): Promise<void> {
+  async copyAttachment(file: StagedFile, key: string, signal?: AbortSignal): Promise<void> {
     if (!this.requesterId || !this.deps.api.copyAttachment) throw new Error("linear_staging_unavailable");
-    const copied = await this.deps.api.copyAttachment(this.deps.sessionId, this.requesterId, file, key);
+    const copied = await this.deps.api.copyAttachment(this.deps.sessionId, this.requesterId, file, key, signal);
     if (copied.key !== key || copied.size !== file.size) throw new Error("linear_file_copy_incomplete");
   }
 

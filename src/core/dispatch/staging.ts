@@ -95,7 +95,8 @@ export function noWorkspaceLine(files: readonly StagedFile[]): string {
 
 export interface CopyDeps {
   store: ArtifactStore;
-  copyAttachment?: (file: StagedFile, key: string) => Promise<void>;
+  copyAttachment?: (file: StagedFile, key: string, signal?: AbortSignal) => Promise<void>;
+  signal?: AbortSignal;
   /** The thread the files belong to: the key's first segment. */
   threadKey: string;
   /** The run's staging counter (`stagingIndex()`): ONE sequence across every
@@ -138,8 +139,10 @@ export async function copyStaged(files: readonly StagedFile[], deps: CopyDeps): 
       const basename = stagedBasename(index, file.name);
       const key = inboundKey(deps.threadKey, file.messageId, index, file.name);
       try {
-        if (deps.copyAttachment) await deps.copyAttachment(file, key);
-        else await deps.store.copyFromUrl({ url: file.url, size: file.size, key });
+        deps.signal?.throwIfAborted();
+        if (deps.copyAttachment) await deps.copyAttachment(file, key, deps.signal);
+        else await deps.store.copyFromUrl({ url: file.url, size: file.size, key }, deps.signal);
+        deps.signal?.throwIfAborted();
         deps.publish?.({
           type: "artifact",
           direction: "in",
@@ -173,14 +176,30 @@ export interface PullDeps {
 export async function pullStaged(outcomes: readonly StagedOutcome[], deps: PullDeps): Promise<StagedOutcome[]> {
   const landed = outcomes.filter((o) => o.error === undefined);
   if (landed.length === 0) return [...outcomes];
+  const cancelled = () => outcomes.map((o) => ({ ...o, error: o.error ?? "workspace staging was cancelled" }));
+  if (deps.signal?.aborted) return cancelled();
   const timeoutMs = deps.timeoutMs ?? BASH_TIMEOUT_MAX_MS;
   const opts = { timeoutMs, ...(deps.signal ? { signal: deps.signal } : {}) };
-  if (deps.resident) await deps.executor.exec(excludeCommand(), opts);
+  if (deps.resident) {
+    try {
+      await deps.executor.exec(excludeCommand(), opts);
+    } catch (error) {
+      if (deps.signal?.aborted) return cancelled();
+      throw error;
+    }
+  }
   const pulled = new Map<string, string | undefined>();
   for (const o of landed) {
-    const url = await deps.store.presignGet(o.key);
-    const out = await deps.executor.exec(pullCommandFor(url, o.basename), opts);
-    pulled.set(o.key, parseExitPrefix(out).failed ? `the pull into the workspace failed: ${out.trim()}` : undefined);
+    if (deps.signal?.aborted) return cancelled();
+    try {
+      const url = await deps.store.presignGet(o.key);
+      deps.signal?.throwIfAborted();
+      const out = await deps.executor.exec(pullCommandFor(url, o.basename), opts);
+      pulled.set(o.key, parseExitPrefix(out).failed ? `the pull into the workspace failed: ${out.trim()}` : undefined);
+    } catch (error) {
+      if (deps.signal?.aborted) return cancelled();
+      throw error;
+    }
   }
   return outcomes.map((o) => {
     const error = o.error ?? pulled.get(o.key);

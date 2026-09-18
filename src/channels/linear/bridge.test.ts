@@ -22,6 +22,32 @@ function fixture() {
 }
 
 describe("Linear edge bridge", () => {
+  it("carries caller cancellation through the bridge request into the active file copy", async () => {
+    const { api, transport } = fixture();
+    const stop = new AbortController();
+    let copySignal: AbortSignal | undefined;
+    api.copyAttachment = vi.fn<NonNullable<LinearApi["copyAttachment"]>>(
+      (_session, _user, _file, _key, signal) =>
+        new Promise((_resolve, reject) => {
+          copySignal = signal;
+          signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+        }),
+    );
+    const remote = new RemoteLinearApi(transport, "org");
+    const file = {
+      url: "https://uploads.linear.app/org/data",
+      name: "data.zip",
+      size: 100,
+      type: "application/zip",
+      messageId: "prompt",
+    };
+    const pending = remote.copyAttachment("s", "linear:org:alice", file, "key", stop.signal);
+    const rejected = expect(pending).rejects.toThrow("linear_bridge_unavailable");
+    await vi.waitFor(() => expect(copySignal).toBeDefined());
+    stop.abort();
+    await rejected;
+    expect(copySignal?.aborted).toBe(true);
+  });
   it("relays an attachment copy with the session and human bound separately from file metadata", async () => {
     const { api, transport } = fixture();
     const file = {
@@ -35,7 +61,7 @@ describe("Linear edge bridge", () => {
     api.copyAttachment = vi.fn(async () => ({ key, size: 100 }));
     const remote = new RemoteLinearApi(transport, "org");
     expect(await remote.copyAttachment("s", "linear:org:alice", file, key)).toEqual({ key, size: 100 });
-    expect(api.copyAttachment).toHaveBeenCalledWith("s", "linear:org:alice", file, key);
+    expect(api.copyAttachment).toHaveBeenCalledWith("s", "linear:org:alice", file, key, expect.any(AbortSignal));
   });
   it("allows child creation to complete across several upstream requests", async () => {
     vi.useFakeTimers();

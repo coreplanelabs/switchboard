@@ -41,7 +41,7 @@ describe("Linear channel output", () => {
     await expect(io.copyAttachment(file, key)).rejects.toThrow("linear_staging_unavailable");
     await io.checkAccess("linear:org:alice");
     await io.copyAttachment(file, key);
-    expect(copy).toHaveBeenCalledWith("s", "linear:org:alice", file, key);
+    expect(copy).toHaveBeenCalledWith("s", "linear:org:alice", file, key, undefined);
     copy.mockResolvedValueOnce({ key, size: 99 });
     await expect(io.copyAttachment(file, key)).rejects.toThrow("linear_file_copy_incomplete");
     vi.mocked(api.canRead).mockResolvedValue(false);

@@ -266,7 +266,7 @@ export async function copyLinearFile(
   ref: LinearFileReference,
   file: StagedFile,
   key: string,
-  deps: { fetch: typeof fetch; token(): Promise<string>; copy: LinearFileCopy },
+  deps: { fetch: typeof fetch; token(): Promise<string>; copy: LinearFileCopy; signal?: AbortSignal },
 ): Promise<{ key: string; size: number }> {
   if (
     privateUrl(file.url) !== file.url ||
@@ -276,10 +276,16 @@ export async function copyLinearFile(
     isSecretFile(file.name)
   )
     throw new Error("linear_file_denied");
+  deps.signal?.throwIfAborted();
   const controller = new AbortController();
+  const signal = AbortSignal.any([
+    controller.signal,
+    AbortSignal.timeout(ARTIFACT_DEFAULTS.copyTimeoutMs),
+    ...(deps.signal ? [deps.signal] : []),
+  ]);
   const response = await deps.fetch(file.url, {
     redirect: "error",
-    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(ARTIFACT_DEFAULTS.copyTimeoutMs)]),
+    signal,
     headers: { authorization: `Bearer ${await deps.token()}` },
   });
   const name = responseName(response.headers.get("content-disposition")) ?? ref.name;
@@ -289,7 +295,7 @@ export async function copyLinearFile(
     throw new Error("linear_file_changed_or_unavailable");
   }
   const pipe = deps.copy.lengthPipe(file.size);
-  const pumping = response.body.pipeTo(pipe.writable, { signal: controller.signal });
+  const pumping = response.body.pipeTo(pipe.writable, { signal });
   try {
     await Promise.all([
       pumping,

@@ -64,6 +64,30 @@ function fixture() {
 }
 
 describe("Linear workspace file copy", () => {
+  it("aborts an in-flight stream on cancellation and leaves no completed object", async () => {
+    const h = fixture();
+    const stop = new AbortController();
+    const cancel = vi.fn();
+    h.download.mockResolvedValueOnce(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(50));
+          },
+          cancel,
+        }),
+        { headers: { "content-type": "application/zip", "content-length": "100" } },
+      ),
+    );
+    const copying = h.api.copyAttachment("s", "linear:org:alice", file, key, stop.signal);
+    const rejected = expect(copying).rejects.toThrow("linear_file_copy_failed");
+    await vi.waitFor(() => expect(h.put).toHaveBeenCalledOnce());
+    stop.abort();
+    await rejected;
+    expect(h.stored).toEqual([]);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
   it("cancels the upstream when storage refuses the stream without echoing the storage error", async () => {
     const h = fixture();
     const cancel = vi.fn();

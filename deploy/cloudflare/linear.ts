@@ -59,7 +59,9 @@ export async function handleLinearEdge(request: Request, env: LinearEnv): Promis
     if (!bytes) return Response.json({ error: "too_large" }, { status: 413 });
     request = new Request(request, { body: bytes as Uint8Array<ArrayBuffer> });
   }
-  return env.LINEAR_STATE.get(env.LINEAR_STATE.idFromName("installation")).fetch(request);
+  return env.LINEAR_STATE.get(env.LINEAR_STATE.idFromName("installation")).fetch(request, {
+    signal: request.signal,
+  });
 }
 
 /** One durable host for the installation's OAuth state, credentials and inbox.

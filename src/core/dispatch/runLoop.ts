@@ -769,6 +769,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         const staged = await stageIntoWorkspace(files, {
           store: deps.artifacts!,
           copyAttachment: io.copyAttachment?.bind(io),
+          signal: run.control.hardSignal,
           threadKey: msg.threadKey,
           publish: (e) => registry.publish(run.id, e),
           nextIndex: nextStagedIndex,
