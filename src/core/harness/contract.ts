@@ -19,6 +19,7 @@ import type { RunEvent } from "../runEvents.js";
 import type { Settlement } from "../runLedger/resume.js";
 import type { StepReport } from "../runLedger/stepReport.js";
 import type { AssembledCompaction } from "../runLedger/transcript.js";
+import type { WindDownEnding } from "./windDown.js";
 import type { Notepad } from "../runLedger/types.js";
 import type { RunControl } from "../runRegistry/runControl.js";
 import type { FollowUpInbox, FollowUpInput } from "../threadAdmission.js";
@@ -366,6 +367,10 @@ export type FollowUpTurn = (input: FollowUpTurnInput) => Promise<string>;
  *  Ending is idempotent; a follow-up after it throws. */
 export interface HarnessSession {
   answer: string;
+  /** The wind-down that labelled `answer`, when one did (harness-pi.md item
+   *  6): the run loop composes the thread's answer from it again once its
+   *  post-steps have established what the tree held and where it went. */
+  ending?: WindDownEnding;
   followUp: FollowUpTurn;
   /** What the run's lease still holds, in ms, read at the call — what the
    *  post-step turns carve their minutes from (`postStepLease`); negative once

@@ -1119,7 +1119,11 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       return { out, commands, salvage };
     };
     const pushed = await budgeted("feat/trunk");
-    expect(pushed.out.answer).toMatch(/^⚠️ _Hit the 45-minute budget before finishing/);
+    // The answer is composed after the salvage (harness-pi item 6): it names
+    // the branch and the head the salvage pushed, never "partial work may exist".
+    expect(pushed.out.answer).toBe(
+      `⚠️ _Hit the 45-minute budget before finishing. What the tree held was pushed to \`${BRANCH}\` at \`${HEAD.slice(0, 7)}\` by the budget salvage, unreviewed — a follow-up starts from it. No PR description was submitted. Findings so far:_\n\nhalf done`,
+    );
     expect(pushed.commands).toContain("git add -u");
     expect(pushed.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
     expect(pushed.salvage).toEqual([
@@ -1128,13 +1132,121 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       }),
     ]);
     const lost = await budgeted(undefined);
-    expect(lost.out.answer).toMatch(/^⚠️ _Hit the 45-minute budget before finishing/);
+    // Nothing pushed: the answer says what the tree held and its fate — a
+    // resident's tree is discarded at the run's end — never that work may exist.
+    expect(lost.out.answer).toBe(
+      `⚠️ _Hit the 45-minute budget before finishing. 1 uncommitted change(s) and 0 unpushed commit(s) were left in the tree and discarded at the run's end. No PR description was submitted. Findings so far:_\n\nhalf done`,
+    );
     expect(lost.commands.some((c) => c.startsWith("git push") || c.startsWith("git commit"))).toBe(false);
     expect(lost.salvage).toEqual([
       expect.objectContaining({
         summary: `the budget-end salvage to \`${BRANCH}\` was skipped: the plan's base is unknown, so the branch cannot be told from it`,
       }),
     ]);
+  });
+
+  // harness-pi item 6: the finale answer reads what the ending established.
+  // The loop's answer is composed AFTER the salvage, the description turn and
+  // the PR post-step, from the ending the harness handed over: a clean tree
+  // whose head is on the remote names that head and the submitted description,
+  // never "partial work may exist" in a tree the salvage just measured clean.
+  it("a coding child at its time budget with a clean, pushed tree and an empty write-up answers with the pushed head and the submitted description, not a guess about partial work", async () => {
+    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const BRANCH = "plan/p/u1";
+    const DESCRIPTION: PrDescription = {
+      title: "feat(seam): count every refusal",
+      tldr: "Counts the refusals at the seam. The count is what the runner reads.",
+      why: "The seam refused silently.",
+      pointers: [{ label: "The count", text: "One counter.", anchor: { path: "src/a", from: 1, to: 2 } }],
+      feedbackWanted: "The counter's name.",
+      verified: "Unit.",
+      decisions: [{ title: "One counter", rationale: "One place to read." }],
+      risk: "none",
+      validation: { criteria: [{ criterion: "unit", proof: "green" }] },
+    };
+    const clock = { now: NOW };
+    const registry = new HarnessRegistry();
+    const container = new FakeHarnessContainer();
+    const commands: string[] = [];
+    let calls = 0;
+    const pi = scriptPiFromProvider(container, {
+      provider: {
+        name: "budgeted-clean",
+        async complete() {
+          const n = calls++;
+          if (n === 0) {
+            // The budget runs out with the loop's first call under way: the
+            // write-up is steered and answered with nothing (n === 1).
+            clock.now = NOW + 46 * 60_000;
+            for (let i = 0; i < 200 && pi.steers.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+          }
+          if (n <= 1) return { content: [{ type: "text", text: "" }], stopReason: "end_turn" };
+          // The description turn: the relayed submit lands, then a line back.
+          if (n === 2)
+            return {
+              content: [{ type: "tool_use", id: "d1", name: "submit_pr_description", input: DESCRIPTION }],
+              stopReason: "tool_use",
+            };
+          return { content: [{ type: "text", text: "Description resubmitted." }], stopReason: "end_turn" };
+        },
+      },
+      registry,
+    });
+    const s = setup("", {
+      agent: "coding",
+      yaml: PI_YAML,
+      coding: true,
+      repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+      coordinator: { parentInstanceId: "coord-c", idempotencyKey: "coord-c:clean/0/coding", base: "feat/trunk" },
+      harness: {
+        harnesses: roster(),
+        registry,
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => container,
+        pollMs: 1,
+        tickMs: 5,
+      },
+      bearer: "sbr_run-l.s3cret",
+      executor: {
+        exec: async (cmd: string) => {
+          commands.push(cmd);
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+          if (/rev-parse @\{u\}/.test(cmd)) return `${HEAD}\n`;
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+          if (/status --porcelain -uno/.test(cmd)) return "";
+          if (/rev-list --count/.test(cmd)) return "0\n";
+          return "";
+        },
+      },
+    });
+    s.deps.findOpenPrByHead = vi.fn(async () => ({ number: 700, htmlUrl: "https://github.com/o/r/pull/700" }));
+    s.deps.openPullRequest = async () => ({ number: 700, htmlUrl: "https://github.com/o/r/pull/700", created: false });
+    s.deps.fetchRepoShipInfo = async () => ({ defaultBranch: "feat/trunk" });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, clock: () => clock.now }));
+    s.ending.drain(true);
+    await s.writer.settled();
+    const rec = (await s.store.get("run-l"))!;
+    const notes = rec.events.filter((e) => e.type === "run_note") as Array<{ kind: string; summary: string }>;
+    // The record's own order: the salvage found nothing, the description was
+    // asked for and submitted, the PR edited at the head.
+    expect(notes.filter((n) => n.kind === "budget_salvage").map((n) => n.summary)).toEqual([
+      `the budget ended with nothing to salvage: the tree is clean and \`${BRANCH}\` holds no unpushed commits`,
+    ]);
+    expect(notes.some((n) => n.kind === "description_turn")).toBe(true);
+    expect(commands.some((c) => c.startsWith("git push") || c.startsWith("git commit"))).toBe(false);
+    expect(out.prNote).toContain(
+      `PR updated: https://github.com/o/r/pull/700 — body re-rendered at \`${HEAD.slice(0, 7)}\``,
+    );
+    // The card reads what the ending established, in that order.
+    expect(out.answer).toBe(
+      `Stopped at the 45-minute budget without finishing. The tree was clean and \`${BRANCH}\` held no unpushed commits — its head \`${HEAD.slice(0, 7)}\` is on the remote. The PR description was submitted.`,
+    );
+    expect(out.answer).not.toContain("Partial work may exist");
+    // The record's answer event carries the same words.
+    const answerEvent = rec.events.find((e) => e.type === "answer") as { text?: string } | undefined;
+    expect(answerEvent?.text).toBe(out.answer);
   });
 
   it("without a store the pi steer is sent as before: no copy, no pull, no line", async () => {

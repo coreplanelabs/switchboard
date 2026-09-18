@@ -88,18 +88,18 @@ import {
   MODEL_CALL_IN_FLIGHT,
   type NeverPostedEnd,
   SOFT_STOP_INSTRUCTION,
-  softStopAnswer,
   softStopNote,
-  timeBudgetAnswer,
   timeBudgetInstruction,
   timeBudgetNote,
   toolCutNote,
-  turnGuardAnswer,
   turnGuardInstruction,
   turnGuardNote,
   turnGuardPace,
   unlabelledAnswer,
+  windDownAnswer,
+  windDownEndingOf,
   windDownFailureNote,
+  type WindDownEnding,
   wrapUpInstruction,
   wrapUpNeverPostedNote,
   wrapUpNote,
@@ -1829,7 +1829,14 @@ export async function driveOpenCode(
    *  lease is the caller's carved minutes, it holds nothing back for a
    *  write-up, and it publishes no `lease` event — the loop's stands. */
   kind: "loop" | "turn" = "loop",
-): Promise<{ answer: string; remainingMs: () => number; storeIds: string[]; hardStopped: boolean }> {
+): Promise<{
+  answer: string;
+  /** The wind-down that labelled the answer, for the run loop to compose the thread's answer from (harness-pi item 6). */
+  ending?: WindDownEnding;
+  remainingMs: () => number;
+  storeIds: string[];
+  hardStopped: boolean;
+}> {
   const now = () => deps.clock();
   const agentSpan = run.span?.start("run.agent");
   if (agentSpan) deps.bearers?.reparent(run.runId, agentSpan);
@@ -2902,8 +2909,14 @@ export async function driveOpenCode(
     note("wrap_up", wrapUpNeverPostedNote(writeUp.kind, "run", neverPostedEnd));
     writeUp = undefined;
   }
-  const answer = writeUpAnswer(writeUp, text, run.agent.maxMinutes, writeUpFailed, neverPostedEnd);
-  return { answer, remainingMs: remaining, hardStopped: false, ...handOver() };
+  // The ending the run loop composes the thread's answer from once its
+  // post-steps have run (harness-pi item 6); the answer here is the same words
+  // with no facts. No label when the wind-down's instruction never reached the
+  // model, but what ended the wait is still said: a model call that failed
+  // under it, or the finale bound ending a wait on an interrupt never answered.
+  const ending = windDownEndingOf(writeUp, text, writeUpFailed, neverPostedEnd === "finale" ? "finale" : "failed");
+  const answer = ending ? windDownAnswer(ending, run.agent.maxMinutes) : unlabelledAnswer(text, undefined);
+  return { answer, ...(ending ? { ending } : {}), remainingMs: remaining, hardStopped: false, ...handOver() };
 }
 
 /** The wind-downs that steer a write-up, and what each labels the answer with. */
@@ -2911,19 +2924,3 @@ type WriteUp = { kind: "time" } | { kind: "turns"; pace: string } | { kind: "sof
 /** The session's interrupt as the loop reads its answer (`interrupt`): landed on a live execution, landed on an
  *  idle one, or failed — refused, unanswered, or answered as no interrupt does — with the failure the run is named by. */
 type InterruptAnswer = "interrupted" | "idle" | { failed: Error };
-
-function writeUpAnswer(
-  writeUp: WriteUp | undefined,
-  text: string,
-  maxMinutes: number,
-  writeUpFailed: string | undefined,
-  neverPostedEnd: NeverPostedEnd,
-): string {
-  if (writeUp?.kind === "time") return timeBudgetAnswer(text, maxMinutes, writeUpFailed);
-  if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
-  if (writeUp?.kind === "soft") return softStopAnswer(text, writeUpFailed);
-  // No label — the wind-down's instruction never reached the model — but what
-  // ended the wait is still said: a model call that failed under it, or the
-  // finale bound ending a wait on an interrupt never answered.
-  return unlabelledAnswer(text, writeUpFailed, neverPostedEnd === "finale" ? "finale" : "failed");
-}

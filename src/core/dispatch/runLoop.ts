@@ -33,7 +33,13 @@ import { harnessContainerFor } from "../harness/botHostContainer.js";
 import { workspaceBindingFor } from "../../execution/factory.js";
 import { isContainerGone } from "../harness/container.js";
 import { ModelPolicyRefusedError } from "../harness/pi/harness.js";
-import { HARD_STOP_MESSAGE, softStopAnswer, timeBudgetAnswer } from "../harness/windDown.js";
+import {
+  HARD_STOP_MESSAGE,
+  windDownAnswer,
+  type EndingFacts,
+  type WindDownEnding,
+  type WorkspaceAtEnd,
+} from "../harness/windDown.js";
 import { loopEndingOf, reviewPostedBefore, type LoopEnding } from "../runLedger/resume.js";
 import type { RouteDecided } from "./route.js";
 import {
@@ -648,6 +654,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let harnessSession: HarnessSession | undefined;
   /** The budget's answer when a relaunch found the run inside its write-up reserve (`lease_spent`): the run ends on its budget with no process to write up. */
   let leaseSpentDuringRelaunch: string | undefined;
+  /** The wind-down that labelled the loop's answer, when one did — the
+   *  harness's (`HarnessSession.ending`), a resumed run's notes' or the lease
+   *  spent in a relaunch — so the thread's answer is composed again once the
+   *  tail has established the facts (harness-pi item 6, `endingFacts`). */
+  let windDownEnding: WindDownEnding | undefined;
+  /** Where the budget-end salvage pushed what the tree held, when it did: the
+   *  fact the answer names over the observation that preceded the push. */
+  let salvagedTo: { branch: string; head?: string } | undefined;
   /** The relaunch's re-attach ended the run — a stop, or the lease spent — so
    *  no process runs and the executor is the replaced container's, whose
    *  worktree was never re-attached: a coding run's workspace observation,
@@ -889,6 +903,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             await judge.end(facts, container);
         }
       } else noteUnknownWord("the run finished on the answer it already had");
+      windDownEnding = windDownEndingUnder(finish.answer, loopEnding);
       answer = answerUnderEnding(finish.answer, loopEnding, agent.maxMinutes);
     } else {
       // The harness (harness.md; pi's is harness-pi.md): the process in the
@@ -1097,7 +1112,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             harnessDeps.registry.forget(run.id);
             relaunchEndedRun = true;
             onEvent({ type: "run_note", kind: "time_budget_exhausted", summary: decision.why });
-            leaseSpentDuringRelaunch = timeBudgetAnswer("", agent.maxMinutes);
+            windDownEnding = { kind: "time", text: "" };
+            leaseSpentDuringRelaunch = windDownAnswer(windDownEnding, agent.maxMinutes);
             break;
           }
           if (decision.round !== undefined) {
@@ -1119,6 +1135,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // No session only when the relaunch's re-attach ended the run: on the
       // lease's end, the budget's answer; on a stop, the stop's.
       answer = harnessSession?.answer ?? leaseSpentDuringRelaunch ?? HARD_STOP_MESSAGE;
+      if (harnessSession?.ending !== undefined) windDownEnding = harnessSession.ending;
     }
     // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
     // settleReviewedHead in reviewRound.ts): for a PR review, read the
@@ -1307,6 +1324,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // The salvaged head is a fact of the run (run-history item 2): what renewal reads.
       if (salvaged.pushed && "head" in salvaged && salvaged.head !== undefined && !("skipped" in target))
         onEvent({ type: "pushed_head", ref: target.branch, sha: salvaged.head, by: "salvage" });
+      if (salvaged.pushed && !("skipped" in target))
+        salvagedTo = {
+          branch: target.branch,
+          ...("head" in salvaged && salvaged.head !== undefined ? { head: salvaged.head } : {}),
+        };
       if (salvaged.pushed) await observeWorkspaceNow();
     }
     // The description turn (docs/reference/specs/pr-description.md item 5,
@@ -1376,6 +1398,36 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       isCodingPrRun && !tailSkipped()
         ? workLeftBehindOf({ uncommittedChanges: observedUncommitted, unpushedCommits: observedUnpushed })
         : undefined;
+    /** What the tail established, for the wind-down's answer (harness-pi item
+     *  6): the tree as the salvage or the last observation left it, its fate
+     *  under the release the record decides (`releaseModeFor`: torn down when
+     *  a command may still run in it; else a cold workspace is kept for the
+     *  thread by its `if-idle` release and a resident's tree is discarded, a
+     *  run starting from a clean tree), and whether a description was
+     *  submitted. A run with no workspace, or whose tail was skipped or
+     *  observes no tree, establishes only that. */
+    const endingFacts = (): EndingFacts => {
+      if (profile.machine === "none") return { workspace: { kind: "none" } };
+      if (!isCodingPrRun || tailSkipped()) return { workspace: { kind: "unread" } };
+      const branch = observedBranch ?? observedCheckedOut;
+      let workspace: WorkspaceAtEnd;
+      if (salvagedTo !== undefined) workspace = { kind: "salvaged", ...salvagedTo };
+      else if (observedUncommitted === undefined || observedUnpushed === undefined) workspace = { kind: "unmeasured" };
+      else if (observedUncommitted === 0 && observedUnpushed === 0)
+        workspace = {
+          kind: "clean",
+          ...(branch !== undefined ? { branch } : {}),
+          ...(observedHead !== undefined ? { head: observedHead } : {}),
+        };
+      else
+        workspace = {
+          kind: "left",
+          uncommitted: observedUncommitted,
+          unpushed: observedUnpushed,
+          fate: commandInFlight ? "torn_down" : profile.machine === "repo-resident" ? "discarded" : "kept",
+        };
+      return { workspace, description: prDescription !== undefined ? "submitted" : "not_submitted" };
+    };
     if (leftBehind) {
       registry.publish(run.id, {
         type: "run_note",
@@ -1445,6 +1497,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (baseline) await root.span("run.reading_diff_join", () => baseline);
     const description = descriptionArtifact;
     if (description) await root.span("run.pr_description_join", () => description);
+    // The finale answer reads what the ending established (harness-pi item 6):
+    // the harness composed its answer when its loop ended, before the salvage,
+    // the description turn and the PR post-step above ran, so it is composed
+    // again HERE from the ending it handed over and the facts those steps left
+    // — the tree first, then the description — through the one composer in
+    // windDown.ts, never by guessing at a tree the salvage just measured. Only
+    // an answer that is still the harness's own composition is replaced: one a
+    // post-turn put in its place (a review's re-review at a moved head) stands.
+    if (windDownEnding !== undefined && answer === windDownAnswer(windDownEnding, agent.maxMinutes))
+      answer = windDownAnswer(windDownEnding, agent.maxMinutes, endingFacts());
     // Typed-output boundary (docs/reference/specs/llm-output.md item 5): the answer is
     // canonicalized ONCE here, so the event text, the channel reply, the
     // GitHub post, and memory all read one Markdown dialect; the model's raw
@@ -1651,6 +1713,18 @@ function describeEnding(ending: LoopEnding): string {
   }
 }
 
+/** The wind-down a resumed run's notes name (`loopEndingOf`) as the ending the
+ *  loop composes the answer from once its tail has run (harness-pi item 6): a
+ *  soft stop or the time budget over the text the record kept; nothing for a
+ *  plain answer, and nothing for the labels only the deleted native loop wrote
+ *  — the turn guard's, `stuck_loop`, `sandbox_dead` — which a row from before
+ *  this release may still carry and `answerUnderEnding` keeps as they were. */
+function windDownEndingUnder(text: string, ending: LoopEnding): WindDownEnding | undefined {
+  if (ending.kind === "soft_stop") return { kind: "soft", text };
+  if (ending.kind === "written_up" && ending.note === "time_budget_exhausted") return { kind: "time", text };
+  return undefined;
+}
+
 /** The answer the thread would have seen had the previous generation lived to
  *  reply: the harness's own label for the ending (the ⏹ of a soft stop, the ⚠️
  *  of a budget) over the write-up, or the text as it stands. The turn guard's
@@ -1659,14 +1733,10 @@ function describeEnding(ending: LoopEnding): string {
  *  still carry — carry their note's summary, which names the pace or the
  *  diagnosis that loop put there. */
 function answerUnderEnding(text: string, ending: LoopEnding, maxMinutes: number): string {
-  if (ending.kind === "answered") return text || "_(no response)_";
-  if (ending.kind === "soft_stop") return softStopAnswer(text);
-  switch (ending.note) {
-    case "time_budget_exhausted":
-      return timeBudgetAnswer(text, maxMinutes);
-    default:
-      return text ? `⚠️ _${ending.summary}_\n\n${text}` : `⚠️ ${ending.summary}`;
-  }
+  const windDown = windDownEndingUnder(text, ending);
+  if (windDown !== undefined) return windDownAnswer(windDown, maxMinutes);
+  if (ending.kind !== "written_up") return text || "_(no response)_";
+  return text ? `⚠️ _${ending.summary}_\n\n${text}` : `⚠️ ${ending.summary}`;
 }
 
 /** The harness word a row names when `harnessFactsOf` reads it as no facts —

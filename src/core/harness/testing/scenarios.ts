@@ -40,6 +40,9 @@ import {
   timeBudgetAnswer,
   timeBudgetNote,
   toolCutNote,
+  windDownAnswer,
+  type EndingFacts,
+  type WindDownEnding,
 } from "../windDown.js";
 import { TRANSPORT_LOST_TEXT } from "./fakeContainer.js";
 
@@ -181,7 +184,15 @@ export interface RunScript {
 /** What the driver hands back: the run's outcome and everything the harness wrote or was seen to do. */
 export interface DrivenRun {
   harness: HarnessName;
-  outcome: { kind: "answered"; answer: string } | { kind: "failed"; error: Error };
+  outcome:
+    | {
+        kind: "answered";
+        answer: string;
+        /** The wind-down's ending the harness handed the run loop beside its
+         *  answer (`HarnessSession.ending`), when one labelled it. */
+        ending?: WindDownEnding;
+      }
+    | { kind: "failed"; error: Error };
   /** What the run's follow-up inbox still holds once the run has ended: the follow-ups handed back. */
   inboxLeft: { text: string }[];
   /** The stop the run's control was asked for, if any — what the dispatcher's settlement reads to drop the run's follow-ups; a run failing by name asks for none. */
@@ -255,6 +266,117 @@ const call = (id: string, name: string, input: Record<string, unknown>): ModelTu
 
 /** A header name that carries a credential: on a request into the container it belongs in `secretHeaders`. */
 const AUTH_HEADER = /^(authorization|proxy-authorization|x-api-key|cookie)$/i;
+
+/** The wind-down's ending the harness handed over on an answered run, or none. */
+const endingOf = (run: DrivenRun): WindDownEnding | undefined =>
+  run.outcome.kind === "answered" ? run.outcome.ending : undefined;
+
+const ENDING_HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+const ENDING_BRANCH = "plan/p/u1";
+/** The budget rows of the finale answer (harness-pi item 6), one per branch
+ *  the run loop can establish once the post-steps have run. Each row's run is
+ *  a budget ending on the harness — the write-up hung (`hangModelCall`) for
+ *  the empty write-up's rows, written for the last — whose structured ending
+ *  the row reads off the run; the facts are what the loop would have measured,
+ *  and `established` the sentence the composed answer must close on. */
+const BUDGET_ENDING_ROWS: ScenarioRow[] = (
+  [
+    {
+      id: "budget-ending-clean-pushed",
+      branch: "a clean tree with a pushed head",
+      facts: {
+        workspace: { kind: "clean", branch: ENDING_BRANCH, head: ENDING_HEAD },
+        description: "submitted",
+      },
+      established: `The tree was clean and \`${ENDING_BRANCH}\` held no unpushed commits — its head \`${ENDING_HEAD.slice(0, 7)}\` is on the remote. The PR description was submitted.`,
+    },
+    {
+      id: "budget-ending-salvaged",
+      branch: "a tree the budget salvage pushed",
+      facts: {
+        workspace: { kind: "salvaged", branch: ENDING_BRANCH, head: ENDING_HEAD },
+        description: "not_submitted",
+      },
+      established: `What the tree held was pushed to \`${ENDING_BRANCH}\` at \`${ENDING_HEAD.slice(0, 7)}\` by the budget salvage, unreviewed — a follow-up starts from it. No PR description was submitted.`,
+    },
+    {
+      id: "budget-ending-left-kept",
+      branch: "unpushed work in a workspace the thread keeps",
+      facts: { workspace: { kind: "left", uncommitted: 2, unpushed: 1, fate: "kept" } },
+      established:
+        "2 uncommitted change(s) and 1 unpushed commit(s) sit in the workspace, kept for this thread until it idles out — a follow-up here reuses them.",
+    },
+    {
+      id: "budget-ending-left-torn-down",
+      branch: "unpushed work in a workspace that is torn down",
+      facts: { workspace: { kind: "left", uncommitted: 2, unpushed: 1, fate: "torn_down" } },
+      established:
+        "2 uncommitted change(s) and 1 unpushed commit(s) were left in the tree, which is torn down since a command may still be running in it — narrow the task and try again.",
+    },
+  ] satisfies Array<{ id: string; branch: string; facts: EndingFacts; established: string }>
+).map(({ id, branch, facts, established }): ScenarioRow => ({
+  id,
+  clause: "conversation",
+  title: `the budget's ending is handed to the run loop as a structured ending, so the thread's answer is composed once the post-steps have established the tree — ${branch}: the same words on every harness`,
+  script: { turns: [call("c1", "bash", { command: "echo hi" }), text("never")], hangModelCall: 2 },
+  check: (run) => {
+    const ending = endingOf(run);
+    assert.ok(
+      ending?.kind === "time" && ending.text === "",
+      `the harness handed no structured budget ending: ${JSON.stringify(ending)}`,
+    );
+    // The harness's own answer is the composer with no facts. With the
+    // loop's facts the same ending opens on the budget's words — the hung
+    // write-up's failed-call clause between, in each harness's own words —
+    // and closes on what was established, never on the guess.
+    assert.equal(answered(run), windDownAnswer(ending, CONFORMANCE_MAX_MINUTES));
+    const composed = windDownAnswer(ending, CONFORMANCE_MAX_MINUTES, facts);
+    assert.ok(
+      composed.startsWith(`Stopped at the ${CONFORMANCE_MAX_MINUTES}-minute budget without finishing`),
+      `the answer does not open with the budget's words: ${composed}`,
+    );
+    assert.ok(composed.endsWith(`. ${established}`), `the answer does not close on what was established: ${composed}`);
+    assert.ok(!composed.includes("Partial work may exist"), `the answer guesses at the tree: ${composed}`);
+    assert.deepEqual(
+      notes(run)
+        .filter((n) => n.kind === "time_budget_exhausted")
+        .map((n) => n.summary),
+      [timeBudgetNote(MODEL_CALL_IN_FLIGHT)],
+    );
+  },
+}));
+BUDGET_ENDING_ROWS.push({
+  id: "budget-ending-written-up",
+  clause: "conversation",
+  title:
+    "the budget's ending carries the write-up's text to the run loop, so the label reads the tree's facts before the findings: the same words on every harness",
+  script: {
+    turns: [call("c1", "bash", { command: "echo hi" }), text("findings so far: hi")],
+    budgetBeforeModelCall: 2,
+  },
+  check: (run) => {
+    const ending = endingOf(run);
+    assert.deepEqual(
+      ending,
+      { kind: "time", text: "findings so far: hi" },
+      "the harness handed no structured budget ending",
+    );
+    assert.equal(answered(run), timeBudgetAnswer("findings so far: hi", CONFORMANCE_MAX_MINUTES));
+    assert.equal(
+      windDownAnswer(ending!, CONFORMANCE_MAX_MINUTES, {
+        workspace: { kind: "clean", branch: ENDING_BRANCH, head: ENDING_HEAD },
+        description: "submitted",
+      }),
+      `⚠️ _Hit the ${CONFORMANCE_MAX_MINUTES}-minute budget before finishing. The tree was clean and \`${ENDING_BRANCH}\` held no unpushed commits — its head \`${ENDING_HEAD.slice(0, 7)}\` is on the remote. The PR description was submitted. Findings so far:_\n\nfindings so far: hi`,
+    );
+    assert.deepEqual(
+      notes(run)
+        .filter((n) => n.kind === "time_budget_exhausted")
+        .map((n) => n.summary),
+      [timeBudgetNote(MODEL_CALL_IN_FLIGHT)],
+    );
+  },
+});
 
 const notes = (run: DrivenRun) =>
   run.events.filter((e): e is Extract<RunEvent, { type: "run_note" }> => e.type === "run_note");
@@ -775,6 +897,16 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       assert.ok(last > lease.loopEndsAt, "the clock never passed the loop's cut");
     },
   },
+  // The finale answer reads what the ending established (harness-pi item 6):
+  // the harness hands the run loop its ending beside the answer — the label's
+  // kind, the text the model settled on, the failed call — and the loop
+  // composes the thread's answer once the salvage and the post-steps have run,
+  // through the one composer in windDown.ts. One row per branch the loop can
+  // establish: the harness half is the structured ending the row reads off
+  // the run, the facts are the loop's, and the words are the same on every
+  // harness — a torn-down tree is never said to hold work, a pushed head is
+  // named. The harness's own answer is the same composer with no facts.
+  ...BUDGET_ENDING_ROWS,
   {
     id: "budget-cuts-the-tool-in-flight",
     clause: "conversation",

@@ -312,7 +312,7 @@ export function piDriver(): HarnessDriver {
         // The seam's door, as the run loop opens every run: the refusal of a
         // foreign row is the seam's, not the object's.
         const session = await openThroughSeam(object, deps, run);
-        outcome = { kind: "answered", answer: session.answer };
+        outcome = { kind: "answered", answer: session.answer, ...(session.ending ? { ending: session.ending } : {}) };
         await session.end();
       } catch (err) {
         outcome = { kind: "failed", error: err instanceof Error ? err : new Error(String(err)) };
