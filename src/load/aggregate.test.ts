@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateSlo, percentile, renderMarkdown, summarize, type Sample } from "./aggregate.js";
+import { evaluateSlo, operationsTable, percentile, renderMarkdown, summarize, type Sample } from "./aggregate.js";
 
 // The load harness's result math (docs/reference/specs/load-harness.md items 1–3): every
 // command records one Sample per operation and this module turns them into the
@@ -114,6 +114,24 @@ describe("evaluateSlo — the D10 lines", () => {
   it("a latency check on an op with no samples fails with `no samples` instead of passing vacuously", () => {
     const checks = evaluateSlo(summary, { latencyMs: [{ op: "write", p: 95, maxMs: 1 }] });
     expect(checks[0]).toMatchObject({ pass: false, actual: "no samples" });
+  });
+});
+
+describe("operationsTable — the per-op table lines", () => {
+  it("renders the exact six lines for a two-operation report: header, divider, attach row (ok, with time), clone row (refused, latency placeholder), and trailing blank line", () => {
+    const samples: Sample[] = [
+      s("attach", 200),
+      s("attach", 400),
+      s("clone", 1, { ok: false, reason: "mirror-busy" }),
+    ];
+    const { ops } = summarize(samples);
+    const table = operationsTable(ops);
+    expect(table).toEqual([
+      "| Op | Count | OK | Failed | p50 ms | p95 ms | p99 ms | Max ms |",
+      "|---|---|---|---|---|---|---|---|",
+      "| attach | 2 | 2 | 0 | 200 | 400 | 400 | 400 |",
+      "| clone | 1 | 0 | 1 | — | — | — | — |",
+    ]);
   });
 });
 
