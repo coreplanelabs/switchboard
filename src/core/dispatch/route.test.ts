@@ -1121,6 +1121,29 @@ describe("buildRoutePrompt — the imperative rule, stated for the write preset 
     expect(one.system).not.toContain("The request links");
   });
 
+  // A live harness probe routed to ship because "probe", "measure" and "execute"
+  // read as verbs of change, while two near-identical asks without those words
+  // routed correctly to explore. The rule names "run and report" as a read-only
+  // sandbox ask and says those words do not make it a code change.
+  it("states that a run-and-report ask — run a command and report the result, nothing to change — routes to the sandbox preset and that probe, measure and execute do not make it a code change", () => {
+    const p = buildRoutePrompt(base);
+    expect(p.system).toMatch(/run.*sandbox.*report.*result|run.*report.*sandbox/i);
+    expect(p.system).toMatch(/probe, measure and execute do not make it a code change/);
+    // The sandbox preset name is derived from the offered table (the repo-cold read-identity
+    // preset), never typed: `explore` appears because that is what the registry offers today.
+    expect(p.system).toMatch(/routes to the sandbox preset.*`explore`/);
+    // The clause ends with "never `ship`" (derived), not a hand-typed name.
+    expect(p.system).toMatch(/never `ship`/);
+    // Without a write preset the clause goes with the rule.
+    const none = buildRoutePrompt({ ...base, presets: presets.filter((x) => x.identity !== "write") });
+    expect(none.system).not.toMatch(/probe, measure and execute/);
+    // When the table has a write preset but no repo-cold preset, the sandbox clause is absent:
+    // a requester who may not run any sandbox preset is not shown a name to steer to.
+    const noSandbox = buildRoutePrompt({ ...base, presets: presets.filter((x) => x.machine !== "repo-cold") });
+    expect(noSandbox.system).toMatch(/fix it/); // write preset still present → rule is present
+    expect(noSandbox.system).not.toMatch(/probe, measure and execute do not make it a code change/);
+  });
+
   it("without a write preset in the table the rule is absent: a requester who may not run ship is never told to pick it", () => {
     const p = buildRoutePrompt({ ...base, presets: presets.filter((x) => x.identity !== "write") });
     expect(p.system).not.toMatch(/fix it/);
