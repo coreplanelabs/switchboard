@@ -1682,7 +1682,14 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     );
     refused.answer({ type: "merge", outcome: "refused", reason: "head moved", at: T0 + 21 * MIN });
     expect(refused.action).toMatchObject({ type: "end", ending: { kind: "merge_refused", reason: "head moved" } });
-    expect(renderUnitReport(refused.state)).toContain("head moved");
+    const refusedReport = renderUnitReport(refused.state);
+    expect(refusedReport).toContain("head moved");
+    // The approved work is on the branch: the remedy is a person's rebase or
+    // fix and a hand merge, after which a re-issue finds the merge and does
+    // not run the unit again — never a re-run of the unit from scratch.
+    expect(refusedReport).toContain("merge it by hand");
+    expect(refusedReport).toContain("not run again");
+    expect(refusedReport).not.toContain("the unit runs again when the plan is re-issued");
   });
 
   it("a merge answered merged with by other — the door found the pull request already merged after the approval — ends the unit merged by other with the merge commit and the time, and the report reads the Already-merged sentence", () => {

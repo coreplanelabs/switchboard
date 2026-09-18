@@ -2509,7 +2509,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       body: {
         ok: true,
         outcome: "refused",
-        reason: `acme/api#7 conflicts with \`main\` at \`${HEAD.slice(0, 7)}\`, rebase and re-issue`,
+        reason: `acme/api#7 conflicts with \`main\` at \`${HEAD.slice(0, 7)}\` — rebase onto \`main\`, push, and merge it by hand once the checks are green; the approved work stands`,
         at: NOW,
       },
     });
@@ -2522,7 +2522,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     });
     expect((await merge(stacked)).body).toMatchObject({
       outcome: "refused",
-      reason: `acme/api#7 conflicts with \`plan/fixture/u9\` at \`${HEAD.slice(0, 7)}\`, rebase and re-issue`,
+      reason: `acme/api#7 conflicts with \`plan/fixture/u9\` at \`${HEAD.slice(0, 7)}\` — rebase onto \`plan/fixture/u9\`, push, and merge it by hand once the checks are green; the approved work stands`,
     });
     // A mergeable pull request with zero checks still answers pending.
     const clean = await mergeHarness({

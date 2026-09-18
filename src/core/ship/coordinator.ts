@@ -1781,9 +1781,17 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
             : "Remaining gate: a person's merge — the runner merges only when the instance's `merge` field says runner, and ship never approves.",
       ].join("\n");
     case "merge_refused":
+      // The approved work is on the branch, so the remedy is a person's hand
+      // merge, never a re-run: a seeded plan re-issued afterwards finds the
+      // merged pull request (the pre-check's `merged` by other, or
+      // `already_landed`) and moves on to the dependents. The generated
+      // plan's line already says to re-issue with the PR URL, which takes the
+      // same recognition path.
       return join([
         `⚠️ The review approved ${e.pr.url} but the runner did not merge it: ${e.reason}. A person decides what becomes of the pull request.`,
-        reissue,
+        s.input.generated
+          ? reissue
+          : `The approved work is on the branch: rebase or fix it, push, and merge it by hand. Then re-issue the plan naming the remaining units — a unit whose pull request has merged is recognized and not run again, and its dependents start from there.`,
       ]);
     case "round_cap":
       return join([
