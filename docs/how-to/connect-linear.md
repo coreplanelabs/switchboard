@@ -118,7 +118,9 @@ visibility of that run. Cancellation also covers your earlier requests still wai
 including requests loading attachments. The durable queue invalidates their
 leases so a late file response cannot start them. An operator's channel grant
 can cancel other people's queued requests; merely using a session does not grant
-that authority. Begun requests continue through active-run cancellation. Stop can also
+that authority. If a begun request is deferred without executing, a Stop received
+in the meantime prevents it from returning to the queue. This cancellation survives
+a restart. Begun requests otherwise continue through active-run cancellation. Stop can also
 end your current waiting question; that cancellation is durable, so a restart does not
 resume the coordinator question. A denied
 or stale Stop leaves the session unchanged. A Linear session does not establish team-wide membership;

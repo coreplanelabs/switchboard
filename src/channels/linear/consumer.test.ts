@@ -71,6 +71,52 @@ function fixture(maxStagedBytes?: number) {
 afterEach(() => vi.useRealTimers());
 
 describe("Linear event consumer", () => {
+  it("does not replay a no-effects deferral that finishes after an authorized Stop", async () => {
+    const f = fixture();
+    let defer!: () => void;
+    f.deps.dispatch.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          defer = () => resolve({ deferred: true });
+        }),
+    );
+    await f.store.accept(event());
+    await f.consumer.poll();
+    await vi.waitFor(() => expect(f.deps.dispatch).toHaveBeenCalledOnce());
+    const runs = createRunsService({ registry: new RunRegistry(), store: new NullRunStore() });
+    f.deps.stop.mockImplementationOnce((input, io) =>
+      stopLinearSession({ runs, inbox: f.store, config: { grantsFor: (id) => grantsFor(id, {}) } }, input, io),
+    );
+    const stop = event();
+    stop.key = "stop-deferred";
+    stop.receivedAt = 150;
+    stop.payload.action = "prompted";
+    stop.payload.agentActivity = {
+      id: "stop-deferred",
+      agentSessionId: "s",
+      userId: "alice",
+      signal: "stop",
+      content: { type: "prompt", body: "Stop" },
+    };
+    await f.store.accept(stop);
+    await f.consumer.poll();
+    await vi.waitFor(() => expect(f.inbox.complete).toHaveBeenCalledWith(stop.key, expect.any(String)));
+    defer();
+    await f.consumer.settled();
+    f.advance(200_000);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.dispatch).toHaveBeenCalledOnce();
+    expect(f.deps.recover).not.toHaveBeenCalled();
+    expect(f.deps.warn).not.toHaveBeenCalled();
+    const later = event();
+    later.key = "after-stop";
+    later.receivedAt = 200_100;
+    await f.store.accept(later);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.dispatch).toHaveBeenCalledTimes(2);
+  });
   it("does not dispatch a file-hydrating request cancelled durably by a later Stop", async () => {
     const f = fixture();
     const preparing = event();

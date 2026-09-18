@@ -28,6 +28,31 @@ function sqlStore() {
 for (const kind of ["memory", "sqlite"] as const) {
   describe(`Linear event inbox — ${kind}`, () => {
     const make = () => (kind === "memory" ? new InMemoryLinearInbox() : sqlStore().inbox);
+    it("retains Stop across an in-flight no-effects deferral without cancelling another requester", async () => {
+      const inbox = make();
+      const preparing = {
+        ...event,
+        payload: { ...event.payload, agentSession: { id: "session", creatorId: "alice" } },
+      };
+      await inbox.accept(preparing);
+      await inbox.claim(200, 100, "first");
+      await inbox.begin(event.key, "first");
+      expect(
+        await inbox.cancelPending({ organizationId: "org", sessionId: "session", userId: "bob", receivedAt: 200 }),
+      ).toBe(0);
+      expect(await inbox.defer(event.key, "first", 210)).toBe(true);
+      expect((await inbox.claim(210, 100, "second"))?.event.key).toBe(event.key);
+      await inbox.begin(event.key, "second");
+      // A begun turn is not yet safe to delete: it may have already acted.
+      expect(
+        await inbox.cancelPending({ organizationId: "org", sessionId: "session", userId: "alice", receivedAt: 220 }),
+      ).toBe(0);
+      expect(await inbox.renew(event.key, "second", 400)).toBe(true);
+      expect(await inbox.defer(event.key, "first", 230)).toBe(false);
+      expect(await inbox.defer(event.key, "second", 230)).toBe(true);
+      expect(await inbox.claim(1000, 100, "later")).toBeUndefined();
+      expect(await inbox.accept(preparing)).toBe(false);
+    });
     it("cancels only older unbegun requests in the authorized session and invalidates their leases", async () => {
       const inbox = make();
       const pending = (key: string, userId = "alice", receivedAt = 100, sessionId = "s", organizationId = "org") => ({
@@ -181,6 +206,31 @@ for (const kind of ["memory", "sqlite"] as const) {
 }
 
 describe("durable Linear event recovery", () => {
+  it("adds the deferred-stop field to an existing queue without cancelling its live delivery", async () => {
+    const { sql, inbox } = sqlStore();
+    await inbox.accept(event);
+    await inbox.claim(200, 100, "old");
+    await inbox.begin(event.key, "old");
+    sql.exec("ALTER TABLE linear_deliveries DROP COLUMN defer_stop_at");
+    const migrated = new SqlLinearInbox(sql);
+    expect(await migrated.claim(300, 100, "new")).toMatchObject({ event, begun: true, attempts: 2 });
+    expect(await migrated.defer(event.key, "new", 310)).toBe(true);
+    expect(await migrated.claim(310, 100, "retry")).toMatchObject({ event });
+  });
+  it("preserves the queued Stop decision across a retry, a new lease, and host replacement", async () => {
+    const { sql, inbox } = sqlStore();
+    const preparing = { ...event, payload: { ...event.payload, agentSession: { id: "session", creatorId: "alice" } } };
+    await inbox.accept(preparing);
+    await inbox.claim(200, 100, "old");
+    await inbox.begin(event.key, "old");
+    await inbox.cancelPending({ organizationId: "org", sessionId: "session", userId: "alice", receivedAt: 200 });
+    await inbox.retry(event.key, "old", 210);
+    const restored = new SqlLinearInbox(sql);
+    expect(await restored.claim(210, 100, "new")).toMatchObject({ begun: true });
+    expect(await restored.defer(event.key, "old", 220)).toBe(false);
+    expect(await restored.defer(event.key, "new", 220)).toBe(true);
+    expect(await new SqlLinearInbox(sql).claim(1000, 100, "replay")).toBeUndefined();
+  });
   it("retains a cancelled preparation across restart and invalidates a pending acknowledgement", async () => {
     const { sql, inbox } = sqlStore();
     const created = { ...event, payload: { ...event.payload, agentSession: { id: "session", creatorId: "alice" } } };

@@ -34,6 +34,8 @@ export interface LinearInbox {
   defer(key: string, lease: string, at: number): Promise<boolean>;
   complete(key: string, lease: string, at: number): Promise<boolean>;
   cancelOrganization(organizationId: string, at: number): Promise<void>;
+  /** Completes unbegun requests and remembers Stop for a later no-effects
+   * deferral. Returns only requests completed now, not uncertain dispatches. */
   cancelPending(input: LinearPendingStop): Promise<number>;
   prune(completedBefore: number): Promise<void>;
 }
@@ -71,6 +73,7 @@ export class SqlLinearInbox implements LinearInbox {
       attempts INTEGER NOT NULL DEFAULT 0,
       run_id TEXT,
       begun INTEGER NOT NULL DEFAULT 0,
+      defer_stop_at INTEGER,
       finished_at INTEGER
     )`);
     if (
@@ -80,6 +83,13 @@ export class SqlLinearInbox implements LinearInbox {
         .some((column) => column.name === "begun")
     )
       sql.exec("ALTER TABLE linear_deliveries ADD COLUMN begun INTEGER NOT NULL DEFAULT 0");
+    if (
+      !sql
+        .exec("PRAGMA table_info(linear_deliveries)")
+        .toArray()
+        .some((column) => column.name === "defer_stop_at")
+    )
+      sql.exec("ALTER TABLE linear_deliveries ADD COLUMN defer_stop_at INTEGER");
     sql.exec(
       "CREATE INDEX IF NOT EXISTS linear_deliveries_pending ON linear_deliveries(phase, available_at, sequence)",
     );
@@ -205,7 +215,13 @@ export class SqlLinearInbox implements LinearInbox {
     return (
       this.sql
         .exec(
-          "UPDATE linear_deliveries SET phase = 'pending', begun = 0, lease = NULL, available_at = ? WHERE event_key = ? AND lease = ? AND phase = 'processing' AND run_id IS NULL RETURNING event_key",
+          `UPDATE linear_deliveries SET
+           phase = CASE WHEN defer_stop_at IS NULL THEN 'pending' ELSE 'done' END,
+           payload = CASE WHEN defer_stop_at IS NULL THEN payload ELSE NULL END,
+           finished_at = CASE WHEN defer_stop_at IS NULL THEN finished_at ELSE ? END,
+           begun = 0, lease = NULL, available_at = ?
+           WHERE event_key = ? AND lease = ? AND phase = 'processing' AND run_id IS NULL RETURNING event_key`,
+          at,
           at,
           key,
           lease,
@@ -253,8 +269,13 @@ export class SqlLinearInbox implements LinearInbox {
   async cancelPending(input: LinearPendingStop): Promise<number> {
     return this.sql
       .exec(
-        `UPDATE linear_deliveries SET phase = 'done', payload = NULL, lease = NULL, finished_at = ?
-       WHERE phase != 'done' AND begun = 0 AND run_id IS NULL AND received_at <= ?
+        `UPDATE linear_deliveries SET
+         phase = CASE WHEN begun = 0 THEN 'done' ELSE phase END,
+         payload = CASE WHEN begun = 0 THEN NULL ELSE payload END,
+         lease = CASE WHEN begun = 0 THEN NULL ELSE lease END,
+         finished_at = CASE WHEN begun = 0 THEN ? ELSE finished_at END,
+         defer_stop_at = COALESCE(defer_stop_at, ?)
+       WHERE phase != 'done' AND run_id IS NULL AND received_at <= ?
        AND json_extract(payload, '$.type') = 'AgentSessionEvent'
        AND json_extract(payload, '$.organizationId') = ?
        AND json_extract(payload, '$.agentSession.id') = ?
@@ -263,7 +284,8 @@ export class SqlLinearInbox implements LinearInbox {
        AND (? IS NULL OR CASE json_extract(payload, '$.action')
          WHEN 'created' THEN json_extract(payload, '$.agentSession.creatorId')
          WHEN 'prompted' THEN json_extract(payload, '$.agentActivity.userId') END = ?)
-       RETURNING event_key`,
+       RETURNING begun`,
+        input.receivedAt,
         input.receivedAt,
         input.receivedAt,
         input.organizationId,
@@ -271,7 +293,8 @@ export class SqlLinearInbox implements LinearInbox {
         input.userId ?? null,
         input.userId ?? null,
       )
-      .toArray().length;
+      .toArray()
+      .filter((row) => row.begun === 0).length;
   }
 }
 
@@ -282,6 +305,8 @@ type MemoryRow = {
   lease?: string;
   attempts: number;
   begun?: boolean;
+  /** Stop cannot erase an uncertain dispatch; a later no-effects deferral can. */
+  deferStopAt?: number;
   runId?: string;
   finishedAt?: number;
 };
@@ -376,6 +401,7 @@ export class InMemoryLinearInbox implements LinearInbox {
     const row = this.owned(key, lease);
     if (!row || row.runId) return false;
     row.begun = false;
+    if (row.deferStopAt !== undefined) return this.complete(key, lease, at);
     row.phase = "pending";
     row.lease = undefined;
     row.availableAt = at;
@@ -421,7 +447,7 @@ export class InMemoryLinearInbox implements LinearInbox {
     let cancelled = 0;
     for (const row of this.rows.values()) {
       const event = row.event;
-      if (!event || row.begun || row.runId || row.phase === "done" || event.receivedAt > input.receivedAt) continue;
+      if (!event || row.runId || row.phase === "done" || event.receivedAt > input.receivedAt) continue;
       const payload = event.payload,
         session = object(payload.agentSession),
         activity = object(payload.agentActivity);
@@ -435,6 +461,8 @@ export class InMemoryLinearInbox implements LinearInbox {
         continue;
       const user = payload.action === "created" ? session.creatorId : activity.userId;
       if (input.userId !== undefined && input.userId !== user) continue;
+      row.deferStopAt ??= input.receivedAt;
+      if (row.begun) continue;
       row.phase = "done";
       row.event = undefined;
       row.lease = undefined;

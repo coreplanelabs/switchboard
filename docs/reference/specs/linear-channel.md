@@ -83,6 +83,11 @@ the human assignee.
     a late file response cannot pass `begin`. Only earlier requests in the same
     session are affected. Self-stop covers the signed requester; stopping other
     queued people requires the shared run-stop policy for that channel.
+    A Stop that races an unbound dispatch records its cancellation decision on
+    the delivery. If dispatch then returns a no-effects deferral, the queue
+    completes the cancelled delivery instead of making it runnable again.
+    The decision survives restart and cannot be cleared by lease renewal or
+    a retry; stale consumers still cannot defer another consumer's lease.
     Only the original requester may steer an active run. Another person's
     prompt stays in the durable queue until it can run under their own identity;
     unknown ownership fails closed across host generations. A proven admission
@@ -221,6 +226,9 @@ the copy. Proving or replacing that local transport remains an acceptance gap.
 
 | Criterion | Proof |
 |---|---|
+| Stop racing an unbound dispatch is retained through deferral, renewal, retry and restart without affecting another requester or a newer lease | `[unit]` `src/channels/linear/inbox.test.ts::Linear event inbox — memory::retains Stop across an in-flight no-effects deferral without cancelling another requester`, `src/channels/linear/inbox.test.ts::Linear event inbox — sqlite::retains Stop across an in-flight no-effects deferral without cancelling another requester`, `src/channels/linear/inbox.test.ts::durable Linear event recovery::preserves the queued Stop decision across a retry, a new lease, and host replacement` |
+| An authorized Stop prevents a later no-effects deferral from dispatching again, while a new request still runs | `[unit]` `src/channels/linear/consumer.test.ts::Linear event consumer::does not replay a no-effects deferral that finishes after an authorized Stop` |
+| Existing queue rows remain usable when deferred-stop tracking is added | `[unit]` `src/channels/linear/inbox.test.ts::durable Linear event recovery::adds the deferred-stop field to an existing queue without cancelling its live delivery` |
 | Stop invalidates queued leases only within the authorized session, requester and arrival cutoff, leaving begun work and control events intact | `[unit]` `src/channels/linear/inbox.test.ts::Linear event inbox — memory::cancels only older unbegun requests in the authorized session and invalidates their leases`, `src/channels/linear/inbox.test.ts::Linear event inbox — sqlite::cancels only older unbegun requests in the authorized session and invalidates their leases` |
 | Cancelled preparation survives restart and cannot be revived by an acknowledgement | `[unit]` `src/channels/linear/inbox.test.ts::durable Linear event recovery::retains a cancelled preparation across restart and invalidates a pending acknowledgement` |
 | A late file response after Stop cannot start the cancelled request, while a new request still runs | `[unit]` `src/channels/linear/consumer.test.ts::Linear event consumer::does not dispatch a file-hydrating request cancelled durably by a later Stop` |
