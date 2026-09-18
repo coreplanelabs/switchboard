@@ -69,9 +69,15 @@ describe("parseRunEventLines", () => {
     const text = [
       '{"type":"run_note","kind":"fleet_busy","summary":"⏳ Sandbox fleet busy — no free per-thread sandbox after waiting 300s","at":5}',
       '{"type":"run_note","kind":"sandbox_dead","summary":"dead","at":6}',
+      // A refused PR description (pr-description.md item 5): the object and the issues ride the note.
+      '{"type":"run_note","kind":"description_refused","summary":"description refused: 1 field over its cap — risk","description":{"risk":"r"},"issues":[{"path":"risk","message":"at most 300 visible characters (got 305)","remove":5,"prefix":"r"}],"at":7}',
     ].join("\n");
     const out = parseRunEventLines(text);
-    expect(out.events.map((e) => (e.type === "run_note" ? e.kind : e.type))).toEqual(["fleet_busy", "sandbox_dead"]);
+    expect(out.events.map((e) => (e.type === "run_note" ? e.kind : e.type))).toEqual([
+      "fleet_busy",
+      "sandbox_dead",
+      "description_refused",
+    ]);
     expect(out.skipped).toBe(0);
   });
 

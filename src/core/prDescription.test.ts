@@ -8,8 +8,11 @@ import {
   PR_DESCRIPTION_CAPS,
   TITLE_GATE_REPOSITORY,
   anchorUrl,
+  describeDescriptionIssues,
+  fitToCap,
   parsePrDescription,
   parsePrDescriptionMarkdown,
+  recordedJson,
   renderPrDescriptionMarkdown,
   titleGateApplies,
   visibleLength,
@@ -225,6 +228,130 @@ describe("parsePrDescription (the schema)", () => {
     // `..` is rejected as a SEGMENT only — a filename containing dots is legitimate.
     expect(parsePrDescription(p({ path: "src/a..b.ts", from: 1, to: 2 })).pointers[0].anchor.path).toBe("src/a..b.ts");
     expect(() => parsePrDescription(p({ path: "src/../x.ts", from: 1, to: 2 }))).toThrow(/repo-relative/);
+  });
+});
+
+// The refusal carries the cut: a field over its cap is answered with the count
+// to remove and the longest prefix that fits, so the next submit is a copy.
+describe("fitToCap — the longest prefix that fits a cap, cut at a word boundary", () => {
+  it("cuts a plain sentence at a word boundary to at most the cap, dropping the orphaned separator", () => {
+    const s = "the blast radius is one route, the rollback is a revert — nothing else moves";
+    const cut = fitToCap(s, 40);
+    expect(visibleLength(cut)).toBeLessThanOrEqual(40);
+    expect(s.startsWith(cut)).toBe(true);
+    // Never inside a word: the character after the cut is a space, and the
+    // cut itself does not end on a separator left behind by the word after it.
+    expect(s[cut.length]).toBe(" ");
+    expect(cut).toBe("the blast radius is one route, the");
+    expect(fitToCap("radius — nothing", 9)).toBe("radius");
+  });
+
+  it("counts a link by its label: a link whose label fits but whose target is long stays whole", () => {
+    const link = `[the issue](https://github.com/acme/api/issues/1${"x".repeat(200)})`;
+    const s = `Closes ${link} for good, and more words after it`;
+    // "Closes [the issue] for good," is 28 visible; " and" would make 32.
+    // The comma the cut leaves behind goes with the word after it.
+    const cut = fitToCap(s, 30);
+    expect(cut).toBe(`Closes ${link} for good`);
+    expect(visibleLength(cut)).toBe(27);
+  });
+
+  it("drops a link that does not fit whole — never a cut inside `[label](target)`", () => {
+    const link = `[a long link label here](https://github.com/acme/api/pull/2)`;
+    const s = `See ${link} now`;
+    expect(fitToCap(s, 10)).toBe("See");
+    expect(fitToCap(s, 27)).toBe("See"); // the label alone is 24 visible; with "See " it is 28
+    expect(fitToCap(s, 28)).toBe(`See ${link}`);
+  });
+
+  it("returns already-fitting text unchanged", () => {
+    const s = `fits [x](${"h".repeat(300)}) fine.`;
+    expect(fitToCap(s, 20)).toBe(s);
+    expect(fitToCap("", 5)).toBe("");
+  });
+
+  it("returns the empty string when the cap is shorter than the first word — a cut inside a word is never offered", () => {
+    expect(fitToCap("supercalifragilistic sentence", 10)).toBe("");
+  });
+
+  it("measures with the given rule: the title's raw count treats a link's target as characters", () => {
+    const s = `fix: [x](${"h".repeat(20)}) and more`;
+    expect(fitToCap(s, 12, (t) => t.length)).toBe("fix"); // the colon is an orphan once the clause after it is gone
+    expect(fitToCap(s, 12)).toBe(`fix: [x](${"h".repeat(20)}) and`);
+  });
+});
+
+describe("describeDescriptionIssues — every issue named, every cap issue with its cut", () => {
+  const issuesOf = (input: unknown, repo?: string) => {
+    try {
+      parsePrDescription(input, repo === undefined ? {} : { repo });
+    } catch (err) {
+      if (err instanceof z.ZodError) return describeDescriptionIssues(input, err);
+      throw err;
+    }
+    throw new Error("did not throw");
+  };
+
+  it("names both over-cap fields in one pass, each with the count to remove and a prefix whose visible length fits", () => {
+    const risk = `${"word ".repeat(59)}[#9](https://github.com/acme/api/issues/9) tail end`;
+    const feedbackWanted = `${"ask ".repeat(50)}last`;
+    const issues = issuesOf({ ...desc(), risk, feedbackWanted });
+    expect(issues.map((i) => i.path)).toEqual(["feedbackWanted", "risk"]);
+    const fw = issues[0];
+    expect(fw.message).toBe(`at most 200 visible characters (got ${visibleLength(feedbackWanted)})`);
+    expect(fw.remove).toBe(visibleLength(feedbackWanted) - 200);
+    expect(visibleLength(fw.prefix!)).toBeLessThanOrEqual(200);
+    expect(feedbackWanted.startsWith(fw.prefix!)).toBe(true);
+    const r = issues[1];
+    expect(r.remove).toBe(visibleLength(risk) - 300);
+    expect(visibleLength(r.prefix!)).toBeLessThanOrEqual(300);
+    expect(r.prefix).toContain("[#9](https://github.com/acme/api/issues/9)");
+    // The quoted prefixes are accepted verbatim on the next submit.
+    expect(parsePrDescription({ ...desc(), risk: r.prefix, feedbackWanted: fw.prefix }).risk).toBe(r.prefix);
+  });
+
+  it("the title's cut counts raw characters, on the gated repository too, in the gate's own sentence", () => {
+    const title = `fix(core): ${"a word ".repeat(12)}end`;
+    expect(title.length).toBeGreaterThan(72);
+    for (const repo of [undefined, TITLE_GATE_REPOSITORY]) {
+      const [t] = issuesOf({ ...desc(), title }, repo);
+      expect(t.path).toBe("title");
+      expect(t.remove).toBe(title.length - 72);
+      expect(t.prefix!.length).toBeLessThanOrEqual(72);
+      expect(title.startsWith(t.prefix!)).toBe(true);
+    }
+    expect(issuesOf({ ...desc(), title }, TITLE_GATE_REPOSITORY)[0].message).toMatch(
+      /^the title is \d+ characters; at most 72/,
+    );
+  });
+
+  it("a non-cap issue keeps its message and carries no cut; a cap with no word that fits carries the count alone", () => {
+    const [grammar] = issuesOf(
+      { ...desc(), title: "feat(dispatch): a scope the code map does not name" },
+      TITLE_GATE_REPOSITORY,
+    );
+    expect(grammar).toEqual({ path: "title", message: expect.stringMatching(/^unknown scope "dispatch"/) });
+    const [anchor] = issuesOf({
+      ...desc(),
+      pointers: [{ label: "t", text: "d", anchor: { path: "/etc/x", from: 1, to: 2 } }],
+    });
+    expect(anchor).toEqual({ path: "pointers.0.anchor.path", message: "path must be repo-relative" });
+    const [noWord] = issuesOf({ ...desc(), verified: "x".repeat(201) });
+    expect(noWord).toEqual({ path: "verified", message: "at most 200 visible characters (got 201)", remove: 1 });
+  });
+});
+
+describe("recordedJson — the refused object as the record can carry it", () => {
+  it("keeps a whole description as it is (three levels, one to spare), drops what JSON drops, and stores a fifth-level object as its JSON text", () => {
+    const d = { ...desc(), agentNotes: undefined };
+    const kept = recordedJson(d) as Record<string, unknown>;
+    expect(kept).toEqual(JSON.parse(JSON.stringify(d)));
+    expect("agentNotes" in kept).toBe(false);
+    expect((kept.pointers as Array<{ anchor: unknown }>)[0].anchor).toEqual({ path: "src/a.ts", from: 3, to: 9 });
+    const deep = { a: { b: { c: { d: { e: 1 } } } }, list: [{ x: [1, "two", null] }] };
+    expect(recordedJson(deep)).toEqual({ a: { b: { c: { d: '{"e":1}' } } }, list: [{ x: [1, "two", null] }] });
+    expect(recordedJson("just a string")).toBe("just a string");
+    expect(recordedJson(undefined)).toBeNull();
   });
 });
 

@@ -152,6 +152,17 @@ export function renderPrTitleVocabulary(releasePleaseConfig, codeMapMarkdown) {
 }
 
 /**
+ * The cap's own sentence for a title of `length` characters. One function, so
+ * the submit tool can tell the gate's cap problem from its grammar problems
+ * by equality and answer it with the cut (`describeDescriptionIssues`).
+ * @param {number} length
+ * @returns {string}
+ */
+export function titleCapProblem(length) {
+  return `the title is ${length} characters; at most ${TITLE_MAX_LENGTH} — one change, one clause, present tense; the PR body carries the rest`;
+}
+
+/**
  * Pure: the verdict for one title against the vocabulary — `types` from the
  * release config, `scopes` from the code map (the generated file's lists, or
  * a test's own). `ok: false` carries every problem found, each phrased as
@@ -179,11 +190,7 @@ export function checkPrTitle(rawTitle, vocabulary) {
   }
   if (/\.$/.test(description)) problems.push("the description ends with a period; drop it (it is a commit subject)");
   const exemptFromCap = type === "revert" || (scope !== undefined && BOT_SCOPES.includes(scope));
-  if (!exemptFromCap && title.length > TITLE_MAX_LENGTH) {
-    problems.push(
-      `the title is ${title.length} characters; at most ${TITLE_MAX_LENGTH} — one change, one clause, present tense; the PR body carries the rest`,
-    );
-  }
+  if (!exemptFromCap && title.length > TITLE_MAX_LENGTH) problems.push(titleCapProblem(title.length));
   if (problems.length > 0) return { ok: false, problems };
   return { ok: true, type, scope: scope ?? null, breaking: breaking === "!", description };
 }

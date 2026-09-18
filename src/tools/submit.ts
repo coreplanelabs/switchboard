@@ -10,7 +10,16 @@
 // holds them equal. The toolset wiring stays in src/tools/workspace.ts.
 
 import { z } from "zod";
-import { parsePrDescription, type PrDescription } from "../core/prDescription.js";
+import {
+  describeDescriptionIssues,
+  describeIssueLine,
+  describeRefusalSummary,
+  mapStringLeaves,
+  parsePrDescription,
+  recordedJson,
+  type PrDescription,
+} from "../core/prDescription.js";
+import { redactSecrets } from "../core/redact.js";
 import { downgradeNote, parseDispositionsInput, parseVerdictInput } from "../core/reviewVerdict.js";
 import { parseHandoff } from "../core/ship/handoff.js";
 import type { RunnableTool } from "./runnableTool.js";
@@ -140,13 +149,19 @@ export const submitDispositionsTool: RunnableTool = {
 // GitHub body from the submitted object at the pushed head and opens/edits
 // the PR itself, so the loop's ground truth comes from code, never from prose.
 // Validation mirrors submit_verdict: a schema violation comes back as a
-// readable string error naming the failing path — never a throw — so the
-// model can fix the object and call again within its own budget.
+// readable string error naming EVERY failing path — never a throw — so the
+// model can fix the object and call again within its own budget. A cap
+// refusal carries the cut: how many visible characters to remove and the
+// longest prefix that fits, quoted whole, so the next submit is a copy and
+// there is no third (an overshoot is one to five characters, and a trim that
+// shortens a URL removes nothing the counter sees). The refused object goes
+// on the record as a `description_refused` note — redacted like the accepted
+// event — so the ledger can say what changed between one submit and the next.
 export const submitPrDescriptionTool: RunnableTool = {
   name: "submit_pr_description",
   failsInText: true,
   description:
-    "Submit the PR description as a typed object. REQUIRED after pushing your branch: Switchboard renders the GitHub PR body from this object at the pushed head and opens (or updates) the pull request itself — never open a PR yourself. The body is a fixed-size MAP for the reader (tldr, why, at most 7 pointers, feedbackWanted, risk, verified) with decisions, validation and agentNotes collapsed under it; every field is capped in visible characters (a link's URL is not counted) and the tool refuses an object over a cap naming the field and the count, so cut and resubmit. `title` becomes the PR's title (at most 72 characters); on Switchboard's own repository it is also judged as that repository's CI `title` check judges it — `type(scope): description`, type from its release config, scope one of its code map's Areas or none — and refused with that check's own sentence, so fix the title and resubmit; pointer anchors are (path, from, to) line ranges at your pushed head, rendered as links. Call it after your last push; if you push again afterwards, call it again — the last valid call wins.",
+    "Submit the PR description as a typed object. REQUIRED after pushing your branch: Switchboard renders the GitHub PR body from this object at the pushed head and opens (or updates) the pull request itself — never open a PR yourself. The body is a fixed-size MAP for the reader (tldr, why, at most 7 pointers, feedbackWanted, risk, verified) with decisions, validation and agentNotes collapsed under it; every field is capped in visible characters (a link's URL is not counted) and the tool refuses an object over a cap naming every field over it with the count, how many visible characters to remove and a prefix that fits — take the prefix as is, or cut at least that many visible characters (shortening a URL removes nothing), and resubmit once. `title` becomes the PR's title (at most 72 characters); on Switchboard's own repository it is also judged as that repository's CI `title` check judges it — `type(scope): description`, type from its release config, scope one of its code map's Areas or none — and refused with that check's own sentence, so fix the title and resubmit; pointer anchors are (path, from, to) line ranges at your pushed head, rendered as links. Call it after your last push; if you push again afterwards, call it again — the last valid call wins.",
   inputSchema: {
     type: "object",
     properties: {
@@ -241,11 +256,21 @@ export const submitPrDescriptionTool: RunnableTool = {
     try {
       desc = parsePrDescription(input, ctx.repo === undefined ? {} : { repo: ctx.repo });
     } catch (err) {
-      const detail =
-        err instanceof z.ZodError
-          ? err.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")
-          : String(err);
-      return `error: invalid PR description — ${detail}`;
+      if (!(err instanceof z.ZodError)) return `error: invalid PR description — ${String(err)}`;
+      const issues = describeDescriptionIssues(input, err);
+      // The refused object and its issues are a fact of the run, published
+      // before the answer so the record reads refusal → next submit in order.
+      // The input is whatever the model sent, so it is redacted as a JSON
+      // value, not as a PrDescription, then clipped to what the record can
+      // carry; the prefixes are the model's own text and take the same walk.
+      ctx.publish?.({
+        type: "run_note",
+        kind: "description_refused",
+        summary: describeRefusalSummary(issues),
+        description: recordedJson(mapStringLeaves(input, redactSecrets)),
+        issues: mapStringLeaves(issues, redactSecrets) as typeof issues,
+      });
+      return `error: invalid PR description — ${issues.map(describeIssueLine).join("; ")}`;
     }
     ctx.onPrDescription?.(desc);
     return `PR description recorded (title: ${desc.title}). Switchboard renders the body at your pushed head and opens or updates the PR; a later call replaces this one.`;

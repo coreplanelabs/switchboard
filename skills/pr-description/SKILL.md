@@ -8,7 +8,7 @@ agents: [coding]
 
 The description is the `PrDescription` object you submit through `submit_pr_description`; Switchboard renders the GitHub body from it at your pushed head. The body has two parts. Above the fold, the **map**: what a person reads in a minute and clicks from. Below the fold, collapsed: what agents and the record need. You write it right after implementing, when you have more context about the change than anyone will ever have again.
 
-The map is the same size for a 3-file and an 80-file PR. The schema enforces that: every field has a cap and the tool refuses an object over it, naming the field. Caps count visible characters; a markdown link's target is not counted, so link freely.
+The map is the same size for a 3-file and an 80-file PR. The schema enforces that: every field has a cap and the tool refuses an object over it, naming every field over its cap with the count. Caps count visible characters; a markdown link's target is not counted, so link freely. When a refusal names a count, remove at least that many visible characters from that field: a link's target does not count, so shortening a URL removes nothing; the refusal quotes a prefix that fits, cut at a word boundary, which you may use as is.
 
 ## The title
 
