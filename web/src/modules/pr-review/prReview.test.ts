@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises } from "@vue/test-utils";
 import { nextTick, reactive } from "vue";
 import PrReviewPanel from "./PrReviewPanel.vue";
 import FileDiffs from "./FileDiffs.vue";
 import FilesChanged from "./FilesChanged.vue";
 import { mountApp } from "../../testing/mount";
+import { loadDiffs } from "./diffsLibrary";
 import { diffStats, ellipsizeMiddle } from "./files";
 import { fileIcon, iconForLanguage, languageFromPath } from "./fileIcons";
 import {
@@ -26,6 +27,15 @@ import type { AbridgeState, PrDescriptionData, PrReviewData, ReadingDiff } from 
 // renderer is stubbed to write each file's lines into its container and to
 // record what it was handed (the theme, the style, the file), so the tests see
 // the module's decisions without the highlighter. The parser stays real.
+
+/** Whichever test first awaits `diffStats` or the renderer pays the library's
+ *  one dynamic import, which vitest's main process serves — and on a saturated
+ *  CI shard (four forks on four vCPUs, the main process transforming the
+ *  neighbours' files) that import alone outran the 5 s per-test default. So
+ *  the library is loaded once before the file under its own budget,
+ *  proportional to that load, and every test measures only its own work. */
+const LIBRARY_LOAD_BUDGET_MS = 30_000;
+beforeAll(() => loadDiffs(), LIBRARY_LOAD_BUDGET_MS);
 
 const { renders, failNextRender } = vi.hoisted(() => ({
   renders: [] as { options: Record<string, unknown>; name: string }[],
