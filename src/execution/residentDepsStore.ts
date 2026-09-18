@@ -115,10 +115,29 @@ export function planDepsMaterialization(input: {
 /** The checkout snapshot leaves out its top-level node_modules: since item 59
  *  that directory is a hardlink view of an immutable store entry, and the
  *  entry has its own backup (below). Nested node_modules (a workspace package's
- *  own) stay in — small, and the view mechanism does not cover them. The
+ *  own) stay in — small, and adoption of an old snapshot re-reads them. The
  *  pattern is anchored at the archive root (mksquashfs wildcard semantics:
  *  a bare name matches only there; `...`-prefixed patterns match anywhere). */
 export const CHECKOUT_SNAPSHOT_EXCLUDES: readonly string[] = ["node_modules"];
+
+/** The entry archive is the entry dir itself minus its markers: `.complete`
+ *  must be written by the restore's own commit, LAST, never extracted — a
+ *  partial download that carried the marker would read as a complete entry. */
+export const DEPS_ENTRY_BACKUP_EXCLUDES: readonly string[] = [".complete", ".used"];
+
+/** List every OUTERMOST node_modules under `rootDir` EXCEPT the top-level
+ *  one, tree-relative (`deploy/w/node_modules`), one per line. npm installs a
+ *  workspace's conflicting versions into the workspace's own node_modules
+ *  (the lockfile names those paths), so an entry or a view that carries only
+ *  the top-level dir leaves the tree short of what its lockfile mandates —
+ *  packages hoisted for a nested dependent then read as extraneous, and
+ *  `npm ls --omit=dev` misattributes their subtrees to production (the
+ *  licenses:check LGPL failure that named this). `-prune` keeps copies
+ *  nested INSIDE a listed node_modules with their parent; `.git` is never a
+ *  source of entries. */
+export function nestedNodeModulesListCmd(rootDir: string): string {
+  return `(cd ${shellQuote(rootDir)} && find . \\( -path ./node_modules -o -name .git \\) -prune -o -name node_modules -type d -prune -print | sed 's|^\\./||')`;
+}
 
 /** One backup per lockfile key, taken ONCE right after the entry is committed
  *  (install or adoption) and never again: the entry is immutable, so its
@@ -194,10 +213,20 @@ export function depsHardenScript(input: {
   emptyOk: boolean;
 }): string {
   const nm = shellQuote(`${input.scratchDir}/node_modules`);
+  const scratch = shellQuote(input.scratchDir);
   const absent = input.emptyOk
     ? `mkdir ${nm} && chown ${input.owner} ${nm}`
     : `echo "install produced no node_modules in ${input.scratchDir}" >&2; exit 1`;
-  return [`set -e`, `test -d ${nm} || { ${absent}; }`, `find ${nm} -type f -perm -u+w -exec chmod u-w {} +`].join("\n");
+  return [
+    `set -e`,
+    `test -d ${nm} || { ${absent}; }`,
+    `find ${nm} -type f -perm -u+w -exec chmod u-w {} +`,
+    // Nested workspace node_modules become entry content too (the commit
+    // script moves them), so their inodes are hardened the same way.
+    `${nestedNodeModulesListCmd(input.scratchDir)} | while IFS= read -r rel; do`,
+    `  find ${scratch}/"$rel" -type f -perm -u+w -exec chmod u-w {} + || exit 1`,
+    `done`,
+  ].join("\n");
 }
 
 /** Commit an install to the store, as root, in the order that makes the entry
@@ -221,6 +250,7 @@ export function depsStoreCommitScript(input: {
   keepScratch?: boolean;
 }): string {
   const scratchNm = shellQuote(`${input.scratchDir}/node_modules`);
+  const scratchDirQ = shellQuote(input.scratchDir);
   const staging = shellQuote(input.stagingDir);
   const stagingNm = shellQuote(`${input.stagingDir}/node_modules`);
   const entry = shellQuote(input.entryDir);
@@ -232,6 +262,14 @@ export function depsStoreCommitScript(input: {
     `rm -rf ${staging}`,
     `mkdir ${staging}`,
     `mv ${scratchNm} ${stagingNm}`,
+    // Every outermost NESTED node_modules moves too, at its tree-relative
+    // path (the top-level one is already in staging, so the walk never sees
+    // it): the entry must hold everything the install produced under a
+    // node_modules, or every view of it drifts from its lockfile.
+    `${nestedNodeModulesListCmd(input.scratchDir)} | while IFS= read -r rel; do`,
+    `  mkdir -p ${staging}/"$(dirname "$rel")" || exit 1`,
+    `  mv ${scratchDirQ}/"$rel" ${staging}/"$rel" || exit 1`,
+    `done`,
     // An entry dir WITHOUT its marker is crash debris (the shell died between
     // the rename and the touch): remove it, or the rename below would nest
     // the new staging inside it and the touch would mark the pair complete.

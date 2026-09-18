@@ -128,6 +128,61 @@ describe("the install scratch tree and the store commit", () => {
     expect(script).toContain("test -d '/workspace/deps/.scratch-x/node_modules'");
   });
 
+  // The incident that forced nested coverage: the lockfile placed
+  // @cloudflare/vitest-pool-workers under deploy/cloudflare-memory/node_modules,
+  // the entry carried only the top-level node_modules, so every resident tree
+  // lacked the nested dir — the hoisted miniflare lost its only dependent,
+  // `npm ls --omit=dev` attributed its sharp subtree to production, and
+  // licenses:check failed on LGPL while a clean `npm ci` of the same commit passed.
+  it("commit: every OUTERMOST nested node_modules the install produced moves into the entry at its tree-relative path; node_modules inside the top-level one and .git are never candidates", () => {
+    const root = mkdtempSync(join(tmpdir(), "deps-store-"));
+    try {
+      const scratch = join(root, ".scratch-n");
+      const staging = join(root, `.staging-${KEY_A}-n`);
+      const entry = join(root, KEY_A);
+      mkdirSync(join(scratch, "node_modules", "wrangler", "node_modules", "inner"), { recursive: true });
+      mkdirSync(join(scratch, "deploy", "cloudflare-memory", "node_modules", "@cloudflare", "vitest-pool-workers"), {
+        recursive: true,
+      });
+      mkdirSync(join(scratch, ".git", "node_modules"), { recursive: true });
+      writeFileSync(
+        join(scratch, "deploy", "cloudflare-memory", "node_modules", "@cloudflare", "vitest-pool-workers", "p.js"),
+        "1",
+      );
+      const r = spawnSync(
+        "sh",
+        [
+          "-c",
+          depsStoreCommitScript({
+            scratchDir: scratch,
+            stagingDir: staging,
+            entryDir: entry,
+            completePath: join(entry, ".complete"),
+          }),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(r.status, r.stderr).toBe(0);
+      // The top-level node_modules keeps its own nested copies inside it.
+      expect(spawnSync("test", ["-d", join(entry, "node_modules", "wrangler", "node_modules", "inner")]).status).toBe(
+        0,
+      );
+      // The workspace's nested node_modules is in the entry at its relative path.
+      expect(
+        spawnSync("test", [
+          "-f",
+          join(entry, "deploy", "cloudflare-memory", "node_modules", "@cloudflare", "vitest-pool-workers", "p.js"),
+        ]).status,
+      ).toBe(0);
+      // .git is never a source of entries; the scratch is gone.
+      expect(spawnSync("test", ["-e", join(entry, ".git")]).status).not.toBe(0);
+      expect(spawnSync("test", ["-e", scratch]).status).not.toBe(0);
+      expect(spawnSync("test", ["-f", join(entry, ".complete")]).status).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("adoption keeps the scratch tree (it IS the warm checkout) — only its node_modules moves", () => {
     const script = depsStoreCommitScript({
       scratchDir: "/workspace/checkout",
@@ -324,6 +379,31 @@ describe("deps-harden: the install's node_modules is made owner-read-only, and a
     expect(lenient).toContain("mkdir '/workspace/deps/.scratch-1/node_modules'");
     expect(lenient).toContain("chown worker1:worker1 '/workspace/deps/.scratch-1/node_modules'");
     expect(lenient).not.toContain("install produced no node_modules");
+  });
+
+  it("script: nested workspace node_modules are hardened like the top-level one (their inodes are shared through the same views)", (ctx) => {
+    const asRoot = process.getuid?.() === 0;
+    ctx.skip(asRoot, "running as root: test -w cannot observe chmod u-w");
+    const root = mkdtempSync(join(tmpdir(), "deps-harden-"));
+    const me = `${spawnSync("id", ["-un"], { encoding: "utf8" }).stdout.trim()}:${spawnSync("id", ["-gn"], { encoding: "utf8" }).stdout.trim()}`;
+    try {
+      const scratch = join(root, ".scratch-nested");
+      mkdirSync(join(scratch, "node_modules"), { recursive: true });
+      mkdirSync(join(scratch, "deploy", "w", "node_modules", "pkg"), { recursive: true });
+      writeFileSync(join(scratch, "deploy", "w", "node_modules", "pkg", "index.js"), "1", { mode: 0o644 });
+      // A source file outside any node_modules keeps its writability.
+      writeFileSync(join(scratch, "deploy", "w", "src.ts"), "1", { mode: 0o644 });
+      const r = spawnSync("sh", ["-c", depsHardenScript({ scratchDir: scratch, owner: me, emptyOk: false })], {
+        encoding: "utf8",
+      });
+      expect(r.status, r.stderr).toBe(0);
+      expect(
+        spawnSync("test", ["-w", join(scratch, "deploy", "w", "node_modules", "pkg", "index.js")]).status,
+      ).not.toBe(0);
+      expect(spawnSync("test", ["-w", join(scratch, "deploy", "w", "src.ts")]).status).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("on a real filesystem: files lose u+w; no node_modules + emptyOk → an empty one exists and the commit succeeds; no node_modules + strict → exit 1 naming the scratch", (ctx) => {

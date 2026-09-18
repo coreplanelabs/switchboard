@@ -304,6 +304,7 @@ import {
   CHECKOUT_SNAPSHOT_EXCLUDES,
   DEPS_BACKUP_KEY_PREFIX,
   DEPS_BACKUP_TTL_S,
+  DEPS_ENTRY_BACKUP_EXCLUDES,
   DEPS_STORE_DIR,
   depsBackupStorageKey,
   depsBackupsToDrop,
@@ -5975,10 +5976,14 @@ export class ResidentDO extends Sandbox<Env> {
       const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
       const backup = await withTimeout(
         this.createBackup({
-          dir: `${depsEntryPath(key)}/node_modules`,
+          // The entry dir itself, not only its top-level node_modules: nested
+          // workspace node_modules are entry content too. The markers are
+          // excluded so a restore's own commit writes `.complete` LAST.
+          dir: depsEntryPath(key),
           localBucket: transfer.localBucket,
           ttl: DEPS_BACKUP_TTL_S,
           name: `${resource} deps ${key.slice(0, 8)}`,
+          excludes: [...DEPS_ENTRY_BACKUP_EXCLUDES],
         }),
         R2_TRANSFER_TIMEOUT_MS,
         "deps backup",
@@ -6020,9 +6025,16 @@ export class ResidentDO extends Sandbox<Env> {
       await this.ensureDepsStoreDir();
       console.log(`deps: restoring ${key.slice(0, 8)} from backup ${record.backup.id.slice(0, 8)} into ${scratch}`);
       await this.runOk(["mkdir", "-p", scratch], "deps-restore-scratch");
+      // The archive is the entry dir (top-level node_modules PLUS nested
+      // workspace ones at their tree-relative paths), so it extracts into the
+      // scratch root and the commit script moves each node_modules like an
+      // install's. An archive from before nested coverage held only the
+      // node_modules CONTENTS: its extract leaves no scratch/node_modules, the
+      // commit fails, the record is dropped and the installer runs — the
+      // documented fall-through, never a stranded key.
       await this.restoreExtracted(
         record.backup,
-        `${scratch}/node_modules`,
+        scratch,
         `deps restore ${key.slice(0, 8)}`,
         "deps-restore-extract",
         deadlineMs,
@@ -6104,6 +6116,15 @@ export class ResidentDO extends Sandbox<Env> {
           parsed.mutableListing,
           "deps-seed-swap",
         );
+        for (const rel of parsed.nested) {
+          await this.swapMutableCaches(
+            `${depsEntryPath(seed)}/${rel}`,
+            `${scratch}/${rel}`,
+            BUILD_USER,
+            parsed.mutableListing,
+            "deps-seed-swap",
+          );
+        }
         console.log(`deps: ${key.slice(0, 8)} seeded from ${seed.slice(0, 8)} (${parsed.mech})`);
       }
       // Unprivileged and token-free, in a tree only this attempt
@@ -6213,6 +6234,21 @@ export class ResidentDO extends Sandbox<Env> {
       parsed.mutableListing,
       "deps-mutable-swap",
     );
+    // Nested workspace node_modules the script hardlinked from the entry get
+    // the same tool-cache swap, each scoped to its own root (mutableCachePaths
+    // keeps only the listing under that root).
+    if (entryNodeModules) {
+      const entryRoot = entryNodeModules.replace(/\/node_modules$/, "");
+      for (const rel of parsed.nested) {
+        await this.swapMutableCaches(
+          `${entryRoot}/${rel}`,
+          `${tree}/${rel}`,
+          user,
+          parsed.mutableListing,
+          "deps-mutable-swap",
+        );
+      }
+    }
     return parsed.mech;
   }
 

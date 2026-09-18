@@ -50,13 +50,13 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run deploy:check` | The rendered `wrangler.jsonc` files match `deploy:gen`. | When one looks hand-edited; change the template. |
 | `npm run check:lockfile` | Native packages carry Linux x64 and macOS arm64 variants; records mirror their `package.json`. | After a manifest edit or `npm install`; failures name the fix. |
 | `npm run check:sandbox-pair` | Each Worker on the `cloudflare/sandbox` image pins `@cloudflare/sandbox` to exactly its Dockerfile tag. | After bumping either half of a pair. |
-| `npm run check:pr-title` | Judges one PR title as the changelog line: grammar, type, scope, the `!` migration note. | `-- "feat(scope): …"` before opening a PR; CI's `title` check. |
+| `npm run check:pr-title` | Judges one PR title as the changelog line: grammar, type, scope, `!`. | `-- "feat(scope): …"` before opening a PR; CI's `title` check. |
 | `npm run pr-title:gen` | Writes the title gate's types and scopes from the release config and the code map. | Part of `fix`. |
 | `npm run pr-title:check` | The committed title vocabulary equals its two sources. | Part of `check:consistency`. |
 | `npm run check:project-facts` | Every copy of the project's names, repository, docs URL and contact address equals `project.json`; its description, topics and npm package fit their rules. | After editing `project.json` or a community file; part of `check:consistency`. |
 | `npm run check:registry-drift` | Every example-config model ref still resolves against the pinned pi registry. | After a pi bump; part of `check:consistency`. |
 | `npm run agents:gen` | Writes the Commands table in AGENTS.md from `package.json` and this file. | After adding or changing a script; part of `fix`. |
-| `npm run clock:gen` | Regenerates both clock allowlists from the tree: wall-clock reads (empty) and duration literals outside `src/core/budgets.ts`. | Part of `fix`. |
+| `npm run clock:gen` | Regenerates both clock allowlists: wall-clock reads (empty) and duration literals outside `src/core/budgets.ts`. | Part of `fix`. |
 | `npm run clock:check` | No production file reads the wall clock directly or gained a duration literal outside `src/core/budgets.ts`; both allowlists match the tree. | Part of `check:consistency`. |
 | `npm run agents:check` | AGENTS.md is under its size budget, its Commands table is current, and every root script is described here. | Part of `check:consistency`. |
 | `npm run lint` | ESLint over the whole tree. | `npm run fix` repairs what it can. |
@@ -69,19 +69,20 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run skills:sync` | Vendors the skills listed in `skills/manifest.yaml`. | After changing the manifest; part of `fix`. |
 | `npm run skills:check` | The vendored skills match the manifest byte for byte. | Part of `check:consistency`. |
 | `npm run licenses:check` | Every production dependency's license is on the allowlist. | After adding a dependency. |
+| `npm run check:deps-drift` | Installed node_modules match the lockfile: drift fails by name. | Part of `check:consistency`. |
 | `npm run docs:gen` | Writes the generated regions of the reference docs from the command registry. | After changing a command, flag, route, or config key; part of `fix`. |
 | `npm run docs:check` | The generated doc regions equal what the code would generate. | Part of `check:consistency`. |
 | `npm run specs:check` | Every `file::describe::it` proof in `docs/reference/specs/*.md` names a real test; header paths exist. | After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit. |
 | `npm run specs:coverage` | Maps a change's paths to the specs whose `Code`/`Tests` headers cover them, then lists changed source paths no spec covers. | `-- --changed origin/main...HEAD [--test-guard]` before review; `-- --require` fails on an uncovered path; `-- --json` for machines. |
-| `npm run decisions:check` | Every record under `docs/decisions/` and `docs/plans/` has a valid `status`, a superseded one names its successor, and an accepted body changes only by an appended `## Amended` re-evaluation. | Part of `check:consistency`; a failing record is superseded or amended by appending, never edited. |
-| `npm run hygiene:check` | The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks. | Part of `check:consistency`. New hit: rewrite the line or allow it by name in `scripts/public-hygiene.allow`; `-- --list <prefix>` shows the rest. |
+| `npm run decisions:check` | Every record under `docs/decisions/` and `docs/plans/` has a valid `status`, a superseded one names its successor, an accepted body only gains an appended `## Amended`. | Part of `check:consistency`; a failing record is superseded or amended by appending, never edited. |
+| `npm run hygiene:check` | The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks. | Part of `check:consistency`. New hit: rewrite the line or allow it in `scripts/public-hygiene.allow`. |
 | `npm run hygiene:gen` | Records the tree's remaining imprint after a scrub; refuses growth unless `-- --force`. | Part of `fix`; new imprint fails it like `hygiene:check`. |
 | `npm run docs:changed` | Says whether the last push touched the docs or their build (a CI job output). | CI only — gates the docs deploy. |
 | `npm run deploy:targets` | Which Workers a PR's diff would deploy, as a job summary; on the release PR, a sticky comment. | CI only — the `deploy targets` job. |
 | `npm run docs:dev` | Serves the docs site locally with live reload. | Writing docs; `-- --port <n>` picks the port. |
 | `npm run docs:build` | Builds the docs site to `docs/.vitepress/dist`. | Rarely by hand; `verify -w docs` and the docs Worker's deploy run it. |
 | `npm run web:preview` | Serves the dashboard bundle over fixtures for a visual check. | After a `web/` change. |
-| `npm run screenshots:gen` | Renders the dashboard screenshots whose inputs changed, both themes, recording each surface's input hashes in `docs/public/screenshots/manifest/` (`--force`: all). | After a `web/` or fixture change, once `screenshots:check` names it; needs `npx playwright-core install chromium`, so it is not part of `fix`. |
+| `npm run screenshots:gen` | Renders the dashboard screenshots whose inputs changed, both themes, recording each surface's input hashes in `docs/public/screenshots/manifest/` (`--force`: all). | After a `web/` or fixture change, once `screenshots:check` names it; needs `npx playwright-core install chromium`, so not in `fix`. |
 | `npm run screenshots:check` | Each surface's inputs still hash to what its screenshots were rendered from — no browser. | Part of `check:consistency`. |
 | `npm run load` | Load harness: `-- history\|resident\|sandbox\|e2e\|cards\|provider\|pi\|route\|door`. | Capacity receipts (docs/reference/specs/load-harness.md). |
 

@@ -100,7 +100,7 @@
       "when": "After bumping either half of a pair."
     },
     "check:pr-title": {
-      "does": "Judges one PR title as the changelog line: grammar, type, scope, the `!` migration note.",
+      "does": "Judges one PR title as the changelog line: grammar, type, scope, `!`.",
       "when": "`-- \"feat(scope): …\"` before opening a PR; CI's `title` check."
     },
     "pr-title:gen": {
@@ -143,6 +143,10 @@
       "does": "Every production dependency's license is on the allowlist.",
       "when": "After adding a dependency."
     },
+    "check:deps-drift": {
+      "does": "Installed node_modules match the lockfile: drift fails by name.",
+      "when": "Part of `check:consistency`."
+    },
     "docs:gen": {
       "does": "Writes the generated regions of the reference docs from the command registry.",
       "when": "After changing a command, flag, route, or config key; part of `fix`."
@@ -160,12 +164,12 @@
       "when": "`-- --changed origin/main...HEAD [--test-guard]` before review; `-- --require` fails on an uncovered path; `-- --json` for machines."
     },
     "decisions:check": {
-      "does": "Every record under `docs/decisions/` and `docs/plans/` has a valid `status`, a superseded one names its successor, and an accepted body changes only by an appended `## Amended` re-evaluation.",
+      "does": "Every record under `docs/decisions/` and `docs/plans/` has a valid `status`, a superseded one names its successor, an accepted body only gains an appended `## Amended`.",
       "when": "Part of `check:consistency`; a failing record is superseded or amended by appending, never edited."
     },
     "hygiene:check": {
       "does": "The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks.",
-      "when": "Part of `check:consistency`. New hit: rewrite the line or allow it by name in `scripts/public-hygiene.allow`; `-- --list <prefix>` shows the rest."
+      "when": "Part of `check:consistency`. New hit: rewrite the line or allow it in `scripts/public-hygiene.allow`."
     },
     "hygiene:gen": {
       "does": "Records the tree's remaining imprint after a scrub; refuses growth unless `-- --force`.",
@@ -180,7 +184,7 @@
       "when": "Part of `check:consistency`."
     },
     "clock:gen": {
-      "does": "Regenerates both clock allowlists from the tree: wall-clock reads (empty) and duration literals outside `src/core/budgets.ts`.",
+      "does": "Regenerates both clock allowlists: wall-clock reads (empty) and duration literals outside `src/core/budgets.ts`.",
       "when": "Part of `fix`."
     },
     "clock:check": {
@@ -217,7 +221,7 @@
     },
     "screenshots:gen": {
       "does": "Renders the dashboard screenshots whose inputs changed, both themes, recording each surface's input hashes in `docs/public/screenshots/manifest/` (`--force`: all).",
-      "when": "After a `web/` or fixture change, once `screenshots:check` names it; needs `npx playwright-core install chromium`, so it is not part of `fix`."
+      "when": "After a `web/` or fixture change, once `screenshots:check` names it; needs `npx playwright-core install chromium`, so not in `fix`."
     },
     "screenshots:check": {
       "does": "Each surface's inputs still hash to what its screenshots were rendered from — no browser.",

@@ -145,6 +145,56 @@ describe("depCacheScript with a store-backed node_modules source (item 59)", () 
   });
 });
 
+describe("depCacheScript nested node_modules (a lockfile that installs into a workspace's own node_modules)", () => {
+  // Without this, every resident tree lacked the nested dirs a lockfile
+  // mandates (deploy/cloudflare-memory/node_modules), the hoisted packages
+  // they anchor became extraneous, and `npm ls --omit=dev` misattributed
+  // their subtrees to production (the LGPL licenses:check failure).
+  it("a store-backed script walks the entry for outermost nested node_modules and hardlinks each at its tree-relative path, gated on the tree having the parent dir and no dir already there", () => {
+    const script = depCacheScript("/workspace/checkout", "/wt", "worker4", {
+      nodeModulesSrc: "/workspace/deps/k/node_modules",
+    });
+    expect(script).toContain("cd '/workspace/deps/k'");
+    expect(script).toContain("-path ./node_modules -o -name .git");
+    expect(script).toContain("nested=");
+  });
+  it("a checkout-backed script (no store entry) has no nested walk — the pre-store behavior is untouched", () => {
+    expect(depCacheScript("/workspace/checkout", "/wt", "worker4")).not.toContain("nested=");
+  });
+  it("runs for real: the nested node_modules lands in the tree as shared inodes, its mutable listing and nested= line are emitted; a tree without the parent dir is skipped silently", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nested-"));
+    try {
+      const entry = join(dir, "deps", "k");
+      const wt = join(dir, "wt");
+      mkdirSync(join(entry, "node_modules", "pkg"), { recursive: true });
+      writeFileSync(join(entry, "node_modules", "pkg", "index.js"), "1");
+      mkdirSync(join(entry, "deploy", "w", "node_modules", ".cache"), { recursive: true });
+      writeFileSync(join(entry, "deploy", "w", "node_modules", "p.js"), "1");
+      mkdirSync(join(entry, "gone", "node_modules"), { recursive: true }); // tree has no `gone/`
+      mkdirSync(join(wt, "deploy", "w"), { recursive: true });
+      const me = execFileSync("id", ["-un"], { encoding: "utf8" }).trim();
+      const script = depCacheScript(join(dir, "checkout"), wt, me, {
+        nodeModulesSrc: join(entry, "node_modules"),
+      });
+      const out = execFileSync("sh", ["-c", script], { encoding: "utf8" });
+      const parsed = parseDepCacheScriptOutput(out);
+      expect(parsed.failedStep).toBeNull();
+      expect(parsed.nested).toEqual(["deploy/w/node_modules"]);
+      expect(existsSync(join(wt, "deploy", "w", "node_modules", "p.js"))).toBe(true);
+      expect(existsSync(join(wt, "gone"))).toBe(false);
+      expect(parsed.mutableListing).toContain(join(wt, "deploy", "w", "node_modules", ".cache"));
+      // mutableCachePaths scoped to the nested root picks up its cache, and
+      // scoped to the top-level root it does not — the swap stays per root.
+      expect(mutableCachePaths(join(wt, "deploy", "w", "node_modules"), parsed.mutableListing)).toEqual([
+        join(wt, "deploy", "w", "node_modules", ".cache"),
+      ]);
+      expect(mutableCachePaths(join(wt, "node_modules"), parsed.mutableListing)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("depCacheScript (all five dirs in ONE fork, tagged output)", () => {
   const script = depCacheScript("/workspace/checkout", "/wt", "worker4");
   it("handles every cached dir, each gated on src-exists and dst-absent exactly like the old per-dir spawns", () => {
@@ -189,8 +239,18 @@ describe("parseDepCacheScriptOutput", () => {
       mech: "hardlink",
       mutableListing: [],
       skipped: [],
+      nested: [],
       failedStep: null,
     });
+  });
+
+  it("collects the nested= lines naming each nested node_modules the script hardlinked, tree-relative, so the Worker can swap their tool caches too", () => {
+    const out = "dir:node_modules=hardlink\nnested=deploy/cloudflare-memory/node_modules\nnested=web/node_modules\n";
+    expect(parseDepCacheScriptOutput(out).nested).toEqual([
+      "deploy/cloudflare-memory/node_modules",
+      "web/node_modules",
+    ]);
+    expect(parseDepCacheScriptOutput("dir:node_modules=hardlink\n").nested).toEqual([]);
   });
   it("collects the skipped= lines the swap script prints for tree-private entries (no store counterpart), so the Worker can name what it left in place", () => {
     expect(parseDepCacheScriptOutput("skipped=.eports.d.ts\nskipped=loader/.cache\n").skipped).toEqual([
