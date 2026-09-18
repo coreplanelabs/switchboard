@@ -130,7 +130,7 @@ const grant = (store: RunBearerStore, runId = "run-1") =>
     runId,
     modelRef: "anthropic/m",
     providerName: "anthropic",
-    providerType: "anthropic",
+    providerWire: "anthropic-messages",
     model: "m",
     maxTokens: 4096,
     maxTurns: 50,

@@ -145,7 +145,7 @@ const grantFor = (runId: string, clock: () => number): RunBearerGrant => ({
   runId,
   modelRef: "switchboard/real-model",
   providerName: "switchboard",
-  providerType: "openai-compatible",
+  providerWire: "openai-chat",
   model: "real-model",
   maxTokens: 4096,
   maxTurns: 50,

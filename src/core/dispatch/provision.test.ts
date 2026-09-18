@@ -1116,7 +1116,7 @@ describe("mintRunBearer — the run's model-proxy bearer", () => {
       runId: run.id,
       modelRef: "anthropic/coding-model",
       providerName: "anthropic",
-      providerType: "anthropic",
+      providerWire: "anthropic-messages",
       model: "coding-model",
       maxTokens: agent.maxTokens,
       maxTurns: agent.maxTurns,

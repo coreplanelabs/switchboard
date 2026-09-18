@@ -14508,7 +14508,7 @@ describe("the model proxy's run bearer through dispatch()", () => {
       runId,
       modelRef: "anthropic/general-model",
       providerName: "anthropic",
-      providerType: "anthropic",
+      providerWire: "anthropic-messages",
       model: "general-model",
       maxTurns: 30, // the general preset's turn guard: its five minutes × RUNAWAY_TURNS_PER_MINUTE
       maxTokens: 16000,

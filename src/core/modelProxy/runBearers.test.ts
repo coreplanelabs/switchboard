@@ -18,7 +18,7 @@ function harness(now = START) {
     runId,
     modelRef: "anthropic/claude-opus-5",
     providerName: "anthropic",
-    providerType: "anthropic",
+    providerWire: "anthropic-messages",
     model: "claude-opus-5",
     maxTokens: 64000,
     maxTurns: 3,

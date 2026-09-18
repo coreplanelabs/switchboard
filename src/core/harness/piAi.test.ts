@@ -135,8 +135,9 @@ describe("PiAiProviders — the provider table config.yaml names, built on pi's 
   });
 
   it("each block is one pi API: anthropic speaks anthropic-messages at pi's Anthropic base, openai-compatible speaks openai-completions at the block's base with the trailing slash stripped", () => {
-    expect(piApiFor("anthropic")).toBe("anthropic-messages");
-    expect(piApiFor("openai-compatible")).toBe("openai-completions");
+    expect(piApiFor("anthropic-messages")).toBe("anthropic-messages");
+    expect(piApiFor("openai-chat")).toBe("openai-completions");
+    expect(piApiFor("openai-responses")).toBe("openai-responses");
     const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK });
     expect(table.get("anthropic")).toMatchObject({ api: "anthropic-messages", baseUrl: ANTHROPIC_BASE_URL });
     expect(table.get("openrouter")).toMatchObject({

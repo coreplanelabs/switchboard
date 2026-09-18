@@ -619,7 +619,7 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
       runId: "run-c",
       modelRef: "anthropic/claude-fable-5",
       providerName: "anthropic",
-      providerType: "anthropic",
+      providerWire: "anthropic-messages",
       model: "claude-fable-5",
       maxTokens: 4096,
       maxTurns: 50,

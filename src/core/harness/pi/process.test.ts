@@ -318,6 +318,29 @@ describe("piModelsJson", () => {
     expect(entry.thinkingLevelMap).toEqual({ low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" });
   });
 
+  it("an openai-responses card puts pi on the Responses API under the proxy's /v1, with no completions compat — max_output_tokens is that adapter's own spelling", () => {
+    const card = cardOf({
+      ref: "openai/gpt-5.4",
+      block: "openai",
+      model: "gpt-5.4",
+      wire: "openai-responses",
+      capField: "max_output_tokens",
+    });
+    const models = JSON.parse(
+      piModelsJson({ ...spec, model: { ...spec.model, id: "gpt-5.4", providerType: "openai-compatible" }, card }),
+    ) as { providers: Record<string, { baseUrl: string; api: string; models: Array<Record<string, unknown>> }> };
+    const p = models.providers[PROXY_PROVIDER];
+    expect(p.baseUrl).toBe("https://bot.example.com/v1");
+    expect(p.api).toBe("openai-responses");
+    expect(p.models[0]).not.toHaveProperty("compat");
+  });
+
+  it("a markers card on the Responses wire asks for no cache_control format — the compat knob is the completions shape's alone", () => {
+    const card = cardOf({ wire: "openai-responses", vendor: "anthropic", cache: "markers" });
+    const entry = modelOf({ ...spec, model: { ...spec.model, providerType: "openai-compatible" }, card });
+    expect(entry).not.toHaveProperty("compat");
+  });
+
   it("a card that says no images narrows the entry's input to text", () => {
     const entry = modelOf({
       ...spec,

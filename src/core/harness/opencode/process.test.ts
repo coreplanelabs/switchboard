@@ -376,6 +376,28 @@ describe("the configuration writer", () => {
     expect(loopback.providers.switchboard.settings.baseURL).toBe("http://127.0.0.1:8080/v1");
   });
 
+  // A Responses block on OpenCode is refused at dispatch until the bundled
+  // @ai-sdk/openai is measured against the logging fake (model-proxy item 1);
+  // the wire's mapping is written here so the configuration is right when the
+  // measurement lifts the refusal.
+  it("an openai-responses card maps onto @ai-sdk/openai under the proxy's /v1 with no chat cap compat — max_output_tokens is that package's own spelling", () => {
+    const card = cardOf({
+      ref: "openai/gpt-5.4",
+      block: "openai",
+      model: "gpt-5.4",
+      wire: "openai-responses",
+      capField: "max_output_tokens",
+    });
+    const responses = openCodeConfig({
+      ...reviewSpec,
+      model: { ...reviewSpec.model, id: "gpt-5.4" },
+      card,
+    }) as any;
+    expect(responses.providers.switchboard.package).toBe("aisdk:@ai-sdk/openai");
+    expect(responses.providers.switchboard.settings.baseURL).toBe("https://bot.example.com/v1");
+    expect(responses.providers.switchboard.models["gpt-5.4"]).not.toHaveProperty("compatibility");
+  });
+
   // The card written into the document (record 0052): the word on the wire is
   // the card's, never one the harness chose.
   const modelEntry = (s: OpenCodeLaunchSpec) => (openCodeConfig(s) as any).providers[PROXY_PROVIDER].models[s.model.id];

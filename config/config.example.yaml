@@ -14,10 +14,9 @@ providers:
   # OpenAI itself runs on its Responses API (record 0052): every first-party
   # OpenAI card in pi's registry is `openai-responses`, OpenAI recommends the
   # wire for new projects, and its chat route loses tool calling with any
-  # effort above `none` from GPT-5.4. The wire is a declaration here; the proxy
-  # serves the Responses route in a later unit, and until then a run on this
-  # block meets the provider's own answer. `type: openai-compatible` keeps
-  # loading as `wire: openai-chat` for one release.
+  # effort above `none` from GPT-5.4. The proxy serves the wire at
+  # `/v1/responses` — a run on this block is pinned and metered like any other.
+  # `type: openai-compatible` keeps loading as `wire: openai-chat` for one release.
   openai:
     wire: openai-responses
     baseUrl: https://api.openai.com/v1

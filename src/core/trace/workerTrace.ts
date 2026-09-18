@@ -54,9 +54,10 @@ export function shimRoute(pathname: string): string | undefined {
   if (pathname.startsWith("/admin/")) return "admin";
   // The artifact copy (deploy/cloudflare/artifactsCopy.ts): the shim's own route, a 1 GB stream.
   if (pathname === "/artifacts/copy") return "artifacts";
-  // The model proxy's two routes (docs/reference/specs/model-proxy.md): a bounded
+  // The model proxy's three routes (docs/reference/specs/model-proxy.md): a bounded
   // request per model call, forwarded to the container like everything else.
-  if (pathname === "/v1/messages" || pathname === "/v1/chat/completions") return "model-proxy";
+  if (pathname === "/v1/messages" || pathname === "/v1/chat/completions" || pathname === "/v1/responses")
+    return "model-proxy";
   // The pi harness's four routes (docs/reference/specs/harness-pi.md item 7): a
   // run's extension asking for its tools, a verdict, a relayed tool's result,
   // how a compaction is written.

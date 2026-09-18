@@ -503,8 +503,13 @@ export const PROVIDER_DRIVERS: readonly ProviderDriver[] = [
     // OpenCode's openai-compatible provider has no marker knob, so an
     // aggregator's markers are pi's alone; the declared reason is the payload
     // check's own words (a declared cannot must fail for exactly its reason).
+    // A Responses block on OpenCode is refused at dispatch by name (U42,
+    // `resolveTarget`) until the bundled `@ai-sdk/openai` is measured against
+    // the logging fake, so its row is declared, never run.
     cannot: {
       "harness-write-cache-markers": "the payload carries no cache_control marker",
+      "openai-responses-cap":
+        "a Responses block on OpenCode is refused at dispatch until @ai-sdk/openai is measured against the logging fake",
     },
   },
 ];

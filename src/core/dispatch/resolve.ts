@@ -19,6 +19,7 @@ import {
 import { parseModelRef } from "../provider.js";
 import { decideControls, resolveModelCard, type ControlDecision, type ModelCard } from "../modelCard.js";
 import { installedModelRegistry } from "../installedModelRegistry.js";
+import { DEFAULT_HARNESS } from "../harness/roster.js";
 import {
   githubTokenScopeFor,
   residentOnboardedProbe,
@@ -251,6 +252,20 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
       refusalOf(
         "model_card_refused",
         `Model "${resolved.modelRef}" refuses ${refused.control}${refused.asked !== undefined ? ` "${refused.asked}"` : ""}: ${refused.why}`,
+      ),
+    );
+  }
+
+  // The Responses wire is pi's alone for now (record 0052, U42): a preset on
+  // OpenCode with a Responses block is refused here, by name, before any card
+  // or span — never a call that fails mid-run — until OpenCode's bundled
+  // `@ai-sdk/openai` is measured against the logging fake (the matrix's
+  // declared `cannot` carries the same reason).
+  if (modelCard.wire === "openai-responses" && (resolved.harness?.name ?? DEFAULT_HARNESS) === "opencode") {
+    throw new RefusalError(
+      refusalOf(
+        "model_card_refused",
+        `Model "${resolved.modelRef}" speaks the openai-responses wire, which the "opencode" harness cannot speak yet: run it on pi, or use an openai-chat block.`,
       ),
     );
   }
