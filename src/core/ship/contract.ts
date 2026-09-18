@@ -439,17 +439,30 @@ export const TIMEOUT_ON_LONG_COMMANDS =
   "State a timeout on any command you expect to run longer than a minute: a timeout that reaches past the loop's " +
   "end is refused before the command runs, never cut midway.";
 
+/** The fast gates a plan child runs before every push, named one by one
+ *  (agent-ship item 13; agent-coding item 9). "Its cheapest proving checks"
+ *  left the choice to the child, and children chose wrong: prettier was
+ *  reported clean while `format:check` was red, and hygiene imprints reached
+ *  CI that `hygiene:check` would have caught locally. Naming the commands
+ *  makes each gate a receipt — the exit line goes into the handoff's verified
+ *  list, and a gate the child could not run is unproven, never claimed clean. */
+export const FAST_GATES_BEFORE_PUSH =
+  "The fast gates, before every push: `npx prettier --check` on the changed files, `npm run hygiene:check`, " +
+  "`npm run specs:check`, and `tsc --noEmit` on the touched project under `NODE_OPTIONS=--max-old-space-size=6144`. " +
+  "Paste each command's exit line into the handoff's verified list; a gate you could not run goes under unproven " +
+  "and is never claimed clean.";
+
 function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
   const branch = rebase.branch ? `\`${rebase.branch}\`` : "the unit's branch";
   const onto = rebase.onto ? `\`${rebase.onto}\`` : "the merged parent";
   return (
     `Rebase ${branch} onto ${onto} before any other work — the parent unit has merged and the base has moved; ` +
     `the only writes are your own on that branch. A conflict ends the unit: report it as the handoff and stop. ` +
-    `Push the branch as soon as the change exists and its cheapest proving checks pass — before the project's ` +
+    `Push the branch as soon as the change exists and the fast gates pass — before the project's ` +
     `full verification, which runs after that push with any fix as a further commit; an unpushed tree does not ` +
-    `survive the run's end. Right before each push, fetch ${onto} again and rebase once more if it moved while ` +
-    `you worked, so the pull request is not born conflicting. At the wind-down note, commit and push what compiles, ` +
-    `say what does not, then answer. ${TIMEOUT_ON_LONG_COMMANDS}`
+    `survive the run's end. ${FAST_GATES_BEFORE_PUSH} Right before each push, fetch ${onto} again and rebase ` +
+    `once more if it moved while you worked, so the pull request is not born conflicting. At the wind-down note, ` +
+    `commit and push what compiles, say what does not, then answer. ${TIMEOUT_ON_LONG_COMMANDS}`
   );
 }
 
