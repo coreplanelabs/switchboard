@@ -4,9 +4,12 @@
 // progress off the row — never off a model's word — and renews only when three
 // things hold: the row shows progress, the grant has a renewal left and the
 // spend is under its cap, and the pipeline's ask still passes the fit.
-// Otherwise it stops and names the clause that failed; a person's reply spends
-// a renewal by hand. Pure and node-free: the unit machine (a Worker) and the
-// bot's routes compute the same decision from the same facts.
+// Otherwise it stops and names the clause that failed. Nothing spends a renewal
+// by hand today — follow-ups route by thread context, never by a keyword
+// (routing-and-config item 3), and a re-issued request opens a fresh grant — so
+// the stop says what actually spends one (a segment's progress) and to re-issue
+// the request. Pure and node-free: the unit machine (a Worker) and the bot's
+// routes compute the same decision from the same facts.
 
 import { fit, type Grant, type Pipeline } from "../budgets.js";
 import type { Handoff } from "./handoff.js";
@@ -140,7 +143,9 @@ export function renewalDecision(input: RenewalInput): RenewalDecision {
 
 /** The card's words (the record's trace, steps 4 and 9): a renewal names its
  *  number of the grant's and the sha it continues from; a stop names the
- *  clause and, when renewals remain, the reply that spends one by hand. */
+ *  clause and, when renewals remain, what actually spends one — a segment's
+ *  progress — and the honest recourse (re-issue the request). It teaches no
+ *  keyword: the router has none (routing-and-config item 3). */
 export function renderRenewal(decision: RenewalDecision, grant: Grant): string {
   if (decision.renew)
     return `renewal ${decision.segment - 1} of ${grant.renewals}, continues ${decision.from !== undefined ? decision.from.slice(0, 7) : "the branch's head"}`;
@@ -151,7 +156,7 @@ export function renderRenewal(decision: RenewalDecision, grant: Grant): string {
   switch (decision.why) {
     case "no_progress":
       return decision.renewalsLeft > 0
-        ? `no progress in the last lease; ${holds}; reply continue to spend one`
+        ? `no progress in the last lease; ${holds} unspent — a renewal is spent only by a segment that pushed to the unit's branch or moved its handoff; re-issue the request to try again`
         : `no progress in the last lease; ${holds}`;
     case "cost_cap":
       return decision.renewalsLeft > 0 ? `${decision.detail}; ${holds} unspent` : decision.detail;
