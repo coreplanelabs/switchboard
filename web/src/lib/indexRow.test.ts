@@ -21,6 +21,7 @@ import {
   delivering,
   countTip,
   countText,
+  PROVISIONAL_LABEL,
 } from "./indexRow";
 import { formatLocalIso } from "./format";
 
@@ -92,6 +93,18 @@ describe("status vocabulary", () => {
     expect(statusDot(finished("interrupted"))).toBe("red"); // cut down before finish
     expect(statusDot(finished("stopped_soft"))).toBe("amber");
     expect(statusDot(finished("completed"))).toBe("grey");
+  });
+
+  it("provisional: a tombstone-first record still in its window renders as 'unfinished — no finish recorded', amber dot; a real `interrupted` record (no provisional flag) is unaffected", () => {
+    // The provisional tombstone: the start-of-run interrupted marker (run-history item 27)
+    const provisional = finished("interrupted", { provisional: true });
+    expect(statusWord(provisional)).toBe(PROVISIONAL_LABEL);
+    expect(statusDot(provisional)).toBe("amber"); // not red — the run may still be live
+    expect(dotTip(provisional)).toContain(PROVISIONAL_LABEL);
+    // A real interrupted record (no provisional flag) is unchanged
+    const realInterrupted = finished("interrupted");
+    expect(statusWord(realInterrupted)).toBe("interrupted");
+    expect(statusDot(realInterrupted)).toBe("red");
   });
 
   it("stop badge: stopping (mode) in flight, the outcome word once stopped", () => {

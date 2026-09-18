@@ -167,6 +167,12 @@ export interface RunView {
   cost?: RunCost;
   /** True once the durable store holds this run (registry flag or store row). */
   persisted?: boolean;
+  /** True when this row came from the store's provisional tombstone — the
+   *  start-of-run `interrupted` still in its provisional window. A store-only
+   *  reader must render it as "unfinished — no finish recorded" rather than as
+   *  `interrupted` (run-history item 27). Absent on live rows and on final
+   *  (finished) records. */
+  provisional?: true;
   /** The generation driving this run when it is not this process (run-history
    *  item 41): a row read from the run ledger — live under another container,
    *  or reclaimed here and not yet launched. Absent on this process's rows. */
@@ -482,7 +488,17 @@ function liveView(s: RunSummary): RunView {
 
 /** A stored row as a view: finished, persisted, and priced when it carries usage. */
 function persistedView(item: RunListItem, prices: ModelPriceTable): RunView {
-  return { ...item, finished: true, persisted: true, ...costOf(item, prices) };
+  return {
+    ...item,
+    finished: true,
+    persisted: true,
+    // Propagate the provisional flag from the record so a caller can render
+    // "unfinished — no finish recorded" instead of `interrupted` (run-history
+    // item 27). The flag is absent on final records, so it is never copied for
+    // a run that ended normally.
+    ...(item.provisional === true ? { provisional: true } : {}),
+    ...costOf(item, prices),
+  };
 }
 
 /** The record's dollars (costs.md item 4c): nothing for a record written before usage existed. */

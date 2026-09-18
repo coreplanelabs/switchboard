@@ -44,7 +44,7 @@ import { durationTone, heatStyle } from "../lib/durationTone";
 import { formatClock, formatDateTime, formatDuration, formatLocalIso, formatUsd } from "../lib/format";
 import { githubCommitUrl, githubPrUrl, githubRepoUrl, githubTreeUrl, shortSha } from "../lib/githubLinks";
 import { phasePaint } from "../lib/termPaint";
-import { statusLabel } from "../lib/indexRow";
+import { statusLabel, PROVISIONAL_LABEL } from "../lib/indexRow";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 
 // The per-run page: one timeline of the whole run, LIVE (follows the
@@ -108,6 +108,10 @@ const liveStamps = ref<{ finishedAt?: number; sealedAt?: number; replyOk?: boole
 const endChip = computed(() => {
   if (isHistory && seed?.mode === "history") {
     if (seed.status === "completed") return { ok: true, cls: "", word: "succeeded" };
+    // A provisional record: the tombstone-first start marker still in its window —
+    // rendered as "unfinished — no finish recorded", amber (not red), because the
+    // run may still be live in a registry the store-only reader cannot see.
+    if (seed.provisional) return { ok: false, cls: "amber", word: PROVISIONAL_LABEL };
     const cls =
       seed.status === "failed" || seed.status === "stopped_hard" || seed.status === "interrupted"
         ? "red"

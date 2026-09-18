@@ -39,6 +39,12 @@ import {
 // reached `finish`.
 export type RunStatus = "completed" | "stopped_soft" | "stopped_hard" | "failed" | "interrupted";
 
+/** How every store-only reader renders a record still in its provisional
+ *  window (run-history.md item 27's third state): not `interrupted` (a real
+ *  terminal state) and not `running` (the store cannot know). One string for
+ *  the CLI's `runs list`/`runs get` and the web's index row and run page. */
+export const PROVISIONAL_LABEL = "unfinished — no finish recorded";
+
 const RUN_STATUSES: readonly RunStatus[] = ["completed", "stopped_soft", "stopped_hard", "failed", "interrupted"];
 
 /** Every `runs.*` id: checked before any store call. */
@@ -115,6 +121,13 @@ export interface RunRecord {
   stepCount?: number;
   schema?: number;
   status: RunStatus;
+  /** Present on a tombstone record still in its provisional window — the
+   *  start-of-run `interrupted` or the drain-deadline upgrade — before the
+   *  run's final write lands. Absent on every final (finished) record. A
+   *  store-only reader must render a provisional record as "unfinished — no
+   *  finish recorded" rather than as `interrupted`, because the run may still
+   *  be live in a registry the reader cannot see (run-history.md item 27). */
+  provisional?: true;
   /** The failure by name, when a `failed` run has one (item 57):
    *  `policy_refusal`, the provider refused the run's model call under its
    *  usage policy. Absent on a run that did not fail, on one that failed for
@@ -944,6 +957,9 @@ export function isRunRecord(v: unknown): v is RunRecord {
       return false;
   }
   if (!RUN_STATUSES.includes(r.status as RunStatus)) return false;
+  // A provisional tombstone carries `provisional: true`; any other value (false,
+  // a string, etc.) is a malformed record — only the presence of the flag matters.
+  if (r.provisional !== undefined && r.provisional !== true) return false;
   if (!isFiniteNumber(r.eventCount) || !isFiniteNumber(r.storedEventCount)) return false;
   if (typeof r.truncated !== "boolean") return false;
   if (!Array.isArray(r.events)) return false;

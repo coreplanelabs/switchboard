@@ -8,6 +8,7 @@ import { causeOf, commandRefusalCode, type CommandGuessHint, type RefusalCause }
 import { viewingRefusal } from "./authz/viewAs.js";
 import type { Actor, Resource } from "./authz/types.js";
 import { ALL_CAPABILITIES, type Capabilities } from "./capabilities.js";
+import { PROVISIONAL_LABEL } from "./runRecord.js";
 
 // Command registry (docs/decisions/0008-one-command-definition-every-surface.md): the ONE seam
 // behind every operator surface. The lowest level is plain TypeScript: a
@@ -754,7 +755,12 @@ export function renderRunLine(r: JsonObject, now: number, surface: "chat" | "tex
   const finishedAt = typeof r.finishedAt === "number" ? r.finishedAt : undefined;
   const receivedAt = typeof r.receivedAt === "number" ? r.receivedAt : undefined;
   const stop = isObject(r.stop) && typeof r.stop.state === "string" ? r.stop.state : undefined;
-  const status = r.finished === true ? (typeof r.status === "string" ? r.status : "finished") : (stop ?? "active");
+  // A provisional tombstone (run-history item 27) is the store's third state:
+  // never `interrupted` — the run may still be live in a registry this
+  // store-only listing cannot see.
+  const finishedWord =
+    r.provisional === true ? PROVISIONAL_LABEL : typeof r.status === "string" ? r.status : "finished";
+  const status = r.finished === true ? finishedWord : (stop ?? "active");
   // The one duration definition (docs/reference/specs/tracing.md): received (or started) to
   // finished, or to now while live.
   const ms = startedAt === undefined ? undefined : runDurationMs({ startedAt, receivedAt, finishedAt }, now);

@@ -499,6 +499,18 @@ describe("RunsService.listRuns — read merge", () => {
     expect(got.ok && got.value.status).toBe("interrupted");
   });
 
+  // run-history item 27: the persisted flag reaches every store-only reader's view.
+  it("a stored provisional tombstone's flag rides the view: listRuns and getRun carry `provisional: true`, and a final record's view carries no key", async () => {
+    const { svc, store } = setup(); // an empty registry = a store-only reader
+    await store!.put(record("tomb", NOW, { status: "interrupted", startedAt: NOW, provisional: true }));
+    await store!.put(record("done", NOW - 1, { status: "completed" }));
+    const finished = await svc.listRuns({ visibleTo: ALL, status: "finished" });
+    expect(finished.runs.find((r) => r.id === "tomb")?.provisional).toBe(true);
+    expect("provisional" in finished.runs.find((r) => r.id === "done")!).toBe(false);
+    const got = await svc.getRun("tomb");
+    expect(got.ok && got.value.provisional).toBe(true);
+  });
+
   it("active = unfinished registry runs only and never calls the store; finished = finished registry ∪ store; all = union", async () => {
     const { reg, svc, store } = setup();
     const list = vi.spyOn(store!, "list");

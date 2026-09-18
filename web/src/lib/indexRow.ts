@@ -20,6 +20,12 @@ export function statusLabel(status: string): string {
         : status;
 }
 
+// The label for a provisional record — the tombstone-first run-start marker
+// still in its provisional window (run-history item 27) — is shared with the
+// CLI's renderers so every store-only surface says the same words.
+import { PROVISIONAL_LABEL } from "@core/core/runRecord.js";
+export { PROVISIONAL_LABEL };
+
 /** The stop badge: "stopping (soft)" while in flight; once stopped, the same
  *  word the outcome badge would use (killed / stopped early). */
 export function stopLabel(stop: { state: string; mode: string }): string {
@@ -27,7 +33,11 @@ export function stopLabel(stop: { state: string; mode: string }): string {
 }
 
 export function statusWord(run: IndexRow): string {
-  return !run.finished ? "live" : run.status ? statusLabel(run.status) : "finished";
+  if (!run.finished) return "live";
+  // A provisional record: the tombstone-first start marker still in its window.
+  // Never `interrupted` — that is a real terminal state for a confirmed dead run.
+  if (run.provisional) return PROVISIONAL_LABEL;
+  return run.status ? statusLabel(run.status) : "finished";
 }
 
 export type DotTone = "green" | "red" | "amber" | "grey";
@@ -43,6 +53,10 @@ export function delivering(run: IndexRow): boolean {
 export function statusDot(run: IndexRow): DotTone {
   if (!run.finished) return "green";
   if (delivering(run)) return "amber";
+  // A provisional record: the tombstone-first marker still in its window — amber,
+  // not red, because the run may still be live in a registry the store-only reader
+  // cannot see. "Unknown" is closer to amber than to red.
+  if (run.provisional) return "amber";
   // `interrupted`: the run was cut down before finish (container
   // replaced or crashed) — as red as a failure. The word itself passes through
   // `statusLabel` unchanged.
