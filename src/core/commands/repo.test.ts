@@ -532,15 +532,15 @@ describe("repo onboard", () => {
     expect(text).not.toContain("…");
   });
 
-  it("a name the installation does not hold with one near match asks the question before the mint (record 0054)", async () => {
+  it("a name the installation does not hold with one near match carries a guess (record 0054): the refusal's text is the base sentence; the guess holds the corrected line and the evidence so renderRefusal shows Yes/No", async () => {
     const c = mockClient();
     const commands = bind({ admin: c, installationRepos: async () => ["acme/infrastructure", "acme/api"] });
     const { res, text } = await say(commands, "repo onboard acme/infra", admin);
     expect(res).toMatchObject({ ok: false, error: "not_found" });
     expect(text).toContain("`acme/infra` is not in the GitHub App installation's repository list.");
-    expect(text).toContain("Did you mean:");
-    expect(text).toContain("`repo onboard acme/infrastructure`");
-    expect(text).toContain("which is onboarded");
+    // The guess carries the corrected line and evidence — not the text (renderRefusal renders these).
+    expect(res.ok === false && res.guess?.line).toBe("repo onboard acme/infrastructure");
+    expect(res.ok === false && res.guess?.evidence).toContain("which is onboarded");
     expect(c.onboard).not.toHaveBeenCalled();
   });
 

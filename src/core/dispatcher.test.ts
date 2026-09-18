@@ -1901,6 +1901,103 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     expect(replies[0]).toContain("backend exploded");
     expect(provider.requests).toHaveLength(0);
   });
+
+  // Feature: docs/reference/specs/routing-and-config.md item 21 (record 0054's Yes on a
+  // command refusal) — when the router binds `repo test` with a near-matching slug,
+  // the refusal carries a `Guess` so the channel shows Yes and No.
+  describe("a not-onboarded typo through the door renders Yes and No on an offering channel (routing-and-config item 21, record 0054)", () => {
+    const now = 1_000_000;
+
+    /** Router, ops backend, registry and deps wired for the near-match case:
+     *  `acme/switchboar` is the typo; `acme/switchboard` is onboarded. */
+    function wiredNearMatch() {
+      const provider = capturingProvider();
+      const deps = makeDeps(ROUTING_ON_YAML, provider);
+      let n = 0;
+      const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
+      deps.runRegistry = registry;
+      deps.admission = new ThreadAdmission();
+      deps.clock = () => now;
+      // The "not-onboarded" backend result; `onboardedSlugs` asks the admin client.
+      deps.operations = fakeOps({ kind: "not-onboarded" });
+      deps.residentAdmin = {
+        onboard: vi.fn(),
+        offboard: vi.fn(),
+        reconfigure: vi.fn(),
+        rebuild: vi.fn(),
+        residents: vi.fn(async () => ({
+          status: 200,
+          data: {
+            cap: 8,
+            count: 1,
+            residents: [{ resource: "repo:acme/switchboard", defaultRef: "main", live: { state: "warm", reason: "" } }],
+          },
+        })),
+        status: vi.fn(),
+      } as unknown as ResidentAdminClient;
+      deps.routeModel = bindsRepoTest("acme/switchboar", "main");
+      const store = new InMemoryConfirmationStore({ clock: () => now });
+      deps.confirmations = store;
+      return { deps, registry, provider, store };
+    }
+
+    it("with `offer`: the routed typo renders Yes and No — the receipt and footer as one reply, then the offer with the question sentence, the corrected line and the evidence; one redispatch row whose proposal is `repo test acme/switchboard main`", async () => {
+      const { deps, store } = wiredNearMatch();
+      const f = fakeIO();
+      const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+      f.io.offer = vi.fn(async (o) => void offers.push(o));
+      await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), f.io);
+      // First reply: receipt + footer (no error text in this reply).
+      expect(f.replies).toHaveLength(1);
+      expect(f.replies[0]).toContain("routed: repo test acme/switchboar main");
+      expect(f.replies[0]).toContain(FOOTER);
+      // Then the offer with Yes/No.
+      expect(offers).toHaveLength(1);
+      const offer = offers[0]!;
+      expect(offer.line).toBe("repo test acme/switchboard main");
+      expect(offer.question?.text).toContain("not onboarded");
+      expect(offer.question?.evidence).toContain("which is onboarded");
+      // The redispatch row: proposal text is the corrected line.
+      expect(store.rows.size).toBe(1);
+      const row = [...store.rows.values()][0]!;
+      expect(row.kind).toBe("redispatch");
+      if (row.kind === "redispatch") {
+        expect(row.message.text).toBe("repo test acme/switchboard main");
+        expect(row.line).toBe("repo test acme/switchboard main");
+        expect(row.code).toBe("command_not_found");
+      }
+    });
+
+    it("without `offer`: the text question goes out as a second reply — the receipt+footer first, then `Did you mean:` with the corrected line — no row minted", async () => {
+      const { deps, store } = wiredNearMatch();
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), io);
+      // Two replies: receipt+footer, then the text question.
+      expect(replies).toHaveLength(2);
+      expect(replies[0]).toContain("routed: repo test acme/switchboar main");
+      expect(replies[0]).toContain(FOOTER);
+      expect(replies[1]).toContain("Did you mean:");
+      expect(replies[1]).toContain("`repo test acme/switchboard main`");
+      expect(replies[1]).toContain("which is onboarded");
+      expect(store.rows.size).toBe(0);
+    });
+
+    it("the error sentence stays byte-identical whether the channel offers or not", async () => {
+      const { deps } = wiredNearMatch();
+      const withOffer = fakeIO();
+      const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+      withOffer.io.offer = vi.fn(async (o) => void offers.push(o));
+      await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), withOffer.io);
+      const { io: plainIO, replies: plainReplies } = fakeIO();
+      const { deps: deps2 } = wiredNearMatch();
+      await dispatch(deps2, msg("run the tests on acme/switchboar", "slack:UADMIN"), plainIO);
+      // The error sentence in the offer's question text equals the error sentence
+      // in the plain text reply's first line.
+      const offerText = offers[0]!.question?.text ?? "";
+      const plainText = plainReplies[1]!.split("\n")[0] ?? "";
+      expect(offerText).toBe(plainText);
+    });
+  });
 });
 
 // Coverage gap (testing P1): defaultOperations() — the REAL backend picker

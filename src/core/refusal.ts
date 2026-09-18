@@ -22,6 +22,17 @@ export interface Guess {
   evidence: string;
 }
 
+/** A command handler's guess hint (record 0054): the corrected chat form and
+ *  the evidence, without the full proposal — the proposal is synthesised at
+ *  the invocation point from the original message and this hint's `line`. The
+ *  handler carries this lighter type on `CommandError.guess`; the adapter
+ *  (`invokeChatCommand`, `answerCommand`) builds the `Guess` that
+ *  `renderRefusal` expects. */
+export interface CommandGuessHint {
+  line: string;
+  evidence: string;
+}
+
 /** One cause per code — the closed table `causeOf` reads. The codes are the
  *  inventory's: the dispatch gates' `refuse(code)` outcomes, the click's four
  *  `confirmation_*` codes, the two `elsewhere_*` reasons that never reached a

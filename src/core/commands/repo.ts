@@ -11,6 +11,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../commandRegistry.js";
+import type { CommandGuessHint } from "../refusal.js";
 import type { OperationResult, Operations, OpName } from "../operations.js";
 import {
   parseSlug,
@@ -196,6 +197,19 @@ export function nearMatchLine(typed: string, near: NearMatch, fix: (match: strin
   return undefined;
 }
 
+/** Build a `CommandGuessHint` for a not-onboarded site that has a unique near
+ *  match (record 0054): the corrected chat form the renderer shows and the
+ *  evidence that names the match. `undefined` when the near-match pass found no
+ *  unique candidate — the question still stands without a guess. `fix` builds
+ *  the corrected line (the same function as `nearMatchLine`'s). */
+export function nearMatchGuessHint(near: NearMatch, fix: (match: string) => string): CommandGuessHint | undefined {
+  if (!near.guess) return undefined;
+  return {
+    line: fix(near.guess),
+    evidence: `${near.reason ?? `\`${near.guess}\``}, which is onboarded`,
+  };
+}
+
 const n = (v: unknown): string => String(typeof v === "number" ? v : (v ?? "?"));
 const obj = (v: unknown): Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
@@ -346,6 +360,16 @@ export const repoOnboard = defineCommand({
     const repos = await installationRepos(deps);
     if (repos && repos.length > 0 && !repos.includes(args.slug)) {
       const near = nearMatch(args.slug, repos);
+      const guess = nearMatchGuessHint(near, (match) => `repo onboard ${match}`);
+      if (guess) {
+        // The guess carries the corrected line; `renderRefusal` renders the
+        // "Did you mean:" question — don't append nearMatchLine to the sentence.
+        throw new CommandError(
+          "not_found",
+          `\`${args.slug}\` is not in the GitHub App installation's repository list.`,
+          { guess },
+        );
+      }
       const line = nearMatchLine(args.slug, near, (match) => `repo onboard ${match}`);
       if (line)
         throw new CommandError(
@@ -618,7 +642,17 @@ export const repoReconfigure = defineCommand({
               .toLowerCase(),
           )
           .filter(Boolean);
-        const line = nearMatchLine(args.slug, nearMatch(args.slug, slugs), (m) => `repo reconfigure ${m}`);
+        const near = nearMatch(args.slug, slugs);
+        const guess = nearMatchGuessHint(near, (m) => `repo reconfigure ${m}`);
+        if (guess) {
+          // The guess carries the corrected line; don't append nearMatchLine.
+          throw new CommandError(
+            "not_found",
+            `\`${args.slug}\` is not onboarded — \`repo onboard ${args.slug}\` first.`,
+            { guess },
+          );
+        }
+        const line = nearMatchLine(args.slug, near, (m) => `repo reconfigure ${m}`);
         throw new CommandError(
           "not_found",
           `\`${args.slug}\` is not onboarded — \`repo onboard ${args.slug}\` first.${line ? `\n${line}` : ""}`,
@@ -703,13 +737,20 @@ function defineOp(op: Extract<OpName, "test" | "build">) {
           // Record 0054: the live registry names the resident they probably
           // meant; one bounded read, and the sentence stands without it.
           const slugs = await onboardedSlugs(deps, span);
-          const line = slugs
-            ? nearMatchLine(args.slug, nearMatch(args.slug, slugs), (m) => `repo ${op} ${m}`)
-            : undefined;
-          throw new CommandError(
-            "not_found",
-            `\`${args.slug}\` is not onboarded as a resident, so \`repo ${op}\` has nothing to run against — \`repo onboard ${args.slug}\` first, or ask the coding agent directly.${line ? `\n${line}` : ""}`,
-          );
+          const near = slugs ? nearMatch(args.slug, slugs) : undefined;
+          // The corrected line includes the ref when one was given so the
+          // person can paste it and the corrected command runs at once.
+          const fixOp = (m: string): string =>
+            args.ref !== undefined ? `repo ${op} ${m} ${args.ref}` : `repo ${op} ${m}`;
+          const guess = near ? nearMatchGuessHint(near, fixOp) : undefined;
+          const baseMsg = `\`${args.slug}\` is not onboarded as a resident, so \`repo ${op}\` has nothing to run against — \`repo onboard ${args.slug}\` first, or ask the coding agent directly.`;
+          if (guess) {
+            // The guess carries the corrected line; `renderRefusal` renders the
+            // "Did you mean:" question — don't append nearMatchLine to the sentence.
+            throw new CommandError("not_found", baseMsg, { guess });
+          }
+          const line = near ? nearMatchLine(args.slug, near, fixOp) : undefined;
+          throw new CommandError("not_found", `${baseMsg}${line ? `\n${line}` : ""}`);
         }
         case "error":
           // The backend's one signal for a platform blip is the field; the
