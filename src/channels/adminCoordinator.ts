@@ -897,6 +897,15 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   const finalReply = finalReplyOf(record.events);
   // A question is a completed turn, not a completed unit. Earlier artifacts
   // are deliberately withheld until the continuation supplies its result.
+  if (record.inputStop)
+    return json(200, {
+      ok: true,
+      run: {
+        ...coordinatorRunView(record, id.value, "Stopped waiting for input."),
+        costUsd: record.cost?.usd == null || earlierCost === null ? null : record.cost.usd + earlierCost,
+      },
+      at,
+    });
   if (record.status === "completed" && record.awaitingInput)
     return json(200, { ok: true, run: coordinatorRunView(record, id.value, finalReply), at });
   const pr = prOpenedOf(record.events);

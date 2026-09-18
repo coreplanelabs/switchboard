@@ -2672,6 +2672,35 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
 });
 
 describe("coordinator question records", () => {
+  it("reports a cancelled question as stopped and withholds its earlier review and PR artifacts", async () => {
+    const h = harness();
+    await h.store.put(
+      record("run-question", {
+        ...TAG,
+        awaitingInput: true,
+        verdict: { verdict: "approve", summary: "Earlier approval", findings: [] },
+        reviewHead: "a".repeat(40),
+        events: [{ type: "pr_opened", number: 7, url: "https://github.com/acme/api/pull/7", created: true, seq: 1 }],
+      }),
+    );
+    await h.store.stopWaiting("run-question", { at: NOW, mode: "hard", by: { kind: "chat", id: INSTANCE.userId } });
+    const reply = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+        parentInstanceId: INSTANCE.id,
+        runId: "run-question",
+      }),
+      h.deps,
+    );
+    expect(reply).toMatchObject({
+      status: 200,
+      body: { run: { status: "stopped_hard", finalReply: "Stopped waiting for input." } },
+    });
+    const run = (reply!.body as { run: Record<string, unknown> }).run;
+    expect(run.awaitingInput).toBeUndefined();
+    expect(run.verdict).toBeUndefined();
+    expect(run.pr).toBeUndefined();
+  });
+
   it("retries unavailable continuation history rather than settling an incomplete round", async () => {
     const h = harness();
     await h.store.put(record("run-question", { ...TAG, awaitingInput: true }));

@@ -231,6 +231,7 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
     const registry = new RunRegistry({ now: () => NOW });
     const store = new InMemoryRunStore({ now: () => NOW });
     const broken: RunStore = {
+      stopWaiting: (id, stop) => store.stopWaiting(id, stop),
       put: (record) => store.put(record),
       abandoned: () => {},
       get: (id) => store.get(id),

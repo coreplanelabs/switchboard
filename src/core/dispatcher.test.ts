@@ -315,6 +315,7 @@ function ledgerBackedStore(ledger: InMemoryRunLedger, store: RunStore): RunStore
     for (const record of ledger.finished.values()) await store.put(record);
   };
   return {
+    stopWaiting: (id, stop) => store.stopWaiting(id, stop),
     put: (record, trace) => store.put(record, trace),
     abandoned: () => {},
     get: async (id) => {
@@ -2970,6 +2971,7 @@ describe("review post-step", () => {
       deps.runRegistry = new RunRegistry({ genId: () => "r-order", genToken: () => "t-order" });
       const inner = new InMemoryRunStore();
       const store: RunStore = {
+        stopWaiting: (id, stop) => inner.stopWaiting(id, stop),
         put: async (r) => {
           order.push(`record:${r.status}`);
           return inner.put(r);

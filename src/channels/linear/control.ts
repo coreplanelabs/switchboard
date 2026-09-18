@@ -53,6 +53,21 @@ export async function stopLinearSession(
     return;
   // The final native activity can reach Linear just before its run record lands.
   if (!run.persisted) throw new Error("linear_stop_unavailable");
-  if (run.awaitingInput && run.finishedAt !== undefined && run.finishedAt <= input.receivedAt)
+  if (
+    (run.awaitingInput || run.inputStop?.at === input.receivedAt) &&
+    run.finishedAt !== undefined &&
+    run.finishedAt <= input.receivedAt
+  ) {
+    const result = await deps.runs.stopRun(
+      run.id,
+      "hard",
+      { kind: "chat", id: actor.id },
+      { receivedAt: input.receivedAt },
+    );
+    if (!result.ok) {
+      if (result.error === "conflict") return;
+      throw new Error("linear_stop_unavailable");
+    }
     await io.reply("Stopped waiting for input. Send a new prompt when you want to continue.");
+  }
 }

@@ -80,6 +80,20 @@ const OPTS = {
 };
 
 describe("WorkerRunStore", () => {
+  it("sends waiting cancellation to the atomic route and rejects malformed acknowledgements", async () => {
+    const stop = { at: NOW, mode: "hard" as const, by: { kind: "chat" as const, id: "linear:org:alice" } };
+    let reply: unknown = { result: "stopped" };
+    const { fetch, calls } = fakeFetch(() => ({ status: 200, body: reply }));
+    const store = new WorkerRunStore({ ...OPTS, fetch });
+    expect(await store.stopWaiting("question", stop)).toBe("stopped");
+    expect(calls[0].url).toBe("https://state.example/runs/stop-waiting");
+    expect(calls[0].body).toEqual({ storeKey: "runs:default", id: "question", stop });
+    expect(await store.stopWaiting("../bad", stop)).toBe("not_found");
+    expect(calls).toHaveLength(1);
+    reply = { result: "unknown" };
+    await expect(store.stopWaiting("question", stop)).rejects.toThrow(PermanentStoreError);
+  });
+
   it("put sends a 1.9 MB record as a string body (Content-Length left to the runtime), the bearer, and the policy", async () => {
     const { fetch, calls } = fakeFetch(() => ({
       status: 200,

@@ -1,7 +1,7 @@
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import type { BoundaryScope, Identity, MachineClass, RunProfile } from "../config/profile.js";
-import type { RunEvent } from "./runEvents.js";
-import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
+import type { RunActor, RunEvent, StopMode } from "./runEvents.js";
+import { ACTOR_ID_PATTERN, isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isRunUsage, type RunUsage } from "./runUsage.js";
 import type { PushedBranch } from "../execution/residentRebind.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
@@ -58,9 +58,54 @@ export interface RunReference {
   messages: number;
 }
 
+export interface InputStop {
+  at: number;
+  by: RunActor;
+  mode: StopMode;
+}
+
+export function isInputStop(value: unknown): value is InputStop {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.at !== "number" || !Number.isFinite(v.at) || v.at < 0 || (v.mode !== "soft" && v.mode !== "hard"))
+    return false;
+  if (typeof v.by !== "object" || v.by === null) return false;
+  const by = v.by as Record<string, unknown>;
+  return (
+    ["access", "mcp", "cli", "chat"].includes(String(by.kind)) &&
+    typeof by.id === "string" &&
+    ACTOR_ID_PATTERN.test(by.id)
+  );
+}
+
+/** A stop is monotonic: retrying a turn's original history cannot reopen input. */
+export function preserveInputStop(record: RunRecord, previous?: InputStop): RunRecord {
+  const inputStop = previous ?? record.inputStop;
+  if (!inputStop) return record;
+  const { awaitingInput: _waiting, ...rest } = record;
+  return { ...rest, inputStop, status: inputStop.mode === "hard" ? "stopped_hard" : "stopped_soft" };
+}
+
+export function stopWaitingRecord(record: RunRecord, stop: InputStop): RunRecord | undefined {
+  if (!isInputStop(stop)) return undefined;
+  if (record.inputStop) {
+    const prior = record.inputStop;
+    return prior.at === stop.at &&
+      prior.mode === stop.mode &&
+      prior.by.kind === stop.by.kind &&
+      prior.by.id === stop.by.id
+      ? record
+      : undefined;
+  }
+  if (record.status !== "completed" || !record.awaitingInput || record.finishedAt > stop.at) return undefined;
+  return preserveInputStop(record, stop);
+}
+
 export interface RunRecord {
   /** This completed turn asked a question; the task still needs user input. */
   awaitingInput?: true;
+  /** Cancellation of this turn's pending question, retained across history retries. */
+  inputStop?: InputStop;
   /** The run registry id (unguessable; safe to print — it is not the view token). */
   id: string;
   /** The human run label from the runs index. */
@@ -865,6 +910,7 @@ export function normalizeStored<T extends { diagnosis: FrictionDiagnosis; channe
 export function isRunRecord(v: unknown): v is RunRecord {
   if (typeof v !== "object" || v === null) return false;
   const r = v as Record<string, unknown>;
+  if (r.inputStop !== undefined && !isInputStop(r.inputStop)) return false;
   if (typeof r.id !== "string" || !RUN_ID_PATTERN.test(r.id)) return false;
   if (
     !isOptionalString(r.label) ||

@@ -16,8 +16,9 @@ session for the answer. Coding/review coordinators also wait when a child asks a
 question, withholding earlier PR or review results. The original requester's
 answer resumes that unit under fresh permission checks, retaining its branch or
 PR and remaining time budget. The coordinator follows the resumed run and counts
-the question turns toward its total cost. Waiting-session cancellation and live
-acceptance still need verification before the integration is ready for end users.
+the question turns toward its total cost. Waiting-session cancellation persists before native completion and survives
+restarts and late history writes. Live acceptance still needs verification before
+the integration is ready for end users.
 
 ## Register the application
 
@@ -111,7 +112,8 @@ publish an automatic PR or review verdict. Questions survive a bot restart.
 
 Native Stop lets a person cancel their own active work through the shared
 `runs:stop` policy. Stopping another person's work requires `runs:write` and
-visibility of that run. Stop can also end your current waiting question. A denied
+visibility of that run. Stop can also end your current waiting question; its
+cancellation is durable, so a restart does not resume that coordinator question. A denied
 or stale Stop leaves the session unchanged. A Linear session does not establish team-wide membership;
 configure an operator's channel grants explicitly. Revocation and access removal are
 infrastructure cancellations and require no new grant from the former requester.
