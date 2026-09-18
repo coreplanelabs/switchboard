@@ -217,26 +217,32 @@ describe("ConfigDO confirmations (docs/reference/specs/routing-and-config.md ite
     });
   });
 
-  it("a row past its expiry is refused `expired` on touch and deleted — the object's clock decides, never the caller's", async () => {
+  it("a row past its expiry is refused `expired` on touch and deleted — the refusal names the row, the object's clock decides, never the caller's", async () => {
     const id = `c-${key()}`;
-    await post("/config/confirmations/put", { ...row(id, `slack:CX:${key()}`), ttlMs: 0 });
+    const thread = `slack:CX:${key()}`;
+    await post("/config/confirmations/put", { ...row(id, thread), ttlMs: 0 });
+    // The deleted row rides the refusal so the bot can record the click (record 0054).
     expect((await post("/config/confirmations/consume", { id, actorIds: [requester] })).data).toEqual({
       refused: "expired",
+      row: { id, threadKey: thread, requester, expiresAt: expect.any(Number), body: { command: "config.set" } },
     });
     expect((await post("/config/confirmations/consume", { id, actorIds: [requester] })).data).toEqual({
       refused: "used",
     });
   });
 
-  it("an actor whose ids miss the requester is refused `foreign` and the row is kept; the requester's own id, or a list holding it, consumes", async () => {
+  it("an actor whose ids miss the requester is refused `foreign` — the refusal names the kept row; the requester's own id, or a list holding it, consumes", async () => {
     const id = `c-${key()}`;
-    await post("/config/confirmations/put", row(id, `slack:CX:${key()}`));
+    const thread = `slack:CX:${key()}`;
+    await post("/config/confirmations/put", row(id, thread));
+    const kept = { id, threadKey: thread, requester, expiresAt: expect.any(Number), body: { command: "config.set" } };
     expect((await post("/config/confirmations/consume", { id, actorIds: ["slack:UOTHER"] })).data).toEqual({
       refused: "foreign",
+      row: kept,
     });
     expect(
       (await post("/config/confirmations/consume", { id, actorIds: ["access:sub-1", "slack:UOTHER"] })).data,
-    ).toEqual({ refused: "foreign" });
+    ).toEqual({ refused: "foreign", row: kept });
     const consumed = await post("/config/confirmations/consume", { id, actorIds: ["access:sub-1", requester] });
     expect((consumed.data.row as { id: string }).id).toBe(id);
   });

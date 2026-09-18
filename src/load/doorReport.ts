@@ -26,10 +26,10 @@ export interface DoorRow {
 }
 
 /** One day's refusal count for one code (record 0054): a run whose `route`
- *  event carries `outcome: "refused"` and the code, counted by day, cause and code.
- *  No writer produces such records yet ([run-history.md] item 2's gap: the confirm
- *  path's refusals return no row to record), so this section counts zero until it
- *  lands; the report's footer names the recordless gate refusals meanwhile. */
+ *  event carries `outcome: "refused"` and the code, counted by day, cause and
+ *  code. The confirm path writes them when the store's refusal still names the
+ *  row ([run-history.md] item 2); gate refusals before a bind leave no record,
+ *  so the report's footer names the telemetry query that counts those. */
 export interface RefusalRow {
   day: string;
   cause: RefusalCause | "unknown";

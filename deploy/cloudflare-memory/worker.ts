@@ -641,7 +641,10 @@ interface ConfirmationRow extends ConfirmationInput {
 }
 /** Why a consume or a cancel refused: the row is gone (`used`), past its expiry (`expired`), or someone else's (`foreign`). */
 type ConfirmationRefusal = "used" | "expired" | "foreign";
-type ConfirmationOutcome = { row: ConfirmationRow } | { refused: ConfirmationRefusal };
+/** A refusal names the row where one still exists — `expired` (deleted here)
+ *  and `foreign` (kept) — so the bot can record the click's refusal against
+ *  the command that was bound (record 0054); `used` has no row to name. */
+type ConfirmationOutcome = { row: ConfirmationRow } | { refused: ConfirmationRefusal; row?: ConfirmationRow };
 type ConfirmationCancelOutcome = { ok: true } | { refused: Exclude<ConfirmationRefusal, "expired"> };
 
 function isJsonObject(v: unknown): v is Record<string, unknown> {
@@ -718,9 +721,9 @@ export class ConfigDO extends DurableObject<Env> {
       if (!stored) return { refused: "used" };
       if (stored.expiresAt <= now) {
         this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
-        return { refused: "expired" };
+        return { refused: "expired", row: stored };
       }
-      if (!actorIds.includes(stored.requester)) return { refused: "foreign" };
+      if (!actorIds.includes(stored.requester)) return { refused: "foreign", row: stored };
       this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
       return { row: stored };
     });

@@ -26,8 +26,10 @@ import {
   type ResumeContext,
 } from "./dispatch/admission.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
-import { actorIdsOf, cancelPending, consumeAndRun } from "./dispatch/confirm.js";
-import { postSettledOutcome } from "./dispatch/commandRun.js";
+import { actorIdsOf, cancelPending, consumeAndRun, REFUSED_REASON } from "./dispatch/confirm.js";
+import { postSettledOutcome, recordRoutedDecision } from "./dispatch/commandRun.js";
+import { COMMAND_RUN_AGENT } from "./runOwner.js";
+import { redactedInput } from "./dispatch/route.js";
 import type { Actor } from "./authz/types.js";
 import { NO_REFERENCES, readReferences, REFERENCE_REFUSAL, type ReferenceDeps } from "./dispatch/references.js";
 import { resolveChatActor } from "./authz/actor.js";
@@ -1627,9 +1629,38 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     }
     const res = await consumeAndRun(deps, { id: click.id, actorIds }, io, ending, trace);
     if (res.kind === "refused") {
+      const refusal = refusalOf(res.refusal, res.text);
+      // A refusal after a command was bound is a run record (record 0054;
+      // run-history item 2): when the store's refusal still named the row
+      // (`expired`, `foreign`), the decision is written like a hand-back's —
+      // nothing invoked, no surface told — with `outcome: "refused"` and the
+      // code, so the door report counts it. `used` and an unreadable store
+      // name no row and are counted from the trace alone.
+      if (res.row) {
+        const row = res.row;
+        await recordRoutedDecision(
+          deps,
+          row.message,
+          io,
+          { id: row.command },
+          {
+            preset: COMMAND_RUN_AGENT,
+            reason: REFUSED_REASON,
+            model: row.model,
+            command: row.command,
+            input: redactedInput(row.input),
+            receipt: row.receipt,
+            outcome: "refused",
+            refusalCode: refusal.code,
+          },
+          res.text,
+          ending,
+          trace,
+        );
+      }
       await ending.sealAfterReply(
         async () => {},
-        () => refuse(refusalOf(res.refusal, res.text)),
+        () => refuse(refusal),
       );
       return ended;
     }

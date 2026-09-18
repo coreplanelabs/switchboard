@@ -13,7 +13,7 @@
 // line, as they would have before the button existed.
 import type { Actor } from "../authz/types.js";
 import type { ChatCommandResult } from "../commandChat.js";
-import type { ConfirmationRefusal } from "../confirmations.js";
+import type { Confirmation, ConfirmationRefusal } from "../confirmations.js";
 import { COMMAND_RUN_AGENT } from "../runOwner.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RequestTrace } from "../requestTrace.js";
@@ -31,6 +31,10 @@ export const OFFER_CANCELLED_LINE = "Cancelled; nothing ran";
 /** The reason a confirmed run's `route` event gives: the click's counterpart
  *  of the paste's `pasted after hand-back`. */
 export const CONFIRMED_REASON = "confirmed after offer";
+
+/** The reason a refused click's record gives (record 0054; [run-history.md](../../../docs/reference/specs/run-history.md)
+ *  item 2): the door's no about the command the row had bound. */
+export const REFUSED_REASON = "refused after offer";
 
 /** The one line for each refusal the store names. */
 export function refusalLine(refused: ConfirmationRefusal): string {
@@ -57,7 +61,9 @@ export type ClickRefusal =
   "confirmation_used" | "confirmation_expired" | "confirmation_foreign" | "confirmation_unreadable";
 
 export type ClickResult =
-  | { kind: "refused"; refusal: ClickRefusal; text: string }
+  /** `row` when the store's refusal still named one (`expired`, `foreign`), so
+   *  the refusal can be recorded against the command that was bound. */
+  | { kind: "refused"; refusal: ClickRefusal; text: string; row?: Confirmation }
   /** The row ran: the command's result, and the reply — the receipt line first, the command's own text under it. */
   | { kind: "ran"; result: ChatCommandResult; text: string };
 
@@ -70,8 +76,11 @@ export interface Click {
   actorIds: readonly string[];
 }
 
-function refused(r: ConfirmationRefusal): { kind: "refused"; refusal: ClickRefusal; text: string } {
-  return { kind: "refused", refusal: `confirmation_${r}`, text: refusalLine(r) };
+function refused(
+  r: ConfirmationRefusal,
+  row?: Confirmation,
+): { kind: "refused"; refusal: ClickRefusal; text: string; row?: Confirmation } {
+  return { kind: "refused", refusal: `confirmation_${r}`, text: refusalLine(r), ...(row ? { row } : {}) };
 }
 
 const UNREADABLE = { kind: "refused", refusal: "confirmation_unreadable", text: OFFER_UNREADABLE_LINE } as const;
@@ -103,7 +112,7 @@ export async function consumeAndRun(
     );
     return UNREADABLE;
   }
-  if (!consumed.ok) return refused(consumed.refused);
+  if (!consumed.ok) return refused(consumed.refused, consumed.row);
   const row = consumed.row;
   const result = await runChatCommand(
     deps,

@@ -183,10 +183,13 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     await d.store.put(pending("c1"), CONFIRMATION_TTL_MS);
     tick(CONFIRMATION_TTL_MS);
     const { io, ending, trace } = request(d);
+    // The store's expired refusal still names the row it deleted, so the
+    // result carries it for the refused record (record 0054).
     expect(await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace)).toEqual({
       kind: "refused",
       refusal: "confirmation_expired",
       text: OFFER_EXPIRED_LINE,
+      row: expect.objectContaining({ id: "c1", command: "config.set" }),
     });
     expect(await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace)).toMatchObject({
       refusal: "confirmation_used",
@@ -201,7 +204,13 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     const { io, ending, trace } = request(d);
     expect(
       await consumeAndRun(d, { id: "c1", actorIds: ["slack:UOTHER", "access:someone-else"] }, io, ending, trace),
-    ).toEqual({ kind: "refused", refusal: "confirmation_foreign", text: OFFER_FOREIGN_LINE });
+    ).toEqual({
+      kind: "refused",
+      refusal: "confirmation_foreign",
+      text: OFFER_FOREIGN_LINE,
+      // The kept row rides the refusal so the click can be recorded (record 0054).
+      row: expect.objectContaining({ id: "c1", command: "config.set" }),
+    });
     expect(d.audits).toEqual([]);
     expect((await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace)).kind).toBe("ran");
   });
