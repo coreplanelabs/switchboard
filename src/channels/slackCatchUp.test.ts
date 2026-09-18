@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { ROUTED_CARD_FOOTER } from "../core/dispatch/route.js";
 import {
   ACK_GRACE_MS,
   catchUpMissedMentions,
@@ -455,16 +454,16 @@ describe("interruptedCardFrame", () => {
     expect(f.detail).toMatch(/re-send/i);
   });
 
-  it("a routed card — its label carries `· routed: <reason>` — closes with the override footer as its last line (routing-and-config item 21); an unrouted card does not", () => {
+  it("a routed card — its label carries `· route reason: <reason>` at debug — closes with the same one-sentence detail as any card: no override footer (routing-and-config item 21)", () => {
     const routed = interruptedCardFrame(
-      "◑ *coding* on `anthropic/claude-fable-5` · routed: terse order to fix failing tests · resident refreshing · 7m 32s",
+      "◑ *coding* on `anthropic/claude-fable-5` · route reason: terse order to fix failing tests · resident refreshing · 7m 32s",
     );
     expect(routed.title).toBe(
-      "❌ interrupted · *coding* on `anthropic/claude-fable-5` · routed: terse order to fix failing tests · resident refreshing · 7m 32s",
+      "❌ interrupted · *coding* on `anthropic/claude-fable-5` · route reason: terse order to fix failing tests · resident refreshing · 7m 32s",
     );
-    expect(routed.detail?.endsWith(`\n${ROUTED_CARD_FOOTER}`)).toBe(true);
     const plain = interruptedCardFrame("◓ *review* on `m` · 153s");
-    expect(plain.detail).not.toContain(ROUTED_CARD_FOOTER);
+    expect(routed.detail).toBe(plain.detail);
+    expect(routed.detail).not.toContain("agent:<preset>");
   });
 
   it("un-escapes the mrkdwn entities Slack returns in history so the label is not double-escaped on re-render", () => {

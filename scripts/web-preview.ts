@@ -1928,6 +1928,7 @@ const SETTINGS_SCOPE: NonNullable<NonNullable<SettingsSeed["channels"]>["selecte
     agent: "review",
     model: "anthropic/claude-opus-5",
     effort: "medium",
+    verbosity: "quiet",
     boundary: { maxMinutes: { value: 45, scope: "channel" }, maxIdentity: { value: "read", scope: "channel" } },
   },
   defaults: {
@@ -1985,7 +1986,7 @@ function settingsSeed(pathname: string, search: string): SettingsSeed | null {
     tab: "channels",
     channels: {
       viewer: {
-        effective: { agent: "general", model: "anthropic/claude-haiku-4-5", effort: "medium" },
+        effective: { agent: "general", model: "anthropic/claude-haiku-4-5", effort: "medium", verbosity: "quiet" },
         defaults: {
           agent: "general",
           models: {

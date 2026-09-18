@@ -201,7 +201,16 @@ const realSleep = (ms: number) => new Promise<void>((r) => realSetTimeout(r, ms)
 function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
   const dir = mkdtempSync(join(tmpdir(), "swb-dispatch-"));
   const cfgPath = join(dir, "config.yaml");
-  writeFileSync(cfgPath, fixtureYaml.replaceAll("__WORKDIR__", join(dir, "workspaces")));
+  // Every fixture runs at `verbose` (routing-and-config item 28): this suite
+  // proves the words the system says — acks, receipts, the workspace on the
+  // card — and the quiet default, which shows none of them, has its own tests
+  // (`the verbosity ladder through dispatch()`) and the unit suites.
+  writeFileSync(
+    cfgPath,
+    fixtureYaml
+      .replaceAll("__WORKDIR__", join(dir, "workspaces"))
+      .replace("defaults:\n", "defaults:\n  verbosity: verbose\n"),
+  );
   const config = new ConfigStore(cfgPath, join(dir, "overrides.json"));
   // The Null Objects a process without the subsystem is wired with (routing-and-
   // config item 16): a test that needs the real thing sets it after `makeDeps`.
@@ -1626,7 +1635,7 @@ describe("repo management commands", () => {
 // model call binds the command, the reply leads with the receipt line, and the
 // op runs at once because `repo:exec` changes nothing of Switchboard's own. An
 // op that cannot serve (no resident, no backend) replies the command's own line
-// and the override footer — never a fall-through to the agent, never a second
+// — never a fall-through to the agent, never a second
 // model call. Only the model call differs between the doors; the gates (the
 // `agentRun` registry gate, `canUseRepo` inside) apply on both.
 describe("deterministic ops: the typed form is stage A, the natural forms reach repo.test through the door", () => {
@@ -1634,7 +1643,6 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     vi.mocked(makeExecutor).mockClear();
   });
 
-  const FOOTER = "wrong preset? reply agent:<preset> to run it another way";
   const RECEIPT = "routed: repo test acme/api main";
 
   function fakeOps(result: import("./operations.js").OperationResult) {
@@ -1686,7 +1694,6 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     expect(lines[1]).toContain("✅");
     expect(lines[1]).toContain("test passed");
     expect(replies[0]).toContain("1 passing");
-    expect(replies[0]).not.toContain(FOOTER);
     expect(statuses).toEqual([]);
     expect(provider.requests).toHaveLength(0);
     expect(makeExecutor).not.toHaveBeenCalled();
@@ -1722,7 +1729,7 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     expect(provider.requests).toHaveLength(0);
   });
 
-  it('a repository with no resident: the bound repo_test answers not_found, and the reply is the receipt, the command\'s own "not onboarded" line and the override footer — one sealed failed command run, no sandbox, no second model call, no agent run', async () => {
+  it('a repository with no resident: the bound repo_test answers not_found, and the reply is the receipt, the command\'s own "not onboarded" line — one sealed failed command run, no sandbox, no second model call, no agent run', async () => {
     const { deps, provider, registry, ops } = routed({ kind: "not-onboarded" });
     deps.routeModel = bindsRepoTest("acme/api", "main");
     const { io, replies, statuses } = fakeIO();
@@ -1735,7 +1742,6 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     expect(lines[1]).toBe(
       "⚠️ `repo test`: `acme/api` is not onboarded as a resident, so `repo test` has nothing to run against — `repo onboard acme/api` first, or ask the coding agent directly.",
     );
-    expect(lines.at(-1)).toBe(FOOTER);
     expect(statuses).toEqual([]);
     expect(provider.requests).toHaveLength(0);
     expect(makeExecutor).not.toHaveBeenCalled();
@@ -1745,7 +1751,7 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     expect(registry.snapshotById("r2")).toBeNull(); // no agent run followed the failed command
   });
 
-  it("an op backend failure (unavailable) through the door has the same shape: the receipt, the ⚠️ line with the backend's message and the footer — never a fall-through to the agent", async () => {
+  it("an op backend failure (unavailable) through the door has the same shape: the receipt, the ⚠️ line with the backend's message — never a fall-through to the agent", async () => {
     const { deps, provider, ops } = routed({ kind: "error", message: "resident /op HTTP 500" });
     deps.routeModel = bindsRepoTest("acme/api", "main");
     const { io, replies } = fakeIO();
@@ -1755,7 +1761,6 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     const lines = replies[0]!.split("\n");
     expect(lines[0]).toBe(RECEIPT);
     expect(lines[1]).toBe("⚠️ `repo test`: resident /op HTTP 500");
-    expect(lines.at(-1)).toBe(FOOTER);
     expect(provider.requests).toHaveLength(0);
   });
 
@@ -1773,11 +1778,10 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     expect(lines[0]).toBe(RECEIPT);
     expect(lines[1]).toContain("❌");
     expect(lines[1]).toContain("test failed (exit 1)");
-    expect(replies[0]).not.toContain(FOOTER);
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("a mutating command-table entry is refused through the door with the named reason under the receipt, and the footer", async () => {
+  it("a mutating command-table entry is refused through the door with the named reason under the receipt", async () => {
     const { deps, provider } = routed({
       kind: "refused",
       reason:
@@ -1790,7 +1794,6 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     expect(lines[0]).toBe(RECEIPT);
     expect(lines[1]).toMatch(/^⚠️ `repo test`: op-refused/);
     expect(lines[1]).toContain("mutating");
-    expect(lines.at(-1)).toBe(FOOTER);
     expect(provider.requests).toHaveLength(0);
   });
 
@@ -1799,12 +1802,12 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     deps.routeModel = bindsRepoTest("acme/api", "main");
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("run the tests on main in acme/api", "slack:UX"), io);
-    expect(replies).toEqual([`${RECEIPT}\n🚫 \`repo test\` is restricted. Ask <@slack:UADMIN>.\n${FOOTER}`]);
+    expect(replies).toEqual([`${RECEIPT}\n🚫 \`repo test\` is restricted. Ask <@slack:UADMIN>.`]);
     expect(ops.calls).toHaveLength(0);
     expect(provider.requests).toHaveLength(0);
   });
 
-  it("a hostile ref the router binds fails the schema at invoke: the receipt, the named refusal and the footer; no backend is reached", async () => {
+  it("a hostile ref the router binds fails the schema at invoke: the receipt and the named refusal; no backend is reached", async () => {
     const { deps, provider, ops } = routed(OK_RESULT);
     deps.routeModel = bindsRepoTest("acme/api", "main;rm");
     const { io, replies } = fakeIO();
@@ -1813,7 +1816,6 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
     const lines = replies[0]!.split("\n");
     expect(lines[0]).toMatch(/^routed: repo test acme\/api /);
     expect(lines[1]).toMatch(/^⚠️ `repo test`: ref/);
-    expect(lines.at(-1)).toBe(FOOTER);
     expect(ops.calls).toHaveLength(0);
     expect(provider.requests).toHaveLength(0);
   });
@@ -1962,7 +1964,7 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
       return { deps, registry, provider, store };
     }
 
-    it("with `offer`: the routed typo renders Yes and No — the receipt and footer as one reply, then the offer with the question sentence, the corrected line and the evidence; one redispatch row whose proposal is `repo test acme/switchboard main`", async () => {
+    it("with `offer`: the routed typo renders Yes and No — the receipt as one reply, then the offer with the question sentence, the corrected line and the evidence; one redispatch row whose proposal is `repo test acme/switchboard main`", async () => {
       const { deps, store } = wiredNearMatch();
       const f = fakeIO();
       const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
@@ -1971,7 +1973,6 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
       // First reply: receipt + footer (no error text in this reply).
       expect(f.replies).toHaveLength(1);
       expect(f.replies[0]).toContain("routed: repo test acme/switchboar main");
-      expect(f.replies[0]).toContain(FOOTER);
       // Then the offer with Yes/No.
       expect(offers).toHaveLength(1);
       const offer = offers[0]!;
@@ -1989,14 +1990,13 @@ describe("deterministic ops: the typed form is stage A, the natural forms reach 
       }
     });
 
-    it("without `offer`: the text question goes out as a second reply — the receipt+footer first, then `Did you mean:` with the corrected line — no row minted", async () => {
+    it("without `offer`: the text question goes out as a second reply — the receipt first, then `Did you mean:` with the corrected line — no row minted", async () => {
       const { deps, store } = wiredNearMatch();
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("run the tests on acme/switchboar", "slack:UADMIN"), io);
       // Two replies: receipt+footer, then the text question.
       expect(replies).toHaveLength(2);
       expect(replies[0]).toContain("routed: repo test acme/switchboar main");
-      expect(replies[0]).toContain(FOOTER);
       expect(replies[1]).toContain("Did you mean:");
       expect(replies[1]).toContain("`repo test acme/switchboard main`");
       expect(replies[1]).toContain("which is onboarded");
@@ -9096,8 +9096,8 @@ workspaceDir: __WORKDIR__
     expect("resume" in unit!).toBe(false);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toBe(
-      `🧭 Handed to the plan runner \`plan-${SHIP_PLAN_ID}\`: plan \`${SHIP_PLAN_ID}\`, 1 unit in dependency order — U1. ` +
-        `the unit runs on \`${SHIP_BRANCH}\` in this thread under your grants; this card follows it and the report lands here.`,
+      `🧭 Handed to the plan runner.\n• plan \`${SHIP_PLAN_ID}\`\n` +
+        `• the unit runs on \`${SHIP_BRANCH}\` in this thread under your grants; this card follows it and the report lands here`,
     );
     // The instance is marked as a generated plan — an id, no path — and no
     // `ship/…` branch appears anywhere in the hand-off.
@@ -9251,7 +9251,7 @@ workspaceDir: __WORKDIR__
     const { instance } = await handed(instances, "run-shipadopt2");
     expect(instance).toMatchObject({ branch: SHIP_BRANCH, base: "main" });
     expect(replies[replies.length - 1]).toContain(
-      "Auto-merge is on for this pull request: the approval merges it once checks pass.",
+      "• auto-merge is on for this pull request: the approval merges it once checks pass",
     );
   });
 
@@ -9317,10 +9317,12 @@ workspaceDir: __WORKDIR__
     const registry = new RunRegistry({ genId: () => "run-shiprouted", genToken: () => "tok" });
     deps.runRegistry = registry;
     const { io, statuses } = fakeIO();
+    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
     await dispatch(deps, msg("fix the login redirect", "slack:UADMIN"), io);
     expect(deps.routeModel).toHaveBeenCalledTimes(1);
     expect(statuses[0].title).toContain("*ship*");
-    expect(statuses[0].title).toContain("routed: a change to land");
+    expect(statuses[0].title).toContain("route reason: a change to land");
     const { instance, unit } = await handed(instances, "run-shiprouted");
     expect(instance).toMatchObject({ merge: "person" });
     expect(instance?.plan?.id).toBe(
@@ -9775,6 +9777,29 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
         expect.objectContaining({ type: "input", text: expect.stringContaining(text) }),
       ),
     );
+
+  it("at quiet — the default — a steered follow-up gets no reply: one run, the follow-up reaches it, the thread hears the answer alone (routing-and-config item 28)", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const second = fakeIO();
+    await dispatch(deps, threadMsg("and also include the numbers", "slack:UY"), second.io);
+    expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
+    expect(second.statuses).toEqual([]);
+    expect(second.replies).toEqual([]);
+    await foldedIn(registry, "r1", "and also include the numbers");
+    settle().answer("first draft");
+    await run;
+    expect(first.replies).toEqual(["answer 2"]);
+  });
 
   it("a thread reply while a run is in flight is steered: no second run, the follow-up reaches the live run at its next step, the reply says where it went", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
@@ -10506,6 +10531,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const { deps, registry, writer, warnings } = wired(provider, { ledger });
     const { io, replies } = ioWithCard();
     const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
+    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
     await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, inbox: reclaimed.inbox } });
     await writer.settled();
     expect(replies).toEqual(["restarted and done"]); // the carried follow-up gets no second ack
@@ -10531,7 +10558,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(warnings).toEqual([]);
   });
 
-  it("a restarted routed run (item 42) reuses the row's decision: the card carries the routed line and the footer, the record gets its route event and run_meta says route, and the router is never asked again", async () => {
+  it("a restarted routed run (item 42) reuses the row's decision: the card carries the route note at debug, the record gets its route event and run_meta says route, and the router is never asked again", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     const request = durableInboxMessage({ ...msg("what is this repo") }, "what is this repo", 5_000);
     await ledger.claim({
@@ -10579,13 +10606,12 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       history: async () => [],
     };
     const restored = messageFromInbox(reclaimed.row.meta.request!, 5_000)!;
+    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
     await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, inbox: reclaimed.inbox } });
     await writer.settled();
     expect(deps.routeModel).not.toHaveBeenCalled();
-    expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · routed: a review ask");
-    expect(statuses.at(-1)!.detail?.split("\n").at(-1)).toBe(
-      "wrong preset? reply agent:<preset> to run it another way",
-    );
+    expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · route reason: a review ask");
     const record = ledger.finished.get("run-routed")!;
     expect(record.agent).toBe("review");
     expect(record.events.filter((e) => e.type === "route")).toEqual([
@@ -10659,7 +10685,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     });
   });
 
-  it("a resumed run whose row carries the route repaints the routed line from the first frame and closes with the override footer (items 38 and routing-and-config 21); the router is not asked again and no second route event is published", async () => {
+  it("a resumed run whose row carries the route repaints the route note at debug from the first frame (items 38 and routing-and-config 21); the router is not asked again and no second route event is published", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     const transcript: ChatMessage[] = [
       { role: "user", content: [{ type: "text", text: "what is this repo" }] },
@@ -10747,15 +10773,16 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
       history: async () => [],
     };
+    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
     await dispatch(deps, resumeMessage(reclaimed.row, "what is this repo"), io, {
       resume: { row: reclaimed.row, lastStep: reclaimed.lastStep!, plan, events, lastSeq: 3, repoCtx: {}, inbox: [] },
     });
     await writer.settled();
     expect(deps.routeModel).not.toHaveBeenCalled();
-    expect(statuses[0].title).toContain("*general* on `anthropic/general-model` · routed: a plain question");
+    expect(statuses[0].title).toContain("*general* on `anthropic/general-model` · route reason: a plain question");
     const closed = statuses.at(-1)!;
     expect(closed.title).toContain("✅");
-    expect(closed.detail?.split("\n").at(-1)).toBe("wrong preset? reply agent:<preset> to run it another way");
     const record = ledger.finished.get("run-routed")!;
     expect(record.events.filter((e) => e.type === "route")).toHaveLength(1);
   });
@@ -14813,7 +14840,6 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
   /** The fixture with no `routing` block at all: the default — on. */
   const routingUnset = (yaml: string) => yaml.replace(ROUTING_OFF, "");
   const ROUTED_YAML = routingOn(YAML_FIXTURE);
-  const FOOTER = "wrong preset? reply agent:<preset> to run it another way";
   /** A scripted router: a change to make is coding, a review ask is review, anything else general. */
   const router = () =>
     vi.fn(async (prompt: { user: string }) => {
@@ -14832,7 +14858,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     vi.mocked(makeExecutor).mockClear();
   });
 
-  it("turned off (`routing: { auto: false }`): a plain message runs defaults.agent as before the router — never called, no route event, no routed line, no override hint", async () => {
+  it("turned off (`routing: { auto: false }`): a plain message runs defaults.agent as before the router — never called, no route event, no route note", async () => {
     let ids = 0;
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
     const provider = capturingProvider();
@@ -14845,11 +14871,10 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     expect(provider.requests[0].model).toBe("general-model");
     expect(routeEvents(registry, "r1")).toEqual([]);
     expect(metaOf(registry, "r1")?.agentSource).toBe("default");
-    expect(statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
-    expect(statuses.every((s) => !s.detail?.includes(FOOTER))).toBe(true);
+    expect(statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
   });
 
-  it("on by default: with no `routing` block a plain message routes — to review on its own model, the routed line on the card, the route event on the record, and the closed card ending with how to override", async () => {
+  it("on by default: with no `routing` block a plain message routes — to review on its own model, the route note on the card at debug, the route event on the record", async () => {
     let ids = 0;
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
     const provider = capturingProvider();
@@ -14858,20 +14883,38 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     deps.runRegistry = registry;
     deps.routeModel = router();
     const { io, statuses, replies } = fakeIO();
+    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
     await dispatch(deps, msg("review it for me"), io);
     expect(deps.routeModel).toHaveBeenCalledTimes(1);
     expect(provider.requests[0].model).toBe("review-model");
     expect(replies).toContain("answer");
-    expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · routed: review fits the request");
+    expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · route reason: review fits the request");
     expect(routeEvents(registry, "r1")).toEqual([
       expect.objectContaining({ type: "route", preset: "review", model: "anthropic/general-model" }),
     ]);
     expect(metaOf(registry, "r1")?.agentSource).toBe("route");
-    // The hint rides the close alone: a reply into the live thread would be a follow-up.
     const closed = statuses.at(-1)!;
     expect(closed.title).toContain("✅");
-    expect(closed.detail?.split("\n").at(-1)).toBe(FOOTER);
-    expect(statuses.slice(0, -1).every((s) => !s.detail?.includes(FOOTER))).toBe(true);
+  });
+
+  it("at quiet — the default — the same routed run's card is `*review* on `<model>`` and nothing more: no route note on any frame, the route still on the record (routing-and-config item 28)", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const provider = capturingProvider();
+    const deps = makeDeps(routingUnset(YAML_FIXTURE), provider);
+    deps.runRegistry = registry;
+    deps.routeModel = router();
+    const { io, statuses, replies } = fakeIO();
+    // The fixture speaks at verbose; a person on the default hears less.
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+    await dispatch(deps, msg("review it for me"), io);
+    expect(replies).toContain("answer");
+    expect(statuses[0].title).toBe("👀 *review* on `anthropic/review-model` · preparing workspace…");
+    expect(statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
+    expect(statuses.at(-1)!.title).toBe("✅ *review* on `anthropic/review-model` · 0s");
+    expect(metaOf(registry, "r1")?.agentSource).toBe("route");
+    expect(routeEvents(registry, "r1")).toHaveLength(1);
   });
 
   it("routing on, a directive on the message: untouched — the router is never called and the run is the directive's", async () => {
@@ -14897,11 +14940,13 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     deps.runRegistry = registry;
     deps.routeModel = router();
     const { io, statuses, replies } = fakeIO();
+    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
     await dispatch(deps, msg("review it for me"), io);
     expect(deps.routeModel).toHaveBeenCalledTimes(1);
     expect(provider.requests[0].model).toBe("review-model");
     expect(replies).toContain("answer");
-    expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · routed: review fits the request");
+    expect(statuses[0].title).toContain("*review* on `anthropic/review-model` · route reason: review fits the request");
     expect(routeEvents(registry, "r1")).toEqual([
       expect.objectContaining({
         type: "route",
@@ -14921,6 +14966,8 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     deps.runRegistry = registry;
     deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "ship", reason: "land it" }));
     const { io, statuses } = fakeIO();
+    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
     await dispatch(deps, msg("land the login fix", "slack:UADMIN"), io);
     expect(deps.routeModel).toHaveBeenCalledTimes(1);
     // Ship never runs a provider turn of its own; this harness has none of the
@@ -14929,7 +14976,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     // the ship suite.
     expect(provider.requests).toHaveLength(0);
     expect(statuses[0].title).toContain("*ship*");
-    expect(statuses[0].title).toContain("routed: land it");
+    expect(statuses[0].title).toContain("route reason: land it");
     // The record-level route event and `agentSource: route` on a routed ship
     // run are proven in the ship suite, where the ledger the ship path claims
     // on is wired.
@@ -14948,7 +14995,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     expect(provider.requests[0].model).toBe("general-model");
     expect(routeEvents(registry, "r1")).toEqual([]);
     expect(metaOf(registry, "r1")?.agentSource).toBe("default");
-    expect(statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
+    expect(statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
   });
 
   it("a route the requester may not run is no route: ship restricted for the plain user runs defaults.agent", async () => {
@@ -14958,7 +15005,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     const { io, statuses } = fakeIO();
     await dispatch(deps, msg("land the login fix"), io); // slack:UX may not run the restricted ship preset
     expect(provider.requests[0].model).toBe("general-model");
-    expect(statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
+    expect(statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
   });
 
   // The compound form (routing-and-config item 21, "Compound requests";
@@ -15078,11 +15125,13 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       userName: "alice",
     });
 
-    it("two independent parts: one conductor run with the routed line and the parts on its card, the route event with the parts, and two children spawned through dispatch() — each on its part's preset with a directive of its own, parentRunId set, the router never asked again", async () => {
+    it("two independent parts: one conductor run with the route note and the parts on its card, the route event with the parts, and two children spawned through dispatch() — each on its part's preset with a directive of its own, parentRunId set, the router never asked again", async () => {
       const { provider, requests } = briefFollowingProvider();
       const t = treeDeps(COMPOUND_YAML, provider);
       t.deps.routeModel = splitter();
       const { parent, children, leads } = treeIO();
+      // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
+      await t.deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
       await dispatch(t.deps, compoundMsg(), parent.io);
       for (const id of ["run-child-1", "run-child-2"])
         await vi.waitFor(() => expect(t.registry.getById(id)?.finished).toBe(true));
@@ -15104,7 +15153,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       expect(brief).toContain("2. `research`: find out why the staging resident went down last night");
       // The card: the routed line in the label, one line per part under it, from the first paint.
       expect(parent.statuses[0].title).toContain(
-        "*conductor* on `anthropic/conductor-model` · routed: two independent asks",
+        "*conductor* on `anthropic/conductor-model` · route reason: two independent asks",
       );
       expect(parent.statuses[0].detail).toBe(
         "general: summarize the open issues in acme/api\nresearch: find out why the staging resident went down last night",
@@ -15166,7 +15215,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       expect(vi.mocked(t.deps.routeModel).mock.calls[0][0].system).not.toMatch(/conductor|compound/i);
       expect(requests[0].model).toBe("general-model");
       expect(children).toHaveLength(0);
-      expect(parent.statuses.every((s) => !s.title.includes("routed:"))).toBe(true);
+      expect(parent.statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
       expect(metaOf(t.registry, "run-parent")?.agentSource).toBe("default");
       expect(routeEvents(t.registry, "run-parent")).toEqual([
         expect.objectContaining({
@@ -15213,6 +15262,8 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       );
       const { parent, children } = treeIO();
       const text = "review the login PR and fix the flaky login test it touches";
+      // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
+      await t.deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
       await dispatch(t.deps, { ...msg(text, "slack:UADMIN"), userName: "alice" }, parent.io);
       await t.writer.settled();
       expect(t.deps.routeModel).toHaveBeenCalledTimes(1);
@@ -15224,7 +15275,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       expect(children).toHaveLength(0);
       // The card: the routed line names the collapse; no part lines under it.
       expect(parent.statuses[0].title).toContain("*ship*");
-      expect(parent.statuses[0].title).toContain("routed: a review and a fix (compound collapsed: review+ship)");
+      expect(parent.statuses[0].title).toContain("route reason: a review and a fix (compound collapsed: review+ship)");
       expect(parent.statuses[0].detail).toBeUndefined();
       // The collapse decision itself (the event's `collapsed.presets`, no
       // `parts`) is proven at the route stage in route.test.ts; the routed
@@ -15238,13 +15289,15 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       const t = treeDeps(COMPOUND_YAML, provider);
       t.deps.routeModel = splitter();
       const { parent, children } = treeIO();
+      // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
+      await t.deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
       await dispatch(
         t.deps,
         { ...msg("clone acme/api, run the suite, then tell me what fails", "slack:UADMIN") },
         parent.io,
       );
       expect(children).toHaveLength(0);
-      expect(parent.statuses[0].title).toContain("*general* on `anthropic/general-model` · routed: general fits");
+      expect(parent.statuses[0].title).toContain("*general* on `anthropic/general-model` · route reason: general fits");
       expect(parent.statuses[0].detail).toBeUndefined();
       expect(routeEvents(t.registry, "run-parent")[0]).not.toHaveProperty("parts");
     });
@@ -15818,7 +15871,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
   // follow-up in a routed thread carries the thread's route — the receipt on
   // the card, the decision on the record — while the router stays unasked, no
   // route event is published and `run_meta.agentSource` stays `sticky`.
-  it("a sticky follow-up in a routed thread carries the thread's route: the card's routed line and override footer, the record's route field with parts and collapse stripped, no route event, agentSource sticky, the router never asked", async () => {
+  it("a sticky follow-up in a routed thread carries the thread's route: the card's route note at debug, the record's route field with parts and collapse stripped, no route event, agentSource sticky, the router never asked", async () => {
     const t = await threadWithSession(PI_YAML);
     const prev = (await t.store.get("run-prev"))!;
     await t.store.put({
@@ -15833,16 +15886,15 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
     vi.mocked(runPiHarnessOpen).mockImplementationOnce(async () => piAnswered("carried"));
     const { io, statuses } = fakeIO(history);
+    // The route reason is a debug note on the card (routing-and-config item 28): asked for here so the label shows it.
+    await t.deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
     await dispatch(t.deps, followUp, io);
     await t.writer.settled();
     // The card says why the preset was chosen, from the first paint, without the earlier run's collapse.
     expect(statuses[0].title).toContain(
-      "*coding* on `anthropic/coding-model` · routed: an imperative ask in a repo thread",
+      "*coding* on `anthropic/coding-model` · route reason: an imperative ask in a repo thread",
     );
     expect(statuses[0].title).not.toContain("compound collapsed");
-    expect(statuses.at(-1)!.detail?.split("\n").at(-1)).toBe(
-      "wrong preset? reply agent:<preset> to run it another way",
-    );
     // The router was never asked: the preset is the transcript's.
     expect(t.provider.requests).toHaveLength(0);
     // The record: the carried decision on `route`, no `route` event, `agentSource` sticky —
@@ -16053,9 +16105,8 @@ describe("the references step in dispatch (record 0037)", () => {
 // record 0039 — the door through dispatch(): a command the router bound from
 // prose is handed back when it writes, run through the registry when it reads,
 // answered with the receipt first, and ended on any failure with the command's
-// own line and the override footer; one model call, never a second route.
+// own line; one model call, never a second route.
 describe("the command menu through dispatch() (record 0036 unit 2; record 0039)", () => {
-  const FOOTER = "wrong preset? reply agent:<preset> to run it another way";
   /** A scripted router that calls one command tool with one input. */
   const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
   const wired = (yaml = ROUTING_ON_YAML) => {
@@ -16097,7 +16148,6 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     const [first, ...rest] = replies[0]!.split("\n");
     expect(first).toBe("routed: config show");
     expect(rest.join("\n")).toContain("agent");
-    expect(replies[0]).not.toContain(FOOTER);
     expect(statuses).toEqual([]);
     expect(provider.requests).toEqual([]);
     expect(registry.snapshotById("r1")).toBeNull();
@@ -16152,7 +16202,7 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     expect([...new Set(deps.invoked)].sort()).toEqual(runs.map((c) => c.id).sort());
   });
 
-  it("a routed read that does work (friction_report) runs as an inline command run carrying the route event right after run_meta, and the reply is the receipt then the command's own text — no footer, no card, no agent turn", async () => {
+  it("a routed read that does work (friction_report) runs as an inline command run carrying the route event right after run_meta, and the reply is the receipt then the command's own text — no card, no agent turn", async () => {
     const { deps, registry, provider } = wired();
     deps.routeModel = call("friction_report", { limit: 5 });
     const { io, replies, statuses } = fakeIO();
@@ -16163,7 +16213,6 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     const lines = replies[0]!.split("\n");
     expect(lines[0]).toBe("routed: friction report --limit 5");
     expect(lines[1]).toContain("runs analyzed");
-    expect(replies[0]).not.toContain(FOOTER);
     expect(statuses).toEqual([]);
     expect(provider.requests).toEqual([]);
     const snap = registry.snapshotById("r1");
@@ -16180,7 +16229,7 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     expect(snap?.events.filter((e) => e.type === "answer")).toHaveLength(1);
   });
 
-  it("a routed read whose invoke fails (a value the schema refuses) seals one failed command run and replies the receipt, the command's own error line and the override footer — one model call, no second route, no agent run", async () => {
+  it("a routed read whose invoke fails (a value the schema refuses) seals one failed command run and replies the receipt and the command's own error line — one model call, no second route, no agent run", async () => {
     const { deps, registry, provider } = wired();
     deps.routeModel = call("friction_report", { limit: "lots" });
     const { io, replies, statuses } = fakeIO();
@@ -16191,7 +16240,6 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     const lines = replies[0]!.split("\n");
     expect(lines[0]).toBe("routed: friction report --limit lots");
     expect(lines[1]).toMatch(/^⚠️ `friction report`/);
-    expect(lines.at(-1)).toBe(FOOTER);
     expect(statuses).toEqual([]);
     expect(provider.requests).toEqual([]);
     const snap = registry.snapshotById("r1");

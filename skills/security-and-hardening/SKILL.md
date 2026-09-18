@@ -11,10 +11,10 @@ description: Hardens code against vulnerabilities. Use when auditing an input
   involved.
 agents:
   - review
-source: https://github.com/addyosmani/agent-skills/blob/6ca0cd7db39b41b1c37e26d335c507ee92382c6d/skills/security-and-hardening/SKILL.md
+source: https://github.com/addyosmani/agent-skills/blob/c004a74784a08295d52749b04cda634125b9a581/skills/security-and-hardening/SKILL.md
 upstream:
   repo: https://github.com/addyosmani/agent-skills
-  commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
+  commit: c004a74784a08295d52749b04cda634125b9a581
   path: skills/security-and-hardening/SKILL.md
   bodySha256: 535bdf26873b5cb3db8941ea906ac6e04ab1f05df2bd617961354911848ba6e9
 ---

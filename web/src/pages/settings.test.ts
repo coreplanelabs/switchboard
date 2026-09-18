@@ -440,7 +440,12 @@ describe("ChannelsPanel", () => {
     { channelId: "slack:C2", settings: ["models"] as never[], source: "config" as const },
   ];
   const SCOPE = {
-    effective: { agent: "review", model: "anthropic/review-model", effort: "medium" as const },
+    effective: {
+      agent: "review",
+      model: "anthropic/review-model",
+      effort: "medium" as const,
+      verbosity: "quiet" as const,
+    },
     defaults: { agent: "general", models: { general: "anthropic/general-model", review: "anthropic/review-model" } },
     channel: {
       agent: "review",
@@ -460,7 +465,12 @@ describe("ChannelsPanel", () => {
 
   it("shows the viewer's own settings first — what a run gets, the defaults, their own scope or the sentence that nothing is theirs yet; a refusal is shown as is (record 0041: never a 'no data' state)", () => {
     const VIEWER = {
-      effective: { agent: "general", model: "anthropic/general-model", effort: "low" as const },
+      effective: {
+        agent: "general",
+        model: "anthropic/general-model",
+        effort: "low" as const,
+        verbosity: "quiet" as const,
+      },
       defaults: { agent: "general", models: { general: "anthropic/general-model", review: "anthropic/review-model" } },
       restrictedAgents: ["coding"],
       user: { model: "anthropic/mine", effort: "low" as const },

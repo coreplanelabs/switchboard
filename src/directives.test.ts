@@ -57,6 +57,33 @@ describe("parseDirectives — effort", () => {
   });
 });
 
+// docs/reference/specs/routing-and-config.md item 28: `verbosity:<level>` is
+// how much of itself the bot says — a directive on the ladder like `effort:`.
+describe("parseDirectives — verbosity", () => {
+  it("extracts verbosity:<level> and strips it, like effort", () => {
+    const d = parseDirectives("verbosity:debug why did the run go to a cold sandbox?");
+    expect(d.verbosity).toBe("debug");
+    expect(d.text).toBe("why did the run go to a cold sandbox?");
+    expect(parseDirectives("plain ask").verbosity).toBeUndefined();
+  });
+
+  it("rejects an unknown level, naming the three", () => {
+    expect(() => parseDirectives("verbosity:loud do it")).toThrow(/Unknown verbosity "loud".*quiet, verbose, debug/);
+  });
+
+  it("is sticky in a thread like effort (user turns only, last wins, lenient)", () => {
+    expect(
+      lastThreadDirectives([
+        { role: "user", text: "verbosity:debug show me everything" },
+        { role: "assistant", text: "quoting verbosity:quiet here must not count" },
+        { role: "user", text: "verbosity:loud is skipped, not thrown" },
+        { role: "user", text: "verbosity:verbose now" },
+      ]).verbosity,
+    ).toBe("verbose");
+    expect(lastThreadDirectives([{ role: "user", text: "no directive" }]).verbosity).toBeUndefined();
+  });
+});
+
 // docs/reference/specs/routing-and-config.md items 1–3: `budget:<minutes>` is
 // the caller's own boundary on ONE run — parsed and stripped like the other
 // three, validated at parse (whole minutes, at least the boundary minimum),

@@ -14,6 +14,7 @@ import type { CoordinatorTag } from "../coordinator/contract.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { RequestDirectives } from "../../directives.js";
+import type { Verbosity } from "../verbosity.js";
 import type { LedgerRun, LedgerWriteThrough } from "../runLedger/writeThrough.js";
 import { putOnce } from "../runHistoryWriter.js";
 import type { AppendableEvent, InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
@@ -441,9 +442,13 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     console.log(
       `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
     );
-    await root.span("dispatch.admission", () => replyAck(io, steerAck(claim.live, at)), {
-      attrs: { outcome: "steered" },
-    });
+    await root.span(
+      "dispatch.admission",
+      () => replyAck(io, verbosityOf(deps, msg, directives), steerAck(claim.live, at)),
+      {
+        attrs: { outcome: "steered" },
+      },
+    );
     return { kind: "steered", where: "here" };
   }
   // The thread is free here, but its live run may be on the ledger under
@@ -530,7 +535,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       console.log(
         `[dispatch] ${msg.threadKey} follow-up steered into run ${elsewhere.runId} live on another generation (durable seq ${seq}${nowLive ? ", now live here" : ""})`,
       );
-      await replyAck(io, steerAck(far, now));
+      await replyAck(io, verbosityOf(deps, msg, directives), steerAck(far, now));
       return { kind: "steered", where: "elsewhere" };
     }
     deps.threadsElsewhere.forget(msg.threadKey);
@@ -752,4 +757,15 @@ export async function foldCarriedInbox(
         `[${carriedInbox.tag}] ${msg.threadKey} run ${carriedRow.runId}: ${folded} follow-up(s) from the durable inbox pending (${late.length} landed after the reclaim)`,
       );
   }
+}
+
+/** The request's verbosity before it resolved (routing-and-config item 28):
+ *  the message's own directive over the scopes — the thread's sticky word is
+ *  not read here, since admission runs before the history is. */
+function verbosityOf(
+  deps: { config: Pick<ConfigStore, "verbosityFor"> },
+  msg: IncomingMessage,
+  directives: RequestDirectives,
+): Verbosity {
+  return deps.config.verbosityFor(msg.channelId, msg.userId, directives.verbosity);
 }

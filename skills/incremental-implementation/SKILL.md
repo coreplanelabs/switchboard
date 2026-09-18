@@ -7,10 +7,10 @@ description: Delivers changes incrementally in thin, verifiable slices. Use when
   when a task feels too big to land in one step.
 agents:
   - coding
-source: https://github.com/addyosmani/agent-skills/blob/6ca0cd7db39b41b1c37e26d335c507ee92382c6d/skills/incremental-implementation/SKILL.md
+source: https://github.com/addyosmani/agent-skills/blob/c004a74784a08295d52749b04cda634125b9a581/skills/incremental-implementation/SKILL.md
 upstream:
   repo: https://github.com/addyosmani/agent-skills
-  commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
+  commit: c004a74784a08295d52749b04cda634125b9a581
   path: skills/incremental-implementation/SKILL.md
   bodySha256: d09768665f152ae33f3a5098f374a1234e9fd62d06559660604e5882c1791e4f
 ---

@@ -408,6 +408,22 @@ describe("config set", () => {
     });
   });
 
+  it("--verbosity lands on the scope and is held to the ladder (routing-and-config item 28)", async () => {
+    const config = store();
+    const commands = bind(config);
+    const { text } = await say(commands, "config set me --verbosity debug", chat(config, "slack:UX"));
+    expect(text).toBe('Updated your scope. Now: {"verbosity":"debug"}');
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({ verbosity: "debug" });
+    expect(config.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} }).verbosity).toBe("debug");
+    expect(config.resolve({ channelId: "slack:CX", userId: "slack:UY", request: {} }).verbosity).toBe("quiet");
+    const me = chat(config, "slack:UX");
+    expect(await commands.invoke("config.set", { args: ["me"], options: { verbosity: "loud" } }, me)).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+      message: 'verbosity: expected one of "quiet", "verbose", "debug"',
+    });
+  });
+
   it("`channel` targets the caller's channel (or --channel) and rides config:write: refused unless granted (admins hold it through `all`)", async () => {
     const open = store(OPEN_YAML);
     const openCmds = bind(open);

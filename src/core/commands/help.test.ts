@@ -60,7 +60,7 @@ describe("help.show — the plain-language guide", () => {
     const { text } = await show("help.show");
     const lines = text.split("\n");
     expect(lines[0]).toBe(
-      "*Switchboard* — just describe what you want. I pick the agent for it and say why on the card (`routed: <reason>`).",
+      "*Switchboard* — just describe what you want. I pick the agent for it; `verbosity:debug` shows why on the card.",
     );
     // The compound door, right after: several asks run as the compound preset.
     expect(lines[1]).toBe(

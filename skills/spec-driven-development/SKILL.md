@@ -8,12 +8,12 @@ description: Creates specs before coding. Use when starting a new project,
   decomposing into a capability map of modules before specifying.
 agents:
   - coding
-source: https://github.com/addyosmani/agent-skills/blob/6ca0cd7db39b41b1c37e26d335c507ee92382c6d/skills/spec-driven-development/SKILL.md
+source: https://github.com/addyosmani/agent-skills/blob/c004a74784a08295d52749b04cda634125b9a581/skills/spec-driven-development/SKILL.md
 upstream:
   repo: https://github.com/addyosmani/agent-skills
-  commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
+  commit: c004a74784a08295d52749b04cda634125b9a581
   path: skills/spec-driven-development/SKILL.md
-  bodySha256: 0df901751a72679874f5ecd1595152d6e760aa5ad90c4f0b8d9b286b07e3241e
+  bodySha256: 649936589e3e0022351757eeb5bf764ecb400dcea2a69f7c58f34f2d0d22e944
 ---
 
 # Spec-Driven Development
@@ -159,6 +159,12 @@ Don't silently fill in ambiguous requirements. The spec's entire purpose is to s
 ## Open Questions
 [Anything unresolved that needs human input]
 ```
+
+**External spec tools:** This workflow is format-agnostic. If the project
+already uses OpenSpec or another specification system, keep that system's
+artifact format and storage conventions instead of creating a duplicate
+`SPEC.md`. This skill owns the clarification, content, and approval gates; the
+external tool owns how the approved spec is represented.
 
 **Reframe instructions as success criteria.** When receiving vague requirements, translate them into concrete conditions:
 

@@ -1,4 +1,5 @@
 import { buildReviewPostBody, parseVerdictInput } from "../reviewVerdict.js";
+import type { Verbosity } from "../verbosity.js";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -183,6 +184,8 @@ function setup(
   answer: string | Error,
   opts: {
     agent?: string;
+    /** The request's verbosity directive (item 28); unset → the default, quiet. */
+    verbosity?: Verbosity;
     provider?: Provider;
     io?: Partial<ChannelIO>;
     executor?: Partial<Executor>;
@@ -268,7 +271,15 @@ function setup(
   const message = msg("hello there", opts.userId);
   const { resolved } = resolveRun(
     { config },
-    { msg: message, directives: { text: "hello there", ...(opts.agent ? { agent: opts.agent } : {}) }, history: [] },
+    {
+      msg: message,
+      directives: {
+        text: "hello there",
+        ...(opts.agent ? { agent: opts.agent } : {}),
+        ...(opts.verbosity ? { verbosity: opts.verbosity } : {}),
+      },
+      history: [],
+    },
   );
   const agent = getAgent(resolved.agentName);
   const registry = new RunRegistry({
@@ -2505,6 +2516,8 @@ describe("the pi harness — the review preset", () => {
     const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
     const s = setup("", {
       agent: "review",
+      // The re-review's note is an ack (item 28): asked for here so the thread shows it.
+      verbosity: "verbose",
       provider: provider("unused"),
       yaml: REVIEW_PI_YAML,
       harness: { harnesses: roster(), registry, harnessUrl: "https://bot.example.com", containerFor: () => container },

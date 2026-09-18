@@ -60,7 +60,7 @@ function plainHelp(output: JsonValue): string {
   const agents = agentsOf(output);
   const bullet = (a: HelpAgent) => `• \`${a.name}\` — ${a.description}`;
   return [
-    "*Switchboard* — just describe what you want. I pick the agent for it and say why on the card (`routed: <reason>`).",
+    "*Switchboard* — just describe what you want. I pick the agent for it; `verbosity:debug` shows why on the card.",
     ...agents
       .filter((a) => a.door === "compound")
       .map((a) => `Several independent asks in one message run as \`${a.name}\`, one child per ask: ${a.description}`),

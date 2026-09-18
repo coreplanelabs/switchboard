@@ -38,8 +38,8 @@
 // the built-in `write`: a repository's own test or build, which changes
 // nothing of Switchboard's own); a command at or after it is handed back as
 // the line to paste and never run from prose — and on any failure replies
-// the command's own error line and the override footer and stops — one model
-// call, never a second route.
+// the command's own error line (under the receipt at verbose) and stops — one
+// model call, never a second route.
 import { AGENTS, COMPOUND_PRESET, type Identity, type MachineClass } from "../../agents/registry.js";
 import { HAND_BACK_PREFIX } from "./handBack.js";
 import { chatActorOf } from "../authz/actor.js";
@@ -51,7 +51,8 @@ import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import { parseModelRef, type Provider, type ToolDef } from "../provider.js";
 import type { ProviderTable } from "../harness/piAi.js";
 import { oneLine, redactAndCap, redactSecrets } from "../redact.js";
-import { ROUTED_LABEL_PREFIX, ROUTED_CARD_FOOTER } from "../statusCardFrame.js";
+import { ROUTE_REASON_PREFIX } from "../statusCardFrame.js";
+import { shows, type Verbosity } from "../verbosity.js";
 import type {
   AgentSource,
   RouteInputLeaf,
@@ -1267,7 +1268,18 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
     ),
   );
   if (decision.preset === undefined && decision.command && ctx.command && deps.commands)
-    return answerCommand(deps, deps.commands, ctx.command, msg, decision.command, modelRef, root);
+    return answerCommand(
+      deps,
+      deps.commands,
+      ctx.command,
+      msg,
+      decision.command,
+      modelRef,
+      // The request's level (item 28), from its own or the thread's directive
+      // over the scopes — the same word `resolveRun` would have settled on.
+      deps.config.verbosityFor(msg.channelId, msg.userId, directives.verbosity ?? sticky.verbosity),
+      root,
+    );
   if (decision.preset === undefined) {
     console.log(`[route] ${msg.threadKey} not routed (${decision.reason}) — running ${cfg.defaults.agent}`);
     return decision.compoundRejected
@@ -1308,14 +1320,14 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
  * machinery a typed command does (`runChatCommand`), as the message's user —
  * authorized before it is parsed, the per-repository allowlist inside the
  * handler — with `source: route` on the audit line and the decision on the
- * run's record as its `route` event; the reply leads with the receipt
- * (`routed: <chat form>`, the same words the card uses for a preset) so the
- * person sees what was bound and can paste it to run it again. On any failure
- * — a refusal, a bad value, a repository with no resident, a backend that
- * cannot serve, a handler error — the reply is the receipt, the command's own
- * error line and the override footer, and the dispatch ends: one model call,
- * never a second route, nothing handed to an agent. Every field the record
- * gains is redacted and capped.
+ * run's record as its `route` event; at `verbose` and above (item 28) the
+ * reply leads with the receipt (`routed: <chat form>`) so the person sees
+ * what was bound and can paste it to run it again — at `quiet` the command's
+ * own text is the whole reply. On any failure — a refusal, a bad value, a
+ * repository with no resident, a backend that cannot serve, a handler error —
+ * the reply is the command's own error line (under the receipt at `verbose`),
+ * and the dispatch ends: one model call, never a second route, nothing handed
+ * to an agent. Every field the record gains is redacted and capped.
  */
 async function answerCommand(
   routeDeps: RouteDeps,
@@ -1324,6 +1336,7 @@ async function answerCommand(
   msg: IncomingMessage,
   decided: RouteCommandDecision,
   modelRef: string,
+  verbosity: Verbosity,
   root: Span,
 ): Promise<RouteStage> {
   const { deps, io, ending, trace } = branch;
@@ -1335,7 +1348,10 @@ async function answerCommand(
     return { kind: "unrouted" };
   }
   const receipt = routeReceipt(def, decided.input);
-  const receiptLine = `${ROUTED_RECEIPT_PREFIX} ${receipt}`;
+  // The receipt is the system's word on what it bound — `verbose` material
+  // (item 28); the record keeps it at every level.
+  const receiptLine = shows(verbosity, "verbose") ? `${ROUTED_RECEIPT_PREFIX} ${receipt}` : undefined;
+  const under = (text: string) => (receiptLine !== undefined ? `${receiptLine}\n${text}` : text);
   const route: RouteEventFields = {
     preset: COMMAND_RUN_AGENT,
     reason: `command ${def.id}`,
@@ -1360,10 +1376,10 @@ async function answerCommand(
     source: "route",
   });
   // A failed command that carries a guess is one question (record 0054): the
-  // receipt leads as it does for any command reply, then `renderRefusal` offers
-  // Yes and No on channels with `offer`, or replies the line to type otherwise.
-  // The receipt goes out first; the footer is not appended — the question carries
-  // the error sentence and `renderRefusal` handles the full offer or text form.
+  // receipt leads (when the level shows it) as it does for any command reply,
+  // then `renderRefusal` offers Yes and No on channels with `offer`, or
+  // replies the line to type otherwise. The question carries the error
+  // sentence and `renderRefusal` handles the full offer or text form.
   // The proposal is the original message with its text replaced by the corrected
   // line (the slug replaced in the original prose, so a Yes runs the right request).
   if (!res.ok && res.guess && res.error) {
@@ -1383,12 +1399,12 @@ async function answerCommand(
       async () => {},
       () =>
         root.span("post.reply", async () => {
-          await io.reply(`${receiptLine}\n${ROUTED_CARD_FOOTER}`);
+          if (receiptLine !== undefined) await io.reply(receiptLine);
           await renderRefusal(refusal, io, { confirmations: deps.confirmations });
         }),
     );
   } else {
-    const text = res.ok ? `${receiptLine}\n${res.text}` : `${receiptLine}\n${res.text}\n${ROUTED_CARD_FOOTER}`;
+    const text = under(res.text);
     await ending.sealAfterReply(
       async () => {},
       () => root.span("post.reply", () => io.reply(text)),
@@ -1513,17 +1529,13 @@ export function redactedInput(input: CommandInput): { [key: string]: RouteInputV
   };
 }
 
-/** The card's route line, appended to its label: `routed: <reason>`, and for
- *  a compound answer the parse collapsed onto one write preset, the collapse
- *  after it: `routed: <reason> (compound collapsed: review+coding)`. */
-export function routedLabel(reason: string, collapsed?: CollapsedCompound): string {
-  return `${ROUTED_LABEL_PREFIX} ${reason}${collapsed ? ` (compound collapsed: ${collapsed.presets.join("+")})` : ""}`;
+/** The card's route note, a `debug` note on its label (routing-and-config
+ *  items 21 and 28): `route reason: <reason>`, and for a compound answer the
+ *  parse collapsed onto one write preset, the collapse after it:
+ *  `route reason: <reason> (compound collapsed: review+coding)`. */
+export function routeReasonLabel(reason: string, collapsed?: CollapsedCompound): string {
+  return `${ROUTE_REASON_PREFIX} ${reason}${collapsed ? ` (compound collapsed: ${collapsed.presets.join("+")})` : ""}`;
 }
-
-/** The routed card's last line on every close lives with the card frame
- *  (`src/core/statusCardFrame.ts`), where every writer of a close — this
- *  stage's card shell, the boot reclaim, the reconnect sweep — reads it. */
-export { ROUTED_CARD_FOOTER } from "../statusCardFrame.js";
 
 /** The card's part lines under a routed conductor's label: one per part,
  *  `<preset>: <text>`, the text on one line and cut at `ROUTE_PART_LINE_CAP`. */

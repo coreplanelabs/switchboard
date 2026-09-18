@@ -108,6 +108,7 @@ const CAUSE_OF = {
   directive_budget: "request",
   directive_severity: "request",
   directive_renewals: "request",
+  directive_verbosity: "request",
   provider_unknown: "request",
   // the model card's refusal (record 0052, model-proxy item 11): a control the
   // resolved card does not take, named before any card or model call

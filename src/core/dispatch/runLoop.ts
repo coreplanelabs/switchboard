@@ -104,7 +104,7 @@ import type { ChannelIO, IncomingMessage, StagedFile, StatusActivity, StatusHand
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
-import { artifactLink, cardActivity } from "./reply.js";
+import { artifactLink, cardActivity, replyAck } from "./reply.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 
@@ -1187,10 +1187,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         },
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
         fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
+        // What the run did about a moved head is `verbose` material
+        // (routing-and-config item 28): the re-review's note and the card's
+        // word. The verdict that follows is the reply everyone gets.
         notify: {
-          reply: (text) => io.reply(text),
+          reply: (text) => replyAck(io, resolved.verbosity, text),
           headMoved: (suffix) => {
-            shell.setLabel(`${shell.label} · ${suffix}`);
+            shell.note("verbose", suffix);
             card.update(currentFrame());
           },
         },
@@ -1452,7 +1455,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         summary: oneLine(workLeftBehindSummary(leftBehind)),
         at: clock(),
       });
-      shell.setLabel(`${shell.label} · ${workLeftBehindLabel(leftBehind)}`);
+      // Work the person has to go and find: on the label at every level.
+      shell.note("quiet", workLeftBehindLabel(leftBehind));
     }
     // The accepted PrDescription is a fact of the run: publish it as a typed
     // event BEFORE the finally below finish()es the stream, string fields

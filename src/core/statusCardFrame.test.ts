@@ -1,12 +1,18 @@
 // Feature: docs/reference/specs/run-visibility.md item 2 — the status card's one frame builder.
 import { describe, expect, it } from "vitest";
+import type { Verbosity } from "./verbosity.js";
 import { createCardShell, LIVE_CARD_PREFIXES, SPINNER_GLYPHS, type CardClose } from "./statusCardFrame.js";
 
 const LABEL = "*review* on `anthropic/claude-fable-5`";
 
-function shellAt(elapsedMs: number) {
+function shellAt(elapsedMs: number, verbosity?: Verbosity) {
   let now = 1_000_000;
-  const shell = createCardShell({ label: LABEL, startedAt: 1_000_000, now: () => now });
+  const shell = createCardShell({
+    label: LABEL,
+    startedAt: 1_000_000,
+    now: () => now,
+    ...(verbosity !== undefined ? { verbosity } : {}),
+  });
   now += elapsedMs;
   return shell;
 }
@@ -75,43 +81,49 @@ describe("createCardShell — every paint comes from one builder", () => {
     expect(shellAt(0).ack()).toEqual({ title: `👀 ${LABEL} · preparing workspace…` });
   });
 
-  it("a footer line (the routed card's override hint) ends every close's detail — after the shape, the queued line and the run's own lines — and never rides the ack or a live frame", () => {
-    let now = 1_000_000;
-    const shell = createCardShell({
-      label: LABEL,
-      startedAt: now,
-      now: () => now,
-      footer: "wrong preset? reply agent:<preset> to run it another way",
-    });
-    expect(shell.ack()).toEqual({ title: `👀 ${LABEL} · preparing workspace…` });
-    now += 5_000;
-    expect(shell.live({ detail: ["○ reading the diff"] })).toEqual({
-      title: `◐ ${LABEL} · 5s`,
-      detail: "○ reading the diff",
+  it("notes paint at the request's verbosity (routing-and-config item 28): a quiet card paints quiet notes alone, verbose adds the verbose ones, debug all — in the order they were added, on every later frame, never on the notes it hides", () => {
+    const at = (verbosity: Verbosity) => {
+      const shell = shellAt(5_000, verbosity);
+      shell.note("debug", "route reason: PR review requested by link");
+      shell.note("verbose", "resident · acme/api · main@abc1234");
+      shell.note("quiet", "1 file left behind");
+      shell.note("verbose", "budget 45 min (channel boundary; preset asks 90)");
+      return shell;
+    };
+    expect(at("quiet").label).toBe(`${LABEL} · 1 file left behind`);
+    expect(at("verbose").label).toBe(
+      `${LABEL} · resident · acme/api · main@abc1234 · 1 file left behind · budget 45 min (channel boundary; preset asks 90)`,
+    );
+    expect(at("debug").label).toBe(
+      `${LABEL} · route reason: PR review requested by link · resident · acme/api · main@abc1234 · 1 file left behind · budget 45 min (channel boundary; preset asks 90)`,
+    );
+    // Every paint reads the same label: the ack, a live frame, every close kind.
+    const quiet = at("quiet");
+    expect(quiet.ack().title).toBe(`👀 ${LABEL} · 1 file left behind · preparing workspace…`);
+    expect(quiet.live().title).toBe(`◐ ${LABEL} · 1 file left behind · 5s`);
+    expect(quiet.close({ kind: "done", icon: "✅" }).title).toBe(`✅ ${LABEL} · 1 file left behind · 5s`);
+    expect(quiet.close({ kind: "not_started", icon: "📦", reason: "repo access" }).title).toBe(
+      `📦 ${LABEL} · 1 file left behind · not started (repo access) · 5s`,
+    );
+    expect(quiet.close({ kind: "refused", icon: "🚫", reason: "no plan" }).title).toBe(
+      `🚫 ${LABEL} · 1 file left behind · no plan · 5s`,
+    );
+    // No verbosity given: quiet — the card of a caller with no resolved request.
+    const bare = shellAt(5_000);
+    bare.note("debug", "untracked by the ledger");
+    expect(bare.label).toBe(LABEL);
+  });
+
+  it("no close carries an override footer: a routed card's close is its own lines and nothing after them", () => {
+    const shell = shellAt(5_000, "debug");
+    shell.note("debug", "route reason: a review by link");
+    expect(shell.close({ kind: "done", icon: "✅", detail: "✓ reading the diff" })).toEqual({
+      title: `✅ ${LABEL} · route reason: a review by link · 5s`,
+      detail: "✓ reading the diff",
       link: undefined,
     });
-    expect(
-      shell.close({ kind: "done", icon: "✅", detail: "✓ reading the diff", shape: "4s thinking · 1s in tools" }),
-    ).toEqual({
-      title: `✅ ${LABEL} · 5s`,
-      detail: "4s thinking · 1s in tools\n✓ reading the diff\nwrong preset? reply agent:<preset> to run it another way",
-      link: undefined,
-    });
-    // A close with nothing else to say still carries it; every close kind does.
-    expect(shell.close({ kind: "done", icon: "❌" }).detail).toBe(
-      "wrong preset? reply agent:<preset> to run it another way",
-    );
-    expect(shell.close({ kind: "not_started", icon: "📦", reason: "repo access" }).detail).toBe(
-      "wrong preset? reply agent:<preset> to run it another way",
-    );
-    expect(shell.close({ kind: "refused", icon: "🚫", reason: "no plan" }).detail).toBe(
-      "wrong preset? reply agent:<preset> to run it another way",
-    );
-    expect(shell.close({ kind: "setup_failed", reason: "attach timed out" }).detail).toBe(
-      "wrong preset? reply agent:<preset> to run it another way",
-    );
-    // No footer: a close's detail is exactly what it was.
-    expect(shellAt(0).close({ kind: "done", icon: "✅" }).detail).toBeUndefined();
+    expect(shell.close({ kind: "done", icon: "❌" }).detail).toBeUndefined();
+    expect(shell.close({ kind: "setup_failed", reason: "attach timed out" }).detail).toBeUndefined();
   });
 
   it("the elapsed time floors in clock style like every other duration surface (docs/reference/specs/tracing.md), never a second ahead of the run page", () => {
@@ -123,7 +135,7 @@ describe("createCardShell — every paint comes from one builder", () => {
 
   it("a note appended to the label reaches every later frame; the glyph sequence is unaffected", () => {
     const shell = shellAt(3_000);
-    shell.setLabel(`${shell.label} · resumed`);
+    shell.note("quiet", "resumed");
     expect(shell.label).toBe(`${LABEL} · resumed`);
     expect(shell.live().title).toBe(`◐ ${LABEL} · resumed · 3s`);
     expect(shell.close({ kind: "done", icon: "✅" }).title).toBe(`✅ ${LABEL} · resumed · 3s`);
@@ -182,8 +194,20 @@ describe("createCardShell — every paint comes from one builder", () => {
     expect(shell.live().title).toBe(`◑ ${LABEL} · 12s`);
   });
 
-  it("a close's shape and queued lines lead its detail, in that order, on runless closes and done closes alike", () => {
-    const shell = shellAt(184_000);
+  it("a close's shape and queued lines lead its detail, in that order, on runless closes and done closes alike — at verbose and above; a quiet close drops both (item 28)", () => {
+    const quiet = shellAt(184_000);
+    expect(
+      quiet.close({
+        kind: "setup_failed",
+        reason: "resident attach timed out",
+        shape: "3m 00s getting ready · 4s Switchboard overhead",
+        queued: "queued 6m 00s before we saw it",
+      }),
+    ).toEqual({ title: "❌ setup failed · resident attach timed out · 3m 04s", detail: undefined });
+    expect(
+      quiet.close({ kind: "done", icon: "✅", detail: "✓ done", shape: "2m 30s thinking · 34s in tools" }).detail,
+    ).toBe("✓ done");
+    const shell = shellAt(184_000, "verbose");
     expect(
       shell.close({
         kind: "setup_failed",

@@ -102,7 +102,8 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     const out = await handOffToCoordinator(h.deps, input());
     expect(out.status).toBe("completed");
     expect(out.reply).toBe(
-      "🧭 Handed to the plan runner `plan-fixture`: plan `fixture` (`docs/plans/fixture.md` at `main`), 3 units in dependency order — U10, U11, U12. Each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread.",
+      "🧭 Handed to the plan runner.\n• plan `fixture` (`docs/plans/fixture.md` at `main`)\n• 3 units in dependency order: U10, U11, U12\n" +
+        "• each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread",
     );
     expect(h.reads).toEqual([["acme/api", "docs/plans/fixture.md", "main"]]);
     expect(h.created).toEqual(["plan-fixture"]);
@@ -170,7 +171,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       input({ requestText: "in acme/api: plan docs/plans/fixture.md units U12, U11" }),
     );
     expect(out.status).toBe("completed");
-    expect(out.reply).toContain("2 units in dependency order — U11, U12");
+    expect(out.reply).toContain("• 2 units in dependency order: U11, U12");
     expect((await h.instances.listUnits("plan-fixture")).map((u) => [u.unit, u.dependsOn])).toEqual([
       ["U11", ["U10"]],
       ["U12", []],
@@ -196,7 +197,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     );
     expect(out.status).toBe("completed");
     expect(out.reply).toBe(
-      `🧭 Handed to the plan runner \`${id}\`: plan \`warm-the-cache-on-wake-dfa06c\`, 1 unit in dependency order — U1. the unit runs on \`plan/warm-the-cache-on-wake-dfa06c/u1\` in this thread under your grants; this card follows it and the report lands here.`,
+      "🧭 Handed to the plan runner.\n• plan `warm-the-cache-on-wake-dfa06c`\n• the unit runs on `plan/warm-the-cache-on-wake-dfa06c/u1` in this thread under your grants; this card follows it and the report lands here",
     );
     expect(h.reads).toEqual([]);
     expect(h.created).toEqual([id]);
@@ -273,7 +274,8 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     ]);
     const attempt2 = await handOffToCoordinator(ready.deps, req);
     expect(attempt2.status).toBe("completed");
-    expect(attempt2.reply).toContain(`\`${id}-2\``);
+    expect(attempt2.instanceId).toBe(`${id}-2`);
+    expect(attempt2.reply).toContain("• attempt 2 of plan `");
     expect(await ready.instances.get(`${id}-2`)).toMatchObject({ attempt: 2, merge: "person" });
     expect(await ready.instances.listUnits(`${id}-2`)).toMatchObject([
       { unit: "U1", branch: "plan/warm-the-cache-on-wake-dfa06c/u1" },
@@ -320,7 +322,8 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       }),
     );
     expect(out.status).toBe("completed");
-    expect(out.reply).toContain(`Handed to the plan runner \`${id}\``);
+    expect(out.reply).toContain("🧭 Handed to the plan runner.");
+    expect(out.instanceId).toBe(id);
     expect(out.reply).toContain(
       "the review loop of https://github.com/acme/api/pull/7 resumes at its next review round on `feat/wake-cache` in this thread under your grants — no new coding round first",
     );
@@ -393,7 +396,8 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     );
     expect(retried.status).toBe("completed");
     expect(retried.reply).toBe(
-      "🧭 Handed to the plan runner `plan-fixture`: plan `fixture` (`docs/plans/fixture.md` at `main`), 2 units in dependency order — U10, U11. Each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread. The records of an earlier attempt that never started were replaced.",
+      "🧭 Handed to the plan runner.\n• plan `fixture` (`docs/plans/fixture.md` at `main`)\n• 2 units in dependency order: U10, U11\n" +
+        "• each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread\n• the records of an earlier attempt that never started were replaced",
     );
     expect(second.statusAsked).toEqual(["plan-fixture"]);
     expect(second.created).toEqual(["plan-fixture"]);
@@ -478,7 +482,8 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       const out = await handOffToCoordinator(resume.deps, input({ runId: "run-s2", now: NOW + 100 }));
       expect(out.status, ended).toBe("completed");
       expect(out.reply, ended).toBe(
-        "🧭 Handed to the plan runner `plan-fixture-2`: attempt 2 of plan `fixture` (`docs/plans/fixture.md` at `main`), 2 units left in dependency order — U11, U12; merged before: U10. Each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread.",
+        "🧭 Handed to the plan runner.\n• attempt 2 of plan `fixture` (`docs/plans/fixture.md` at `main`)\n• 2 units left in dependency order: U11, U12\n• merged before: U10\n" +
+          "• each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread",
       );
       expect(resume.statusAsked).toEqual(["plan-fixture"]);
       expect(resume.created).toEqual(["plan-fixture-2"]);
@@ -518,7 +523,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(third.statusAsked).toEqual(["plan-fixture-2"]);
     expect(third.created).toEqual(["plan-fixture-3"]);
     expect(out.reply).toContain("attempt 3 of plan `fixture`");
-    expect(out.reply).toContain("1 unit left in dependency order — U12; merged before: U10, U11");
+    expect(out.reply).toContain("• 1 unit left in dependency order: U12\n• merged before: U10, U11");
     expect((await store.get("plan-fixture-3"))?.attempt).toBe(3);
     // Every unit the request names merged already: nothing to run, nothing written.
     const done = harness({ store, status: { "plan-fixture-3": { kind: "status", status: "complete" } } });
@@ -558,7 +563,8 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     const out = await handOffToCoordinator(again.deps, input({ runId: "run-s3", now: NOW + 200 }));
     expect(out.status).toBe("completed");
     expect(out.reply).toBe(
-      "🧭 Handed to the plan runner `plan-fixture-2`: attempt 2 of plan `fixture` (`docs/plans/fixture.md` at `main`), 2 units left in dependency order — U11, U12; merged before: U10. Each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread. The records of an earlier attempt that never started were replaced.",
+      "🧭 Handed to the plan runner.\n• attempt 2 of plan `fixture` (`docs/plans/fixture.md` at `main`)\n• 2 units left in dependency order: U11, U12\n• merged before: U10\n" +
+        "• each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread\n• the records of an earlier attempt that never started were replaced",
     );
     expect(again.statusAsked).toEqual(["plan-fixture-2"]);
     expect(again.created).toEqual(["plan-fixture-2"]);

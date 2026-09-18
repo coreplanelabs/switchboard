@@ -104,10 +104,10 @@ export interface LiveRunMeta {
   request?: Record<string, unknown>;
   /** The router's decision when it chose the run's preset (routing-and-config
    *  item 21) — the same fields the record's `route` event carries. On the row
-   *  so a resume repaints the card as it was (` · routed: <reason>`, the
-   *  parts, the override footer on the close) and a reclaim closing the run
-   *  knows it was routed without reading the events. Absent for a preset a
-   *  person, a scope or the default chose. */
+   *  so a resume repaints the card as it was (the `route reason:` note at
+   *  debug, the parts) and a record built from the row knows it was routed
+   *  without reading the events. Absent for a preset a person, a scope or the
+   *  default chose. */
   route?: {
     preset: string;
     reason: string;

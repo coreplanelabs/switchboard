@@ -40,7 +40,7 @@ const INDEX: ChannelScopeIndexRow[] = [
 ];
 
 const DESCRIPTION: ConfigDescription = {
-  effective: { agent: "review", model: "anthropic/review-model" },
+  effective: { agent: "review", model: "anthropic/review-model", verbosity: "quiet" },
   defaults: { agent: "general", models: { general: "anthropic/general-model" } },
   channel: {
     agent: "review",

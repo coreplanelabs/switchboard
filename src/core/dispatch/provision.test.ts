@@ -293,9 +293,10 @@ describe("startMemoryRead — the memory read, started", () => {
 });
 
 describe("openAckCard — the ack card the thread sees while setup runs", () => {
-  it("a routed run's label carries the routed line; a compound's card leads every frame with one line per part", async () => {
+  it("a routed run's label carries the route reason at debug alone; a compound's card leads every frame with one line per part at every level (item 28)", async () => {
     const d = deps();
-    const { agent, resolved, root, trace } = request(d, "review #7 and also look into the outage");
+    const { agent, resolved: quietly, root, trace } = request(d, "review #7 and also look into the outage");
+    const resolved = { ...quietly, verbosity: "debug" as const };
     const { io, statuses } = fakeIO();
     const parts = [
       { preset: "review", text: "review https://github.com/acme/api/pull/7" },
@@ -312,7 +313,7 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
       route: { preset: "conductor", reason: "two independent asks", model: "anthropic/fast", parts },
     });
     clearInterval(ack.heartbeat);
-    expect(statuses[0].title).toContain("· routed: two independent asks");
+    expect(statuses[0].title).toContain("· route reason: two independent asks");
     expect(statuses[0].detail).toBe(
       "review: review https://github.com/acme/api/pull/7\nresearch: why did the staging resident go down last night",
     );
@@ -333,15 +334,43 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
       route: { preset: "review", reason: "a PR URL", model: "anthropic/fast" },
     });
     clearInterval(one.heartbeat);
-    expect(single.statuses[0].title).toContain("· routed: a PR URL");
+    expect(single.statuses[0].title).toContain("· route reason: a PR URL");
     expect(single.statuses[0].detail).toBeUndefined();
-    // Every close of a routed card — a single route or a compound — ends with how to run it another way.
-    expect(one.shell.close({ kind: "done", icon: "✅", detail: "✓ reviewed" }).detail).toBe(
-      "✓ reviewed\nwrong preset? reply agent:<preset> to run it another way",
+    // No close carries an override footer any more: the close is the run's own lines.
+    expect(one.shell.close({ kind: "done", icon: "✅", detail: "✓ reviewed" }).detail).toBe("✓ reviewed");
+    expect(ack.shell.close({ kind: "not_started", icon: "📦", reason: "repo access" }).detail).toBeUndefined();
+    // At quiet (the default) the same routed request paints no route reason; the parts still lead.
+    const quiet = fakeIO();
+    const q = await openAckCard(d, {
+      io: quiet.io,
+      agent,
+      resolved: quietly,
+      startedAt: NOW,
+      clock: () => NOW,
+      root,
+      trace,
+      route: { preset: "conductor", reason: "two independent asks", model: "anthropic/fast", parts },
+    });
+    clearInterval(q.heartbeat);
+    expect(quietly.verbosity).toBe("quiet");
+    expect(quiet.statuses[0].title).toBe(`👀 *${agent.name}* on \`${quietly.modelRef}\` · preparing workspace…`);
+    expect(quiet.statuses[0].detail).toBe(
+      "review: review https://github.com/acme/api/pull/7\nresearch: why did the staging resident go down last night",
     );
-    expect(ack.shell.close({ kind: "not_started", icon: "📦", reason: "repo access" }).detail).toBe(
-      "wrong preset? reply agent:<preset> to run it another way",
-    );
+    // Verbose shows the run's notes and still not the route reason.
+    const verbose = fakeIO();
+    const v = await openAckCard(d, {
+      io: verbose.io,
+      agent,
+      resolved: { ...quietly, verbosity: "verbose" },
+      startedAt: NOW,
+      clock: () => NOW,
+      root,
+      trace,
+      route: { preset: "review", reason: "a PR URL", model: "anthropic/fast" },
+    });
+    clearInterval(v.heartbeat);
+    expect(verbose.statuses[0].title).not.toContain("route reason");
   });
 
   it("posts the ack frame once, hands back the shell, the coalesced card and a heartbeat the caller owns", async () => {

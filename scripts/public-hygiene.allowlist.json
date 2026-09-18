@@ -12,16 +12,16 @@
     "planIds": 1
   },
   "src/core/coordinator/handOff.test.ts": {
-    "planIds": 6
+    "planIds": 5
   },
   "src/core/coordinator/handOff.ts": {
     "planIds": 2
   },
   "src/core/dispatch/ship.test.ts": {
-    "planIds": 4
+    "planIds": 3
   },
   "src/core/dispatcher.test.ts": {
-    "planIds": 8
+    "planIds": 7
   },
   "src/core/ship/contract.test.ts": {
     "planIds": 3

@@ -277,9 +277,23 @@ describe("admit — the thread admission claim", () => {
     expect(item).toMatchObject({ text: "and also the numbers", userId: "slack:UY", at: NOW, ledgerSeq: 7 });
     expect(item.msg).toBe(message);
     expect(item.io).toBe(io);
+    // The ack is verbose material (routing-and-config item 28): at the default,
+    // quiet, the steer is silent — the run picks the message up and its answer
+    // is what the thread hears.
+    expect(replies).toEqual([]);
+    expect(admission.get(THREAD)).toBe(claim.live); // still the live run's slot
+  });
+
+  it("a steered follow-up is acked at verbose — the message's own `verbosity:` directive is read before the request resolves (item 28)", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = admission.claim(THREAD, { agent: "general", now: 4_000 });
+    claim.live.runId = "run-1";
+    const { deps, ctx, replies } = setup("verbosity:verbose and also the numbers", { user: "slack:UY", admission });
+    expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "here" });
+    const [item] = claim.live.inbox.drain();
+    expect(item).toMatchObject({ text: "and also the numbers" });
     expect(replies).toHaveLength(1);
     expect(replies[0]).toMatch(/^↪ Folded into the \*general\* run already in flight in this thread \(6s in\)/);
-    expect(admission.get(THREAD)).toBe(claim.live); // still the live run's slot
   });
 
   it("a live run with no row yet (still in setup) gets the follow-up in memory only: nothing is pushed to the ledger", async () => {
@@ -428,8 +442,8 @@ describe("admit — the thread admission claim", () => {
         { runId: "run-far", message: durableInboxMessage(message, "and also the numbers", NOW) },
       ]);
       expect(admission.get(THREAD)).toBeUndefined();
-      expect(replies).toHaveLength(1);
-      expect(replies[0]).toMatch(/^↪ Folded into the \*general\* run already in flight/);
+      // Quiet by default: the steer is silent (item 28) — the verbose ack is the "here" test's.
+      expect(replies).toEqual([]);
     });
 
     it("a push the ledger refuses means the row is gone: the thread is forgotten and the message runs fresh (proceed)", async () => {

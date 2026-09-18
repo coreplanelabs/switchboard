@@ -9,6 +9,7 @@ import { boundaryProblem, INTAKE_MODES, MAX_INSTRUCTIONS_LENGTH, MIN_BOUNDARY_MI
 import { CONFIRM_CLASSES, type Boundary } from "../../config/profile.js";
 import { IDENTITIES, MACHINE_CLASSES, type MachineClass } from "../../agents/registry.js";
 import { EFFORT_LEVELS, type Effort } from "../../effort.js";
+import { VERBOSITY_LEVELS } from "../verbosity.js";
 import type { HarnessName } from "../harness/contract.js";
 import { HARNESS_NAMES } from "../harness/roster.js";
 import { ADDRESS_SEVERITIES } from "../shipPipeline.js";
@@ -30,11 +31,11 @@ import {
 //   config show [--channel <id>]
 //   config overrides                       — the channels that carry a scope, setting names only
 //   config set <channel|me|thread> [--agent x] [--model p/m] [--models.<agent> p/m] [--effort e] [--efforts.<agent> e]
+//                           [--verbosity quiet|verbose|debug]
 //                           [--harness.<agent> pi|opencode] [--intake.threadReplies mention|classify|always]
 //                           [--boundary.maxMinutes n] [--boundary.maxIdentity none|read|write] [--boundary.machines a,b]
 //                           [--channel <id>] [--thread <key>]
-//   config clear <channel|me|thread> [--channel <id>] [--thread <key>]
-//   config instructions <channel|me> [text…] [--channel <id>]
+//   config clear <channel|me|thread> [--channel <id>] [--thread <key>]//   config instructions <channel|me> [text…] [--channel <id>]
 // The caller's own channel (`caller.origin`) is the default target; `--channel`
 // names another (or is required where there is no origin — a machine surface).
 // The `thread` scope is the caller's own thread (`--thread <key>` on a machine
@@ -107,6 +108,11 @@ const effort = z.enum(EFFORT_LEVELS);
  *  derived, so a level added to `EFFORT_LEVELS` reaches help and the machine
  *  schemas without anyone retyping the list. */
 const effortLevels = `<${EFFORT_LEVELS.join("|")}>`;
+/** The verbosity ladder as the option prints it (`<quiet|verbose|debug>`;
+ *  routing-and-config item 28): derived, so a level added to
+ *  `VERBOSITY_LEVELS` reaches help and the machine schemas by itself. */
+const verbosity = z.enum(VERBOSITY_LEVELS);
+const verbosityLevels = `<${VERBOSITY_LEVELS.join("|")}>`;
 const modelRef = z.string().min(1);
 /** The roster's words as the option accepts them (`--harness.<agent> pi|opencode`;
  *  docs/reference/specs/harness.md item 8): derived from `HARNESS_NAMES`, so a
@@ -389,6 +395,11 @@ export const configSet = defineCommand({
     models: z.record(z.string(), modelRef).optional().describe("per-agent model: --models.<agent> provider/model"),
     effort: effort.optional().describe(`force a model effort ${effortLevels}`),
     efforts: z.record(z.string(), effort).optional().describe(`per-agent effort: --efforts.<agent> ${effortLevels}`),
+    verbosity: verbosity
+      .optional()
+      .describe(
+        `how much of itself the bot says ${verbosityLevels}: quiet is only what needs you, verbose adds what it is doing for you, debug adds the router's reason`,
+      ),
     harness: z
       .record(z.string(), harnessWord)
       .optional()
@@ -424,7 +435,7 @@ export const configSet = defineCommand({
   // Reversible: one `config set` or `config clear` undoes it; the receipt names the scope.
   annotations: { destructive: false, risk: () => "changes the scope's settings for everyone in it until reset" },
   describe:
-    "Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself, or the intake gate's mode for a thread (gated like the channel); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
+    "Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, or the intake gate's mode for a thread (gated like the channel); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
   render: (output) => {
     const o = output as JsonObject;
     return `Updated ${who(o.scope as "channel" | "me" | "thread")} scope. Now: ${JSON.stringify(o.effective)}`;
@@ -454,6 +465,9 @@ export const configSet = defineCommand({
     if (options.models) patch.models = options.models;
     if (options.effort !== undefined) patch.effort = options.effort as Effort;
     if (options.efforts) patch.efforts = options.efforts as Record<string, Effort>;
+    // Held to the ladder by the schema; the store holds a stored document to
+    // the same rule at load (`validateScopeVerbosity`).
+    if (options.verbosity !== undefined) patch.verbosity = options.verbosity;
     // The word was held to the roster by the schema; the store holds a stored
     // document to the same rule at load, so the two paths cannot drift.
     if (options.harness) patch.harness = options.harness as Record<string, HarnessName>;
@@ -485,7 +499,7 @@ export const configSet = defineCommand({
     if (Object.keys(patch).length === 0)
       throw new CommandError(
         "invalid_input",
-        "nothing to set: pass --agent, --model, --models.<agent>, --effort, --efforts.<agent>, --harness.<agent>, --intake.threadReplies, or --boundary.<maxMinutes|maxIdentity|machines|confirm>",
+        "nothing to set: pass --agent, --model, --models.<agent>, --effort, --efforts.<agent>, --verbosity, --harness.<agent>, --intake.threadReplies, or --boundary.<maxMinutes|maxIdentity|machines|confirm>",
       );
     let effective: Scope;
     if (args.scope === "channel") {

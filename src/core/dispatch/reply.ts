@@ -5,6 +5,7 @@
 // and a command reply that outgrows one chat message. Pure string and shape
 // work over the core's own types — no channel SDK (AGENTS.md invariant 1).
 import { buildReviewChannelReply, type ReviewPost, type ReviewVerdict } from "../reviewVerdict.js";
+import { shows, type Verbosity } from "../verbosity.js";
 import { visibilityOf } from "../authz/channelDirectory.js";
 import type { ChannelIO, ConfirmationOffer, DocumentAttachment, ImageAttachment } from "../types.js";
 import { confirmationMessageOf, newConfirmationId, renderOffer, type ConfirmationStore } from "../confirmations.js";
@@ -449,12 +450,16 @@ export function refusalQuestion(refusal: Refusal): string {
 }
 /**
  * An acknowledgement from a producing module the fence covers (record 0054):
- * a steered follow-up's ack, a hand-off's accepted reply — sentences that
- * refuse nothing. The fence (`refusals/no-raw-refusal`) keeps producers off
- * `io.reply`; what goes through here is review's to judge as an ack, never a
- * refusal in ack's clothing.
+ * a steered follow-up's ack, a hand-off's accepted reply, a unit-owned
+ * thread's "noted" — sentences that refuse nothing and say what the system is
+ * doing for the person. `verbose` material (routing-and-config item 28): sent
+ * only when the request's level shows it; at `quiet` the person hears the
+ * result and nothing before it. The fence (`refusals/no-raw-refusal`) keeps
+ * producers off `io.reply`; what goes through here is review's to judge as an
+ * ack, never a refusal in ack's clothing.
  */
-export async function replyAck(io: ChannelIO, text: string): Promise<void> {
+export async function replyAck(io: ChannelIO, verbosity: Verbosity, text: string): Promise<void> {
+  if (!shows(verbosity, "verbose")) return;
   return io.reply(text);
 }
 /**

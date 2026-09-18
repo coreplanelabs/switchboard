@@ -87,6 +87,14 @@ defaults:
   # provider default. Skipped for models without effort support.
   # efforts:
   #   coding: medium
+  # How much the bot says about its own doing (docs/reference/specs/routing-and-config.md
+  # item 28): quiet (default) — only what needs the person: answers, verdicts,
+  # refusals, questions, results, the card's progress; verbose — plus every
+  # acknowledgement (a follow-up folded into a live run, a plan handed to the
+  # runner, the workspace and budget on the card); debug — plus the router's
+  # reason and the ledger's word. Same layering as effort: per-channel/user
+  # `verbosity` and a per-request `verbosity:<level>` directive override it.
+  # verbosity: quiet
   # A boundary caps what ANY run in a scope may have — never grants — on the
   # three axes of a run's profile (docs/reference/specs/routing-and-config.md item 2):
   # maxMinutes (the wall-clock budget; at least 2), maxIdentity (the credential
@@ -156,6 +164,7 @@ defaults:
 # users:
 #   slack:U012345:
 #     model: openai/gpt-5
+#     verbosity: verbose          # hear every acknowledgement of what the bot does for you
 #     harness:
 #       coding: opencode
 

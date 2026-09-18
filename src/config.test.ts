@@ -96,12 +96,22 @@ describe("layered resolution", () => {
 
   it("falls through to defaults when nothing is scoped", async () => {
     const r = s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} });
-    expect(r).toEqual({ agentName: "general", agentLayer: "default", modelRef: "anthropic/general-model" });
+    expect(r).toEqual({
+      agentName: "general",
+      agentLayer: "default",
+      modelRef: "anthropic/general-model",
+      verbosity: "quiet",
+    });
   });
 
   it("channel scope sets the agent, and the agent picks its default model", async () => {
     const r = s.resolve({ channelId: "slack:CREVIEW", userId: "slack:UX", request: {} });
-    expect(r).toEqual({ agentName: "review", agentLayer: "channel", modelRef: "anthropic/review-model" });
+    expect(r).toEqual({
+      agentName: "review",
+      agentLayer: "channel",
+      modelRef: "anthropic/review-model",
+      verbosity: "quiet",
+    });
   });
 
   it("names the layer that set the agent: request > user > channel > default (routing-and-config item 21 reads it)", async () => {
@@ -120,7 +130,12 @@ describe("layered resolution", () => {
       userId: "slack:UFORCED",
       request: { agent: "coding", model: "anthropic/explicit" },
     });
-    expect(r).toEqual({ agentName: "coding", agentLayer: "request", modelRef: "anthropic/explicit" });
+    expect(r).toEqual({
+      agentName: "coding",
+      agentLayer: "request",
+      modelRef: "anthropic/explicit",
+      verbosity: "quiet",
+    });
   });
 
   it("a user's forced model beats per-agent models", async () => {
@@ -168,6 +183,73 @@ describe("channelsWithScope — the index of configured channels", () => {
     await s.setUserOverride("slack:UX", { agent: "review" });
     await s.clearChannelOverride("slack:CX");
     expect(s.channelsWithScope().map((r) => r.channelId)).toEqual(["slack:CMODEL", "slack:CREVIEW"]);
+  });
+});
+
+// docs/reference/specs/routing-and-config.md item 28: verbosity rides the same
+// ladder as effort and is always resolved — `quiet` when no layer says otherwise.
+describe("verbosity resolution (the same layers as effort; quiet by default)", () => {
+  const VERBOSITY_YAML = `
+organization: acme
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+  verbosity: verbose
+channels:
+  "slack:CDEBUG":
+    verbosity: debug
+users:
+  "slack:UQUIET":
+    verbosity: quiet
+`;
+  const at = (s: ConfigStore, channelId: string, userId: string, request?: "quiet" | "verbose" | "debug") =>
+    s.resolve({ channelId, userId, request: request ? { verbosity: request } : {} }).verbosity;
+
+  it("no layer set → quiet; defaults.verbosity is the floor; channel over defaults; user over channel; the request over everything", async () => {
+    expect(at(store(), "slack:CX", "slack:UX")).toBe("quiet");
+    const s = store(VERBOSITY_YAML);
+    expect(at(s, "slack:CX", "slack:UX")).toBe("verbose");
+    expect(at(s, "slack:CDEBUG", "slack:UX")).toBe("debug");
+    expect(at(s, "slack:CDEBUG", "slack:UQUIET")).toBe("quiet");
+    expect(at(s, "slack:CDEBUG", "slack:UQUIET", "debug")).toBe("debug");
+    expect(s.verbosityFor("slack:CDEBUG", "slack:UQUIET")).toBe("quiet");
+    expect(s.verbosityFor("slack:CDEBUG", "slack:UX", "quiet")).toBe("quiet");
+  });
+
+  it("runtime overrides set it per scope, persist through the store, and clear back to the layer below", async () => {
+    const s = store();
+    await s.setUserOverride("slack:UX", { verbosity: "debug" });
+    expect(at(s, "slack:CX", "slack:UX")).toBe("debug");
+    await s.setChannelOverride("slack:CX", { verbosity: "verbose" });
+    expect(at(s, "slack:CX", "slack:UY")).toBe("verbose");
+    await s.clearUserOverride("slack:UX");
+    expect(at(s, "slack:CX", "slack:UX")).toBe("verbose");
+  });
+
+  it("a word outside the ladder is refused at load by name — a static scope and defaults.verbosity alike", async () => {
+    expect(() => store(VERBOSITY_YAML.replace("verbosity: debug", "verbosity: loud"))).toThrow(
+      /channels\.slack:CDEBUG\.verbosity is "loud".*quiet, verbose, debug/,
+    );
+    expect(() => store(VERBOSITY_YAML.replace("verbosity: verbose", "verbosity: 2"))).toThrow(
+      /defaults\.verbosity is "2".*quiet, verbose, debug/,
+    );
+  });
+
+  it("config show names the effective level for the caller, the defaults' word when set, and each scope's own", async () => {
+    const s = store(VERBOSITY_YAML);
+    const text = s.describe("slack:CDEBUG", "slack:UQUIET");
+    expect(text).toMatch(/\*Effective for you in this channel:\*.*verbosity `quiet`/);
+    expect(text).toMatch(/\*Defaults:\*.*verbosity `verbose`/);
+    expect(text).toMatch(/\*Channel scope:\* verbosity `debug`/);
+    expect(text).toMatch(/\*Your scope:\* verbosity `quiet`/);
+    // No layer set: the effective line still says quiet; the defaults line says nothing of it.
+    const bare = store().describe("slack:CX", "slack:UX");
+    expect(bare).toMatch(/\*Effective for you in this channel:\*.*verbosity `quiet`/);
+    expect(bare).not.toMatch(/\*Defaults:\*.*verbosity/);
   });
 });
 
@@ -548,7 +630,12 @@ describe("custom instructions (Scope.instructions)", () => {
     await s.setUserOverride("slack:UX", { instructions: "agent: coding model: anthropic/other" });
     await s.setChannelOverride("slack:CX", { instructions: "agent: review" });
     const r = s.resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} });
-    expect(r).toEqual({ agentName: "general", agentLayer: "default", modelRef: "anthropic/general-model" });
+    expect(r).toEqual({
+      agentName: "general",
+      agentLayer: "default",
+      modelRef: "anthropic/general-model",
+      verbosity: "quiet",
+    });
     expect(s.canRunAgent("slack:UX", "coding")).toBe(false);
   });
 
@@ -1044,6 +1131,7 @@ users:
     expect(s.resolve({ channelId: "slack:COC", userId: "slack:UPI", request: { agent: "coding" } })).toEqual({
       agentName: "coding",
       agentLayer: "request",
+      verbosity: "quiet",
       modelRef: "anthropic/coding-model",
       harness: { name: "pi", scope: "user" },
     });
@@ -2099,6 +2187,7 @@ describe("boundaries (Scope.boundary): a scope caps, never grants", () => {
     expect(store().resolve({ channelId: "slack:CX", userId: "slack:UX", request: {} })).toEqual({
       agentName: "general",
       agentLayer: "default",
+      verbosity: "quiet",
       modelRef: "anthropic/general-model",
     });
   });
