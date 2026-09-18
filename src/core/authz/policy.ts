@@ -135,6 +135,10 @@ export const POLICY: readonly Rule[] = [
   // scope from anywhere, a private one only from inside it, `unknown` never.
   { action: "config:read", resource: "config-scope", resourceKind: "channel", when: [grant("config:write")] },
   { action: "config:read", resource: "config-scope", resourceKind: "channel", when: [MEMBER_OF] },
+  // A THREAD's scope (`config set thread`, routing-and-config item 27): the
+  // channel-config right — whoever may set the channel may set a thread in it;
+  // never a baseline, so membership alone admits nobody.
+  { action: "config:write", resource: "config-scope", resourceKind: "thread", when: [grant("config:write")] },
   // A user edits only their own scope.
   { action: "config:write", resource: "config-scope", resourceKind: "user", when: [IS_SELF] },
 

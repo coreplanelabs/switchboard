@@ -31,14 +31,14 @@ export type AttributeName = Exclude<keyof ResourceAttributes, "visibility">;
 /** The kinds each kinded resource type takes. Types absent here are not kinded. */
 export const RESOURCE_KINDS: { readonly [T in ResourceType]?: readonly KindOf<T>[] } = {
   "memory-scope": ["org", "user", "repo", "channel"],
-  "config-scope": ["channel", "user", "org"],
+  "config-scope": ["channel", "user", "thread", "org"],
 };
 
 /** A resource type, or `type/kind` for the kinded ones — the unit a rule row targets. */
 export type Target =
   | Exclude<ResourceType, "memory-scope" | "config-scope">
   | `memory-scope/${"org" | "user" | "repo" | "channel"}`
-  | `config-scope/${"channel" | "user" | "org"}`;
+  | `config-scope/${"channel" | "user" | "thread" | "org"}`;
 
 export const TARGET_ATTRIBUTES: Readonly<Record<Target, readonly AttributeName[]>> = {
   run: ["channelId", "userId", "repo"],
@@ -50,6 +50,9 @@ export const TARGET_ATTRIBUTES: Readonly<Record<Target, readonly AttributeName[]
   repo: ["repo"],
   "config-scope/channel": ["channelId"],
   "config-scope/user": ["userId"],
+  // A thread key carries no attribute a condition reads: the one row on it is
+  // a bare grant check (the channel-config right, `config set thread`).
+  "config-scope/thread": [],
   "config-scope/org": [],
   agent: ["name"],
   command: [],
@@ -136,6 +139,7 @@ export function attributesOf(resource: Resource): ResourceAttributes {
           return { channelId: resource.id, visibility: "unknown", channelVisibility: resource.visibility ?? "unknown" };
         case "user":
           return { userId: resource.id, visibility: "unknown" };
+        case "thread":
         case "org":
           return { visibility: "unknown" };
       }

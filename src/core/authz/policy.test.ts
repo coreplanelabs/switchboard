@@ -37,6 +37,7 @@ const channelConfig = (id: string, visibility?: ChannelVisibility): Resource => 
   ...(visibility ? { visibility } : {}),
 });
 const userConfig = (id: string): Resource => ({ type: "config-scope", kind: "user", id });
+const threadConfig = (id: string): Resource => ({ type: "config-scope", kind: "thread", id });
 const orgConfig: Resource = { type: "config-scope", kind: "org" };
 
 const channel = (c: { id: string; visibility: ChannelVisibility }): Resource => ({
@@ -346,6 +347,23 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [pointing(A.admin, "pub1"), channelConfig("slack:C_PRIV", "private")],
       [pointing(A.member, "pub1"), channelConfig("slack:C_PRIV", "private")],
       [A.chatUserGated, channelConfig("slack:C_PUB1")],
+    ],
+  },
+  // The thread scope (`config set thread`, routing-and-config item 27): the same
+  // channel-config right — whoever may set the channel may set a thread in it;
+  // membership alone never admits, and a credential needs the grant.
+  "config:write config-scope/thread [has-grant(config:write)]": {
+    allow: [
+      [A.member, threadConfig("slack:C_PUB1:1.0")],
+      [A.chatUser, threadConfig("slack:C_PUB2:1.0")],
+      [A.admin, threadConfig("slack:C_PRIV:1.0")],
+      [A.operator, threadConfig("slack:C_PRIV:1.0")],
+    ],
+    deny: [
+      [A.chatUserGated, threadConfig("slack:C_PUB1:1.0")],
+      [A.reader, threadConfig("slack:C_PUB1:1.0")],
+      [A.browser, threadConfig("slack:C_PUB1:1.0")],
+      [A.mcpWriter, threadConfig("slack:C_PUB1:1.0")],
     ],
   },
   "config:write config-scope/user [is-self]": {

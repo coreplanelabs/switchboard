@@ -454,6 +454,8 @@ export const FIXTURE = {
   reviewRun: "rev-1",
   repo: "acme/api",
   channel: "slack:C1",
+  /** A thread in the fixture channel — what `config set|clear thread` targets from a machine surface. */
+  thread: "slack:C1:1.0",
   /** The caller's own memory record; the only user scope a caller can reach is its own. */
   ownMemoryRecord: `mem:user:${CALLER_ID}:1`,
   /** The seeded MCP server (auth none) present in every tier the suite asks for. */
@@ -518,10 +520,13 @@ export const COMMAND_FIXTURES: Readonly<
     why: "a machine caller has no origin channel — `--channel` is required there",
   },
   "config.set": {
-    baseline: { channel: FIXTURE.channel, agent: "general" },
-    why: "as config.show, plus at least one setting (a bare `config set` is `nothing to set`)",
+    baseline: { channel: FIXTURE.channel, thread: FIXTURE.thread, intake: { threadReplies: "classify" } },
+    why: "as config.show plus `--thread` (a machine caller has no origin thread), and at least one setting every scope takes (a bare `config set` is `nothing to set`; a thread scope carries only the intake gate's mode)",
   },
-  "config.clear": { baseline: { channel: FIXTURE.channel }, why: "as config.show" },
+  "config.clear": {
+    baseline: { channel: FIXTURE.channel, thread: FIXTURE.thread },
+    why: "as config.show, plus `--thread` for the thread scope on machine surfaces",
+  },
   "config.instructions": { baseline: { channel: FIXTURE.channel }, why: "as config.show" },
   "repo.reconfigure": {
     baseline: { ref: "main" },

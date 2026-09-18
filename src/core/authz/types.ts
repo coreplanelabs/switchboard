@@ -114,6 +114,8 @@ export type Resource =
       readonly visibility?: ChannelVisibility;
     }
   | { readonly type: "config-scope"; readonly kind: "user"; readonly id: string }
+  /** A thread's runtime scope (`config set thread`, routing-and-config item 27); `id` is the thread key. */
+  | { readonly type: "config-scope"; readonly kind: "thread"; readonly id: string }
   | { readonly type: "config-scope"; readonly kind: "org" }
   | { readonly type: "agent"; readonly name: string }
   /** List-shaped actions with no single resource (`runs.list`, `friction.report`). */
