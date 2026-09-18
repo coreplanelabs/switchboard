@@ -650,11 +650,23 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let leaseSpentDuringRelaunch: string | undefined;
   /** The relaunch's re-attach ended the run — a stop, or the lease spent — so
    *  no process runs and the executor is the replaced container's, whose
-   *  worktree was never re-attached: the tail's workspace observation and the
-   *  push-before-abort salvage would each be a `/exec` the resident answers
-   *  `needs: attach` and the recovery refuses inside the reserve, spent for a
-   *  tree nobody asked for. Both are skipped, as a hard stop skips them. */
+   *  worktree was never re-attached: a coding run's workspace observation,
+   *  push-before-abort salvage, description turn, work-left-behind note and PR
+   *  post-step, and a review's head settle (`git rev-parse HEAD` on the
+   *  replaced container), verdict turn and review post-step would each drive
+   *  or read a tree nobody looked at (each `/exec` a `needs: attach` the
+   *  recovery refuses inside the reserve), or post the budget's answer to the
+   *  PR as a verdict it is not. The whole tail is skipped through
+   *  `tailSkipped`, as a hard stop skips it — the one predicate every tail
+   *  step keys on. */
   let relaunchEndedRun = false;
+  /** Whether the run's tail — a coding run's observation, salvage, description
+   *  turn, work-left-behind note and PR post-step; a review's head settle,
+   *  verdict turn and review post-step — is skipped: a hard stop observed
+   *  nothing and posts nothing, and a relaunch that ended the run has no tree
+   *  to look at and no verdict to post. Read at each step, since a stop can
+   *  land between them. */
+  const tailSkipped = (): boolean => run.control.requested === "hard" || relaunchEndedRun;
   // Give the workspace back now rather than at the inactivity sweep: a
   // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
   // 16a). The release mode is paired to the round's agent by the attach
@@ -1116,17 +1128,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // carry the review across a rebase of the same commits, or void the
     // verdict and re-review ONCE at the new head (worktree moved, one more
     // prompt on the run's own pi session, harness-pi item 14). A hard stop
-    // observes nothing and settles nothing; a verdict already posted before a
+    // observes nothing and settles nothing, and so does a relaunch that ended
+    // the run (`tailSkipped`: the HEAD read would be a `needs: attach` on the
+    // replaced container); a verdict already posted before a
     // restart is settled (it landed at its head) and is not re-reviewed; a
     // `finish` plan has no session, so a move it finds is left to the post
     // gate (agent-review item 10).
-    if (
-      isPrReview &&
-      repoCtx.repo &&
-      repoCtx.pr !== undefined &&
-      run.control.requested !== "hard" &&
-      postedBefore === undefined
-    ) {
+    if (isPrReview && repoCtx.repo && repoCtx.pr !== undefined && !tailSkipped() && postedBefore === undefined) {
       const settled = await settleReviewedHead({
         span: root,
         pr: { repo: repoCtx.repo, number: repoCtx.pr },
@@ -1177,7 +1185,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       isPrReview &&
       repoCtx.repo &&
       repoCtx.pr !== undefined &&
-      run.control.requested !== "hard" &&
+      !tailSkipped() &&
       postedBefore === undefined &&
       verdict === undefined &&
       !reviewPostOptedOut(ctx.requestText)
@@ -1264,7 +1272,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ...(planBaseLost ? { planBaseLost: true } : {}),
       ...(ownPr !== undefined ? { ownPr } : {}),
     };
-    if (isCodingPrRun && run.control.requested !== "hard" && !relaunchEndedRun) await observeWorkspaceNow();
+    if (isCodingPrRun && !tailSkipped()) await observeWorkspaceNow();
     // Push-before-abort (agent-ship.md item 8): a ship coding child (a
     // coordinator's spawn) whose loop ended at the time budget commits and
     // pushes what the observation found still in the tree to the unit's own
@@ -1274,13 +1282,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // skipped, so a re-issue starts from the partial work instead of zero.
     // The note is the record's; a push moves the observation, so it is read
     // again.
-    if (
-      isCodingPrRun &&
-      coordinator !== undefined &&
-      budgetEnded &&
-      run.control.requested !== "hard" &&
-      !relaunchEndedRun
-    ) {
+    if (isCodingPrRun && coordinator !== undefined && budgetEnded && !tailSkipped()) {
       const target = salvageTargetOf({
         pushedBranch: pushes.branch(),
         checkedOut: observedCheckedOut,
@@ -1323,7 +1325,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // and asks nothing — the post-step's note then says the description was
     // not resubmitted.
     let descriptionTurnRan = false;
-    if (isCodingPrRun && run.control.requested !== "hard" && !relaunchEndedRun && prDescription === undefined) {
+    if (isCodingPrRun && !tailSkipped() && prDescription === undefined) {
       const turnTarget = await descriptionTurnTarget({
         observed: {
           head: observedHead,
@@ -1371,7 +1373,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // observation above (after the description turn, in case it pushed); a
     // hard stop observed nothing and has its own ⛔.
     const leftBehind =
-      isCodingPrRun && run.control.requested !== "hard"
+      isCodingPrRun && !tailSkipped()
         ? workLeftBehindOf({ uncommittedChanges: observedUncommitted, unpushedCommits: observedUnpushed })
         : undefined;
     if (leftBehind) {
@@ -1406,8 +1408,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // the dispatch's resolved ref — binding is only ever set on the resident
     // path (factory.ts), so no resident check is needed. The note rides on
     // the final reply below. A hard stop observed nothing above and posts
-    // nothing.
-    if (isCodingPrRun && run.control.requested !== "hard") {
+    // nothing; a relaunch that ended the run likewise (`tailSkipped`).
+    if (isCodingPrRun && !tailSkipped()) {
       prNote = await root.span("run.pr_post_step", () =>
         runCodingPrPostStep({
           observed: {
@@ -1464,13 +1466,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // second ago. Best-effort: a post failure is recorded and said in the
     // thread but never fails the run (the review lands in Slack regardless).
     // A HARD-stopped review has no findings — only the abort line — so
-    // nothing is posted and nothing is recorded. The step reads the canonical
+    // nothing is posted and nothing is recorded; a relaunch that ended the run
+    // likewise (`tailSkipped`): the budget's answer is no verdict, and the
+    // replaced container was never re-attached. The step reads the canonical
     // answer above: the GitHub body and the `answer` event are one dialect.
     // Only a review run reaches it: every other run's stream is as before. A
     // verdict a previous generation posted before the restart is the outcome
     // already (`postedBefore`): the record carries it, GitHub is not asked twice.
     if (postedBefore) reviewPost = postedBefore;
-    else if (agent.name === "review" && run.control.requested !== "hard")
+    else if (agent.name === "review" && !tailSkipped())
       reviewPost = await root.span("run.review_post_step", () =>
         runReviewPostStep({
           agent,

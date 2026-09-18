@@ -151,9 +151,9 @@ export async function prepareRelaunch(
     if (reattached.kind === "lease_spent")
       return {
         kind: "lease_spent",
-        why:
-          `the container was replaced with ${Math.max(0, Math.round(reattached.leftMs / 1000))}s of the run's lease left, ` +
-          "inside the write-up reserve; no re-attach was opened and no write-up ran",
+        // The bound's own sentence (`attachBoundWithinRun`'s note, the one
+        // source, worded by the bound that refused), with what it meant here.
+        why: `the container was replaced under the run: ${reattached.note}; no write-up ran`,
       };
     if (reattached.kind === "reattach_refused")
       return refuse(

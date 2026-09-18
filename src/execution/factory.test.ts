@@ -1528,8 +1528,8 @@ describe("makeExecutor resident selection", () => {
         await pA;
         expect(settledA).toBeInstanceOf(WorkspaceReattachLeaseSpentError);
         expect((settledA as WorkspaceReattachLeaseSpentError).leftMs).toBe(60_000);
-        expect((settledA as WorkspaceReattachLeaseSpentError).why).toBe(
-          "the run has 60s of its lease left, inside the 60s write-up reserve or under what an attach needs; no re-attach was opened",
+        expect((settledA as WorkspaceReattachLeaseSpentError).note).toBe(
+          "the run has 60s of wall clock left, inside the 60s write-up reserve, so no attach was opened",
         );
         expect(a.calls).toHaveLength(14);
         expect(a.calls.every((c) => c === "/status")).toBe(true);
@@ -1548,7 +1548,44 @@ describe("makeExecutor resident selection", () => {
         await pB;
         expect(settledB).toBeInstanceOf(WorkspaceReattachLeaseSpentError);
         expect((settledB as WorkspaceReattachLeaseSpentError).leftMs).toBe(85_000);
+        // The bound's own sentence, worded by the bound that refused: the floor, not the reserve.
+        expect((settledB as WorkspaceReattachLeaseSpentError).note).toBe(
+          "the run has 85s of wall clock left, only 25s past the 60s write-up reserve — under the 30s an attach needs — so no attach was opened",
+        );
         expect(b.calls).toEqual(["/status", "/status", "/status", "/status", "/status"]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a wake-budget strike under the re-attach with the lease spent meanwhile is the lease's end too, never `workspace_lost`: 100 s left, the probe serves at once, /attach answers a transient 500 and the resident stays restoring for the whole 40 s the lease leaves the wait — the strike is read after the lease, and the run ends on its budget", async () => {
+      vi.useFakeTimers();
+      try {
+        stubEnvs();
+        // The probe serves; the attach meets a blip the Worker typed transient; the
+        // engine view never serves again within the wait the lease leaves (40 s).
+        const { calls } = stubFetch(
+          { body: { state: "warm", reason: "" } },
+          { body: { error: "attach-failed: Network connection lost.", status: 500, transient: true } },
+          ...Array.from({ length: 12 }, () => ({ body: { state: "restoring", reason: "rehydrating", inFlight: 0 } })),
+        );
+        const start = Date.now();
+        let settled: unknown;
+        const p = makeExecutor(residentOpts(), {
+          ...repoCtx(),
+          reattach: recorded,
+          remainingMs: () => 100_000 - (Date.now() - start),
+        }).catch((e: unknown) => (settled = e));
+        await vi.advanceTimersByTimeAsync(40_000);
+        await p;
+        expect(settled).toBeInstanceOf(WorkspaceReattachLeaseSpentError);
+        expect((settled as WorkspaceReattachLeaseSpentError).leftMs).toBe(60_000);
+        expect((settled as WorkspaceReattachLeaseSpentError).note).toBe(
+          "the run has 60s of wall clock left, inside the 60s write-up reserve, so no attach was opened",
+        );
+        // The probe, the attach, then the wake's probes every 5 s to the clipped budget's edge: 9 of them.
+        expect(calls.slice(0, 2)).toEqual(["/status", "/attach"]);
+        expect(calls.slice(2)).toEqual(Array.from({ length: 9 }, () => "/status"));
       } finally {
         vi.useRealTimers();
       }
