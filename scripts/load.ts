@@ -133,6 +133,7 @@ const USAGE = `usage: tsx scripts/load.ts <command> [flags]
 
 commands
   history    peak concurrency and durations from the run store
+             [--limit N]: stop after N runs have been read (default: unlimited, 0 = unlimited)
              env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env)
   resident   N synthetic threads against one resident
              --resource repo:owner/name  --threads N  --hold S  --stagger S  --profile review|coding
@@ -326,6 +327,7 @@ async function history(f: Flags): Promise<boolean> {
   const startedAt = new Date(systemClock()).toISOString();
   const base = str(f, "state-url", process.env.SWITCHBOARD_STATE_WORKER_URL).replace(/\/$/, "");
   const token = bearer(str(f, "token-env", "MEMORY_TOKEN"));
+  const limit = num(f, "limit", 0);
   const items = await pageAll(
     async (cursor) => {
       const body: Record<string, unknown> = { storeKey: "runs:default", limit: 200, ...(cursor ?? {}) };
@@ -340,7 +342,7 @@ async function history(f: Flags): Promise<boolean> {
       };
       return data.items;
     },
-    { pageSize: 200, maxPages: 50 },
+    { pageSize: 200, maxPages: 50, ...(limit > 0 ? { maxItems: limit } : {}) },
   );
   const runs = realRuns(items);
   const peak = peakConcurrency(runs);
