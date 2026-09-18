@@ -344,6 +344,13 @@ export interface OpenCodeBridgeObservation {
   boundary?: boolean;
   /** The model call failed for another reason: the run fails by that name. */
   providerError?: string;
+  /** The inbox id of a steer the server just delivered (`session.inbox.delivered`):
+   *  the steer's fate is now known — the connection's `inboxFate` resolves it. */
+  inboxDelivered?: string;
+  /** The execution ended interrupted and was not the loop-end cut's own: any
+   *  steer enqueued but not yet delivered is dropped with it — the connection's
+   *  `inboxFate` is told, and each waiter resolves `false`. */
+  inboxDropped?: boolean;
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
@@ -1098,6 +1105,15 @@ export class OpenCodeBridge {
         }
         break;
       }
+      case "session.inbox.delivered":
+        // The server delivered a steer to the session's model at a step boundary
+        // (`session.inbox.delivered` carries `inboxID`, which equals the message id
+        // the steer's POST answer named). The drainer waits on this to confirm
+        // the steer landed rather than trusting the POST answer alone — a steer
+        // enqueued but not delivered before an interrupt is dropped, and the POST
+        // answer's id alone cannot tell the two apart.
+        if (typeof data.inboxID === "string") out.inboxDelivered = data.inboxID;
+        break;
       case "session.execution.succeeded":
       case "session.execution.interrupted":
       case "session.idle":
@@ -1111,10 +1127,17 @@ export class OpenCodeBridge {
         // kind can tell the two executions apart (the class doc, the schema).
         if (this.isCutsEnd(event.type)) {
           if (!earlier) this.note("settle_set_aside", owedEndNote(event.type));
+          // The cut execution's `interrupted` end drops any steer it had not
+          // yet delivered: the drainer's `InboxFate` waiters are resolved now
+          // so no steer waits past the interrupt it was dropped with.
+          if (event.type === "session.execution.interrupted" && !earlier) out.inboxDropped = true;
           break;
         }
         if (earlier) break;
         this.stepOpen = false;
+        // An `interrupted` end that is not the cut's drops any steer that was
+        // enqueued but not yet delivered: the drainer's `InboxFate` is told.
+        if (event.type === "session.execution.interrupted") out.inboxDropped = true;
         // The tailer refills the store after `succeeded` and `interrupted`, and
         // the last step's refill — the row that carries the answer — lands
         // after the event too: the settle is that refill's (`settleOwedTo`),
@@ -1908,6 +1931,13 @@ export interface OpenCodeConnection {
   writes?: { seq: number; ownPrompts: Map<string, number>; imported: ReadonlySet<string> };
   /** The step boundaries the loop's feed delivers, for a steer's resolution to wait on (`StepBoundaries`). */
   boundaries?: StepBoundaries;
+  /** The inbox delivery tracker: populated by the loop from `session.inbox.delivered`
+   *  and `session.execution.interrupted` events, so the drainer can wait for a steer's
+   *  fate rather than trusting the POST answer's id alone. A steer enqueued into a
+   *  running execution is delivered only at the next step boundary; an interrupt
+   *  between the POST and that boundary drops it. `InboxFate.wait(inboxID)` resolves
+   *  `true` on delivery, `false` when `interruptAll` fires. */
+  inboxFate?: InboxFate;
   /** The failure by name the follow-up drainer hands the loop (`error` set): the
    *  loop ends on it — the interrupt posted, no stop asked of the run's control
    *  and no `stopped` note — and the harness throws it once the loop has left.
@@ -1944,6 +1974,60 @@ export class StepBoundaries {
 
   private wake(next: "boundary" | "left"): void {
     for (const waiter of this.waiters.splice(0)) waiter(next);
+  }
+}
+
+/** Whether a steer the server enqueued (its POST answer named an inbox id)
+ *  was delivered to the session's model (`session.inbox.delivered`) or dropped
+ *  by an interrupted execution before delivery. The drainer waits on this
+ *  instead of trusting the POST answer alone: a steer enqueued into a running
+ *  execution lands only at the next step boundary, and an interrupt between the
+ *  POST and that boundary drops it with no row in the store and no
+ *  `session.inbox.delivered`. `wait(inboxID)` resolves `true` when delivery
+ *  is confirmed, `false` when the execution that held the steer ended
+ *  interrupted (`interruptAll`). */
+export class InboxFate {
+  private readonly delivered = new Set<string>();
+  private gone = false;
+  private readonly waiters = new Map<string, Array<(delivered: boolean) => void>>();
+
+  /** The server delivered the steer: resolve all waiters for this id. */
+  deliver(inboxID: string): void {
+    this.delivered.add(inboxID);
+    const w = this.waiters.get(inboxID);
+    if (w !== undefined) {
+      for (const fn of w.splice(0)) fn(true);
+      this.waiters.delete(inboxID);
+    }
+  }
+
+  /** An interrupted execution dropped all steers it had not yet delivered:
+   *  resolve every waiter pending at this moment as `false` (dropped). The
+   *  tracker stays open — a steer posted after this interrupt (into the
+   *  write-up's execution the loop-end cut starts, say) can still be
+   *  delivered at that execution's step boundary, so only `close` latches. */
+  interruptAll(): void {
+    for (const fns of this.waiters.values()) for (const fn of fns) fn(false);
+    this.waiters.clear();
+  }
+
+  /** The loop is leaving: no delivery will ever come, so every pending waiter
+   *  resolves `false` and every later `wait` answers `false` on the spot.
+   *  Idempotent — a second call is a safe no-op. */
+  close(): void {
+    this.gone = true;
+    this.interruptAll();
+  }
+
+  /** Wait for this inbox id's fate: `true` (delivered) or `false` (dropped by an interrupt). */
+  wait(inboxID: string): Promise<boolean> {
+    if (this.delivered.has(inboxID)) return Promise.resolve(true);
+    if (this.gone) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const list = this.waiters.get(inboxID) ?? [];
+      list.push(resolve);
+      this.waiters.set(inboxID, list);
+    });
   }
 }
 
@@ -2902,6 +2986,13 @@ export async function driveOpenCode(
       // lands at a boundary the live server reaches, and a replayed one would
       // only send the drainer to read a store that cannot yet hold its row.
       if (!reattachCatchUp && obs.boundary === true) conn.boundaries?.reached();
+      // The inbox delivery tracker: tell the drainer when a steer was delivered
+      // or when an interrupted execution dropped all pending steers.
+      // Gated like the boundary line above: a dead generation's replayed
+      // `session.inbox.delivered` or `interrupted` end is history — acting on
+      // it would resolve a live steer's fate from an execution already over.
+      if (!reattachCatchUp && obs.inboxDelivered !== undefined) conn.inboxFate?.deliver(obs.inboxDelivered);
+      if (!reattachCatchUp && obs.inboxDropped === true) conn.inboxFate?.interruptAll();
       if (record.feed === "messages" && conn.saveOffset !== undefined) {
         const save = conn.saveOffset;
         void bridge.flush().then(() => save(after));
@@ -2954,6 +3045,18 @@ export async function driveOpenCode(
   } finally {
     left = true;
     conn.boundaries?.left();
+    // Any steer still waiting for inbox delivery (`inboxFate.wait`) is unblocked
+    // when the loop leaves: a delivery the feed already confirmed was handled
+    // before this point; one the feed never confirmed is the loop gone with the
+    // execution that held the steer — the drainer reads `false` (not delivered)
+    // and hands the steer back to the inbox for a fresh turn. Called after
+    // `conn.boundaries.left()` so a boundary waiter resolves before an inbox
+    // waiter on the same tick: the order matches the server's `step.ended →
+    // inbox.delivered` sequence, and an inbox waiter that resolves `false` hands
+    // the steer back rather than reading a step boundary that will not come.
+    // `close`, not `interruptAll`: only here is "no delivery will ever come"
+    // true, so only here does the tracker latch for good.
+    conn.inboxFate?.close();
     transport.close();
     // The span says what the outcome says: an operator's abort, a bypass, a
     // reply or a request the server refused, a replaced or lost container, a

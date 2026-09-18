@@ -1615,10 +1615,20 @@ class ScriptedServe {
   /** Any steers posted during the step just ended whose rows are not in the
    *  store yet (a steer into a running execution: delivered at the step
    *  boundary, measured), injected as user turns there — before the store's
-   *  refill for the step — so the model's next call sees them. */
+   *  refill for the step — so the model's next call sees them.
+   *
+   *  The real binary emits `session.inbox.delivered` right after the step's
+   *  `session.step.ended` for each steer it delivers (measured), which is what
+   *  the harness's `InboxFate` waits on. The fake emits it here, in the same
+   *  order, so the drainer's `inboxFate.wait` resolves correctly for running-
+   *  execution steers. A steer dropped by an interrupt (`pendingSteers.splice(0)`
+   *  at the interrupted end) never reaches here, and `inboxFate.interruptAll` is
+   *  called by the `session.execution.interrupted` observation instead. */
   private flushSteers(): void {
-    for (const steer of this.pendingSteers.splice(0))
+    for (const steer of this.pendingSteers.splice(0)) {
       if (!steer.inStore) this.store.push({ id: steer.id, type: "user", text: steer.text, time: { created: NOW } });
+      this.emitEvent("session.inbox.delivered", { sessionID: this.sessionID, inboxID: steer.id });
+    }
   }
 
   /** The store the model saw, as the completion request the proxy would carry. */
