@@ -550,6 +550,31 @@ describe("pinning and pass-through — the OpenAI shape", () => {
     expect(rest).toEqual(sentRest);
   });
 
+  it("forwards pi's aggregator words byte-for-byte outside the two pinned fields: the reasoning object, the developer role and its cache_control markers on the prompt, the last tool and the tail", async () => {
+    const h = harness();
+    const token = h.bearers.mint(h.localGrant("run-1", { maxTokens: 4096 }));
+    const marker = { type: "ephemeral" };
+    const sent = openAiRequest({
+      reasoning: { effort: "high" },
+      messages: [
+        { role: "developer", content: [{ type: "text", text: "terse", cache_control: marker }] },
+        { role: "user", content: [{ type: "text", text: "hi", cache_control: marker }] },
+      ],
+      tools: [
+        { type: "function", function: { name: "read", parameters: { type: "object" } } },
+        { type: "function", function: { name: "bash", parameters: { type: "object" } }, cache_control: marker },
+      ],
+    });
+    const res = await handleModelProxyRequest(
+      request({ path: OPENAI_CHAT_COMPLETIONS_PATH, headers: bearer(token), json: sent }).req,
+      h.deps,
+    );
+    expect(res.status).toBe(200);
+    const { model: _m, max_tokens: _t, ...rest } = h.calls[0].body;
+    const { model: _sm, max_tokens: _st, ...sentRest } = sent;
+    expect(rest).toEqual(sentRest);
+  });
+
   it("a body that caps with max_completion_tokens is pinned on that key and never grows a second cap", () => {
     const pinned = pinRequest(
       "openai-chat",

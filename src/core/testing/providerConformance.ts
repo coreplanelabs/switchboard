@@ -85,8 +85,10 @@ const providerTypeOf = (card: ModelCard): ProviderConfig["type"] =>
 
 /** The request body pi sends for the card, derived from the `models.json` the
  *  harness writes (record 0052): the effort word read from the file's level
- *  map — `output_config.effort` on the Anthropic shape, `reasoning_effort` on
- *  the completions shape — the cap under the file's `compat.maxTokensField`
+ *  map — `output_config.effort` on the Anthropic shape, `reasoning: { effort }`
+ *  when the file's compat spells thinking the aggregator's way
+ *  (`thinkingFormat: "openrouter"`, U45), `reasoning_effort` on the plain
+ *  completions shape — the cap under the file's `compat.maxTokensField`
  *  (the wire's spelling when the file names none), and `cache_control` markers
  *  exactly when the file says `compat.cacheControlFormat: "anthropic"` or the
  *  shape is Anthropic's own. */
@@ -110,7 +112,7 @@ export function piCapturedBody(card: ModelCard, asked: AskedControls): Record<st
           id: string;
           maxTokens: number;
           thinkingLevelMap?: Record<string, string | null>;
-          compat?: { maxTokensField?: string; cacheControlFormat?: string };
+          compat?: { maxTokensField?: string; cacheControlFormat?: string; thinkingFormat?: string };
         }>;
       }
     >;
@@ -122,6 +124,7 @@ export function piCapturedBody(card: ModelCard, asked: AskedControls): Record<st
     const word = entry.thinkingLevelMap === undefined ? asked.effort : entry.thinkingLevelMap[asked.effort];
     if (typeof word === "string") {
       if (anthropic) body.output_config = { effort: word };
+      else if (entry.compat?.thinkingFormat === "openrouter") body.reasoning = { effort: word };
       else body.reasoning_effort = word;
     }
   }
@@ -467,12 +470,29 @@ export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
     id: "cache-markers-generic",
     control: "cache",
     title: "a markers vendor on a biller with no harness-side provider degrades, the note true on both harnesses",
-    // The record half alone: pi still writes its marker compat for any markers
-    // card until U45 keys it on the biller, so the payload is not asserted here
-    // — the package write is `process.test.ts`'s.
+    // Both halves: the record degrades, and neither harness's write places a
+    // marker for a biller no harness-side provider vouches for (U45 keyed pi's
+    // marker compat on the biller, as OpenCode's package already was).
     ref: "local/anthropic/claude-sonnet-4",
     asked: {},
     expect: { outcome: "degraded", applied: "markers", vouched: false, why: "no harness-side provider vouches" },
+    payload: (body) => {
+      if (JSON.stringify(body).includes("cache_control"))
+        throw new Error("a generic biller's payload carries a cache marker no endpoint honours");
+    },
+  },
+  {
+    id: "aggregator-effort-shape",
+    control: "effort",
+    title: "a variant tier on the aggregator goes out as the aggregator's own reasoning object, never the flat field",
+    ref: "openrouter/anthropic/claude-sonnet-4",
+    asked: { effort: "high" },
+    expect: { outcome: "native", applied: "high", vouched: true },
+    payload: (body) => {
+      if ((body.reasoning as { effort?: string } | undefined)?.effort !== "high")
+        throw new Error("the aggregator payload does not spell the tier as reasoning.effort");
+      if ("reasoning_effort" in body) throw new Error("the aggregator payload carries the flat reasoning_effort");
+    },
   },
   {
     id: "harness-write-effort-map",
