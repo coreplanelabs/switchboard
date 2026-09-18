@@ -15,7 +15,9 @@ Conductors report child questions as waiting for input and point to the child's
 session for the answer. Coding/review coordinators also wait when a child asks a
 question, withholding earlier PR or review results. The original requester's
 answer resumes that unit under fresh permission checks, retaining its branch or
-PR and remaining time budget. The coordinator follows the resumed run and counts
+PR and remaining time budget. Waiting for an answer counts toward that budget;
+an unanswered question ends the unit when its deadline is reached, leaving an
+existing pull request awaiting review. The coordinator follows the resumed run and counts
 the question turns toward its total cost. Waiting-session cancellation persists before native completion and survives
 restarts and late history writes. Live acceptance still needs verification before
 the integration is ready for end users.

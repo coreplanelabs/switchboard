@@ -2035,6 +2035,31 @@ describe("the severity gate — an approve's findings held to the level in force
 });
 
 describe("coordinator child clarification", () => {
+  it.each(["coding", "review"])("ends an unanswered %s question at the unit deadline after restart", (agent) => {
+    const d = fresh(input());
+    if (agent === "review") throughRoundZero(d);
+    else d.answer({ type: "branch", ok: true, at: T0 });
+    const deadline = T0 + 240 * MIN;
+    const question = finished({ status: "completed", awaitingInput: true });
+    runChild(d, "run-question", question, deadline - 10_000);
+    expect(d.action).toMatchObject({ type: "sleep", ms: 10_000 });
+    const restored = new Driver(JSON.parse(JSON.stringify(d.state)));
+    restored.answer({ type: "sleep" });
+    restored.answer({ type: "read-record", run: question, at: deadline });
+    expect(restored.action).toMatchObject({
+      type: "end",
+      ending: { kind: agent === "review" ? "review_pending" : "wall_clock_cap" },
+    });
+    expect(restored.state.spentMs.waiting).toBe(10_000);
+  });
+
+  it("ends a question first observed after the deadline without another sleep", () => {
+    const d = fresh(input());
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(d, "run-question", finished({ status: "completed", awaitingInput: true }), T0 + 241 * MIN);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "wall_clock_cap" } });
+  });
+
   it("follows a continuing run and keeps the final run id for later round briefs", () => {
     const d = fresh(input());
     d.answer({ type: "branch", ok: true, at: T0 });

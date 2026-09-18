@@ -934,7 +934,11 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         timeoutMs: waitSliceMs(s.clock, p.until),
       };
     case "input-wait":
-      return { type: "sleep", step: `${roundStep(s, p.round)}/input/${p.n}`, ms: 30_000 };
+      return {
+        type: "sleep",
+        step: `${roundStep(s, p.round)}/input/${p.n}`,
+        ms: Math.min(30_000, Math.max(1, remainingMs(s))),
+      };
     case "read":
       return { type: "read-record", step: `${roundStep(s, p.round)}/read/${p.n}`, runId: p.runId };
     case "pr-check":
@@ -1585,7 +1589,8 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
                     }
                   : { lastCodingRunId: runId }),
             };
-      if (r.run.finished && r.run.status === "completed" && r.run.awaitingInput)
+      if (r.run.finished && r.run.status === "completed" && r.run.awaitingInput) {
+        if (remainingMs(current) <= 0) return end(current, capEnding(current, p.round));
         return {
           state: {
             ...current,
@@ -1593,6 +1598,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           },
           notes: [],
         };
+      }
       if (!r.run.finished)
         return {
           state: {

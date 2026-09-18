@@ -2672,6 +2672,43 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
 });
 
 describe("coordinator question records", () => {
+  it.each([1, 2])(
+    "retries a failed durable point read %s while the finished child is still cached",
+    async (failedRead) => {
+      const h = harness();
+      const child = h.registry.create("coding · question", {
+        ...TAG,
+        agent: "coding",
+        channelId: INSTANCE.channelId,
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+      });
+      h.registry.publish(child.id, {
+        type: "pr_opened",
+        number: 7,
+        url: "https://github.com/acme/api/pull/7",
+        created: true,
+      });
+      h.registry.finish(child.id, "completed");
+      await h.store.put(record(child.id, { ...TAG, awaitingInput: true }));
+      const read = h.store.getSummary.bind(h.store);
+      let reads = 0;
+      vi.spyOn(h.store, "getSummary").mockImplementation((id) => {
+        if (++reads === failedRead) throw new Error("history temporarily unavailable");
+        return read(id);
+      });
+      const request = post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+        parentInstanceId: INSTANCE.id,
+        runId: child.id,
+      });
+      await expect(handleCoordinatorRequest(request, h.deps)).rejects.toThrow(/temporarily unavailable/);
+      const retry = await handleCoordinatorRequest(request, h.deps);
+      expect(retry).toMatchObject({ status: 200, body: { run: { awaitingInput: true } } });
+      expect((retry!.body as { run: Record<string, unknown> }).run.pr).toBeUndefined();
+      expect(h.merges).toHaveLength(0);
+    },
+  );
+
   it("reports a cancelled question as stopped and withholds its earlier review and PR artifacts", async () => {
     const h = harness();
     await h.store.put(

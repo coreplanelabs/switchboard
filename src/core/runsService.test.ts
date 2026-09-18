@@ -82,6 +82,36 @@ function expectNoToken(value: unknown): void {
 }
 
 describe("RunsService.getRun", () => {
+  it.each(["missing", "tombstone", "unavailable"])(
+    "a required finished record retries %s history and recovers its waiting marker",
+    async (state) => {
+      const { reg, tick, store, svc } = setup();
+      const run = reg.create("coding · question");
+      if (state === "tombstone") await store!.put(record(run.id, NOW, { startedAt: NOW, status: "interrupted" }));
+      tick(1_000);
+      reg.finish(run.id, "completed");
+      if (state === "unavailable")
+        vi.spyOn(store!, "getSummary").mockRejectedValueOnce(new Error("history temporarily unavailable"));
+      await expect(svc.getRun(run.id, { requireRecord: true })).rejects.toThrow(/temporarily unavailable/);
+      await store!.put(record(run.id, NOW + 1_000, { awaitingInput: true }));
+      const retry = await svc.getRun(run.id, { requireRecord: true });
+      expect(retry).toMatchObject({ ok: true, value: { finished: true, status: "completed", awaitingInput: true } });
+      await store!.stopWaiting(run.id, { at: NOW + 2_000, by: actor, mode: "hard" });
+      expect(await svc.getRun(run.id, { requireRecord: true })).toMatchObject({
+        ok: true,
+        value: { status: "stopped_hard", inputStop: { mode: "hard" } },
+      });
+    },
+  );
+
+  it("requires a history store only once the run has finished", async () => {
+    const { reg, svc } = setup(null);
+    const run = reg.create("coding · live");
+    expect(await svc.getRun(run.id, { requireRecord: true })).toMatchObject({ ok: true, value: { finished: false } });
+    reg.finish(run.id, "completed");
+    await expect(svc.getRun(run.id, { requireRecord: true })).rejects.toThrow(/temporarily unavailable/);
+  });
+
   it("returns a live run as finished:false with no token and no events unless asked", async () => {
     const { reg, svc } = setup();
     const { id } = reg.create("coding · acme/x");

@@ -184,17 +184,23 @@ Coordinator record reads retain the `awaitingInput` marker and withhold earlier
 PR or review artifacts while the completed turn is a question. Coding and review
 rounds enter a persisted input-wait phase, re-read after durable 30-second sleeps,
 and do not spawn, check PRs or merge from that question. Time awaiting a person
-is reported as waiting. Stops and failures take precedence over a question marker.
-Human-reply continuation into the coordinator's original unit remains to be wired
-and proven end to end.
+is reported as waiting and counts toward the unit's wall-clock budget. The last
+sleep is shortened to the remaining budget; an unanswered question at or past
+the deadline ends at the wall-clock cap (or review pending for an existing PR),
+including after a restart. Stops and failures take precedence over a question marker.
+Human-reply continuation into the coordinator's original unit is wired; live
+end-to-end verification remains open.
 
 ## Proof
 
 | Criterion | Proof |
+|---|---|
+| Cached finished children cannot hide a failed durable question or stop read; retry recovers the question | `[unit]` `src/channels/adminCoordinator.test.ts::coordinator question records::retries a failed durable point read %s while the finished child is still cached` |
+| Unanswered coordinator questions respect the unit deadline after restart | `[unit]` `src/core/ship/coordinator.test.ts::coordinator child clarification::ends an unanswered %s question at the unit deadline after restart`, `src/core/ship/coordinator.test.ts::coordinator child clarification::ends a question first observed after the deadline without another sleep` |
+| The workflow reports a question deadline and finishes without spawning or merging | `[unit]` `src/core/coordinator/driver.test.ts::coordinator driver clarification::reports an unanswered question's deadline and finishes without another child or merge` |
 | A coordinator answer retains the stored task and requester | `[unit]` `src/core/coordinator/clarification.test.ts::coordinator clarification context::*` |
 | A coordinator answer rechecks the original preset before starting | `[unit]` `src/core/dispatcher.test.ts::coordinator clarification replies::*` |
 | Coordinator question turns do not advance PR or review work | `[unit]` `src/channels/adminCoordinator.test.ts::coordinator question records::*`, `src/core/ship/coordinator.test.ts::coordinator child clarification::*`, `src/core/coordinator/driver.test.ts::coordinator driver clarification::*` |
-|---|---|
 | Native child creation durability | `[unit]` `src/channels/linear/children.test.ts::*`, `src/channels/linear/api.children.test.ts::*` |
 | Child run tools retain clarification as unfinished | `[unit]` `src/tools/runs.test.ts::child clarification stays unfinished::*` |
 | Child replies preserve requester isolation | `[unit]` `src/core/dispatch/lineage.test.ts::*` |

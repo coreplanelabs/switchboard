@@ -857,7 +857,7 @@ async function coordinatorRoundRuns(
   const newest = original.awaitingInput
     ? [...members.values()].sort((a, b) => b.startedAt - a.startedAt)[0]!
     : original;
-  const current = newest.id === original.id ? original : await runs.getRun(newest.id);
+  const current = newest.id === original.id ? original : await runs.getRun(newest.id, { requireRecord: true });
   if ("ok" in current && !current.ok) throw new Error("The coordinator continuation is temporarily unavailable");
   const view = "ok" in current ? current.value : current;
   if (!view.finished) return { current: view, earlierCost: 0 };
@@ -866,7 +866,7 @@ async function coordinatorRoundRuns(
   let earlierCost: number | null = cursor ? null : 0;
   for (const row of members.values()) {
     if (row.id === view.id || !row.awaitingInput || row.startedAt > view.startedAt) continue;
-    const prior = await runs.getRun(row.id);
+    const prior = await runs.getRun(row.id, { requireRecord: true });
     const usd = prior.ok && prior.value.finished ? prior.value.cost?.usd : undefined;
     if (usd == null) earlierCost = null;
     else if (earlierCost !== null) earlierCost += usd;
@@ -884,14 +884,14 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   const at = (deps.clock ?? systemClock)();
   // A run outside the instance is `not_found`, byte-identical to a missing one
   // (authorization.md: a denied read reveals nothing).
-  const res = await deps.runs.getRun(body.runId);
+  const res = await deps.runs.getRun(body.runId, { requireRecord: true });
   if (!res.ok || res.value.parentInstanceId !== id.value) return json(404, { ok: false, error: "not_found" });
   const { current: view, earlierCost } = await coordinatorRoundRuns(deps.runs, res.value);
   if (!view.finished) return json(200, { ok: true, run: coordinatorRunView(view, id.value, undefined), at });
   // Finished: the final reply and the typed artifacts the record carries — the
   // coding child's pull request, the review child's verdict and whether it
   // stands on the pull request, the coding run's dispositions.
-  const full = await deps.runs.getRun(view.id, { include: "messages" });
+  const full = await deps.runs.getRun(view.id, { include: "messages", requireRecord: true });
   if (!full.ok) throw new Error("The coordinator result is temporarily unavailable");
   const record = full.value;
   const finalReply = finalReplyOf(record.events);

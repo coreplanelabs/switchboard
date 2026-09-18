@@ -1526,6 +1526,31 @@ describe("the plan runner's driver — a unit whose pull request already merged 
 });
 
 describe("coordinator driver clarification", () => {
+  it("reports an unanswered question's deadline and finishes without another child or merge", async () => {
+    const s = steps();
+    const deadline = T0 + 240 * MIN;
+    const question = { id: "run-c0", finished: true, status: "completed", awaitingInput: true };
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [record(question, deadline - 10_000), record(question, deadline)],
+      "pr-check": [prNone()],
+      round: [acked()],
+      "unit-end": [ok({ ok: true, told: true }, deadline)],
+      finish: [ok({ ok: true, runId: "run-parent" }, deadline)],
+    });
+    await runPlan(s.runner, b.client, INSTANCE);
+    expect(s.taken.filter((step) => step.kind === "sleep")).toEqual([expect.objectContaining({ ms: 10_000 })]);
+    expect(b.of("spawn")).toHaveLength(1);
+    expect(b.of("merge")).toHaveLength(0);
+    expect(b.of("unit-end")).toEqual([
+      expect.objectContaining({ ending: expect.objectContaining({ kind: "wall_clock_cap" }) }),
+    ]);
+    expect(b.of("finish")).toHaveLength(1);
+  });
+
   it("keeps polling a question through durable sleeps before proceeding with the completed result", async () => {
     const s = steps();
     const b = bot({

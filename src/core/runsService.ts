@@ -342,7 +342,9 @@ export interface RunsService {
    *  registry's rows. Empty without a ledger; a ledger that cannot be read is a
    *  warning and empty. */
   liveElsewhere(visibleTo: Predicate): Promise<RunView[]>;
-  getRun(id: string, opts?: { include?: "messages" }): Promise<Result<RunRecordView>>;
+  /** Coordinators require the finished record: a missing or unavailable store
+   *  must not make a cached question look like completed work. */
+  getRun(id: string, opts?: { include?: "messages"; requireRecord?: true }): Promise<Result<RunRecordView>>;
   getRunEvents(id: string, opts: { afterSeq?: number; limit?: number }): Promise<Result<RunEventsPageView>>;
   getRunFriction(id: string): Promise<Result<RunFrictionView>>;
   stopRun(id: string, mode: StopMode, actor: RunActor, options?: { receivedAt: number }): Promise<Result<StopRunView>>;
@@ -636,9 +638,12 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
    *  wakes a reader is sent, so the reader that follows sees the verdict the
    *  record landed with, never the row's silence. A store without the record
    *  yet — or holding only the start tombstone, which carries none — lends
-   *  nothing; a store that throws is one warning and nothing. */
+   *  nothing; a store that throws is one warning and nothing. A coordinator's
+   *  required read instead retries until the terminal record is available. */
   const storedArtifacts = async (
     id: string,
+    requireRecord = false,
+    expectedStatus?: RunRecord["status"],
   ): Promise<
     Pick<
       RunView,
@@ -659,11 +664,14 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     try {
       row = await storeSummary(id);
     } catch (err) {
+      if (requireRecord) throw err;
       warn(
         `[runs] history store read failed for ${id} — serving the registry row without its record: ${describe(err)}`,
       );
       return {};
     }
+    if (requireRecord && (!row || (!row.inputStop && row.status !== expectedStatus)))
+      throw new Error("The finished run record is temporarily unavailable");
     if (!row) return {};
     return {
       ...(row.inputStop
@@ -813,7 +821,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         // A finished row inside the registry's window: its identity, stop state,
         // finish fields and events are the registry's; the record's typed
         // artifacts are the store's to supply (item 21). A live row never asks.
-        if (summary.finished) Object.assign(view, await storedArtifacts(id));
+        if (summary.finished) Object.assign(view, await storedArtifacts(id, opts.requireRecord, summary.status));
         return { ok: true, value: view };
       }
       // Live on the ledger, not here (item 41): the row and the events it holds.
