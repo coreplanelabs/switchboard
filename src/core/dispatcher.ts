@@ -1413,6 +1413,9 @@ export async function dispatch(
       coordinator,
       seed,
       ...(session ? { seedLog: session.log } : {}),
+      // A promotion gone untracked marks the card as the reserve-time path
+      // above does — the label, not the bot log alone, says the run's row is gone.
+      markUntracked: () => shell.setLabel(`${shell.label} · untracked by the ledger`),
     });
     // The run's reach into its own session log (session-log item 10): the
     // `recall` and `notes` tools over the row's place in the log, once the
