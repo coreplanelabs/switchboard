@@ -29,7 +29,7 @@ import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { memoryContextBlock, type MemoryStore } from "../memory/index.js";
 import { provisionalBearerExpiresAt } from "../budgets.js";
 import type { RunBearerStore } from "../modelProxy/runBearers.js";
-import { parseModelRef } from "../provider.js";
+import { parseModelRef, wireOf } from "../provider.js";
 import { skillGuidanceBlock, type SkillStore } from "../../skills/index.js";
 import { mcpGuidanceBlock, type McpToolSource, type McpToolsForRun } from "../../mcp/source.js";
 import { configAwarenessBlock } from "../configAwareness.js";
@@ -956,7 +956,7 @@ export function mintRunBearer(deps: ProvisionDeps, ctx: MintBearerContext): stri
     runId,
     modelRef: resolved.modelRef,
     providerName,
-    providerType: providerCfg.type,
+    providerWire: wireOf(providerCfg),
     model,
     maxTokens: agent.maxTokens,
     maxTurns: agent.maxTurns,

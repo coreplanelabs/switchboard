@@ -1335,13 +1335,13 @@ describe("the example config's provider blocks", () => {
     });
     const block = store.config.providers[ref.provider];
     expect(
-      upstreamFor("openai-compatible", ref.provider, block, secretsFrom({ OPENROUTER_API_KEY: "sk-or-test" }), {}),
+      upstreamFor("openai-chat", ref.provider, block, secretsFrom({ OPENROUTER_API_KEY: "sk-or-test" }), {}),
     ).toEqual({
       ok: true,
       url: `${OPENROUTER.baseUrl}/chat/completions`,
       headers: { "content-type": "application/json", authorization: "Bearer sk-or-test" },
     });
-    expect(upstreamFor("openai-compatible", ref.provider, block, secretsFrom({}), {})).toEqual({
+    expect(upstreamFor("openai-chat", ref.provider, block, secretsFrom({}), {})).toEqual({
       ok: false,
       code: "provider_key_missing",
       message: 'provider "openrouter": OPENROUTER_API_KEY is not set',

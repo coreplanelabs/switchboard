@@ -157,7 +157,9 @@ export function feedByteLength(records: readonly unknown[]): number {
  *  duration: what a harness that forwarded the bot's key would leak, derived
  *  from the run's provider dialect so a new dialect brings its own variable. */
 function providerKeyEnvs(providerType: ProviderConfig["type"]): string[] {
-  return openCodeProviderPackage(providerType).includes("anthropic")
+  return openCodeProviderPackage(providerType === "anthropic" ? "anthropic-messages" : "openai-chat").includes(
+    "anthropic",
+  )
     ? ["ANTHROPIC_API_KEY"]
     : ["OPENAI_API_KEY", "OPENAI_API_BASE"];
 }

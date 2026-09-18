@@ -95,9 +95,8 @@ export interface Provider {
 
 /** The three wire shapes a provider block may declare (record 0052):
  *  Anthropic's Messages API, OpenAI's Chat Completions and OpenAI's Responses
- *  API. `openai-responses` is a declaration only in this slice — the proxy
- *  still serves two routes (a later slice adds the third) — and a block that names it
- *  keeps routing through the compatible shape until then. */
+ *  API. Each is a proxy route of its own (`PROXY_PATHS`): an `openai-responses`
+ *  block runs on `/v1/responses`, pinned and metered like the other two. */
 export const WIRES = ["anthropic-messages", "openai-chat", "openai-responses"] as const;
 export type Wire = (typeof WIRES)[number];
 

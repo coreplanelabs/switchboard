@@ -10,7 +10,7 @@
 import type { Identity } from "../../../agents/registry.js";
 import { EFFORT_LEVELS, type Effort } from "../../../effort.js";
 import type { ModelCard } from "../../modelCard.js";
-import type { ProviderConfig } from "../../provider.js";
+import { WIRE_ALIASES, type ProviderConfig, type Wire } from "../../provider.js";
 import type { PiCompactionConfig } from "../../../config.js";
 import type { HarnessPaths, HarnessStart } from "../container.js";
 import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
@@ -234,9 +234,15 @@ export function piThinkingLevelMap(levels: ModelCard["levels"] | undefined): Rec
   return map;
 }
 
+/** The wire a run's pi speaks: the card's (record 0052 — every dispatched run
+ *  carries one), else the legacy provider type's alias for a hand-built spec. */
+export function piRunWire(spec: { model: { providerType: ProviderConfig["type"] }; card?: ModelCard }): Wire {
+  return spec.card?.wire ?? WIRE_ALIASES[spec.model.providerType] ?? "openai-chat";
+}
+
 /** The two spellings pi's completions compat takes for the output cap; the
  *  card's field is written only when it is one of them (`max_output_tokens`
- *  belongs to the Responses route, which pi's completions shape never posts). */
+ *  is the Responses wire's own spelling, which its adapter writes natively). */
 const PI_MAX_TOKENS_FIELDS = ["max_completion_tokens", "max_tokens"] as const;
 type PiMaxTokensField = (typeof PI_MAX_TOKENS_FIELDS)[number];
 function piMaxTokensField(capField: string | undefined): PiMaxTokensField | undefined {
@@ -247,7 +253,8 @@ function piMaxTokensField(capField: string | undefined): PiMaxTokensField | unde
 
 /** pi's `models.json`: one provider, the bot's proxy, on the wire shape the
  *  run's provider speaks — `anthropic-messages` posts `/v1/messages` under the
- *  base, `openai-completions` posts `/chat/completions` under `<base>/v1` —
+ *  base, `openai-completions` posts `/chat/completions` and `openai-responses`
+ *  posts `/responses`, both under `<base>/v1` —
  *  with the key read from the bearer's variable at request time and a zero
  *  rate card, because pi's `usage.cost` is never what a page shows: the proxy
  *  meters. The model entry is the run's card (record 0052), never one pi
@@ -259,13 +266,14 @@ function piMaxTokensField(capField: string | undefined): PiMaxTokensField | unde
  *  aggregator) on the completions shape, and the thinking payload the model
  *  takes on the Anthropic shape (`takesAdaptiveThinking`). */
 export function piModelsJson(spec: PiLaunchSpec): string {
-  const anthropic = spec.model.providerType === "anthropic";
+  const wire = piRunWire(spec);
+  const anthropic = wire === "anthropic-messages";
   const base = spec.harnessUrl.replace(/\/$/, "");
   const card = spec.card;
-  const capField = piMaxTokensField(card?.capField);
+  const capField = wire === "openai-chat" ? piMaxTokensField(card?.capField) : undefined;
   const completionsCompat = {
     ...(capField !== undefined ? { maxTokensField: capField } : {}),
-    ...(card?.cache === "markers" ? { cacheControlFormat: "anthropic" } : {}),
+    ...(wire === "openai-chat" && card?.cache === "markers" ? { cacheControlFormat: "anthropic" } : {}),
   };
   const compat = anthropic
     ? { forceAdaptiveThinking: takesAdaptiveThinking(spec.model.id) }
@@ -278,7 +286,11 @@ export function piModelsJson(spec: PiLaunchSpec): string {
         providers: {
           [PROXY_PROVIDER]: {
             baseUrl: anthropic ? base : `${base}/v1`,
-            api: anthropic ? "anthropic-messages" : "openai-completions",
+            api: anthropic
+              ? "anthropic-messages"
+              : wire === "openai-responses"
+                ? "openai-responses"
+                : "openai-completions",
             apiKey: `$${RUN_BEARER_ENV}`,
             models: [
               {

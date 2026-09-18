@@ -25,6 +25,7 @@ import {
   handleModelProxyRequest,
   isModelProxyPath,
   OPENAI_CHAT_COMPLETIONS_PATH,
+  OPENAI_RESPONSES_PATH,
   pinRequest,
   PROXY_PATHS,
   proxyShapeOf,
@@ -37,10 +38,17 @@ import {
 const START = 1_700_000_000_000;
 const REAL_ANTHROPIC_KEY = "sk-ant-the-real-key";
 const REAL_LOCAL_KEY = "lk-the-real-local-key";
+const REAL_OPENAI_KEY = "sk-the-real-openai-key";
 const PROVIDERS: Record<string, ProviderConfig> = {
   anthropic: { type: "anthropic", apiKeyEnv: "ANTHROPIC_API_KEY" },
   local: { type: "openai-compatible", baseUrl: "http://llm.internal/v1/", apiKeyEnv: "LOCAL_KEY" },
   keyless: { type: "openai-compatible", baseUrl: "http://ollama.internal/v1" },
+  openai: {
+    type: "openai-compatible",
+    wire: "openai-responses",
+    baseUrl: "https://api.openai.test/v1",
+    apiKeyEnv: "OPENAI_API_KEY",
+  },
 };
 
 interface UpstreamCall {
@@ -85,7 +93,9 @@ function harness(
   const deps: ModelProxyDeps = {
     bearers,
     providers: () => PROVIDERS,
-    secrets: secretsFrom(opts.env ?? { ANTHROPIC_API_KEY: REAL_ANTHROPIC_KEY, LOCAL_KEY: REAL_LOCAL_KEY }),
+    secrets: secretsFrom(
+      opts.env ?? { ANTHROPIC_API_KEY: REAL_ANTHROPIC_KEY, LOCAL_KEY: REAL_LOCAL_KEY, OPENAI_API_KEY: REAL_OPENAI_KEY },
+    ),
     clock: () => clock.now,
     fetch: fetchFake as unknown as typeof fetch,
     log: (line) => void logs.push(line),
@@ -94,7 +104,7 @@ function harness(
     runId,
     modelRef: "anthropic/claude-opus-5",
     providerName: "anthropic",
-    providerType: "anthropic",
+    providerWire: "anthropic-messages",
     model: "claude-opus-5",
     maxTokens: 64000,
     maxTurns: 60,
@@ -107,11 +117,33 @@ function harness(
     grant(runId, {
       modelRef: "local/llama-3",
       providerName: "local",
-      providerType: "openai-compatible",
+      providerWire: "openai-chat",
       model: "llama-3",
       ...over,
     });
-  return { clock, bearers, root, starts, ends, published, calls, logs, deps, grant, localGrant, fetchFake };
+  const responsesGrant = (runId: string, over: Partial<RunBearerGrant> = {}) =>
+    grant(runId, {
+      modelRef: "openai/gpt-5.4",
+      providerName: "openai",
+      providerWire: "openai-responses",
+      model: "gpt-5.4",
+      ...over,
+    });
+  return {
+    clock,
+    bearers,
+    root,
+    starts,
+    ends,
+    published,
+    calls,
+    logs,
+    deps,
+    grant,
+    localGrant,
+    responsesGrant,
+    fetchFake,
+  };
 }
 
 /** A request whose body iterable records whether it was ever pulled. */
@@ -260,28 +292,31 @@ const json = (res: ProxyResponse) => JSON.parse(res.body as string) as Record<st
 const errorType = (res: ProxyResponse) => (json(res).error as { type: string }).type;
 
 describe("the model proxy's paths", () => {
-  it("names the two shapes pi speaks natively, and nothing else", () => {
-    expect(proxyShapeOf(ANTHROPIC_MESSAGES_PATH)).toBe("anthropic");
-    expect(proxyShapeOf(OPENAI_CHAT_COMPLETIONS_PATH)).toBe("openai-compatible");
+  it("names the three shapes a harness speaks natively, and nothing else", () => {
+    expect(proxyShapeOf(ANTHROPIC_MESSAGES_PATH)).toBe("anthropic-messages");
+    expect(proxyShapeOf(OPENAI_CHAT_COMPLETIONS_PATH)).toBe("openai-chat");
+    expect(proxyShapeOf(OPENAI_RESPONSES_PATH)).toBe("openai-responses");
     expect(proxyShapeOf("/v1/complete")).toBeUndefined();
     expect(proxyShapeOf("/v1/messages/count_tokens")).toBeUndefined();
     expect(isModelProxyPath("/v1/messages")).toBe(true);
     expect(isModelProxyPath("/v1/chat/completions")).toBe(true);
+    expect(isModelProxyPath("/v1/responses")).toBe(true);
     expect(isModelProxyPath("/ingress")).toBe(false);
     expect(isModelProxyPath("/v1/")).toBe(false);
   });
 
-  // docs/reference/specs/harness.md: the proxy's wire roster is the two
+  // docs/reference/specs/harness.md: the proxy's wire roster is the three
   // dialects pi speaks, held here as the route table; a harness that needs a
-  // third dialect is a change to record 0038, never a quiet route.
-  it("serves exactly two dialects — Anthropic messages and OpenAI-compatible chat completions — and a third path under a valid run bearer is refused 404 not_found by name, never forwarded", async () => {
+  // fourth dialect is a change to record 0038, never a quiet route.
+  it("serves exactly three dialects — Anthropic messages, OpenAI chat completions and OpenAI responses — and a fourth path under a valid run bearer is refused 404 not_found by name, never forwarded", async () => {
     expect(Object.entries(PROXY_PATHS)).toEqual([
-      ["anthropic", ANTHROPIC_MESSAGES_PATH],
-      ["openai-compatible", OPENAI_CHAT_COMPLETIONS_PATH],
+      ["anthropic-messages", ANTHROPIC_MESSAGES_PATH],
+      ["openai-chat", OPENAI_CHAT_COMPLETIONS_PATH],
+      ["openai-responses", OPENAI_RESPONSES_PATH],
     ]);
     const h = harness();
     const token = h.bearers.mint(h.grant("run-1"));
-    for (const path of ["/v1/responses", "/v1/complete", "/v1/messages/count_tokens"]) {
+    for (const path of ["/v1/completions", "/v1/complete", "/v1/messages/count_tokens"]) {
       const res = await handleModelProxyRequest(request({ path, headers: bearer(token) }).req, h.deps);
       expect(res.status).toBe(404);
       expect(errorType(res)).toBe("not_found");
@@ -354,7 +389,7 @@ describe("the door — decided from the headers, before the body is read", () =>
     expect(h.calls).toHaveLength(2);
   });
 
-  it("a run whose provider speaks the other shape is refused 400 wrong_shape, naming the path it should have used", async () => {
+  it("a run whose provider speaks another shape is refused 400 wrong_shape, naming the path it should have used", async () => {
     const h = harness();
     const token = h.bearers.mint(h.grant("run-1")); // an Anthropic run
     const res = await handleModelProxyRequest(
@@ -364,6 +399,50 @@ describe("the door — decided from the headers, before the body is read", () =>
     expect(res.status).toBe(400);
     expect(errorType(res)).toBe("wrong_shape");
     expect((json(res).error as { message: string }).message).toContain(ANTHROPIC_MESSAGES_PATH);
+    expect(h.fetchFake).not.toHaveBeenCalled();
+  });
+
+  it("the wrong-shape refusal names the Responses route both ways: a Responses run on the chat path is told /v1/responses, a chat run on the Responses path /v1/chat/completions", async () => {
+    const h = harness();
+    const responses = h.bearers.mint(h.responsesGrant("run-1"));
+    const wrongPath = await handleModelProxyRequest(
+      request({ path: OPENAI_CHAT_COMPLETIONS_PATH, headers: bearer(responses) }).req,
+      h.deps,
+    );
+    expect(wrongPath.status).toBe(400);
+    expect(errorType(wrongPath)).toBe("wrong_shape");
+    expect((json(wrongPath).error as { message: string }).message).toContain(OPENAI_RESPONSES_PATH);
+    const chat = h.bearers.mint(h.localGrant("run-2"));
+    const wrongRoute = await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(chat) }).req,
+      h.deps,
+    );
+    expect(wrongRoute.status).toBe(400);
+    expect(errorType(wrongRoute)).toBe("wrong_shape");
+    expect((json(wrongRoute).error as { message: string }).message).toContain(OPENAI_CHAT_COMPLETIONS_PATH);
+    expect(h.fetchFake).not.toHaveBeenCalled();
+  });
+
+  it("the door refuses on the Responses path as on the other two: no bearer 401 in the OpenAI error shape, an unknown run 404, a revoked bearer 403 — none forwarded", async () => {
+    const h = harness();
+    const none = await handleModelProxyRequest(request({ path: OPENAI_RESPONSES_PATH, headers: {} }).req, h.deps);
+    expect(none.status).toBe(401);
+    expect(json(none).type).toBeUndefined(); // the OpenAI error shape, not Anthropic's envelope
+    expect(errorType(none)).toBe("missing_bearer");
+    const unknown = await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer("sbr_never-minted.aaaaaaaa") }).req,
+      h.deps,
+    );
+    expect(unknown.status).toBe(404);
+    expect(errorType(unknown)).toBe("unknown_run");
+    const token = h.bearers.mint(h.responsesGrant("run-1"));
+    h.bearers.revoke("run-1");
+    const revoked = await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token) }).req,
+      h.deps,
+    );
+    expect(revoked.status).toBe(403);
+    expect(errorType(revoked)).toBe("revoked");
     expect(h.fetchFake).not.toHaveBeenCalled();
   });
 });
@@ -428,7 +507,7 @@ describe("pinning and pass-through — the Anthropic shape", () => {
   it("pinRequest is pure: the input object is not mutated", () => {
     const body = anthropicRequest();
     const before = JSON.stringify(body);
-    const pinned = pinRequest("anthropic", body, { model: "m", maxTokens: 9 });
+    const pinned = pinRequest("anthropic-messages", body, { model: "m", maxTokens: 9 });
     expect(pinned).toMatchObject({ model: "m", max_tokens: 9 });
     expect(JSON.stringify(body)).toBe(before);
   });
@@ -473,12 +552,12 @@ describe("pinning and pass-through — the OpenAI shape", () => {
 
   it("a body that caps with max_completion_tokens is pinned on that key and never grows a second cap", () => {
     const pinned = pinRequest(
-      "openai-compatible",
+      "openai-chat",
       { model: "x", max_completion_tokens: 1, max_tokens: 2 },
       { model: "m", maxTokens: 77 },
     );
     expect(pinned).toEqual({ model: "m", max_completion_tokens: 77 });
-    expect(pinRequest("openai-compatible", { model: "x" }, { model: "m", maxTokens: 77 })).toEqual({
+    expect(pinRequest("openai-chat", { model: "x" }, { model: "m", maxTokens: 77 })).toEqual({
       model: "m",
       max_tokens: 77,
     });
@@ -514,6 +593,97 @@ describe("pinning and pass-through — the OpenAI shape", () => {
     expect(errorType(res2)).toBe("provider_unconfigured");
     expect(h.fetchFake).not.toHaveBeenCalled();
     expect(h.bearers.grantOf("run-1")?.turns).toBe(0);
+  });
+});
+
+/** A Responses-shaped request as a coding preset on pi would send it: the flat
+ *  tool table, `reasoning.effort`, everything the proxy must carry untouched. */
+const responsesRequest = (over: Record<string, unknown> = {}) => ({
+  model: "gpt-4o", // the run's preset says otherwise; the proxy pins it
+  max_output_tokens: 5,
+  stream: true,
+  instructions: "You are terse.",
+  input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+  tools: [
+    { type: "function", name: "bash", description: "run", parameters: { type: "object" } },
+    { type: "function", name: "read", description: "read", parameters: { type: "object" } },
+  ],
+  tool_choice: "auto",
+  reasoning: { effort: "high" },
+  metadata: { user_id: "worker5" },
+  ...over,
+});
+
+/** One buffered Responses answer, completed with a function call in the output. */
+function responsesAnswer(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "resp_1",
+    object: "response",
+    status: "completed",
+    output: [{ type: "function_call", call_id: "call_1", name: "bash", arguments: '{"command":"ls"}' }],
+    usage: {
+      input_tokens: 900,
+      input_tokens_details: { cached_tokens: 700, cache_write_tokens: 120 },
+      output_tokens: 33,
+      output_tokens_details: { reasoning_tokens: 21 },
+      total_tokens: 933,
+    },
+    ...over,
+  };
+}
+
+/** The SSE frames of one streamed Responses answer, as the API sends them. */
+function responsesStreamChunks(): string[] {
+  return [
+    sse("response.created", { type: "response.created", response: { id: "resp_1", status: "in_progress" } }),
+    sse("response.output_item.added", {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { type: "function_call", call_id: "call_1", name: "bash" },
+    }),
+    sse("response.function_call_arguments.delta", {
+      type: "response.function_call_arguments.delta",
+      delta: '{"command":',
+    }) +
+      sse("response.function_call_arguments.delta", { type: "response.function_call_arguments.delta", delta: '"ls"}' }),
+    sse("response.completed", { type: "response.completed", response: responsesAnswer() }),
+  ];
+}
+
+describe("pinning and pass-through — the Responses shape", () => {
+  it("forwards to <baseUrl>/responses with the provider's bearer, pins model and max_output_tokens, keeps the rest — reasoning.effort and the flat tool table byte-for-byte", async () => {
+    const h = harness();
+    const token = h.bearers.mint(h.responsesGrant("run-1", { maxTokens: 4096 }));
+    const sent = responsesRequest();
+    const res = await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: sent }).req,
+      h.deps,
+    );
+    expect(res.status).toBe(200);
+    const [call] = h.calls;
+    expect(call.url).toBe("https://api.openai.test/v1/responses");
+    expect(call.headers.authorization).toBe(`Bearer ${REAL_OPENAI_KEY}`);
+    expect(call.headers["x-api-key"]).toBeUndefined();
+    expect(call.body.model).toBe("gpt-5.4");
+    expect(call.body.max_output_tokens).toBe(4096);
+    const { model: _m, max_output_tokens: _t, ...rest } = call.body;
+    const { model: _sm, max_output_tokens: _st, ...sentRest } = sent;
+    expect(rest).toEqual(sentRest);
+    expect(JSON.stringify(call)).not.toContain(token);
+  });
+
+  it("pinRequest keeps max_output_tokens at or above the Responses API's floor of 16, and is pure", () => {
+    const body = responsesRequest({ max_output_tokens: 100000 });
+    const before = JSON.stringify(body);
+    expect(pinRequest("openai-responses", body, { model: "m", maxTokens: 8 })).toMatchObject({
+      model: "m",
+      max_output_tokens: 16,
+    });
+    expect(pinRequest("openai-responses", body, { model: "m", maxTokens: 4096 })).toMatchObject({
+      model: "m",
+      max_output_tokens: 4096,
+    });
+    expect(JSON.stringify(body)).toBe(before);
   });
 });
 
@@ -776,7 +946,7 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
   });
 
   it("the SSE meter reads a data line split across chunks and CRLF framing, and ignores what is not JSON", () => {
-    const meter = new SseMeter("anthropic");
+    const meter = new SseMeter("anthropic-messages");
     const encoder = new TextEncoder();
     const frame = sse("message_start", {
       type: "message_start",
@@ -794,6 +964,118 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
       usage: { inputTokens: 10, outputTokens: 99, cacheReadTokens: 4 },
       stopReason: "max_tokens",
     });
+  });
+});
+
+describe("the meter — the Responses route (model-proxy item 6)", () => {
+  it("a coding preset on pi on the route offers tools with reasoning.effort and gets a tool call back from the fake: the stream forwarded chunk for chunk, the span ended tool_use with the usage shape's four counts and the ttft", async () => {
+    const h = harness({ answer: () => streamingResponse(responsesStreamChunks(), h.clock, 40) });
+    const token = h.bearers.mint(h.responsesGrant("run-1"));
+    const sent = responsesRequest();
+    const res = await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: sent }).req,
+      h.deps,
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
+    expect(await drain(res.body)).toEqual(responsesStreamChunks());
+    expect(h.calls[0].body.reasoning).toEqual({ effort: "high" });
+    expect(h.calls[0].body.tools).toEqual(sent.tools);
+    const [turn] = h.ends.filter((s) => s.name === "model.turn");
+    expect(turn.status).toBe("ok");
+    expect(turn.attrs).toEqual({
+      model: "openai/gpt-5.4",
+      tools: 2,
+      toolNames: "bash,read",
+      toolChoice: "auto",
+      stopReason: "tool_use",
+      inputTokens: 900,
+      outputTokens: 33,
+      cacheReadTokens: 700,
+      cacheWriteTokens: 120,
+      ttftMs: 40,
+    });
+    expect(h.bearers.grantOf("run-1")?.turns).toBe(1);
+  });
+
+  it("a buffered Responses answer is metered whole: completed with no function call is end_turn, incomplete at max_output_tokens is max_tokens, a failed status is other", async () => {
+    const answers = [
+      responsesAnswer({ output: [{ type: "message", role: "assistant", content: [] }] }),
+      responsesAnswer({ status: "incomplete", incomplete_details: { reason: "max_output_tokens" } }),
+      responsesAnswer({ status: "failed" }),
+    ];
+    const h = harness({
+      answer: () =>
+        new Response(JSON.stringify(answers.shift()), { status: 200, headers: { "content-type": "application/json" } }),
+    });
+    const token = h.bearers.mint(h.responsesGrant("run-1"));
+    for (let i = 0; i < 3; i++) {
+      await handleModelProxyRequest(
+        request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest() }).req,
+        h.deps,
+      );
+    }
+    const turns = h.ends.filter((s) => s.name === "model.turn");
+    expect(turns.map((t) => t.attrs.stopReason)).toEqual(["end_turn", "max_tokens", "other"]);
+    expect(turns[0].attrs).toMatchObject({
+      inputTokens: 900,
+      outputTokens: 33,
+      cacheReadTokens: 700,
+      cacheWriteTokens: 120,
+    });
+  });
+
+  it("a tool_choice in the flat Responses shape is recorded as the span's word: required is any, a flat function object is tool, none is none", async () => {
+    const h = harness({
+      answer: () =>
+        new Response(JSON.stringify(responsesAnswer()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const token = h.bearers.mint(h.responsesGrant("run-1"));
+    for (const tool_choice of ["required", { type: "function", name: "bash" }, "none"]) {
+      await handleModelProxyRequest(
+        request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest({ tool_choice }) }).req,
+        h.deps,
+      );
+    }
+    const turns = h.ends.filter((s) => s.name === "model.turn");
+    expect(turns.map((t) => [t.attrs.tools, t.attrs.toolNames, t.attrs.toolChoice])).toEqual([
+      [2, "bash,read", "any"],
+      [2, "bash,read", "tool"],
+      [2, "bash,read", "none"],
+    ]);
+  });
+
+  it("after markLoopEnded a Responses request goes upstream with tool_choice none and its flat tool table untouched; a turn marked with tools goes upstream trimmed to them", async () => {
+    const h = harness({
+      answer: () =>
+        new Response(JSON.stringify(responsesAnswer()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const token = h.bearers.mint(h.responsesGrant("run-1"));
+    h.bearers.markLoopEnded("run-1");
+    await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest() }).req,
+      h.deps,
+    );
+    expect(h.calls[0].body.tool_choice).toBe("none");
+    expect(h.calls[0].body.tools).toEqual(responsesRequest().tools);
+    expect(h.ends.filter((s) => s.name === "model.turn")[0].attrs).toMatchObject({
+      toolChoice: "none",
+      tools: 2,
+      toolNames: "bash,read",
+    });
+    h.bearers.markTurn("run-1", ["read"]);
+    await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest() }).req,
+      h.deps,
+    );
+    const trimmed = h.calls[1].body.tools as Array<{ name: string }>;
+    expect(trimmed.map((t) => t.name)).toEqual(["read"]);
   });
 });
 
@@ -904,7 +1186,7 @@ describe("what the proxy never says", () => {
       expect(line).not.toContain("You are terse");
       expect(line).not.toContain("Hel");
     }
-    expect(h.logs[0]).toMatch(/run=run-1 turn=1\/1 anthropic → 200/);
+    expect(h.logs[0]).toMatch(/run=run-1 turn=1\/1 anthropic-messages → 200/);
   });
 });
 

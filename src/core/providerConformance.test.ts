@@ -78,10 +78,12 @@ describe("the provider table", () => {
     expect(matrix).toContain("| Control | Row | pi | opencode |");
     expect(matrix).toContain("trace-12-effort-refused");
     // The harness-write rows are green on both drivers since the card reaches
-    // the harnesses (U39); the one declared cannot left is OpenCode's marker knob.
+    // the harnesses (U39); the declared cannots left are OpenCode's marker knob
+    // and its unmeasured Responses provider (U42's dispatch refusal).
     expect(matrix).not.toContain("cannot `harness-write-effort-map`");
     expect(matrix).not.toContain("cannot `harness-write-cap-field`");
     expect(matrix).toContain("✖ opencode cannot `harness-write-cache-markers`");
+    expect(matrix).toContain("✖ opencode cannot `openai-responses-cap`");
   });
 
   // Feature: docs/reference/specs/model-proxy.md item 11 — one parser for a ref.

@@ -100,9 +100,11 @@ import {
   piLaunchFiles,
   piRunPaths,
   piRunPathsAt,
+  piRunWire,
   type PiLaunchSpec,
   type PiRunPaths,
 } from "./process.js";
+import { piApiFor } from "../piAi.js";
 import { parsePiLine } from "./protocol.js";
 import { RELAY_POLL_WINDOW_MS, stillRunningNote, type LiveHarness, type RelayedToolAnswer } from "./relay.js";
 import type { ToolRuleContext } from "./toolRules.js";
@@ -945,7 +947,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               model: {
                 provider: run.model.provider,
                 id: run.model.id,
-                api: run.model.providerType === "anthropic" ? "anthropic-messages" : "openai-completions",
+                api: piApiFor(piRunWire({ model: { providerType: run.model.providerType }, card: run.card })),
               },
               at: now(),
             },

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-// The model proxy (docs/reference/specs/model-proxy.md) is two routes on the
+// The model proxy (docs/reference/specs/model-proxy.md) is three routes on the
 // bot's container; the shim's part is to know nothing about them: it answers
 // three paths itself and forwards every other path to the container, so a
 // model call reaches the bot unread, and it holds the provider keys only to
@@ -14,7 +14,7 @@ const read = (name: string) => readFileSync(fileURLToPath(new URL(`./${name}`, i
 describe("the shim forwards the model proxy's paths to the container blind", () => {
   const source = read("worker.ts");
 
-  it("answers three paths itself — the restart, the coordinator's instance create and its status — and hands every other path to the container, so /v1/messages and /v1/chat/completions reach the bot unread", () => {
+  it("answers three paths itself — the restart, the coordinator's instance create and its status — and hands every other path to the container, so /v1/messages, /v1/chat/completions and /v1/responses reach the bot unread", () => {
     expect(source).toMatch(/pathname === "\/admin\/restart"\s*\?\s*await handleAdminRestart\(/);
     expect(source).toMatch(/pathname === COORDINATOR_INSTANCES_PATH\s*\?\s*await handleCoordinatorInstances\(/);
     expect(source).toMatch(/statusId !== undefined\s*\?\s*await handleCoordinatorInstanceStatus\(/);

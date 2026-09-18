@@ -92,7 +92,7 @@ function world(takeover: TakeoverFacts = settledTakeover()) {
     runId,
     modelRef: "anthropic/m",
     providerName: "anthropic",
-    providerType: "anthropic" as const,
+    providerWire: "anthropic-messages" as const,
     model: "m",
     maxTokens: 1000,
     maxTurns: 10,

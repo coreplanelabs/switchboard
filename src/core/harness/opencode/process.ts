@@ -18,7 +18,7 @@ import type { Identity } from "../../../agents/registry.js";
 import { EFFORT_LEVELS, type Effort } from "../../../effort.js";
 import type { ModelCard } from "../../modelCard.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
-import type { ProviderConfig } from "../../provider.js";
+import { WIRE_ALIASES, type ProviderConfig, type Wire } from "../../provider.js";
 import type { Clock } from "../../trace/types.js";
 import {
   HarnessContainerError,
@@ -246,19 +246,32 @@ export interface OpenCodeLaunchSpec {
   compaction?: OpenCodeCompactionConfig;
 }
 
-/** The provider package for the run's wire shape: both map onto providers the
- *  binary bundles (`packages/core/src/aisdk-native.ts:98-119`;
- *  `@ai-sdk/anthropic` 3.0.82 and `@ai-sdk/openai-compatible` 2.0.41 are
- *  `packages/core` dependencies), so nothing is installed at runtime. */
-export function openCodeProviderPackage(providerType: ProviderConfig["type"]): string {
-  return providerType === "anthropic" ? "aisdk:@ai-sdk/anthropic" : "aisdk:@ai-sdk/openai-compatible";
+/** The wire a run's OpenCode speaks: the card's (record 0052 — every
+ *  dispatched run carries one), else the legacy provider type's alias for a
+ *  hand-built spec. */
+export function openCodeRunWire(spec: { model: { providerType: ProviderConfig["type"] }; card?: ModelCard }): Wire {
+  return spec.card?.wire ?? WIRE_ALIASES[spec.model.providerType] ?? "openai-chat";
 }
 
-/** The proxy as the provider's base URL: both native providers hang their
+/** The provider package for the run's wire shape: each maps onto a provider the
+ *  binary bundles (`packages/core/src/aisdk-native.ts:98-119`;
+ *  `@ai-sdk/anthropic` 3.0.82, `@ai-sdk/openai-compatible` 2.0.41 and
+ *  `@ai-sdk/openai` are `packages/core` dependencies), so nothing is installed
+ *  at runtime. The Responses wire maps to `@ai-sdk/openai`, but a Responses
+ *  block on OpenCode is refused at dispatch by name until that package is
+ *  measured against the logging fake (record 0052; the matrix's `cannot`). */
+export function openCodeProviderPackage(wire: Wire): string {
+  if (wire === "anthropic-messages") return "aisdk:@ai-sdk/anthropic";
+  if (wire === "openai-responses") return "aisdk:@ai-sdk/openai";
+  return "aisdk:@ai-sdk/openai-compatible";
+}
+
+/** The proxy as the provider's base URL: the native providers hang their
  *  route under it — `/messages` on the Anthropic shape, `/chat/completions`
- *  on the OpenAI shape (measured against a logging fake) — and the proxy
- *  serves `/v1/messages` and `/v1/chat/completions`, so the base is `<bot>/v1`
- *  for either. */
+ *  on the chat shape (measured against a logging fake), `/responses` on the
+ *  Responses shape — and the proxy
+ *  serves `/v1/messages`, `/v1/chat/completions` and `/v1/responses`, so the
+ *  base is `<bot>/v1` for each. */
 export function openCodeProviderBaseUrl(harnessUrl: string): string {
   return `${harnessUrl.replace(/\/$/, "")}/v1`;
 }
@@ -360,26 +373,28 @@ export function openCodeSystemPrompt(spec: OpenCodeLaunchSpec): string {
  *  take `false`: `packages/schema/src/config/lsp.ts:19`, `formatter.ts:14`); and
  *  the compaction thresholds when the deployment sets them. */
 export function openCodeConfig(spec: OpenCodeLaunchSpec): Record<string, unknown> {
-  const { id, maxTokens, providerType, contextTokens } = spec.model;
+  const { id, maxTokens, contextTokens } = spec.model;
   const card = spec.card;
   const compaction = {
     ...(spec.compaction?.buffer !== undefined ? { buffer: spec.compaction.buffer } : {}),
     ...(spec.compaction?.keepTokens !== undefined ? { keep: { tokens: spec.compaction.keepTokens } } : {}),
   };
   const variants = openCodeVariants(spec.model, card);
+  const wire = openCodeRunWire(spec);
   // The cap field the completions dialect spells the output cap with, the
   // card's word when it is one the schema takes (`compatibility.maxTokensField`
   // knows the two chat spellings; the Anthropic dialect's cap is always
-  // `max_tokens` and the Responses route is a later slice's).
+  // `max_tokens`, the Responses dialect's `max_output_tokens` — its adapter's
+  // own spelling, no compat needed).
   const capField =
-    providerType !== "anthropic" && (card?.capField === "max_completion_tokens" || card?.capField === "max_tokens")
+    wire === "openai-chat" && (card?.capField === "max_completion_tokens" || card?.capField === "max_tokens")
       ? card.capField
       : undefined;
   return {
     providers: {
       [PROXY_PROVIDER]: {
         name: "Switchboard model proxy",
-        package: openCodeProviderPackage(providerType),
+        package: openCodeProviderPackage(wire),
         settings: { baseURL: openCodeProviderBaseUrl(spec.harnessUrl), apiKey: `{env:${RUN_BEARER_ENV}}` },
         models: {
           [id]: {
