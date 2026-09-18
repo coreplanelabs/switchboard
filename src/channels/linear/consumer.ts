@@ -151,6 +151,15 @@ export class LinearConsumer {
           if (owned) ready = await inbox.complete(event.key, lease);
           return;
         }
+        if (session.unsupportedSurface && !(isStop && event.payload.action === "prompted")) {
+          if (!session.dismissedAt)
+            await api.activity(session.id, {
+              type: "error",
+              body: "This Linear conversation has no supported issue, project or document origin. Please mention or delegate Switchboard on an issue to continue.",
+            });
+          if (owned) ready = await inbox.complete(event.key, lease);
+          return;
+        }
         let input: LinearInput;
         try {
           input = linearMessage(event, session, session.appUserId);

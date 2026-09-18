@@ -541,6 +541,49 @@ describe("Linear event consumer", () => {
     expect(g.deps.dispatch).not.toHaveBeenCalled();
     expect(g.inbox.complete).not.toHaveBeenCalled();
   });
+  it("still honors Stop when a running session's origin becomes unsupported", async () => {
+    const f = fixture();
+    vi.mocked(f.api.session).mockResolvedValue({
+      id: "s",
+      appUserId: "bot",
+      creatorId: "alice",
+      unsupportedSurface: true,
+    });
+    const stop = event();
+    stop.payload.action = "prompted";
+    stop.payload.agentActivity = {
+      id: "stop",
+      agentSessionId: "s",
+      userId: "alice",
+      signal: "stop",
+      content: { type: "prompt", body: "Stop" },
+    };
+    await f.store.accept(stop);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.stop).toHaveBeenCalledOnce();
+    expect(f.deps.dispatch).not.toHaveBeenCalled();
+    expect(f.api.activity).not.toHaveBeenCalled();
+  });
+  it("answers an unsupported origin explicitly without dispatching or repeatedly retrying it", async () => {
+    const f = fixture();
+    vi.mocked(f.api.session).mockResolvedValue({
+      id: "s",
+      appUserId: "bot",
+      creatorId: "alice",
+      unsupportedSurface: true,
+    });
+    await f.store.accept(event());
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.dispatch).not.toHaveBeenCalled();
+    expect(f.api.activity).toHaveBeenCalledWith("s", {
+      type: "error",
+      body: expect.stringContaining("no supported issue, project or document origin"),
+    });
+    expect(f.inbox.complete).toHaveBeenCalledOnce();
+    expect(f.inbox.retry).not.toHaveBeenCalled();
+  });
   it("closes permanently invalid signed inputs honestly without retrying them forever", async () => {
     const f = fixture(),
       invalid = event();

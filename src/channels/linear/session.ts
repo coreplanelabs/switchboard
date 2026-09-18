@@ -33,9 +33,10 @@ export function linearMessage(event: LinearWebhookEvent, current: LinearSession,
   )
     throw new Error("linear_wrong_session");
   if (current.dismissedAt) throw new Error("linear_session_dismissed");
-  const channel = current.issue?.teamId ?? current.id;
+  const channel = current.issue?.teamId ?? current.surface?.id ?? current.id;
   if (!safeId(channel)) throw new Error("linear_invalid_team");
-  const channelId = `linear:${org}:${channel}`,
+  const scope = !current.issue && current.surface ? `${current.surface.kind}:${channel}` : channel;
+  const channelId = `linear:${org}:${scope}`,
     threadKey = `linear:${org}:${current.id}`;
   let user: unknown,
     text: string | undefined,
@@ -74,8 +75,12 @@ export function linearMessage(event: LinearWebhookEvent, current: LinearSession,
       messageId,
       receivedAt: event.receivedAt,
       ...(name ? { userName: name } : {}),
-      ...(current.issue ? { channelName: current.issue.identifier } : {}),
-      ...(current.url ? { sourceUrl: current.url } : {}),
+      ...(current.issue
+        ? { channelName: current.issue.identifier }
+        : current.surface
+          ? { channelName: current.surface.title }
+          : {}),
+      ...((current.url ?? current.surface?.url) ? { sourceUrl: current.url ?? current.surface?.url } : {}),
     },
   };
 }
@@ -86,6 +91,12 @@ export function linearSessionContext(session: LinearSession): string | undefined
   const parts = [
     session.issue
       ? `Linear issue ${session.issue.identifier}: ${session.issue.title}\n\n${session.issue.description ?? ""}`
+      : undefined,
+    session.surface
+      ? `Linear ${session.surface.kind} ${session.surface.title}:\n\n${session.surface.content ?? ""}`
+      : undefined,
+    session.sourceComment?.body && session.sourceComment.body !== session.comment?.body
+      ? `Source comment:\n${session.sourceComment.body}`
       : undefined,
     session.comment?.body ? `Comment that started this session:\n${session.comment.body}` : undefined,
   ].filter((part) => part !== undefined);

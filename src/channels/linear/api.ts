@@ -1,4 +1,13 @@
 import {
+  SURFACE_CONTEXT_FIELDS,
+  SURFACE_ACCESS_FIELDS,
+  linearSurfaceOrigin,
+  linearSurfaceContext,
+  linearSurfaceSourceText,
+  linearSurfaceAllows,
+  type LinearSurface,
+} from "./surfaces.js";
+import {
   downloadLinearFiles,
   fileReferences,
   LINEAR_FILE_LIMITS,
@@ -37,6 +46,9 @@ export interface LinearSession {
   /** Created through the channel's durable child intent, never webhook text. */
   managedChild?: true;
   comment?: { body: string };
+  sourceComment?: { body: string };
+  surface?: LinearSurface;
+  unsupportedSurface?: true;
   issue?: {
     id: string;
     identifier: string;
@@ -96,7 +108,8 @@ export function required(value: unknown): string {
 
 const SESSION_QUERY = `query SwitchboardSession($id: String!) {
   organization { id }
-  agentSession(id: $id) { id url dismissedAt appUser { id } creator { id } comment { id body user { id } }
+  agentSession(id: $id) { id url dismissedAt pullRequest { id } appUser { id } creator { id } comment { id body user { id } ${SURFACE_CONTEXT_FIELDS} }
+    sourceComment { body ${SURFACE_CONTEXT_FIELDS} }
     issue { id identifier title description team { id } delegate { id } } }
 }`;
 const HISTORY_QUERY = `query SwitchboardHistory($id: String!, $before: String) {
@@ -242,7 +255,8 @@ export class DirectLinearApi implements LinearApi {
     const data = await this.query(
       `query SwitchboardSessionAccess($id: String!) {
       organization { id }
-      agentSession(id: $id) { id dismissedAt appUser { id }
+      agentSession(id: $id) { id dismissedAt pullRequest { id } appUser { id }
+        comment { ${SURFACE_ACCESS_FIELDS} } sourceComment { ${SURFACE_ACCESS_FIELDS} }
         issue { team { id visibility restrictedBy { id } } } }
     }`,
       { id: sessionId },
@@ -256,9 +270,8 @@ export class DirectLinearApi implements LinearApi {
       session.dismissedAt
     )
       return false;
-    // Other mention surfaces need their own visibility facts before their context can run.
     const team = object(object(session.issue).team);
-    if (!string(team.id)) return false;
+    if (!string(team.id) && !linearSurfaceOrigin(session)) return false;
     try {
       const person = await linearPerson(
         {
@@ -268,7 +281,17 @@ export class DirectLinearApi implements LinearApi {
         },
         { id: userId, actions: [] },
       );
-      return linearTeamAllows(person, "conversation:read", team);
+      return string(team.id)
+        ? linearTeamAllows(person, "conversation:read", team)
+        : linearSurfaceAllows(
+            {
+              organizationId: this.deps.organizationId,
+              appUserId: this.deps.appUserId,
+              query: (query, variables) => this.query(query, variables, signal),
+            },
+            person,
+            session,
+          );
     } catch (error) {
       if (error instanceof Error && error.message === "linear_human_required") return false;
       throw error;
@@ -300,7 +323,8 @@ export class DirectLinearApi implements LinearApi {
       const data = await this.query(
         `query SwitchboardFileContext($id: String!, $after: String) {
         organization { id }
-        agentSession(id: $id) { id dismissedAt appUser { id } comment { body }
+        agentSession(id: $id) { id dismissedAt pullRequest { id } appUser { id } comment { body ${SURFACE_CONTEXT_FIELDS} }
+          sourceComment { body ${SURFACE_CONTEXT_FIELDS} }
           issue { description comments(first: 100, after: $after) { nodes { body } pageInfo { hasNextPage endCursor } } } }
       }`,
         { id: sessionId, after },
@@ -317,6 +341,9 @@ export class DirectLinearApi implements LinearApi {
       const issue = object(session.issue);
       collect(issue.description);
       collect(object(session.comment).body);
+      collect(linearSurfaceSourceText(session));
+      collect(linearSurfaceContext(session)?.content);
+      if (!session.issue) break;
       const comments = object(issue.comments);
       if (!Array.isArray(comments.nodes)) throw new Error("linear_invalid_response");
       for (const comment of comments.nodes) collect(object(comment).body);
@@ -430,6 +457,8 @@ export class DirectLinearApi implements LinearApi {
       throw new Error("linear_wrong_installation");
     if (session.id !== id) throw new Error("linear_invalid_response");
     const issue = object(session.issue);
+    const surface = linearSurfaceContext(session);
+    const sourceComment = linearSurfaceSourceText(session);
     const childComment = string(object(session.comment).id);
     const child = childComment ? await this.deps.children?.get(this.deps.organizationId, childComment) : undefined;
     const managedChild =
@@ -441,6 +470,8 @@ export class DirectLinearApi implements LinearApi {
     return {
       id,
       appUserId: this.deps.appUserId,
+      ...(surface ? { surface } : !session.issue ? { unsupportedSurface: true as const } : {}),
+      ...(sourceComment ? { sourceComment: { body: sourceComment } } : {}),
       ...(managedChild ? { managedChild: true as const } : {}),
       ...(string(object(session.creator).id) ? { creatorId: string(object(session.creator).id) } : {}),
       ...(string(session.url) ? { url: string(session.url) } : {}),

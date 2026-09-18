@@ -24,6 +24,35 @@ const event: LinearWebhookEvent = {
 };
 
 describe("Linear session input", () => {
+  it("scopes project and document sessions independently and restores their content", () => {
+    for (const kind of ["project", "document"] as const) {
+      const current: LinearSession = {
+        id: "session",
+        appUserId: "bot",
+        creatorId: "alice",
+        surface: {
+          kind,
+          id: "origin",
+          title: "Design",
+          content: "Read the linked notes",
+          url: "https://linear.app/acme/origin",
+        },
+      };
+      expect(
+        linearMessage({ ...event, payload: { ...event.payload, promptContext: undefined } }, current, "bot"),
+      ).toMatchObject({
+        kind: "message",
+        msg: {
+          channelId: `linear:org:${kind}:origin`,
+          threadKey: "linear:org:session",
+          userId: "linear:org:alice",
+          channelName: "Design",
+          sourceUrl: "https://linear.app/acme/origin",
+          text: expect.stringContaining("Read the linked notes"),
+        },
+      });
+    }
+  });
   it("retains the source comment and its file when promptContext is absent", () => {
     const body = "Please inspect [log.txt](https://uploads.linear.app/org/log)";
     const input = linearMessage(

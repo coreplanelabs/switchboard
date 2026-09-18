@@ -22,6 +22,14 @@ the question turns toward its total cost. Waiting-session cancellation persists 
 restarts and late history writes. Live acceptance still needs verification before
 the integration is ready for end users.
 
+Project and document sessions can use their current comment origin for context.
+Project access follows its teams; document access follows its project, issue or
+team owner, checked against the requesting human on every access check. Their
+configuration scopes are `linear:<workspace>:project:<id>` and
+`linear:<workspace>:document:<id>`. Unknown origins receive an explicit error.
+Native child sessions currently require an issue origin. Live project/document
+mention and permission-removal acceptance remains unverified.
+
 ## Register the application
 
 In Linear's API settings, create a private OAuth application named after your
@@ -98,10 +106,10 @@ Even an administrator's Switchboard grant does not bypass Linear's private-team
 boundary. Subissue creation does not automatically delegate another run.
 
 Before a command, queued prompt or restored run starts, Switchboard checks the
-requester's current access to the session's issue team. Removed membership or an
+requester's current access to the session's issue, project or document origin. Removed membership or an
 inactive account prevents execution. Temporary lookup failures keep queued and
-restored work available for retry. Sessions outside issues are not yet supported:
-their document or project visibility must be verified before their context can run.
+restored work available for retry. Unknown origins receive an explicit unsupported
+response; session context references cannot substitute for origin visibility.
 
 When a session already has an active run, its original requester can steer it.
 Another person’s prompt waits in the durable queue and starts a new turn under

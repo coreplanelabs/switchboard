@@ -22,6 +22,7 @@ export interface LinearLiveWork {
   id: string;
   threadKey?: string;
   channelId?: string;
+  userId?: string;
   startedAt: number;
 }
 
@@ -46,7 +47,20 @@ export async function handleLinearLifecycle(
     if (!thread || thread.organizationId !== p.organizationId || run.startedAt > event.receivedAt) continue;
     let stop =
       revoked || (permissions && [...removed].some((id) => run.channelId === `linear:${p.organizationId}:${id}`));
-    if (!stop && (unassigned || (permissions && p.canAccessAllPublicTeams === false))) {
+    const scopedOrigin =
+      run.channelId?.startsWith(`linear:${p.organizationId}:project:`) ||
+      run.channelId?.startsWith(`linear:${p.organizationId}:document:`);
+    if (!stop && permissions && scopedOrigin && (removed.size > 0 || p.canAccessAllPublicTeams === false)) {
+      // A project may retain access through another team. Re-evaluate its
+      // current origin and requester rather than treating a removed team as
+      // either an unconditional stop or permission to keep running.
+      try {
+        stop = !run.userId || !(await deps.api(thread.organizationId).canRead(thread.sessionId, run.userId));
+      } catch {
+        stop = true;
+      }
+    }
+    if (!stop && (unassigned || (permissions && p.canAccessAllPublicTeams === false && !scopedOrigin))) {
       try {
         const session = await deps.api(thread.organizationId).session(thread.sessionId);
         if (session.appUserId !== p.appUserId) continue;
