@@ -52,7 +52,7 @@ import {
   type ReleaseMode,
   type ReleaseResult,
 } from "./executor.js";
-import type { ExecTraceOptions, MoveOptions, ReleaseOptions } from "./executor.js";
+import { isDeadlineMiss, type ExecTraceOptions, type MoveOptions, type ReleaseOptions } from "./executor.js";
 import type { LeftBehind } from "./residentCleanliness.js";
 
 // Remote execution against a resident repo environment — the always-warm
@@ -798,7 +798,8 @@ export class ResidentOperations implements Operations {
 
 /** Result of a /status probe: a definite lifecycle answer, or an unreachable
  *  marker. `transport: true` means the failure was network-level (fetch threw
- *  or timed out) — the only kind the factory's negative cache may store. */
+ *  or timed out); of those, only a failure that is NOT `timedOut` may the
+ *  factory's negative cache store (resident-repos.md item 25). */
 export type ResidentStatusProbe =
   | { kind: "status"; state: string; reason: string; seed?: ResidentSeedHandle }
   | {
@@ -806,6 +807,10 @@ export type ResidentStatusProbe =
       error: string;
       /** The request itself failed (nothing answered). `false` when something answered with a non-2xx, carried as `status`. */
       transport: boolean;
+      /** Set with `transport` when what failed was the probe's own deadline:
+       *  the host was reached and answered nothing in time. Slow is not gone —
+       *  this dispatch falls cold, and the breaker stays closed for the rest. */
+      timedOut?: true;
       status?: number;
       /** The non-2xx was the platform's transient, by its provenance: the Worker
        *  typed its own answer so (`catchAllErr` at the fetch handler: the Durable
@@ -903,7 +908,9 @@ export class ResidentExecutor implements Executor {
     return ex;
   }
 
-  /** One operator-scope GET /status, bounded by timeoutMs. Never throws. */
+  /** One operator-scope GET /status, bounded by timeoutMs. Never throws. A
+   *  deadline miss is flagged `timedOut` beside `transport`, so the factory
+   *  falls cold for the one dispatch without arming its breaker. */
   static async probeStatus(
     baseUrl: string,
     token: string,
@@ -924,8 +931,15 @@ export class ResidentExecutor implements Executor {
         { route: "/status" },
       );
     } catch (err) {
-      // network failure or probe timeout — not-warm, and negative-cacheable
-      return { kind: "unreachable", error: err instanceof Error ? err.message : String(err), transport: true };
+      // Network failure or the probe's own deadline — not warm either way. The
+      // deadline is named apart (`execDeadline` aborts with a TimeoutError): the
+      // host answered slowly, and only a failure to reach it is negative-cacheable.
+      return {
+        kind: "unreachable",
+        error: err instanceof Error ? err.message : String(err),
+        transport: true,
+        ...(isDeadlineMiss(err) ? { timedOut: true } : {}),
+      };
     }
     if (res.status === 404) {
       // a definite answer (resource not onboarded), never a service failure

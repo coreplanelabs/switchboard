@@ -9,7 +9,7 @@ import { residentTraceOf, type ResidentTrace } from "./residentTrace.js";
 import { mkdirSync } from "node:fs";
 import type { AgentDef, Identity, MachineClass } from "../agents/registry.js";
 import type { RunProfile } from "../config/profile.js";
-import { LocalExecutor, isRunStopError, type Executor } from "./executor.js";
+import { LocalExecutor, execDeadline, isDeadlineMiss, isRunStopError, type Executor } from "./executor.js";
 import { E2BExecutor } from "./e2b.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import {
@@ -48,7 +48,8 @@ export interface ResidentExecutionConfig {
    *  commands (default RESIDENT_ADMIN_TOKEN). Unset env = repo-management
    *  commands answer with a named configuration error; runs are unaffected. */
   adminTokenEnv?: string;
-  /** /status probe timeout in ms (default 2000); a timed-out probe = not warm */
+  /** /status probe deadline in ms (default `PROBE_TIMEOUT_MS`, 8000); a probe
+   *  that misses it = not warm for this dispatch, never an outage. */
   probeTimeoutMs?: number;
 }
 
@@ -290,11 +291,22 @@ export interface ExecutorSelection {
 // rebuild escapes).
 
 // Negative cache (circuit breaker) for resident /status probe TRANSPORT
-// failures only: a resident-service outage costs one probe timeout, not one
-// per concurrent dispatch. Not-warm lifecycle states are definite answers and
-// are NEVER cached (the next dispatch must see a recovery immediately).
-// In-process only — deliberately not persisted (restart-survival invariant).
+// failures that did not reach the host: a resident-service outage costs one
+// failed connect, not one per concurrent dispatch. A probe whose own deadline
+// passed reached a host that answered slowly — one such miss in 1,633 probes
+// sent a run cold off a healthy resident and, through this breaker, every
+// dispatch of the next 30 s with it — so a deadline miss falls cold for its
+// dispatch alone and arms nothing. Not-warm lifecycle states are definite
+// answers and are NEVER cached (the next dispatch must see a recovery
+// immediately). In-process only — deliberately not persisted (restart-survival
+// invariant).
 const PROBE_OUTAGE_WINDOW_MS = 30_000;
+
+/** The /status probe's default deadline. Wide enough for the route's fan-out
+ *  (the registry and four resident reads) on a busy Durable Object; a resident
+ *  that is gone fails the connect long before it, and a wedged one costs the
+ *  dispatch these seconds once, then the cold fallback. */
+export const PROBE_TIMEOUT_MS = 8_000;
 
 /** How long the bot holds its one /await-restore request (item 27): generous
  *  next to the resident's own restore ceiling, so the server's answer — the
@@ -855,13 +867,12 @@ export function residentSlugsLister(
     try {
       res = await fetch(`${cfg.baseUrl.replace(/\/$/, "")}/residents`, {
         headers: { authorization: `Bearer ${token.reveal()}` },
-        signal: AbortSignal.timeout(cfg.probeTimeoutMs ?? 2000),
+        signal: execDeadline(cfg.probeTimeoutMs ?? PROBE_TIMEOUT_MS),
       });
     } catch (err) {
-      probeOutage = {
-        until: systemClock() + PROBE_OUTAGE_WINDOW_MS,
-        error: err instanceof Error ? err.message : String(err),
-      };
+      // A failed connect opens the window like the selection probe's would; a
+      // deadline miss is the host answering slowly and arms nothing (item 25).
+      if (!isDeadlineMiss(err)) armOutage(err instanceof Error ? err.message : String(err));
       return undefined;
     }
     if (!res.ok) return undefined;
@@ -908,14 +919,16 @@ async function probeResident(
     cfg.baseUrl,
     token.reveal(),
     resource,
-    cfg.probeTimeoutMs ?? 2000,
+    cfg.probeTimeoutMs ?? PROBE_TIMEOUT_MS,
     span,
     stop,
   );
   // The run's own stop aborted the request: the stop's signal decides before
   // the error's name, as at every send — the caller's stop, never the network,
-  // and no outage window for every other dispatch in the process.
-  if (probe.kind === "unreachable" && probe.transport && !stop?.aborted) armOutage(probe.error);
+  // and no outage window for every other dispatch in the process. A deadline
+  // miss arms none either: the host was reached and answered slowly, which is
+  // this dispatch's cold fallback and nobody else's (item 25).
+  if (probe.kind === "unreachable" && probe.transport && !probe.timedOut && !stop?.aborted) armOutage(probe.error);
   return probe;
 }
 

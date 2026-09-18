@@ -262,7 +262,7 @@ execution:
   #   baseUrl: https://switchboard-resident.<account>.workers.dev
   #   tokenEnv: RESIDENT_OPERATOR_TOKEN  # operator bearer secret (default)
   #   adminTokenEnv: RESIDENT_ADMIN_TOKEN # admin bearer for `repo ...` commands (default)
-  #   probeTimeoutMs: 2000               # /status probe budget; timeout = not warm
+  #   probeTimeoutMs: 8000               # /status probe deadline; a miss = not warm for that dispatch, never an outage
 
 # Where per-conversation agent workspaces are created (local execution only).
 # Under docker compose this directory is a named volume, so checkouts survive a restart.
