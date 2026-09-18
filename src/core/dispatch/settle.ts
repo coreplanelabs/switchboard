@@ -6,6 +6,8 @@
 // its outer finally, ends the request's root with the settlement's stop mode,
 // and runs the fresh turn `prepareFreshTurn` builds as an ordinary dispatch of
 // its own — the recursion stays a real call to `dispatch()`, in `dispatch()`.
+import { refusalOf } from "../refusal.js";
+import { renderRefusal } from "./reply.js";
 import type { StopMode } from "../runEvents.js";
 import type { Clock, Span } from "../trace/types.js";
 import type { RunControl } from "../runRegistry/runControl.js";
@@ -92,7 +94,8 @@ export function settleThread(deps: Pick<AdmissionDeps, "admission">, ctx: Settle
 /** Each dropped follow-up's sender is told it was not run — one `post.followups` span. */
 export async function tellDropped(root: Span, pending: PersonFollowUp[]): Promise<void> {
   await root.span("post.followups", async () => {
-    for (const p of pending) await p.io.reply(FOLLOW_UP_DROPPED_BY_STOP).catch(() => {});
+    for (const p of pending)
+      await renderRefusal(refusalOf("follow_up_dropped", FOLLOW_UP_DROPPED_BY_STOP), p.io).catch(() => {});
   });
 }
 

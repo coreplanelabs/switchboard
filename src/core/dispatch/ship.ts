@@ -43,6 +43,7 @@ import { createCardShell } from "../statusCardFrame.js";
 import type { RunEnding } from "../runEnding.js";
 import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, type StatusHandle } from "../types.js";
 import { refusalOf, type Refusal } from "../refusal.js";
+import { renderRefusal, replyAck } from "./reply.js";
 import { REFUSAL_SENTENCES } from "./reply.js";
 
 /** What the ship branch reads: the run slice (the config, the registry and
@@ -165,7 +166,7 @@ export async function runShipBranch(
   );
   if (!pre.ok) {
     console.log(`[ship] ${msg.threadKey} not started: ${pre.where}`);
-    await refuse(refusalOf("ship_preflight", pre.reply), () =>
+    await refuse(pre.refusal, () =>
       card.done(shell.close({ kind: "refused", icon: "🚫", reason: pre.card, ...closeLines(clock(), false) })),
     );
     return;
@@ -481,6 +482,9 @@ export async function runShipBranch(
   await ending.sealAfterReply(
     () =>
       root.span("post.card_close", () => card.done(shell.close({ kind: "done", icon, ...doneLines(shipDiagnosis) }))),
-    () => root.span("post.reply", () => io.reply(outcome.reply)),
+    () =>
+      root.span("post.reply", () =>
+        outcome.refusal ? renderRefusal(outcome.refusal, io) : replyAck(io, outcome.reply),
+      ),
   );
 }

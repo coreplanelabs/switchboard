@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { causeOf, REFUSAL_CODES, refusalOf, RefusalError, type RefusalCode } from "./refusal.js";
+import { causeOf, REFUSAL_CODES, refusalOf, RefusalError, residentErrorCause, type RefusalCode } from "./refusal.js";
 
 // Feature: record 0054:
 // every refusal is one `Refusal` with exactly one cause per code, read from one
@@ -51,5 +51,20 @@ describe("the refusal seam — one cause per code, in one table", () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toBe(refusal.text);
     expect(err.refusal).toBe(refusal);
+  });
+
+  it("the Worker's `error` prefix names the cause — a ref the person can fix is `request`, a version skew is the machinery's (record 0054)", () => {
+    // The Worker's two ref refusals are the person's: a missing binding and a
+    // ref that does not resolve.
+    expect(residentErrorCause("needs-ref: this thread has no ref binding yet")).toBe("request");
+    expect(residentErrorCause('unknown-ref: ref "nope" does not resolve in the mirror')).toBe("request");
+    // `op-unavailable` is the Worker's command table lacking the op the bot
+    // sent — a bot/Worker version skew, never a sentence the person could
+    // reword, so it is the machinery's like every other prefix.
+    expect(residentErrorCause('op-unavailable: the command table has no "attach" entry')).toBe("system");
+    expect(residentErrorCause("not-onboarded: no registry record")).toBe("system");
+    expect(residentErrorCause("attach-failed: reconcile timed out")).toBe("system");
+    // No prefix at all is the machinery's too, never a guess at the person.
+    expect(residentErrorCause("boom")).toBe("system");
   });
 });

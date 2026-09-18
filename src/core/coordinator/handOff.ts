@@ -15,6 +15,7 @@
 // plan runs; every refusal is a reply, and nothing is created on one. Pure over
 // its seams: the file read, the instance store, the create and the status read.
 
+import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { DEFAULT_GRANT, type Grant, type GrantSource } from "../budgets.js";
 import { PLAN_MAX_CHARS, unitTitleOf } from "../ship/contract.js";
 import type { ShipEntry } from "../ship/preflight.js";
@@ -95,6 +96,9 @@ export interface HandOffDeps {
 export interface HandOffOutcome {
   status: "completed" | "aborted";
   reply: string;
+  /** An aborted hand-off's refusal (record 0054): the reply's own sentence
+   *  with its code and cause; the ship branch renders it through the seam. */
+  refusal?: Refusal;
 }
 
 /** Everything an instance record carries but its id, branch, plan and attempt — the same for every attempt of a plan. */
@@ -124,7 +128,11 @@ type Planned = {
   autoMergeEnabled?: boolean;
 };
 
-const refused = (reply: string): HandOffOutcome => ({ status: "aborted", reply });
+const refused = (code: RefusalCode, reply: string): HandOffOutcome => ({
+  status: "aborted",
+  reply,
+  refusal: refusalOf(code, reply),
+});
 const describe = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** The Workflow platform's words for an instance that has not ended. */
@@ -134,12 +142,13 @@ const ENDED = new Set(["complete", "errored", "terminated"]);
 async function plan(
   deps: HandOffDeps,
   input: HandOffInput,
-): Promise<{ ok: true; planned: Planned } | { ok: false; reply: string }> {
+): Promise<{ ok: true; planned: Planned } | { ok: false; reply: string; code: RefusalCode }> {
   const { entry, msg } = input;
   const base = entry.base;
   if (base === undefined)
     return {
       ok: false,
+      code: "plan_base_unknown",
       reply: `🚫 The plan runner needs the pull request's base branch and no base branch is known for ${entry.repo}.`,
     };
   const identity: Identity = {
@@ -206,13 +215,14 @@ async function plan(
   if (input.agentSource === "route")
     return {
       ok: false,
+      code: "plan_routed_seed",
       reply: `🚫 A routed request never runs a seeded plan — its units would merge under the runner's grant. Type \`agent:ship plan ${request.planPath}\` to run it.`,
     };
   let planId: string;
   try {
     planId = planIdOf(request.planPath);
   } catch (err) {
-    return { ok: false, reply: `🚫 ${describe(err)}` };
+    return { ok: false, code: "plan_id_invalid", reply: `🚫 ${describe(err)}` };
   }
   let text: string;
   try {
@@ -220,12 +230,14 @@ async function plan(
     if (file.truncated === true)
       return {
         ok: false,
+        code: "plan_unreadable",
         reply: `🚫 The plan \`${request.planPath}\` is longer than ${PLAN_MAX_CHARS.toLocaleString("en-US")} characters at \`${base}\` in ${entry.repo}; its later units would be lost, so nothing was run — split the plan.`,
       };
     text = file.content;
   } catch (err) {
     return {
       ok: false,
+      code: "plan_unreadable",
       reply: `🚫 The plan \`${request.planPath}\` could not be read at \`${base}\` in ${entry.repo}: ${describe(err)}`,
     };
   }
@@ -233,13 +245,14 @@ async function plan(
   if (graph.units.length === 0)
     return {
       ok: false,
+      code: "plan_no_units",
       reply: `🚫 The plan \`${request.planPath}\` has no unit headings (\`### U<n>. <title>\`) — nothing to run.`,
     };
   let selected: string[];
   try {
     selected = openPlanCursor(graph, request.units).order;
   } catch (err) {
-    return { ok: false, reply: `🚫 ${describe(err)}` };
+    return { ok: false, code: "plan_units_unknown", reply: `🚫 ${describe(err)}` };
   }
   return {
     ok: true,
@@ -312,7 +325,7 @@ function planWhere(p: Planned, units: readonly CoordinatorUnit[], mergedBefore: 
 export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInput): Promise<HandOffOutcome> {
   const log = deps.log ?? console.log;
   const planned = await plan(deps, input);
-  if (!planned.ok) return refused(planned.reply);
+  if (!planned.ok) return refused(planned.code, planned.reply);
   const p = planned.planned;
   // The instance's plan: a seeded one names its path; a generated one carries
   // only the id — the mark every reader keys on. A seeded plan's units are the
@@ -347,14 +360,17 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   const where = `plan \`${p.planId}\``;
   if (status.kind === "unanswered")
     return refused(
+      "plan_runner_state_unknown",
       `⚠️ The plan runner could not tell whether \`${latest.id}\` still runs: ${status.reason}. Nothing ran; re-issue the request to try again.`,
     );
   if (status.kind === "status" && RUNNING.has(status.status))
     return refused(
+      "plan_runner_live",
       `🚫 A runner for ${where} is still running (\`${latest.id}\`, status: ${status.status}): wait for it to end — or terminate it in the Workflows dashboard — before re-issuing.`,
     );
   if (status.kind === "status" && !ENDED.has(status.status))
     return refused(
+      "plan_runner_state_unread",
       `🚫 A runner for ${where} (\`${latest.id}\`) is in a state the bot does not read as ended (${status.status}) — a person decides.`,
     );
   // What the earlier attempts merged is done for good, whichever attempt runs
@@ -374,6 +390,7 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
   const remaining = p.selected.filter((u) => !merged.has(u));
   if (remaining.length === 0)
     return refused(
+      "plan_units_merged",
       `🚫 Every unit of ${where} this request names is merged already (${p.selected.join(", ")}) — nothing left to run.`,
     );
   const mergedBefore = p.selected.filter((u) => merged.has(u));
@@ -421,17 +438,20 @@ async function start(
   if (!put.ok) {
     if (put.reason === "unavailable")
       return refused(
+        "plan_history_unavailable",
         "⚠️ The plan runner needs run history on the state Worker (`runHistory.worker`): the instance record could not be written, so nothing ran.",
       );
     // Another record took the id between the read and the write: a race two
     // requesters lose together — neither touches what is there.
     return refused(
+      "plan_runner_conflict",
       `🚫 A runner for \`${instance.id}\` was just recorded by another request — re-issue in a minute if it did not start.`,
     );
   }
   const rows = await deps.instances.putUnits(units);
   if (!rows.ok)
     return refused(
+      "plan_history_unavailable",
       "⚠️ The plan runner needs run history on the state Worker: the unit rows could not be written, so nothing ran.",
     );
   let answer: CreateInstanceAnswer;
@@ -452,6 +472,7 @@ async function start(
       // store wiped or restored — so neither side can be trusted to resume.
       const status = answer.status !== undefined ? `, status: ${answer.status}` : "";
       return refused(
+        "plan_instance_orphaned",
         `🚫 A Workflow instance \`${instance.id}\` already exists on the platform${status} but the state Worker knew nothing of it — a person decides; re-issuing will not resume it.`,
       );
     }
@@ -459,6 +480,7 @@ async function start(
     case "unanswered":
       log(`[ship] ${input.msg.threadKey}: the plan runner ${instance.id} could not be started — ${answer.reason}`);
       return refused(
+        "plan_start_failed",
         `⚠️ The plan runner could not be started: ${answer.reason}. Nothing ran; re-issue the request to try again.`,
       );
   }

@@ -1,3 +1,4 @@
+import { refusalOf, residentErrorCause, RefusalError } from "../core/refusal.js";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { classifyError } from "../core/trace/classify.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
@@ -1087,13 +1088,29 @@ export class ResidentExecutor implements Executor {
     }
     if (status === 409 && data.needs === "recreate")
       return traced(new ResidentReuseRefusedError(this.opts.resource, err));
-    if (status === 404) return traced(new Error(`resident attach: ${this.opts.resource} is not onboarded (${err})`));
+    if (status === 404)
+      // A registry fact, not the person's wording (record 0054): `system`.
+      return traced(
+        new RefusalError(
+          refusalOf("resident_attach_failed", `resident attach: ${this.opts.resource} is not onboarded (${err})`),
+        ),
+      );
     // A deterministic refusal — `attach-failed at <step>`, a throw in the route,
     // a 4xx — is the attach's own legible error, judged at once. A refusal the
     // platform's transient (`isTransientRefusal`) never reaches here: every
     // caller waits on it first (`attach`, the wake wait's re-attach), and a
     // wait spent is the wake's strike.
-    return traced(new Error(`resident attach failed for ${this.opts.resource}: ${err}`));
+    // The Worker's `error` prefix names the cause (record 0054): a wrong or
+    // missing ref is the person's to fix; everything else is the machinery's.
+    const cause = residentErrorCause(err);
+    return traced(
+      new RefusalError(
+        refusalOf(
+          cause === "request" ? "resident_attach_rejected" : "resident_attach_failed",
+          `resident attach failed for ${this.opts.resource}: ${err}`,
+        ),
+      ),
+    );
   }
 
   /** Move the thread's worktree to `sha` (agent-review.md item 12): one more

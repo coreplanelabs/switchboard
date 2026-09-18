@@ -1,3 +1,4 @@
+import type { RefusalCode } from "../refusal.js";
 import { authorize } from "../authz/authorize.js";
 import { pointingActor } from "../authz/pointingActor.js";
 import type { Actor } from "../authz/types.js";
@@ -40,6 +41,23 @@ export interface ReferenceDeps {
 /** Why a reference was refused — the log line's token, never the reply's. */
 export type ReferenceRefusal =
   "over-cap" | "rate-limited" | "guest" | "timed-out" | "never" | "not-a-member" | "denied" | "fetch-failed";
+
+/** The token's refusal code (record 0054): the one sentence stays one line
+ *  (record 0037 — it reveals nothing about the channel); only the code splits,
+ *  so the span carries the cause while the reply does not. */
+export function referenceRefusalCode(token: ReferenceRefusal): RefusalCode {
+  const codes = {
+    "over-cap": "reference_over_cap",
+    "rate-limited": "reference_rate_limited",
+    guest: "reference_guest",
+    "timed-out": "reference_timed_out",
+    never: "reference_never",
+    "not-a-member": "reference_not_a_member",
+    denied: "reference_denied",
+    "fetch-failed": "reference_fetch_failed",
+  } as const satisfies Record<ReferenceRefusal, RefusalCode>;
+  return codes[token];
+}
 
 export interface ReferencesResult {
   /** The conversations read, in request order, capped. */

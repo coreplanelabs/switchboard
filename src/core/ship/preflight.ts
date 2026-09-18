@@ -4,6 +4,7 @@
 // resumes at review on an open PR of ship's own. Pure decisions over injected
 // lookups; the hand-off (coordinator/handOff.ts) carries what this decides.
 
+import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { resolveBaseRef, type PullRequestFacts, type RepoShipInfo } from "../../execution/githubPulls.js";
 import type { RepoContext } from "../repoContext.js";
 import { parseShipPlanRequest, isUnitBranch } from "./coordinator.js";
@@ -85,7 +86,7 @@ export interface ShipEntry {
 }
 
 export type ShipPreflightResult =
-  { ok: true; entry: ShipEntry } | { ok: false; where: string; card: string; reply: string };
+  { ok: true; entry: ShipEntry } | { ok: false; where: string; card: string; reply: string; refusal: Refusal };
 
 export interface ShipPreflightInput {
   /** Platform-namespaced channel id (AGENTS.md invariant 4) — the prefix IS
@@ -109,7 +110,13 @@ export interface ShipPreflightInput {
   runsBase?: string;
 }
 
-const refuse = (where: string, card: string, reply: string): ShipPreflightResult => ({ ok: false, where, card, reply });
+const refuse = (code: RefusalCode, where: string, card: string, reply: string): ShipPreflightResult => ({
+  ok: false,
+  where,
+  card,
+  reply,
+  refusal: refusalOf(code, reply),
+});
 
 /**
  * Every check that must refuse BEFORE round 0, in order: channel, compound
@@ -126,6 +133,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
     const base = input.runsBase?.trim();
     const page = base ? `${base.replace(/\/+$/, "")}/runs` : "the bot's /runs page";
     return refuse(
+      "ship_preflight_channel",
       "channel",
       "not started (Slack/CLI only)",
       `🚫 \`agent:ship\` runs only from Slack or the CLI — this adapter is single-shot and cannot hold a pipeline-length run. ` +
@@ -138,6 +146,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   const missing = ["ship", "coding", "review"].filter((a) => !input.gates.canRunAgent(a));
   if (missing.length > 0) {
     return refuse(
+      "ship_preflight_permission",
       `permission (${missing.join(", ")})`,
       "not started (permissions)",
       `🚫 Running \`ship\` drives \`coding\` and \`review\` child rounds, and you're not on the allowlist for ${missing
@@ -148,6 +157,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   const repo = repoCtx.repo;
   if (!repo) {
     return refuse(
+      "ship_preflight_no_repo",
       "no repo",
       "not started (no repository)",
       "🚫 `agent:ship` needs a target repository — name it in the request, e.g. `agent:ship in owner/repo: <task>`.",
@@ -168,6 +178,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   const seeded = parseShipPlanRequest(task) !== undefined;
   if (!seeded && repoCtx.prUnpostable?.reason === "unreachable") {
     return refuse(
+      "ship_preflight_pr_unreachable",
       "thread PR unreachable",
       "not started (PR unverifiable)",
       `🚫 This thread names PR ${repo}#${repoCtx.prUnpostable.number} but it could not be fetched to run ship's entry checks — refusing fail-closed. Retry in a moment, or check the PR on GitHub.`,
@@ -188,6 +199,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       // target is refused fail-closed.
       if (!facts) {
         return refuse(
+          "ship_preflight_pr_facts",
           "PR facts unavailable",
           "not started (PR unverifiable)",
           `🚫 Could not fetch ${where} to run ship's entry checks (open? same-repo head?) — refusing fail-closed. Retry in a moment.`,
@@ -198,6 +210,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
         // is not a branch ship can push to or resume on.
         if (!facts.sameRepoHead) {
           return refuse(
+            "ship_preflight_fork_head",
             "fork-head PR",
             "not started (fork head)",
             `🚫 ${where}'s head branch lives on a fork, not on \`${repo}\` — ship cannot drive it.`,
@@ -206,6 +219,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
         const branch = facts.headRef ?? repoCtx.ref;
         if (!branch) {
           return refuse(
+            "ship_preflight_head_unknown",
             "head branch unknown",
             "not started (head branch unknown)",
             `🚫 Could not determine ${where}'s head branch, so ship cannot bind the thread's worktree to it — refusing fail-closed.`,
@@ -254,6 +268,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       // resume; with task text the thread may start a fresh task below.
       if (!task) {
         return refuse(
+          "ship_preflight_closed_resume",
           "closed resume target",
           "not started (PR closed)",
           `🚫 ${where} is closed — there is no review loop to resume. Give ship a task to start fresh work.`,
@@ -263,6 +278,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
   }
   if (!task) {
     return refuse(
+      "ship_preflight_no_task",
       "no task",
       "not started (no task)",
       `🚫 Nothing to ship: give ship a task (\`agent:ship in ${repo}: <task>\`), or name an open ship PR by URL to resume its review loop.`,
