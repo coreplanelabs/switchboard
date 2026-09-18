@@ -2631,3 +2631,43 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     expect(gone.logs.some((l) => l.includes("the board comment could not be posted"))).toBe(true);
   });
 });
+
+describe("coordinator question records", () => {
+  it("returns the question marker without exposing earlier verdict or PR artifacts", async () => {
+    const h = harness();
+    await h.store.put(
+      record("run-question", {
+        ...TAG,
+        awaitingInput: true,
+        verdict: { verdict: "approve", findings: [] },
+        reviewHead: "a".repeat(40),
+        events: [
+          { type: "pr_opened", number: 7, url: "https://github.com/acme/api/pull/7", created: true, seq: 1 },
+          { type: "answer", text: "Which behavior do you want?", seq: 2 },
+        ],
+      }),
+    );
+    const reply = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+        parentInstanceId: INSTANCE.id,
+        runId: "run-question",
+      }),
+      h.deps,
+    );
+    expect(reply).toMatchObject({
+      status: 200,
+      body: {
+        run: {
+          finished: true,
+          status: "completed",
+          awaitingInput: true,
+          finalReply: "Which behavior do you want?",
+        },
+      },
+    });
+    const run = reply!.body.run as Record<string, unknown>;
+    expect(run.verdict).toBeUndefined();
+    expect(run.pr).toBeUndefined();
+    expect(run.reviewPosted).toBeUndefined();
+  });
+});

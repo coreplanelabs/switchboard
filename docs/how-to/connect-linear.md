@@ -12,8 +12,10 @@ and delegate unchanged. Coordinator thread creation uses durable keys to recover
 the same conversation after retries. The creation webhook does not start a
 second child run; subsequent human replies and Stop remain native session events.
 Conductors report child questions as waiting for input and point to the child's
-session for the answer. Clarification across coding/review coordinator workflows
-and live acceptance still need verification before
+session for the answer. Coding/review coordinators also wait when a child asks a
+question, withholding earlier PR or review results. Routing the human reply back
+into that coordinator's unit and live acceptance remain unfinished; these workflows
+still need verification before
 the integration is ready for end users.
 
 ## Register the application

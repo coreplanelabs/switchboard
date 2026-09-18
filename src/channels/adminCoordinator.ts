@@ -275,6 +275,7 @@ function parseBrief(v: unknown): Parsed<Brief> {
  *  but the final reply — the coordinator confirms an event and reads the
  *  child's handoff from it. */
 export interface CoordinatorRunView {
+  awaitingInput?: true;
   id: string;
   finished: boolean;
   status?: string;
@@ -702,6 +703,7 @@ function coordinatorRunView(
   return {
     id: view.id,
     finished: view.finished,
+    ...(view.finished && view.status === "completed" && view.awaitingInput ? { awaitingInput: true as const } : {}),
     ...(view.status !== undefined ? { status: view.status } : {}),
     ...(view.agent !== undefined ? { agent: view.agent } : {}),
     startedAt: view.startedAt,
@@ -820,6 +822,10 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   const full = await deps.runs.getRun(body.runId, { include: "messages" });
   const record = full.ok ? full.value : view;
   const finalReply = finalReplyOf(record.events);
+  // A question is a completed turn, not a completed unit. Earlier artifacts
+  // are deliberately withheld until the continuation supplies its result.
+  if (record.status === "completed" && record.awaitingInput)
+    return json(200, { ok: true, run: coordinatorRunView(record, id.value, finalReply), at });
   const pr = prOpenedOf(record.events);
   // Whether the verdict stands on the unit's pull request: the child's own
   // record of its post first (item 18) — it posted, or it recorded why not —

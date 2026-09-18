@@ -287,6 +287,7 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
     run: {
       finished: true,
       status: run.status as Extract<ChildFacts, { finished: true }>["status"],
+      ...(run.awaitingInput === true ? { awaitingInput: true as const } : {}),
       ...(finalReply !== undefined ? { finalReply } : {}),
       ...(pr !== undefined ? { pr } : {}),
       ...(headSha !== undefined ? { headSha } : {}),

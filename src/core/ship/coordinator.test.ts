@@ -1892,3 +1892,37 @@ describe("the severity gate — an approve's findings held to the level in force
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "round_cap", maxRounds: 1 } });
   });
 });
+
+describe("coordinator child clarification", () => {
+  it.each(["coding", "review"])("waits durably for a %s question without acting on earlier artifacts", (agent) => {
+    const d = fresh(input());
+    if (agent === "review") throughRoundZero(d);
+    else d.answer({ type: "branch", ok: true, at: T0 });
+    const at = T0 + 12 * MIN;
+    const question = finished({
+      status: "completed",
+      awaitingInput: true,
+      finalReply: "Which behavior do you want?",
+      pr: { number: 7, url: PR_URL, created: true },
+      verdict: { verdict: "approve", findings: [] },
+      reviewPosted: true,
+    });
+    runChild(d, "run-question", question, at);
+    expect(d.action).toMatchObject({ type: "sleep", ms: 30_000 });
+    expect(d.state.ending).toBeUndefined();
+    const restored = new Driver(JSON.parse(JSON.stringify(d.state)));
+    expect(restored.action).toEqual(d.action);
+    restored.answer({ type: "sleep" });
+    expect(restored.action).toMatchObject({ type: "read-record", runId: "run-question" });
+    restored.answer({ type: "read-record", run: question, at: at + 30_000 });
+    expect(restored.action).toMatchObject({ type: "sleep", ms: 30_000 });
+    expect(restored.state.spentMs.waiting).toBe(30_000);
+    restored.answer({ type: "sleep" });
+    restored.answer({
+      type: "read-record",
+      run: finished({ status: "stopped_hard", awaitingInput: true }),
+      at: at + 60_000,
+    });
+    expect(restored.action).toMatchObject({ type: "end", ending: { kind: "stopped", mode: "hard" } });
+  });
+});
