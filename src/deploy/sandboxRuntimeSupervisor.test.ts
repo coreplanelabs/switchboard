@@ -198,7 +198,9 @@ describe("the runtime supervisor, driven", () => {
     dirs.push(dir);
     const s = startSupervisor(dir, fakeRuntime(dir, ["exit:1", "live"]), ["--flag", "value"]);
     try {
-      await until(() => safeRead(s.starts) >= 2, 5_000);
+      // The fixture writes its counter before its log. Observe the restart's
+      // log itself rather than racing that second write after the counter.
+      await expect.poll(s.log, { timeout: 5_000 }).toContain("start 2 args=--flag value");
       expect(s.log()).toContain("start 1 args=--flag value");
       expect(s.log()).toContain("start 2 args=--flag value");
       expect(s.stderr()).toContain("sandbox-runtime-supervisor: the runtime exited with status 1; starting it again");
