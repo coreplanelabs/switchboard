@@ -3,6 +3,7 @@ import {
   CONTRACT_HEADING,
   CONTRACT_SECTION_HEADINGS,
   DEFAULT_CONTRACT_MAX_CHARS,
+  FAST_GATES_BEFORE_PUSH,
   GUARDS,
   PR_TITLE_GUARD,
   TIMEOUT_ON_LONG_COMMANDS,
@@ -372,10 +373,10 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     // an unpushed tree does not survive the run's end) and carries the pre-push re-fetch, so the
     // pull request is not born conflicting when main moved while the child worked
     expect(text).toContain(
-      "Push the branch as soon as the change exists and its cheapest proving checks pass — before the project's " +
+      "Push the branch as soon as the change exists and the fast gates pass — before the project's " +
         "full verification, which runs after that push with any fix as a further commit; an unpushed tree does not " +
-        "survive the run's end. Right before each push, fetch `main` again and rebase once more if it moved while " +
-        "you worked, so the pull request is not born conflicting.",
+        `survive the run's end. ${FAST_GATES_BEFORE_PUSH} Right before each push, fetch \`main\` again and rebase ` +
+        "once more if it moved while you worked, so the pull request is not born conflicting.",
     );
     expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(
       text.indexOf("Right before each push"),
@@ -398,6 +399,29 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect(dropped).toEqual([]);
     expect(chars).toBe(text.length);
     expect(text).not.toContain("Cut to fit");
+  });
+
+  it("the first instruction names the fast gates a child runs before every push — never a vague 'cheapest proving checks' — and routes each exit line to the handoff's verified list, an unrun gate to unproven", () => {
+    const { text } = renderContract(u10(), {});
+    // the four gates by name, each a command a child can run verbatim
+    expect(FAST_GATES_BEFORE_PUSH).toContain("`npx prettier --check` on the changed files");
+    expect(FAST_GATES_BEFORE_PUSH).toContain("`npm run hygiene:check`");
+    expect(FAST_GATES_BEFORE_PUSH).toContain("`npm run specs:check`");
+    expect(FAST_GATES_BEFORE_PUSH).toContain(
+      "`tsc --noEmit` on the touched project under `NODE_OPTIONS=--max-old-space-size=6144`",
+    );
+    // the receipts: each command's exit line into the handoff's verified list; a gate the child
+    // could not run goes under unproven and is never claimed clean
+    expect(FAST_GATES_BEFORE_PUSH).toContain("Paste each command's exit line into the handoff's verified list");
+    expect(FAST_GATES_BEFORE_PUSH).toContain("a gate you could not run goes under unproven and is never claimed clean");
+    // the rendered first instruction carries the gates and no longer the vague phrase
+    expect(text).toContain(FAST_GATES_BEFORE_PUSH);
+    expect(text).not.toContain("cheapest proving checks");
+    // the gates sit between the push order and the pre-push re-fetch
+    expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(
+      text.indexOf(FAST_GATES_BEFORE_PUSH),
+    );
+    expect(text.indexOf(FAST_GATES_BEFORE_PUSH)).toBeLessThan(text.indexOf("Right before each push"));
   });
 
   it("a unit with no spec rows and no rules says so under the same headings", () => {
