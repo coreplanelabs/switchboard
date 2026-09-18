@@ -943,6 +943,16 @@ class ScriptedServe {
       event: { id: `evt_${type}_${this.ordinal++}`, type, created: NOW, data },
     });
   }
+  /** Waits until the harness's poll has read every record emitted so far
+   *  (`FakeHarnessContainer.drained`). The transport hands a record it read to
+   *  the bridge before the loop's next tick can run its checks, so a clock
+   *  moved after this wait falls on what the play last wrote — the step's
+   *  start, so the wind-down's note names the model call in flight, not the
+   *  tool settled before it. A count of ticks left that to the poll timer
+   *  racing the tick timer, which a starved worker loses. */
+  private async awaitFeedRead(): Promise<void> {
+    for (let i = 0; i < 2000 && !this.container.drained; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+  }
   private emitPermissions(pending: unknown[]): void {
     this.container.emit({
       feed: "permissions",
@@ -1606,7 +1616,7 @@ class ScriptedServe {
         });
         // The step's start is read off the feed before the clock moves, so the
         // budget note finds the model call in flight and not the tool before it.
-        for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+        await this.awaitFeedRead();
         this.deps.spendBudget();
         for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
       }
@@ -1648,10 +1658,14 @@ class ScriptedServe {
           assistantMessageID: this.stepId(t),
           agent: "switchboard",
         });
+        // The step's start is on the bridge's books before either clock move
+        // below — the budget's, or the soft stop's straight to the finale
+        // bound — so the wind-down finds the hung model call, not the tool the
+        // turn before settled.
+        await this.awaitFeedRead();
         if (this.script.softStopBeforeModelCall !== t + 1) {
           if (this.deps.spendBudget === undefined)
             throw new Error("hangModelCall needs the driver's clock: hand the serve `spendBudget`");
-          for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
           // The write-up's steer: the one posted after the budget is spent (a
           // follow-up's steer may already be pending into this execution).
           const steersBefore = this.pendingSteers.length;
@@ -2009,7 +2023,7 @@ class ScriptedServe {
         throw new Error(
           "hangToolCall needs the driver's clock: hand the serve `advanceClock`, `spendBudget` and `finaleMs`",
         );
-      for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+      await this.awaitFeedRead();
       // Owed before the wait: the interrupt's late tail may be read at the next
       // prompt before this play has ticked on.
       this.hungTool = { callId, assistantMessageID, turn: turnIndex };
