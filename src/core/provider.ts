@@ -122,6 +122,12 @@ export interface ProviderModelOverride {
   cache?: "automatic" | "markers" | "none" | "unknown";
   /** USD per million tokens, by kind. */
   price?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  /** The answer shapes the model can produce for a forced one-call turn (the
+   *  router's, intake's): `tool` — a forced tool call — and `text` — the
+   *  one-JSON-object text contract. Absent, both are assumed; an empty list
+   *  declares neither, and a load whose intake would classify on such a card
+   *  is refused by name (routing-and-config item 27). */
+  answers?: ("tool" | "text")[];
 }
 
 export interface ProviderConfig {

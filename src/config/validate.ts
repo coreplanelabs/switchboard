@@ -36,6 +36,7 @@ import {
 } from "../mcp/registry.js";
 import type {
   AppConfig,
+  IntakeConfig,
   OpenCodeConfig,
   PiCompactionConfig,
   PiConfig,
@@ -75,6 +76,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   ship: true,
   spawn: true,
   routing: true,
+  intake: true,
   references: true,
   harness: true,
   pi: true,
@@ -340,6 +342,7 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.ship !== undefined) validateShip(cfg.ship);
   if (cfg.spawn !== undefined) validateSpawn(cfg.spawn);
   if (cfg.routing !== undefined) validateRouting(cfg.routing, cfg.providers);
+  validateIntake(cfg);
   if (cfg.references !== undefined) validateReferences(cfg.references);
   if (cfg.artifacts !== undefined) validateArtifacts(cfg.artifacts);
   if (cfg.pi !== undefined) validatePi(cfg.pi);
@@ -527,6 +530,7 @@ const MODEL_OVERRIDE_KEYS: Record<string, true> = {
   inputs: true,
   cache: true,
   price: true,
+  answers: true,
 };
 const INPUT_KINDS: Record<string, true> = { image: true, document: true };
 const PRICE_KINDS: Record<string, true> = { input: true, output: true, cacheRead: true, cacheWrite: true };
@@ -564,6 +568,16 @@ export function validateModelOverride(path: string, raw: unknown): void {
   }
   if (m.cache !== undefined && !(CACHE_RULES as readonly unknown[]).includes(m.cache))
     throw new Error(`${path}.cache must be ${CACHE_RULES.join(", ")}`);
+  if (m.answers !== undefined) {
+    if (!Array.isArray(m.answers))
+      throw new Error(`${path}.answers must be a list of answer shapes (${ROUTE_ANSWER_MODES.join(", ")})`);
+    for (const shape of m.answers as unknown[]) {
+      if (!(ROUTE_ANSWER_MODES as readonly unknown[]).includes(shape))
+        throw new Error(
+          `${path}.answers carries ${JSON.stringify(shape)}, which is not an answer shape (${ROUTE_ANSWER_MODES.join(", ")})`,
+        );
+    }
+  }
   if (m.price !== undefined) {
     if (typeof m.price !== "object" || m.price === null || Array.isArray(m.price))
       throw new Error(`${path}.price must be a mapping of kind → USD per million tokens`);
@@ -659,6 +673,73 @@ function validateRouting(routing: RoutingConfig, providers: Record<string, unkno
   }
 }
 
+/** The `intake` block's keys, held equal to `IntakeConfig` the way the top-level keys are. */
+const INTAKE_KEYS: Record<keyof IntakeConfig, true> = { threadReplies: true, model: true };
+
+/** The thread-reply gate's modes (routing-and-config item 27, record 0058). */
+export const INTAKE_MODES = ["mention", "classify", "always"] as const;
+export type IntakeMode = (typeof INTAKE_MODES)[number];
+
+/** The gate's default mode (routing-and-config item 27): `intake.threadReplies`
+ *  where the block sets it, else `classify` — the one place the default lives;
+ *  callers ask this, never the field. Defined beside the validator that checks
+ *  the card under it, re-exported by `src/config.ts` for every other caller. */
+export function defaultIntakeMode(config: AppConfig): IntakeMode {
+  return config.intake?.threadReplies ?? "classify";
+}
+
+/** The verdict's model ref, resolved as the router's is: `intake.model`, else
+ *  `routing.model`, else `defaults.models.general`; undefined when the config
+ *  names none — the gate then cannot classify and says so at its caller. The
+ *  one resolver: `validateIntake` checks the card of the ref it returns, and
+ *  `decideIntake` calls the same ref at runtime (`src/config.ts` re-exports it). */
+export function intakeModelRef(config: AppConfig): string | undefined {
+  return config.intake?.model ?? config.routing?.model ?? config.defaults?.models?.["general"];
+}
+
+/** `intake` (docs/reference/specs/routing-and-config.md item 27): the mode is
+ *  one of the three words and nothing else, `model` is a `<provider>/<model>`
+ *  ref whose provider the config declares — the routing block's own check —
+ *  and, when the effective default mode is `classify` (the code's default, so
+ *  an absent block counts), the effective model's operator card must support
+ *  at least one answer shape: a card declaring `answers: []` can neither take
+ *  the forced tool call nor the text contract, so it is refused at load,
+ *  never silenced at runtime. Any other key is refused by name. */
+function validateIntake(cfg: AppConfig): void {
+  const intake = cfg.intake;
+  if (intake !== undefined) {
+    if (typeof intake !== "object" || intake === null || Array.isArray(intake))
+      throw new Error("config.yaml: intake must be a mapping");
+    for (const key of unknownKeys(intake, INTAKE_KEYS))
+      throw new Error(`config.yaml: intake.${key} is not a known key`);
+    if (intake.threadReplies !== undefined && !(INTAKE_MODES as readonly unknown[]).includes(intake.threadReplies))
+      throw new Error(
+        `config.yaml: intake.threadReplies must be ${INTAKE_MODES.join(", ").replace(/, (\w+)$/, " or $1")}`,
+      );
+    if (intake.model !== undefined) {
+      if (typeof intake.model !== "string" || !intake.model.includes("/"))
+        throw new Error("config.yaml: intake.model must be a <provider>/<model> ref");
+      const provider = parseModelRef(intake.model).provider;
+      if (!cfg.providers || !Object.hasOwn(cfg.providers, provider))
+        throw new Error(`config.yaml: intake.model names provider "${provider}", which providers does not define`);
+    }
+  }
+  // The classify card check: under the default mode intake will make a model
+  // call, so a card the operator declared unable to answer either shape must
+  // fail here by name rather than fall silent on every unmentioned reply.
+  if (defaultIntakeMode(cfg) !== "classify") return;
+  const ref = intakeModelRef(cfg);
+  if (typeof ref !== "string" || !ref.includes("/")) return;
+  const { provider, model } = parseModelRef(ref);
+  const answers = (cfg.providers?.[provider] as ProviderConfig | undefined)?.models?.[model]?.answers;
+  if (answers !== undefined && !answers.includes("tool") && !answers.includes("text"))
+    throw new Error(
+      `config.yaml: intake defaults to classify, and its model ${ref} supports neither a forced tool call nor the ` +
+        `text contract (providers.${provider}.models.${model}.answers) — set intake.threadReplies to mention or ` +
+        `always, or pick a model that answers one`,
+    );
+}
+
 /** `grants`: every finding names the actor id and axis it is about —
  *  an unknown namespace, a misspelled `all`, an unknown field — and the load
  *  fails, because a silently dropped entry would be a silently missing grant. */
@@ -745,6 +826,20 @@ export function validateScopeBlocks(
     for (const [id, scope] of Object.entries(scopes ?? {})) {
       const level = addressSeverityProblem(`${kind}.${id}.review.addressSeverity`, scope.review?.addressSeverity);
       if (level) throw new Error(`${source}: ${level}`);
+      // The intake gate's scope field (routing-and-config item 27): the mode
+      // alone — the model is the defaults layer's — refused by name so a typo
+      // never reads as "the default".
+      if (scope.intake !== undefined) {
+        if (typeof scope.intake !== "object" || scope.intake === null || Array.isArray(scope.intake))
+          throw new Error(`${source}: ${kind}.${id}.intake must be a mapping`);
+        for (const key of unknownKeys(scope.intake, { threadReplies: true }))
+          throw new Error(`${source}: ${kind}.${id}.intake.${key} is not a known key`);
+        const mode = scope.intake.threadReplies;
+        if (mode !== undefined && !(INTAKE_MODES as readonly unknown[]).includes(mode))
+          throw new Error(
+            `${source}: ${kind}.${id}.intake.threadReplies must be ${INTAKE_MODES.join(", ").replace(/, (\w+)$/, " or $1")}`,
+          );
+      }
       // A scope written before the key moved (`config set … --ship.addressSeverity`)
       // is named, never silently ignored into "no gate".
       if (scope.ship !== undefined && "addressSeverity" in scope.ship)

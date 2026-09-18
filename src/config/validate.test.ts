@@ -61,6 +61,27 @@ describe("validateProviders — the block's declaration", () => {
     ).toThrow(/providers\.a\.models\.m-1\.levels\.high must be a wire word or null/);
   });
 
+  it("refuses a malformed models.<id>.answers by name: not a list, or a word that is not an answer shape", () => {
+    expect(() =>
+      validateProviders(
+        providers({ a: { wire: "openai-chat", models: { "m-1": { answers: "tool" } } } }),
+        "config.yaml",
+      ),
+    ).toThrow(/providers\.a\.models\.m-1\.answers must be a list of answer shapes \(tool, text\)/);
+    expect(() =>
+      validateProviders(
+        providers({ a: { wire: "openai-chat", models: { "m-1": { answers: ["tool", "json"] } } } }),
+        "config.yaml",
+      ),
+    ).toThrow(/providers\.a\.models\.m-1\.answers carries "json", which is not an answer shape \(tool, text\)/);
+    expect(() =>
+      validateProviders(
+        providers({ a: { wire: "openai-chat", models: { "m-1": { answers: ["text"] } } } }),
+        "config.yaml",
+      ),
+    ).not.toThrow();
+  });
+
   it("accepts a well-formed override: levels as words or null, a window, inputs, a cache rule and a price", () => {
     const cfg = providers({
       a: {

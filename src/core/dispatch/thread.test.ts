@@ -5,6 +5,7 @@ import {
   previousRunOf,
   readThread,
   refusedRequestsOf,
+  requesterOf,
   runsSince,
   stickyAgentOf,
   THREAD_READ_LIMIT,
@@ -79,6 +80,32 @@ describe("stickyAgentOf — the thread's agent by transcript", () => {
     expect(
       stickyAgentOf([child, run({ id: "c0", agent: "review", session: closed, parentInstanceId: "plan-fix-1" })]),
     ).toBeUndefined();
+  });
+});
+
+// docs/reference/specs/routing-and-config.md item 27 (record 0058): the
+// requester the intake facts name — the person of the thread's newest run a
+// person addressed, whatever state that run is in.
+describe("requesterOf — the person of the thread's newest addressed run", () => {
+  it("returns the newest addressed run's user whether that run is live, finished or refused at a gate", () => {
+    expect(requesterOf([run({ id: "live", userId: "slack:U_ALICE", finished: false })])).toBe("slack:U_ALICE");
+    expect(requesterOf([run({ id: "done", userId: "slack:U_ALICE", session: closed })])).toBe("slack:U_ALICE");
+    // A run refused at a gate wrote no session log; its user still holds the thread.
+    expect(requesterOf([run({ id: "refused", userId: "slack:U_ALICE" })])).toBe("slack:U_ALICE");
+    // The newest addressed run decides, not an older one.
+    expect(requesterOf([run({ id: "r2", userId: "slack:U_BOB" }), run({ id: "r1", userId: "slack:U_ALICE" })])).toBe(
+      "slack:U_BOB",
+    );
+  });
+
+  it("skips a coordinator's spawned child: the runner's turns never name the requester", () => {
+    const child = run({ id: "c1", userId: "slack:UBOT", parentInstanceId: "plan-fix-1" });
+    expect(requesterOf([child, run({ id: "r1", userId: "slack:U_ALICE" })])).toBe("slack:U_ALICE");
+    expect(requesterOf([child])).toBeUndefined();
+  });
+
+  it("returns none on an empty page", () => {
+    expect(requesterOf([])).toBeUndefined();
   });
 });
 

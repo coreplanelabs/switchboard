@@ -24,6 +24,14 @@ export interface AttrDomain {
   dedupe: "fresh" | "duplicate";
   /** How the requester was found (slack-channel.md item 13): the sender, the configured relay app's footer, or the app itself. */
   requester: "message" | "relay-footer" | "bot";
+  /** The intake verdict on an unmentioned thread reply (routing-and-config.md
+   *  item 27, record 0058); the reason is free text and lives on the receipt
+   *  row and the log line, never on a span. */
+  intake: "addressed" | "silent";
+  /** How the verdict was reached (`IntakeSource`). */
+  intakeSource: "model" | "mode" | "error" | "timeout";
+  /** What became of the receipt (`IntakeReceiptOutcome`). */
+  intakeReceipt: "inserted" | "existing" | "failed" | "absent";
   // dispatch.* / run.* / post.*
   outcome: string;
   /** The refusal's code (src/core/refusal.ts) — on the `dispatch.refuse` span
@@ -169,6 +177,9 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   files: "number",
   dedupe: "string",
   requester: "string",
+  intake: "string",
+  intakeSource: "string",
+  intakeReceipt: "string",
   outcome: "string",
   refusal: "string",
   cause: "string",
