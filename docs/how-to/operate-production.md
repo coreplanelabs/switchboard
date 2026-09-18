@@ -27,7 +27,7 @@ npx @coreplane/switchboard deploy all --affected
 | Preflight | Refuses while |
 |---|---|
 | bot | the bot has runs in flight, or the container is mid-rollout |
-| resident | any resident has work in flight (needs `RESIDENT_READ_TOKEN`) |
+| resident | any resident has work in flight (needs `RESIDENT_READ_TOKEN`); with `RESIDENT_DRAIN_TOKEN` the step first drains the fleet — new runs wait at their attach, the runs in flight finish — and waits up to 60 min for them instead of 30 min for a quiet minute |
 
 ## Change the config without a release
 
@@ -88,7 +88,7 @@ The project's own production, not Switchboard:
 
 - Deploys run from CI, which refuses any ref but `main`: `gh workflow run deploy-production.yml --ref main -f targets=affected` (also `-f targets=bot,resident`; `-f force=true` bypasses the preflights).
 - The profile and config live in a private repository named by the variable `SWITCHBOARD_DEPLOY_PROFILE`, read with an App token minted as `CONFIG_REPO_TOKEN`.
-- CI holds `CLOUDFLARE_DEPLOY_TOKEN`, `RESIDENT_READ_TOKEN` and `SANDBOX_TOKEN`; the docs deploy uses `CLOUDFLARE_API_TOKEN`.
+- CI holds `CLOUDFLARE_DEPLOY_TOKEN`, `RESIDENT_READ_TOKEN`, `RESIDENT_DRAIN_TOKEN` (drain and undrain only; the resident step drains the fleet with it; without it the step waits for a quiet minute and says so) and `SANDBOX_TOKEN`; the docs deploy uses `CLOUDFLARE_API_TOKEN`.
 
 ## Next
 

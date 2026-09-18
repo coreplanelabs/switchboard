@@ -1,3 +1,4 @@
+import { DRAIN } from "../core/budgets.js";
 import { refusalOf, residentErrorCause, RefusalError } from "../core/refusal.js";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { classifyError } from "../core/trace/classify.js";
@@ -172,6 +173,53 @@ export function answeredStatus(httpStatus: number, data: Record<string, unknown>
 export function isTransientRefusal(answer: { status: number; data: Record<string, unknown> }): boolean {
   if (answer.status < 500 || answer.status > 599) return false;
   return answer.data.transient === true || typeof answer.data.error !== "string";
+}
+
+/** The fleet drain (docs/reference/specs/resident-repos.md item 69): `/attach`
+ *  answers 503 with a `draining` record while a deploy waits for the runs in
+ *  flight to end. A new run waits at its attach for the fleet to reopen — one
+ *  re-attach per poll — under its own lease, never the wake budget (a drain
+ *  lasts as long as the longest run in flight, tens of minutes; a wake is
+ *  seconds). The refusal is read by its record, never by its words. */
+export const DRAIN_POLL_MS: number = DRAIN.pollMs;
+/** The most a run waits for a drain to lift with no lease to clip it (the CLI,
+ *  staging): past a coding child's whole lease, like the deploy's own wait. */
+export const DRAIN_WAIT_MAX_MS: number = DRAIN.waitMaxMs;
+/** What the wait leaves of the run's lease for the attach and the work after
+ *  it: a drained run that would start with less has nothing to start for. */
+export const DRAIN_LEASE_RESERVE_MS: number = DRAIN.leaseReserveMs;
+
+export function isDrainingRefusal(answer: { status: number; data: Record<string, unknown> }): boolean {
+  const d = answer.data.draining;
+  return (
+    answer.status === 503 && typeof d === "object" && d !== null && typeof (d as { until?: unknown }).until === "string"
+  );
+}
+
+/** The drain's own end, as the record says it; undefined when unreadable. */
+function drainingUntil(answer: { data: Record<string, unknown> }): string | undefined {
+  const d = answer.data.draining as { until?: unknown } | undefined;
+  return typeof d?.until === "string" ? d.until : undefined;
+}
+
+/** The wait for the fleet to reopen ran out — the run's lease, or the ceiling
+ *  — with the fleet still drained. Typed `refused`: no wait clears it, and the
+ *  factory reports it as the attach's own refusal, naming the drain. */
+export class ResidentDrainingError extends ExecInfraError {
+  constructor(
+    readonly resource: string,
+    readonly waitedMs: number,
+    readonly until: string | undefined,
+    words: string,
+  ) {
+    super(
+      `resident /attach: the fleet is drained for a deploy and did not reopen within the ${Math.round(waitedMs / 1000)}s this run could wait` +
+        `${until ? ` (the drain ends by ${until})` : ""} — ${words}`,
+      "refused",
+    );
+    this.name = "ResidentDrainingError";
+    classifyError(this, { kind: "infra", code: "attach" });
+  }
 }
 
 /** An attach this executor did not open: the run's lease is inside its
@@ -1035,6 +1083,10 @@ export class ResidentExecutor implements Executor {
   async attach(span?: Span, opts: { signal?: AbortSignal; budgetMs?: number } = {}): Promise<ResidentBinding> {
     const answer = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
     if (answer.ok) return answer.binding;
+    if (isDrainingRefusal(answer)) {
+      const reopened = await this.awaitDrainEnd(answer, opts, span);
+      return { ...reopened.binding, wokeAfterMs: reopened.waitedMs };
+    }
     if (isTransientRefusal(answer)) {
       const woke = await this.awaitWake("/attach", refusalWords(answer), {
         origin: "transient-refusal",
@@ -1045,6 +1097,51 @@ export class ResidentExecutor implements Executor {
       return { ...woke.binding, wokeAfterMs: woke.waitedMs };
     }
     throw this.attachRefusal(answer);
+  }
+
+  /** The wait for a drained fleet to reopen (item 69): one re-attach every
+   *  `DRAIN_POLL_MS` until the fleet admits the run, under the run's own lease
+   *  less what the attach and the work need (`DRAIN_LEASE_RESERVE_MS`), or the
+   *  ceiling with no lease. The run's stop ends it at once (the pause and the
+   *  re-attach both carry its signal). An answer that is no longer the drain is
+   *  judged as `attach` judges a first answer: admitted, the platform's transient
+   *  (handed to the wake wait with what the budget left), or the attach's own
+   *  refusal. The budget ending with the fleet still drained is the typed
+   *  `ResidentDrainingError`, naming how long the run could wait and when the
+   *  drain says it ends. */
+  private async awaitDrainEnd(
+    first: { status: number; data: Record<string, unknown> },
+    opts: { signal?: AbortSignal; budgetMs?: number },
+    span?: Span,
+  ): Promise<{ binding: ResidentBinding; waitedMs: number }> {
+    const t0 = systemClock();
+    const left = this.opts.remainingMs?.();
+    const budget = Math.min(
+      DRAIN_WAIT_MAX_MS,
+      left === undefined ? DRAIN_WAIT_MAX_MS : Math.max(0, left - DRAIN_LEASE_RESERVE_MS),
+    );
+    const deadline = t0 + budget;
+    let answer = first;
+    for (;;) {
+      const now = systemClock();
+      if (now >= deadline)
+        throw new ResidentDrainingError(this.opts.resource, now - t0, drainingUntil(answer), refusalWords(answer));
+      await wakePause(Math.min(DRAIN_POLL_MS, deadline - now), opts.signal, "/attach");
+      const next = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
+      if (next.ok) return { binding: next.binding, waitedMs: systemClock() - t0 };
+      answer = next;
+      if (isDrainingRefusal(answer)) continue;
+      if (isTransientRefusal(answer)) {
+        const woke = await this.awaitWake("/attach", refusalWords(answer), {
+          origin: "transient-refusal",
+          signal: opts.signal,
+          budgetMs: Math.max(0, deadline - systemClock()),
+          span,
+        });
+        return { binding: woke.binding, waitedMs: systemClock() - t0 };
+      }
+      throw this.attachRefusal(answer);
+    }
   }
 
   /** One `/attach`, answered rather than thrown: the binding on a 200, else
@@ -1522,7 +1619,7 @@ export class ResidentExecutor implements Executor {
           // too; anything else is the attach's own error, a needs-ref carrying the
           // wait so its caller's retry draws on one budget and names the total.
           if (isTransientRefusal(answer)) transient = true;
-          else if (!isContainerRolling(answer.data.error)) {
+          else if (!isContainerRolling(answer.data.error) && !isDrainingRefusal(answer)) {
             const refused = this.attachRefusal(answer);
             if (refused instanceof ResidentNeedsRefError) refused.wokeAfterMs = spent();
             throw refused;

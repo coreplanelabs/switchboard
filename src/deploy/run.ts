@@ -1,4 +1,18 @@
 import { spawn } from "node:child_process";
+import {
+  DRAINED_GAVE_UP_SUFFIX,
+  drainBeganLine,
+  drainBody,
+  drainLiftedLine,
+  drainSet,
+  drainSkippedLine,
+  drainUntil,
+  drainUrl,
+  postJson,
+  RESIDENT_DRAINED_WAIT_MAX_MS,
+  undrainUrl,
+  type PostAnswer,
+} from "./residentDrain.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute } from "node:path";
 import { startProcessRoot } from "../core/requestTrace.js";
@@ -650,6 +664,9 @@ export interface SandboxGateDeps {
   probeExec(execUrl: string, bearer: string, threadKey: string): Promise<ProbeResult>;
   now(): number;
   sleep(ms: number): Promise<void>;
+  /** One authenticated JSON POST (the fleet drain's `/drain` and `/undrain`, release-and-deploy
+   *  item 31); absent → the runner never drains and says why. */
+  postJson?(url: string, bearer: string, body: Record<string, unknown>): Promise<PostAnswer>;
 }
 
 /** One read-only wrangler command in a Worker's dir, its `--json` payload parsed;
@@ -684,6 +701,7 @@ const INSTANCES_PER_PAGE = 100;
 
 export const defaultSandboxGateDeps: SandboxGateDeps = {
   env: process.env,
+  postJson,
   readHealth: (url, bearer) => readHealthz(url, bearer),
   readAppState: async (dir, containerApp) => {
     const id = await resolveContainerAppId(dir, containerApp);
@@ -890,9 +908,82 @@ async function deployStepTraced(
 ): Promise<StepOutcome> {
   const started = deps.now();
   // A step may carry its own budget (the resident's, sized for runs and a
-  // provisioning rather than a rollout — plan.ts RESIDENT_WAIT_MAX_MS).
-  const waitMaxMs = step.waitMaxMs ?? plan.waitMaxMs;
+  // provisioning rather than a rollout — plan.ts RESIDENT_WAIT_MAX_MS). A
+  // drained fleet (release-and-deploy item 31) waits past a run's whole lease
+  // instead: the wait ends when the runs in flight end, and nothing new lands.
+  const drain = await beginDrain(step, expectedCommit, io, deps);
+  const waitMaxMs = drain.drained
+    ? Math.max(step.waitMaxMs ?? plan.waitMaxMs, RESIDENT_DRAINED_WAIT_MAX_MS)
+    : (step.waitMaxMs ?? plan.waitMaxMs);
   const deadline = started + waitMaxMs;
+  try {
+    return await deployStepLoop(step, plan, expectedCommit, io, deps, exec, root, {
+      started,
+      waitMaxMs,
+      deadline,
+      drained: drain.drained,
+    });
+  } finally {
+    // Whatever the step ended as — live, refused past the budget, failed — the
+    // fleet reopens; a drain nobody lifted would end by itself, but a run should
+    // not wait the margin out for a deploy that is over.
+    // Lifted whenever a drain was ASKED for, not only when its answer said it
+    // landed: a `/drain` whose answer was lost after the registry stored the
+    // record would otherwise close the fleet for the record's whole life.
+    // `/undrain` is idempotent, and a rejected bearer answers 401 to both alike.
+    if (drain.attempted) await endDrain(step, drain.until, io, deps);
+  }
+}
+
+/** The fleet drain before the step's first attempt: with the step's drain and its drain bearer
+ *  in the env, `POST /drain` for the drained wait plus the margin; the line says what happened.
+ *  Without either, the step waits as before and the line says so. `attempted` is whether a
+ *  `/drain` was posted at all — the `finally` lifts on it — and `drained` whether the answer
+ *  said the record landed, which sizes the wait. */
+async function beginDrain(
+  step: DeployStep,
+  expectedCommit: string,
+  io: DeployRunnerIO,
+  deps: SandboxGateDeps,
+): Promise<{ attempted: boolean; drained: boolean; until: string | undefined }> {
+  if (!step.drain) return { attempted: false, drained: false, until: undefined };
+  const bearer = deps.env[step.drain.tokenEnv];
+  if (!bearer || !deps.postJson) {
+    io.log(drainSkippedLine(step.name, step.drain.tokenEnv));
+    return { attempted: false, drained: false, until: undefined };
+  }
+  const answer = await deps.postJson(
+    drainUrl(step.drain.url),
+    bearer,
+    drainBody(RESIDENT_DRAINED_WAIT_MAX_MS, expectedCommit),
+  );
+  io.log(drainBeganLine(step.name, answer));
+  return { attempted: true, drained: drainSet(answer), until: drainUntil(answer) };
+}
+
+async function endDrain(
+  step: DeployStep,
+  until: string | undefined,
+  io: DeployRunnerIO,
+  deps: SandboxGateDeps,
+): Promise<void> {
+  const bearer = step.drain ? deps.env[step.drain.tokenEnv] : undefined;
+  if (!step.drain || !bearer || !deps.postJson) return;
+  const answer = await deps.postJson(undrainUrl(step.drain.url), bearer, {});
+  io.log(drainLiftedLine(step.name, answer, until));
+}
+
+async function deployStepLoop(
+  step: DeployStep,
+  plan: Pick<DeployPlan, "waitMaxMs" | "pollMs">,
+  expectedCommit: string,
+  io: DeployRunnerIO,
+  deps: SandboxGateDeps,
+  exec: StepExec,
+  root: Span,
+  wait: { started: number; waitMaxMs: number; deadline: number; drained: boolean },
+): Promise<StepOutcome> {
+  const { started, waitMaxMs, deadline } = wait;
   for (;;) {
     io.log(`\n[deploy:all] ▶ ${step.name} (${step.script}) — ${step.dir}: ${step.command.join(" ")}`);
     const sandbox =
@@ -951,7 +1042,12 @@ async function deployStepTraced(
       const left = deadline - deps.now();
       // The budget ran out with the refusal standing: the step FAILS by name,
       // never a deploy over what refused (liveGate.ts `preflightGaveUpLine`).
-      if (left <= 0) return { ok: false, live: "not deployed", reason: preflightGaveUpLine(waitMaxMs, outcome.reason) };
+      if (left <= 0)
+        return {
+          ok: false,
+          live: "not deployed",
+          reason: preflightGaveUpLine(waitMaxMs, outcome.reason) + (wait.drained ? DRAINED_GAVE_UP_SUFFIX : ""),
+        };
       // Never a silent wait: say what is in flight and how far into the budget we are.
       const body = step.healthUrl ? await fetchHealthz(step.healthUrl) : undefined;
       io.log(
@@ -960,7 +1056,8 @@ async function deployStepTraced(
           : `[deploy:all] ${step.name}: still waiting — ${outcome.reason}`,
       );
       io.log(`[deploy:all] ${step.name}: retrying in ${plan.pollMs / 1000}s (${Math.ceil(left / 60_000)} min left)`);
-      await sleep(plan.pollMs);
+      // The injected clock (the default is the real one): a test drives the wait without waiting.
+      await deps.sleep(plan.pollMs);
       continue;
     }
     return { ok: false, live: "not deployed", reason: outcome.reason };
