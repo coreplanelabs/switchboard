@@ -427,6 +427,29 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(merged).not.toContain("Remaining gate");
     expect(merged).not.toContain("Auto-merge is on");
     expect(report).not.toContain("only a plan branch");
+    // The checks at the approved head decide the headline (record 0055):
+    // a failed check is never called merge-ready, a pending one is named, and
+    // green is said in so many words; without the fact the report is unchanged.
+    const red = renderUnitReport(d.state, { checks: { total: 3, pending: [], failed: ["ci / package"] } });
+    expect(red).toContain("⚠️ Approved but not merge-ready after 1 review round: https://github.com/acme/api/pull/7");
+    expect(red).toContain("CI is red at the approved head: ci / package");
+    expect(red).not.toContain("✅ Merge-ready");
+    expect(red).toContain("Verdict: LGTM — clean");
+    const pending = renderUnitReport(d.state, { checks: { total: 3, pending: ["ci / bot", "ci / web"], failed: [] } });
+    expect(pending).toContain("✅ Approved after 1 review round: https://github.com/acme/api/pull/7");
+    expect(pending).toContain("checks pending at the approved head: ci / bot, ci / web");
+    expect(pending).not.toContain("Merge-ready");
+    const green = renderUnitReport(d.state, { checks: { total: 3, pending: [], failed: [] } });
+    expect(green).toContain("✅ Merge-ready after 1 review round: https://github.com/acme/api/pull/7");
+    expect(green).toContain("3 checks green at the approved head");
+    expect(renderUnitReport(d.state, { checks: { total: 0, pending: [], failed: [] } })).toContain(
+      "no check reported at the approved head",
+    );
+    // A pending check and a failed one at once: red wins, both are named.
+    const both = renderUnitReport(d.state, { checks: { total: 3, pending: ["ci / web"], failed: ["ci / package"] } });
+    expect(both).toContain("⚠️ Approved but not merge-ready");
+    expect(both).toContain("CI is red at the approved head: ci / package");
+    expect(both).toContain("pending: ci / web");
   });
 
   it("findings round trip: request_changes → the findings step, a coding child briefed with the review's run, never a `fix` round → re-review with the prior review run and the coding run that answered it → approve; the declined disposition rides the report", () => {

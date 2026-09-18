@@ -1271,7 +1271,9 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
       // The merge_ready ending reads the facts once more AT THE APPROVED HEAD
       // (agent-ship item 9): auto-merge was off at entry and is on now.
-      "pr-check": [prOpen(T0 + 5 * MIN, { autoMergeEnabled: true })],
+      "pr-check": [
+        prOpen(T0 + 5 * MIN, { autoMergeEnabled: true, checks: { total: 2, pending: [], failed: ["ci / package"] } }),
+      ],
       round: [acked(), acked()],
       "unit-end": [ok({ ok: true, told: true }, T0 + 5 * MIN)],
       finish: [ok({ ok: true, runId: "run-parent" }, T0 + 5 * MIN)],
@@ -1292,7 +1294,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     ]);
     // The one pr-check is the ending's facts read at the approved head — no
     // pre-check ran (the resume path skips it).
-    expect(b.of("pr-check")).toEqual([{ parentInstanceId: "ship-run-s", unit: "task" }]);
+    expect(b.of("pr-check")).toEqual([{ parentInstanceId: "ship-run-s", unit: "task", checks: true }]);
     expect(b.of("branch")).toEqual([]);
     expect(b.of("spawn")).toEqual([
       {
@@ -1310,7 +1312,12 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       codingRunId?: string;
     }>;
     expect(end.ending.kind).toBe("merge_ready");
-    expect(end.ending.report).toContain(`✅ Merge-ready after 1 review round: ${PR_URL}`);
+    // The facts read asked for the checks at the approved head and one is red
+    // (record 0055): the report never calls the head merge-ready, while
+    // the machine's ending kind is unchanged and the auto-merge fact still rides.
+    expect(end.ending.report).toContain(`⚠️ Approved but not merge-ready after 1 review round: ${PR_URL}`);
+    expect(end.ending.report).toContain("CI is red at the approved head: ci / package");
+    expect(end.ending.report).not.toContain("✅ Merge-ready");
     expect(end.ending.report).toContain(
       "Auto-merge is on for this pull request: the approval merges it once checks pass.",
     );

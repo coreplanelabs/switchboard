@@ -1913,6 +1913,32 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       url: "https://github.com/acme/api/pull/12",
     });
     expect((await call(h, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U99" })).status).toBe(404);
+
+    // `checks: true` (the ending's facts read, record 0055) adds the check runs
+    // at the head as the merge door reads them; an unreadable GitHub leaves the
+    // field out rather than failing the read; without the flag nothing is asked.
+    const withChecks = await planHarness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },
+      checks: { total: 3, pending: ["ci / web"], failed: ["ci / package"] },
+    });
+    expect(
+      (await call(withChecks, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", checks: true })).body,
+    ).toMatchObject({
+      state: "open",
+      headSha: "abc123",
+      checks: { total: 3, pending: ["ci / web"], failed: ["ci / package"] },
+    });
+    const unreadable = await planHarness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },
+      checks: new Error("GitHub 502"),
+    });
+    const noChecks = await call(unreadable, "pr-check", {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      checks: true,
+    });
+    expect(noChecks.status).toBe(200);
+    expect(noChecks.body).not.toHaveProperty("checks");
   });
 
   it("pr-check for a unit whose branch only a merged pull request heads answers merged and remembers that pull request on the row, so the row reads like a unit the runner merged", async () => {
