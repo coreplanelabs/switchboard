@@ -53,6 +53,15 @@ export function continuable(run: RunView): run is RunView & { agent: string } {
  *  person's follow-up is not a continuation of them. */
 const addressed = (run: RunView): boolean => run.parentInstanceId === undefined;
 
+/** The thread's requester (routing-and-config item 27, record 0058): the
+ *  person of the thread's newest run a person addressed — whether that run is
+ *  live, finished or refused at a gate, since "who the bot is talking to" does
+ *  not change when a run ends. A coordinator's child is skipped, never the
+ *  requester; a page with no addressed run names nobody. */
+export function requesterOf(runs: readonly RunView[]): string | undefined {
+  return runs.find(addressed)?.userId;
+}
+
 /** The thread's sticky agent by transcript (routing-and-config item 3): the
  *  agent of the thread's newest run a person addressed, when that run can be
  *  continued. A newest run that cannot be — live, refused at a gate, from

@@ -93,4 +93,13 @@ describe("attrs", () => {
     expect(invalidAttrKeys({ instanceId: "refresh a/b" })).toEqual(["instanceId"]);
     expect(invalidAttrKeys({ instanceId: "x".repeat(101) })).toEqual(["instanceId"]);
   });
+
+  it("the three intake keys have a class (routing-and-config item 27): closed literal values on slack.receive, never free text", () => {
+    for (const key of ["intake", "intakeSource", "intakeReceipt"]) expect(ATTR_KEYS).toContain(key);
+    expect(invalidAttrKeys({ intake: "silent", intakeSource: "timeout", intakeReceipt: "absent" })).toEqual([]);
+    expect(invalidAttrKeys({ intake: "addressed", intakeSource: "model", intakeReceipt: "inserted" })).toEqual([]);
+    expect(invalidAttrKeys({ intake: true } as never)).toEqual(["intake"]);
+    expect(invalidAttrKeys({ intakeSource: 3 } as never)).toEqual(["intakeSource"]);
+    expect(invalidAttrKeys({ intakeReceipt: false } as never)).toEqual(["intakeReceipt"]);
+  });
 });

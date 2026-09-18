@@ -7,8 +7,10 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { secretsFrom, type Secrets } from "./secrets.js";
 import {
   ConfigStore,
+  defaultIntakeMode,
   FileOverridesBacking,
   InMemoryOverridesBacking,
+  intakeModelRef,
   loadAppConfigFrom,
   openConfigStore,
   OverridesConflictError,
@@ -789,6 +791,81 @@ describe("routing block (routing.auto, routing.model)", () => {
     expect(() => store(YAML_FIXTURE + "routing: true\n")).toThrow(/routing must be a mapping/);
     expect(() => store(YAML_FIXTURE + "routing:\n  automatic: true\n")).toThrow(
       /routing\.automatic is not a known key/,
+    );
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 27 (record 0058) —
+// the `intake` block and the `intake` scope field: the thread-reply gate's
+// mode, its model, and the load-time card check under the classify default.
+describe("intake block and Scope.intake (routing-and-config item 27)", () => {
+  it("parses the block; a config without an intake block resolves the default mode classify", () => {
+    const s = store(YAML_FIXTURE + "intake:\n  threadReplies: mention\n  model: anthropic/fast-model\n");
+    expect(s.config.intake).toEqual({ threadReplies: "mention", model: "anthropic/fast-model" });
+    expect(defaultIntakeMode(s.config)).toBe("mention");
+    expect(store().config.intake).toBeUndefined();
+    expect(defaultIntakeMode(store().config)).toBe("classify");
+  });
+
+  it("the intake model resolves intake.model, else routing.model, else defaults.models.general", () => {
+    expect(intakeModelRef(store().config)).toBe("anthropic/general-model");
+    expect(intakeModelRef(store(YAML_FIXTURE + "routing:\n  model: anthropic/fast-model\n").config)).toBe(
+      "anthropic/fast-model",
+    );
+    expect(
+      intakeModelRef(
+        store(YAML_FIXTURE + "routing:\n  model: anthropic/fast-model\nintake:\n  model: anthropic/gate-model\n")
+          .config,
+      ),
+    ).toBe("anthropic/gate-model");
+  });
+
+  it("refuses an unknown mode by name — a typo can never read as a working setting", () => {
+    for (const value of ['"sometimes"', "true", '"Classify"'])
+      expect(() => store(YAML_FIXTURE + `intake:\n  threadReplies: ${value}\n`)).toThrow(
+        /intake\.threadReplies must be mention, classify or always/,
+      );
+    expect(() => store(YAML_FIXTURE + "intake: true\n")).toThrow(/intake must be a mapping/);
+    expect(() => store(YAML_FIXTURE + "intake:\n  mode: classify\n")).toThrow(/intake\.mode is not a known key/);
+  });
+
+  it("refuses intake.model when it is not a <provider>/<model> ref or names an undeclared provider", () => {
+    expect(() => store(YAML_FIXTURE + "intake:\n  model: fast-model\n")).toThrow(
+      /intake\.model must be a <provider>\/<model> ref/,
+    );
+    expect(() => store(YAML_FIXTURE + "intake:\n  model: openai/gpt-5\n")).toThrow(
+      /intake\.model names provider "openai", which providers does not define/,
+    );
+  });
+
+  it("a card that supports neither a forced tool call nor the text contract is refused at load when the effective default mode is classify — and loads under mention or always", () => {
+    const card = "    models:\n      gate-model:\n        answers: []\n";
+    const providers = `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\n    apiKeyEnv: ANTHROPIC_API_KEY\n${card}defaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`;
+    expect(() => store(providers + "intake:\n  model: anthropic/gate-model\n")).toThrow(
+      /intake.*neither.*(tool|text)/s,
+    );
+    // The same card is fine when intake never calls a model by default.
+    expect(() => store(providers + "intake:\n  model: anthropic/gate-model\n  threadReplies: always\n")).not.toThrow();
+    expect(() => store(providers + "intake:\n  model: anthropic/gate-model\n  threadReplies: mention\n")).not.toThrow();
+    // A card that names an answer shape loads under classify.
+    const tools = providers.replace("answers: []", 'answers: ["tool"]');
+    expect(() => store(tools + "intake:\n  model: anthropic/gate-model\n")).not.toThrow();
+    // A card that declares nothing is not refused: both shapes are assumed.
+    expect(() => store(YAML_FIXTURE + "intake:\n  model: anthropic/general-model\n")).not.toThrow();
+  });
+
+  it("Scope.intake validates by name on channels and users: only threadReplies, only a known mode", () => {
+    const withChannel = (block: string) => YAML_FIXTURE.replace("channels:", `channels:\n  "slack:CQUIET":\n${block}`);
+    const s = store(withChannel("    intake:\n      threadReplies: mention"));
+    expect(s.config.channels?.["slack:CQUIET"]?.intake).toEqual({ threadReplies: "mention" });
+    expect(() =>
+      store(YAML_FIXTURE.replace("users:", 'users:\n  "slack:UX":\n    intake:\n      threadReplies: sometimes')),
+    ).toThrow(/users\.slack:UX\.intake\.threadReplies must be mention, classify or always/);
+    expect(() => store(withChannel("    intake:\n      model: anthropic/x"))).toThrow(
+      /channels\.slack:CQUIET\.intake\.model is not a known key/,
+    );
+    expect(() => store(withChannel("    intake: classify"))).toThrow(
+      /channels\.slack:CQUIET\.intake must be a mapping/,
     );
   });
 });

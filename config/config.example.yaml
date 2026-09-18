@@ -56,6 +56,10 @@ providers:
     #     inputs:
     #       image: true
     #     cache: automatic
+    #     # The answer shapes the card takes — a forced tool call, the one-JSON-
+    #     # object text contract, or both (absent assumes both). The intake gate
+    #     # refuses at load a card declaring neither under its classify default.
+    #     answers: ["tool", "text"]
     # A passthrough is merged into the request body on the wires whose adapter
     # takes one — a vendor-only feature such as OpenRouter's routing, never a
     # control: it is not decided, not noted and not in the matrix, and a wrong
@@ -443,6 +447,26 @@ workspaceDir: ./workspaces
 #   auto: false
 #   model: anthropic/claude-haiku-4-5
 #   answer: text
+
+# The thread-reply intake gate (docs/decisions/0058-a-thread-reply-is-read-before-it-is-answered-intake-decides-whether-the-bot-was-addressed.md;
+# docs/reference/specs/routing-and-config.md item 27). How an unmentioned reply
+# in a channel thread the bot is part of is treated — NOTHING CALLS THE GATE
+# YET; the Slack wiring lands in a later release, and until then behavior is
+# unchanged whatever this block says. `threadReplies`: `classify` (the code's
+# default — one cheap model turn decides whether the bot was addressed; a
+# silent reply then gets no reaction, no card and no run), `mention` (only a
+# mention is answered; an unmentioned reply is silent with a receipt and no
+# model call) or `always` (today's answer-every-reply path, byte for byte).
+# Also settable per channel and per user: `intake: { threadReplies: <mode> }`
+# on a `channels.<id>` or `users.<id>` scope, user over channel over here.
+# `model` is the verdict's model; default `routing.model`, else
+# `defaults.models.general`. A mention, a DM and a top-level post never pass
+# through the gate in any mode. A model whose operator card (`providers.<p>.
+# models.<id>.answers`) declares it answers neither a forced tool call nor the
+# text contract is refused at load when the default mode is `classify`.
+# intake:
+#   threadReplies: classify
+#   model: anthropic/claude-haiku-4-5
 
 # Linked threads (docs/decisions/0037-a-linked-thread-is-quoted-not-joined.md;
 # docs/reference/specs/routing-and-config.md item 22). Off by default. On, a
