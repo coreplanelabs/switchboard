@@ -54,6 +54,10 @@ export interface RunMeta {
    *  a spawned child seeded from its parent's turns, `channel` otherwise —
    *  stamped by the dispatcher, so the summary and the drain's record keep it. */
   seed?: RunSeed;
+  /** A ship pipeline's parent run (record 0060): occupies no thread — the
+   *  in-process occupancy readers skip it — while it still lists under its
+   *  conversation like any run. */
+  hosted?: true;
 }
 
 /** `seq` is the event's 1-based position in the run's stream (the registry's

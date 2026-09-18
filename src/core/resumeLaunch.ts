@@ -62,7 +62,9 @@ export function resumeMessage(row: LiveRunRow, inputText: string): IncomingMessa
   return {
     channelId: row.meta.channelId,
     userId: row.meta.userId,
-    threadKey: row.threadKey,
+    // The metadata's thread, never the ledger's key column (record 0060): a
+    // hosted row's key carries the `#host` suffix no message thread can match.
+    threadKey: row.meta.threadKey,
     text: `${directives} ${inputText}`.trim(),
     ...(row.meta.userName !== undefined ? { userName: row.meta.userName } : {}),
     ...(row.meta.authenticatedAs !== undefined ? { authenticatedAs: row.meta.authenticatedAs } : {}),
@@ -80,6 +82,17 @@ export function repoContextOf(row: LiveRunRow): RepoContext {
     ...(m.ref !== undefined ? { ref: m.ref } : {}),
     ...(m.pr !== undefined ? { pr: m.pr } : {}),
     ...(m.headSha !== undefined ? { headSha: m.headSha } : {}),
+  };
+}
+
+/** What the launcher's channel handle is rebuilt from (run-history item 38):
+ *  the METADATA's thread, never the ledger's key column (record 0060), the
+ *  requester, and the card so a resumed run edits the same message. */
+export function resumeIoTarget(row: LiveRunRow): { threadKey: string; userId: string; cardTs?: string } {
+  return {
+    threadKey: row.meta.threadKey,
+    userId: row.meta.userId,
+    ...(row.card ? { cardTs: row.card.ts } : {}),
   };
 }
 

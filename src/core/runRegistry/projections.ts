@@ -68,6 +68,8 @@ export interface RunSummary {
   idempotencyKey?: string;
   /** `RunMeta.seed`: where the run's conversation started (run-history item 52). */
   seed?: RunSeed;
+  /** `RunMeta.hosted`: a ship pipeline's parent, occupying no thread (record 0060). */
+  hosted?: true;
   /** Present only once a stop has been requested. */
   stop?: RunStopStatus;
   /** Present (true) once the history writer confirmed the run is in the durable
@@ -146,6 +148,7 @@ export function summaryOf(run: RunState): RunSummary {
     ...(m?.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
     ...(m?.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),
     ...(m?.seed !== undefined ? { seed: m.seed } : {}),
+    ...(m?.hosted ? { hosted: true as const } : {}),
     finished: run.finished,
     startedAt: run.startedAt,
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),

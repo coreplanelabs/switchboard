@@ -232,7 +232,10 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
       const prUrl = prUrlOf(events);
       outcome.closed.push({
         runId: row.runId,
-        threadKey: row.threadKey,
+        // The metadata's thread, never the ledger's key column (record 0060):
+        // the interrupted-run notice files a hosted row's closure under its
+        // conversation, where the host key would name no thread at all.
+        threadKey: row.meta.threadKey,
         status,
         from: run.reclaimedFrom,
         why,

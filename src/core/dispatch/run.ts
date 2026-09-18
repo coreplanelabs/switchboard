@@ -390,13 +390,17 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         },
       }),
     );
-    if (opened) {
-      ledgerRun = opened;
+    // Anything but `tracked` — untracked (the note went through `onUntracked`),
+    // fenced, or a process without a ledger — and the run goes on exactly as it
+    // did before the ledger existed.
+    if (opened.kind === "tracked") {
+      const tracked = opened.run;
+      ledgerRun = tracked;
       // Every event published so far (the request, run_meta, context) and
       // every one to come, in `seq` order, through the batched flusher. The
       // ledger is a store: the viewer replay budget never applies to it.
       registry.subscribe(run.id, run.token, {
-        onEvent: (event, seq) => opened.event(event, seq),
+        onEvent: (event, seq) => tracked.event(event, seq),
         ...REPLAY_EVERYTHING,
       });
     }

@@ -1034,6 +1034,47 @@ describe("RunsService with the run ledger — one registry across generations (r
     expect(await svc.stopRun("far-nope", "soft", actor)).toEqual({ ok: false, error: "not_found" });
   });
 
+  // record 0060 (run-history item 29): a ship parent is claimed under the host
+  // key while its metadata names the thread — every surface lists it under its
+  // conversation, marked hosted, with the label the registry gave it.
+  it("lists a ledger row claimed under the host key under its conversation's threadKey, with hosted and its label; a registry row created with meta.hosted lists the same", async () => {
+    const { svc, reg, ledger } = ledgerSetup();
+    await ledger.claim({
+      runId: "host-1",
+      threadKey: "web:s:c9#host",
+      gen: "g-OTHER",
+      leaseMs: 30_000,
+      startedAt: NOW - 5_000,
+      meta: {
+        channelId: "web:s",
+        userId: "access:u1",
+        threadKey: "web:s:c9",
+        agent: "ship",
+        hosted: true,
+        label: "ship · acme/api",
+      },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    const far = await svc.listRuns({ visibleTo: ALL, status: "active", threadKey: "web:s:c9" });
+    expect(far.runs.map((r) => r.id)).toEqual(["host-1"]);
+    expect(far.runs[0]).toMatchObject({ hosted: true, label: "ship · acme/api", threadKey: "web:s:c9" });
+    // Nothing lists under the host key itself: the key column is the ledger's alone.
+    expect((await svc.listRuns({ visibleTo: ALL, status: "active", threadKey: "web:s:c9#host" })).runs).toEqual([]);
+
+    const { id } = reg.create("ship · acme/api", {
+      agent: "ship",
+      channelId: "web:s",
+      userId: "access:u1",
+      threadKey: "web:s:c8",
+      hosted: true,
+    });
+    const near = await svc.listRuns({ visibleTo: ALL, status: "active", threadKey: "web:s:c8" });
+    expect(near.runs.map((r) => r.id)).toEqual([id]);
+    expect(near.runs[0]).toMatchObject({ hosted: true, label: "ship · acme/api" });
+  });
+
   it("one ledger listing serves every read within the TTL — a page view's run, events and friction reads cost one listLive; the events of several rows are read in parallel; a failed listing is not kept", async () => {
     let clock = NOW;
     const base = setup();

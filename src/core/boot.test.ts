@@ -124,6 +124,30 @@ describe("reclaimRuns", () => {
     );
   });
 
+  // record 0060 (run-history item 36): a hosted row is claimed under the host
+  // key; the closure and its record both name the metadata's thread, so the
+  // interrupted notice and the listing file it under its conversation.
+  it("closes a host-keyed row under the metadata's thread: the closed outcome and the record both carry the conversation, never the `#host` key", async () => {
+    const { ledger, run } = harness();
+    const c = claim("r-ship", "web:s:c9#host");
+    await ledger.claim({
+      ...c,
+      meta: {
+        channelId: "web:s",
+        userId: "access:u1",
+        threadKey: "web:s:c9",
+        agent: "ship",
+        hosted: true,
+        label: "ship · acme/api",
+      },
+    });
+    const outcome = await run();
+    expect(outcome.closed).toHaveLength(1);
+    expect(outcome.closed[0]).toMatchObject({ runId: "r-ship", threadKey: "web:s:c9", status: "interrupted" });
+    expect(ledger.finished.get("r-ship")).toMatchObject({ id: "r-ship", threadKey: "web:s:c9" });
+    expect(ledger.live.has("r-ship")).toBe(false);
+  });
+
   it("a closed run whose run_meta says the router chose its preset is marked routed, so its card close can carry the override footer (routing-and-config item 21); a run a person or the default chose is not", async () => {
     const { ledger, run } = harness();
     for (const [id, agentSource] of [

@@ -12,7 +12,7 @@ import type { RunEvent } from "../runEvents.js";
 import {
   NullLedgerRun,
   NullLedgerWriteThrough,
-  type LedgerRun,
+  type OpenOutcome,
   type OpenRunRequest,
 } from "../runLedger/writeThrough.js";
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
@@ -79,10 +79,10 @@ class RecordingLedger extends NullLedgerWriteThrough {
   constructor() {
     super("gen-T", new NullRunStore());
   }
-  override async open(req: OpenRunRequest): Promise<LedgerRun | undefined> {
+  override async open(req: OpenRunRequest): Promise<OpenOutcome> {
     this.opened.push(req);
     this.handle = new RecordingRun(req.runId, { put: async () => {}, abandoned: () => {} });
-    return this.handle;
+    return { kind: "tracked", run: this.handle };
   }
 }
 
@@ -201,7 +201,7 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     // row, said why through onUntracked, and answered undefined.
     ledger.open = async (req) => {
       req.onUntracked?.("the claim failed after 3 attempts");
-      return undefined;
+      return { kind: "untracked", why: "the claim failed after 3 attempts" };
     };
     let marked = 0;
     const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });

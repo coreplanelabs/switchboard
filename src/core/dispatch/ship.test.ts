@@ -15,6 +15,7 @@ import { RunRegistry } from "../runRegistry.js";
 import { createLedgerWriteThrough, NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { InMemoryRunStore, NullRunStore } from "../runStore.js";
+import { RouteMissingError } from "../runStoreWorker.js";
 import { InMemoryCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { ThreadAdmission } from "../threadAdmission.js";
 import type { ChannelIO, StatusHandle, StatusUpdate } from "../types.js";
@@ -414,6 +415,91 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     const liveAfterSecond = await inner.listLive();
     const threadRows = liveAfterSecond.filter((r) => r.threadKey === THREAD);
     expect(threadRows).toHaveLength(0);
+  });
+});
+
+// Feature: record 0060 (agent-ship item 16; run-history item 29) — the parent
+// run is claimed under the HOST KEY with `hosted` and the label on both stores,
+// files under its conversation, registers no session, and a thread whose
+// pipeline is live refuses a second one by name.
+describe("runShipBranch — the host key and the hosted marker (record 0060)", () => {
+  function ledgerSetup(minutes = 200) {
+    const inner = new InMemoryRunLedger(() => NOW);
+    const claims: Parameters<InMemoryRunLedger["claim"]>[0][] = [];
+    const claimSpy = Object.create(inner) as InMemoryRunLedger;
+    claimSpy.claim = (req) => {
+      claims.push(req);
+      return InMemoryRunLedger.prototype.claim.call(inner, req);
+    };
+    const ledger = createLedgerWriteThrough({
+      ledger: claimSpy,
+      gen: "gen-T",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+    const s = setup("slack:UADMIN", { minutes });
+    s.deps.runLedger = ledger;
+    return { ...s, inner, claims };
+  }
+
+  it("claims the ledger under the host key with the thread, `hosted` and the label in the metadata, marks the registry row hosted, and registers no session (the claim carries no seed)", async () => {
+    const s = ledgerSetup();
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.refusals).toEqual([]);
+    expect(s.claims).toHaveLength(1);
+    expect(s.claims[0]).toMatchObject({
+      threadKey: `${THREAD}#host`,
+      meta: {
+        threadKey: THREAD,
+        hosted: true,
+        label: 'ship · acme/api · "in acme/api: fix the login redirect"',
+        agent: "ship",
+      },
+    });
+    expect(s.claims[0].meta.session).toBeUndefined();
+    expect(s.inner.sessions.size).toBe(0); // no session registered for a hosted claim
+    expect(s.registry.getById("run-s")).toMatchObject({ hosted: true, threadKey: THREAD });
+  });
+
+  it("one pipeline per thread: a live host-key row refuses a second ship by name — nothing handed to the runner, the card closes ⚠️, the run still ends completed", async () => {
+    const s = ledgerSetup();
+    await s.inner.claim({
+      runId: "r-live",
+      threadKey: `${THREAD}#host`,
+      gen: "gen-OTHER",
+      leaseMs: 60_000,
+      startedAt: NOW - 1_000,
+      meta: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: THREAD, hosted: true },
+      system: "",
+      tools: [],
+    });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.created).toEqual([]); // the runner is never asked
+    expect(s.replies).toHaveLength(1);
+    expect(s.replies[0]).toContain("A pipeline is already running in this thread");
+    expect(JSON.stringify(s.closes[0])).toContain("⚠️");
+    expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed" });
+    // The live pipeline's row is untouched.
+    expect(s.inner.live.get("r-live")).toMatchObject({ threadKey: `${THREAD}#host`, ownerGen: "gen-OTHER" });
+  });
+
+  it("an untracked answer that is not thread-live (missing routes) hands off as before: the runner is asked and the reply says where the plan runs", async () => {
+    const s = setup("slack:UADMIN", { minutes: 200 });
+    const inner = new InMemoryRunLedger(() => NOW);
+    const noRoutes = Object.create(inner) as InMemoryRunLedger;
+    noRoutes.claim = async () => {
+      throw new RouteMissingError("run ledger /runs/claim: route missing");
+    };
+    s.deps.runLedger = createLedgerWriteThrough({
+      ledger: noRoutes,
+      gen: "gen-T",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.refusals).toEqual([]);
+    expect(s.created).toHaveLength(1);
+    expect(s.replies[0]).toContain("Handed to the plan runner");
   });
 });
 

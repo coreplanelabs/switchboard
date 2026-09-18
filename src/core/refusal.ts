@@ -56,6 +56,8 @@ const CAUSE_OF = {
   which_branch: "request",
   workspace_lost: "system",
   ship_budget: "request",
+  // one pipeline per thread (record 0060): the host key's claim answered thread-live
+  ship_thread_live: "request",
   setup_failed: "system",
   // the click on a confirmation (confirm.ts)
   confirmation_used: "request",

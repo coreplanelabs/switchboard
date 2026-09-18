@@ -506,6 +506,9 @@ export const REFUSAL_SENTENCES = {
   which_branch: (p: { repo: string | undefined }) =>
     `🌿 Which branch of \`${p.repo}\` should this thread work on? ` +
     `No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I'll pick it up from there.`,
+  ship_thread_live: () =>
+    "🚫 A pipeline is already running in this thread — one pipeline per thread. " +
+    "Follow the one in flight here, or start this one in a thread of its own.",
   ship_budget: (p: { maxMinutes: number; maxRounds: number; need: number; provision: number; coding: number }) =>
     `🚫 Ship cannot start under a ${p.maxMinutes}-minute budget: the loop it allows (${p.maxRounds} review rounds) needs ${p.need} minutes — ` +
     `${p.provision} to provision, the coding child's ${p.coding}, and the reserve for the rounds after it at their floors. ` +
