@@ -14,13 +14,15 @@
 // outcome — whatever the command, announced to no surface unless the command
 // was a run anyway.
 import { systemClock } from "../trace/index.js";
-import { COMMAND_RUN_AGENT } from "../runOwner.js";
+import { COMMAND_RUN_AGENT, DOOR_RUN_AGENT } from "../runOwner.js";
 import type { Span } from "../trace/types.js";
 import type { RequestTrace } from "../requestTrace.js";
 import { graftResidentSteps, sanitizeGraftedSteps } from "../../execution/residentTrace.js";
 import { residentOnboardedProbe, residentSlugsLister } from "../../execution/factory.js";
 import { resolveRepoContext, type RepoContext } from "../repoContext.js";
-import { redactSecrets, type RunEvent } from "../runEvents.js";
+import { redactAndCap, redactSecrets, type RunEvent } from "../runEvents.js";
+import { refusalLine, type Refusal } from "../refusal.js";
+import { ROUTE_RECEIPT_CAP } from "./route.js";
 import type { RunStatus } from "../runRecord.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import { invokeChatCommand, type ChatCommandResult, type ParsedChatCommand } from "../commandChat.js";
@@ -141,6 +143,102 @@ export async function recordRoutedDecision(
   await runInlineCommandRun(deps, msg, cliWords(def.id)[0], io, async () => ({ ok: true, text }), ending, trace, {
     route,
     announce: false,
+  });
+}
+
+/**
+ * A refusal as a run record (record 0054, as amended: every refusal the door
+ * makes is a run record, a gate refusal before any command is bound and before
+ * admission included). Written beside the rendered sentence and telling no
+ * surface of the run — like a hand-back's record — so the reply the person
+ * reads is exactly what it was: agent `door`, the refusal's code as the
+ * label's lead, status `completed`, no `runStarted`/`runFinished` signal, no
+ * thread claim; the redacted request is its `input` event and one `refusal`
+ * event carries the code, the cause and the redacted sentence capped like a
+ * receipt (`ROUTE_RECEIPT_CAP`). A message without a thread of its own records
+ * with the channel as its thread key. The door report counts these records
+ * with the refused route outcomes, so refusals per day, cause and code read
+ * off the run store alone.
+ */
+export async function recordRefusal(
+  deps: FastPathDeps,
+  msg: IncomingMessage,
+  _io: ChannelIO,
+  refusal: Refusal,
+  ending: RunEnding,
+  trace: RequestTrace,
+): Promise<void> {
+  const registry = deps.runRegistry ?? defaultRunRegistry;
+  const root = trace.root;
+  const clock = deps.clock ?? systemClock;
+  const threadKey = msg.threadKey || msg.channelId;
+  // No span of its own: the caller records inside its `dispatch.refuse` span.
+  const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
+  const run = registry.create(
+    composeRunLabel({
+      agent: refusal.code,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      channelName: msg.channelName,
+      userName: msg.userName,
+      text: msg.text,
+    }),
+    {
+      agent: DOOR_RUN_AGENT,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      threadKey,
+      channelVisibility,
+      receivedAt: trace.receivedAt,
+      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+    },
+  );
+  registry.publish(run.id, {
+    type: "input",
+    text: redactSecrets(msg.text),
+    messageId: messageIdOf(msg, run.id),
+    at: clock(),
+  });
+  registry.publish(run.id, {
+    type: "refusal",
+    code: refusal.code,
+    cause: refusal.cause,
+    text: redactAndCap(refusalLine(refusal), ROUTE_RECEIPT_CAP),
+    at: clock(),
+  });
+  // The door said no and said it cleanly: the record's status is `completed` —
+  // `failed` is for a command whose own work broke — and the refusal event
+  // says what was refused.
+  const status: RunStatus = "completed";
+  registry.finish(run.id, status);
+  ending.finished(run.id);
+  const snap = registry.snapshot(run.id, run.token);
+  const finishedAt = snap?.finishedAt ?? clock();
+  const diagnosis = analyzeRunFriction(snap?.events ?? [], {
+    finished: true,
+    truncated: snap?.truncated ?? false,
+    owner: "command",
+    window: { start: trace.receivedAt, end: finishedAt },
+  });
+  ending.register({
+    runId: run.id,
+    flipOnPostFinishFailure: false,
+    write: (seal) =>
+      deps.runHistoryWriter.write(
+        assembleRunRecord({
+          run,
+          snap,
+          agent: DOOR_RUN_AGENT,
+          msg: { ...msg, threadKey },
+          channelVisibility,
+          finishedAt,
+          status,
+          diagnosis,
+          seal,
+        }),
+        { span: root },
+      ),
   });
 }
 

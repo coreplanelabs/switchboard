@@ -1288,7 +1288,8 @@ describe("resident repo dispatch", () => {
       expect(inFlight).toEqual([1]);
       expect(activeRunCount()).toBe(0);
       // The redispatched run's record names the question it answered (run-history item 2).
-      // The question's refusal registered no run, so the Yes-run is the thread's first row.
+      // The question's refusal registered its own `door` record (record 0054,
+      // as amended), so the Yes-run sits beside it on the thread.
       const runs = ["r1", "r2", "r3", "r4"].map((id2) => w.registry.snapshotById(id2)).filter((s) => s !== null);
       const note = runs.flatMap((s) => s!.events).find((e) => e.type === "run_note" && e.kind === "redispatch");
       expect(note).toMatchObject({ summary: "confirmed after question repo_not_onboarded" });
@@ -1313,6 +1314,24 @@ describe("resident repo dispatch", () => {
       expect(no.replies).toEqual(["Cancelled; nothing ran"]);
       expect(w.store.rows.size).toBe(0);
       expect(w.provider.requests).toHaveLength(0);
+      // A refused click still leaves exactly one record (record 0054, as
+      // amended): the stranger's Yes wrote one `door` record carrying the
+      // stored proposal and the click's code — beside the question's own (r1)
+      // — and the cancel, a completed decision, recorded nothing more.
+      const doorRows = ["r1", "r2", "r3", "r4"]
+        .map((id2) => w.registry.getById(id2))
+        .filter((r) => r?.agent === "door");
+      expect(doorRows).toHaveLength(2);
+      expect(doorRows[0]).toMatchObject({ status: "completed" });
+      const foreignRecord = w.registry.snapshotById(doorRows[1]!.id);
+      expect(foreignRecord?.events.find((e) => e.type === "refusal")).toMatchObject({
+        code: "confirmation_foreign",
+        cause: "policy",
+        text: "only the requester can confirm this",
+      });
+      expect(foreignRecord?.events.find((e) => e.type === "input")).toMatchObject({
+        text: "agent:coding in acme/api: say hi",
+      });
     });
 
     it("a store that cannot be reached at the mint costs the button alone: the same question goes out as text, the line to type in it", async () => {
@@ -9773,7 +9792,9 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await firstStarted;
     const second = fakeIO();
     await dispatch(deps, threadMsg("agent:research look up the numbers"), second.io);
-    expect(registry.listActive()).toHaveLength(1);
+    // One live run; the refusal's own `door` record (record 0054, as amended)
+    // sits finished beside it, never a second run.
+    expect(registry.listActive().filter((r) => r.agent !== "door")).toHaveLength(1);
     expect(second.statuses).toEqual([]);
     expect(second.replies[0]).toMatch(/^⏳ A \*general\* run is already in flight/);
     expect(second.replies[0]).toContain("`agent:research`");
@@ -9991,7 +10012,13 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
   });
 
   function wired(provider: Provider, over: { ledger?: InMemoryRunLedger; gen?: string; yaml?: string } = {}) {
-    const registry = new RunRegistry({ genId: () => "run-l", genToken: () => "tok" });
+    // The first row is the run's (`run-l`, what every assertion names); a later
+    // one — a refusal's `door` record (record 0054, as amended) — gets its own id.
+    let minted = 0;
+    const registry = new RunRegistry({
+      genId: () => (++minted === 1 ? "run-l" : `run-l${minted}`),
+      genToken: () => "tok",
+    });
     const store = new InMemoryRunStore();
     const ledger = over.ledger ?? new InMemoryRunLedger();
     const warnings: string[] = [];
@@ -10379,12 +10406,15 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(replies.some((r) => r.includes("Which branch"))).toBe(true);
     expect(ledger.live.size).toBe(0);
     expect(ledger.finished.size).toBe(0);
-    expect(registry.listActive()).toEqual([]);
+    // The refusal's own `door` record is the one row left (record 0054, as
+    // amended: every refusal is a run record); the run that never started is gone.
+    expect(registry.listActive().map((r) => r.agent)).toEqual(["door"]);
     // The row came (the create, then one upsert per content event published at
     // the reservation — request, meta, context) and went (the discard), and
-    // nothing came after the removal.
+    // nothing more came for it after the removal.
     expect(index[0]?.type).toBe("upsert");
-    expect(index.at(-1)).toEqual({ type: "removed", id: "run-l" });
+    const rowEvents = index.filter((ev) => (ev.type === "removed" ? ev.id : ev.run.id) === "run-l");
+    expect(rowEvents.at(-1)).toEqual({ type: "removed", id: "run-l" });
     expect(index.filter((ev) => ev.type === "removed")).toHaveLength(1);
     expect(warnings).toEqual([]);
   });
@@ -11070,7 +11100,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await writer.settled();
     expect(replies[0]).toContain("🚫"); // the refusal is still said, as for any dispatch
     expect(provider.requests).toEqual([]);
-    expect(registry.listActive()).toEqual([]);
+    // The refusal's `door` record is the one row left (record 0054, as amended).
+    expect(registry.listActive().map((r) => r.agent)).toEqual(["door"]);
     expect(ledger.live.has("run-old")).toBe(false);
     expect(ledger.finished.get("run-old")?.status).toBe("interrupted");
   });
@@ -11422,12 +11453,21 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(calls.every((c) => c.host === "resident.example")).toBe(true);
     expect(provider.requests).toHaveLength(1);
     expect(replies.at(-1)).toBe("started over and done");
-    expect(registry.listActive().map((r) => r.id)).toEqual(["run-l"]);
-    expect(ledger.finished.get("run-l")?.status).toBe("completed");
+    // The re-attach refusal's own `door` record took the first minted id
+    // (record 0054, as amended: every refusal is a run record), so the
+    // restarted run is `run-l2` and rides beside it.
+    expect(
+      registry
+        .listActive()
+        .filter((r) => r.agent !== "door")
+        .map((r) => r.id),
+    ).toEqual(["run-l2"]);
+    expect(registry.listActive().find((r) => r.agent === "door")).toMatchObject({ id: "run-l", status: "completed" });
+    expect(ledger.finished.get("run-l2")?.status).toBe("completed");
     expect(ledger.live.has("run-old")).toBe(false);
     // The restarted run is the same instance's child: its own coordinator_tag names the plan's base,
     // so its unit branch is its push target and the base is what the gate protects.
-    expect(ledger.finished.get("run-l")?.events.find((e) => e.type === "coordinator_tag")).toMatchObject({
+    expect(ledger.finished.get("run-l2")?.events.find((e) => e.type === "coordinator_tag")).toMatchObject({
       parentInstanceId: "plan-p",
       base: "main",
     });
@@ -12036,14 +12076,17 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(a.replies.some((r) => r.includes("mcp discovery exploded"))).toBe(true);
     // The follow-up was not lost: it ran as its own turn, on its own sender's handle…
     expect(b.replies.at(-1)).toBe("answer 2");
-    // …and its reservation found the thread free: run-1's row was abandoned BEFORE the settle handed the follow-up on.
-    expect(order.indexOf("abandon run-1")).toBeLessThan(order.indexOf("claim run-2 ok"));
-    expect(order.filter((o) => o.startsWith("claim run-2"))).toEqual(["claim run-2 ok", "claim run-2 ok"]);
+    // …and its reservation found the thread free: run-1's row was abandoned
+    // BEFORE the settle handed the follow-up on. (run-2 is the failure's own
+    // `door` refusal record — record 0054, as amended — which claims no thread;
+    // the fresh turn's run is run-3.)
+    expect(order.indexOf("abandon run-1")).toBeLessThan(order.indexOf("claim run-3 ok"));
+    expect(order.filter((o) => o.startsWith("claim run-3"))).toEqual(["claim run-3 ok", "claim run-3 ok"]);
     expect(inner.live.has("run-1")).toBe(false);
     expect(inner.finished.has("run-1")).toBe(false); // never started: no record of it
-    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(inner.finished.get("run-3")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
     expect(
-      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+      inner.finished.get("run-3")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
     ).toEqual([]);
     expect(inner.live.size).toBe(0);
   });
@@ -12131,16 +12174,18 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await writer.settled();
     expect(b.replies.at(-1)).toBe("answer 2");
     // The finally's abandon threw; the fresh turn's claim met the dead row, abandoned it again, and claimed once more.
+    // run-2 is the failure's own `door` refusal record (record 0054, as
+    // amended), which claims no thread; the fresh turn's run is run-3.
     expect(order.slice(0, 4)).toEqual([
       "abandon run-1 threw",
-      "claim run-2 thread-live",
+      "claim run-3 thread-live",
       "abandon run-1",
-      "claim run-2 ok",
+      "claim run-3 ok",
     ]);
     expect(inner.live.has("run-1")).toBe(false);
-    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(inner.finished.get("run-3")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
     expect(
-      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+      inner.finished.get("run-3")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
     ).toEqual([]);
     expect(inner.live.size).toBe(0);
   });
@@ -13958,7 +14003,9 @@ workspaceDir: __WORKDIR__
     expect(parent.replies[0]).toContain("spawn refused (agent_allowlist)");
     expect(parent.replies[0]).toContain("not on the allowlist");
     expect(agentsProvisioned()).toEqual(["conductor"]);
-    expect(t.registry.getById("run-child")).toBeNull();
+    // The child's gate refusal is a `door` record in the child's thread
+    // (record 0054, as amended) — never a child run.
+    expect(t.registry.getById("run-child")).toMatchObject({ agent: "door", status: "completed" });
   });
 
   it("a child whose preset needs `read` in a channel bounded to `none` ends at the profile gate — the parent, identity `none`, runs there — and the parent is told by the gate's name", async () => {
@@ -13971,7 +14018,9 @@ workspaceDir: __WORKDIR__
     expect(child.replies[0]).toContain("this channel's boundary");
     expect(parent.replies[0]).toContain("spawn refused (profile_bounded)");
     expect(agentsProvisioned()).toEqual(["conductor"]);
-    expect(t.registry.getById("run-child")).toBeNull();
+    // The child's gate refusal is a `door` record in the child's thread
+    // (record 0054, as amended) — never a child run.
+    expect(t.registry.getById("run-child")).toMatchObject({ agent: "door", status: "completed" });
   });
 
   // docs/reference/specs/agent-conductor.md item 3: a child is a reader — a
@@ -17007,5 +17056,83 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(row!.ending).toBeUndefined();
     expect(replies[0]).toContain("queued");
     expect(s.provider.requests).toHaveLength(0);
+  });
+});
+
+// Feature: record 0054, as amended — every refusal the door makes is a run
+// record (docs/reference/specs/run-history.md item 2;
+// docs/reference/specs/routing-and-config.md item 4): a gate refusal before any
+// command is bound and before admission, a silent refusal and the catch-all
+// alike leave one `door` record whose `refusal` event carries the code and its
+// cause, with no thread claim, no run signalled to the channel and the reply
+// byte-identical — so `npm run load -- door` counts refusals per day, cause and
+// code from the run store alone.
+describe("every refusal is a run record (record 0054, as amended)", () => {
+  const wired = (fixture = YAML_FIXTURE) => {
+    let n = 0;
+    const deps = makeDeps(fixture, capturingProvider());
+    deps.runRegistry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
+    deps.admission = new ThreadAdmission();
+    const store = new InMemoryRunStore();
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    return { deps, store };
+  };
+
+  it("a gate refusal (the agent allowlist) leaves one `door` record — completed, its refusal event carrying the code, the cause and the reply's own sentence — with no run signalled and the reply unchanged", async () => {
+    const { deps, store } = wired();
+    const { io, replies } = fakeIO();
+    const started = vi.fn();
+    const finished = vi.fn();
+    io.runStarted = started;
+    io.runFinished = finished;
+    const ended = await dispatch(deps, msg("agent:coding fix it"), io);
+    expect(ended).toMatchObject({ status: "refused", refusal: "agent_allowlist", cause: "policy" });
+    expect(replies).toHaveLength(1); // the named 🚫 line, exactly as before the record existed
+    expect(started).not.toHaveBeenCalled();
+    expect(finished).not.toHaveBeenCalled();
+    // No thread claim: the gate refused before admission, so nothing holds the thread.
+    expect(deps.admission!.get("slack:CX:1.0")).toBeUndefined();
+    await deps.runHistoryWriter.settled();
+    const rec = (await store.get("r1"))!;
+    expect(rec).toMatchObject({
+      agent: "door",
+      status: "completed",
+      threadKey: "slack:CX:1.0",
+      channelId: "slack:CX",
+      userId: "slack:UX",
+    });
+    expect(rec.label).toMatch(/^agent_allowlist · /);
+    expect(rec.events.filter((e) => e.type === "input" || e.type === "refusal").map((e) => e.type)).toEqual([
+      "input",
+      "refusal",
+    ]);
+    expect(rec.events.find((e) => e.type === "input")).toMatchObject({ text: "agent:coding fix it" });
+    expect(rec.events.find((e) => e.type === "refusal")).toMatchObject({
+      code: "agent_allowlist",
+      cause: "policy",
+      text: replies[0],
+    });
+    // One refusal, one record: nothing else was registered for this request.
+    expect(await store.get("r2")).toBeNull();
+  });
+
+  it("the catch-all's uncaught refusal records with cause `system`: the ⚠️ reply as today, one `door` record carrying `uncaught`", async () => {
+    const { deps, store } = wired();
+    const { io, replies } = fakeIO();
+    io.history = () => {
+      throw new Error("history exploded");
+    };
+    const ended = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(ended).toMatchObject({ status: "failed", refusal: "uncaught", cause: "system" });
+    expect(replies.some((r) => r.includes("⚠️ history exploded"))).toBe(true);
+    await deps.runHistoryWriter.settled();
+    const rec = (await store.get("r1"))!;
+    expect(rec).toMatchObject({ agent: "door", status: "completed" });
+    expect(rec.events.find((e) => e.type === "refusal")).toMatchObject({
+      code: "uncaught",
+      cause: "system",
+      text: "history exploded",
+    });
+    expect(await store.get("r2")).toBeNull();
   });
 });

@@ -293,6 +293,8 @@ export function activityLine(e: RunEvent): string {
       return "handed to the plan runner"; // published straight to the registry — never arrives here
     case "route":
       return `routed to ${e.preset}`; // published straight to the registry — never arrives here
+    case "refusal":
+      return `refused: ${e.code}`; // published straight to the registry — never arrives here (a door record has no card)
     case "span_start":
     case "span_end":
       return ""; // timing, not activity (docs/reference/specs/tracing.md): the card's activity line never shows a span

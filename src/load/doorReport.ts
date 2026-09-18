@@ -1,14 +1,18 @@
 // The door report (docs/reference/specs/load-harness.md item 19; record 0044,
 // the counts before anything is built): how many routed writes the door
 // handed back as a line to paste, and how many of those lines were pasted, per
-// day and per command — read off the run store's command records alone. A
+// day and per command — read off the run store's records alone. A
 // hand-back is a command run whose `route` event carries `outcome: "hand_back"`;
 // a paste is one carrying `outcome: "pasted"` and `handBackRunId`, joined to
 // its hand-back by that id and counted under the hand-back's day and command,
-// whatever day the paste landed. Nothing here invokes anything: the list and
-// the per-run events are the inputs, and a store that cannot be read is said
-// so on the report rather than guessed around.
-import { COMMAND_RUN_AGENT } from "../core/runOwner.js";
+// whatever day the paste landed. Refusals are counted the same way (record
+// 0054, as amended: every refusal is a run record): the `door` records the
+// dispatcher writes for every refusal — gate refusals before any command is
+// bound included — and the command records whose `route` carries `outcome:
+// "refused"`, together, per day, cause and code. Nothing here invokes
+// anything: the list and the per-run events are the inputs, and a store that
+// cannot be read is said so on the report rather than guessed around.
+import { COMMAND_RUN_AGENT, DOOR_RUN_AGENT } from "../core/runOwner.js";
 import { causeOf, REFUSAL_CODES, type RefusalCause, type RefusalCode } from "../core/refusal.js";
 import { RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 import type { RunEvent } from "../core/runEvents.js";
@@ -25,11 +29,14 @@ export interface DoorRow {
   pastes: number;
 }
 
-/** One day's refusal count for one code (record 0054): a run whose `route`
- *  event carries `outcome: "refused"` and the code, counted by day, cause and
- *  code. The confirm path writes them when the store's refusal still names the
- *  row ([run-history.md] item 2); gate refusals before a bind leave no record,
- *  so the report's footer names the telemetry query that counts those. */
+/** One day's refusal count for one code (record 0054): a `door` record's
+ *  `refusal` event, or a command run whose `route` event carries `outcome:
+ *  "refused"` and the code, counted by day, cause and code. The dispatcher
+ *  writes a `door` record for every refusal it makes — a gate refusal before
+ *  any command is bound included — and the confirm path writes a refused route
+ *  when the store's refusal still names the row ([run-history.md] item 2), so
+ *  the count reads off the run store alone. The cause comes from the one
+ *  code→cause table; a code it does not know counts as `unknown`. */
 export interface RefusalRow {
   day: string;
   cause: RefusalCause | "unknown";
@@ -46,6 +53,8 @@ export interface DoorReport {
   unmatchedPastes: number;
   /** Command runs whose events were read, door decisions or not. */
   commandRuns: number;
+  /** `door` records read — one per refusal the dispatcher recorded. */
+  doorRuns: number;
   /** The store threw on a list: the counts are the live registry's rows alone. */
   storeUnavailable: boolean;
   /** Sorted by day, then command. */
@@ -64,17 +73,19 @@ export interface DoorReportOptions {
 }
 
 type RouteEvent = Extract<RunEvent, { type: "route" }>;
+type RefusalEvent = Extract<RunEvent, { type: "refusal" }>;
 
 /** The day a run finished, as the report buckets it. */
 function dayOf(run: RunView): string {
   return new Date(run.finishedAt ?? run.startedAt).toISOString().slice(0, 10);
 }
 
-/** Every finished command run in the window, newest first, through the
+/** Every finished run of one agent in the window, newest first, through the
  *  list's own cursor; a store the list could not reach ends the read where it
  *  stands and is reported. */
-async function commandRuns(
+async function runsOf(
   runs: Pick<RunsService, "listRuns">,
+  agent: string,
   opts: DoorReportOptions,
 ): Promise<{ runs: RunView[]; storeUnavailable: boolean }> {
   const limit = Math.min(RUN_LIST_MAX_LIMIT, Math.max(1, opts.pageSize ?? RUN_LIST_MAX_LIMIT));
@@ -86,7 +97,7 @@ async function commandRuns(
     const result = await runs.listRuns({
       status: "finished",
       visibleTo: { kind: "all" },
-      agent: COMMAND_RUN_AGENT,
+      agent,
       limit,
       ...(opts.sinceMs !== undefined ? { sinceMs: opts.sinceMs } : {}),
       ...(before !== undefined ? { before: before.finishedAt, beforeId: before.id } : {}),
@@ -107,32 +118,49 @@ async function routeOf(runs: Pick<RunsService, "getRunEvents">, id: string): Pro
   return route?.type === "route" ? route : undefined;
 }
 
+/** The door record's `refusal` event, when its record has one. */
+async function refusalOf(runs: Pick<RunsService, "getRunEvents">, id: string): Promise<RefusalEvent | undefined> {
+  const page = await runs.getRunEvents(id, {});
+  if (!page.ok) return undefined;
+  const refusal = page.value.events.find((e) => e.type === "refusal");
+  return refusal?.type === "refusal" ? refusal : undefined;
+}
+
 /**
- * The report over one runs service: the window's command runs, each one's
- * `route` event read, the hand-backs bucketed by day and command and the
- * pastes joined to them by `handBackRunId`. A routed read (a route with no
- * outcome) and a typed inline run (no route) are read and left out.
+ * The report over one runs service: the window's command runs and `door`
+ * records, each one's `route` or `refusal` event read, the hand-backs bucketed
+ * by day and command, the pastes joined to them by `handBackRunId`, and every
+ * refusal — a `door` record's or a refused route's — bucketed by day, cause
+ * and code. A routed read (a route with no outcome) and a typed inline run
+ * (no route) are read and left out.
  */
 export async function doorReport(
   runs: Pick<RunsService, "listRuns" | "getRunEvents">,
   opts: DoorReportOptions = {},
 ): Promise<DoorReport> {
-  const listed = await commandRuns(runs, opts);
+  const listed = await runsOf(runs, COMMAND_RUN_AGENT, opts);
+  const doorListed = await runsOf(runs, DOOR_RUN_AGENT, opts);
   const handBacks = new Map<string, { day: string; command: string }>();
   const pastes: string[] = [];
   const refusalBuckets = new Map<string, RefusalRow>();
+  // The record's cause comes from the one code→cause table; a code the
+  // table does not know (a record from a newer bot) counts as `unknown`.
+  const countRefusal = (run: RunView, code: string) => {
+    const cause = (REFUSAL_CODES as readonly string[]).includes(code) ? causeOf(code as RefusalCode) : "unknown";
+    const id = `${dayOf(run)}/${cause}/${code}`;
+    const row = refusalBuckets.get(id) ?? { day: dayOf(run), cause, code, count: 0 };
+    row.count++;
+    refusalBuckets.set(id, row);
+  };
+  for (const run of doorListed.runs) {
+    const refusal = await refusalOf(runs, run.id);
+    if (refusal) countRefusal(run, refusal.code);
+  }
   for (const run of listed.runs) {
     const route = await routeOf(runs, run.id);
     if (!route) continue;
     if (route.outcome === "refused") {
-      // The record's cause comes from the one code→cause table; a code the
-      // table does not know (a record from a newer bot) counts as `unknown`.
-      const code = route.refusalCode ?? "unknown";
-      const cause = (REFUSAL_CODES as readonly string[]).includes(code) ? causeOf(code as RefusalCode) : "unknown";
-      const id = `${dayOf(run)}/${cause}/${code}`;
-      const row = refusalBuckets.get(id) ?? { day: dayOf(run), cause, code, count: 0 };
-      row.count++;
-      refusalBuckets.set(id, row);
+      countRefusal(run, route.refusalCode ?? "unknown");
       continue;
     }
     if (route.command === undefined) continue;
@@ -169,7 +197,8 @@ export async function doorReport(
     pastes: joined,
     unmatchedPastes: pastes.length - joined,
     commandRuns: listed.runs.length,
-    storeUnavailable: listed.storeUnavailable,
+    doorRuns: doorListed.runs.length,
+    storeUnavailable: listed.storeUnavailable || doorListed.storeUnavailable,
     rows,
   };
 }
@@ -184,7 +213,7 @@ export function pasteRate(handBacks: number, pastes: number): string {
  *  commands under it, and a last line when the store could not be read. */
 export function renderDoor(report: DoorReport): string[] {
   const lines = [
-    `door: ${report.handBacks} hand-back(s), ${report.pastes} paste(s) joined (${pasteRate(report.handBacks, report.pastes)} pasted), ${report.unmatchedPastes} paste(s) whose hand-back is outside the window; ${report.commandRuns} command run(s) read`,
+    `door: ${report.handBacks} hand-back(s), ${report.pastes} paste(s) joined (${pasteRate(report.handBacks, report.pastes)} pasted), ${report.unmatchedPastes} paste(s) whose hand-back is outside the window; ${report.commandRuns} command run(s) and ${report.doorRuns} door record(s) read`,
   ];
   const days = new Map<string, DoorRow[]>();
   for (const row of report.rows) days.set(row.day, [...(days.get(row.day) ?? []), row]);
@@ -197,9 +226,9 @@ export function renderDoor(report: DoorReport): string[] {
         `  - ${r.command}: hand-backs ${r.handBacks}, pastes ${r.pastes} (${pasteRate(r.handBacks, r.pastes)})`,
       );
   }
-  // The refusals the store recorded (record 0054): per day, per cause and
-  // per code. Only refusals after a command was bound are records; the rest are
-  // root spans — the footer names the telemetry query that counts those.
+  // The refusals the store recorded (record 0054, as amended): per day, per
+  // cause and per code — every refusal is a run record, gate refusals before a
+  // bind included, so the count needs no telemetry query beside it.
   if (report.refusals.length > 0) {
     const total = report.refusals.reduce((n, r) => n + r.count, 0);
     lines.push(`refusals recorded: ${total}`);
@@ -212,8 +241,5 @@ export function renderDoor(report: DoorReport): string[] {
   }
   if (report.storeUnavailable)
     lines.push("the run store could not be read: the counts above are the live registry's alone");
-  lines.push(
-    "gate refusals (no record): count root spans with the `refusal` and `cause` attributes over the retention window",
-  );
   return lines;
 }

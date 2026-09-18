@@ -945,6 +945,14 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
+  /** A refusal the door made ([record 0054](../../docs/decisions/0054-a-refusal-the-person-caused-is-one-question-with-a-best-guess.md),
+   *  as amended: every refusal is a run record; run-history.md item 2): the
+   *  code, its one cause, and the sentence the person read — redacted and
+   *  capped like a route receipt (`ROUTE_RECEIPT_CAP`). Exactly one per `door`
+   *  record, published by `recordRefusal` beside the redacted request, so the
+   *  door report counts every refusal — a gate refusal before any command is
+   *  bound included — from the run store alone. Additive: unknown → ignored. */
+  | { type: "refusal"; code: string; cause: string; text: string; seq?: number; at?: number }
   /** The span records (docs/reference/specs/tracing.md): published, counted and stored like
    *  every other event, read as timing and never as content. */
   | SpanStartEvent
