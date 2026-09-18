@@ -224,9 +224,10 @@ export type RunNoteKind =
    *  (`packages/core/src/permission.ts:203-220` at the pinned v2.0.3) and
    *  ends their step (measured in `opencode/testing/realDriver.test.ts`).
    *  The summary names the call, the reply the gate had decided and the
-   *  sibling's refusal when the step has one. Information, not a failure:
-   *  nothing ran that the gate did not decide, and the call settles by the
-   *  server's own tool event. Published by the OpenCode bridge. */
+   *  sibling's refusal when the step has one (or says no refusal is on the
+   *  record). Information, not a failure: nothing ran that the gate did not
+   *  decide, the loop is not stopped, and the step ends by the server's word.
+   *  Published by the OpenCode bridge. */
   | "ask_withdrawn"
   /** An OpenCode tool settled under a step this loop never saw start and the
    *  settle was set aside (harness.md item 13): an earlier execution's late

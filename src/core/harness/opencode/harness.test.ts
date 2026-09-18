@@ -2143,6 +2143,41 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
   });
 
+  // Feature: docs/reference/specs/harness.md item 2 — a 404 on the re-issued
+  // reply is read against the pending asks as item 2 reads any 404: the ask
+  // gone is the server's withdrawal (a note, the run going on), still listed
+  // is a reply that failed, fail closed.
+  it("a gate reply the reset cut, still pending at the re-list, re-issued once and answered 404 with the ask gone by then is the ask withdrawn: one ask_withdrawn note (no refusal of the step on the record), two replies, two listings, no harness_error, and the run answers", async () => {
+    const r = await openCodeDriver({ controlResetOnReply: "lost-then-dropped" }).run(toolTurn);
+    expect(answered(r)).toBe("done");
+    expect(replies(r)).toHaveLength(2);
+    expect(gets(r, "/permission")).toHaveLength(2);
+    const withdrawn = notes(r).filter((n) => n.kind === "ask_withdrawn");
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0].summary).toMatch(
+      /withdrew the ask for bash \(call c1\) before the gate's reply \(once\) landed/,
+    );
+    expect(withdrawn[0].summary).toMatch(/no refusal of the same step is on the record/);
+    expect(notes(r).filter((n) => n.kind === "resumed")).toHaveLength(1);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(posts(r, "/interrupt")).toHaveLength(0);
+    // The call settled by the server's own word: aborted, never run.
+    expect(r.events.some((e) => e.type === "tool_result" && e.callId === "c1" && !e.ok)).toBe(true);
+  });
+
+  it("a gate reply the reset cut, still pending at the re-list, re-issued once and answered 404 while the ask stays listed fails the run closed by name: OpenCodeReplyFailedError naming the 404, two replies, two listings, a harness_error, the interrupt posted, no ask_withdrawn note", async () => {
+    const r = await openCodeDriver({ controlResetOnReply: "lost-then-refused" }).run(toolTurn);
+    expect(r.outcome.kind).toBe("failed");
+    const err = r.outcome.kind === "failed" ? r.outcome.error : undefined;
+    expect(err?.name).toBe("OpenCodeReplyFailedError");
+    expect(err?.message).toMatch(/for request per_c1 \(call c1\) could not be posted \(the server answered 404\)/);
+    expect(replies(r)).toHaveLength(2);
+    expect(gets(r, "/permission")).toHaveLength(2);
+    expect(notes(r).filter((n) => n.kind === "ask_withdrawn")).toEqual([]);
+    expect(notes(r).some((n) => n.kind === "harness_error" && /could not be posted/.test(n.summary))).toBe(true);
+    expect(posts(r, "/interrupt")).toHaveLength(1);
+  });
+
   it("a gate reply whose outcome the server cannot be asked about fails the run closed by name: OpenCodeReplyFailedError carrying the unresolved write, a harness_error naming the request, the interrupt posted", async () => {
     const r = await openCodeDriver({ controlResetOnReply: "unlistable" }).run(toolTurn);
     expect(r.outcome.kind).toBe("failed");
