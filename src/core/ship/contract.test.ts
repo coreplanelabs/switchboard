@@ -401,7 +401,7 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect(text).not.toContain("Cut to fit");
   });
 
-  it("the first instruction names the fast gates a child runs before every push — never a vague 'cheapest proving checks' — and routes each exit line to the handoff's verified list, an unrun gate to unproven", () => {
+  it("the first instruction names the fast gates a child runs before every push — never a vague 'cheapest proving checks' — and routes each exit line to the description's validation table, an unrun gate to the handoff's unproven", () => {
     const { text } = renderContract(u10(), {});
     // the four gates by name, each a command a child can run verbatim
     expect(FAST_GATES_BEFORE_PUSH).toContain("`npx prettier --check` on the changed files");
@@ -410,10 +410,16 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect(FAST_GATES_BEFORE_PUSH).toContain(
       "`tsc --noEmit` on the touched project under `NODE_OPTIONS=--max-old-space-size=6144`",
     );
-    // the receipts: each command's exit line into the handoff's verified list; a gate the child
-    // could not run goes under unproven and is never claimed clean
-    expect(FAST_GATES_BEFORE_PUSH).toContain("Paste each command's exit line into the handoff's verified list");
-    expect(FAST_GATES_BEFORE_PUSH).toContain("a gate you could not run goes under unproven and is never claimed clean");
+    // the receipts point at what exists: the exit line is the proof column of the PR description's
+    // validation table (the handoff has no verified list); a gate the child could not run goes under
+    // the handoff's unproven list and is never claimed clean
+    expect(FAST_GATES_BEFORE_PUSH).toContain(
+      "Paste each command's exit line into the PR description's validation table as the row's proof",
+    );
+    expect(FAST_GATES_BEFORE_PUSH).toContain(
+      "a gate you could not run goes under the handoff's unproven list and is never claimed clean",
+    );
+    expect(FAST_GATES_BEFORE_PUSH).not.toContain("verified list");
     // the rendered first instruction carries the gates and no longer the vague phrase
     expect(text).toContain(FAST_GATES_BEFORE_PUSH);
     expect(text).not.toContain("cheapest proving checks");

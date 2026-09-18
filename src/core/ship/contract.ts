@@ -444,13 +444,16 @@ export const TIMEOUT_ON_LONG_COMMANDS =
  *  left the choice to the child, and children chose wrong: prettier was
  *  reported clean while `format:check` was red, and hygiene imprints reached
  *  CI that `hygiene:check` would have caught locally. Naming the commands
- *  makes each gate a receipt — the exit line goes into the handoff's verified
- *  list, and a gate the child could not run is unproven, never claimed clean. */
+ *  makes each gate a receipt — the exit line goes into the PR description's
+ *  validation table as the row's proof (the handoff has no verified list;
+ *  parseHandoff carries deviations, followUps, unproven and landed), and a
+ *  gate the child could not run goes under the handoff's unproven list,
+ *  never claimed clean. */
 export const FAST_GATES_BEFORE_PUSH =
   "The fast gates, before every push: `npx prettier --check` on the changed files, `npm run hygiene:check`, " +
   "`npm run specs:check`, and `tsc --noEmit` on the touched project under `NODE_OPTIONS=--max-old-space-size=6144`. " +
-  "Paste each command's exit line into the handoff's verified list; a gate you could not run goes under unproven " +
-  "and is never claimed clean.";
+  "Paste each command's exit line into the PR description's validation table as the row's proof; a gate you " +
+  "could not run goes under the handoff's unproven list and is never claimed clean.";
 
 function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
   const branch = rebase.branch ? `\`${rebase.branch}\`` : "the unit's branch";
