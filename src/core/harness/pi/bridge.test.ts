@@ -5,6 +5,7 @@ import { recordingSink } from "../../testing/recordingSink.js";
 import { createTracer } from "../../trace/tracer.js";
 import { MODEL_CALL_IN_FLIGHT } from "../windDown.js";
 import { PI_EVENT_DISPOSITION, PiBridge, describePiToolCall, piBashExit } from "./bridge.js";
+import { POINTER_SUMMARY_PREFIX } from "./compactionFallback.js";
 import type { PiEvent } from "./protocol.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 5 — the bridge: every event
@@ -538,6 +539,40 @@ describe("the notes — compaction, harness errors, dialogs, the unknown", () =>
       type: "run_note",
       kind: "harness_error",
       summary: "pi's compaction failed: quota",
+    });
+  });
+
+  it("a failed compaction rides the observation with pi's words for the harness to judge; an aborted one does not; a compaction carrying the bot's pointer summary is noted as the bot's (harness-pi item 7)", () => {
+    const { bridge, events } = harness();
+    const refusal =
+      "Auto-compaction failed: Turn prefix summarization failed: refused under the provider's usage policy";
+    const failed = bridge.observe({
+      type: "compaction_end",
+      reason: "threshold",
+      result: undefined,
+      aborted: false,
+      errorMessage: refusal,
+    });
+    expect(failed.compactionFailed).toBe(refusal);
+    expect(failed.compaction).toBeUndefined();
+    const wordless = bridge.observe({ type: "compaction_end", reason: "threshold", result: null, aborted: false });
+    expect(wordless.compactionFailed).toBe("compaction failed");
+    const aborted = bridge.observe({ type: "compaction_end", reason: "threshold", result: undefined, aborted: true });
+    expect(aborted.compactionFailed).toBeUndefined();
+    const pointer = `${POINTER_SUMMARY_PREFIX}: pi's summary of them could not be written (…)`;
+    const compacted = bridge.observe({
+      type: "compaction_end",
+      reason: "threshold",
+      result: { summary: pointer, firstKeptEntryId: "e9", tokensBefore: 187_000, estimatedTokensAfter: 20_000 },
+      aborted: false,
+    });
+    expect(compacted.compaction).toEqual({ summary: pointer, tokensBefore: 187_000, firstKeptEntryId: "e9" });
+    expect(compacted.compactionFailed).toBeUndefined();
+    expect(events.at(-1)).toMatchObject({
+      type: "run_note",
+      kind: "compacted",
+      summary:
+        "pi compacted the context (threshold) with the bot's pointer summary, pi's own having failed: 187000 → about 20000 tokens; the transcript keeps the originals",
     });
   });
 

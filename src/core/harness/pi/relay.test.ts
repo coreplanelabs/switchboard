@@ -18,10 +18,12 @@ import { recordingSink } from "../../testing/recordingSink.js";
 import { createTracer } from "../../trace/tracer.js";
 import { commandPastLoopEndRefusal } from "../windDown.js";
 import type { ChannelIO, IncomingMessage } from "../../types.js";
+import { POINTER_SUMMARY_PREFIX, pointerSummary } from "./compactionFallback.js";
 import {
   HarnessRegistry,
   RELAY_POLL_WINDOW_MS,
   RelayedCalls,
+  answerCompaction,
   authorizeToolCall,
   piContentOf,
   relayToolCall,
@@ -161,6 +163,26 @@ describe("relayedToolDefinitions", () => {
       type: "string",
       description: "Output of `git rev-parse HEAD` in the checkout you reviewed (the commit the review is about)",
     });
+  });
+});
+
+describe("answerCompaction — the bot's word on how pi's compaction is written", () => {
+  it("leaves the summary to pi while the run's last compaction stands or the harness offers no failure; hands the pointer summary once the last one failed for good, taken once", () => {
+    const ask = { reason: "threshold", tokensBefore: 187_000, readFiles: ["src/a.ts"], modifiedFiles: [] };
+    const { harness } = live();
+    expect(answerCompaction(harness, ask)).toEqual({});
+    let failure: string | undefined = "Auto-compaction failed: summary refused under the provider's usage policy";
+    harness.takeCompactionFailure = () => {
+      const f = failure;
+      failure = undefined;
+      return f;
+    };
+    const answer = answerCompaction(harness, ask);
+    expect(answer.summary?.startsWith(POINTER_SUMMARY_PREFIX)).toBe(true);
+    expect(answer.summary).toBe(
+      pointerSummary(ask, "Auto-compaction failed: summary refused under the provider's usage policy"),
+    );
+    expect(answerCompaction(harness, ask)).toEqual({});
   });
 });
 

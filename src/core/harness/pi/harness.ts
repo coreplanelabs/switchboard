@@ -532,6 +532,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
 
   let writeUp: WriteUp | undefined;
   let writeUpAt: number | undefined;
+  /** The words pi's last compaction failed in for good (item 7): a policy
+   *  refusal of the summary, a summary over its cap — never a transient the
+   *  next try would ride out. The relay takes it when the extension asks how
+   *  the next compaction is written; a compaction that lands clears it. */
+  let compactionFailure: string | undefined;
   /** The wrap-up steer the write-up sent — the very object the gate holds or
    *  the transport re-sends — so a loop's end can tell whether pi ever got it. */
   let writeUpSteer: Record<string, unknown> | undefined;
@@ -597,6 +602,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     toolSpan: (callId) => bridge.openSpan(callId),
     gateSaw: (callId) => bridge.gateSaw(callId),
     toolsBlocked,
+    takeCompactionFailure: () => {
+      const failure = compactionFailure;
+      compactionFailure = undefined;
+      return failure;
+    },
     callSeen: async (callId) => {
       for (let waited = 0; !bridge.callOpen(callId) && waited < CALL_SEEN_WAIT_MS; waited += seenTick)
         await deps.sleep(seenTick);
@@ -1678,7 +1688,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       if (obs.message?.role === "user") steerEchoed(obs.message);
       if (obs.message && (await mirror.onMessage(obs.message, bridge.turns))) held();
+      // A compaction that failed for good arms the bot's pointer summary for
+      // the next one (item 7): pi tries again at every turn boundary while
+      // the window stays over the threshold, and the same words are refused
+      // again, so the try after this one is written without a model call. A
+      // transient failure — an overload, a cut stream — arms nothing: pi's
+      // next try is the retry.
+      if (obs.compactionFailed !== undefined && !isTransientProviderError(obs.compactionFailed))
+        compactionFailure = obs.compactionFailed;
       if (obs.compaction) {
+        compactionFailure = undefined;
         if (await mirror.onCompaction(obs.compaction, bridge.turns)) held();
         // The notepad's second read point (session-log item 10): after every
         // compaction, at pi's next turn boundary, unless the run is winding

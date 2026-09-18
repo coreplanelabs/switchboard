@@ -88,10 +88,11 @@ describe("shimRoute", () => {
     expect(shimRoute("/v1/messages/count_tokens")).toBe("other");
   });
 
-  it("names the pi harness's three paths as one route word, and no other /harness path (docs/reference/specs/harness-pi.md)", () => {
+  it("names the pi harness's four paths as one route word, and no other /harness path (docs/reference/specs/harness-pi.md)", () => {
     expect(shimRoute("/harness/tools")).toBe("harness");
     expect(shimRoute("/harness/authorize")).toBe("harness");
     expect(shimRoute("/harness/tool")).toBe("harness");
+    expect(shimRoute("/harness/compaction")).toBe("harness");
     expect(shimRoute("/harness/other")).toBe("other");
   });
 });

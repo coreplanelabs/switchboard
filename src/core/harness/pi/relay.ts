@@ -1,12 +1,15 @@
 // The bot's side of the extension (docs/reference/specs/harness-pi.md item 7):
-// what a run's pi asks over the three harness routes. `tools` — the run's
+// what a run's pi asks over the four harness routes. `tools` — the run's
 // relayed tool definitions, one JSON Schema each, so the extension registers
 // them; `authorize` — the gate before every tool call, pi's own tools judged
 // by the tool rules for the run's identity and every tool refused during the write-up, a
 // refusal recorded as `tool_refused` on the run; `tool` — a relayed tool run in
 // the bot with the run's own context (the executor, the GitHub gate, the
 // dispatcher's recorders) under the span the bridge opened for the call, its
-// result in pi's shape. A call may outlive one request (the conductor's
+// result in pi's shape; `compaction` — how the compaction pi is about to write
+// is written: pi's own summary, or the bot's pointer summary
+// (`answerCompaction`, `compactionFallback.ts`) after one that failed for
+// good. A call may outlive one request (the conductor's
 // `await_runs` waits for minutes): the route answers within a window or says
 // the call is still running, and the extension asks again with the same call
 // id, which joins the one run (`RelayedCalls`) and never starts it twice. The
@@ -25,6 +28,7 @@ import { sleepUnlessAborted } from "../../dispatch/awaitChildren.js";
 import type { Backend } from "../../trace/attrs.js";
 import { redactAndCap, type RunEvent } from "../../runEvents.js";
 import type { Span } from "../../trace/types.js";
+import { pointerSummary, type CompactionAnswer, type CompactionAsk } from "./compactionFallback.js";
 import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
 
 /** One run driving a pi, as the routes see it. */
@@ -45,6 +49,13 @@ export interface LiveHarness {
   gateSaw: (callId: string) => void;
   /** The reason every tool is refused right now — the write-up — or nothing. */
   toolsBlocked: () => string | undefined;
+  /** The failure the run's last compaction ended in for good — a policy
+   *  refusal of the summary, a summary over its cap: never a blip pi's next
+   *  try would ride out — taken once: the compaction asked for next is
+   *  written with the bot's pointer summary in pi's place (harness-pi item 7),
+   *  and the take clears it so pi's own summary is tried the time after.
+   *  Absent, or nothing to take, pi's own summary stands. */
+  takeCompactionFailure?: () => string | undefined;
   /** Resolves once the bridge has read the call's start off pi's log, or after
    *  a short bound. The extension's request for a relayed tool can reach the
    *  bot before the poll that reads the line announcing the call, and a tool
@@ -324,6 +335,16 @@ export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): Autho
   const verdict = judgeToolCall(ask.tool, ask.input, harness.rules);
   if (verdict.verdict === "allowed") return { allow: true };
   return refuse(verdict.reason);
+}
+
+/** The bot's word on a compaction pi is about to write (harness-pi item 7):
+ *  the pointer summary when the run's last compaction failed for good — the
+ *  failure taken from the harness, so the compaction after this one tries
+ *  pi's own summary again — and nothing otherwise, pi's own summary standing. */
+export function answerCompaction(harness: LiveHarness, ask: CompactionAsk): CompactionAnswer {
+  const failure = harness.takeCompactionFailure?.();
+  if (failure === undefined) return {};
+  return { summary: pointerSummary(ask, failure) };
 }
 
 /** A relayed tool, run as the native loop runs it: the run's context, the
