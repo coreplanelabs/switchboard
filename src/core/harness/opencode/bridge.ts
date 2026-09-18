@@ -312,9 +312,19 @@ const RESOURCE_PERMISSIONS: ReadonlySet<string> = new Set(["external_directory",
 export interface OpenCodeReply {
   requestID: string;
   callId?: string;
+  /** The step the ask named (`source.messageID`): what a withdrawn ask's sibling refusal is looked up by. */
+  stepID?: string;
   reply: "once" | "reject";
   message?: string;
 }
+
+/** How a gate reply whose landing the server's answer left open was read off
+ *  the server's own pending asks (`resolveReplyAgainstPending`): `landed`, the
+ *  reply took; `withdrawn`, the server dropped the ask before the reply
+ *  reached it (an `ask_withdrawn` note, the run going on); `failed`, the
+ *  reply never landed and cannot be made to — the run stops, fail closed. */
+export type OpenCodeReplyResolution =
+  { outcome: "landed" | "withdrawn" } | { outcome: "failed"; failure: { status: number } | Error };
 
 /** What the harness does with one observed feed record. */
 export interface OpenCodeBridgeObservation {
@@ -462,6 +472,9 @@ export class OpenCodeBridge {
    *  call not among these ran with no decision; a success for a call the bot
    *  rejected ran against the reject. Both are bypasses. */
   private readonly answered = new Map<string, "once" | "reject">();
+  /** stepID → the calls of that step the gate refused, in the order refused:
+   *  what explains a sibling ask the server withdrew (`askWithdrawn`). */
+  private readonly refusedByStep = new Map<string, Array<{ callId: string; tool: string }>>();
   /** requestID → the reply the bot decided, and whether the server has echoed
    *  it once. A `permission.replied` is the bot's own echo only when its
    *  requestID is here, its effect equals the decided one, and it is the first;
@@ -474,10 +487,19 @@ export class OpenCodeBridge {
    *  answered while the bot was away — by the dead generation an instant
    *  before it died, or by the model's shell with the server's password — and
    *  the run cannot tell by whom (`unattributable`): its echo fails the run
-   *  closed, at most one model call lost. */
+   *  closed, at most one model call lost. An ask the server withdrew before
+   *  the bot's reply reached it (`askWithdrawn`) is `withdrawn`: the server's
+   *  own `reject` for it is the withdrawal's echo, not a reply the bot did not
+   *  send. */
   private readonly decidedReplies = new Map<
     string,
-    { reply: "once" | "reject" | undefined; callId: string; echoed: boolean; unattributable?: boolean }
+    {
+      reply: "once" | "reject" | undefined;
+      callId: string;
+      echoed: boolean;
+      unattributable?: boolean;
+      withdrawn?: boolean;
+    }
   >();
   /** The calls whose result the ledger held at the re-attach: the dead generation saw them run. */
   private readonly ledgerResults = new Set<string>();
@@ -765,6 +787,29 @@ export class OpenCodeBridge {
    *  between steps, or settled. Read structurally by the loop's wind-down (a
    *  tool open is cut, a model call is steered) and worded by `doingWords` for
    *  the notes — the same words pi's bridge gives. */
+  /** The server withdrew an ask before the gate's reply to it landed (the
+   *  reply refused 404, the ask gone from the pending asks): said once, as an
+   *  `ask_withdrawn` note naming the call, the reply the gate had decided and
+   *  the refusal of the same step that explains it when the step has one
+   *  (harness.md item 2). Information, not a failure: nothing ran that the
+   *  gate did not decide, and the call settles by the server's own tool event. */
+  askWithdrawn(reply: OpenCodeReply): void {
+    const decided = this.decidedReplies.get(reply.requestID);
+    if (decided !== undefined) decided.withdrawn = true;
+    const tool = openCodeToolNameWord(this.toolNames.get(reply.callId ?? "") ?? "tool");
+    const call = reply.callId ? `${tool} (call ${reply.callId})` : `request ${reply.requestID}`;
+    const refused = (reply.stepID !== undefined ? this.refusedByStep.get(reply.stepID) : undefined) ?? [];
+    const siblings = refused.filter((r) => r.callId !== reply.callId);
+    const why =
+      siblings.length > 0
+        ? `the gate refused ${siblings.map((s) => `${s.tool} (call ${s.callId})`).join(", ")} in the same step, and at a reject OpenCode declines every other pending ask and ends their step`
+        : "no refusal of the same step is on the record, so the server dropped it for a reason of its own";
+    this.note(
+      "ask_withdrawn",
+      `OpenCode withdrew the ask for ${call} before the gate's reply (${reply.reply}) landed — ${why}; the call settles by the server's own word, and the run goes on`,
+    );
+  }
+
   doingNow(): DoingNow | undefined {
     const open = [...this.openTools.values()].map((o) => o.tool);
     if (open.length > 0) return { tools: open };
@@ -1347,11 +1392,19 @@ export class OpenCodeBridge {
     // overwrite an allowance.
     if (this.answered.get(callId) !== "reject") this.answered.set(callId, verdict.reply);
     this.decidedReplies.set(request.id, { reply: verdict.reply, callId, echoed: false });
-    if (verdict.reply === "reject")
+    const stepID = typeof request.source?.messageID === "string" ? request.source.messageID : undefined;
+    if (verdict.reply === "reject") {
       this.note("tool_refused", `${verdict.tool} refused: ${redactAndCap(verdict.message ?? "", 300)}`);
+      if (stepID !== undefined) {
+        const refused = this.refusedByStep.get(stepID);
+        if (refused === undefined) this.refusedByStep.set(stepID, [{ callId, tool: verdict.tool }]);
+        else refused.push({ callId, tool: verdict.tool });
+      }
+    }
     out.replies.push({
       requestID: request.id,
       callId,
+      ...(stepID !== undefined ? { stepID } : {}),
       reply: verdict.reply,
       ...(verdict.message ? { message: verdict.message } : {}),
     });
@@ -1389,6 +1442,15 @@ export class OpenCodeBridge {
         decided.reply = reply;
         this.answered.set(decided.callId, reply);
       }
+      decided.echoed = true;
+      return;
+    }
+    if (reply === "reject" && decided.withdrawn === true && !decided.echoed) {
+      // The server's own rejection of an ask it withdrew — the step ended on a
+      // sibling's refusal and the binary rejects the step's other pending asks
+      // itself (measured, `testing/realDriver.test.ts`) — is the withdrawal's
+      // echo, whatever the bot had decided for it: no tool ran on it. A second
+      // echo, or one answering `once`, is judged below as any reply is.
       decided.echoed = true;
       return;
     }
@@ -2471,64 +2533,95 @@ export async function driveOpenCode(
     return read.messages.find((m) => m.type === "user" && !known.has(m.id) && (m as { text?: unknown }).text === text)
       ?.id;
   };
-  /** A gate reply the reset cut, resolved from the pending asks: still pending,
-   *  re-issued once (a 404 then is the ask dropped meanwhile — the binary's
-   *  interrupt — and decides nothing); gone, landed. The failure, if any. */
-  const resolveReplyAfterReset = async (
+  /** A gate reply whose landing the server's answer left open — cut by a
+   *  control reset, or refused 404 — resolved from the server's own pending
+   *  asks (`GET …/permission`, the one idempotent read), never re-sent blind.
+   *  The ask gone after a reset: the reply landed before the reset cut its
+   *  answer, or the interrupt dropped the ask — nothing owed either way. The
+   *  ask gone after a 404: the server withdrew it before the reply reached it
+   *  — the gate refused a sibling call of the same step and the binary ended
+   *  the step on the refusal, its other asks dropped with it (measured against
+   *  the pinned binary, `testing/realDriver.test.ts`) — so the reply is
+   *  `withdrawn` and the call settles by the server's own tool event. The ask
+   *  still pending after a reset: the reply never landed and is re-issued
+   *  once, a 404 on the re-issue read here again (the ask dropped between the
+   *  listing and the re-issue). The ask still pending after a 404: the server
+   *  lists an ask it refuses to answer — the reply genuinely failed. A listing
+   *  that cannot be read or is not a list, or a re-issue that meets the reset
+   *  again, is `OpenCodeWriteUnresolvedError`: the outcome unknown, fail closed. */
+  const resolveReplyAgainstPending = async (
     route: { method: string; path: string },
     body: unknown,
     requestID: string,
-  ): Promise<{ status: number } | Error | undefined> => {
+    after: "reset" | "not-found",
+  ): Promise<OpenCodeReplyResolution> => {
     const what = `the gate's reply for request ${requestID}`;
+    const unresolved = (why: string): OpenCodeReplyResolution => ({
+      outcome: "failed",
+      failure: new OpenCodeWriteUnresolvedError(what, why),
+    });
     let listed: HarnessResponse;
     try {
       listed = await request(sessionRoutes["session.permission.list"]);
     } catch (err) {
-      return new OpenCodeWriteUnresolvedError(
-        what,
+      return unresolved(
         `the pending asks could not be listed: ${redactAndCap(err instanceof Error ? err.message : String(err), 200)}`,
       );
     }
     if (listed.status < 200 || listed.status >= 300)
-      return new OpenCodeWriteUnresolvedError(what, `the pending-asks listing answered ${listed.status}`);
-    if (!(parsePermissionList(listed.body) ?? []).some((ask) => ask.id === requestID)) return undefined;
+      return unresolved(`the pending-asks listing answered ${listed.status}`);
+    const asks = parsePermissionList(listed.body);
+    if (asks === undefined) return unresolved("the pending-asks listing was not a list");
+    if (!asks.some((ask) => ask.id === requestID)) return { outcome: after === "reset" ? "landed" : "withdrawn" };
+    if (after === "not-found") return { outcome: "failed", failure: { status: 404 } };
     try {
       const res = await request(route, body);
-      if (res.status === 404) return undefined;
-      if (res.status < 200 || res.status >= 300) return { status: res.status };
-      return undefined;
+      if (res.status === 404) return resolveReplyAgainstPending(route, body, requestID, "not-found");
+      if (res.status < 200 || res.status >= 300) return { outcome: "failed", failure: { status: res.status } };
+      return { outcome: "landed" };
     } catch (again) {
-      if (again instanceof Error && isControlReset(again))
-        return new OpenCodeWriteUnresolvedError(what, "the re-issued reply met the reset again");
-      return again instanceof Error ? again : new Error(String(again));
+      if (again instanceof Error && isControlReset(again)) return unresolved("the re-issued reply met the reset again");
+      return { outcome: "failed", failure: again instanceof Error ? again : new Error(String(again)) };
     }
   };
-  /** The bridge's replies posted, `once` or `reject`. A reply that does not
-   *  land — the request threw, or the server answered outside 2xx — stops the
-   *  run, fail closed: the ask is still pending, so the tool has not run and
-   *  nothing is lost, where a turn waiting on an unanswered ask would hang to
-   *  its deadline. Answers the failure, or nothing when every reply landed. */
+  /** The bridge's replies posted, `once` or `reject`. A reply the server
+   *  answers 2xx landed. One it answers 404 is read against its pending asks
+   *  (`resolveReplyAgainstPending`): the ask gone, the server withdrew it
+   *  before the reply reached it — one `ask_withdrawn` note, the run going on,
+   *  the call settling by the server's own tool event; the ask still pending,
+   *  the reply genuinely failed. A reply that fails — the request threw, the
+   *  server answered another status outside 2xx, or a 404's ask is still
+   *  pending — stops the run, fail closed: the ask is still pending, so the
+   *  tool has not run and nothing is lost, where a turn waiting on an
+   *  unanswered ask would hang to its deadline. Answers the failure, or
+   *  nothing when every reply landed or was withdrawn. */
   const postReplies = async (obs: OpenCodeBridgeObservation): Promise<OpenCodeReplyFailedError | undefined> => {
     for (const reply of obs.replies) {
-      let failure: { status: number } | Error | undefined;
+      let resolution: OpenCodeReplyResolution;
       const route = openCodePermissionReplyRoute(conn.sessionID, reply.requestID);
       const body = { reply: reply.reply, ...(reply.message ? { message: reply.message } : {}) };
       try {
         const res = await request(route, body);
-        if (res.status < 200 || res.status >= 300) failure = { status: res.status };
+        resolution =
+          res.status >= 200 && res.status < 300
+            ? { outcome: "landed" }
+            : res.status === 404
+              ? await resolveReplyAgainstPending(route, body, reply.requestID, "not-found")
+              : { outcome: "failed", failure: { status: res.status } };
       } catch (err) {
         if (err instanceof Error && isControlReset(err)) {
           // The reset cut the reply's answer: the server's own state says
-          // whether it landed. The ask still pending, it did not, and is
-          // re-issued once; the ask gone, it did — or the interrupt dropped the
-          // ask (the binary's way; a reply to it answers 404, the answer, not a
-          // failure). Never re-sent blind.
+          // whether it landed. Never re-sent blind.
           resetUnder();
-          failure = await resolveReplyAfterReset(route, body, reply.requestID);
-        } else failure = err instanceof Error ? err : new Error(String(err));
+          resolution = await resolveReplyAgainstPending(route, body, reply.requestID, "reset");
+        } else resolution = { outcome: "failed", failure: err instanceof Error ? err : new Error(String(err)) };
       }
-      if (failure !== undefined) {
-        replyFailed = new OpenCodeReplyFailedError(reply.requestID, reply.callId, reply.reply, failure);
+      if (resolution.outcome === "withdrawn") {
+        bridge.askWithdrawn(reply);
+        continue;
+      }
+      if (resolution.outcome === "failed") {
+        replyFailed = new OpenCodeReplyFailedError(reply.requestID, reply.callId, reply.reply, resolution.failure);
         note("harness_error", `${replyFailed.message} — the run is stopped`);
         void interrupt({ ending: "a gate reply left unresolved" });
         return replyFailed;

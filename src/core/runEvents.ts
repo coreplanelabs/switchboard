@@ -217,6 +217,17 @@ export type RunNoteKind =
    *  item 7): the summary names the tool and the rule; the model read the same
    *  reason as the tool's result. Published by the bot's authorize route. */
   | "tool_refused"
+  /** OpenCode withdrew a pending ask before the gate's reply to it landed
+   *  (harness.md item 2): the server answered the reply 404 and its pending
+   *  asks no longer listed the ask — the gate refused a sibling call of the
+   *  same step, and at a reject the binary declines every other pending ask
+   *  (`packages/core/src/permission.ts:203-220` at the pinned v2.0.3) and
+   *  ends their step (measured in `opencode/testing/realDriver.test.ts`).
+   *  The summary names the call, the reply the gate had decided and the
+   *  sibling's refusal when the step has one. Information, not a failure:
+   *  nothing ran that the gate did not decide, and the call settles by the
+   *  server's own tool event. Published by the OpenCode bridge. */
+  | "ask_withdrawn"
   /** An OpenCode tool settled under a step this loop never saw start and the
    *  settle was set aside (harness.md item 13): an earlier execution's late
    *  result — the pinned binary's ordinary shape after a hung call's interrupt
@@ -283,6 +294,7 @@ export const RUN_NOTE_KINDS = [
   "harness_error",
   "policy_refusal",
   "tool_refused",
+  "ask_withdrawn",
   "settle_set_aside",
   "tool_unnamed",
   "directory_reached",

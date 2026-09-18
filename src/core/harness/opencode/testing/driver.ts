@@ -230,6 +230,25 @@ export interface FakeServeOptions {
   failReplyPosts?: number;
   /** Every permission-reply POST throws (the container gone under the request), the ask left pending. */
   replyPostThrows?: boolean;
+  /** Every permission-reply POST answers 404 while the ask stays pending — a
+   *  server that lists an ask and refuses its reply, the contradiction the
+   *  harness fails closed on. */
+  replyRefusedWhilePending?: boolean;
+  /** A `reject` reply declines every other ask the session has pending, as the
+   *  pinned binary's `Permission.reply` does (`packages/core/src/permission.ts:203-220`
+   *  at v2.0.3, each declined ask published as a `permission.replied` `reject`):
+   *  the next tool call of the same turn finds its ask declined the moment it is
+   *  raised — the ask on the stream for the bot to decide, no waiter and not
+   *  listed pending, so the bot's reply answers 404 (`:198-201`) — the server's
+   *  own `reject` echo and the tool's `aborted` failure (`The user declined this
+   *  tool call`) follow, and a step with a declined call ends as the binary's
+   *  processor ends it: `session.step.failed` `aborted` (`Step interrupted`),
+   *  then `session.execution.interrupted`. The fake plays a turn's calls one
+   *  after another, so the sibling's ask is raised after the refusal where the
+   *  binary raises both before it; what the bridge reads — the ask, the 404,
+   *  the listing, the echo, the settle, the end — is the measured shape
+   *  (`realDriver.test.ts`, the two-call row). */
+  declineCascade?: boolean;
   /** Every steer POST (a follow-up) answers 500: the server never takes the follow-up. */
   steerPostFails?: boolean;
   /** The session's prime — its import or its create — answers 500. */
@@ -542,6 +561,12 @@ class ScriptedServe {
   private ordinal = 0;
   private replyFailuresLeft: number;
   private readonly replyPostThrows: boolean;
+  private readonly replyRefusedWhilePending: boolean;
+  private readonly declineCascade: boolean;
+  /** A `reject` landed in the turn under play (`declineCascade`): the turn's next asks are declined as raised. */
+  private cascadeArmed = false;
+  /** The calls of the turn under play the cascade declined: any makes the step end interrupted. */
+  private declinedInTurn = 0;
   private readonly steerPostFails: boolean;
   private readonly primePostFails: boolean;
   private readonly promptPostFails: number | undefined;
@@ -673,6 +698,8 @@ class ScriptedServe {
   ) {
     this.replyFailuresLeft = options.failReplyPosts ?? 0;
     this.replyPostThrows = options.replyPostThrows === true;
+    this.replyRefusedWhilePending = options.replyRefusedWhilePending === true;
+    this.declineCascade = options.declineCascade === true;
     this.steerPostFails = options.steerPostFails === true;
     this.primePostFails = options.primePostFails === true;
     this.promptPostFails = options.promptPostFails;
@@ -1211,6 +1238,9 @@ class ScriptedServe {
         this.replyFailuresLeft--;
         return j(500, { error: "the store hiccuped" });
       }
+      // The ask stays pending — listed, its waiter kept — and the reply is
+      // refused all the same (`replyRefusedWhilePending`).
+      if (this.replyRefusedWhilePending) return j(404, { error: "permission not found" });
       const body = parseBody(req.body);
       const decision: Decision = {
         reply: body.reply === "reject" ? "reject" : "once",
@@ -1785,6 +1815,8 @@ class ScriptedServe {
     if (dropped) this.container.emit({ feed: "tailer", at: NOW, note: "stream closed" });
     else
       this.emitEvent("session.step.started", { sessionID: this.sessionID, assistantMessageID, agent: "switchboard" });
+    this.cascadeArmed = false;
+    this.declinedInTurn = 0;
     const content: Record<string, unknown>[] = [];
     for (const part of turn.content) {
       if (part.type === "text") {
@@ -1797,6 +1829,28 @@ class ScriptedServe {
         if (this.hungTool !== undefined || this.cutPlay === play) return;
         if (this.interrupted || this.replaced) break;
       }
+    }
+    // A step with a call the cascade declined ends as the binary's processor
+    // ends it (`declineCascade`): the assistant message fails `aborted` (`Step
+    // interrupted`) and the execution ends `interrupted` (`play`), no next turn.
+    if (this.declinedInTurn > 0) {
+      this.emitEvent("session.step.failed", {
+        sessionID: this.sessionID,
+        assistantMessageID,
+        error: { type: "aborted", message: "Step interrupted" },
+      });
+      this.store.push({
+        id: assistantMessageID,
+        type: "assistant",
+        agent: "switchboard",
+        model: { providerID: "switchboard", id: this.run.model.id },
+        content,
+        error: { type: "aborted", message: "Step interrupted" },
+        time: { created: NOW, completed: NOW },
+      });
+      this.interrupted = true;
+      this.emitMessages();
+      return;
     }
     this.emitEvent("session.step.ended", {
       sessionID: this.sessionID,
@@ -1929,6 +1983,26 @@ class ScriptedServe {
       resources: ask.resources,
       source: { type: "tool", messageID: assistantMessageID, id: callId },
     };
+    // The reject cascade (`declineCascade`): a reject earlier in this turn
+    // declined this ask the moment the server raised it. The ask is on the
+    // stream for the bot to decide, with no waiter and never listed pending, so
+    // the bot's reply meets 404 and the listing shows it gone; the server's own
+    // `reject` echo and the tool's `aborted` failure follow, and the step ends
+    // as an interruption (`playTurn`).
+    if (this.declineCascade && this.cascadeArmed) {
+      this.declinedInTurn++;
+      this.emitEvent("permission.asked", request);
+      this.emitEvent("permission.replied", { sessionID: this.sessionID, requestID, reply: "reject" });
+      const declined = "The user declined this tool call";
+      this.emitEvent("session.tool.failed", {
+        sessionID: this.sessionID,
+        assistantMessageID,
+        id: callId,
+        executed: false,
+        error: { type: "aborted", message: declined },
+      });
+      return this.toolContent(callId, ask.name, input, "error", declined, "aborted");
+    }
     // The ask pending at the cut (`hangAtAsk`): never on the feed — no event, no
     // refill — so the bot decides nothing; the clock passes the loop's end and
     // the play waits for the interrupt, which drops the ask below.
@@ -1994,6 +2068,7 @@ class ScriptedServe {
       });
     }
     const decision = await this.waitReply(requestID);
+    if (decision.reply === "reject" && this.declineCascade) this.cascadeArmed = true;
     // The execution stays under way until the drainer's steer for THAT follow-up
     // has been posted — one more steer than the serve had seen when it was
     // pushed — so the steer meets a running execution, as the option says.

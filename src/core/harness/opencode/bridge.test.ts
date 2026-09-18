@@ -262,7 +262,7 @@ describe("the gate's honest cannot, the compaction row, the budget stop, the unk
   it("the bot's own reply — decided at the ask, the same effect, the first echo — is not a bypass", () => {
     const { bridge } = harness();
     const ask = bridge.observe(asked("per_1", "c1", "shell", "ls"));
-    expect(ask.replies).toEqual([{ requestID: "per_1", callId: "c1", reply: "once" }]);
+    expect(ask.replies).toEqual([{ requestID: "per_1", callId: "c1", stepID: "msg_a0", reply: "once" }]);
     expect(bridge.observe(replied("per_1", "once")).bypass).toBeUndefined();
   });
 
@@ -597,6 +597,67 @@ describe("the loop — a reply that cannot be posted, and the narration's timing
       expect(r.outcome.error.name).toBe("OpenCodeReplyFailedError");
       expect(r.outcome.error.message).toMatch(/container is gone/);
     }
+    expect(r.killed.length).toBeGreaterThan(0);
+  });
+
+  // Feature: docs/reference/specs/harness.md item 2 — a reply the server
+  // answers 404 is read against its pending asks: the ask gone is the server's
+  // withdrawal (the reject cascade after a sibling's refusal), said once and
+  // continued; the ask still pending is a reply that failed, fail closed.
+  const twoCalls: RunScript = {
+    turns: [
+      {
+        content: [
+          { type: "tool_use", id: "c1", name: "bash", input: { command: "git push origin main" } },
+          { type: "tool_use", id: "c2", name: "bash", input: { command: "echo sibling" } },
+        ],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "done" }], stopReason: "end_turn" },
+    ],
+  };
+  const replyPosts = (r: DrivenRun) => r.requests.filter((q) => /\/permission\/[^/]+\/reply$/.test(q.path));
+  const pendingLists = (r: DrivenRun) => r.requests.filter((q) => q.method === "GET" && /\/permission$/.test(q.path));
+
+  it("a permission-reply POST the server answers 404 for an ask its pending list no longer carries — the reject cascade after a sibling's refusal — is the ask withdrawn: one ask_withdrawn note naming the sibling's refusal, no reply-failed error, the server's own reject echo no bypass, the sibling settled by the server's aborted failure, and the run ending by the server's own interrupted end", async () => {
+    const r = await openCodeDriver({ declineCascade: true }).run(twoCalls);
+    expect(r.outcome.kind).toBe("answered");
+    const withdrawn = notes(r.events).filter((n) => n.kind === "ask_withdrawn");
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0].summary).toMatch(
+      /withdrew the ask for bash \(call c2\) before the gate's reply \(once\) landed/,
+    );
+    expect(withdrawn[0].summary).toMatch(/the gate refused bash \(call c1\) in the same step/);
+    expect(notes(r.events).filter((n) => n.kind === "tool_refused")).toHaveLength(1);
+    expect(
+      notes(r.events).filter((n) => n.kind === "harness_error" && /could not be posted|bypassed/.test(n.summary)),
+    ).toEqual([]);
+    // Two replies posted, one listing after the 404 — never a blind re-send.
+    expect(replyPosts(r)).toHaveLength(2);
+    expect(pendingLists(r)).toHaveLength(1);
+    // The sibling settled by the server's own word: its result on the record, not ok, the call never run.
+    const sibling = r.events.find(
+      (e): e is Extract<RunEvent, { type: "tool_result" }> => e.type === "tool_result" && e.callId === "c2",
+    );
+    expect(sibling).toMatchObject({ ok: false });
+    expect(sibling?.summary).toMatch(/declined this tool call/);
+    // The step ended interrupted by the binary, not by a loop-posted interrupt.
+    expect(r.requests.filter((q) => q.method === "POST" && /\/interrupt$/.test(q.path))).toHaveLength(0);
+  });
+
+  it("a permission-reply POST the server answers 404 while its pending list still carries the ask stops the run by name, as any reply that did not land — fail closed, no ask_withdrawn note", async () => {
+    const r = await openCodeDriver({ replyRefusedWhilePending: true }).run(oneCall);
+    expect(r.outcome.kind).toBe("failed");
+    if (r.outcome.kind === "failed") {
+      expect(r.outcome.error.name).toBe("OpenCodeReplyFailedError");
+      expect(r.outcome.error.message).toMatch(/per_c1/);
+      expect(r.outcome.error.message).toMatch(/answered 404/);
+    }
+    expect(notes(r.events).filter((n) => n.kind === "ask_withdrawn")).toEqual([]);
+    expect(notes(r.events).some((n) => n.kind === "harness_error" && /could not be posted/.test(n.summary))).toBe(true);
+    // One POST and one listing: the 404 is read against the pending asks, never retried blind.
+    expect(replyPosts(r)).toHaveLength(1);
+    expect(pendingLists(r)).toHaveLength(1);
     expect(r.killed.length).toBeGreaterThan(0);
   });
 
