@@ -31,6 +31,13 @@ USER root
 # (src/execution/bashTimeout.ts); changing it requires a container rebuild +
 # redeploy.
 ENV COMMAND_TIMEOUT_MS=1240000
+# One Node process may take 8 GiB of the 12 for its heap. V8's own default is
+# a quarter of physical memory (~3 GiB on this instance), which would refuse
+# the very command the instance size was chosen for — a large monorepo's
+# typecheck near 8 GB (docs/reference/specs/execution.md item 16) — while the
+# box sat three-quarters empty. The same cap as the resident image's;
+# src/deploy/imageNode.test.ts holds the two equal.
+ENV NODE_OPTIONS=--max-old-space-size=8192
 # docker.io + iptables: a Docker engine for runs whose tests need containers
 # (act's default job mode, testcontainers, compose, image builds). Nothing
 # starts the daemon at boot — the wrapper below does, on the first `docker`

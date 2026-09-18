@@ -36,12 +36,21 @@ RUN git config --system user.name "switchboard-resident" \
 # cores once several threads run). These defaults inherit into every thread's
 # `su … -c` shell (su without `-` keeps the environment). CI=1 makes runners
 # non-interactive (no watch mode, no TTY progress spinners in captured
-# output). The heap cap keeps one runaway process to an eighth of the 12 GiB
-# so its neighbours keep theirs.
+# output). NODE_OPTIONS lets one Node process take 8 GiB of the 12 for its
+# heap. V8's own default is a quarter of physical memory (~3 GiB here), and
+# this image once pinned it lower still, at 1,536 MB — an eighth, meant as a
+# fair share among the 16 seats — under which this repository's own two `tsc`
+# passes die with "heap out of memory" (they pass at 3,072 MB with ~2 GB of
+# RSS each; measured), and which is a quarter of the large-monorepo typecheck
+# the instance size exists for (docs/reference/specs/execution.md item 16). A
+# per-process heap limit never shared memory between processes (16 × 1,536 MB
+# already exceeded the instance); the cgroup does that. So the cap is a
+# runaway guard, sized for the largest legitimate command with room, and the
+# same as the sandbox image's; src/deploy/imageNode.test.ts holds the two equal.
 ENV CI=1 \
     VITEST_MAX_WORKERS=1 VITEST_MAX_THREADS=1 VITEST_MAX_FORKS=1 VITEST_MIN_THREADS=1 VITEST_MIN_FORKS=1 \
     UV_THREADPOOL_SIZE=4 \
-    NODE_OPTIONS=--max-old-space-size=1536
+    NODE_OPTIONS=--max-old-space-size=8192
 
 # Node 24, not the base's. The 0.13.0-next base ships Node 22.23.2 like the
 # 0.12.9 one (copied from node:22-slim: the binary at /usr/local/bin/node, npm
