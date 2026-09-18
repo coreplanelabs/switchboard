@@ -677,6 +677,34 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   return {
     delivery: { service: async () => delivery },
     costs: { service: async () => costs },
+    // `providers check`: one aggregator block with one ref, the endpoints
+    // answered canned through the deps' own fetch (the global one is disarmed
+    // in the conformance suite — nothing here may reach a network).
+    providers: {
+      configured: async () => ({
+        blocks: {
+          openrouter: {
+            type: "openai-compatible" as const,
+            wire: "openai-chat" as const,
+            vendor: "model",
+            catalog: "none",
+            baseUrl: "https://openrouter.fixture/api/v1",
+          },
+        },
+        refs: ["openrouter/acme/model-1"],
+      }),
+      registry: () => ({ card: () => undefined }),
+      fetch: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: {
+            architecture: { input_modalities: ["text"] },
+            endpoints: [{ context_length: 32_768, supported_parameters: ["max_tokens"] }],
+          },
+        }),
+      }),
+    },
     help: {
       agents: () =>
         Object.values(AGENTS).map((a) => ({ name: a.name, description: a.description, door: presetDoor(a) })),

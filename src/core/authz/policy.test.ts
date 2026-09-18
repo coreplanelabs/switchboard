@@ -182,6 +182,14 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.browser, command("costs.snapshot")],
     ],
   },
+  // `providers check` reads a provider's own endpoints on request: a browser
+  // session's read baseline holds it, a Slack user needs the grant.
+  ...commandRow(
+    "providers:read",
+    "providers.check",
+    [A.admin, A.browser, A.operator],
+    [A.member, A.chatUser, A.noGrants, A.dispatchOnly],
+  ),
   "friction:write command [has-grant(friction:write)]": {
     allow: [
       [A.schedule, command("friction.propose")],
