@@ -140,24 +140,29 @@ export interface Report {
   notes?: string[];
 }
 
+/** The per-operation latency table section (the `## Operations` block). */
+export function operationsTable(ops: OpStats[]): string[] {
+  const lines: string[] = [
+    "## Operations",
+    "",
+    "| Op | Count | OK | Failed | p50 ms | p95 ms | p99 ms | Max ms |",
+    "|---|---|---|---|---|---|---|---|",
+  ];
+  for (const o of ops) {
+    lines.push(
+      `| ${o.op} | ${o.count} | ${o.ok} | ${o.failed} | ${fmt(o.p50)} | ${fmt(o.p95)} | ${fmt(o.p99)} | ${fmt(o.max)} |`,
+    );
+  }
+  return lines;
+}
+
 /** The markdown receipt: parameters, the per-op table, refusals, checks, verdict. */
 export function renderMarkdown(report: Report): string {
   const lines: string[] = [];
   lines.push(`# ${report.title} ${report.runId}`, "", `Started ${report.startedAt}.`, "");
   lines.push("## Parameters", "", "| Parameter | Value |", "|---|---|");
   for (const [k, v] of Object.entries(report.params)) lines.push(`| ${k} | ${formatValue(v)} |`);
-  lines.push(
-    "",
-    "## Operations",
-    "",
-    "| Op | Count | OK | Failed | p50 ms | p95 ms | p99 ms | Max ms |",
-    "|---|---|---|---|---|---|---|---|",
-  );
-  for (const o of report.summary.ops) {
-    lines.push(
-      `| ${o.op} | ${o.count} | ${o.ok} | ${o.failed} | ${fmt(o.p50)} | ${fmt(o.p95)} | ${fmt(o.p99)} | ${fmt(o.max)} |`,
-    );
-  }
+  lines.push("", ...operationsTable(report.summary.ops));
   lines.push("", "## Refusals by reason", "");
   const refusals = Object.entries(report.summary.refusals);
   if (refusals.length === 0) lines.push("none");
