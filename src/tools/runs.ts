@@ -56,13 +56,19 @@ export interface SteerCapability {
 const UNAVAILABLE = "run tools are not available in this context.";
 const NOT_FOUND = "not_found";
 
+/** A completed turn may still be waiting for a person to finish the task. */
+function statusOf(view: RunView): string {
+  if (!view.finished) return "running";
+  return view.awaitingInput && view.status === "completed" ? "awaiting_input" : (view.status ?? "finished");
+}
+
 /** One run as the tools show it: identity, where it is, what it is doing —
  *  never the capability token (`RunView` carries none), never event text. */
 function rowOf(v: RunView): Record<string, unknown> {
   return {
     id: v.id,
     ...(v.agent !== undefined ? { agent: v.agent } : {}),
-    status: v.finished ? (v.status ?? "finished") : "running",
+    status: statusOf(v),
     ...(v.activity !== undefined ? { activity: v.activity } : {}),
     ...(v.parentRunId !== undefined ? { parentRunId: v.parentRunId } : {}),
     ...(v.label !== undefined ? { label: v.label } : {}),
@@ -105,7 +111,7 @@ function rowFollowing(view: RunView, current: RunView): Record<string, unknown> 
   const { activity: _activity, finishedAt: _finishedAt, ...identity } = rowOf(view);
   return {
     ...identity,
-    status: current.finished ? (current.status ?? "finished") : "running",
+    status: statusOf(current),
     ...(current.activity !== undefined ? { activity: current.activity } : {}),
     ...(current.finishedAt !== undefined ? { finishedAt: current.finishedAt } : {}),
     continuedBy: current.id,
@@ -325,6 +331,17 @@ async function readChild(
   // Only a finished run's events are read — once, for its final reply.
   const full = await service.getRun(current.id, { include: "messages" });
   const finalReply = full.ok ? finalReplyOf(full.value) : undefined;
+  if (statusOf(current) === "awaiting_input") {
+    return {
+      state: {
+        kind: "awaiting_input",
+        ...(current.activity !== undefined ? { activity: current.activity } : {}),
+        ...(finalReply !== undefined ? { finalReply } : {}),
+        ...continued,
+      },
+      view,
+    };
+  }
   return {
     state: {
       kind: "ended",
@@ -343,6 +360,13 @@ function waitNote(why: WaitEnd, running: string[]): string {
   switch (why) {
     case "all_ended":
       return "Every run named has ended.";
+    case "awaiting_input":
+      return (
+        "A child needs information before its task can finish. Relay its question with request_input, " +
+        "including the child's thread link so the person can answer there. Do not mark it complete or restart it. " +
+        "After the reply, await the same child id again to follow its continuation." +
+        still
+      );
     case "stop":
       return `A stop was requested of this run — wrap up now.${still}`;
     case "follow_up":
@@ -367,6 +391,14 @@ function childRow(id: string, state: ChildState, view: RunView | undefined): Rec
         status: "running",
         ...(state.activity !== undefined ? { activity: state.activity } : {}),
         ...(state.elsewhere ? { elsewhere: true } : {}),
+        ...(state.continuedBy !== undefined ? { continuedBy: state.continuedBy } : {}),
+      };
+    case "awaiting_input":
+      return {
+        ...identity,
+        status: "awaiting_input",
+        ...(state.activity !== undefined ? { activity: state.activity } : {}),
+        ...(state.finalReply !== undefined ? { finalReply: state.finalReply } : {}),
         ...(state.continuedBy !== undefined ? { continuedBy: state.continuedBy } : {}),
       };
     case "ended":
@@ -406,7 +438,7 @@ export const awaitRunsTool: RunnableTool = {
     "Wait for runs — normally your children — to end, and get each one's end as data: its terminal status (completed, failed, " +
     "refused, stopped_soft, stopped_hard, interrupted) with its final reply wrapped as untrusted content; `running` for one still " +
     "live when the wait was cut; `not_found` for an unknown id or one the requester may not read. The wait ends at the first of: " +
-    "every named run ended; `timeoutMinutes` (optional, whole minutes); the edge of your own budget (a minute before your clock " +
+    "every named run ended; a child asks for clarification (`awaiting_input`, with its question); `timeoutMinutes` (optional, whole minutes); the edge of your own budget (a minute before your clock " +
     "runs out — write up what came back and name what is still running, which keeps running); a stop; a follow-up landing in " +
     "this thread (it rides your next turn). `ended` says which. An interrupted child is reported, never restarted. A child is " +
     "its thread: when a person's reply in a child's thread started a later run there, the child's row follows that run — " +
@@ -460,7 +492,7 @@ export const awaitRunsTool: RunnableTool = {
         followUpPending: wait.followUpsArrived() > arrivedAtStart,
       });
       if (decision.kind === "end") {
-        const running = watch.pending();
+        const running = watch.pending().filter((id) => watch.get(id)?.kind === "running");
         return JSON.stringify({
           ended: decision.why,
           waitedMs: now - startedAt,
@@ -495,8 +527,8 @@ export const listRunsTool: RunnableTool = {
   name: "list_runs",
   description:
     "List runs as the person who asked you may see them: by default this run's own children (`scope: children`), or every run " +
-    "they may read (`scope: all`); `status` picks live (`active`), finished, or both (default). One row per run: id, preset, " +
-    "status (running, or the terminal status), the latest activity line, the parent run, the label, the thread and a link. " +
+    "they may read (`scope: all`); `status` picks live (`active`), finished turns (including questions), or both (default). One row per run: id, preset, " +
+    "status (running, awaiting_input, or the terminal status), the latest activity line, the parent run, the label, the thread and a link. " +
     "Never a run's messages — get_run_status answers those.",
   inputSchema: {
     type: "object",

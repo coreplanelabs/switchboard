@@ -26,6 +26,12 @@ A run that starts other runs. `agent:conductor` — or the router's compound for
 
 - `[gap]` The board: `parentRunId` is on the record and the live summary, a ship unit's row names its coding thread and its review thread, a unit's runs list in round order from one read and on one page (`runs unit`, [agent-ship.md](agent-ship.md) item 17; [live-view.md](live-view.md) item 28) and a conductor's children from one read and on its run page (`runs children`, item 11); the `/runs` index does not yet draw the tree ([record 0034](../../decisions/0034-one-agent-per-unit-a-run-continues-a-transcript.md), the unit as the reading unit).
 
+A child that asks for clarification is `awaiting_input`, not a completed result.
+The run tools report its question as untrusted output; `await_runs` returns
+immediately so the conductor can request the missing information. A subsequent
+wait follows the child's thread continuation and only reports completion once
+that continuation finishes without another question.
+
 ## Validation criteria
 
 | Criterion | Proof |
@@ -85,3 +91,4 @@ A run that starts other runs. `agent:conductor` — or the router's compound for
 | 11: `runs children <id>` answers the listing behind the parent's point read — an unknown parent and a parent outside the predicate are `run not found` with the deny on the audit line — and `runs list --parent` is the same filter | `[unit]` `src/core/commands/runs.test.ts::runs unit / runs children / runs search — the unit is the reading unit::runs children lists the runs naming the parent…`, `src/core/commands/runs.test.ts::runs.list::the parent option lists the runs one run spawned…` |
 | 11: a conductor's run page seeds and lists its children — the history seed under the predicate with a live child's token, the live seed from the registry with each child's own token; the page draws them as fold rows in start order, a finished one opening to its timeline, a live one linking with its token | `[unit]` `src/channels/liveView.test.ts::the unit page and what a run is the parent of (item 28)::a history page seeds the runs its run spawned…`, `src/channels/liveView.test.ts::the unit page and what a run is the parent of (item 28)::a live page seeds the children the registry holds…`, `web/src/pages/runPage.test.ts::RunPage — history mode::a conductor's page lists the runs it spawned…` |
 | 11, live: a conductor's children from one route | `[agent]` (human-gated.) After a conductor run on the deployed bot, `runs children <its run id>` from the CLI or `GET /api/runs.children?id=…` — expect one row per child in the order they were spawned, each opening its page. |
+| Child clarification stays unfinished and follows its continuation | `[unit]` `src/tools/runs.test.ts::child clarification stays unfinished::*`, `src/core/dispatch/awaitChildren.test.ts::waiting for child clarification::*` |

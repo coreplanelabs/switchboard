@@ -254,3 +254,18 @@ describe("waitCapabilityFor — what a waiting tool watches", () => {
     await expect(cap.sleep(1)).resolves.toBeUndefined();
   });
 });
+
+describe("waiting for child clarification", () => {
+  it("a question remains nonterminal and can be replaced by a running continuation", () => {
+    const watch = new ChildrenWatch(["child"]);
+    watch.observe("child", { kind: "awaiting_input", finalReply: "Which repository?" });
+    expect(watch.allEnded).toBe(false);
+    expect(watch.pending()).toEqual(["child"]);
+    expect(decideWait(inputs({ children: watch.snapshot() }))).toEqual({ kind: "end", why: "awaiting_input" });
+    expect(decideWait(inputs({ children: watch.snapshot(), stop: "hard" }))).toEqual({ kind: "end", why: "stop" });
+    expect(watch.observe("child", { kind: "running", continuedBy: "reply" })).toBe(true);
+    expect(decideWait(inputs({ children: watch.snapshot() })).kind).toBe("wait");
+    watch.observe("child", { kind: "ended", status: "completed", continuedBy: "reply" });
+    expect(watch.allEnded).toBe(true);
+  });
+});

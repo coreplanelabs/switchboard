@@ -11,7 +11,9 @@ It retains the requesting person's permissions and leaves the issue's assignee
 and delegate unchanged. Coordinator thread creation uses durable keys to recover
 the same conversation after retries. The creation webhook does not start a
 second child run; subsequent human replies and Stop remain native session events.
-Child-workflow clarification and live acceptance still need verification before
+Conductors report child questions as waiting for input and point to the child's
+session for the answer. Clarification across coding/review coordinator workflows
+and live acceptance still need verification before
 the integration is ready for end users.
 
 ## Register the application
