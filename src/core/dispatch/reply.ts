@@ -376,7 +376,25 @@ export function errorReply(err: unknown): string {
  * gains its question and offer in a later unit of record 0054.
  */
 export async function renderRefusal(refusal: Refusal, io: ChannelIO): Promise<void> {
+  // A `request` refusal that holds a guess is one question: the producer's
+  // sentence, the marker, the corrected line to type and the evidence that
+  // names the match. A channel that offers gets Yes and No on the same
+  // question in the unit that lands the button; until then the line to type is
+  // what the person reads (the record's channel-without-offer shape).
+  if (refusal.cause === "request" && refusal.guess) return io.reply(refusalQuestion(refusal));
   return io.reply(refusalLine(refusal));
+}
+/**
+ * The one question a `request` refusal with a guess renders (record 0054): the
+ * producer's sentence, then the marker — `Did you mean:`, the corrected line as
+ * one code span — and the evidence. Pure and exported so the surfaces that
+ * render a refusal without a channel (the chat error line, tests) read the same
+ * bytes the renderer sends.
+ */
+export function refusalQuestion(refusal: Refusal): string {
+  const guess = refusal.guess;
+  if (!guess) return refusalLine(refusal);
+  return `${refusal.text}\nDid you mean:\n\`${guess.line}\`\n\n${guess.evidence}`;
 }
 /**
  * An acknowledgement from a producing module the fence covers (record 0054):
