@@ -165,7 +165,9 @@ export interface AdminCoordinatorDeps {
    *  apart); tests pass one that records instead of waiting. */
   sleep?: (ms: number) => Promise<void>;
   /** The merge step's facts and its one write (githubPulls): the pull request
-   *  as GitHub has it, the checks at a head, the squash at exactly that head. */
+   *  as GitHub has it, the checks at a head, the squash at exactly that head.
+   *  The pr-check follows the machine's adopted pull request through the same
+   *  read when nothing heads the unit's branch (issue 1799). */
   fetchPrFacts: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
   fetchCommitChecks: (repo: string, sha: string) => Promise<CommitChecks | undefined>;
   mergePullRequest: (
@@ -961,6 +963,12 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     RUN_ID_PATTERN.test((body.recover as Record<string, unknown>).runId as string)
       ? { runId: (body.recover as Record<string, unknown>).runId as string }
       : undefined;
+  // The pull request the machine has adopted (issue 1799): followed by number
+  // when nothing heads the unit's branch, so the answer is the pull request's
+  // live state, never `none` over a record fact written minutes earlier.
+  if (body.pr !== undefined && (typeof body.pr !== "number" || !Number.isInteger(body.pr) || body.pr <= 0))
+    return json(400, { ok: false, error: "pr must be a pull request number" });
+  const follow = typeof body.pr === "number" ? body.pr : undefined;
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
@@ -1003,6 +1011,49 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     // runner's merge). Asked only now: an open pull request is the round's.
     const merged = await deps.findMergedPrByHead(instance.repo, branch);
     if (!merged) {
+      // The machine's adopted pull request heads another branch (issue 1799:
+      // the child worked the thread's own pull request, not the unit's branch),
+      // so before answering `none` the check follows it and answers what GitHub
+      // says NOW: open at a fresh head, merged, or verified closed (`prClosed`
+      // — the machine must not brief a review on it). An unreadable follow
+      // falls through to the plain answer, claiming nothing.
+      if (follow !== undefined && recover === undefined) {
+        const facts = await deps.fetchPrFacts({ repo: instance.repo, number: follow });
+        if (facts !== undefined) {
+          const url = facts.htmlUrl ?? `https://github.com/${instance.repo}/pull/${follow}`;
+          if (facts.mergedAt !== undefined && facts.mergeCommitSha !== undefined) {
+            await remember({ number: follow, url });
+            return json(200, {
+              ok: true,
+              state: "merged",
+              prNumber: follow,
+              url,
+              sha: facts.mergeCommitSha,
+              mergedAt: facts.mergedAt,
+              at,
+            });
+          }
+          if (facts.state === "open") {
+            await remember({ number: follow, url });
+            const checks =
+              body.checks === true && facts.headSha !== undefined
+                ? await deps.fetchCommitChecks(instance.repo, facts.headSha).catch(() => undefined)
+                : undefined;
+            return json(200, {
+              ok: true,
+              state: "open",
+              prNumber: follow,
+              url,
+              ...(facts.headSha !== undefined ? { headSha: facts.headSha } : {}),
+              ...(facts.autoMergeEnabled !== undefined ? { autoMergeEnabled: facts.autoMergeEnabled } : {}),
+              ...(checks !== undefined ? { checks } : {}),
+              at,
+            });
+          }
+          // Closed unmerged: said so, so the machine's endings are truthful.
+          return json(200, { ok: true, state: "none", prClosed: true, at });
+        }
+      }
       // A dead coding child's pushed work is recovered here: the pull request
       // is opened from the branch itself rather than the round ending aborted
       // with the work stranded (agent-ship items 10 and 15).

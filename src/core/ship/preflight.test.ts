@@ -90,7 +90,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     });
   });
 
-  it("context: an in-message pull request beside task text stays context — a fresh entry off the default branch, even when its facts cannot be fetched or its head is a fork", async () => {
+  it("context: a FOREIGN in-message pull request (not the thread's own) beside task text stays context — a fresh entry off the default branch, even when its facts cannot be fetched or its head is a fork", async () => {
     const unfetchable = await shipPreflight(
       input({
         requestText: "investigate the bug seen on acme/api#508",
@@ -312,6 +312,122 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
       codes.add(res.refusal.code);
     }
     expect(codes.size, "one code per gate, never a shared one").toBe(9);
+  });
+});
+
+describe("shipPreflight — the entry table over (task text, PR source, thread's own, PR facts) (agent-ship item 10, issue 1799)", () => {
+  const OWN_TASK = `CI is red on ${PR_URL} — fix the failing check, keep one commit`;
+  /** The thread's own pull request, named by URL in the current message — the
+   *  re-issue shape of issue 1799. The resolver hands both facts: the reference
+   *  is in-message (prFromMessage) AND the PR is the thread's own (prIsThreadOwn,
+   *  off the thread's record PR / unit row). */
+  const ownCtx = {
+    repo: "acme/api",
+    pr: 7,
+    prFromMessage: true,
+    prIsThreadOwn: true,
+    ref: "feat/rate-limit",
+    refFromPr: true,
+  };
+  /** A stranger's pull request cited as evidence inside the task text. */
+  const foreignCtx = { repo: "acme/api", pr: 508, prFromMessage: true, ref: "feat/rate-limit", refFromPr: true };
+
+  it("row 1 — task · PR from thread inference · open → adopt", async () => {
+    const res = await shipPreflight(
+      input({
+        requestText: "in acme/api: also add rate limiting",
+        repoCtx: { repo: "acme/api", pr: 7, ref: "feat/rate-limit", refFromPr: true },
+        prFacts: async () => openPr(),
+      }),
+    );
+    expect(res).toMatchObject({
+      ok: true,
+      entry: { branch: "feat/rate-limit", base: "release/1.x", adopt: { pr: 7, url: PR_URL } },
+    });
+  });
+
+  it("row 2 — no task · PR from message · open, any author → resume", async () => {
+    const res = await shipPreflight(
+      input({
+        requestText: PR_URL,
+        repoCtx: { repo: "acme/api", pr: 7, prFromMessage: true, ref: "feat/rate-limit", refFromPr: true },
+        prFacts: async () => openPr({ author: { login: "alice", id: 1 } }),
+      }),
+    );
+    expect(res).toMatchObject({ ok: true, entry: { resume: { pr: 7, headSha: HEAD, url: PR_URL } } });
+  });
+
+  it("row 3 — task · PR from message · thread's own · open same-repo → ADOPT, never a fresh plan branch (the defect)", async () => {
+    const res = await shipPreflight(input({ requestText: OWN_TASK, repoCtx: ownCtx, prFacts: async () => openPr() }));
+    expect(res).toEqual({
+      ok: true,
+      entry: {
+        repo: "acme/api",
+        branch: "feat/rate-limit",
+        base: "release/1.x",
+        adopt: { pr: 7, url: PR_URL },
+      },
+    });
+  });
+
+  it("row 4 — task · PR from message · thread's own · unfetchable → refused ship_preflight_pr_facts (fail-closed like every adopt)", async () => {
+    const res = await shipPreflight(input({ requestText: OWN_TASK, repoCtx: ownCtx, prFacts: async () => undefined }));
+    expect(res).toMatchObject({ ok: false, where: "PR facts unavailable" });
+    if (!res.ok) expect(res.refusal.code).toBe("ship_preflight_pr_facts");
+  });
+
+  it("row 5 — task · PR from message · thread's own · fork head → refused ship_preflight_fork_head", async () => {
+    const res = await shipPreflight(
+      input({ requestText: OWN_TASK, repoCtx: ownCtx, prFacts: async () => openPr({ sameRepoHead: false }) }),
+    );
+    expect(res).toMatchObject({ ok: false, where: "fork-head PR" });
+    if (!res.ok) expect(res.refusal.code).toBe("ship_preflight_fork_head");
+  });
+
+  it("row 6 — task · PR from message · thread's own · closed → a fresh entry off the default branch", async () => {
+    const res = await shipPreflight(
+      input({ requestText: OWN_TASK, repoCtx: ownCtx, prFacts: async () => openPr({ state: "closed" }) }),
+    );
+    expect(res).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
+  });
+
+  it("row 7 — task · PR from message · NOT the thread's · open → a fresh entry off the default branch (context; the guard against a cited foreign PR hijacking a thread)", async () => {
+    const res = await shipPreflight(
+      input({
+        requestText: "investigate the bug seen on acme/api#508",
+        repoCtx: foreignCtx,
+        prFacts: async () => openPr(),
+      }),
+    );
+    expect(res).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
+  });
+
+  it("row 8 — task · PR from message · NOT the thread's · unfetchable or fork → a fresh entry (context stays context)", async () => {
+    const unfetchable = await shipPreflight(
+      input({
+        requestText: "investigate the bug seen on acme/api#508",
+        repoCtx: foreignCtx,
+        prFacts: async () => undefined,
+      }),
+    );
+    expect(unfetchable).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
+    const fork = await shipPreflight(
+      input({
+        requestText: "investigate the bug seen on acme/api#508",
+        repoCtx: foreignCtx,
+        prFacts: async () => openPr({ sameRepoHead: false }),
+      }),
+    );
+    expect(fork).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
+  });
+
+  it("row 9 — seeded `plan <path>` request · any PR → the graph's branches, the PR is context and its facts never read", async () => {
+    const prFacts = vi.fn(async () => openPr());
+    const res = await shipPreflight(
+      input({ requestText: "in acme/api: plan docs/plans/fixture.md", repoCtx: ownCtx, prFacts }),
+    );
+    expect(res).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
+    expect(prFacts).not.toHaveBeenCalled();
   });
 });
 

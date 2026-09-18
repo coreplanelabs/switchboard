@@ -318,7 +318,7 @@ function isCommitChecks(v: unknown): v is { total: number; pending: string[]; fa
 function prCheckReturn(step: string, a: BotAnswer): StepReturn {
   const { ok, state, prNumber, url, headSha, sha, mergedAt, at } = a.body;
   if (ok === true && state === "none") {
-    const { unrecovered, aheadOfBase } = a.body;
+    const { unrecovered, aheadOfBase, prClosed } = a.body;
     return {
       type: "pr-check",
       step,
@@ -328,6 +328,9 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
         // The branch's commits over the base, when the bot could read them
         // (agent-ship item 12): zero is the `already_landed` ending's fact.
         ...(typeof aheadOfBase === "number" ? { aheadOfBase } : {}),
+        // The followed pull request verified closed unmerged (issue 1799):
+        // the machine must not brief a review round on it.
+        ...(prClosed === true ? { prClosed: true } : {}),
       },
       at,
     };
@@ -453,12 +456,19 @@ async function perform(
     case "pr-check":
       // `recover` rides only after a dead coding child: the bot opens the pull
       // request from the pushed branch itself instead of answering `none`.
+      // `pr` is the machine's adopted pull request (issue 1799): the bot
+      // follows it when nothing heads the unit's branch and answers its live
+      // state instead of `none` over a minutes-old record fact.
       return prCheckReturn(
         action.step,
         answerOf(
           "pr-check",
           await step.do(action.step, STEP_CONFIG, () =>
-            call(bot, "pr-check", { ...tag, ...(action.recover !== undefined ? { recover: action.recover } : {}) }),
+            call(bot, "pr-check", {
+              ...tag,
+              ...(action.recover !== undefined ? { recover: action.recover } : {}),
+              ...(action.pr !== undefined ? { pr: action.pr } : {}),
+            }),
           ),
         ),
       );

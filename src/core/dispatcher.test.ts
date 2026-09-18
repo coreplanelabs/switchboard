@@ -9254,6 +9254,40 @@ workspaceDir: __WORKDIR__
     );
   });
 
+  it("a re-issue naming the thread's OWN pull request by URL beside new task text ADOPTS it — never a fresh plan branch, never 'context' (issue 1799)", async () => {
+    const { deps, instances, created } = shipDeps();
+    // The resolver hands both facts: the PR reference is in-message
+    // (prFromMessage) AND it is the thread's own (prIsThreadOwn, off the
+    // thread's record PR) — the shape of `agent:ship … CI is red on <URL of
+    // this thread's PR> — fix …` re-issued after a unit ended short.
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+      prIsThreadOwn: true,
+      ref: SHIP_BRANCH,
+      refFromPr: true,
+      headSha: HEAD_A,
+      baseRef: "main",
+    });
+    const registry = new RunRegistry({ genId: () => "run-shipown", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(
+      deps,
+      msg(`agent:ship CI is red on ${PR_URL} — fix the failing check, keep one commit`, "slack:UADMIN"),
+      io,
+    );
+    expect(created).toHaveLength(1);
+    const { instance, unit } = await handed(instances, "run-shipown");
+    // The unit runs on the pull request's own head branch — no fresh plan branch.
+    expect(instance).toMatchObject({ branch: SHIP_BRANCH, base: "main" });
+    expect(unit).toMatchObject({ branch: SHIP_BRANCH });
+    expect("resume" in unit!).toBe(false);
+    expect(replies[replies.length - 1]).toContain(`adopts ${PR_URL}`);
+    expect(replies[replies.length - 1]).toContain("no new branch");
+  });
+
   it("a seeded plan request in the same pull-request thread stays seeded: the rows keep the graph plan branches, the PR is context", async () => {
     const { deps, instances } = shipDeps();
     deps.githubApi = new InMemoryGithubApi({

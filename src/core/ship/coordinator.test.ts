@@ -1082,6 +1082,46 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(renderUnitReport(plain.state)).not.toContain("Not renewed");
   });
 
+  it("row 10 — unit end: a round-0 child whose record names a pull request it updated on ANOTHER branch (the thread's own, adopted late) runs the review round on it at the head the child pushed — never 'no pull request' over work that stands (issue 1799)", () => {
+    // The pr-check reads the UNIT's branch, which nothing heads: the child
+    // worked on the pull request's own head branch. Its record carries the
+    // pull request (`pr_opened`, created: false — a body re-render counts) and
+    // the head it pushed, and those two facts are the round's pull request.
+    const d = fresh(input({ merge: "person" }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      d,
+      "run-c0",
+      finished({ status: "completed", pr: { number: 7, url: PR_URL, created: false }, headSha: HEAD_A }),
+      T0 + 5 * MIN,
+    );
+    // The check carries the record's pull request for the bot to follow.
+    expect(d.action).toMatchObject({ type: "pr-check", pr: 7 });
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 5 * MIN });
+    // The review round runs on the child's pull request, briefed at its head.
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      preset: "review",
+      round: { index: 1, kind: "review" },
+      brief: { kind: "review", pr: 7, headSha: HEAD_A },
+    });
+    expect(d.state.pr).toEqual({ number: 7, url: PR_URL });
+    expect(d.rounds()).toEqual(["0 coding started", "0 coding pr_opened"]);
+
+    // The followed pull request verified CLOSED unmerged (`prClosed`): the
+    // recovery never briefs a review on it, and round 0's own ending stands.
+    const closed = fresh(input({ merge: "person" }));
+    closed.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      closed,
+      "run-c0",
+      finished({ status: "completed", pr: { number: 7, url: PR_URL, created: false }, headSha: HEAD_A }),
+      T0 + 5 * MIN,
+    );
+    closed.answer({ type: "pr-check", pr: { state: "none", prClosed: true }, at: T0 + 5 * MIN });
+    expect(closed.action).toMatchObject({ type: "end", ending: { kind: "aborted", round: { index: 0 } } });
+  });
+
   it("aborts: a round 0 that opened no pull request, a branch that could not be created, a coding child that failed, a findings step that repushed nothing (unless every finding was declined)", () => {
     const noPr = fresh(input({ merge: "person" }));
     noPr.answer({ type: "branch", ok: true, at: T0 });
@@ -1745,7 +1785,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     });
   });
 
-  it("a findings step whose pull request was closed out from under it and reopened adopts the open pull request on the branch; one with no open pull request aborts", () => {
+  it("a findings step whose pull request was closed out from under it and reopened adopts the open pull request on the branch; one whose followed pull request is verified closed aborts", () => {
     const adopt = fresh(input({ merge: "person" }));
     throughRoundZero(adopt);
     runChild(
@@ -1781,9 +1821,73 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
       T0 + 20 * MIN,
     );
     runChild(gone, "run-f1", finished({ status: "completed", dispositions: [FIXED], headSha: HEAD_C }), T0 + 30 * MIN);
-    gone.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 30 * MIN });
+    // The findings pr-check carries the adopted pull request for the bot to
+    // follow, and its answer VERIFIED it closed: only then does the unit abort.
+    expect(gone.action).toMatchObject({ type: "pr-check", pr: 7 });
+    gone.answer({ type: "pr-check", pr: { state: "none", prClosed: true }, at: T0 + 30 * MIN });
     expect(gone.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
     expect(renderUnitReport(gone.state)).toContain("no open pull request");
+  });
+
+  it("a findings step whose child repushed the adopted pull request on ANOTHER branch (issue 1799) carries on to the re-review at the pushed head — a plain `none` over the unit's branch never aborts a round whose pull request the machine holds — while one that repushed nothing keeps its abort", () => {
+    // The issue-1799 shape past round 0: the child works the thread's own pull
+    // request on its own head branch, so nothing ever heads the unit's branch —
+    // in the findings rounds exactly as in round 0.
+    const roundsOn = (d: Driver, headAfterFix: string) => {
+      d.answer({ type: "branch", ok: true, at: T0 });
+      runChild(
+        d,
+        "run-c0",
+        finished({ status: "completed", pr: { number: 7, url: PR_URL, created: false }, headSha: HEAD_A }),
+        T0 + 5 * MIN,
+      );
+      d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 5 * MIN });
+      runChild(
+        d,
+        "run-r1",
+        finished({
+          status: "completed",
+          verdict: { verdict: "request_changes", summary: "x", findings: [FINDING] },
+          reviewPosted: true,
+          reviewHead: HEAD_A,
+        }),
+        T0 + 20 * MIN,
+      );
+      expect(d.action).toMatchObject({ type: "spawn", round: { index: 1, kind: "findings" } });
+      runChild(
+        d,
+        "run-f1",
+        finished({ status: "completed", dispositions: [FIXED], headSha: headAfterFix }),
+        T0 + 30 * MIN,
+      );
+      // The unit's branch still heads nothing; the check follows the pull request.
+      expect(d.action).toMatchObject({ type: "pr-check", pr: 7 });
+      return d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 30 * MIN });
+    };
+
+    // Repushed: the re-review runs on the held pull request at the pushed head.
+    const fixed = fresh(input({ merge: "person" }));
+    roundsOn(fixed, HEAD_B);
+    expect(fixed.action).toMatchObject({
+      type: "spawn",
+      step: "U10/2/review",
+      brief: { kind: "review", pr: 7, headSha: HEAD_B },
+    });
+    expect(fixed.rounds()).toEqual([
+      "0 coding started",
+      "0 coding pr_opened",
+      "1 review started",
+      "1 review request_changes",
+      "1 coding started",
+      "1 coding pr_opened",
+    ]);
+
+    // Nothing repushed (the head the review already read, not every finding
+    // declined): the abort of item 7 stands through the recovery too.
+    const idle = fresh(input({ merge: "person" }));
+    roundsOn(idle, HEAD_A);
+    expect(idle.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    expect(renderUnitReport(idle.state)).toContain("produced no new head");
   });
 
   it("every step name is the unit, the round and the kind, so the spawn's key is unique across a plan's units and never carries a colon", () => {
