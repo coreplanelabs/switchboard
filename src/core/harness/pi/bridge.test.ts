@@ -541,17 +541,22 @@ describe("the notes — compaction, harness errors, dialogs, the unknown", () =>
     });
   });
 
-  it("an extension error, an unknown kind and an impossible kind are harness_error notes naming them; a dialog is cancelled and noted", () => {
+  it("an extension error, an unknown kind and an impossible kind are harness_error notes naming them — a kind's note said once, however often the kind arrives; a dialog is cancelled and noted", () => {
     const { bridge, events } = harness();
     bridge.observe({ type: "extension_error", extensionPath: "/tmp/e.js", event: "tool_call", error: "TypeError: x" });
     bridge.observe({ type: "brand_new_kind" });
     bridge.observe({ type: "auto_retry_start", attempt: 1 });
+    // The same kinds again: the first arrival was the finding, a flood of one
+    // wrong table entry is not one note per event (the OpenCode bridge's rule too).
+    bridge.observe({ type: "brand_new_kind" });
+    bridge.observe({ type: "auto_retry_start", attempt: 2 });
+    bridge.observe({ type: "brand_new_kind" });
     const obs = bridge.observe({ type: "extension_ui_request", id: "d1", method: "confirm", title: "Trust?" });
     expect(obs.replies).toEqual([{ type: "extension_ui_response", id: "d1", cancelled: true }]);
     expect(events.map((e) => (e as { kind: string; summary: string }).summary)).toEqual([
       "the harness extension failed on tool_call: TypeError: x",
-      "pi emitted an event kind this build does not know: brand_new_kind",
-      "pi emitted auto_retry_start, which the harness turns off at start",
+      "pi emitted an event kind this build does not know: brand_new_kind (said once: later events of this kind are not noted)",
+      "pi emitted auto_retry_start, which the harness turns off at start (said once: later events of this kind are not noted)",
       "pi asked a confirm dialog no one answers (Trust?); cancelled",
     ]);
     expect(events.every((e) => e.type === "run_note" && e.kind === "harness_error")).toBe(true);
@@ -560,6 +565,14 @@ describe("the notes — compaction, harness errors, dialogs, the unknown", () =>
       replies: [],
     });
     expect(events).toHaveLength(4);
+    // Another kind of each class is its own first arrival, said once too.
+    bridge.observe({ type: "auto_retry_end", attempt: 2 });
+    bridge.observe({ type: "other_new_kind" });
+    bridge.observe({ type: "auto_retry_end", attempt: 3 });
+    expect(events.slice(4).map((e) => (e as { summary: string }).summary.replace(/ \(said once.*$/, ""))).toEqual([
+      "pi emitted auto_retry_end, which the harness turns off at start",
+      "pi emitted an event kind this build does not know: other_new_kind",
+    ]);
   });
 
   it("the structural events — responses, agent and turn boundaries, queue changes — say what they are and add nothing to the stream", () => {

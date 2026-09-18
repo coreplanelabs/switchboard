@@ -7,11 +7,13 @@
 // partial the final record carries — every `*.delta`, the streamed boundaries,
 // the tool's input as it arrives), `note` (a `run_note` — the asks, the
 // retries, the failures), `impossible` (a kind this run's configuration turns
-// off or never causes — the persistent shells and ptys, the reverts and
-// forks, the agent and model switches; a `harness_error` if it arrives all the
-// same). A kind the table does not name is a `harness_error` note naming it,
-// so an OpenCode bump shows in the first run's record — the same rule pi's
-// `PI_EVENT_DISPOSITION` follows.
+// off or never causes — the ptys and the session's own shell command, the
+// reverts and forks, the agent and model switches; a `harness_error` if it
+// arrives all the same). A kind the table does not name is a `harness_error`
+// note naming it, so an OpenCode bump shows in the first run's record — the
+// same rule pi's `PI_EVENT_DISPOSITION` follows. Either note is said once per
+// kind for the run (the bridge's `namedKinds`): the first arrival is the
+// finding, and one wrong entry here must never be one note per event.
 //
 // The catalogue is the pinned protocol's server manifest
 // (`@opencode/schema`'s `EventManifest.ServerDefinitions`, plus the stream's
@@ -106,7 +108,15 @@ export const OPENCODE_EVENT_DISPOSITION: Readonly<Record<string, Disposition>> =
   "session.revert.staged": "impossible",
   "session.revert.cleared": "impossible",
   "session.revert.committed": "impossible",
-  // The persistent shell and the skill activation are features this config leaves off.
+  // The session's own shell command: a client's `POST /api/session/:id/shell`
+  // runs one command in the session's directory and lands its output as a
+  // message of the session's (`Session.Message.Shell`), the server saying
+  // `session.shell.started` before and `session.shell.ended` after (the
+  // pinned `@opencode/protocol`'s `groups/session.js`, route `session.shell`;
+  // `@opencode/schema`'s `session-event.js`, `Shell.Started`/`Ended`). Not the
+  // `shell` TOOL (below, structure): nothing but the bridge drives the
+  // session, and the bridge never posts it. The skill activation is a feature
+  // this config leaves off.
   "session.shell.started": "impossible",
   "session.shell.ended": "impossible",
   "session.skill.activated": "impossible",
@@ -125,8 +135,26 @@ export const OPENCODE_EVENT_DISPOSITION: Readonly<Record<string, Disposition>> =
   "reference.updated": "structure",
   "skill.updated": "structure",
   "vcs.branch.updated": "structure",
+  // The web-search provider catalogue changed (an empty payload; the server
+  // registers its providers at boot whether or not the `websearch` tool is
+  // denied, and the real binary says it once per run).
+  "websearch.updated": "structure",
   "worktree.resolved": "structure",
   "worktree.updated": "structure",
+
+  // ── The shell tool's own process, as the server's Shell service says it ───
+  // `shell.created` carries a `Shell.Info` (the command, the cwd, the pid, the
+  // output file), `shell.exited` its `{ id, exit, status }`, `shell.deleted`
+  // its id: the lifecycle of the process behind the `shell` TOOL, which the
+  // Shell service broadcasts for every shell call the model makes (the pinned
+  // `@opencode/schema`'s `shell.js`: `Shell.Event`, whose `Metadata` comment
+  // names `ShellTool` as the caller). They land nowhere of their own: the
+  // call's `session.tool.called`/`success`/`failed` rows already carry the
+  // command and the exit. Marked impossible, they put two `harness_error`
+  // notes on the run per shell call (measured live).
+  "shell.created": "structure",
+  "shell.exited": "structure",
+  "shell.deleted": "structure",
 
   // ── The server's features this run turns off (impossible) ────────────────
   "credential.switched": "impossible",
@@ -143,14 +171,10 @@ export const OPENCODE_EVENT_DISPOSITION: Readonly<Record<string, Disposition>> =
   "pty.deleted": "impossible",
   "pty.exited": "impossible",
   "pty.updated": "impossible",
-  "shell.created": "impossible",
-  "shell.deleted": "impossible",
-  "shell.exited": "impossible",
   "tui.command.execute": "impossible",
   "tui.prompt.append": "impossible",
   "tui.session.select": "impossible",
   "tui.toast.show": "impossible",
-  "websearch.updated": "impossible",
 };
 
 /** Where one event kind lands, or `undefined` for a kind the table does not

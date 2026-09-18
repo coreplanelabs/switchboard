@@ -48,6 +48,7 @@ import {
   type HarnessDeps,
   type HarnessRecord,
   type HarnessRun,
+  SAID_ONCE_SUFFIX,
 } from "../contract.js";
 import type { ProxyRefusalCode } from "../../../channels/modelProxy.js";
 import {
@@ -450,6 +451,10 @@ export class OpenCodeBridge {
    *  What the budget note says the run was at when no tool call is open
    *  (`doingNow`), as pi's bridge reads it off `turn_start`. */
   private stepOpen = false;
+  /** The event kinds a `harness_error` has named — a kind the table does not
+   *  know, a kind marked impossible — so the note is said once per kind
+   *  (`noteKindOnce`), never once per arrival. */
+  private readonly namedKinds = new Set<string>();
   /** callId → the tool name the model gave it (from `session.tool.input.started`). */
   private readonly toolNames = new Map<string, string>();
   /** The open calls' spans, by callId. */
@@ -809,6 +814,15 @@ export class OpenCodeBridge {
     this.emit({ type: "run_note", kind, summary });
   }
 
+  /** A `harness_error` naming an event kind, said once per kind for the run
+   *  (harness.md item 4): the first arrival is the finding; the rest of a flood
+   *  of the same kind is not more news and would bury the record. */
+  private noteKindOnce(eventKind: string, summary: string): void {
+    if (this.namedKinds.has(eventKind)) return;
+    this.namedKinds.add(eventKind);
+    this.note("harness_error", `${summary}${SAID_ONCE_SUFFIX}`);
+  }
+
   private emit(event: RunEvent): void {
     this.deps.emit(event.at === undefined ? { ...event, at: this.deps.clock() } : event);
   }
@@ -836,14 +850,14 @@ export class OpenCodeBridge {
     const out: OpenCodeBridgeObservation = { replies: [], settled: false };
     const disposition = openCodeDispositionOf(event.type);
     if (disposition === undefined) {
-      this.note(
-        "harness_error",
+      this.noteKindOnce(
+        event.type,
         `OpenCode emitted an event kind this build does not know: ${redactAndCap(event.type, 80)}`,
       );
       return out;
     }
     if (disposition === "impossible") {
-      this.note("harness_error", `OpenCode emitted ${event.type}, which this run's configuration turns off`);
+      this.noteKindOnce(event.type, `OpenCode emitted ${event.type}, which this run's configuration turns off`);
       return out;
     }
     const data = isRecord(event.data) ? event.data : {};

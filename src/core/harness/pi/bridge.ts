@@ -24,7 +24,7 @@ import {
 } from "../../runEvents.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
 import type { Clock, Span } from "../../trace/types.js";
-import type { Disposition } from "../contract.js";
+import { type Disposition, SAID_ONCE_SUFFIX } from "../contract.js";
 import { MODEL_CALL_IN_FLIGHT } from "../windDown.js";
 import { BLOCKED_AT_DOOR_PREFIX, BLOCKED_UNAVAILABLE_PREFIX } from "./extensionSource.js";
 import { piAnsweredWithoutRunning, type PiEvent } from "./protocol.js";
@@ -185,6 +185,10 @@ export class PiBridge {
    *  were vetted by the bot generation that died, and this one never heard. */
   judgeGate = true;
   private summarizationRetries = 0;
+  /** The event kinds a `harness_error` has named — a kind the table does not
+   *  know, a kind marked impossible — so the note is said once per kind
+   *  (`noteKindOnce`), never once per arrival. */
+  private readonly namedKinds = new Set<string>();
   /** The span a starting call's `tool.<name>` opens under: the run's
    *  `run.agent` for the loop, a follow-up turn's own for its duration
    *  (`under`; harness-pi item 14). */
@@ -227,11 +231,14 @@ export class PiBridge {
     const out: BridgeObservation = { replies: [], settled: false };
     const disposition = PI_EVENT_DISPOSITION[event.type];
     if (disposition === undefined) {
-      this.note("harness_error", `pi emitted an event kind this build does not know: ${redactAndCap(event.type, 80)}`);
+      this.noteKindOnce(
+        event.type,
+        `pi emitted an event kind this build does not know: ${redactAndCap(event.type, 80)}`,
+      );
       return out;
     }
     if (disposition === "impossible") {
-      this.note("harness_error", `pi emitted ${event.type}, which the harness turns off at start`);
+      this.noteKindOnce(event.type, `pi emitted ${event.type}, which the harness turns off at start`);
       return out;
     }
     switch (event.type) {
@@ -292,6 +299,15 @@ export class PiBridge {
   private note(kind: RunNoteKind, summary: string): void {
     this.deps.onProgress?.(summary);
     this.emit({ type: "run_note", kind, summary });
+  }
+
+  /** A `harness_error` naming an event kind, said once per kind for the run
+   *  (harness.md item 4): the first arrival is the finding; the rest of a flood
+   *  of the same kind is not more news and would bury the record. */
+  private noteKindOnce(eventKind: string, summary: string): void {
+    if (this.namedKinds.has(eventKind)) return;
+    this.namedKinds.add(eventKind);
+    this.note("harness_error", `${summary}${SAID_ONCE_SUFFIX}`);
   }
 
   private emit(event: RunEvent): void {

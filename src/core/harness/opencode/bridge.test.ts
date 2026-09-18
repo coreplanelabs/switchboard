@@ -96,7 +96,7 @@ describe("OPENCODE_EVENT_DISPOSITION — every event the server streams is decid
     expect(new Set(Object.keys(OPENCODE_EVENT_DISPOSITION))).toEqual(expected);
   });
 
-  it("classifies the record's kinds as the clause needs: the tool call mapped, the deltas folded, the step boundaries structure, the asks and failures notes, the reverts and shell features impossible; an rpc event is folded and an unknown kind is undecided", () => {
+  it("classifies the record's kinds as the clause needs: the tool call mapped, the deltas folded, the step boundaries and the shell tool's own process structure, the asks and failures notes, the reverts and the session's shell messages impossible; an rpc event is folded and an unknown kind is undecided", () => {
     expect(openCodeDispositionOf("session.tool.called")).toBe("mapped");
     expect(openCodeDispositionOf("session.tool.success")).toBe("mapped");
     expect(openCodeDispositionOf("session.compaction.ended")).toBe("mapped");
@@ -112,7 +112,20 @@ describe("OPENCODE_EVENT_DISPOSITION — every event the server streams is decid
     expect(openCodeDispositionOf("permission.asked")).toBe("note");
     expect(openCodeDispositionOf("session.execution.failed")).toBe("note");
     expect(openCodeDispositionOf("session.revert.staged")).toBe("impossible");
+    // The `shell` tool's own process lifecycle — the server's Shell service
+    // says it for every shell call the model makes — lands nowhere of its
+    // own: the call's rows already carry the command and the exit.
+    expect(openCodeDispositionOf("shell.created")).toBe("structure");
+    expect(openCodeDispositionOf("shell.exited")).toBe("structure");
+    expect(openCodeDispositionOf("shell.deleted")).toBe("structure");
+    // The server's provider catalogue changing is its own shape, denied tool or not.
+    expect(openCodeDispositionOf("websearch.updated")).toBe("structure");
+    // A shell command a client posts INTO the session as a message of its own
+    // is something no one does under the run; the ptys stay off too.
     expect(openCodeDispositionOf("session.shell.started")).toBe("impossible");
+    expect(openCodeDispositionOf("session.shell.ended")).toBe("impossible");
+    expect(openCodeDispositionOf("pty.created")).toBe("impossible");
+    expect(openCodeDispositionOf("persistent-pty.added")).toBe("impossible");
     expect(openCodeDispositionOf("rpc.some.plugin.call")).toBe("folded");
     expect(openCodeDispositionOf("session.made.up.kind")).toBeUndefined();
   });
@@ -332,13 +345,31 @@ describe("the gate's honest cannot, the compaction row, the budget stop, the unk
     expect(mentions.providerError).toMatch(/upstream/);
   });
 
-  it("an event kind the table does not name is a harness_error note naming it; an impossible kind is one too", () => {
+  it("an event kind the table does not name is a harness_error note naming it; an impossible kind is one too — each said once per kind, however often the kind arrives", () => {
     const { bridge, events } = harness();
     bridge.observe(ev("session.made.up.kind"));
     bridge.observe(ev("session.revert.staged", { sessionID: "ses_c" }));
-    const errs = notes(events).filter((n) => n.kind === "harness_error");
-    expect(errs.some((n) => n.summary.includes("session.made.up.kind"))).toBe(true);
-    expect(errs.some((n) => n.summary.includes("session.revert.staged"))).toBe(true);
+    // The same kinds again: the first arrival was the finding; a flood of one
+    // wrong table entry is not one note per event (measured live: two notes
+    // per shell call while `shell.created`/`shell.exited` sat as impossible).
+    bridge.observe(ev("session.made.up.kind"));
+    bridge.observe(ev("session.revert.staged", { sessionID: "ses_c" }));
+    bridge.observe(ev("session.made.up.kind"));
+    const errs = () => notes(events).filter((n) => n.kind === "harness_error");
+    expect(errs().map((n) => n.summary)).toEqual([
+      "OpenCode emitted an event kind this build does not know: session.made.up.kind (said once: later events of this kind are not noted)",
+      "OpenCode emitted session.revert.staged, which this run's configuration turns off (said once: later events of this kind are not noted)",
+    ]);
+    // Another kind of each class is its own first arrival, said once too.
+    bridge.observe(ev("session.forked", { sessionID: "ses_c" }));
+    bridge.observe(ev("session.other.made.up.kind"));
+    bridge.observe(ev("session.forked", { sessionID: "ses_c" }));
+    expect(errs().map((n) => n.summary.replace(/ \(said once.*$/, ""))).toEqual([
+      "OpenCode emitted an event kind this build does not know: session.made.up.kind",
+      "OpenCode emitted session.revert.staged, which this run's configuration turns off",
+      "OpenCode emitted session.forked, which this run's configuration turns off",
+      "OpenCode emitted an event kind this build does not know: session.other.made.up.kind",
+    ]);
   });
 });
 

@@ -35,8 +35,15 @@ import type { ToolRuleContext } from "./pi/toolRules.js";
  *  record carries), `impossible` (the harness never causes it — a harness error
  *  if it arrives anyway), `note` (a `run_note`). A kind a harness's table does
  *  not name is a `harness_error` note naming it, so a harness bump shows in
- *  the first run's record. */
+ *  the first run's record — said once per kind (`SAID_ONCE_SUFFIX`). */
 export type Disposition = "mapped" | "structure" | "folded" | "impossible" | "note";
+
+/** The tail of a `harness_error` that names an event kind — one the table does
+ *  not name, one marked `impossible` that arrived all the same. Each bridge
+ *  says such a note once per kind for the run (its `namedKinds`): the first
+ *  arrival is the finding, and one wrong table entry must be one line on the
+ *  record, never one per event (measured live: two notes per shell call). */
+export const SAID_ONCE_SUFFIX = " (said once: later events of this kind are not noted)";
 
 /** What a run's row remembers about its pi (harness-pi.md item 8), so the next
  *  bot generation finds it: read by `harnessFactsOf`, written by pi's loop. */

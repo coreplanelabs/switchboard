@@ -1622,7 +1622,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         .map((n) => n.summary),
     ).toEqual([
       windDownFailureNote(reason),
-      "OpenCode emitted an event kind this build does not know: made_up_late_kind",
+      "OpenCode emitted an event kind this build does not know: made_up_late_kind (said once: later events of this kind are not noted)",
     ]);
     // The earlier execution's compaction is record state, landed in every mode.
     expect(notes(o.events).some((n) => n.kind === "compacted")).toBe(true);
