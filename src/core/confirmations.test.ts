@@ -112,6 +112,19 @@ function contract(name: string, make: () => { store: ConfirmationStore; tick: (m
       expect((await store.consume("other", ["slack:UREQ"])).ok).toBe(true);
     });
 
+    it("pendingByThread answers the thread's unexpired row — the person it waits on rides it — none once expired, none for a thread with no row", async () => {
+      const { store, tick } = make();
+      expect(await store.pendingByThread("slack:CX:1.0")).toBeUndefined();
+      const row = await store.put(pending("p1"), TTL);
+      const read = await store.pendingByThread("slack:CX:1.0");
+      expect(read).toEqual(row);
+      expect(read?.message.userId).toBe("slack:UREQ");
+      // A read deletes nothing: the same row answers again.
+      expect(await store.pendingByThread("slack:CX:1.0")).toEqual(row);
+      tick(TTL);
+      expect(await store.pendingByThread("slack:CX:1.0")).toBeUndefined();
+    });
+
     it("a question's redispatch row round-trips whole: put, consume for the requester, the same fields back", async () => {
       const { store } = make();
       const row = await store.put(
@@ -170,6 +183,11 @@ contract("WorkerConfirmationStore over a scripted object", () => {
       });
       return answer({ ok: true, expiresAt });
     }
+    if (path === "/config/confirmations/pending-by-thread") {
+      const found = [...rows.entries()].find(([, r]) => r.threadKey === b.threadKey);
+      if (!found || found[1].expiresAt <= clock()) return answer({ row: null });
+      return answer({ row: { id: found[0], ...found[1] } });
+    }
     const actorIds = b.actorIds as string[];
     // The cancel-by-thread route: the thread's row under the same requester check.
     const id =
@@ -227,13 +245,24 @@ describe("WorkerConfirmationStore (the ConfigDO confirmations client)", () => {
         },
       }),
       "/config/confirmations/cancel": () => ({ ok: true }),
+      "/config/confirmations/pending-by-thread": () => ({
+        row: {
+          id: "c1",
+          threadKey: "slack:CX:1.0",
+          requester: "slack:UREQ",
+          expiresAt: 4_200_000,
+          body: pending("c1"),
+        },
+      }),
     });
     const row = await store.put(pending("c1"), TTL);
     expect(row).toEqual({ ...pending("c1"), expiresAt: 4_200_000 });
+    expect(await store.pendingByThread("slack:CX:1.0")).toEqual(row);
     expect(await store.consume("c1", ["slack:UREQ", "access:sub"])).toEqual({ ok: true, row });
     expect(await store.cancel("c1", ["slack:UREQ"])).toEqual({ ok: true });
     expect(calls.map((c) => c.path)).toEqual([
       "/config/confirmations/put",
+      "/config/confirmations/pending-by-thread",
       "/config/confirmations/consume",
       "/config/confirmations/cancel",
     ]);
@@ -245,7 +274,8 @@ describe("WorkerConfirmationStore (the ConfigDO confirmations client)", () => {
       body: pending("c1"),
       ttlMs: TTL,
     });
-    expect(calls[1]!.body).toEqual({ id: "c1", actorIds: ["slack:UREQ", "access:sub"] });
+    expect(calls[1]!.body).toEqual({ threadKey: "slack:CX:1.0" });
+    expect(calls[2]!.body).toEqual({ id: "c1", actorIds: ["slack:UREQ", "access:sub"] });
     expect(store.describe()).toContain("memory.test");
   });
 
@@ -283,12 +313,17 @@ describe("WorkerConfirmationStore (the ConfigDO confirmations client)", () => {
       ok: false,
       refused: "foreign",
     });
+    // pending-by-thread: a thread with no row (or an expired one) answers `row: null`, read as none.
+    const empty = fake({ "/config/confirmations/pending-by-thread": () => ({ row: null }) });
+    expect(await empty.store.pendingByThread("slack:CX:1.0")).toBeUndefined();
     const malformed = fake({
       "/config/confirmations/consume": () => ({ row: { id: "c1", body: { command: 7 } } }),
       "/config/confirmations/put": () => ({ ok: true }),
+      "/config/confirmations/pending-by-thread": () => ({ row: { id: "c1", body: { command: 7 } } }),
     });
     await expect(malformed.store.consume("c1", ["slack:UREQ"])).rejects.toThrow(/confirmation store/);
     await expect(malformed.store.put(pending("c1"), TTL)).rejects.toThrow(/confirmation store/);
+    await expect(malformed.store.pendingByThread("slack:CX:1.0")).rejects.toThrow(/confirmation store/);
     const down = fake({ "/config/confirmations/put": () => ({ error: "unavailable" }) }, 503);
     await expect(down.store.put(pending("c1"), TTL)).rejects.toThrow(/confirmation store answered HTTP 503/);
     const unreachable = new WorkerConfirmationStore({

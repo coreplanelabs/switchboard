@@ -779,6 +779,27 @@ export class ConfigDO extends DurableObject<Env> {
     });
   }
 
+  /** The thread's pending row when one exists and is inside its ttl, else
+   *  null. A pure read: expiry is checked here on this object's clock and
+   *  nothing is deleted — nothing sweeps, and a consume still finds the
+   *  expired row to name `expired`. */
+  async pendingConfirmationByThread(threadKey: string, now: number): Promise<ConfirmationRow | null> {
+    const row = this.sql
+      .exec<{ id: string; requester: string; expires_at: number; body: string }>(
+        `SELECT id, requester, expires_at, body FROM confirmations WHERE thread_key = ?`,
+        threadKey,
+      )
+      .toArray()[0];
+    if (!row || row.expires_at <= now) return null;
+    return {
+      id: row.id,
+      threadKey,
+      requester: row.requester,
+      expiresAt: row.expires_at,
+      body: parseStored(row.body, isJsonObject) ?? {},
+    };
+  }
+
   private readConfirmation(id: string): ConfirmationRow | undefined {
     const row = this.sql
       .exec<{ thread_key: string; requester: string; expires_at: number; body: string }>(
@@ -1199,6 +1220,7 @@ const CONFIG_ROUTES = new Set([
   "/config/confirmations/consume",
   "/config/confirmations/cancel",
   "/config/confirmations/cancel-by-thread",
+  "/config/confirmations/pending-by-thread",
 ]);
 const TICKET_STATES: ReadonlySet<string> = new Set<McpTicketState>(MCP_TICKET_STATES);
 /** A confirmation id as the bot mints it (a UUID) — one token, no whitespace, bounded. */
@@ -1283,6 +1305,15 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
       const outcome = await dO.cancelConfirmation(click.id, click.actorIds);
       console.log(`[config/confirmations/cancel] ${click.id} ${"ok" in outcome ? "cancelled" : outcome.refused}`);
       return json(outcome);
+    }
+    case "/config/confirmations/pending-by-thread": {
+      if (typeof b.threadKey !== "string" || !b.threadKey) return json({ error: "threadKey required" }, 400);
+      // The stub types this result `never`: workers-types' Serializable rejects
+      // the row's opaque `Record<string, unknown>` body. What arrives is the
+      // object's declared result, so the boundary restates it.
+      const row = (await dO.pendingConfirmationByThread(b.threadKey, systemClock())) as ConfirmationRow | null;
+      console.log(`[config/confirmations/pending-by-thread] ${b.threadKey} ${row === null ? "none" : row.id}`);
+      return json({ row });
     }
     case "/config/confirmations/cancel-by-thread": {
       if (typeof b.threadKey !== "string" || !b.threadKey) return json({ error: "threadKey required" }, 400);

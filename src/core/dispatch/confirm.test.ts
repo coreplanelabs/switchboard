@@ -289,6 +289,7 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
       put: (row, ttl) => d.store.put(row, ttl),
       cancel: (id, ids) => d.store.cancel(id, ids),
       cancelByThread: (key, ids) => d.store.cancelByThread(key, ids),
+      pendingByThread: (key) => d.store.pendingByThread(key),
       describe: () => "throwing",
       consume: async () => {
         throw new Error("store down");
@@ -432,6 +433,7 @@ describe("cancelPending — the other button", () => {
         put: (row, ttl) => d.store.put(row, ttl),
         consume: (id, ids) => d.store.consume(id, ids),
         cancelByThread: (key, ids) => d.store.cancelByThread(key, ids),
+        pendingByThread: (key) => d.store.pendingByThread(key),
         describe: () => "throwing",
         cancel: async () => {
           throw new Error("store down");

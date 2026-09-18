@@ -27,6 +27,7 @@ import type { ConfirmationOffer, IncomingMessage } from "./types.js";
 //   POST /config/confirmations/consume {id, actorIds} → {row: {id, threadKey, requester, expiresAt, body}} | {refused: used | expired | foreign}
 //   POST /config/confirmations/cancel  {id, actorIds} → {ok} | {refused: used | foreign}
 //   POST /config/confirmations/cancel-by-thread {threadKey, actorIds} → {ok} | {refused: used | foreign}
+//   POST /config/confirmations/pending-by-thread {threadKey} → {row: {id, threadKey, requester, expiresAt, body} | null}   (a read; an expired row reads as none and is not deleted)
 
 /** A routed write's pending confirmation as the store holds it (record 0044):
  *  the message the sentence arrived as (its identity, thread and relay fields
@@ -103,6 +104,11 @@ export interface ConfirmationStore {
    *  answer supersedes the button (record 0054), so a click cannot follow it.
    *  A thread with no row is `used`. */
   cancelByThread(threadKey: string, actorIds: readonly string[]): Promise<CancelOutcome>;
+  /** The thread's pending row when one exists and is inside its ttl — the
+   *  row's `message.userId` names the person it waits on — else none. A pure
+   *  read: expiry is checked by this reader on the store's clock and nothing
+   *  is deleted, so a consume still finds the expired row to name `expired`. */
+  pendingByThread(threadKey: string): Promise<Confirmation | undefined>;
   describe(): string;
 }
 
@@ -290,6 +296,12 @@ export class InMemoryConfirmationStore implements ConfirmationStore {
     if (id === undefined) return { ok: false, refused: "used" };
     return judge(this.rows, id, actorIds, this.clock(), "cancel") as CancelOutcome;
   }
+  async pendingByThread(threadKey: string): Promise<Confirmation | undefined> {
+    const id = threadRowId(this.rows, threadKey);
+    const row = id === undefined ? undefined : this.rows.get(id);
+    if (!row || row.expiresAt <= this.clock()) return undefined;
+    return structuredClone(row);
+  }
   describe(): string {
     return "in-memory";
   }
@@ -345,6 +357,13 @@ export class FileConfirmationStore implements ConfirmationStore {
     const out = judge(rows, id, actorIds, this.clock(), "cancel") as CancelOutcome;
     this.write(rows);
     return out;
+  }
+  async pendingByThread(threadKey: string): Promise<Confirmation | undefined> {
+    const rows = this.read();
+    const id = threadRowId(rows, threadKey);
+    const row = id === undefined ? undefined : rows.get(id);
+    if (!row || row.expiresAt <= this.clock()) return undefined;
+    return row;
   }
   describe(): string {
     return `file ${this.path}`;
@@ -402,6 +421,16 @@ export class WorkerConfirmationStore implements ConfirmationStore {
     if (body.ok === true) return { ok: true };
     if (body.refused === "used" || body.refused === "foreign") return { ok: false, refused: body.refused };
     throw new Error("confirmation store answered a cancel-by-thread outside its contract");
+  }
+  async pendingByThread(threadKey: string): Promise<Confirmation | undefined> {
+    const body = await this.post("/config/confirmations/pending-by-thread", { threadKey });
+    if (body.row === null) return undefined;
+    const stored = isRecord(body.row) ? body.row : undefined;
+    const row = parseConfirmation(
+      stored && isRecord(stored.body) ? { ...stored.body, expiresAt: stored.expiresAt } : undefined,
+    );
+    if (!row) throw new Error("confirmation store answered a pending-by-thread outside its contract");
+    return row;
   }
   describe(): string {
     return `state Worker ${this.baseUrl} (ConfigDO confirmations)`;

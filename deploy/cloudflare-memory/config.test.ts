@@ -271,6 +271,32 @@ describe("ConfigDO confirmations (docs/reference/specs/routing-and-config.md ite
     ).toBe(elsewhere);
   });
 
+  it("pending-by-thread answers the thread's unexpired row without deleting it, null for a thread with none, and null when the thread's row is past its expiry — the object's clock decides", async () => {
+    const thread = `slack:CX:${key()}`;
+    const id = `c-${key()}`;
+    expect((await post("/config/confirmations/pending-by-thread", { threadKey: thread })).data).toEqual({ row: null });
+    const put = await post("/config/confirmations/put", row(id, thread));
+    const expiresAt = put.data.expiresAt as number;
+    const pending = { id, threadKey: thread, requester, expiresAt, body: { command: "config.set" } };
+    expect((await post("/config/confirmations/pending-by-thread", { threadKey: thread })).data).toEqual({
+      row: pending,
+    });
+    // A read deletes nothing: the same row answers again and still consumes.
+    expect((await post("/config/confirmations/pending-by-thread", { threadKey: thread })).data).toEqual({
+      row: pending,
+    });
+    expect(
+      ((await post("/config/confirmations/consume", { id, actorIds: [requester] })).data.row as { id: string }).id,
+    ).toBe(id);
+    // An expired row present reads as none — the reader checks expiry, nothing sweeps — and stays for the consume to name `expired`.
+    const expired = `c-${key()}`;
+    await post("/config/confirmations/put", { ...row(expired, thread), ttlMs: 0 });
+    expect((await post("/config/confirmations/pending-by-thread", { threadKey: thread })).data).toEqual({ row: null });
+    expect((await post("/config/confirmations/consume", { id: expired, actorIds: [requester] })).data).toMatchObject({
+      refused: "expired",
+    });
+  });
+
   it("cancel deletes the row for the requester and refuses a stranger; a cancelled or unknown id reads `used`", async () => {
     const id = `c-${key()}`;
     await post("/config/confirmations/put", row(id, `slack:CX:${key()}`));
@@ -334,5 +360,7 @@ describe("ConfigDO confirmations (docs/reference/specs/routing-and-config.md ite
     expect(
       (await post("/config/confirmations/cancel-by-thread", { threadKey: `slack:CX:${key()}`, actorIds: 7 })).status,
     ).toBe(400);
+    expect((await post("/config/confirmations/pending-by-thread", { threadKey: "" })).status).toBe(400);
+    expect((await post("/config/confirmations/pending-by-thread", { threadKey: 7 })).status).toBe(400);
   });
 });
