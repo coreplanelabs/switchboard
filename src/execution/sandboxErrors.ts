@@ -170,7 +170,7 @@ export const SANDBOX_START_WAIT_MAX_MS = 10 * 60_000;
 export const SANDBOX_START_BACKOFF_MS: readonly number[] = [5_000, 10_000, 15_000];
 
 /** The reasons whose answers the executor re-sends after a wait — a full
- *  fleet, a starting container, a loaded container that did not accept the
+ *  fleet, a starting container, a container that did not accept the
  *  connection (`runtime-busy`, below). Every other `reason` — or none — is an
  *  ordinary failure after one send. */
 export type WaitReason = typeof FLEET_BUSY_REASON | typeof SANDBOX_STARTING_REASON | typeof RUNTIME_BUSY_REASON;
@@ -323,43 +323,46 @@ export function runtimeUnreachableExecAnswer(message: string): {
   return { error: message, reason: RUNTIME_UNREACHABLE_REASON, stdout: "", stderr: message, exitCode: 127 };
 }
 
-// ---- A loaded container that did not accept the connection (docs/reference/specs/execution.md item 28) ----
+// ---- A container that did not accept the connection (docs/reference/specs/execution.md item 28) ----
 //
 // The container's runtime accepts one control connection per SDK call. When
-// the container is saturated by a command already running in it (a whole
-// repository's verify on every core), the platform's own accept allowance —
-// a few seconds, not the SDK's 30 s connect timeout — runs out first, and the
-// platform's fetch to the container's port throws a plain `Error` reading
-// `Container is taking too long to accept the connection; the application
-// could be overwhelmed with load`. Nothing ran: the SDK was still connecting,
-// before any process was started. Seen live: the harness's one-second poll of
-// its transcript log met it three minutes into a verify, the failure reached
-// the bot as an ordinary in-body error, and a run that had passed its gate once
-// was torn down while its container answered the next command a second later.
-// The Worker names the condition instead, with a machine token the executor
-// re-sends on — the identical request, once the container accepts again.
+// the platform's fetch to the container's port is not accepted inside the
+// platform's own allowance — a few seconds, not the SDK's 30 s connect timeout
+// — it throws a plain `Error` reading `Container is taking too long to accept
+// the connection; the application could be overwhelmed with load`. Nothing
+// ran: the SDK was still connecting, before any process was started. The
+// platform's words name a cause it never measured: seen live under a command
+// saturating every core (a whole repository's verify, three minutes in) AND
+// on an idle container (a review thread running `sed` and `grep`, the
+// connection accepted 0.9 s before and 0.8 s after the refused one). Both
+// times the harness's one-second poll of its transcript log met it, the
+// failure reached the bot as an ordinary in-body error, and the run was torn
+// down while its container answered the next command a second later. The
+// Worker names the refusal instead — never its cause — with a machine token
+// the executor re-sends on: the identical request, once the container accepts.
 
 /** The named reason the Worker answers with, beside `fleet-busy` and `sandbox-starting`. */
 export const RUNTIME_BUSY_REASON = "runtime-busy" as const;
 
 /** What the token means, in the words the model and the operator see. */
 export const RUNTIME_BUSY_EXPLANATION =
-  "the thread's sandbox container is running but did not accept the connection in time — it is loaded by what already runs in it; nothing ran, the request is re-sent once it accepts";
+  "the thread's sandbox container is running but did not accept the connection inside the platform's allowance — nothing ran, the request is re-sent once it accepts";
 
 /** The platform's wording for a container port that did not accept the SDK's
  *  connect inside the platform's own allowance. A wording, not a type: the
  *  platform throws a plain `Error`, and the SDK hands it on unwrapped. */
 export const RUNTIME_BUSY_WORDING = /taking too long to accept the connection/i;
 
-/** The executor waits at most this long for a loaded container to accept,
- *  capped by the operation's own budget: what loads the container is one of
- *  the thread's own commands, bounded like every command, and a poll that
+/** The executor waits at most this long for the container to accept, capped
+ *  by the operation's own budget: when a command of the thread's own is what
+ *  holds the container, it is bounded like every command, and a poll that
  *  waits past its own budget has nothing left to run. */
 export const RUNTIME_BUSY_WAIT_MAX_MS = 5 * 60_000;
 
 /** Backoff between re-sends: 3 s, 5 s, then 10 s. Each refusal already cost
- *  the platform's allowance (about six seconds live), and a loaded container
- *  frees its cores for moments at a time, so the poll stays dense. */
+ *  the platform's allowance (about six seconds live), and the container has
+ *  accepted again within a second of every refusal seen, so the poll stays
+ *  dense. */
 export const RUNTIME_BUSY_BACKOFF_MS: readonly number[] = [3_000, 5_000, 10_000];
 
 /** The name the Worker's typed error carries across the Durable Object RPC boundary. */
@@ -381,9 +384,10 @@ export function runtimeBusyMessage(f: { containerId: string; cause: string }): s
   return `${RUNTIME_BUSY_REASON}: ${RUNTIME_BUSY_EXPLANATION} (container ${f.containerId}; ${f.cause.trim() || "no detail from the platform"})`;
 }
 
-/** The Worker's typed error for a loaded container, built inside the Durable
- *  Object and read by the fetch handler across the RPC boundary — matched by
- *  name and by its message token, never by `instanceof`. */
+/** The Worker's typed error for a container that did not accept the
+ *  connection, built inside the Durable Object and read by the fetch handler
+ *  across the RPC boundary — matched by name and by its message token, never
+ *  by `instanceof`. */
 export class SandboxRuntimeBusyError extends Error {
   readonly reason = RUNTIME_BUSY_REASON;
   constructor(readonly facts: { containerId: string; cause: string }) {
@@ -417,10 +421,12 @@ export function runtimeBusyExecAnswer(message: string): {
 }
 
 /** The message `ExecCapacityError` carries when the container never accepted
- *  inside the wait: the wait, what loads it, and what to do. */
+ *  inside the wait: the wait, what was met, the one cause known and the one
+ *  ruled out, and what to do. It never tells the reader to wait for a command
+ *  that may not be running. */
 export function runtimeBusyExhaustedMessage(waitedMs: number): string {
   return (
     `sandbox busy — the thread's container did not accept a connection within ${Math.round(waitedMs / 1000)}s ` +
-    "(a command already running in it has every core); wait for it to finish, then retry"
+    "(the platform refused every connect of the wait; a command saturating its cores is one cause, an idle container has met it too); retry"
   );
 }

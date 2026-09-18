@@ -194,7 +194,7 @@ describe("sandbox Worker wiring (static)", () => {
   // output of a running command, whose re-send would run it twice; the file
   // routes throw the typed error and the fetch handler answers 503 with the
   // token; a busy error that escaped the Durable Object is still named.
-  it("a loaded container's refusal is the runtime-busy token at the spawn and the warm-up alone, the file routes' 503, and named after the RPC boundary", () => {
+  it("a refused connect is the runtime-busy token at the spawn and the warm-up alone, the file routes' 503, and named after the RPC boundary", () => {
     // The spawn's catch and the warm-up's catch go through `spawnFailure`; the output's catch does not.
     expect(worker).toMatch(
       /proc = await createExtensionProcessSandbox\(this\)\.exec\(argv, \{ env: envVars, timeout: backstopMs \}\);\s*\} catch \(err\) \{[^}]*return this\.spawnFailure\(err, startedAt\);/,

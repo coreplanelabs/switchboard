@@ -13,6 +13,7 @@ import {
   isRuntimeUnreachableError,
   RUNTIME_BUSY_BACKOFF_MS,
   RUNTIME_BUSY_ERROR_NAME,
+  RUNTIME_BUSY_EXPLANATION,
   RUNTIME_BUSY_REASON,
   RUNTIME_BUSY_WAIT_MAX_MS,
   RUNTIME_UNREACHABLE_ERROR_NAME,
@@ -315,10 +316,11 @@ describe("the runtime-unreachable answer shapes the Worker sends", () => {
   });
 });
 
-// Feature: docs/reference/specs/execution.md item 28 — a loaded container that did
-// not accept the connection is a wait, not a dead sandbox: the platform's
-// accept refusal met before a process was started is named with a token the
-// executor re-sends on.
+// Feature: docs/reference/specs/execution.md item 28 — a container that did not
+// accept the connection is a wait, not a dead sandbox: the platform's accept
+// refusal met before a process was started is named with a token the executor
+// re-sends on. The token names the refusal, never its cause: the platform's
+// words blame load, and an idle container has met them live.
 describe("the runtime-busy signal, message and error", () => {
   const PLATFORM =
     "Container is taking too long to accept the connection; the application could be overwhelmed with load";
@@ -369,13 +371,25 @@ describe("the runtime-busy signal, message and error", () => {
     expect(isRuntimeUnreachableError(err)).toBe(false);
   });
 
-  it("the wait is bounded like the fleet's and polls denser than the start's; the exhausted message names the wait and what loads the container", () => {
+  it("the wait is bounded like the fleet's and polls denser than the start's; the exhausted message names the wait and the refusal, never a cause", () => {
     expect(RUNTIME_BUSY_WAIT_MAX_MS).toBe(5 * 60_000);
     expect(RUNTIME_BUSY_BACKOFF_MS).toEqual([3_000, 5_000, 10_000]);
     expect(RUNTIME_BUSY_BACKOFF_MS[0]).toBeLessThan(SANDBOX_START_BACKOFF_MS[0]);
     expect(runtimeBusyExhaustedMessage(60_000)).toBe(
-      "sandbox busy — the thread's container did not accept a connection within 60s (a command already running in it has every core); wait for it to finish, then retry",
+      "sandbox busy — the thread's container did not accept a connection within 60s (the platform refused every connect of the wait; a command saturating its cores is one cause, an idle container has met it too); retry",
     );
+  });
+
+  // Seen live on an idle container (a review thread running `sed` and `grep`,
+  // the connection accepted 0.9 s before and 0.8 s after the refused one): the
+  // words the model and the operator read must not assert what loads the
+  // container, nor tell them to wait for a command that is not running.
+  it("neither the explanation nor the exhausted message asserts a cause the platform never proved", () => {
+    for (const text of [RUNTIME_BUSY_EXPLANATION, runtimeBusyExhaustedMessage(60_000)]) {
+      expect(text).not.toMatch(/loaded|every core|wait for it to finish|overwhelmed/i);
+      expect(text).toMatch(/did not accept/);
+    }
+    expect(RUNTIME_BUSY_EXPLANATION).toContain("nothing ran");
   });
 });
 

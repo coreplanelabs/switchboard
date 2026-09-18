@@ -57,8 +57,8 @@ export interface CloudflareSandboxOptions {
 
 /** The Worker named a condition the executor waits on — a full fleet
  *  (docs/reference/specs/execution.md item 14), a container still starting
- *  (item 23) or a loaded container that did not accept the connection (item
- *  28): in-body on the streamed /exec answer, or as an HTTP 503 on
+ *  (item 23) or a container that did not accept the connection (item 28):
+ *  in-body on the streamed /exec answer, or as an HTTP 503 on
  *  /read and /write. Matched on the machine token only — an older Worker's
  *  bare SDK message stays an ordinary in-body error (infra), so a bot
  *  deployed ahead of its Worker changes nothing. */
@@ -70,9 +70,10 @@ function waitReasonOf(res: Response, data: Record<string, unknown>): WaitReason 
  *  fleet is waited on inside the operation's own budget (a slot is the
  *  command's time); a starting container is waited on under the start budget
  *  whatever the command's budget (the start is not the command's time, and a
- *  60 s command must survive a two-minute start); a loaded container is
- *  waited on inside the operation's own budget like the fleet, on a denser
- *  ladder (the cores free up for moments, and a poll has seconds to spend). */
+ *  60 s command must survive a two-minute start); a container that did not
+ *  accept the connection is waited on inside the operation's own budget like
+ *  the fleet, on a denser ladder (it has accepted again within a second of
+ *  every refusal seen, and a poll has seconds to spend). */
 function waitPlan(
   reason: WaitReason,
   budgetMs: number,
@@ -158,8 +159,8 @@ export class CloudflareSandboxExecutor implements Executor {
 
   /** One request to the Worker, with the transport-level retries, and the
    *  wait around it for a named condition — a full fleet (item 14), a
-   *  container still starting (item 23) or a loaded container that did not
-   *  accept the connection (item 28): a busy answer re-sends the IDENTICAL request
+   *  container still starting (item 23) or a container that did not accept
+   *  the connection (item 28): a busy answer re-sends the IDENTICAL request
    *  (same route, body — env included —, headers; the envs resolved once
    *  here, so the wait never mints a new credential mid-command) after 10 s,
    *  20 s, then 30 s, until the total wait reaches `budgetMs` capped at
@@ -292,7 +293,7 @@ export class CloudflareSandboxExecutor implements Executor {
       } catch {
         // fall through with {} — the HTTP status decides
       }
-      // A full fleet, a starting container or a loaded container that did not
+      // A full fleet, a starting container or a container that did not
       // accept the connection are the answers that are re-sent (by `call`):
       // the Worker names them only before any command or file op started, so
       // nothing ran.

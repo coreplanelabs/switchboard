@@ -354,7 +354,10 @@ export const wakeStopped = (route: string): ExecInfraError =>
  *  typed shape as the wake wait's (`wakeStopped`), naming this wait. */
 export const busyStopped = (route: string): ExecInfraError =>
   classifyError(
-    new ExecInfraError(`resident ${route}: stopped waiting for a loaded container: the run was stopped`, "aborted"),
+    new ExecInfraError(
+      `resident ${route}: stopped waiting for the container to accept the connection: the run was stopped`,
+      "aborted",
+    ),
     { kind: "transport" },
   );
 
@@ -1274,8 +1277,8 @@ export class ResidentExecutor implements Executor {
       waitStarted ??= systemClock();
       return Math.max(0, waitBudget - (systemClock() - waitStarted));
     };
-    // A loaded container's refusal (resident-repos.md item 68) is waited out
-    // around every send this operation makes, inside the command's own budget.
+    // A refused connect (resident-repos.md item 68) is waited out around every
+    // send this operation makes, inside the command's own budget.
     const busyBudgetMs = Math.min(opts.waitBudgetMs ?? BASH_TIMEOUT_MS, RUNTIME_BUSY_WAIT_MAX_MS);
     const send = () => this.callWaitingOutBusy(route, body, callTimeoutMs, busyBudgetMs, signal, span);
     // Every attach an operation opens from here — the rolling wake's re-attach,
@@ -1353,7 +1356,7 @@ export class ResidentExecutor implements Executor {
    *  nothing ran and the IDENTICAL request is safe to re-send — after 3 s,
    *  5 s, then 10 s, until the total wait reaches `budgetMs` (the command's
    *  own, under the five-minute cap). Then `ExecCapacityError`, never
-   *  `ExecInfraError`: a loaded container is not a dead one. A hard stop ends
+   *  `ExecInfraError`: a container that refused a connect is not a dead one. A hard stop ends
    *  the pause at once with the stop's typed error. Every other answer is
    *  returned as it came for the caller's own rules. */
   private async callWaitingOutBusy(

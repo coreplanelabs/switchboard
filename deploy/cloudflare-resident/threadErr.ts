@@ -288,7 +288,7 @@ export function threadErrBuilders(p: ThrowPredicates): ThreadErrBuilders {
     // `isRuntimeUnreachableReason`) — and the remainder sentences.
     for (const link of selfAndCauses(err)) {
       if (isRuntimeUnreachableSignal(link)) return true;
-      // The DO's own word for a loaded container (`runtime-busy:`, item 68):
+      // The DO's own word for a refused connect (`runtime-busy:`, item 68):
       // the container accepts again in moments, so a re-probe clears it.
       if (isRuntimeBusyError(link)) return true;
       const message = messageOf(link);
@@ -315,7 +315,7 @@ export function threadErrBuilders(p: ThrowPredicates): ThreadErrBuilders {
       if (route === "/exec" && !vouched) return { error: messageOf(err), status: 409, cause: "system" };
       return runtimeReplacedErr(new RuntimeReplacedError("call", err, vouched));
     }
-    // The DO's own word for a loaded container, thrown out of a method before
+    // The DO's own word for a refused connect, thrown out of a method before
     // the stub answered (item 68): the same 503 the method answers inside, so
     // the client re-sends on the token wherever the throw was met.
     if (isRuntimeBusyError(err)) return runtimeBusyErr(err instanceof Error ? err : new Error(messageOf(err)));
@@ -326,7 +326,7 @@ export function threadErrBuilders(p: ThrowPredicates): ThreadErrBuilders {
   return { isTransientPlatformThrow, catchAllErr, threadRejectionErr };
 }
 
-/** A loaded container that did not accept the connection
+/** A container that did not accept the connection
  *  (docs/reference/specs/resident-repos.md item 68; execution.md item 28): the
  *  platform's accept refusal met at the exec choke point's SPAWN — nothing
  *  ran, the worktree is as it was — named with the wait token the client
