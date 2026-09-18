@@ -2412,7 +2412,7 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
   let outcome: DrivenRun["outcome"];
   try {
     const session = await openThroughSeam(harness, deps, run);
-    outcome = { kind: "answered", answer: session.answer };
+    outcome = { kind: "answered", answer: session.answer, ...(session.ending ? { ending: session.ending } : {}) };
     await session.end();
   } catch (err) {
     outcome = { kind: "failed", error: err instanceof Error ? err : new Error(String(err)) };

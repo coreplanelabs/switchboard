@@ -45,20 +45,20 @@ import {
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
   hardStopNote,
-  softStopAnswer,
   softStopNote,
-  timeBudgetAnswer,
   timeBudgetInstruction,
   timeBudgetNote,
-  turnGuardAnswer,
   turnGuardInstruction,
   turnGuardNote,
   turnGuardPace,
+  windDownAnswer,
+  windDownEndingOf,
   windDownFailureNote,
   wrapUpInstruction,
   wrapUpNote,
   toolCutNote,
   unlabelledAnswer,
+  type WindDownEnding,
 } from "../windDown.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
@@ -1832,6 +1832,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       throw new Error(`pi exited before the run settled${tail.trim() ? `: ${redactAndCap(tail.trim(), 400)}` : ""}`);
     };
     let answer: string;
+    let ending: WindDownEnding | undefined;
     // The wind-down owns the ending (item 15): a transport loss, or the word,
     // met while the finale was being aborted is said on the record and never
     // judged — no probe, no verdict, no thrown transport error — and the
@@ -1863,17 +1864,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         );
       }
       const text = bridge.answer() ?? "";
-      answer =
-        writeUp?.kind === "time"
-          ? timeBudgetAnswer(text, run.agent.maxMinutes, writeUpFailed)
-          : writeUp?.kind === "turns"
-            ? turnGuardAnswer(text, writeUp.pace, writeUpFailed)
-            : writeUp?.kind === "soft" || stopMode === "soft"
-              ? softStopAnswer(text, writeUpFailed)
-              : // A wrap-up pi never saw clears the label, never the failure the
-                // reader had (harness-pi item 16): the model's own text with the
-                // failure after it, or the failure alone when pi wrote nothing.
-                unlabelledAnswer(text, writeUpFailed);
+      // The ending the run loop composes the thread's answer from once its
+      // post-steps have run (item 6); the answer here is the same words with
+      // no facts. A wrap-up pi never saw clears the label, never the failure
+      // the reader had (harness-pi item 16): the model's own text with the
+      // failure after it, or the failure alone when pi wrote nothing.
+      ending = windDownEndingOf(writeUp ?? (stopMode === "soft" ? { kind: "soft" } : undefined), text, writeUpFailed);
+      answer = ending ? windDownAnswer(ending, run.agent.maxMinutes) : unlabelledAnswer(text, undefined);
     }
     // The loop is over: its `run.agent` ends here, as the native loop's does,
     // before any follow-up turn — each of those opens a `run.agent` of its own.
@@ -2110,10 +2107,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           throw new Error(`the model call failed: ${turnError}`);
         }
         const text = bridge.answer() ?? "";
-        if (writeUp?.kind === "time") return timeBudgetAnswer(text, input.maxMinutes, writeUpFailed);
-        if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
-        if (writeUp?.kind === "soft") return softStopAnswer(text, writeUpFailed);
-        return unlabelledAnswer(text, writeUpFailed);
+        const turnEnding = windDownEndingOf(writeUp, text, writeUpFailed);
+        return turnEnding ? windDownAnswer(turnEnding, input.maxMinutes) : unlabelledAnswer(text, undefined);
       } catch (err) {
         turnFailed = true;
         // The same fail-by-name as the loop's: the note carries the vanished
@@ -2130,7 +2125,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         turnSpan?.end(hardStopped || bypass || turnFailed ? "error" : "ok");
       }
     };
-    return { answer, followUp, remainingMs: () => deadline - now(), end };
+    return { answer, ...(ending ? { ending } : {}), followUp, remainingMs: () => deadline - now(), end };
   } catch (err) {
     // A loop that throws — a refused prompt, a dead pi, a failed model call, a
     // gate bypass — is a failed loop, and its span says so. The follow-ups it

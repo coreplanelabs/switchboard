@@ -52,6 +52,7 @@ import {
   type OpenCodeHarnessFacts,
 } from "../contract.js";
 import type { RunBearerStore } from "../../modelProxy/runBearers.js";
+import type { WindDownEnding } from "../windDown.js";
 import { OPENCODE_EVENT_DISPOSITION } from "./dispositions.js";
 import {
   driveOpenCode,
@@ -544,12 +545,13 @@ export async function openOpenCodeRun(
     );
 
     let answer: string;
+    let ending: WindDownEnding | undefined;
     let remainingMs: () => number;
     let hardStopped: boolean;
     let drained: unknown;
     try {
       let storeIds: string[];
-      ({ answer, remainingMs, storeIds, hardStopped } = await driveOpenCode(deps, run, conn));
+      ({ answer, ending, remainingMs, storeIds, hardStopped } = await driveOpenCode(deps, run, conn));
       for (const id of storeIds) known.add(id);
     } finally {
       draining = false;
@@ -559,6 +561,7 @@ export async function openOpenCodeRun(
 
     return {
       answer,
+      ...(ending ? { ending } : {}),
       followUp: async (input) => {
         // One more turn on the same session (the post-turns: the coding
         // description, the review's verdict), driven through the same loop over
