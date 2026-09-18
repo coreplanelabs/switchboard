@@ -54,5 +54,11 @@ export default defineConfig({
     name: "web",
     environment: "happy-dom",
     include: ["src/**/*.test.ts"],
+    // A `beforeAll` that dynamically imports a library (runPage.test.ts loads
+    // @pierre/diffs) crosses to vitest's main process, and on a saturated CI
+    // shard that import can outrun the 10 s default hook timeout while the
+    // tests around it hold a 30 s budget. Hooks get the same budget, for every
+    // web file, so a slow import cannot fail the suite.
+    hookTimeout: 30_000,
   },
 });
