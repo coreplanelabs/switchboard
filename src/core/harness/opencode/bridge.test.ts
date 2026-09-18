@@ -300,6 +300,19 @@ describe("the gate's honest cannot, the compaction row, the budget stop, the unk
     expect(failed.bridge.stepsWithHeldRefusals()).toEqual([]);
   });
 
+  it("two withdrawn calls in one cascaded step accumulate: the one re-prompt names both, consumed once", () => {
+    const { bridge } = harness();
+    // The gate refuses c1 (a push to a protected branch); the server then
+    // withdraws the step's other two asks — the cascade.
+    bridge.observe(asked("per_1", "c1", "shell", "git push origin main"));
+    bridge.askWithdrawn({ requestID: "per_2", callId: "c2", stepID: "msg_a0", reply: "once" });
+    bridge.askWithdrawn({ requestID: "per_3", callId: "c3", stepID: "msg_a0", reply: "once" });
+    const prompt = bridge.takeCascadeRePrompt();
+    expect(prompt).toMatch(/refused/);
+    expect(prompt).toMatch(/\(call c2\) and \S+ \(call c3\) were declined with it — the step ended/);
+    expect(bridge.takeCascadeRePrompt()).toBeUndefined();
+  });
+
   it("a forged `once` for an ask the bot rejected — the effect differs from the bot's recorded decision — is a bypass", () => {
     const { bridge, events } = harness();
     const ask = bridge.observe(asked("per_2", "c2", "shell", "git push origin main"));
@@ -671,9 +684,10 @@ describe("the loop — a reply that cannot be posted, and the narration's timing
   const replyPosts = (r: DrivenRun) => r.requests.filter((q) => /\/permission\/[^/]+\/reply$/.test(q.path));
   const pendingLists = (r: DrivenRun) => r.requests.filter((q) => q.method === "GET" && /\/permission$/.test(q.path));
 
-  it("a permission-reply POST the server answers 404 for an ask its pending list no longer carries — the reject cascade after a sibling's refusal — is the ask withdrawn: one ask_withdrawn note naming the sibling's refusal, no reply-failed error, the server's own reject echo no bypass, the sibling settled by the server's aborted failure, and the run ending by the server's own interrupted end", async () => {
+  it("a permission-reply POST the server answers 404 for an ask its pending list no longer carries — the reject cascade after a sibling's refusal — is the ask withdrawn: one ask_withdrawn note naming the sibling's refusal, no reply-failed error, the server's own reject echo no bypass, the sibling settled by the server's aborted failure; the step.failed {aborted} is not a harness_error; the loop re-prompts the model with the refusal (a decline_cascade note) so the model continues — the run answers with the next step, not answerless", async () => {
     const r = await openCodeDriver({ declineCascade: true }).run(twoCalls);
     expect(r.outcome.kind).toBe("answered");
+    if (r.outcome.kind === "answered") expect(r.outcome.answer).toBe("done");
     const withdrawn = notes(r.events).filter((n) => n.kind === "ask_withdrawn");
     expect(withdrawn).toHaveLength(1);
     expect(withdrawn[0].summary).toMatch(
@@ -681,9 +695,16 @@ describe("the loop — a reply that cannot be posted, and the narration's timing
     );
     expect(withdrawn[0].summary).toMatch(/the gate refused bash \(call c1\) in the same step/);
     expect(notes(r.events).filter((n) => n.kind === "tool_refused")).toHaveLength(1);
+    // The cascade step's aborted failure is not a harness_error: it is the server's expected end.
     expect(
-      notes(r.events).filter((n) => n.kind === "harness_error" && /could not be posted|bypassed/.test(n.summary)),
+      notes(r.events).filter(
+        (n) => n.kind === "harness_error" && /Step interrupted|could not be posted|bypassed/.test(n.summary),
+      ),
     ).toEqual([]);
+    // A decline_cascade note says the loop re-prompted the model.
+    const cascade = notes(r.events).filter((n) => n.kind === "decline_cascade");
+    expect(cascade).toHaveLength(1);
+    expect(cascade[0].summary).toMatch(/re-prompting the model with the refusal/);
     // Two replies posted, one listing after the 404 — never a blind re-send.
     expect(replyPosts(r)).toHaveLength(2);
     expect(pendingLists(r)).toHaveLength(1);

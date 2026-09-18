@@ -501,7 +501,23 @@ export class OpenCodeBridge {
    *  what explains a sibling ask the server withdrew (`askWithdrawn`). A
    *  step's entry is dropped when the step ends or fails, so the map never
    *  outgrows the open step on a long run. */
-  private readonly refusedByStep = new Map<string, Array<{ callId: string; tool: string }>>();
+  private readonly refusedByStep = new Map<string, Array<{ callId: string; tool: string; message?: string }>>();
+  /** The re-prompt text for a decline cascade on the last step: set when
+   *  `askWithdrawn` sees a withdrawal whose sibling refusal is on the record —
+   *  the binary declines every other pending ask at a reject and ends their step
+   *  `session.step.failed {aborted}`, the execution ending `interrupted` — so
+   *  the loop re-prompts the model with the refusal and the cascade note,
+   *  exactly as it would after a single refusal. Consumed once by
+   *  `takeCascadeRePrompt` so the loop posts exactly one re-prompt per cascade. */
+  private cascadeRePrompt: string | undefined;
+  /** The calls the cascade withdrew on the step that produced `cascadeRePrompt`,
+   *  accumulated across withdrawals so the re-prompt names every one — reset
+   *  when a new step cascades. */
+  private cascadeWithdrawn: string[] = [];
+  /** The step id that produced the cascade (`cascadeRePrompt`): the step whose
+   *  `session.step.failed {aborted}` is the cascade's own end and is not a
+   *  harness error — the server's expected behaviour at a reject cascade. */
+  private cascadeStepID: string | undefined;
   /** requestID → the reply the bot decided, and whether the server has echoed
    *  it once. A `permission.replied` is the bot's own echo only when its
    *  requestID is here, its effect equals the decided one, and it is the first;
@@ -832,6 +848,17 @@ export class OpenCodeBridge {
     return [...this.refusedByStep.keys()];
   }
 
+  /** The re-prompt text for a decline cascade, consumed once: set when the
+   *  gate refused a call and the server declined every other pending ask of
+   *  the step (`askWithdrawn` with siblings), so the loop posts it as a
+   *  `queue` prompt after the execution ends `interrupted`. Returns `undefined`
+   *  when no cascade occurred or the text was already consumed. */
+  takeCascadeRePrompt(): string | undefined {
+    const text = this.cascadeRePrompt;
+    this.cascadeRePrompt = undefined;
+    return text;
+  }
+
   askWithdrawn(reply: OpenCodeReply): void {
     const tool = openCodeToolNameWord(this.toolNames.get(reply.callId ?? "") ?? "tool");
     const call = reply.callId ? `${tool} (call ${reply.callId})` : `request ${reply.requestID}`;
@@ -840,6 +867,23 @@ export class OpenCodeBridge {
     if (siblings.length > 0) {
       const decided = this.decidedReplies.get(reply.requestID);
       if (decided !== undefined) decided.withdrawn = true;
+      // The decline cascade: the bot refused a call and the server declined
+      // every other pending ask of the step with it, ending the step `aborted`
+      // and the execution `interrupted`. The loop re-prompts the model with the
+      // refusal so it can continue — the same path a single refusal takes — and
+      // does not end the run answerless (`cascadeRePrompt`, `takeCascadeRePrompt`).
+      // One note per withdrawal; the re-prompt is rebuilt on each so it carries
+      // ALL refusals and ALL withdrawn calls of the step — two withdrawn calls
+      // in one step produce one re-prompt naming both.
+      const refusalLines = siblings.map((s) => `${s.tool} refused${s.message ? `: ${s.message}` : ""}`).join("; ");
+      if (this.cascadeStepID === reply.stepID) this.cascadeWithdrawn.push(call);
+      else this.cascadeWithdrawn = [call];
+      const withdrawn = this.cascadeWithdrawn.join(" and ");
+      const were = this.cascadeWithdrawn.length > 1 ? "were" : "was";
+      this.cascadeRePrompt = `The gate refused the following tool call(s) in this step: ${refusalLines}. ${withdrawn} ${were} declined with it — the step ended. Continue from this refusal: try a different approach or write up what you have found so far.`;
+      // Track the step so its `session.step.failed {aborted}` is not named as
+      // a harness error — it is the server's expected end of a cascade step.
+      this.cascadeStepID = reply.stepID;
     }
     const why =
       siblings.length > 0
@@ -1069,6 +1113,20 @@ export class OpenCodeBridge {
           errorTypeOf(data.error) === "aborted"
         )
           break;
+        // The decline cascade's step aborting: the server's expected end of a
+        // step whose sibling call the gate refused — not a harness error, but the
+        // server's own closure of the step the cascade ended (`cascadeStepID`).
+        // The re-prompt the loop posts after the execution ends `interrupted`
+        // carries the refusal note; saying this as a harness_error would bury it.
+        if (
+          this.cascadeStepID !== undefined &&
+          typeof data.assistantMessageID === "string" &&
+          data.assistantMessageID === this.cascadeStepID &&
+          errorTypeOf(data.error) === "aborted"
+        ) {
+          this.cascadeStepID = undefined;
+          break;
+        }
         this.note("harness_error", `an OpenCode step failed: ${redactAndCap(errorMessage(data.error), 200)}`);
         break;
       case "session.execution.failed": {
@@ -1503,8 +1561,9 @@ export class OpenCodeBridge {
       this.note("tool_refused", `${verdict.tool} refused: ${redactAndCap(verdict.message ?? "", 300)}`);
       if (stepID !== undefined) {
         const refused = this.refusedByStep.get(stepID);
-        if (refused === undefined) this.refusedByStep.set(stepID, [{ callId, tool: verdict.tool }]);
-        else refused.push({ callId, tool: verdict.tool });
+        const entry = { callId, tool: verdict.tool, ...(verdict.message ? { message: verdict.message } : {}) };
+        if (refused === undefined) this.refusedByStep.set(stepID, [entry]);
+        else refused.push(entry);
       }
     }
     out.replies.push({
@@ -3037,8 +3096,75 @@ export async function driveOpenCode(
         } else providerError = obs.providerError;
       }
       if (obs.settled) {
-        settled = true;
-        break;
+        // The decline cascade: the server declined every other pending ask of a
+        // step whose other call(s) the gate refused, ending the step `aborted`
+        // and the execution `interrupted` — the bot did not post the interrupt
+        // (`!interrupts.cut`, `!cutInFlight`), so this settle is the server's
+        // own end after the cascade. The model never read the refusal: re-prompt
+        // it with the refusal and the cascade note, exactly as a single refusal
+        // lets it continue (harness.md item 2). The loop does not settle
+        // here; the new execution runs and its answer is the run's answer.
+        // A write-up already under way (the budget, the turn guard, a soft stop)
+        // wins: its instruction was already posted or decided, and the cascade
+        // re-prompt would start a second execution the write-up's loop would
+        // never read — the loop settles on the write-up's answer and leaves the
+        // re-prompt unconsumed.
+        const cascadePrompt = !interrupts.cut && !cutInFlight && !writeUp ? bridge.takeCascadeRePrompt() : undefined;
+        if (cascadePrompt !== undefined) {
+          // Re-prompt the model with the refusal note: a `queue` prompt, since
+          // the execution is now idle. The bridge reads the new execution's
+          // records in `earlier` mode until its `session.execution.started`
+          // makes it own again. The first-event bound is armed for the queued
+          // re-prompt: the run has not gone silent — the cascade's end was a live
+          // server action — but a re-prompt the server silently ignores would
+          // wait to the budget; the bound fails it by name first.
+          executionOwned = false;
+          note(
+            "decline_cascade",
+            `the execution ended on the decline cascade — re-prompting the model with the refusal so it can continue`,
+          );
+          const promptSeq = conn.writes ? ++conn.writes.seq : 0;
+          const rePromptReq = request(sessionRoutes["session.prompt"], {
+            text: cascadePrompt,
+            delivery: "queue",
+          }).then(
+            (admitted) => {
+              if (ended !== undefined || left) return;
+              if (admitted.status < 200 || admitted.status >= 300) {
+                const err = new OpenCodeRequestRefusedError(
+                  "decline cascade re-prompt",
+                  admitted.status,
+                  admitted.body,
+                );
+                note("harness_error", `${err.message} — the run is stopped`);
+                conn.failure.error ??= err;
+                return;
+              }
+              const id = parseAnswerId(admitted.body);
+              if (id !== undefined) {
+                conn.writes?.ownPrompts.set(id, promptSeq);
+                conn.knownMessageIds?.add(id);
+              }
+              // The admission response and the feed travel separate streams,
+              // so the new execution's `session.execution.started` can be read
+              // before this callback runs; arming then would leave `awaiting`
+              // set forever and falsely end the live run "silent". Arm only
+              // while the execution is not yet the loop's own.
+              if (!executionOwned) awaiting = { phase: "the decline cascade re-prompt", since: now() };
+            },
+            (err: unknown) => {
+              if (ended !== undefined || left) return;
+              const msg = `the decline cascade re-prompt did not reach the server: ${redactAndCap(err instanceof Error ? err.message : String(err), 200)}`;
+              note("harness_error", `${msg} — the run is stopped`);
+              conn.failure.error ??= new Error(msg);
+            },
+          );
+          conn.posted?.add(rePromptReq);
+          void rePromptReq.then(() => conn.posted?.delete(rePromptReq));
+        } else {
+          settled = true;
+          break;
+        }
       }
       check();
     }

@@ -282,7 +282,15 @@ export type RunNoteKind =
   /** The native loop's stuck-loop guard: the same tool call failed identically
    *  six times in a row and the run was forced into its write-up. Written by
    *  no loop since that loop's deletion; a record from before it may carry it. */
-  | "stuck_loop";
+  | "stuck_loop"
+  /** OpenCode's reject cascade ended the execution `interrupted` after the bot
+   *  refused one of a step's two (or more) calls — the binary declines every
+   *  other pending ask at a reject and ends the step `session.step.failed
+   *  {aborted}`, the execution ending `session.execution.interrupted` — and the
+   *  model never read the refusal. The loop re-prompts with the refusal so the
+   *  model can continue, exactly as it does after a single refusal. Published
+   *  by the OpenCode bridge. */
+  | "decline_cascade";
 
 /** Every `RunNoteKind`, as a value (a reader that filters notes by kind uses
  *  this; adding a kind to the union without adding it here is a type error). */
@@ -326,6 +334,7 @@ export const RUN_NOTE_KINDS = [
   "directory_reached",
   "budget_salvage",
   "stuck_loop",
+  "decline_cascade",
 ] as const satisfies readonly RunNoteKind[];
 type _EveryKindListed = [RunNoteKind] extends [(typeof RUN_NOTE_KINDS)[number]] ? true : never;
 const _everyKindListed: _EveryKindListed = true;

@@ -1936,6 +1936,8 @@ class ScriptedServe {
     // A step with a call the cascade declined ends as the binary's processor
     // ends it (`declineCascade`): the assistant message fails `aborted` (`Step
     // interrupted`) and the execution ends `interrupted` (`play`), no next turn.
+    // The loop re-prompts after the cascade, and the next play continues from
+    // the turn AFTER the cascaded one (`resumeTurn`).
     if (this.declinedInTurn > 0) {
       this.emitEvent("session.step.failed", {
         sessionID: this.sessionID,
@@ -1952,6 +1954,7 @@ class ScriptedServe {
         time: { created: NOW, completed: NOW },
       });
       this.interrupted = true;
+      this.resumeTurn = index + 1;
       this.emitMessages();
       return;
     }
