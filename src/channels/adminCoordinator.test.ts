@@ -2639,7 +2639,7 @@ describe("coordinator question records", () => {
       record("run-question", {
         ...TAG,
         awaitingInput: true,
-        verdict: { verdict: "approve", findings: [] },
+        verdict: { verdict: "approve", summary: "Earlier approval", findings: [] },
         reviewHead: "a".repeat(40),
         events: [
           { type: "pr_opened", number: 7, url: "https://github.com/acme/api/pull/7", created: true, seq: 1 },
@@ -2665,7 +2665,7 @@ describe("coordinator question records", () => {
         },
       },
     });
-    const run = reply!.body.run as Record<string, unknown>;
+    const run = (reply!.body as { run: Record<string, unknown> }).run;
     expect(run.verdict).toBeUndefined();
     expect(run.pr).toBeUndefined();
     expect(run.reviewPosted).toBeUndefined();
