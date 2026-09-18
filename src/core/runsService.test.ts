@@ -264,6 +264,7 @@ describe("RunsService.getRun", () => {
     const inner = new InMemoryRunStore({ now: () => NOW });
     const store: RunStore = {
       put: (r) => inner.put(r),
+      abandoned: () => {},
       get: vi.fn((id: string) => inner.get(id)),
       getSummary: vi.fn((id: string) => inner.getSummary(id)),
       list: (o) => inner.list(o),
@@ -333,6 +334,7 @@ describe("RunsService.getRun", () => {
     const inner = new InMemoryRunStore({ now: () => NOW });
     const store: RunStore = {
       put: (r) => inner.put(r),
+      abandoned: () => {},
       get: vi.fn((id: string) => inner.get(id)),
       getSummary: vi.fn((id: string) => inner.getSummary(id)),
       list: (o) => inner.list(o),
@@ -707,6 +709,7 @@ describe("RunsService.listRuns — read merge", () => {
     });
     const store: RunStore = {
       put: vi.fn(),
+      abandoned: () => {},
       get: vi.fn(async () => null),
       getSummary: vi.fn(async () => null),
       list: vi.fn(async (opts) => rows.slice(0, Math.min(200, opts.limit ?? 50))),
@@ -726,6 +729,7 @@ describe("RunsService.listRuns — read merge", () => {
   it("degrades to live rows + storeUnavailable when the store throws, warning once per failure (the message, never a token); active is unaffected", async () => {
     const broken: RunStore = {
       put: vi.fn(),
+      abandoned: () => {},
       get: vi.fn(async () => {
         throw new Error("boom");
       }),
@@ -1101,6 +1105,7 @@ describe("RunsService — summary-only persisted reads", () => {
     );
     const store: RunStore = {
       put: (r) => inner.put(r),
+      abandoned: () => {},
       get: vi.fn((id: string) => inner.get(id)),
       getSummary: vi.fn((id: string) => inner.getSummary(id)),
       list: (o) => inner.list(o),

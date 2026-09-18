@@ -72,6 +72,13 @@ export const finaleTimedOutNote = (closes: "run" | "turn" = "run"): string =>
  *  never saw it, so the answer wears no wind-down label. */
 export const wrapUpUndeliveredNote = (kind: "time" | "turns" | "soft", closes: "run" | "turn" = "run"): string =>
   `the ${wrapUpName(kind)} wrap-up instruction never reached pi — held behind a prompt in doubt when pi settled — so the ${closes} closes on pi's own answer, unlabelled`;
+/** The card's line when OpenCode's loop-end cut found the session idle (the
+ *  tool completed and the execution finished on its own during the interrupt's
+ *  round-trip; harness.md item 13): the wrap-up instruction was never posted,
+ *  so the answer is the model's own and wears no wind-down label — the same
+ *  rule as pi's undelivered wrap-up. */
+export const wrapUpNeverPostedNote = (kind: "time" | "turns" | "soft", closes: "run" | "turn" = "run"): string =>
+  `the ${wrapUpName(kind)} wrap-up instruction was never posted — the loop-end interrupt found the session idle, the execution having finished on its own — so the ${closes} closes on OpenCode's own answer, unlabelled`;
 /** The card's line when the wrap-up instruction's write failed with the
  *  control plane's reset (harness-pi item 16): a steer is never resolved by a
  *  re-send, so the finale's clock is not started on an instruction pi may
@@ -122,7 +129,26 @@ export const abortReaskedNote = (
  *  and the run's end kills pi. */
 export const abortFailedAfterEndNote = (closes: "run" | "turn" = "run", times = 0): string =>
   `the stop's write failed with the control plane's reset after the ${closes} ended${times === 0 ? "" : `, after asking pi to stop again ${timesWord(times)}`}; nothing asks again, and the run's end kills pi`;
-/** How many times, as the abort series' lines say it — one word for both lines, so they cannot drift. */
+/** The record's line, written by the session's end BEFORE the run is marked
+ *  finished, when a stop the loop or a turn (`closes`) sent is still in flight
+ *  as the session ends (harness-pi item 16): its landing is unheard, and a
+ *  landing after this line is not recorded — the registry drops content on a
+ *  finished run — so this is the last word on the stop. What ended pi is the
+ *  `ending`: the session's kill, or — on a container replaced under the run,
+ *  where no kill runs — the replacement, whose relaunch the run loop carries
+ *  on with. With the count of re-asks (`times`) on it, as the series' other
+ *  closing lines carry. */
+export const abortUnheardAtEndNote = (
+  closes: "run" | "turn" = "run",
+  times = 0,
+  ending: "kill" | "replaced" = "kill",
+): string => {
+  const asked = times === 0 ? "" : `, after asking pi to stop again ${timesWord(times)}`;
+  return ending === "kill"
+    ? `the run ended with the ${closes}'s stop still in flight, its landing unheard${asked}; the kill ended pi`
+    : `the container was replaced with the ${closes}'s stop still in flight, its landing unheard${asked}; the relaunch carries on`;
+};
+/** How many times, as the abort series' lines say it — one word for all the series' lines, so they cannot drift. */
 const timesWord = (n: number): string => (n === 1 ? "once" : `${n} times`);
 const wrapUpName = (kind: "time" | "turns" | "soft"): string =>
   kind === "time" ? "time-budget" : kind === "turns" ? "turn-guard" : "soft-stop";

@@ -19,16 +19,18 @@ import { RunRegistry } from "../../runRegistry.js";
 import { followUpPrompt } from "../../threadAdmission.js";
 import { PROXY_PROVIDER } from "../pi/process.js";
 import { FakeHarnessContainer } from "../testing/fakeContainer.js";
-import type { DrivenRun, RunScript } from "../testing/scenarios.js";
+import { FAILED_MODEL_CALL_ERROR, type DrivenRun, type RunScript } from "../testing/scenarios.js";
 import { loopClock, MINUTE_MS } from "../../budgets.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import {
   finaleAbortReason,
   finaleTimedOutNote,
   HARD_STOP_MESSAGE,
+  MODEL_CALL_IN_FLIGHT,
   timeBudgetAnswer,
   toolCutNote,
   windDownFailureNote,
+  wrapUpNeverPostedNote,
 } from "../windDown.js";
 import { bearerHashOf, RunBearerStore, type RunBearerGrant } from "../../modelProxy/runBearers.js";
 import { createTracer } from "../../trace/tracer.js";
@@ -1023,7 +1025,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     await session.end();
   });
 
-  it("a tool that completes on its own while the loop-end interrupt is in flight: the interrupt answers `interrupted: false`, so nothing was cut — no tool_cut note, no write-up prompt posted; the tool's own success is read as the loop's own and lands unmarked — nothing in flight — and the run closes under the budget's no-write-up label", async () => {
+  it("a tool that completes on its own while the loop-end interrupt is in flight: the interrupt answers `interrupted: false`, so nothing was cut — no tool_cut note, no write-up prompt posted; the tool's own success is read as the loop's own and lands unmarked — nothing in flight — and the run closes on the model's own answer, unlabelled, a wrap_up note saying the instruction was never posted", async () => {
     const hungTool: RunScript = {
       turns: [
         {
@@ -1038,9 +1040,14 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       hungTool,
     );
     const session = await o.opened;
-    // Nothing was interrupted: the execution ran on to its own end, and its last text is the answer under the
-    // budget's label.
-    expect(session.answer).toBe(timeBudgetAnswer("never", 10));
+    // Nothing was interrupted: the execution ran on to its own end, and its last text is the answer — the
+    // budget's write-up instruction was never posted, so the answer wears no label and the record says why.
+    expect(session.answer).toBe("never");
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "wrap_up")
+        .map((n) => n.summary),
+    ).toContain(wrapUpNeverPostedNote("time"));
     // The budget note names the tool in flight; the cut note is written only once an interrupt has landed on a live
     // execution, and this one landed on an idle session.
     expect(notes(o.events).filter((n) => n.kind === "time_budget_exhausted")).toHaveLength(1);
@@ -1218,10 +1225,172 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         .filter((n) => n.kind === "settle_set_aside")
         .map((n) => n.summary),
     ).toEqual([
-      "the interrupted execution ended (session.execution.interrupted) after the write-up's execution started; set aside — the end the loop-end cut owed, not the write-up's settle",
+      "the interrupted execution ended (session.execution.interrupted) while the loop read in its own mode — before the interrupt's answer, or after the write-up's own start; set aside — the end the loop-end cut owed, not the write-up's settle",
     ]);
     expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:true"]);
     expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
+    await session.end();
+  });
+
+  it("a tool call cut at the loop's end whose interrupted execution's end the server serializes before it answers the interrupt: the end lands in the loop's own mode with the answer still in flight and is the cut's — the debt provisional from the interrupt's posting, paid by that `interrupted` end, set aside — never the settle; the write-up answers, its own end settling the run", async () => {
+    const o = openRun({ hangToolCall: 1, interruptAnswersAfterTail: true }, sleepThenNever);
+    const session = await o.opened;
+    expect(session.answer).toBe(timeBudgetAnswer("never", 10));
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    expect(notes(o.events).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "tool_cut")
+        .map((n) => n.summary),
+    ).toEqual([toolCutNote("running bash")]);
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "settle_set_aside")
+        .map((n) => n.summary),
+    ).toEqual([
+      "the interrupted execution ended (session.execution.interrupted) while the loop read in its own mode — before the interrupt's answer, or after the write-up's own start; set aside — the end the loop-end cut owed, not the write-up's settle",
+    ]);
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:true"]);
+    expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
+    await session.end();
+  });
+
+  it("a tool call cut at the loop's end while its ask was still pending: the interrupt drops the ask and the tool fails `aborted` before it ran — the interrupt's own doing, landing as the call's result marked cut, no harness_error for a call with no ask the bot answered, no reply ever posted — and the write-up answers", async () => {
+    const o = openRun({ hangAtAsk: 1 }, sleepThenNever);
+    const session = await o.opened;
+    expect(session.answer).toBe(timeBudgetAnswer("never", 10));
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    expect(notes(o.events).filter((n) => n.kind === "harness_error" || n.kind === "tool_refused")).toEqual([]);
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "tool_cut")
+        .map((n) => n.summary),
+    ).toEqual([toolCutNote("running bash")]);
+    expect(o.container.requests.filter((q) => /\/permission\/[^/]+\/reply$/.test(q.path))).toHaveLength(0);
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:false:true"]);
+    expect(callsInFlight(o.events, "completed").map((c) => c.callId)).toEqual(["c1"]);
+    await session.end();
+  });
+
+  it("the interrupted execution's end never serialized and the write-up's own execution failing on the provider: the failure is the write-up's — the wind-down's note names it and the run closes by the wind-down's answer at once — never set aside as the end the cut owed, never a finale run out", async () => {
+    const o = openRun(
+      { hangToolCall: 1, owedEndNeverSerialized: true },
+      {
+        turns: [
+          {
+            content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+            stopReason: "tool_use",
+          },
+          { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+        ],
+        failModelCall: 2,
+      },
+    );
+    const session = await o.opened;
+    expect(session.answer).toBe(timeBudgetAnswer("", 10, FAILED_MODEL_CALL_ERROR));
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary),
+    ).toEqual([windDownFailureNote(FAILED_MODEL_CALL_ERROR)]);
+    expect(notes(o.events).filter((n) => n.kind === "settle_set_aside")).toEqual([]);
+    await session.end();
+  });
+
+  it("an operator's hard stop requested while the loop-end interrupt is in flight and still unread when the interrupt answers: the write-up prompt is not posted — the stop is read at the answer, not a tick later — and the run ends as the stop", async () => {
+    const r = await openCodeDriver({ hangToolCall: 1, hardStopBeforeCutAnswer: true }).run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+      ],
+    });
+    expect(r.outcome).toEqual({ kind: "answered", answer: HARD_STOP_MESSAGE });
+    expect(r.stopRequested).toBe("hard");
+    // One prompt (the request's), no write-up posted; two interrupts (the cut's and the stop's own ending).
+    expect(r.requests.filter((q) => q.method === "POST" && /\/prompt$/.test(q.path))).toHaveLength(1);
+    expect(r.requests.filter((q) => q.method === "POST" && /\/interrupt$/.test(q.path))).toHaveLength(2);
+  });
+
+  it("a tool call cut at the loop's end whose write-up prompt fails on its transport: the server took nothing and no execution was started, so the run fails by name at once — the post's harness_error on the record — never a finale run out for a prompt that never reached the server", async () => {
+    // The write-up's queued prompt is the session's second queue prompt.
+    const o = openRun({ hangToolCall: 1, promptPostThrows: 2 }, sleepThenNever);
+    await expect(o.opened).rejects.toMatchObject({
+      message: "the write-up prompt did not reach the server, so no write-up execution was started",
+    });
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary),
+    ).toContain(
+      "the write-up prompt did not reach the server: harness container: request failed — curl: (56) Recv failure: Connection reset by peer",
+    );
+  });
+
+  it("a tool that completes on its own while the loop-end interrupt is in flight, whose execution then ends on the proxy's turn-budget refusal: the wind-down had decided and posted nothing, so the refusal starts the write-up as a steer into the idle session — the write-up answers under the budget's label, never a finale run out with nothing executing", async () => {
+    const o = openRun(
+      {
+        hangToolCall: 1,
+        hungToolSettlesDuringInterrupt: true,
+        budgetRefusalAtModelCall: 2,
+        steerOnIdleStartsExecution: true,
+      },
+      {
+        turns: [
+          {
+            content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+            stopReason: "tool_use",
+          },
+          { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+          { content: [{ type: "text", text: "findings so far" }], stopReason: "end_turn" },
+        ],
+      },
+    );
+    const session = await o.opened;
+    expect(session.answer).toBe(timeBudgetAnswer("findings so far", 10));
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    // The request's prompt, then the write-up's steer into the idle session; one interrupt, answered idle.
+    expect(
+      o.container.requests
+        .filter((q) => q.method === "POST" && /\/prompt$/.test(q.path))
+        .map((q) => (JSON.parse(String(q.body)) as { delivery?: string }).delivery),
+    ).toEqual(["queue", "steer"]);
+    expect(o.container.requests.filter((q) => q.method === "POST" && /\/interrupt$/.test(q.path))).toHaveLength(1);
+    expect(notes(o.events).filter((n) => n.kind === "tool_cut")).toEqual([]);
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:false"]);
+    await session.end();
+  });
+
+  it("the hung tool completes during the interrupt's round-trip and the execution moves on to its next step, which the interrupt cuts, its tail before the answer: that step began after the interrupt was posted and is the cut's — its aborted failure no harness_error — the tool's own success lands unmarked, the tool_cut note names the model call, and the write-up answers", async () => {
+    const o = openRun(
+      { hangToolCall: 1, cutLandsOnNextStep: true, interruptAnswersAfterTail: true },
+      {
+        turns: [
+          {
+            content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+            stopReason: "tool_use",
+          },
+          { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+          { content: [{ type: "text", text: "findings so far" }], stopReason: "end_turn" },
+        ],
+      },
+    );
+    const session = await o.opened;
+    expect(session.answer).toBe(timeBudgetAnswer("findings so far", 10));
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    expect(notes(o.events).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "tool_cut")
+        .map((n) => n.summary),
+    ).toEqual([toolCutNote(MODEL_CALL_IN_FLIGHT)]);
+    // The tool completed before the interrupt landed: its own success, unmarked; the model call was what the cut met.
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:false"]);
+    expect(callsInFlight(o.events, "completed")).toEqual([]);
     await session.end();
   });
 

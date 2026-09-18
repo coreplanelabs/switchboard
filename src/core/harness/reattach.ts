@@ -102,7 +102,7 @@ export function reattachTransport(
   deps: Pick<PiRpcTransportDeps, "container" | "paths" | "pid" | "pollMs" | "sleep">,
 ): { transport: PiRpcTransport; unsent: Record<string, unknown>[] } {
   const offset = old.consumedOffset;
-  const unsent = old.takeUnsent();
+  const unsent = old.takeUnsent("reattach");
   old.abandon();
   return { transport: new PiRpcTransport({ ...deps, offset }), unsent };
 }
@@ -224,7 +224,10 @@ export class HeldSends {
    *  object after a re-attach still runs it — told whether the write landed or
    *  failed (the finale's clock, harness-pi item 15, starts when pi has the
    *  wrap-up, not when the loop asked, and not at all on a write that failed). */
-  private readonly onLanded = new Map<Record<string, unknown>, (landing: Settled) => void>();
+  private readonly onLanded = new Map<
+    Record<string, unknown>,
+    { run: (landing: Settled) => void; outlivesDrop: boolean }
+  >();
 
   constructor(private readonly deliver: (command: Record<string, unknown>) => Promise<Landing>) {}
 
@@ -238,10 +241,17 @@ export class HeldSends {
    *  lives here, by the command's type, so no caller can get it wrong.
    *  `onLanded` runs when the write has settled at the transport — told
    *  `landed`, `failed` with the reset, or `dropped` — never at the hand-off to
-   *  a chain that only holds it, and never once the loop or turn that sent it
-   *  has ended (`dropHeld` forgets it). */
-  send(command: Record<string, unknown>, onLanded?: (landing: Settled) => void): void {
-    if (onLanded) this.onLanded.set(command, onLanded);
+   *  a chain that only holds it. Once the loop or turn that sent it has ended
+   *  (`dropHeld`) it runs only if the sender said so (`outlivesDrop`): the
+   *  sender states the callback's lifetime, the gate keeps one rule — the pi
+   *  harness marks its abort's, the one landing an ended loop still wants on
+   *  the record, and its callback knows the loop is over. */
+  send(
+    command: Record<string, unknown>,
+    onLanded?: (landing: Settled) => void,
+    opts?: { outlivesDrop?: boolean },
+  ): void {
+    if (onLanded) this.onLanded.set(command, { run: onLanded, outlivesDrop: opts?.outlivesDrop === true });
     if (this.holding && !PASSES_HOLD.has(String(command.type))) {
       this.queue.push({ command, state: "send" });
       return;
@@ -295,15 +305,15 @@ export class HeldSends {
 
   /** The loop or turn that sent what is still pending has ended: drop the held
    *  writes, delivering nothing, answer what was dropped so the caller can say
-   *  so, and forget EVERY callback but an abort's — a write in flight included,
-   *  whose landing, however late, is nobody's now (a dispatched wrap-up steer
-   *  settling inside a follow-up turn would otherwise start the turn's clock or
-   *  re-ask the loop's instruction into it — forgotten here, by construction,
-   *  not checked by each sender). An abort's callback alone survives: a stop in
-   *  flight when its loop ended is the one landing the ended loop still wants
-   *  on the record (harness-pi item 16: a swallowed stop is seen, never
-   *  assumed), and its sender notes what became of it and never asks again
-   *  after the drop. A held follow-up steer went back to the inbox with the other unechoed
+   *  so, and forget every callback its sender did not mark `outlivesDrop` — a
+   *  write in flight included, whose landing, however late, is nobody's now (a
+   *  dispatched wrap-up steer settling inside a follow-up turn would otherwise
+   *  start the turn's clock or re-ask the loop's instruction into it —
+   *  forgotten here, by construction, not checked by each sender). A callback
+   *  marked to outlive the drop stays: the pi harness marks its abort's, since
+   *  a stop in flight when its loop ended is the one landing the ended loop
+   *  still wants on the record (harness-pi item 16: a swallowed stop is seen,
+   *  never assumed). A held follow-up steer went back to the inbox with the other unechoed
    *  steers (the loop's `requeueUnechoed`), a held wind-down steer belongs to
    *  the loop that ended (its answer then wears no label for a wrap-up pi never
    *  saw), and a prompt still in doubt when the loop settled is nothing a later
@@ -314,7 +324,7 @@ export class HeldSends {
     const dropped = this.queue.map((held) => held.command);
     this.queue.length = 0;
     this.headSince = undefined;
-    for (const command of this.onLanded.keys()) if (command.type !== "abort") this.onLanded.delete(command);
+    for (const [command, entry] of this.onLanded) if (!entry.outlivesDrop) this.onLanded.delete(command);
     return dropped;
   }
 
@@ -330,7 +340,7 @@ export class HeldSends {
       if (landing === "held") return;
       const onLanded = this.onLanded.get(command);
       this.onLanded.delete(command);
-      onLanded?.(landing);
+      onLanded?.run(landing);
     });
   }
 

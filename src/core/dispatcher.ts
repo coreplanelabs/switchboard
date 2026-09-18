@@ -891,18 +891,18 @@ export async function dispatch(
     if (reservation) {
       reserved = reservation.reserved;
       requestRow = reservation.requestRow;
-      // A run the ledger would not track after waiting for a finish this
-      // process was landing (run-history item 54) says so on its own stream and
-      // on its card, not in the bot log alone: no handoff, resume or reclaim
-      // reaches this run, and a reader of its record should see why. Head
-      // material, like the cold-sandbox note below: a setup fact ahead of the loop.
-      if (reservation.untracked !== undefined) {
+      // A run the ledger would not track — whichever way its reservation ended
+      // untracked (run-history item 54) — says so on its own stream and on its
+      // card, not in the bot log alone: no handoff, resume or reclaim reaches
+      // this run, and a reader of its record should see why. Head material,
+      // like the cold-sandbox note below: a setup fact ahead of the loop.
+      if (reservation.untrackedWhy !== undefined) {
         registry.publish(runId, {
           type: "run_note",
           kind: "ledger_untracked",
           summary: redactAndCap(
             oneLine(
-              `not tracked by the run ledger: ${reservation.untracked} — no handoff, resume or reclaim reaches this run; its record still reaches the store`,
+              `not tracked by the run ledger: ${reservation.untrackedWhy} — no handoff, resume or reclaim reaches this run; its record still reaches the store`,
             ),
             500,
           ),
@@ -1467,6 +1467,20 @@ export async function dispatch(
     // sender when an operator stopped it. The fresh turn is an ordinary
     // dispatch: it claims the thread itself, and a follow-up arriving during it
     // steers into it.
+    //
+    // Before the thread is settled: a reservation never promoted (item 42) —
+    // the dispatch ended before its prompt existed: a refusal after the reserve,
+    // an attach that failed, a throw — so the run never started and nothing is
+    // recorded; the row goes, or the sweep would restart it forever, and it
+    // goes NOW, ahead of the fresh turn the settle may dispatch for follow-ups
+    // queued during the attach: that turn's own reservation would otherwise
+    // meet this row still live — a finish nobody is landing, so nothing to wait
+    // for — and run untracked for its whole life (item 54). A fenced
+    // reservation is another generation's to restart: `abandon` is a no-op on it.
+    if (reserved && !ledgerRun) await root.span("post.ledger_abandon", () => reserved!.abandon());
+    // …and the registry row created with it goes the same way: no finished
+    // frame, no record — a run that never started is not listed as one that did.
+    if (registered && !runLoopStarted) registry.discard(registered.id);
     const settled = settleThread(deps, {
       msg,
       admitted,
@@ -1525,15 +1539,6 @@ export async function dispatch(
           ),
         );
     }
-    // A reservation never promoted (item 42): the dispatch ended before its
-    // prompt existed — a refusal after the reserve, an attach that failed, a
-    // throw — so the run never started and nothing is recorded; the row goes,
-    // or the sweep would restart it forever. A fenced reservation is another
-    // generation's to restart: `abandon` is a no-op on it.
-    if (reserved && !ledgerRun) await root.span("post.ledger_abandon", () => reserved!.abandon());
-    // …and the registry row created with it goes the same way: no finished
-    // frame, no record — a run that never started is not listed as one that did.
-    if (registered && !runLoopStarted) registry.discard(registered.id);
     // The ledger heartbeat stops with the run (the finish write, in flight
     // through the writer, closes the row itself).
     void ledgerRun?.close();

@@ -28,7 +28,7 @@ import type { LiveRunRow } from "../runLedger/types.js";
 import {
   NullLedgerRun,
   NullLedgerWriteThrough,
-  type LedgerRun,
+  type ReserveOutcome,
   type ReserveRunRequest,
 } from "../runLedger/writeThrough.js";
 import { NullRunStore } from "../runStore.js";
@@ -129,9 +129,9 @@ class RecordingLedger extends NullLedgerWriteThrough {
   constructor() {
     super("gen-T", new NullRunStore());
   }
-  override async reserve(req: ReserveRunRequest): Promise<LedgerRun | undefined> {
+  override async reserve(req: ReserveRunRequest): Promise<ReserveOutcome> {
     this.reserved.push(req);
-    return new NullLedgerRun(req.runId, { put: async () => {} });
+    return { kind: "tracked", run: new NullLedgerRun(req.runId, { put: async () => {}, abandoned: () => {} }) };
   }
 }
 

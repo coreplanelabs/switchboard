@@ -217,12 +217,12 @@ describe("HeldSends — the one gate every write to pi takes (harness-pi item 16
     expect(held.holding).toBe(true); // P1 still awaits its echo; S1 still behind it
   });
 
-  it("dropHeld keeps an abort's callback alone: a stop in flight when the loop or turn ended is the one landing it still wants on the record, so its landing — failed or landed — still runs after the drop, while a steer's in flight is forgotten as before", async () => {
+  it("dropHeld keeps a callback its sender marked as outliving the drop: the pi harness marks its abort's, the one landing an ended loop still wants on the record, so that landing — failed or landed — still runs after the drop, while a callback not so marked (a steer's in flight) is forgotten as before", async () => {
     const settles: ((landing: Landing) => void)[] = [];
     const landings: string[] = [];
     const held = new HeldSends(() => new Promise<Landing>((r) => settles.push(r)));
     held.send(S1, (landing) => landings.push(`S1:${landing}`)); // the steer, in flight
-    held.send(ABORT, (landing) => landings.push(`abort:${landing}`)); // the stop, in flight behind it
+    held.send(ABORT, (landing) => landings.push(`abort:${landing}`), { outlivesDrop: true }); // the stop, in flight behind it
     expect(held.dropHeld()).toEqual([]); // nothing held; both in flight when the loop ended
     settles[0]("landed"); // the steer's landing: nobody's
     settles[1]("failed"); // the stop's: still heard, so a swallowed stop is seen

@@ -99,6 +99,9 @@ export class WorkerRunStore implements RunStore {
     this.fetchImpl = opts.fetch ?? fetch;
   }
 
+  abandoned(): void {
+    // a store keeps nothing in flight per record (run-history item 54): nothing to settle
+  }
   async put(record: RunRecord, trace?: TraceOptions): Promise<PutResult> {
     if (!RUN_ID_PATTERN.test(record.id))
       throw new PermanentStoreError(`run store: refusing to put malformed id ${JSON.stringify(record.id)}`);

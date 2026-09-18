@@ -15,6 +15,7 @@ import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { RequestDirectives } from "../../directives.js";
 import type { LedgerRun, LedgerWriteThrough } from "../runLedger/writeThrough.js";
+import { putOnce } from "../runHistoryWriter.js";
 import type { AppendableEvent, InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
 import type { ThreadsElsewhere } from "../runLedger/threadsElsewhere.js";
 import type { ResumePlan } from "../runLedger/resume.js";
@@ -154,7 +155,11 @@ export function followUpFromInbox(item: InboxItem, io: ChannelIO, fallbackAt: nu
  *  Best-effort, like `closeResumedRow` below. */
 export async function closeRestartRow(adopted: LedgerRun, restart: RestartContext, why: string): Promise<void> {
   try {
-    await adopted.sink.put(
+    // One attempt, no retry — `putOnce` says the sink's final word on a failure
+    // (run-history item 54); the record's assembly is inside the try, so the
+    // closer stays best-effort whatever the row holds.
+    await putOnce(
+      adopted.sink,
       reclaimedRunRecord({ row: restart.row, events: [], status: "interrupted", finishedAt: systemClock() }),
     );
   } catch (err) {
@@ -178,7 +183,10 @@ export async function closeResumedRow(
   status: RunStatus = "interrupted",
 ): Promise<void> {
   try {
-    await adopted.sink.put(
+    // One attempt, no retry — `putOnce` says the sink's final word on a failure
+    // (run-history item 54); the assembly stays inside the try (best-effort).
+    await putOnce(
+      adopted.sink,
       reclaimedRunRecord({ row: resume.row, events: resume.events, status, finishedAt: systemClock() }),
     );
   } catch (err) {
@@ -620,7 +628,7 @@ export async function adoptCarriedRun(deps: AdmissionDeps, ctx: AdmissionContext
     // heartbeat keeps the lease through this attach as well. The reserve is
     // the owner's idempotent re-claim; the request rides on the row already.
     carried.requestRow = restart.row.meta.request;
-    carried.reserved = await root.span("dispatch.ledger_reserve", () =>
+    const reserved = await root.span("dispatch.ledger_reserve", () =>
       deps.runLedger.reserve({
         runId: restart.row.runId,
         threadKey: msg.threadKey,
@@ -630,6 +638,7 @@ export async function adoptCarriedRun(deps: AdmissionDeps, ctx: AdmissionContext
         ...ctx.hooks.reservation,
       }),
     );
+    carried.reserved = reserved.kind === "tracked" ? reserved.run : undefined;
   }
   // A run live here is not live elsewhere (thread-admission item 5): the
   // reclaim listed this row on the boot-gap map as one taken for the launcher,
