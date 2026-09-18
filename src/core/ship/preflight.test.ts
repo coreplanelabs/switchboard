@@ -4,6 +4,7 @@
 // fact is the pull request's own, named, never refused).
 import { describe, expect, it, vi } from "vitest";
 import type { PullRequestFacts, RepoShipInfo } from "../../execution/githubPulls.js";
+import type { RefusalCause, RefusalCode } from "../refusal.js";
 import { shipPreflight, shipTaskText, shipUnitText, type ShipPreflightInput } from "./preflight.js";
 
 const HEAD = "a".repeat(40);
@@ -208,6 +209,82 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
       }),
     );
     expect(throwing).toEqual({ ok: true, entry: { repo: "acme/api", base: undefined } });
+  });
+
+  it("every gate's refusal carries its own `ship_preflight_*` code and the table's cause — nine codes, one per gate, the result carrying it (record 0054)", async () => {
+    const cases: Array<{ gate: string; code: RefusalCode; cause: RefusalCause; input: ShipPreflightInput }> = [
+      {
+        gate: "channel",
+        code: "ship_preflight_channel",
+        cause: "system",
+        input: input({ channelId: "http:CX" }),
+      },
+      {
+        gate: "permission",
+        code: "ship_preflight_permission",
+        cause: "policy",
+        input: input({ gates: { canRunAgent: (a) => a !== "coding", adminsHint: () => "an admin" } }),
+      },
+      {
+        gate: "no repo",
+        code: "ship_preflight_no_repo",
+        cause: "request",
+        input: input({ repoCtx: {} }),
+      },
+      {
+        gate: "thread PR unreachable",
+        code: "ship_preflight_pr_unreachable",
+        cause: "system",
+        input: input({ repoCtx: { repo: "acme/api", prUnpostable: { number: 7, reason: "unreachable" } } }),
+      },
+      {
+        gate: "PR facts unavailable",
+        code: "ship_preflight_pr_facts",
+        cause: "system",
+        input: input({ repoCtx: { repo: "acme/api", pr: 7 } }),
+      },
+      {
+        gate: "fork head",
+        code: "ship_preflight_fork_head",
+        cause: "request",
+        input: input({ repoCtx: { repo: "acme/api", pr: 7 }, prFacts: async () => openPr({ sameRepoHead: false }) }),
+      },
+      {
+        gate: "head branch unknown",
+        code: "ship_preflight_head_unknown",
+        cause: "system",
+        input: input({ repoCtx: { repo: "acme/api", pr: 7 }, prFacts: async () => openPr({ headRef: undefined }) }),
+      },
+      {
+        gate: "closed resume target",
+        code: "ship_preflight_closed_resume",
+        cause: "request",
+        input: input({
+          requestText: PR_URL,
+          repoCtx: { repo: "acme/api", pr: 7 },
+          prFacts: async () => openPr({ state: "closed" }),
+        }),
+      },
+      {
+        gate: "no task",
+        code: "ship_preflight_no_task",
+        cause: "request",
+        input: input({ requestText: "" }),
+      },
+    ];
+    const codes = new Set<string>();
+    for (const c of cases) {
+      const res = await shipPreflight(c.input);
+      expect(res.ok, `${c.gate}: expected a refusal`).toBe(false);
+      if (res.ok) continue;
+      expect(res.refusal.code, c.gate).toBe(c.code);
+      expect(res.refusal.cause, c.gate).toBe(c.cause);
+      // The result carries the reply itself: the card and the refusal's text
+      // are one sentence, byte-identical.
+      expect(res.refusal.text, c.gate).toBe(res.reply);
+      codes.add(res.refusal.code);
+    }
+    expect(codes.size, "one code per gate, never a shared one").toBe(9);
   });
 });
 
