@@ -159,7 +159,11 @@ import {
 } from "../../src/core/schedules.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 import { RestoreWaiters } from "../../src/execution/restoreWaiters.js";
-import { isRuntimeBusySignal, SandboxRuntimeBusyError } from "../../src/execution/sandboxErrors.js";
+import {
+  isRuntimeBusySignal,
+  RUNTIME_BUSY_REASON,
+  SandboxRuntimeBusyError,
+} from "../../src/execution/sandboxErrors.js";
 import {
   decisivePull,
   effectiveLimits,
@@ -613,6 +617,12 @@ const LIFECYCLE_KEY = "resident:lifecycle";
  *  resident, with the step it last reported and the cycle lease it holds, and
  *  the last bucket the cron skipped (a live cycle, a duplicate id). */
 const REFRESH_INSTANCE_KEY = "resident:refreshInstance";
+/** The settled state a cycle found before it wrote `refreshing` (item 68):
+ *  what a cycle that yields to a busy container puts back. Rewritten by every
+ *  cycle right before its `refreshing` write, so it always names the state
+ *  under the current marker and nothing older. */
+const REFRESHING_FROM_KEY = "resident:refreshingFrom";
+type RefreshingFrom = ResidentStatus;
 /** A `du` over a multi-GB checkout plus every live tree is seconds warm, tens
  *  of seconds on a cold page cache — the same class as a git network step. */
 const DU_TIMEOUT_MS = GIT_NETWORK_TIMEOUT_MS;
@@ -3358,6 +3368,9 @@ export class ResidentDO extends Sandbox<Env> {
       }
     }
 
+    // Item 68: remember what `refreshing` covers, so a cycle the busy container
+    // turns away can put it back — the last snapshot never stopped serving.
+    await this.ctx.storage.put(REFRESHING_FROM_KEY, (await this.getStatus()) satisfies RefreshingFrom);
     await this.setResidentState("refreshing");
     let sha: string;
     try {
@@ -3380,6 +3393,9 @@ export class ResidentDO extends Sandbox<Env> {
       // and die at git-setup). Name the disk instead: not
       // serviceable, and the recovery below can free it.
       const failure = await this.classifyFailure("fetch", message);
+      // Item 68: the container did not accept the connect — a run's command
+      // has its cores. Not GitHub, not the mirror: the instance step yields.
+      if (failure.busy) throw err;
       if (failure.diskFull) {
         await this.setResidentState("degraded", failure.reason);
         await this.recoverFromDiskFull(failure.reason, selfInFlight);
@@ -3533,7 +3549,9 @@ export class ResidentDO extends Sandbox<Env> {
    *  error can surface between steps — with the generic "refresh" step, whose
    *  failure reason is the `refresh-failed: …` shape. A full disk is a third
    *  class: `disk-full: …`, never serviceable, and the one failure the
-   *  resident can act on itself (recoverFromDiskFull). */
+   *  resident can act on itself (recoverFromDiskFull). A container that did
+   *  not accept the connect (`runtime-busy`, item 68) is a fourth: `busy`,
+   *  and the cycle yields to the run that holds it. */
   private async classifyCycleError(err: unknown): Promise<RefreshFailure> {
     // The control port never answered (item 64): the count decides, and a disk
     // probe would only cost another 30 s abort against the same silent port.
@@ -3911,7 +3929,10 @@ export class ResidentDO extends Sandbox<Env> {
    *  on purpose (`CycleRestartError`), is thrown to the engine, whose retry
    *  re-enters the same idempotent method — the row stays `refreshing`, never
    *  `degraded`, and a `refreshing` younger than the stale bound keeps the
-   *  cron from creating a second instance meanwhile. A failure of the repo's
+   *  cron from creating a second instance meanwhile. A container that turned
+   *  the step's connect away (`runtime-busy`, item 68) ends the cycle as
+   *  `stopped` with nothing recorded — `yieldCycle` puts back the state the
+   *  cycle found. A failure of the repo's
    *  own is recorded — `degraded` with the reason, the last snapshot still
    *  serving — and answered `failed`, which ends the cycle; the next cron
    *  firing starts the next one from that state. */
@@ -3963,6 +3984,21 @@ export class ResidentDO extends Sandbox<Env> {
         return { ...result, startedAt, trace: trace.steps() };
       }
       const failure = await this.classifyCycleError(err);
+      if (failure.busy) {
+        // Item 68: the container did not accept the cycle's connect — a run's
+        // command has its cores. Nothing ran and nothing about the repository
+        // is known: the cycle yields, the state it found goes back, and no
+        // failure is recorded — not `degraded`, not a rung of item 67's ladder
+        // (three cycles of it used to destroy the container under the run).
+        // The next cron firing tries again; the engine is not asked to retry
+        // into the same busy container.
+        outcome = `yielded (${failure.reason})`;
+        console.log(
+          `refresh instance ${instance}: ${step} yielded — ${failure.reason.slice(0, 400)}; the next cycle retries`,
+        );
+        await this.yieldCycle(instance);
+        return { status: "stopped", why: RUNTIME_BUSY_REASON, startedAt, trace: trace.steps() };
+      }
       if (failure.interrupted) {
         outcome = `interrupted (${failure.reason}) — the engine retries`;
         console.log(`refresh instance ${instance}: ${step} interrupted — ${failure.reason.slice(0, 400)}; retrying`);
@@ -3982,6 +4018,27 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(`refresh instance ${instance}: recording ${step} failed: ${errMsg(err)}`),
       );
     }
+  }
+
+  /** A cycle that met the busy container ends here (item 68): the lease it
+   *  holds goes back, and the `refreshing` it wrote is undone to the settled
+   *  state it found, so the row says what the last snapshot still is — warm,
+   *  or the degraded an earlier cycle earned — never a `degraded` of this
+   *  cycle's own. A `refreshing` this cycle did not write (a step past the
+   *  fetch found the marker of a cycle that died mid-flight) is left to the
+   *  watchdog, which normalizes it. */
+  private async yieldCycle(instance: string): Promise<void> {
+    await this.clearInstanceLease(instance);
+    const status = await this.getStatus();
+    if (status.state !== "refreshing") return;
+    const from = await this.ctx.storage.get<RefreshingFrom>(REFRESHING_FROM_KEY);
+    if (!from || (from.state !== "warm" && from.state !== "degraded")) {
+      console.log(
+        `refresh instance ${instance}: yielded from \`refreshing\` over ${from?.state ?? "no recorded state"}; left for the watchdog`,
+      );
+      return;
+    }
+    await this.setResidentState(from.state, from.reason);
   }
 
   /** Step `fetch`: the gates, the cycle lease, the fetch and the plan. The
@@ -4227,7 +4284,8 @@ export class ResidentDO extends Sandbox<Env> {
    *  errno, so a full-disk attach reads like a lock bug without the probe. */
   private async classifyFailure(step: string, message: string): Promise<RefreshFailure> {
     const direct = classifyRefreshFailure({ step, message });
-    if (direct.diskFull || direct.interrupted) return direct;
+    // A busy container (item 68) would only refuse the disk probe's exec too.
+    if (direct.diskFull || direct.interrupted || direct.busy) return direct;
     return classifyRefreshFailure({ step, message, freeKiB: await this.freeKiB() });
   }
 

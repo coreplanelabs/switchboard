@@ -37,6 +37,7 @@ import {
   type RefreshDisk,
 } from "./residentRefresh.js";
 import { DISK_FULL_FREE_KIB } from "./residentDisk.js";
+import { runtimeBusyMessage } from "./sandboxErrors.js";
 import { degradedIsServiceable } from "./residentState.js";
 import { installedSdkSource } from "./testing/installedSdkSource.js";
 
@@ -334,6 +335,7 @@ describe("classifyRefreshFailure (a build SIGTERM'd by a deploy is an interrupti
       interrupted: false,
       diskFull: false,
       runtimeUnreachable: false,
+      busy: false,
       reason: "build-failed: exit 1: src/x.ts(3,1): error TS2304",
     });
   });
@@ -599,6 +601,7 @@ describe("classifyRefreshFailure (a full container disk is `disk-full`, not GitH
       interrupted: false,
       diskFull: false,
       runtimeUnreachable: false,
+      busy: false,
       reason: `git-setup-failed: ${msg}`,
     });
     expect(classifyRefreshFailure({ step: "git-setup", message: msg, freeKiB: null }).diskFull).toBe(false);
@@ -919,6 +922,7 @@ describe("runtime-unreachable (a container whose control port never answers is n
       interrupted: false,
       diskFull: false,
       runtimeUnreachable: true,
+      busy: false,
       reason: runtimeUnreachableReason(2),
     });
     expect(
@@ -944,6 +948,7 @@ describe("runtime-unreachable (a container whose control port never answers is n
       interrupted: false,
       diskFull: false,
       runtimeUnreachable: false,
+      busy: false,
       reason: "refresh-failed: The operation was aborted",
     });
   });
@@ -996,5 +1001,56 @@ describe("runtime-unreachable (a container whose control port never answers is n
     expect(dflt, "the SDK declares a portReadyTimeoutMS default").not.toBeNull();
     expect(WAKE_PORT_READY_MS).toBeGreaterThan(Number(dflt![1]));
     expect(WAKE_PORT_READY_MS).toBeGreaterThan(SDK_CONNECT_TIMEOUT_MS);
+  });
+});
+
+describe("classifyRefreshFailure (a busy container is a yield, not evidence)", () => {
+  // Item 68 on the cycle: a run's command has the container's cores, the
+  // platform refused the cycle's connect, `run()` named it with the token.
+  // Nothing ran, nothing about the repository is known — the cycle yields,
+  // it is never `degraded` and never a rung of item 67's ladder.
+  const typed = runtimeBusyMessage({
+    containerId: "c0ffee",
+    cause: "Container is taking too long to accept the connection; the application could be overwhelmed with load",
+  });
+
+  it("the typed word thrown between steps → refresh-yielded, not interrupted, not disk-full, not unreachable", () => {
+    const f = classifyRefreshFailure({ step: "refresh", message: typed });
+    expect(f.busy).toBe(true);
+    expect(f.interrupted).toBe(false);
+    expect(f.diskFull).toBe(false);
+    expect(f.runtimeUnreachable).toBe(false);
+    expect(f.reason).toBe(`refresh-yielded: refresh ${typed}`);
+    expect(f.reason).not.toMatch(/-failed:/);
+  });
+
+  it("the word survives a wrapper: a StepError's message, or the fetch's mint prefix in front of it", () => {
+    expect(classifyRefreshFailure({ step: "snapshot", message: typed }).busy).toBe(true);
+    const prefixed = `token-mint-failed (command-level, fetching anonymously): boom; then ${typed}`;
+    const f = classifyRefreshFailure({ step: "fetch", message: prefixed });
+    expect(f.busy).toBe(true);
+    expect(f.reason).toBe(`refresh-yielded: fetch ${prefixed}`);
+  });
+
+  it("the token decides, never the words: the platform's bare wording without the token stays a step failure", () => {
+    const bare =
+      "Container is taking too long to accept the connection; the application could be overwhelmed with load";
+    const f = classifyRefreshFailure({ step: "refresh", message: bare });
+    expect(f.busy).toBe(false);
+    expect(f.reason).toBe(`refresh-failed: ${bare}`);
+  });
+
+  it("a busy verdict is decided before the disk probe's inference: a low free-disk reading does not turn it into disk-full", () => {
+    const f = classifyRefreshFailure({ step: "refresh", message: typed, freeKiB: 0 });
+    expect(f.busy).toBe(true);
+    expect(f.diskFull).toBe(false);
+  });
+
+  it("every other verdict answers busy: false", () => {
+    expect(classifyRefreshFailure({ step: "build", message: "exit 1: tsc failed" }).busy).toBe(false);
+    expect(classifyRefreshFailure({ step: "build", message: "exit 143: Session terminated" }).busy).toBe(false);
+    expect(classifyRefreshFailure({ step: "refresh", message: "x", runtimeUnreachable: { count: 1 } }).busy).toBe(
+      false,
+    );
   });
 });
