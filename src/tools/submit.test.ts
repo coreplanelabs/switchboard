@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PrDescription } from "../core/prDescription.js";
+import { TITLE_GATE_REPOSITORY, type PrDescription } from "../core/prDescription.js";
 import type { Handoff } from "../core/ship/handoff.js";
 import { TOOLSETS } from "./toolsets.js";
 import { submitHandoffTool, submitPrDescriptionTool, submitVerdictTool } from "./submit.js";
@@ -432,6 +432,30 @@ describe("submit_pr_description tool", () => {
     expect(got).toEqual([]);
     expect(String(out)).toMatch(/^error:/);
     expect(String(out)).toContain("title");
+  });
+
+  it("on the repository that carries the title gate, a title the gate would refuse is a string error carrying the gate's own sentence — the run cuts and resubmits in the same turn, and CI's `title` check never sees it; on any other repository, or none, the same title is accepted", async () => {
+    const title = "feat(dispatch): every gate refusal is a Refusal with a cause, counted";
+    const got: PrDescription[] = [];
+    const out = await submitPrDescriptionTool.run(
+      { ...validInput(), title },
+      { ...ctxWith((d) => got.push(d)), repo: TITLE_GATE_REPOSITORY },
+    );
+    expect(got).toEqual([]);
+    expect(String(out)).toMatch(
+      /^error: invalid PR description — title: unknown scope "dispatch" — use one of: dispatcher, core, /,
+    );
+    expect(String(out)).toContain("(the Areas in docs/reference/code-map.md), or no scope for a tree-wide change");
+    // The vocabulary is one repository's; a run elsewhere is never told to use its Areas.
+    for (const repo of ["acme/api", undefined]) {
+      const accepted: PrDescription[] = [];
+      const ok = await submitPrDescriptionTool.run(
+        { ...validInput(), title },
+        { ...ctxWith((d) => accepted.push(d)), ...(repo ? { repo } : {}) },
+      );
+      expect(String(ok)).toMatch(/PR description recorded/);
+      expect(accepted.map((d) => d.title)).toEqual([title]);
+    }
   });
 
   it("a bad anchor is a string error naming the full path into the pointers", async () => {

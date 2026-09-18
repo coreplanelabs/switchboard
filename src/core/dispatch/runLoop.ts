@@ -500,8 +500,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // a fix-up push supersedes the earlier one); the post-step below renders
   // the GitHub body from it at the observed pushed head and opens/edits the
   // PR. See prDescription.ts.
+  // Restored against the universal schema, never the title gate's: the gate
+  // judged the title when it was submitted, and a row written before a gate
+  // change must not lose its description on resume. A row that still fails is
+  // dropped fail-closed — said in the log, so the post-step's "no valid
+  // description" has a cause on record.
   const restoredDescription = PrDescriptionSchema.safeParse(restored.prDescription);
   let prDescription: PrDescription | undefined = restoredDescription.success ? restoredDescription.data : undefined;
+  if (!restoredDescription.success && restored.prDescription !== undefined) {
+    const why = restoredDescription.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+    console.log(`[resume] ${msg.threadKey} the restored PR description no longer parses and is dropped — ${why}`);
+  }
   const onPrDescription = (d: PrDescription) => {
     prDescription = d;
     ledgerRun?.setState({ prDescription: d });
@@ -774,6 +783,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     skills: deps.skills,
     github: githubCapabilityFor(deps, chatActorOf(deps.config, msg)),
     agentName: agent.name,
+    ...(repoCtx.repo ? { repo: repoCtx.repo } : {}),
     ...(spawn ? { spawn } : {}),
     ...(runs ? { runs } : {}),
     ...(steer ? { steer } : {}),

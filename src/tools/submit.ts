@@ -146,14 +146,14 @@ export const submitPrDescriptionTool: RunnableTool = {
   name: "submit_pr_description",
   failsInText: true,
   description:
-    "Submit the PR description as a typed object. REQUIRED after pushing your branch: Switchboard renders the GitHub PR body from this object at the pushed head and opens (or updates) the pull request itself — never open a PR yourself. The body is a fixed-size MAP for the reader (tldr, why, at most 7 pointers, feedbackWanted, risk, verified) with decisions, validation and agentNotes collapsed under it; every field is capped in visible characters (a link's URL is not counted) and the tool refuses an object over a cap naming the field and the count, so cut and resubmit. `title` becomes the PR's title; pointer anchors are (path, from, to) line ranges at your pushed head, rendered as links. Call it after your last push; if you push again afterwards, call it again — the last valid call wins.",
+    "Submit the PR description as a typed object. REQUIRED after pushing your branch: Switchboard renders the GitHub PR body from this object at the pushed head and opens (or updates) the pull request itself — never open a PR yourself. The body is a fixed-size MAP for the reader (tldr, why, at most 7 pointers, feedbackWanted, risk, verified) with decisions, validation and agentNotes collapsed under it; every field is capped in visible characters (a link's URL is not counted) and the tool refuses an object over a cap naming the field and the count, so cut and resubmit. `title` becomes the PR's title (at most 72 characters); on Switchboard's own repository it is also judged as that repository's CI `title` check judges it — `type(scope): description`, type from its release config, scope one of its code map's Areas or none — and refused with that check's own sentence, so fix the title and resubmit; pointer anchors are (path, from, to) line ranges at your pushed head, rendered as links. Call it after your last push; if you push again afterwards, call it again — the last valid call wins.",
   inputSchema: {
     type: "object",
     properties: {
       title: {
         type: "string",
         description:
-          "The PR title — one line naming the change, `type(scope): what a reader can now do or expect`, at most 72 characters in all",
+          "The PR title — one line naming the change, `type(scope): what a reader can now do or expect`, at most 72 characters in all; on Switchboard's own repository a title its CI title check would refuse (type, scope, grammar) is refused here with the same sentence",
       },
       tldr: {
         type: "string",
@@ -239,7 +239,7 @@ export const submitPrDescriptionTool: RunnableTool = {
   async run(input, ctx) {
     let desc: PrDescription;
     try {
-      desc = parsePrDescription(input);
+      desc = parsePrDescription(input, ctx.repo === undefined ? {} : { repo: ctx.repo });
     } catch (err) {
       const detail =
         err instanceof z.ZodError

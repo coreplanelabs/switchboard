@@ -1,5 +1,8 @@
 import { z } from "zod";
+import { checkPrTitle, TITLE_MAX_LENGTH } from "./prTitle.mjs";
+import PR_TITLE_VOCABULARY from "./prTitleVocabulary.json" with { type: "json" };
 import { redactSecrets } from "./redact.js";
+import { SWITCHBOARD_REPO } from "./selfDescription.js";
 
 // The PR description as DATA (docs/reference/specs/pr-description.md; the
 // shape is docs/decisions/0050). One typed object carries everything a reader
@@ -23,9 +26,9 @@ import { redactSecrets } from "./redact.js";
  *  schema, the prompt and the tool descriptions. */
 export const PR_DESCRIPTION_CAPS = {
   /** The squash subject and the changelog line, the whole line counted: the
-   *  number the title gate (`scripts/check-pr-title.mjs`, `TITLE_MAX_LENGTH`)
-   *  holds it to; a test keeps the two equal. */
-  title: 72,
+   *  title gate's own number (`src/core/prTitle.mjs`), read from it so the
+   *  two cannot drift. */
+  title: TITLE_MAX_LENGTH,
   tldr: 300,
   why: 400,
   pointers: 7,
@@ -71,13 +74,42 @@ function capped<T extends z.ZodType<string>>(base: T, max: number) {
 
 /** `line` with a raw-character cap — for the title, which GitHub never
  *  renders as markdown, so a link's target is characters the reader sees.
- *  Counts exactly what the title gate (`scripts/check-pr-title.mjs`) counts. */
+ *  Counts exactly what the title gate counts; holds on every repository. */
 function cappedRaw<T extends z.ZodType<string>>(base: T, max: number) {
   return base.superRefine((s, ctx) => {
     const n = s.length;
     if (n > max) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `at most ${max} characters (got ${n})` });
   });
 }
+
+/** The repository whose CI carries the title gate — this project's own. Its
+ *  vocabulary (the code map's Areas, the release config's types) is the house
+ *  convention of one repository, so only a description bound for it is judged
+ *  by it; every other repository keeps the cap alone, as before the gate. */
+export const TITLE_GATE_REPOSITORY = SWITCHBOARD_REPO;
+
+/** Whether a description bound for `repo` (`owner/name`, as the dispatcher
+ *  resolved it; undefined for a no-repo run) is judged by the title gate. */
+export function titleGateApplies(repo: string | undefined): boolean {
+  return repo !== undefined && repo.toLowerCase() === TITLE_GATE_REPOSITORY;
+}
+
+/** `line` judged as the CI title gate judges it (`checkPrTitle`, the one
+ *  predicate `scripts/check-pr-title.mjs` runs, against the generated
+ *  vocabulary): the grammar, the type, the scope from the code map's Areas,
+ *  no trailing period, and the 72-character cap counted raw with the bots'
+ *  scopes and a revert exempt. One issue per problem, in the gate's own
+ *  sentence, so a run cuts and resubmits inside its turn instead of learning
+ *  from a red `title` check once the PR is open — the last tool call of a
+ *  run whose loop was cut has no shell left to ask the gate itself. The
+ *  migration note behind `!` needs files only the gate can read, so the gate
+ *  alone judges that. An empty title is already `line`'s issue. */
+const gatedTitle = line.superRefine((s, ctx) => {
+  if (s === "") return;
+  const verdict = checkPrTitle(s, PR_TITLE_VOCABULARY);
+  if (verdict.ok) return;
+  for (const message of verdict.problems) ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+});
 
 /** Between a pointer's text and its risk on the rendered row. */
 export const RISK_SEPARATOR = " ⚠ ";
@@ -126,7 +158,9 @@ function boundedArray<T extends z.ZodTypeAny>(item: T, min: number, max: number,
 export const PrDescriptionSchema = z.object({
   /** The PR title's single source. Metadata for the PR's own title field —
    *  never rendered into the body (GitHub shows the title itself) — and the
-   *  squash subject, so it is capped like every other field. */
+   *  squash subject, so it is capped like every other field; on the
+   *  repository that carries the title gate, `prDescriptionSchemaFor` judges
+   *  it as the gate does. */
   title: cappedRaw(line, PR_DESCRIPTION_CAPS.title),
   tldr: capped(prose, PR_DESCRIPTION_CAPS.tldr),
   why: capped(prose, PR_DESCRIPTION_CAPS.why),
@@ -163,8 +197,19 @@ export type { PrAnchor, Pointer, PrDescription, RenderedPrAnchor, RenderedPointe
 
 /** Validate untrusted input (a tool call, a JSON file) into a PrDescription.
  *  Throws a zod error naming the offending path — callers surface it. */
-export function parsePrDescription(input: unknown): PrDescription {
-  return PrDescriptionSchema.parse(input);
+/** The schema for a description bound for `repo`: the universal one, with the
+ *  title judged as the CI title gate judges it on the repository that carries
+ *  the gate (`titleGateApplies`). The gated schema replaces the cap's message
+ *  with the gate's own count sentence — one wording per repository, never two. */
+export function prDescriptionSchemaFor(repo: string | undefined): typeof PrDescriptionSchema {
+  return titleGateApplies(repo) ? PrDescriptionSchema.extend({ title: gatedTitle }) : PrDescriptionSchema;
+}
+
+/** The one validating entry point. `target.repo` is the repository the
+ *  description is bound for (`ToolContext.repo`); absent, no repository
+ *  carries the gate and the universal schema judges. */
+export function parsePrDescription(input: unknown, target: { repo?: string } = {}): PrDescription {
+  return prDescriptionSchemaFor(target.repo).parse(input);
 }
 
 /** The `pr_description` event's payload: every string LEAF passed through

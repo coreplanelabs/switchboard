@@ -100,8 +100,16 @@
       "when": "After bumping either half of a pair."
     },
     "check:pr-title": {
-      "does": "Judges one PR title as the changelog line it becomes: grammar, type, scope, the migration note behind `!`.",
-      "when": "`-- \"feat(scope): …\"` before opening a PR; CI's `title` check runs it."
+      "does": "Judges one PR title as the changelog line: grammar, type, scope, the `!` migration note.",
+      "when": "`-- \"feat(scope): …\"` before opening a PR; CI's `title` check."
+    },
+    "pr-title:gen": {
+      "does": "Writes the title gate's types and scopes from the release config and the code map.",
+      "when": "Part of `fix`."
+    },
+    "pr-title:check": {
+      "does": "The committed title vocabulary equals its two sources.",
+      "when": "Part of `check:consistency`."
     },
     "check:dist": {
       "does": "Builds, then proves the compiled entry points and the web bundle the image needs exist.",
