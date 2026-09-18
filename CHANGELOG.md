@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.247.0](https://github.com/coreplanelabs/switchboard/compare/v1.246.0...v1.247.0) (2026-09-18)
+
+
+### Features
+
+* **dispatcher:** a refused click after an offer is a run record ([#1690](https://github.com/coreplanelabs/switchboard/issues/1690)) ([2cd5d04](https://github.com/coreplanelabs/switchboard/commit/2cd5d048abf85f6d1f0d3f04252f606cb53cdd0a))
+* **dispatcher:** every gate refusal is a Refusal with a cause, counted ([#1669](https://github.com/coreplanelabs/switchboard/issues/1669)) ([5dd5374](https://github.com/coreplanelabs/switchboard/commit/5dd5374d93b7d49f62de5b1cd2a893805105bc3b))
+* **ship:** the coding lease asks 90, the fix floor 15 and ship 240 ([#1686](https://github.com/coreplanelabs/switchboard/issues/1686)) ([ee443af](https://github.com/coreplanelabs/switchboard/commit/ee443afd6eecf570024a74fa6743af769a7b1359))
+* **web:** navigate in place — a page answers its seed as JSON ([#1676](https://github.com/coreplanelabs/switchboard/issues/1676)) ([6706d7a](https://github.com/coreplanelabs/switchboard/commit/6706d7a55e29410ac35edeabd444248f44ea08e8))
+
+
+### Bug fixes
+
+* **core:** "in the &lt;name&gt; repo" addresses that repository ([#1682](https://github.com/coreplanelabs/switchboard/issues/1682)) ([b10cb59](https://github.com/coreplanelabs/switchboard/commit/b10cb59245e7a7205e94e7f7637049601e234c1b))
+* **harness:** a wrap-up pi never saw keeps the failure the reader had ([#1666](https://github.com/coreplanelabs/switchboard/issues/1666)) ([985e80a](https://github.com/coreplanelabs/switchboard/commit/985e80ac4a43367609e77e8288b7c0ca0c374901))
+* **harness:** the finale answer reads what the salvage established ([#1687](https://github.com/coreplanelabs/switchboard/issues/1687)) ([3a3a951](https://github.com/coreplanelabs/switchboard/commit/3a3a951b358929b33c9ffa0c877104bf6522a214))
+* **harness:** the finale note names the wait it ended, not a model call ([#1668](https://github.com/coreplanelabs/switchboard/issues/1668)) ([f3e84bf](https://github.com/coreplanelabs/switchboard/commit/f3e84bf55561e2b5a546bfd19a5376b229175c40))
+* **ship:** the plan is read whole, never through the tool clip ([#1675](https://github.com/coreplanelabs/switchboard/issues/1675)) ([#1679](https://github.com/coreplanelabs/switchboard/issues/1679)) ([041df24](https://github.com/coreplanelabs/switchboard/commit/041df24f881dc5ec8b5a79c50c6e0780a48ee5af))
+* **tools:** submit_pr_description refuses a title the CI gate refuses ([#1684](https://github.com/coreplanelabs/switchboard/issues/1684)) ([132c6ec](https://github.com/coreplanelabs/switchboard/commit/132c6ecc22ebc119e870c2c11b344572d60cb63a))
+* **web:** the view-as picker offers the installation's people ([#1673](https://github.com/coreplanelabs/switchboard/issues/1673)) ([689c4d1](https://github.com/coreplanelabs/switchboard/commit/689c4d100a9f82140581949f735fe5a9a69ac338))
+
+
+### Documentation
+
+* **docs:** record 0054 and its plan gain repository cards ([#1671](https://github.com/coreplanelabs/switchboard/issues/1671)) ([6d9373d](https://github.com/coreplanelabs/switchboard/commit/6d9373df437ddb21e6a164387271a0b36c5a3d5d))
+* **docs:** U38 waits on the met ask receipt; the A/B gates U40 ([#1337](https://github.com/coreplanelabs/switchboard/issues/1337)) ([#1672](https://github.com/coreplanelabs/switchboard/issues/1672)) ([8125c50](https://github.com/coreplanelabs/switchboard/commit/8125c50e36c9a39b3efc94696e1a58460f420220))
+* **ship:** record 0055, one thread per unit; a round reads the checks ([#1688](https://github.com/coreplanelabs/switchboard/issues/1688)) ([3dddede](https://github.com/coreplanelabs/switchboard/commit/3dddede29ca3f33fa4cdaa0d40979207092643ed))
+
 ## [1.246.0](https://github.com/coreplanelabs/switchboard/compare/v1.245.0...v1.246.0) (2026-09-18)
 
 
