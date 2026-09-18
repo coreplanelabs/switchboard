@@ -34,7 +34,7 @@ export interface LiveHarness {
   tools: RunnableTool[];
   toolContext: ToolContext;
   backend?: Backend;
-  /** The checkout and the run's branch the tool rules judge pi's own tools against. */
+  /** The checkout, the run's branch and the loop's clock the tool rules judge pi's own tools against. */
   rules: ToolRuleContext;
   emit: (event: RunEvent) => void;
   /** The span the bridge opened for a call still running, so a relayed tool's work hangs under it. */

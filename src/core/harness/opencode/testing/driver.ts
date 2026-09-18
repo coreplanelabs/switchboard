@@ -63,6 +63,7 @@ import { FakeHarnessContainer } from "../../testing/fakeContainer.js";
 import {
   CONFORMANCE_MAX_MINUTES,
   FAILED_MODEL_CALL_ERROR,
+  NEAR_LOOP_END_SECONDS,
   type DrivenRun,
   type HarnessDriver,
   type ModelTurn,
@@ -504,6 +505,8 @@ interface ServeDeps {
   /** Moves the run's clock past its deadline (`budgetBeforeModelCall`): the
    *  serve has no clock of its own, the driver that built the run does. */
   spendBudget?: () => void;
+  /** Sets the run's clock `NEAR_LOOP_END_SECONDS` short of the loop's end (`nearLoopEndBeforeModelCall`). */
+  nearLoopEnd?: () => void;
   /** Moves the run's clock forward by `ms`: past the finale bound once a
    *  write-up's steer has landed on a hung turn, past the first-event bound
    *  after a prompt the serve stays silent on. */
@@ -1620,6 +1623,14 @@ class ScriptedServe {
         this.deps.spendBudget();
         for (let i = 0; i < 200 && this.pendingSteers.length === 0; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
       }
+      if (this.script.nearLoopEndBeforeModelCall === t + 1) {
+        // The clock sits inside the loop, short of its end by the script's
+        // distance, as pi's driver places it: what a gate makes of a bash
+        // timeout from here is the row's question.
+        if (this.deps.nearLoopEnd === undefined)
+          throw new Error("nearLoopEndBeforeModelCall needs the driver's clock: hand the serve `nearLoopEnd`");
+        this.deps.nearLoopEnd();
+      }
       if (this.script.softStopBeforeModelCall === t + 1) {
         // An operator's soft stop before this model call: requested, then the
         // loop's write-up steer waited for, so this call is the one that
@@ -2294,6 +2305,8 @@ export function openCodeDriver(options: FakeServeOptions = {}): HarnessDriver {
     cannot: {
       "gate-approval-unforgeable":
         "OpenCode's approval lives in its server, whose password the model's shell shares, so an effect the bot did not decide — a call with no ask, a reply the bot did not send, a reply that differs from the bot's, a success after the bot's refusal — is caught by detection and fails the run closed, never prevented by construction",
+      "budget-refuses-a-command-past-the-loop-end":
+        "OpenCode's permission ask hands the bot the command alone — no timeout rides on `permission.asked` — and its bash timeout is its server's own, so the gate cannot judge a timeout against the loop's end; a command past it runs and the loop's end cuts it as today",
     },
     facts: (partial) => ({
       harness: "opencode",
@@ -2411,6 +2424,7 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
     ...(deps.tickMs !== undefined ? { tickMs: deps.tickMs } : {}),
     // The clock lands past the LOOP's end, inside the lease (pi's driver does the same).
     spendBudget: () => void (clock.now = lease.loopEnd + 1),
+    nearLoopEnd: () => void (clock.now = lease.loopEnd - NEAR_LOOP_END_SECONDS * 1000),
     advanceClock: (ms) => void (clock.now += ms),
     finaleMs: lease.finaleMs,
     inbox,

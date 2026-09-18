@@ -581,7 +581,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       return "the run has hit its turn guard: no more tool calls — write your final answer now";
     return "an operator asked this run to stop: no more tool calls — write your final answer now";
   };
-  const rules: ToolRuleContext = { ...run.rules, identity: run.agent.identity };
+  // The loop's clock rides on the rules: a bash call whose explicit timeout
+  // reaches past `loopEnd` — the moment the cut below fires — is refused at
+  // the gate before it runs (harness-pi item 7), not cut at the end.
+  const rules: ToolRuleContext = { ...run.rules, identity: run.agent.identity, loopEndsIn: () => loopEnd - now() };
   // The waits on the bridge pace with the log poll: a test that polls every millisecond is not made to wait fifty.
   const seenTick = Math.min(CALL_SEEN_TICK_MS, deps.pollMs ?? CALL_SEEN_TICK_MS);
   const live: LiveHarness = {
@@ -1911,6 +1914,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
        *  a wait under the turn gives up here, never at the deadline. */
       const turnEnd = turnDeadline + turnLease.finaleMs;
       input.toolContext.remainingMs = () => turnDeadline - now();
+      // The turn's loop ends at its own deadline: a timeout is judged against that, not the run's loop end.
+      live.rules = { ...rules, loopEndsIn: () => turnLease.loopEnd - now() };
       const turnsBefore = bridge.turns;
       // The loop's write-up, when it took one, is spent: the turn has its own budget.
       clearWriteUp();
@@ -2118,6 +2123,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       } finally {
         deps.bearers?.clearTurn(run.runId);
         live.toolContext = runContext;
+        live.rules = rules;
         bridge.under(undefined);
         // A turn that threw before its loop's end dropped nothing yet: nothing
         // of it may reach the next turn either.

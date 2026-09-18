@@ -55,6 +55,16 @@ export const timeBudgetNote = (doing?: string): string =>
  *  command out; `doing` is the bridge's `running <tools>`. */
 export const toolCutNote = (doing: string): string =>
   `the loop's end cut the command in flight (${doing}) so the write-up keeps its allowance`;
+/** The gate's refusal of a bash call whose explicit timeout reaches past the
+ *  loop's end (harness-pi item 7; the loop's end cuts what still runs, decision
+ *  0046 unit seven): said before the command runs, in whole seconds, with the
+ *  two ways forward — instead of the minutes a command that could never finish
+ *  would spend before the cut told the model. `askedSecs` is the timeout the
+ *  call named, `leftSecs` what remains before the loop ends. */
+export const commandPastLoopEndRefusal = (askedSecs: number, leftSecs: number): string =>
+  `budget — this command asked for a ${askedSecs} s timeout and the loop ends in ${leftSecs} s, so it could never finish: ` +
+  `re-issue it with a timeout inside the ${leftSecs} s left if it finishes sooner, or push what you have and write up — ` +
+  `the full verification is CI's.`;
 export const turnGuardNote = (pace: string): string =>
   `turn guard fired: ${pace}, a pace that looks like a loop — writing up findings so far`;
 export const softStopNote = (): string => "soft stop — no further steps, writing up findings so far";

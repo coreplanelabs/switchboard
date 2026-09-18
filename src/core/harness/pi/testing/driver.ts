@@ -20,6 +20,7 @@ import { FakeHarnessContainer } from "../../testing/fakeContainer.js";
 import {
   CONFORMANCE_MAX_MINUTES,
   FAILED_MODEL_CALL_ERROR,
+  NEAR_LOOP_END_SECONDS,
   type DrivenRun,
   type HarnessDriver,
   type RunScript,
@@ -183,6 +184,11 @@ export function piDriver(): HarnessDriver {
             // write-up that follows runs within the lease, as the row asserts.
             clock.now = lease.loopEnd + 1;
             await awaitSteer();
+          }
+          if (script.nearLoopEndBeforeModelCall === modelCalls) {
+            // The clock sits inside the loop, short of its end by the script's
+            // distance: the gate judges a bash timeout against what is left.
+            clock.now = lease.loopEnd - NEAR_LOOP_END_SECONDS * 1000;
           }
           if (script.softStopBeforeModelCall === modelCalls) {
             // An operator's soft stop with this call under way: the harness's

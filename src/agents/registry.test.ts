@@ -17,6 +17,7 @@ import {
   type AgentDef,
   CHECKS_BY_COST,
 } from "./registry.js";
+import { TIMEOUT_ON_LONG_COMMANDS } from "../core/ship/contract.js";
 
 // Features: docs/reference/specs/agent-general.md, docs/reference/specs/agent-review.md,
 // docs/reference/specs/agent-coding.md — budgets, toolsets, and prompt guarantees are
@@ -450,6 +451,9 @@ describe("coding prompts: checks by cost — push before the expensive ones (age
     expect(CHECKS_BY_COST).toMatch(
       /At the wind-down note, commit and push what compiles, say what does not, then answer/,
     );
+    // a timeout stated on every long command, so the harness refuses one past the loop's end before it runs
+    expect(CHECKS_BY_COST).toContain(TIMEOUT_ON_LONG_COMMANDS);
+    expect(TIMEOUT_ON_LONG_COMMANDS).toMatch(/refused before the command runs, never cut midway/);
     // stack-agnostic: no package manager, test runner or language named
     expect(CHECKS_BY_COST).not.toMatch(/\b(npm|pnpm|yarn|bun|vitest|jest|pytest|cargo|go test|make)\b/);
     for (const sys of codingPrompts()) expect(sys).toContain(CHECKS_BY_COST);

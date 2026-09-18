@@ -16,6 +16,7 @@ import type { RunEvent } from "../../runEvents.js";
 import type { RunsService, RunView } from "../../runsService.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import { createTracer } from "../../trace/tracer.js";
+import { commandPastLoopEndRefusal } from "../windDown.js";
 import type { ChannelIO, IncomingMessage } from "../../types.js";
 import {
   HarnessRegistry,
@@ -73,7 +74,9 @@ const executor: Executor = {
   writeFile: async () => "",
 };
 
-function live(opts: { blocked?: string; withSpan?: boolean; identity?: "none" | "read" | "write" } = {}) {
+function live(
+  opts: { blocked?: string; withSpan?: boolean; identity?: "none" | "read" | "write"; loopEndsIn?: () => number } = {},
+) {
   const events: RunEvent[] = [];
   const progress: string[] = [];
   const sink = recordingSink();
@@ -89,7 +92,12 @@ function live(opts: { blocked?: string; withSpan?: boolean; identity?: "none" | 
     tools: [echo, throwing, seeing],
     toolContext: { executor, reportProgress: (c) => void progress.push(c) },
     backend: "resident",
-    rules: { identity: opts.identity ?? "write", checkout: "/work/repo", branch: "feat/x" },
+    rules: {
+      identity: opts.identity ?? "write",
+      checkout: "/work/repo",
+      branch: "feat/x",
+      ...(opts.loopEndsIn ? { loopEndsIn: opts.loopEndsIn } : {}),
+    },
     emit: (e) => void events.push(e),
     toolSpan: (callId) => (callId === "c1" ? openSpan : undefined),
     gateSaw: (callId) => void seen.push(callId),
@@ -183,6 +191,30 @@ describe("authorizeToolCall — the gate", () => {
         type: "run_note",
         kind: "tool_refused",
         summary: "submit_verdict refused: submit_verdict is the `verdict` bundle, outside the write identity's reach",
+      },
+    ]);
+  });
+
+  it("refuses a bash call whose explicit timeout reaches past the loop's end: the refusal is the tool's result in the wind-down's words and a tool_refused note on the record; a timeout inside the end and a call naming none run", () => {
+    const { harness, events } = live({ loopEndsIn: () => 384_000 });
+    expect(
+      authorizeToolCall(harness, { toolCallId: "a", tool: "bash", input: { command: "npm run verify", timeout: 600 } }),
+    ).toEqual({ allow: false, reason: commandPastLoopEndRefusal(600, 384) });
+    expect(
+      authorizeToolCall(harness, {
+        toolCallId: "b",
+        tool: "bash",
+        input: { command: "npm test -- one.test.ts", timeout: 60 },
+      }),
+    ).toEqual({ allow: true });
+    expect(
+      authorizeToolCall(harness, { toolCallId: "c", tool: "bash", input: { command: "git push origin feat/x" } }),
+    ).toEqual({ allow: true });
+    expect(events).toEqual([
+      {
+        type: "run_note",
+        kind: "tool_refused",
+        summary: `bash refused: ${commandPastLoopEndRefusal(600, 384)}`,
       },
     ]);
   });

@@ -2,7 +2,12 @@
 import type { Effort } from "../effort.js";
 import { BASH_TIMEOUT_MAX_MS } from "../execution/bashTimeout.js";
 import { ASKS, RUNAWAY_TURNS_PER_MINUTE, runawayTurnCap, type LoopPreset } from "../core/budgets.js";
-import { CONTRACT_HEADING, CONTRACT_SECTION_HEADINGS, PR_TITLE_GUARD } from "../core/ship/contract.js";
+import {
+  CONTRACT_HEADING,
+  CONTRACT_SECTION_HEADINGS,
+  PR_TITLE_GUARD,
+  TIMEOUT_ON_LONG_COMMANDS,
+} from "../core/ship/contract.js";
 // Which model runs it is resolved separately by the config layers, so any
 // agent can run on any configured provider/model.
 
@@ -233,7 +238,7 @@ Keep notes with the \`notes\` tool: one short document, replaced whole each time
 // project's most expensive checks first; the rule is the runner's to hold, not
 // a line every requester remembers to paste. Stack-agnostic on purpose — the
 // classes are by duration, the project's own scripts and CI say which is which.
-export const CHECKS_BY_COST = `CHECKS BY COST — push before the expensive ones. Every check you might run has a cost class: seconds (a formatter or a linter on the files you touched, one test file, a docs, link or spec check, the typecheck of one package) or minutes (the whole test suite, a build, a dependency install, an end-to-end or full verification). Know a command's class before you run it — from the project's own scripts and CI configuration, from how long it took last time, or by the class above when you have nothing better. Prove each change with the cheapest check that can prove it, matched to the change's scope: a documentation change gets the documentation checks, one module gets its own tests, a shared type gets the typecheck. As soon as the change exists and those checks pass, commit and push — the pushed branch is the deliverable, and an unpushed tree does not survive the run's end. Only then run the expensive checks, once, and fix forward with further commits and pushes. Never start an operation whose expected duration does not fit the time you have left minus what a commit, a push and the description need: push what there is and say plainly what is unverified instead. At the wind-down note, commit and push what compiles, say what does not, then answer. The description's validation names exactly what ran; what did not run is CI's to gate, and you say so.`;
+export const CHECKS_BY_COST = `CHECKS BY COST — push before the expensive ones. Every check you might run has a cost class: seconds (a formatter or a linter on the files you touched, one test file, a docs, link or spec check, the typecheck of one package) or minutes (the whole test suite, a build, a dependency install, an end-to-end or full verification). Know a command's class before you run it — from the project's own scripts and CI configuration, from how long it took last time, or by the class above when you have nothing better. Prove each change with the cheapest check that can prove it, matched to the change's scope: a documentation change gets the documentation checks, one module gets its own tests, a shared type gets the typecheck. As soon as the change exists and those checks pass, commit and push — the pushed branch is the deliverable, and an unpushed tree does not survive the run's end. Only then run the expensive checks, once, and fix forward with further commits and pushes. Never start an operation whose expected duration does not fit the time you have left minus what a commit, a push and the description need: push what there is and say plainly what is unverified instead. At the wind-down note, commit and push what compiles, say what does not, then answer. ${TIMEOUT_ON_LONG_COMMANDS} The description's validation names exactly what ran; what did not run is CI's to gate, and you say so.`;
 
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
 

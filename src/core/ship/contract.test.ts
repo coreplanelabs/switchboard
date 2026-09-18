@@ -5,6 +5,7 @@ import {
   DEFAULT_CONTRACT_MAX_CHARS,
   GUARDS,
   PR_TITLE_GUARD,
+  TIMEOUT_ON_LONG_COMMANDS,
   contractFromPlan,
   generatedUnit,
   itemNumbersNamed,
@@ -365,6 +366,8 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect(text).toContain("Rebase `plan/fixture/u10-warm-the-cache` onto `main`");
     // and the wind-down step (decision 0046): push what compiles at the wind-down note, then answer
     expect(text).toContain("At the wind-down note, commit and push what compiles, say what does not, then answer.");
+    // and the timeout clause the coding contract carries: a timeout past the loop's end is refused, not cut
+    expect(text).toContain(TIMEOUT_ON_LONG_COMMANDS);
     // the first instruction orders the push before the full verification (agent-coding item 13:
     // an unpushed tree does not survive the run's end) and carries the pre-push re-fetch, so the
     // pull request is not born conflicting when main moved while the child worked
