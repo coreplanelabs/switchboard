@@ -207,5 +207,7 @@ RUN npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.3 \
 # stays PID 1 — it reaps orphans and forwards the platform's signals — and
 # runs the supervisor, which starts the server again when it exits.
 # src/deploy/sandboxRuntimeSupervisor.test.ts holds this pair of lines.
-COPY --chmod=0755 runtime-supervisor.sh /usr/local/bin/sandbox-runtime-supervisor
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/sandbox-runtime-supervisor"]
+# The .mjs extension keeps Node reading it as ESM; its `#!/usr/bin/env node`
+# resolves to the Node copied in above.
+COPY --chmod=0755 runtime-supervisor.mjs /usr/local/bin/sandbox-runtime-supervisor.mjs
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/sandbox-runtime-supervisor.mjs"]
