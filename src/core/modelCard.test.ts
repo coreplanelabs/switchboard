@@ -246,4 +246,31 @@ describe("decideControls — native, degraded or refused before the first call",
     const decisions = decideControls(card, {});
     expect(decisions.map((d) => d.control)).toEqual(["cap", "window", "cache"]);
   });
+
+  // Record 0052's amendment (U44): the cache outcome reads the harness's
+  // ability, not the vendor table alone — a markers rule is native only where
+  // a harness-side write places the markers (pi's per-block compat; OpenCode's
+  // top-level `cache_control` via `settings.extraBody` on a biller the table
+  // names), and a generic biller degrades with a note true on both harnesses.
+  it("a markers rule is native on the Anthropic wire and on a biller the harness table names, and degrades on a generic biller with a note true on both harnesses", () => {
+    const direct = resolveModelCard("anthropic/claude-opus-4-6", blocks, REGISTRY);
+    expect(decideControls(direct, {}).find((d) => d.control === "cache")).toMatchObject({
+      outcome: "native",
+      applied: "markers",
+      vouched: true,
+    });
+    const aggregator = resolveModelCard("openrouter/anthropic/claude-sonnet-4", blocks, REGISTRY);
+    expect(aggregator.cache).toBe("markers");
+    expect(decideControls(aggregator, {}).find((d) => d.control === "cache")).toMatchObject({
+      outcome: "native",
+      applied: "markers",
+      vouched: true,
+    });
+    const generic = resolveModelCard("local/anthropic/claude-sonnet-4", blocks, REGISTRY);
+    expect(generic.cache).toBe("markers");
+    const cell = decideControls(generic, {}).find((d) => d.control === "cache")!;
+    expect(cell).toMatchObject({ outcome: "degraded", applied: "markers", vouched: false });
+    expect(cell.why).toContain('no harness-side provider vouches for the "local" biller');
+    expect(cell.why).not.toContain("OpenCode");
+  });
 });

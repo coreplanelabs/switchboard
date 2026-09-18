@@ -18,7 +18,7 @@ import type { Identity } from "../../../agents/registry.js";
 import { EFFORT_LEVELS, type Effort } from "../../../effort.js";
 import type { ModelCard } from "../../modelCard.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
-import { WIRE_ALIASES, type ProviderConfig, type Wire } from "../../provider.js";
+import { billerHarnessProvider, WIRE_ALIASES, type ProviderConfig, type Wire } from "../../provider.js";
 import type { Clock } from "../../trace/types.js";
 import {
   HarnessContainerError,
@@ -253,16 +253,37 @@ export function openCodeRunWire(spec: { model: { providerType: ProviderConfig["t
   return spec.card?.wire ?? WIRE_ALIASES[spec.model.providerType] ?? "openai-chat";
 }
 
-/** The provider package for the run's wire shape: each maps onto a provider the
- *  binary bundles (`packages/core/src/aisdk-native.ts:98-119`;
- *  `@ai-sdk/anthropic` 3.0.82, `@ai-sdk/openai-compatible` 2.0.41 and
- *  `@ai-sdk/openai` are `packages/core` dependencies), so nothing is installed
- *  at runtime. The Responses wire maps to `@ai-sdk/openai`, but a Responses
- *  block on OpenCode is refused at dispatch by name until that package is
- *  measured against the logging fake (record 0052; the matrix's `cannot`). */
-export function openCodeProviderPackage(wire: Wire): string {
+/** The provider package for the run's wire shape and the block's biller
+ *  (record 0052's amendment: the harness write names the biller's own
+ *  provider, never a generic alias): each maps onto a provider the binary
+ *  bundles — `@ai-sdk/anthropic`, `@ai-sdk/openai-compatible` and
+ *  `@ai-sdk/openai` are `packages/core` dependencies, and the aggregator's
+ *  `@openrouter/ai-sdk-provider` resolves to the binary's own
+ *  `@opencode/ai/providers/openrouter` — so nothing is installed at runtime.
+ *  On the chat wire the biller decides (`billerHarnessProvider`): the
+ *  aggregator's package speaks the aggregator's own protocol through the proxy
+ *  — it asks for `usage.cost` on the final chunk (`usage: { include: true }`)
+ *  and spells reasoning `reasoning: { effort }` — where the generic package
+ *  asks for none. Its per-block cache breakpoints do NOT ride from the write:
+ *  measured against the pinned 2.0.3 binary through the real proxy, the binary
+ *  exempts the openrouter route from its per-block cache placement (`auto`
+ *  places hints on its Anthropic-family routes only) and no configuration key
+ *  reaches the request's own `cache` option — so a `markers` card rides the
+ *  aggregator's OTHER documented spelling instead: one top-level
+ *  `cache_control: { type: "ephemeral" }` on the request (OpenRouter's
+ *  "automatic caching", honoured on its Anthropic, Vertex, Azure, Bedrock and
+ *  Claude-on-AWS routes), written as the provider's `settings.extraBody`,
+ *  which the binary's native providers merge into every request body
+ *  (`openCodeConfig`; a model-level `options` entry does NOT reach the body,
+ *  measured). The Responses wire maps to `@ai-sdk/openai`,
+ *  but a Responses block on OpenCode is refused at dispatch by name until that
+ *  package is measured against the logging fake (record 0052; the matrix's
+ *  `cannot`). */
+export function openCodeProviderPackage(wire: Wire, biller?: string): string {
   if (wire === "anthropic-messages") return "aisdk:@ai-sdk/anthropic";
   if (wire === "openai-responses") return "aisdk:@ai-sdk/openai";
+  const provider = billerHarnessProvider(biller);
+  if (provider !== undefined) return `aisdk:${provider.openCodePackage}`;
   return "aisdk:@ai-sdk/openai-compatible";
 }
 
@@ -285,7 +306,10 @@ export function openCodeProviderBaseUrl(harnessUrl: string): string {
  *  `output_config.effort` with adaptive thinking on the Anthropic dialect,
  *  where only a model that takes adaptive thinking carries an effort word at
  *  all (a budget model has no word to spell, so it gets no variants and the
- *  tier is left to the provider's default). Unknown levels are the identity
+ *  tier is left to the provider's default); `reasoning: { effort }` on the
+ *  aggregator's own protocol (the spelling its provider package takes — the
+ *  binary's own catalog spells its effort variants so for
+ *  `@openrouter/ai-sdk-provider`). Unknown levels are the identity
  *  map — the asked tier's own word, unvouched, never a silent clamp. */
 export function openCodeVariants(
   model: { id: string; providerType: ProviderConfig["type"] },
@@ -294,6 +318,7 @@ export function openCodeVariants(
   if (card === undefined) return undefined;
   const anthropic = model.providerType === "anthropic";
   if (anthropic && !takesAdaptiveThinking(model.id)) return undefined;
+  const aggregator = !anthropic && card.wire === "openai-chat" && billerHarnessProvider(card.block) !== undefined;
   const variants: Array<{ id: string; body: Record<string, unknown> }> = [];
   for (const tier of EFFORT_LEVELS) {
     const level = card.levels === "unknown" ? undefined : card.levels[tier];
@@ -303,7 +328,9 @@ export function openCodeVariants(
       id: tier,
       body: anthropic
         ? { thinking: { type: "adaptive" }, output_config: { effort: word } }
-        : { reasoning_effort: word },
+        : aggregator
+          ? { reasoning: { effort: word } }
+          : { reasoning_effort: word },
     });
   }
   return variants.length > 0 ? variants : undefined;
@@ -390,12 +417,27 @@ export function openCodeConfig(spec: OpenCodeLaunchSpec): Record<string, unknown
     wire === "openai-chat" && (card?.capField === "max_completion_tokens" || card?.capField === "max_tokens")
       ? card.capField
       : undefined;
+  // A `markers` card on a biller the harness table names caches the
+  // aggregator's own way (record 0052's amendment, U44): the pinned binary
+  // exempts the openrouter route from per-block `cache_control` placement, so
+  // the write spells OpenRouter's other documented form — one top-level
+  // `cache_control: { type: "ephemeral" }` ("automatic caching", honoured on
+  // its Anthropic-family routes) — as the provider's `settings.extraBody`,
+  // which the binary merges into every request body. A model-level `options`
+  // entry does NOT reach the body (measured against 2.0.3 through the real
+  // proxy, `opencode/testing/realDriver.test.ts`).
+  const aggregatorMarkers =
+    wire === "openai-chat" && card?.cache === "markers" && billerHarnessProvider(card.block) !== undefined;
   return {
     providers: {
       [PROXY_PROVIDER]: {
         name: "Switchboard model proxy",
-        package: openCodeProviderPackage(wire),
-        settings: { baseURL: openCodeProviderBaseUrl(spec.harnessUrl), apiKey: `{env:${RUN_BEARER_ENV}}` },
+        package: openCodeProviderPackage(wire, card?.block),
+        settings: {
+          baseURL: openCodeProviderBaseUrl(spec.harnessUrl),
+          apiKey: `{env:${RUN_BEARER_ENV}}`,
+          ...(aggregatorMarkers ? { extraBody: { cache_control: { type: "ephemeral" } } } : {}),
+        },
         models: {
           [id]: {
             name: id,
