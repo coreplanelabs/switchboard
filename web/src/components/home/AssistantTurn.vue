@@ -53,6 +53,9 @@ const emit = defineEmits<{
 }>();
 
 const model = createRunPageModel();
+// The runner clock's anchor (live-view item 18): the seed's server clock, so
+// the replay's open spans are timed by their real start, not the page load.
+if (props.live?.serverNow) model.seedClock(props.live.serverNow);
 const state = model.state;
 const phase = ref<StreamPhase>(props.live ? "connecting" : "ended");
 const route = ref<{ preset: string; reason: string } | null>(props.turn.route ?? null);
