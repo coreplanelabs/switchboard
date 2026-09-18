@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 // dist/ must never ship test files: a *.test.js in the image would import
-// vitest, which `npm ci --omit=dev` prunes, and throw at startup. Run after
+// vitest, which `npm ci --omit=dev` prunes, and throw at startup. And it must
+// ship the runtime inputs tsc only carries because `allowJs` and
+// `resolveJsonModule` are on — the title gate's predicate and its generated
+// vocabulary, which the bot imports as-is — since a missing one is a crash on
+// the first `submit_pr_description`, not a type error. Run after
 // `npm run build` (the `check:dist` script does both).
 
-import { readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+
+/** Files under dist/ that are not compiled from TypeScript and that the bot imports at runtime. */
+const REQUIRED = ["core/prTitle.mjs", "core/prTitleVocabulary.json"];
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
@@ -29,4 +36,12 @@ if (offenders.length > 0) {
   for (const f of offenders) console.error(`  ${f}`);
   process.exit(1);
 }
-console.log(`check:dist ok — ${files.length} file(s) in dist/, no test files`);
+const missing = REQUIRED.filter((f) => !existsSync(join(dist, f)));
+if (missing.length > 0) {
+  console.error(
+    `check:dist FAILED — ${missing.length} runtime input(s) missing from dist/ (tsc emits them under allowJs):`,
+  );
+  for (const f of missing) console.error(`  ${f}`);
+  process.exit(1);
+}
+console.log(`check:dist ok — ${files.length} file(s) in dist/, no test files, every runtime input present`);

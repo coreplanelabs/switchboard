@@ -46,6 +46,7 @@ import {
 import { setShutdownNotice } from "./dispatch/run.js";
 import { durableInboxMessage, type DispatchFollowUp } from "./dispatch/admission.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
+import { TITLE_GATE_REPOSITORY } from "./prDescription.js";
 import { RunRegistry } from "./runRegistry.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
 import { activityText } from "./statusCardFrame.js";
@@ -3767,6 +3768,59 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(target.body).toContain("**Why:**");
     // the reply carries the returned URL with the created wording
     expect(replies.some((r) => r.includes("https://github.com/acme/api/pull/7") && /PR opened/.test(r))).toBe(true);
+  });
+
+  it("on the repository that carries the title gate, the tool refuses a title CI's `title` check would refuse — the gate's sentence in the tool result — and the corrected resubmit opens the PR; the same title on another repository opens as before", async () => {
+    // The incident: a run on the bot's own repository submitted a scope the
+    // code map does not name, the tool said "recorded", CI failed the title.
+    const refused = { ...DESCRIPTION, title: "feat(dispatch): every gate refusal is a Refusal with a cause, counted" };
+    const corrected = { ...DESCRIPTION, title: "feat(dispatcher): every gate refusal is a Refusal with a cause" };
+    const submitThenSubmit = (): Provider => {
+      let n = 0;
+      return {
+        name: "fake",
+        async complete(): Promise<CompletionResult> {
+          n++;
+          if (n === 1)
+            return {
+              content: [{ type: "tool_use", id: "d1", name: "submit_pr_description", input: refused }],
+              stopReason: "tool_use",
+            };
+          if (n === 2)
+            return {
+              content: [{ type: "tool_use", id: "d2", name: "submit_pr_description", input: corrected }],
+              stopReason: "tool_use",
+            };
+          return { content: [{ type: "text", text: "Done — branch pushed." }], stopReason: "end_turn" };
+        },
+      };
+    };
+    const own = codingDeps(submitThenSubmit());
+    own.resolveRepoContext = () => ({ repo: TITLE_GATE_REPOSITORY, ref: "main" });
+    codingExecutor({ head: HEAD, branch: "feat/refusals", bindingRef: "main" });
+    const ownSpy = openSpy();
+    own.openPullRequest = ownSpy.fn;
+    const registry = new RunRegistry({ genId: () => "r-gate", genToken: () => "t-gate" });
+    own.runRegistry = registry;
+    await dispatch(own, msg("agent:coding count every gate refusal", "slack:UADMIN"), fakeIO().io);
+    expect(ownSpy.calls.map((c) => c.title)).toEqual([corrected.title]);
+    const results = (registry.snapshot("r-gate", "t-gate")?.events ?? []).filter(
+      (e) => e.type === "tool_result" && e.tool === "submit_pr_description",
+    );
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({ ok: false });
+    expect(`${results[0].type === "tool_result" ? (results[0].output ?? results[0].summary) : ""}`).toMatch(
+      /unknown scope "dispatch" — use one of: dispatcher, core, /,
+    );
+    expect(results[1]).toMatchObject({ ok: true });
+
+    // Another repository never sees this repository's vocabulary: the refused title opens there.
+    const foreign = codingDeps(describeThenAnswer(refused));
+    codingExecutor({ head: HEAD, branch: "feat/refusals", bindingRef: "main" });
+    const foreignSpy = openSpy();
+    foreign.openPullRequest = foreignSpy.fn;
+    await dispatch(foreign, msg("agent:coding count every gate refusal", "slack:UADMIN"), fakeIO().io);
+    expect(foreignSpy.calls.map((c) => c.title)).toEqual([refused.title]);
   });
 
   /** A coding-agent provider that runs `steps` as bash commands in order, then

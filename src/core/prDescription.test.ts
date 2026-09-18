@@ -6,13 +6,17 @@ import {
   GENERATED_FOOTER,
   MAP_LABELS,
   PR_DESCRIPTION_CAPS,
+  TITLE_GATE_REPOSITORY,
   anchorUrl,
   parsePrDescription,
   parsePrDescriptionMarkdown,
   renderPrDescriptionMarkdown,
+  titleGateApplies,
   visibleLength,
   type PrDescription,
 } from "./prDescription.js";
+import { checkPrTitle, TITLE_MAX_LENGTH } from "./prTitle.mjs";
+import PR_TITLE_VOCABULARY from "./prTitleVocabulary.json" with { type: "json" };
 
 // Feature: docs/reference/specs/pr-description.md (shape: docs/decisions/0050) — the PR
 // description is data; the GitHub body is one rendering of it: a fixed-size
@@ -107,15 +111,16 @@ describe("parsePrDescription (the schema)", () => {
 
   it("caps every map field in visible characters and names the cap and the count; a link's target is not counted", () => {
     const long = (n: number) => "x".repeat(n);
-    // The title is the squash subject and the changelog line: 72, the same
-    // number the title gate (`npm run check:pr-title`) holds it to.
+    // The title is the squash subject and the changelog line: 72, the title
+    // gate's own number, counted raw on EVERY repository (GitHub renders no
+    // markdown in a title, so a link's target is characters the reader sees);
+    // the gate's grammar and vocabulary apply on one repository only — the
+    // block below.
     expect(PR_DESCRIPTION_CAPS.title).toBe(72);
     expect(issueAt(() => parsePrDescription({ ...desc(), title: long(73) }), "title")).toBe(
       "at most 72 characters (got 73)",
     );
     expect(parsePrDescription({ ...desc(), title: long(72) }).title).toBe(long(72));
-    // The title is counted raw, as the gate counts it: GitHub renders no
-    // markdown in a title, so a link's target is characters the reader sees.
     const linkedTitle = `fix: [x](${"h".repeat(63)})`;
     expect(linkedTitle).toHaveLength(73);
     expect(issueAt(() => parsePrDescription({ ...desc(), title: linkedTitle }), "title")).toBe(
@@ -220,6 +225,110 @@ describe("parsePrDescription (the schema)", () => {
     // `..` is rejected as a SEGMENT only — a filename containing dots is legitimate.
     expect(parsePrDescription(p({ path: "src/a..b.ts", from: 1, to: 2 })).pointers[0].anchor.path).toBe("src/a..b.ts");
     expect(() => parsePrDescription(p({ path: "src/../x.ts", from: 1, to: 2 }))).toThrow(/repo-relative/);
+  });
+});
+
+describe("the title is judged as the CI title gate judges it (release-and-deploy item 22)", () => {
+  // A title the gate refuses used to reach GitHub: the tool checked only the
+  // cap, and a run whose loop was cut had no shell left to run
+  // `npm run check:pr-title` itself. On the repository that carries the gate
+  // the schema now runs the gate's own predicate against the generated
+  // vocabulary and reports the gate's own sentence, so the model cuts and
+  // resubmits inside the same turn. The vocabulary is one repository's house
+  // convention, so every other repository keeps the cap alone.
+  const gated = (over: Partial<PrDescription>) =>
+    parsePrDescription({ ...desc(), ...over }, { repo: TITLE_GATE_REPOSITORY });
+  const gateProblems = (title: string): string[] => {
+    const v = checkPrTitle(title, PR_TITLE_VOCABULARY);
+    return v.ok ? [] : v.problems;
+  };
+  const issuesAt = (fn: () => unknown, path: string): string[] => {
+    try {
+      fn();
+    } catch (err) {
+      if (err instanceof z.ZodError) return err.issues.filter((i) => i.path.join(".") === path).map((i) => i.message);
+      throw err;
+    }
+    throw new Error("did not throw");
+  };
+  const issueAt = (fn: () => unknown, path: string): string => {
+    const [first, ...rest] = issuesAt(fn, path);
+    if (first === undefined) throw new Error(`no issue at ${path}`);
+    expect(rest, `one issue at ${path}`).toEqual([]);
+    return first;
+  };
+
+  it("an unknown scope is refused at `title` with the gate's sentence — the scope, the whole vocabulary and the code map named", () => {
+    const title = "feat(dispatch): every gate refusal is a Refusal with a cause, counted";
+    const message = issueAt(() => gated({ title }), "title");
+    expect(message).toBe(gateProblems(title)[0]);
+    expect(message).toMatch(/^unknown scope "dispatch" — use one of: dispatcher, core, /);
+    expect(message).toContain("(the Areas in docs/reference/code-map.md), or no scope for a tree-wide change");
+  });
+
+  it("an unknown type, a title outside the grammar and a trailing period are refused with the gate's sentence too", () => {
+    for (const title of ["feature: new thing", "Fix the gate", "fix:no space", "fix(core): stop here."]) {
+      expect(gateProblems(title)).not.toEqual([]);
+      expect(issueAt(() => gated({ title }), "title")).toBe(gateProblems(title)[0]);
+    }
+  });
+
+  it("every problem the gate finds is one issue at `title`, in the gate's order", () => {
+    const title = "feature(readme): x.";
+    expect(issuesAt(() => gated({ title }), "title")).toEqual(gateProblems(title));
+    expect(gateProblems(title)).toHaveLength(3);
+  });
+
+  it("a code-map scope, no scope, the bots' scopes over the cap and a revert pass, as they pass the gate", () => {
+    for (const title of [
+      "fix(tools): the tool refuses the title the gate refuses",
+      "docs: a tree-wide change carries no scope",
+      `chore(deps): bump ${"x".repeat(80)}`,
+      "chore(main): release 1.2.3",
+      `revert: feat(core): ${"x".repeat(80)}`,
+    ]) {
+      expect(gateProblems(title)).toEqual([]);
+      expect(gated({ title }).title).toBe(title);
+    }
+  });
+
+  it("the golden description's title passes the gate and the schema alike", () => {
+    expect(gateProblems(goldenFixture().title)).toEqual([]);
+    expect(gated({ title: goldenFixture().title }).title).toBe(goldenFixture().title);
+  });
+
+  it("only a description bound for the repository that carries the gate is judged by it — another repository, or none, keeps the cap alone", () => {
+    // The vocabulary and the file the refusal names belong to one repository;
+    // a run on any other must not be told to use its Areas.
+    const foreign = "fix(api): handle 429 retries";
+    expect(gateProblems(foreign)).not.toEqual([]);
+    expect(parsePrDescription({ ...desc(), title: foreign }, { repo: "acme/api" }).title).toBe(foreign);
+    expect(parsePrDescription({ ...desc(), title: foreign }).title).toBe(foreign);
+    expect(parsePrDescription({ ...desc(), title: "Fix the gate" }, { repo: "acme/api" }).title).toBe("Fix the gate");
+    expect(issueAt(() => gated({ title: foreign }), "title")).toMatch(/^unknown scope "api" — use one of: /);
+    // The cap still holds everywhere, in the universal wording.
+    const long = "x".repeat(73);
+    expect(issueAt(() => parsePrDescription({ ...desc(), title: long }, { repo: "acme/api" }), "title")).toBe(
+      "at most 72 characters (got 73)",
+    );
+    // The repository is matched as the dispatcher resolves it: a lowercase slug; case never decides.
+    expect(titleGateApplies(TITLE_GATE_REPOSITORY)).toBe(true);
+    expect(titleGateApplies(TITLE_GATE_REPOSITORY.toUpperCase())).toBe(true);
+    expect(titleGateApplies("acme/api")).toBe(false);
+    expect(titleGateApplies(undefined)).toBe(false);
+  });
+
+  it("the cap is the gate's number: 72 raw characters, a link's target counted, refused naming the count in the gate's words", () => {
+    expect(PR_DESCRIPTION_CAPS.title).toBe(TITLE_MAX_LENGTH);
+    const fill = (prefix: string, n: number) => prefix + "x".repeat(n - prefix.length);
+    expect(gated({ title: fill("fix(core): ", 72) }).title).toHaveLength(72);
+    expect(issueAt(() => gated({ title: fill("fix(core): ", 73) }), "title")).toBe(
+      "the title is 73 characters; at most 72 — one change, one clause, present tense; the PR body carries the rest",
+    );
+    // GitHub renders no markdown in a title, so a link's target is characters the reader sees.
+    const linkedTitle = `fix: [x](${"h".repeat(63)})`;
+    expect(linkedTitle).toHaveLength(73);
+    expect(issueAt(() => gated({ title: linkedTitle }), "title")).toMatch(/^the title is 73 characters/);
   });
 });
 

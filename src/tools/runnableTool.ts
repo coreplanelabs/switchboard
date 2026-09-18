@@ -140,6 +140,13 @@ export interface ToolContext {
    *  PR's own size and refuses to post a verdict whose digest covered less
    *  (docs/reference/specs/agent-review.md item 15). Absent → the tool still answers. */
   onDigest?: (report: DigestReport) => void;
+  /** The repository the run works in, `owner/name` as the dispatcher resolved
+   *  it (`RepoContext.repo`). `submit_pr_description` reads it to decide
+   *  whether the title is judged by this project's own title gate — only a
+   *  description bound for the repository that carries the gate is
+   *  (docs/reference/specs/pr-description.md item 1). Absent (a no-repo run,
+   *  a unit context) → no repository carries the gate, the cap alone holds. */
+  repo?: string;
   /** Receives the coding agent's typed PR description from
    *  `submit_pr_description` (docs/reference/specs/pr-description.md). Injected by the
    *  dispatcher for coding runs; the last valid call wins. The dispatcher
