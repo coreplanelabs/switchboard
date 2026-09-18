@@ -78,15 +78,30 @@ export function drainSkippedLine(step: string, tokenEnv: string, tag = "deploy:a
   return `[${tag}] ${step}: ${tokenEnv} is not set — waiting without a drain: new runs keep landing and the wait may never find a quiet minute (add the secret; release-and-deploy item 31)`;
 }
 
-/** The step's last line: the fleet reopened, or did not and reopens by itself. */
+/** The step's last line, true to what stood. A drain the runner saw land
+ *  (`drained`): reopened, or NOT reopened and reopening by itself at its end.
+ *  A drain the runner never saw land — the `/drain` answer refused or lost —
+ *  is lifted anyway (it may have landed), and the line says so: `cleared`
+ *  answers whether anything stood; a failed lift after no confirmed drain
+ *  names the doubt and where to look, never a drain that "ends". */
 export function drainLiftedLine(
   step: string,
   answer: PostAnswer,
-  until: string | undefined,
+  drain: { drained: boolean; until: string | undefined },
   tag = "deploy:all",
 ): string {
-  if (!("error" in answer) && answer.status >= 200 && answer.status < 300) return `[${tag}] ${step}: fleet reopened`;
-  return `[${tag}] ${step}: fleet NOT reopened (${answerWords(answer)}) — it reopens by itself${until ? ` at ${until}` : " when the drain ends"}; \`POST /undrain\` with the drain or admin bearer reopens it now`;
+  const ok = !("error" in answer) && answer.status >= 200 && answer.status < 300;
+  if (drain.drained) {
+    if (ok) return `[${tag}] ${step}: fleet reopened`;
+    return `[${tag}] ${step}: fleet NOT reopened (${answerWords(answer)}) — it reopens by itself${drain.until ? ` at ${drain.until}` : " when the drain ends"}; \`POST /undrain\` with the drain or admin bearer reopens it now`;
+  }
+  if (ok) {
+    const cleared = "error" in answer ? false : answer.body.cleared === true;
+    return cleared
+      ? `[${tag}] ${step}: fleet reopened — the drain had landed although its answer was lost`
+      : `[${tag}] ${step}: no drain stood to lift — the fleet was never closed`;
+  }
+  return `[${tag}] ${step}: the lift answered ${answerWords(answer)} and no drain was confirmed — the fleet should be open; \`GET /residents\` says (\`draining\`), and \`POST /undrain\` with the drain or admin bearer reopens it if not`;
 }
 
 /** Appended to the gave-up line when the fleet was drained for the whole wait:

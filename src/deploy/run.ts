@@ -931,7 +931,7 @@ async function deployStepTraced(
     // landed: a `/drain` whose answer was lost after the registry stored the
     // record would otherwise close the fleet for the record's whole life.
     // `/undrain` is idempotent, and a rejected bearer answers 401 to both alike.
-    if (drain.attempted) await endDrain(step, drain.until, io, deps);
+    if (drain.attempted) await endDrain(step, drain, io, deps);
   }
 }
 
@@ -963,14 +963,14 @@ async function beginDrain(
 
 async function endDrain(
   step: DeployStep,
-  until: string | undefined,
+  drain: { drained: boolean; until: string | undefined },
   io: DeployRunnerIO,
   deps: SandboxGateDeps,
 ): Promise<void> {
   const bearer = step.drain ? deps.env[step.drain.tokenEnv] : undefined;
   if (!step.drain || !bearer || !deps.postJson) return;
   const answer = await deps.postJson(undrainUrl(step.drain.url), bearer, {});
-  io.log(drainLiftedLine(step.name, answer, until));
+  io.log(drainLiftedLine(step.name, answer, drain));
 }
 
 async function deployStepLoop(
