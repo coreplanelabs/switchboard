@@ -136,6 +136,10 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.parentInstanceId === "string";
     case "route":
       return typeof o.preset === "string" && typeof o.reason === "string" && typeof o.model === "string";
+    case "refusal":
+      // A refusal the door recorded (record 0054, as amended): the code, its
+      // cause and the capped sentence — a captured door record replays whole.
+      return typeof o.code === "string" && typeof o.cause === "string" && typeof o.text === "string";
     default:
       return false;
   }

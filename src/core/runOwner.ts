@@ -11,6 +11,11 @@ import type { RunOwner } from "./trace/streamSpans.js";
 /** The agent name a command run's `run_meta` carries: no model, no prompt. */
 export const COMMAND_RUN_AGENT = "command";
 
+/** The agent name a door refusal record carries (record 0054, as amended:
+ *  every refusal is a run record): no model, no prompt, no thread claim —
+ *  the record of a refusal the door made, written by `recordRefusal`. */
+export const DOOR_RUN_AGENT = "door";
+
 /** The partition owner a run's agent name implies. */
 export function runOwnerOf(agent: string | null | undefined): RunOwner {
   return agent === COMMAND_RUN_AGENT ? "command" : "agent";

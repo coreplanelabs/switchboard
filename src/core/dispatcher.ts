@@ -27,7 +27,7 @@ import {
 } from "./dispatch/admission.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
 import { actorIdsOf, cancelPending, consumeAndRun, REFUSED_REASON } from "./dispatch/confirm.js";
-import { postSettledOutcome, recordRoutedDecision } from "./dispatch/commandRun.js";
+import { postSettledOutcome, recordRefusal, recordRoutedDecision } from "./dispatch/commandRun.js";
 import { COMMAND_RUN_AGENT } from "./runOwner.js";
 import { redactedInput } from "./dispatch/route.js";
 import type { Actor } from "./authz/types.js";
@@ -378,9 +378,20 @@ export async function dispatch(
     root.setAttrs({ refusal: outcome, cause });
     return cause;
   };
+  // Every refusal is a run record (record 0054, as amended): one `door` record
+  // per request — written after the sentence on the same `dispatch.refuse`
+  // span, and never twice when the catch-all follows a gate that already
+  // recorded (a setup failure's silent close, then its error reply).
+  let refusalRecorded = false;
+  const recordRefusalOnce = async (refusal: Refusal) => {
+    if (refusalRecorded) return;
+    refusalRecorded = true;
+    await recordRefusal(deps, msg, io, refusal, ending, trace);
+  };
   // A gate refusal is the site's `Refusal` — its own sentence, the cause from
   // the one table — stamped, the side work (a card close, a release) run
-  // inside the span, and the sentence rendered by the ONE renderer.
+  // inside the span, the sentence rendered by the ONE renderer, and the
+  // decision recorded as a `door` run.
   const refuse = async (refusal: Refusal, side?: () => Promise<void>) => {
     const cause = stampRefusal(refusal.code);
     await root.span(
@@ -391,17 +402,27 @@ export async function dispatch(
         // (record 0054): the renderer offers Yes and No where the channel can
         // show them, and the line to type everywhere else.
         await renderRefusal(refusal, io, { confirmations: deps.confirmations });
+        await recordRefusalOnce(refusal);
       },
       { attrs: { outcome: refusal.code, refusal: refusal.code, cause } },
     );
   };
   // A refusal nothing is said for — a coordinator spawn (the thread must not
   // hear a bot-to-bot retry), a lost workspace whose card says it, the
-  // catch-all's card close (the error reply follows on its own path): stamped
-  // and counted like any other, rendered by nobody.
+  // catch-all's card close (the error reply follows on its own path): stamped,
+  // recorded and counted like any other, rendered by nobody — the record's
+  // refusal event carries no sentence because none was said.
   const refuseSilently = <T>(outcome: RefusalCode, side: () => Promise<T>) => {
     const cause = stampRefusal(outcome);
-    return root.span("dispatch.refuse", side, { attrs: { outcome, refusal: outcome, cause } });
+    return root.span(
+      "dispatch.refuse",
+      async () => {
+        const result = await side();
+        await recordRefusalOnce(refusalOf(outcome, ""));
+        return result;
+      },
+      { attrs: { outcome, refusal: outcome, cause } },
+    );
   };
   // The card's shape and queued lines at a close (docs/reference/specs/tracing.md item 5):
   // a runless close reads the root's children so far over a live window; a
@@ -1628,13 +1649,17 @@ export async function dispatch(
         () =>
           root.span(
             replyName,
-            () => {
+            async () => {
               // The failure reply carries the run link when a run started: the
               // card scrolls away, and a failed run's transcript should be one
               // click from the thread.
               const line = redactSecrets(stripAnsi(errorReply(err)));
               const link = admitted?.runLink;
-              return io.reply(link ? `${line}\n\n[Live run](${link})` : line);
+              await io.reply(link ? `${line}\n\n[Live run](${link})` : line);
+              // The catch-all's refusal is a record too (record 0054, as
+              // amended) — after the reply, on the same span, and once: a
+              // setup failure's silent close already recorded this request's.
+              if (replyName === "dispatch.refuse") await recordRefusalOnce(thrown ?? refusalOf("uncaught", errMsg));
             },
             replyAttrs,
           ),
@@ -1841,8 +1866,9 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
       // nothing invoked, no surface told — with `outcome: "refused"` and the
       // code, so the door report counts it. `used` and an unreadable store
       // name no row and are counted from the trace alone.
-      if (res.row && res.row.kind === "run") {
-        const row = res.row;
+      const clickRow = res.row;
+      if (clickRow && clickRow.kind === "run") {
+        const row = clickRow;
         await recordRoutedDecision(
           deps,
           row.message,
@@ -1862,6 +1888,12 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
           ending,
           trace,
         );
+      } else if (clickRow && clickRow.kind === "redispatch") {
+        // A question's refused click is a record too (record 0054, as amended:
+        // every refusal is a run record): the stored proposal is the request
+        // the door refused, so the `door` record carries it. A `used` click and
+        // an unreadable store name no row — there is no message to record.
+        await recordRefusal(deps, clickRow.message, io, refusal, ending, trace);
       }
       await ending.sealAfterReply(
         async () => {},
