@@ -1214,6 +1214,140 @@ describe("resident repo dispatch", () => {
     expect(provider.requests).toHaveLength(0);
   });
 
+  // Feature: record 0054's Yes — on a channel that can show an offer, the
+  // question with a guess carries Yes and No; Yes hands the stored proposal to
+  // dispatch() as the requester and the run's record names the question's code.
+  describe("the question's Yes: the guess is stored and one click redispatches it (record 0054)", () => {
+    const requester: Actor = { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS };
+    const stranger: Actor = { kind: "user", id: "slack:UOTHER", grants: NO_GRANTS };
+    /** The rejected-slug request on an offering channel with the store wired:
+     *  everything the question needs to mint its row. */
+    const wiredQuestion = () => {
+      let n = 0;
+      const now = 1_000_000;
+      const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
+      const provider = capturingProvider();
+      const deps = makeDeps(REPO_PERMS_YAML, provider);
+      deps.runRegistry = registry;
+      deps.admission = new ThreadAdmission();
+      deps.clock = () => now;
+      deps.capabilities = { ...deps.capabilities, residents: true };
+      deps.resolveRepoContext = () => ({ rejectedRepo: "acme/apj" });
+      deps.residentSlugs = async () => ["acme/api"];
+      const store = new InMemoryConfirmationStore({ clock: () => now });
+      deps.confirmations = store;
+      const f = fakeIO();
+      const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+      f.io.offer = vi.fn(async (o) => void offers.push(o));
+      return { deps, registry, provider, store, offers, ...f, now: () => now };
+    };
+    const ask = (deps: TestDeps, io: ChannelIO) =>
+      dispatch(deps, msg("agent:coding in acme/apj: say hi", "slack:UADMIN"), io);
+
+    it("the question with a guess mints one redispatch row — the proposal as the requester's message, the code — and offers Yes: the sentence, the line and the evidence ride the offer; no plain reply", async () => {
+      const w = wiredQuestion();
+      await ask(w.deps, w.io);
+      expect(w.replies).toEqual([]);
+      expect(w.offers).toHaveLength(1);
+      const offer = w.offers[0]!;
+      expect(offer).toMatchObject({
+        line: "agent:coding in acme/api: say hi",
+        expiresAt: w.now() + CONFIRMATION_TTL_MS,
+        question: {
+          text: expect.stringContaining("not onboarded"),
+          evidence: expect.stringContaining("which is onboarded"),
+        },
+      });
+      expect(w.store.rows.get(offer.id)).toMatchObject({
+        kind: "redispatch",
+        message: { channelId: "slack:CX", userId: "slack:UADMIN", text: "agent:coding in acme/api: say hi" },
+        line: "agent:coding in acme/api: say hi",
+        code: "repo_not_onboarded",
+      });
+      expect(w.provider.requests).toHaveLength(0); // nothing ran yet
+    });
+
+    it("Yes consumes the row and hands the proposal to dispatch() as the requester — one run, counted in flight once, its record carrying the question's code in a redispatch note", async () => {
+      const w = wiredQuestion();
+      await ask(w.deps, w.io);
+      const id = w.offers[0]!.id;
+      // The corrected slug resolves now — that is what the fix fixed.
+      w.deps.resolveRepoContext = () => ({ repo: "acme/api" });
+      const inFlight: number[] = [];
+      w.provider.complete = async (req) => {
+        w.provider.requests.push(req);
+        inFlight.push(activeRunCount());
+        return { content: [{ type: "text", text: "answer" }], stopReason: "end_turn" };
+      };
+      const clickIO = fakeIO();
+      const outcome = await dispatchClick(w.deps, { kind: "confirm", id, actor: requester, io: clickIO.io });
+      expect(outcome).toEqual({ status: "completed" });
+      expect(clickIO.replies).toContain("answer");
+      expect(w.provider.requests).toHaveLength(1); // the redispatched run's one model turn
+      // The click's slot was handed over: one click is one run in flight, never two.
+      expect(inFlight).toEqual([1]);
+      expect(activeRunCount()).toBe(0);
+      // The redispatched run's record names the question it answered (run-history item 2).
+      // The question's refusal registered no run, so the Yes-run is the thread's first row.
+      const runs = ["r1", "r2", "r3", "r4"].map((id2) => w.registry.snapshotById(id2)).filter((s) => s !== null);
+      const note = runs.flatMap((s) => s!.events).find((e) => e.type === "run_note" && e.kind === "redispatch");
+      expect(note).toMatchObject({ summary: "confirmed after question repo_not_onboarded" });
+      // Consumed: a second Yes is `used` and runs nothing more.
+      const again = await dispatchClick(w.deps, { kind: "confirm", id, actor: requester, io: fakeIO().io });
+      expect(again).toMatchObject({ status: "refused", refusal: "confirmation_used" });
+      expect(w.provider.requests).toHaveLength(1);
+    });
+
+    it("a stranger's Yes is refused with the requester line and the row stays; No cancels for the requester — `Cancelled; nothing ran`, the row gone", async () => {
+      const w = wiredQuestion();
+      await ask(w.deps, w.io);
+      const id = w.offers[0]!.id;
+      const foreign = fakeIO();
+      const refusedOutcome = await dispatchClick(w.deps, { kind: "confirm", id, actor: stranger, io: foreign.io });
+      expect(refusedOutcome).toMatchObject({ status: "refused", refusal: "confirmation_foreign" });
+      expect(foreign.replies).toEqual(["only the requester can confirm this"]);
+      expect(w.store.rows.has(id)).toBe(true); // kept for the requester
+      const no = fakeIO();
+      const cancelled = await dispatchClick(w.deps, { kind: "cancel", id, actor: requester, io: no.io });
+      expect(cancelled).toEqual({ status: "completed" });
+      expect(no.replies).toEqual(["Cancelled; nothing ran"]);
+      expect(w.store.rows.size).toBe(0);
+      expect(w.provider.requests).toHaveLength(0);
+    });
+
+    it("a store that cannot be reached at the mint costs the button alone: the same question goes out as text, the line to type in it", async () => {
+      const w = wiredQuestion();
+      w.deps.confirmations = {
+        put: async () => {
+          throw new Error("object unreachable");
+        },
+        consume: (id, ids) => w.store.consume(id, ids),
+        cancel: (id, ids) => w.store.cancel(id, ids),
+        cancelByThread: (key, ids) => w.store.cancelByThread(key, ids),
+        describe: () => "throwing",
+      };
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await ask(w.deps, w.io);
+      } finally {
+        warn.mockRestore();
+      }
+      expect(w.offers).toEqual([]);
+      expect(w.replies).toHaveLength(1);
+      expect(w.replies[0]).toContain("Did you mean:");
+      expect(w.replies[0]).toContain("`agent:coding in acme/api: say hi`");
+    });
+
+    it("without `offer` on the channel the question is byte for byte the text one — no row minted", async () => {
+      const w = wiredQuestion();
+      const plain = fakeIO();
+      await ask(w.deps, plain.io);
+      expect(plain.replies).toHaveLength(1);
+      expect(plain.replies[0]).toContain("Did you mean:");
+      expect(w.store.rows.size).toBe(0);
+    });
+  });
+
   // Feature: docs/reference/specs/routing-and-config.md item 16 — the note names `repo
   // onboard`, a command an installation without residents does not have: the
   // gate reads the capability, and a rejected slug is then no reason to stop.
@@ -16288,6 +16422,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
       },
       consume: (id, ids) => store.consume(id, ids),
       cancel: (id, ids) => store.cancel(id, ids),
+      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
       describe: () => "throwing",
     };
     deps.confirmations = throwing;
@@ -16394,6 +16529,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     deps.confirmations = {
       put: (row, ttl) => store.put(row, ttl),
       cancel: (id, ids) => store.cancel(id, ids),
+      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
       describe: () => "throwing",
       consume: async () => {
         throw new Error("object unreachable");
@@ -16462,6 +16598,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     deps.confirmations = {
       put: (row, ttl) => store.put(row, ttl),
       cancel: (id, ids) => store.cancel(id, ids),
+      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
       describe: () => "throwing",
       consume: async () => {
         throw new Error("object unreachable");
@@ -16487,6 +16624,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     deps.confirmations = {
       put: (row, ttl) => store.put(row, ttl),
       cancel: (id, ids) => store.cancel(id, ids),
+      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
       describe: () => "gated",
       consume: async (id, ids) => {
         await gate;

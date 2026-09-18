@@ -749,6 +749,26 @@ export class ConfigDO extends DurableObject<Env> {
     });
   }
 
+  /** Delete the thread's pending row under the same requester check (record
+   *  0054: a typed answer supersedes the button, so a click cannot follow
+   *  it). At most one row per thread exists (`putConfirmation` replaces); a
+   *  thread with none is `used`. The body stays opaque here — a row stored
+   *  before the bot's union gained `kind` cancels the same way. */
+  async cancelConfirmationByThread(threadKey: string, actorIds: readonly string[]): Promise<ConfirmationCancelOutcome> {
+    return this.ctx.storage.transactionSync(() => {
+      const stored = this.sql
+        .exec<{ id: string; requester: string }>(
+          `SELECT id, requester FROM confirmations WHERE thread_key = ?`,
+          threadKey,
+        )
+        .toArray()[0];
+      if (!stored) return { refused: "used" };
+      if (!actorIds.includes(stored.requester)) return { refused: "foreign" };
+      this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, stored.id);
+      return { ok: true };
+    });
+  }
+
   private readConfirmation(id: string): ConfirmationRow | undefined {
     const row = this.sql
       .exec<{ thread_key: string; requester: string; expires_at: number; body: string }>(
@@ -1168,6 +1188,7 @@ const CONFIG_ROUTES = new Set([
   "/config/confirmations/put",
   "/config/confirmations/consume",
   "/config/confirmations/cancel",
+  "/config/confirmations/cancel-by-thread",
 ]);
 const TICKET_STATES: ReadonlySet<string> = new Set<McpTicketState>(MCP_TICKET_STATES);
 /** A confirmation id as the bot mints it (a UUID) — one token, no whitespace, bounded. */
@@ -1251,6 +1272,16 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
       if (click instanceof Response) return click;
       const outcome = await dO.cancelConfirmation(click.id, click.actorIds);
       console.log(`[config/confirmations/cancel] ${click.id} ${"ok" in outcome ? "cancelled" : outcome.refused}`);
+      return json(outcome);
+    }
+    case "/config/confirmations/cancel-by-thread": {
+      if (typeof b.threadKey !== "string" || !b.threadKey) return json({ error: "threadKey required" }, 400);
+      if (!Array.isArray(b.actorIds) || !b.actorIds.every((a): a is string => typeof a === "string"))
+        return json({ error: "actorIds must be a list of actor ids" }, 400);
+      const outcome = await dO.cancelConfirmationByThread(b.threadKey, b.actorIds);
+      console.log(
+        `[config/confirmations/cancel-by-thread] ${b.threadKey} ${"ok" in outcome ? "cancelled" : outcome.refused}`,
+      );
       return json(outcome);
     }
     default:

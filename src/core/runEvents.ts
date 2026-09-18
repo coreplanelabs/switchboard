@@ -135,6 +135,12 @@ export type RunNoteKind =
    *  unknown so no line since could be told apart. One note per reason,
    *  published by the dispatcher before the first turn. */
   | "seed"
+  /** This run is a question's Yes (record 0054;
+   *  docs/reference/specs/run-history.md item 2): the stored proposal went
+   *  back through `dispatch()` as the requester, and the summary names the
+   *  question's refusal code. Published by the dispatcher before the first
+   *  turn. */
+  | "redispatch"
   /** A coding run pushed onto a branch that already heads an open PR without
    *  resubmitting the PR description, and the same run is being given one
    *  bounded extra model turn to submit it (docs/reference/specs/pr-description.md
@@ -290,6 +296,7 @@ export const RUN_NOTE_KINDS = [
   "resumed",
   "control_degraded",
   "seed",
+  "redispatch",
   "description_turn",
   "verdict_turn",
   "cold_sandbox",

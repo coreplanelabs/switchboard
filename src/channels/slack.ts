@@ -582,9 +582,16 @@ export type ConfirmClick = Pick<SlackActionMiddlewareArgs<BlockAction<ButtonActi
 
 /** The note the taken offer carries while the core works (item 14): which
  *  button, who pressed it, and that it is in hand — as mrkdwn for the context
- *  block and as plain text for the fallback. */
-export function takenOfferNote(kind: "confirm" | "cancel", userId: string): { mrkdwn: string; plain: string } {
-  const button = kind === "confirm" ? "Run" : "Cancel";
+ *  block and as plain text for the fallback. The label is the pressed
+ *  button's own (the payload carries it), so a question's Yes reads “Yes
+ *  clicked by …” (record 0054) and a bare payload falls back to the offer's
+ *  Run and Cancel. */
+export function takenOfferNote(
+  kind: "confirm" | "cancel",
+  userId: string,
+  label?: string,
+): { mrkdwn: string; plain: string } {
+  const button = label ?? (kind === "confirm" ? "Run" : "Cancel");
   const doing = kind === "confirm" ? "running…" : "cancelling…";
   return { mrkdwn: `*${button}* clicked by <@${userId}> · ${doing}`, plain: `${button} clicked · ${doing}` };
 }
@@ -597,10 +604,11 @@ export function takenOfferBlocks(
   blocks: readonly SlackBlockKit[],
   kind: "confirm" | "cancel",
   userId: string,
+  label?: string,
 ): SlackBlockKit[] {
   return [
     ...blocks.filter((b) => b.type !== "actions"),
-    { type: "context", elements: [{ type: "mrkdwn", text: takenOfferNote(kind, userId).mrkdwn }] },
+    { type: "context", elements: [{ type: "mrkdwn", text: takenOfferNote(kind, userId, label).mrkdwn }] },
   ];
 }
 
@@ -648,11 +656,12 @@ export async function handleConfirmClick(
   // is replaced by the answer. A take that fails is logged and the click
   // proceeds — the core's consume is single-use whatever the message shows.
   try {
+    const label = action.text?.text;
     await client.chat.update({
       channel,
       ts: message.ts,
-      text: `${message.text ?? ""}\n${takenOfferNote(kind, body.user.id).plain}`,
-      blocks: takenOfferBlocks(message.blocks ?? [], kind, body.user.id),
+      text: `${message.text ?? ""}\n${takenOfferNote(kind, body.user.id, label).plain}`,
+      blocks: takenOfferBlocks(message.blocks ?? [], kind, body.user.id, label),
     });
   } catch (err) {
     console.error(
@@ -1071,6 +1080,30 @@ function chunkText(text: string, limit: number): string[] {
 function offerBlocks(offer: ConfirmationOffer): slackTypes.KnownBlock[] {
   const line = escapeMrkdwn(offer.line);
   const code = line.includes("`") ? `\`\`\`\n${line}\n\`\`\`` : `\`${line}\``;
+  // A question's offer (record 0054): the refusal's sentence above the line —
+  // the marker's `Did you mean:` leading the code — the evidence as context,
+  // and Yes and No on the same two actions the confirmation uses, so one
+  // intake serves both and Yes consumes the row exactly as Run does.
+  if (offer.question) {
+    return [
+      { type: "section", text: { type: "mrkdwn", text: escapeMrkdwn(offer.question.text) } },
+      { type: "section", text: { type: "mrkdwn", text: `Did you mean:\n${code}` } },
+      { type: "context", elements: [{ type: "mrkdwn", text: escapeMrkdwn(offer.question.evidence) }] },
+      {
+        type: "actions",
+        elements: [
+          {
+            type: "button",
+            action_id: "confirm.run",
+            text: { type: "plain_text", text: "Yes" },
+            style: "primary",
+            value: offer.id,
+          },
+          { type: "button", action_id: "confirm.cancel", text: { type: "plain_text", text: "No" }, value: offer.id },
+        ],
+      },
+    ];
+  }
   const context: slackTypes.ContextBlockElement[] = [
     ...(offer.risk ? [{ type: "mrkdwn" as const, text: escapeMrkdwn(offer.risk) }] : []),
     { type: "mrkdwn", text: escapeMrkdwn(offer.footer) },

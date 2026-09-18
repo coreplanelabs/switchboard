@@ -730,6 +730,43 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
     // The buttons still carry the id whatever the line looks like.
     expect(blocksOf(call)[2]!.elements!.map((e) => e.value)).toEqual(["c-3", "c-3"]);
   });
+
+  it("a question's offer (record 0054) posts the refusal's sentence, `Did you mean:` over the line as code, the evidence as context, and Yes (primary) and No carrying the id", async () => {
+    const { c, postMessage } = client();
+    await new SlackIO(c, ev).offer({
+      id: "q-1",
+      line: "agent:ship repo:acme/api fix it",
+      risk: "",
+      footer: "",
+      expiresAt: 600_000,
+      question: {
+        text: "acme/api is not onboarded here.",
+        evidence: "acme/api is one edit away from acme/apj, which is onboarded",
+      },
+    });
+    const call = postMessage.mock.calls[0]![0];
+    expect(call).toMatchObject({ channel: "C1", thread_ts: "1.0" });
+    // The fallback still carries the line to type, as the record's channel-without-blocks shape does.
+    expect(String(call.text)).toContain("agent:ship repo:acme/api fix it");
+    expect(String(call.text)).toContain("Did you mean:");
+    const blocks = blocksOf(call);
+    expect(blocks.map((b) => b.type)).toEqual(["section", "section", "context", "actions"]);
+    expect(blocks[0]!.text).toEqual({ type: "mrkdwn", text: "acme/api is not onboarded here." });
+    expect(blocks[1]!.text).toEqual({ type: "mrkdwn", text: "Did you mean:\n`agent:ship repo:acme/api fix it`" });
+    expect(blocks[2]!.elements).toEqual([
+      { type: "mrkdwn", text: "acme/api is one edit away from acme/apj, which is onboarded" },
+    ]);
+    expect(blocks[3]!.elements).toEqual([
+      {
+        type: "button",
+        action_id: "confirm.run",
+        text: { type: "plain_text", text: "Yes" },
+        style: "primary",
+        value: "q-1",
+      },
+      { type: "button", action_id: "confirm.cancel", text: { type: "plain_text", text: "No" }, value: "q-1" },
+    ]);
+  });
 });
 
 describe("handleConfirmClick — the action intake (docs/reference/specs/slack-channel.md item 14)", () => {
@@ -781,14 +818,19 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
     return { calls, update, postMessage, replies, ack, grantsFor, deps, clients: { client: c, statusClient: c } };
   }
   /** A `block_actions` payload for one of the offer's buttons, as Bolt hands it to the listener. */
-  function payload(actionId: string, opts: { user?: string; value?: string | undefined; message?: object } = {}) {
+  function payload(
+    actionId: string,
+    opts: { user?: string; value?: string | undefined; message?: object; label?: string } = {},
+  ) {
     const value = "value" in opts ? opts.value : "c-1";
     const action = {
       type: "button" as const,
       block_id: "b3",
       action_id: actionId,
       action_ts: "4.5",
-      text: { type: "plain_text" as const, text: "Run" },
+      // The pressed button's own label rides the payload; the taken-offer note
+      // reads it, so a question's Yes reads "Yes clicked by …".
+      text: { type: "plain_text" as const, text: opts.label ?? (actionId === "confirm.cancel" ? "Cancel" : "Run") },
       ...(value !== undefined ? { value } : {}),
     };
     const message =
@@ -876,6 +918,20 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
       thread_ts: "1.0",
       text: "✅ acme/api onboarded",
     });
+  });
+
+  it("a question's Yes rides the same intake and the taken note reads the pressed button's own label: `Yes clicked by …` (record 0054)", async () => {
+    const s = scripted();
+    coreReplies("working on it");
+    await handleConfirmClick(s.deps, s.clients, { ack: s.ack, ...payload("confirm.run", { label: "Yes" }) });
+    expect(dispatchClickMock.mock.calls[0]![1]).toMatchObject({ kind: "confirm", id: "c-1" });
+    expect(JSON.stringify(s.update.mock.calls[0]![0].blocks)).toContain("*Yes* clicked by <@UA> · running…");
+    expect(String(s.update.mock.calls[0]![0].text)).toContain("Yes clicked · running…");
+    const noS = scripted();
+    coreReplies(OFFER_CANCELLED_LINE);
+    await handleConfirmClick(noS.deps, noS.clients, { ack: noS.ack, ...payload("confirm.cancel", { label: "No" }) });
+    expect(dispatchClickMock.mock.calls[1]![1]).toMatchObject({ kind: "cancel", id: "c-1" });
+    expect(JSON.stringify(noS.update.mock.calls[0]![0].blocks)).toContain("*No* clicked by <@UA> · cancelling…");
   });
 
   it("Cancel hands dispatchClick kind cancel with the same id, and the message reads `Cancelled; nothing ran` under the line", async () => {
