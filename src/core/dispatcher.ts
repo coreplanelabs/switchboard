@@ -395,7 +395,14 @@ export async function dispatch(
     const tellLineage = async (heard: LineageHeard) => {
       if (!lineage) return;
       await tellParent(
-        { runs: runsService, config: deps.config, runLedger: deps.runLedger, clock, admission },
+        {
+          runs: runsService,
+          config: deps.config,
+          runLedger: deps.runLedger,
+          clock,
+          admission,
+          isolateFollowUps: io.isolateFollowUps,
+        },
         lineage,
         msg,
         heard,

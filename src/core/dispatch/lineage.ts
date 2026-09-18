@@ -105,6 +105,7 @@ export async function tellParent(
     runLedger: Pick<LedgerWriteThrough, "pushInbox">;
     clock?: Clock;
     admission: ThreadAdmission<DispatchFollowUp>;
+    isolateFollowUps?: boolean;
   },
   lineage: ThreadLineage,
   msg: IncomingMessage,
@@ -114,6 +115,9 @@ export async function tellParent(
   if (!res.ok) return "parent_ended";
   const parent = res.value;
   if (parent.finished || parent.threadKey === undefined || parent.agent === undefined) return "parent_ended";
+  // A reply in a child's conversation is still input from that person. The
+  // lineage notification must not bypass the channel's requester isolation.
+  if (deps.isolateFollowUps && parent.userId !== msg.userId) return "refused";
   const out = await steerRun(
     deps,
     {
