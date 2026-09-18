@@ -1,7 +1,7 @@
 // Types only, and from the zod-free module deliberately: this file is part of
 // the node-free contract the memory Worker and web app compile with their own
 // tsconfigs — importing prDescription.ts would drag zod into those graphs.
-import type { PrDescription, RenderedPointer } from "./prDescriptionTypes.js";
+import type { DescriptionIssue, PrDescription, RecordedJson, RenderedPointer } from "./prDescriptionTypes.js";
 import type { HarnessScope } from "./harness/scope.js";
 import type { ModelCard } from "./modelCard.js";
 
@@ -146,6 +146,15 @@ export type RunNoteKind =
    *  bounded extra model turn to submit it (docs/reference/specs/pr-description.md
    *  item 5). Published by the dispatcher before that turn. */
   | "description_turn"
+  /** `submit_pr_description` refused the object (docs/reference/specs/pr-description.md
+   *  item 5): the summary counts the fields over their cap and names them
+   *  (or the issues, when none is a cap), `description` is the object as
+   *  submitted — redacted like the accepted `pr_description` event's, and not
+   *  necessarily a valid `PrDescription` — and `issues` the refusal's list
+   *  with each cap's count to remove and the prefix that fits, so the record
+   *  says what the model changed between one submit and the next. Published
+   *  by the tool, before it answers. */
+  | "description_refused"
   /** A review run's loop ended on a pull request without `submit_verdict`, and
    *  the same run is being given one bounded extra model turn to call it
    *  (docs/reference/specs/agent-review.md item 5; verdictTurn.ts). Published by
@@ -298,6 +307,7 @@ export const RUN_NOTE_KINDS = [
   "seed",
   "redispatch",
   "description_turn",
+  "description_refused",
   "verdict_turn",
   "cold_sandbox",
   "ledger_untracked",
@@ -566,6 +576,12 @@ export type RunEvent =
        *  interval the dropped setup records covered — a `not recorded` loss. */
       from?: number;
       to?: number;
+      /** On a `description_refused` note only: the refused object as submitted
+       *  (JSON, not necessarily a valid `PrDescription`; `RecordedJson` says
+       *  why it is typed level by level), every string leaf redacted, and the
+       *  issues the refusal named. */
+      description?: RecordedJson;
+      issues?: DescriptionIssue[];
       spanId?: string;
       seq?: number;
       at?: number;

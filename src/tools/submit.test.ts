@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { TITLE_GATE_REPOSITORY, type PrDescription } from "../core/prDescription.js";
+import { TITLE_GATE_REPOSITORY, visibleLength, type PrDescription } from "../core/prDescription.js";
+import type { RunEvent } from "../core/runEvents.js";
 import type { Handoff } from "../core/ship/handoff.js";
 import { TOOLSETS } from "./toolsets.js";
 import { submitHandoffTool, submitPrDescriptionTool, submitVerdictTool } from "./submit.js";
@@ -496,6 +497,89 @@ describe("submit_pr_description tool", () => {
     await submitPrDescriptionTool.run(validInput(), ctx);
     await submitPrDescriptionTool.run({ ...validInput(), title: "Second title" }, ctx);
     expect(latest?.title).toBe("Second title");
+  });
+
+  // The refusal carries the cut (docs/reference/specs/pr-description.md item 5):
+  // a run that overshoots two caps by a few characters is told, once, every
+  // field, how much to remove and a prefix that fits — so the second submit is
+  // a copy and there is no third.
+  it("an object over two caps is refused once naming BOTH fields, each with the count to remove and a prefix that fits; resubmitting the quoted prefixes is accepted", async () => {
+    const risk = `${"blast radius ".repeat(22)}[#9](https://github.com/acme/api/issues/9) then the world`;
+    const feedbackWanted = `${"the cut ".repeat(25)}itself`;
+    expect(visibleLength(risk)).toBe(305);
+    expect(visibleLength(feedbackWanted)).toBe(206);
+    const got: PrDescription[] = [];
+    const out = String(
+      await submitPrDescriptionTool.run(
+        { ...validInput(), risk, feedbackWanted },
+        ctxWith((d) => got.push(d)),
+      ),
+    );
+    expect(got).toEqual([]);
+    expect(out).toMatch(/^error: invalid PR description — /);
+    const quoted = (field: string) => {
+      const m = out.match(
+        new RegExp(
+          `${field}: at most (\\d+) visible characters \\(got (\\d+)\\) — remove at least (\\d+) visible characters; a prefix that fits: "([^"]*)"`,
+        ),
+      );
+      expect(m, `${field} in ${out}`).not.toBeNull();
+      return { cap: Number(m![1]), got: Number(m![2]), remove: Number(m![3]), prefix: m![4] };
+    };
+    const fw = quoted("feedbackWanted");
+    expect(fw).toMatchObject({ cap: 200, got: 206, remove: 6 });
+    expect(visibleLength(fw.prefix)).toBeLessThanOrEqual(200);
+    const r = quoted("risk");
+    expect(r).toMatchObject({ cap: 300, got: 305, remove: 5 });
+    expect(visibleLength(r.prefix)).toBeLessThanOrEqual(300);
+    expect(r.prefix).toContain("[#9](https://github.com/acme/api/issues/9)"); // the link's target counted for nothing
+    // The second submit is a copy of the two prefixes.
+    const ok = await submitPrDescriptionTool.run(
+      { ...validInput(), risk: r.prefix, feedbackWanted: fw.prefix },
+      ctxWith((d) => got.push(d)),
+    );
+    expect(String(ok)).toMatch(/PR description recorded/);
+    expect(got.map((d) => d.risk)).toEqual([r.prefix]);
+  });
+
+  it("a refused submit is on the record: a `description_refused` note carries the redacted object and the issues, before the tool answers", async () => {
+    const published: RunEvent[] = [];
+    const secret = `ghp_${"A".repeat(36)}`;
+    const risk = `${"blast radius ".repeat(23)}the token ${secret} leaks here`;
+    const out = String(
+      await submitPrDescriptionTool.run(
+        { ...validInput(), risk, tldr: "x".repeat(301) },
+        { ...ctxWith(() => {}), publish: (e) => published.push(e) },
+      ),
+    );
+    expect(out).toMatch(/^error:/);
+    expect(published).toHaveLength(1);
+    const note = published[0];
+    if (note.type !== "run_note") throw new Error(`not a note: ${note.type}`);
+    expect(note.kind).toBe("description_refused");
+    expect(note.summary).toBe("description refused: 2 fields over their cap — tldr, risk");
+    // The object as submitted, every string leaf redacted like the accepted event's.
+    const description = note.description as Record<string, unknown>;
+    expect(description.title).toBe("Fix the widget gate");
+    expect(description.risk).toContain("«redacted-github-token»");
+    expect(JSON.stringify(note)).not.toContain(secret);
+    expect(note.issues?.map((i) => i.path)).toEqual(["tldr", "risk"]);
+    expect(note.issues?.[0]).toEqual({ path: "tldr", message: "at most 300 visible characters (got 301)", remove: 1 });
+    expect(note.issues?.[1]).toMatchObject({ path: "risk", remove: expect.any(Number), prefix: expect.any(String) });
+    expect(note.issues?.[1].prefix).not.toContain(secret);
+  });
+
+  it("a refusal for reasons other than a cap names the issues on the note too, and the summary says how many", async () => {
+    const published: RunEvent[] = [];
+    await submitPrDescriptionTool.run(
+      { ...validInput(), title: "feat(dispatch): a scope the code map does not name" },
+      { ...ctxWith(() => {}), publish: (e) => published.push(e), repo: TITLE_GATE_REPOSITORY },
+    );
+    expect(published).toHaveLength(1);
+    const note = published[0];
+    if (note.type !== "run_note") throw new Error(`not a note: ${note.type}`);
+    expect(note.summary).toBe("description refused: 1 issue — title");
+    expect(note.issues).toEqual([{ path: "title", message: expect.stringMatching(/^unknown scope "dispatch"/) }]);
   });
 
   it("an invalid call after a valid one leaves the valid one standing", async () => {

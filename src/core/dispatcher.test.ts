@@ -3991,6 +3991,92 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(foreignSpy.calls.map((c) => c.title)).toEqual([refused.title]);
   });
 
+  it("a description over two caps is refused ONCE with both fields, each with the count to remove and a prefix that fits; the model's copy of the two prefixes opens the PR; the record carries the refused object redacted", async () => {
+    // The incident: a run overshot two caps by a few characters and needed
+    // four submits — one refusal per field, and a trim the counter could not
+    // see. Now the first refusal names both fields with a fitting prefix, so
+    // the second submit is a copy of the refusal.
+    const secret = `ghp_${"B".repeat(36)}`;
+    const over = {
+      ...DESCRIPTION,
+      risk: `${"blast radius ".repeat(22)}[#9](https://github.com/acme/api/issues/9) then the world ${secret}`,
+      feedbackWanted: `${"the cut ".repeat(25)}itself`,
+    };
+    const quoted = (refusal: string, field: string): string => {
+      const m = refusal.match(
+        new RegExp(
+          `${field}: at most \\d+ visible characters \\(got \\d+\\) — remove at least \\d+ visible characters; a prefix that fits: "([^"]*)"`,
+        ),
+      );
+      if (!m) throw new Error(`no cut for ${field} in: ${refusal}`);
+      return m[1];
+    };
+    let n = 0;
+    const copyThePrefixes: Provider = {
+      name: "fake",
+      async complete(req): Promise<CompletionResult> {
+        n++;
+        if (n === 1)
+          return {
+            content: [{ type: "tool_use", id: "d1", name: "submit_pr_description", input: over }],
+            stopReason: "tool_use",
+          };
+        if (n === 2) {
+          const result = req.messages
+            .flatMap((m) => (typeof m.content === "string" ? [] : m.content))
+            .find((p) => p.type === "tool_result");
+          const refusal = String(result && result.type === "tool_result" ? result.content : "");
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "d2",
+                name: "submit_pr_description",
+                input: { ...over, risk: quoted(refusal, "risk"), feedbackWanted: quoted(refusal, "feedbackWanted") },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        }
+        return { content: [{ type: "text", text: "Done — branch pushed." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = codingDeps(copyThePrefixes);
+    codingExecutor({ head: HEAD, branch: "fix/the-cut", bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const registry = new RunRegistry({ genId: () => "r-cut", genToken: () => "t-cut" });
+    deps.runRegistry = registry;
+    await dispatch(deps, msg("agent:coding cut the prose", "slack:UADMIN"), fakeIO().io);
+    // Two submits, not four: one refusal naming both fields, then the accepted copy.
+    const events = registry.snapshot("r-cut", "t-cut")?.events ?? [];
+    const results = events.filter((e) => e.type === "tool_result" && e.tool === "submit_pr_description");
+    expect(results.map((r) => (r.type === "tool_result" ? r.ok : undefined))).toEqual([false, true]);
+    const refusal = results[0].type === "tool_result" ? String(results[0].output ?? results[0].summary) : "";
+    expect(refusal).toContain(
+      "feedbackWanted: at most 200 visible characters (got 206) — remove at least 6 visible characters",
+    );
+    expect(refusal).toContain("risk: at most 300 visible characters (got");
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].body).toContain("**Risk:** blast radius");
+    expect(spy.calls[0].body).toContain("[#9](https://github.com/acme/api/issues/9)");
+    // The refused object is a fact of the run, redacted like the accepted one.
+    const refused = events.find((e) => e.type === "run_note" && e.kind === "description_refused");
+    expect(refused).toMatchObject({
+      type: "run_note",
+      kind: "description_refused",
+      summary: "description refused: 2 fields over their cap — feedbackWanted, risk",
+    });
+    expect(JSON.stringify(refused)).not.toContain(secret);
+    expect(JSON.stringify(refused)).toContain("«redacted-github-token»");
+    expect(refused && refused.type === "run_note" ? refused.issues?.map((i) => i.path) : []).toEqual([
+      "feedbackWanted",
+      "risk",
+    ]);
+    // The accepted object rides the record too, so the two can be diffed.
+    expect(events.some((e) => e.type === "pr_description")).toBe(true);
+  });
+
   /** A coding-agent provider that runs `steps` as bash commands in order, then
    *  submits the description, then answers — the shape of a run that pushes
    *  and keeps working in the checkout afterwards. */
