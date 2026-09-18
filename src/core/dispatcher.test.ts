@@ -1180,6 +1180,40 @@ describe("resident repo dispatch", () => {
     expect(statuses[statuses.length - 1].title).toContain("not started");
   });
 
+  // Feature: record 0054 — a request-caused refusal becomes one question with
+  // the bot's best guess: the corrected line to type and the evidence, over the
+  // resident registry listing (one bounded call).
+  it("fresh thread + a rejected bare slug near ONE resident → one question: the corrected line to type and the evidence (record 0054)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.capabilities = { ...deps.capabilities, residents: true };
+    deps.resolveRepoContext = () => ({ rejectedRepo: "acme/infra" });
+    deps.residentSlugs = async () => ["acme/infrastructure", "acme/api"];
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding in acme/infra: change the onboarding link", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("not onboarded");
+    expect(replies[0]).toContain("Did you mean:");
+    expect(replies[0]).toContain("`agent:coding in acme/infrastructure: change the onboarding link`");
+    expect(replies[0]).toContain("which is onboarded");
+    expect(provider.requests).toHaveLength(0); // no model turn
+    expect(makeExecutor).not.toHaveBeenCalled();
+  });
+
+  it("two residents tie: the question stands without a guess — no line is proposed (record 0054)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(REPO_PERMS_YAML, provider);
+    deps.capabilities = { ...deps.capabilities, residents: true };
+    deps.resolveRepoContext = () => ({ rejectedRepo: "acme/infra" });
+    deps.residentSlugs = async () => ["acme/infrastructure", "acme/infra-tools"];
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:coding in acme/infra: change the onboarding link", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("not onboarded");
+    expect(replies[0]).not.toContain("Did you mean:");
+    expect(provider.requests).toHaveLength(0);
+  });
+
   // Feature: docs/reference/specs/routing-and-config.md item 16 — the note names `repo
   // onboard`, a command an installation without residents does not have: the
   // gate reads the capability, and a rejected slug is then no reason to stop.

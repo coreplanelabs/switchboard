@@ -26,6 +26,7 @@ import type { IssueTracker } from "../execution/githubIssues.js";
 import { resolveGithubIdentity } from "../execution/githubApp.js";
 import { GithubDeliverySource } from "../execution/githubDelivery.js";
 import { ResidentOperations } from "../execution/resident.js";
+import { RestGithubApi } from "../execution/githubApi.js";
 import { parseCostsConfig } from "./costs.js";
 import { costsFromConfig, NullCostsService, type CostsService } from "./costsService.js";
 import { createDeliveryService, NullDeliveryService, parseDeliveryConfig, type DeliveryService } from "./delivery.js";
@@ -327,6 +328,16 @@ export function buildCoreCommands(
         wiring.operations ? wiring.operations(caller) : defaultOperations(await cfg(), wiring.secrets, caller),
       canUseRepo: async (callerId, slug) => (await cfg()).canUseRepo(callerId, slug),
       inspect: wiring.repoInspector ?? githubRepoInspector(),
+      // Record 0054: the installation's repository list, read before an onboard
+      // mints so a name the App cannot see asks its own question instead of
+      // reaching GitHub's 422. A failed read is undefined and changes nothing.
+      installationRepos: async () => {
+        try {
+          return (await new RestGithubApi().listRepos()).map((r) => r.fullName.toLowerCase());
+        } catch {
+          return undefined;
+        }
+      },
     },
     memory: {
       config: async () => (await cfg()).config.memory,

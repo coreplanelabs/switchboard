@@ -464,6 +464,32 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
     expect(offer).not.toHaveBeenCalled();
     expect(OFFER_CANCELLED_LINE).toBe("Cancelled; nothing ran"); // the No path's line, unchanged by the seam
   });
+
+  it("a `request` refusal with a guess is one question: the sentence, the marker, the corrected line as one code span, and the evidence — and it is the line to type on a channel with no offer", async () => {
+    const { io, replies, offer } = capture();
+    const proposal = {
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      threadKey: "slack:CX:1.0",
+      text: "agent:ship in acme/infrastructure: change the onboarding link",
+    };
+    const guess = {
+      proposal,
+      line: proposal.text,
+      evidence: "one edit from `acme/infrastructure`, which is onboarded",
+    };
+    await renderRefusal(
+      refusalOf("repo_not_onboarded", "📦 `acme/infra` is not onboarded as a resident.", { guess }),
+      io,
+    );
+    expect(replies).toEqual([
+      "📦 `acme/infra` is not onboarded as a resident.\n" +
+        "Did you mean:\n" +
+        "`agent:ship in acme/infrastructure: change the onboarding link`\n\n" +
+        "one edit from `acme/infrastructure`, which is onboarded",
+    ]);
+    expect(offer).not.toHaveBeenCalled();
+  });
 });
 
 describe("composeRunLabel", () => {

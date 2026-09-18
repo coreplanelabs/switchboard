@@ -14,13 +14,15 @@ import type { BoundaryScope, ProfileRefusal, ProfileResolution, RunProfile } fro
 import type { RequestDirectives } from "../../directives.js";
 import type { Capabilities } from "../capabilities.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
-import { currentPrHeadSha, type RepoContext } from "../repoContext.js";
+import { currentPrHeadSha, type RepoContext, type ResidentSlugs } from "../repoContext.js";
+import { nearMatch } from "../nearMatch.js";
+import { residentSlugsLister } from "../../execution/factory.js";
 import { checkPrHeadPreflight, guardAttachedHead } from "../reviewRound.js";
 import type { CardShell } from "../statusCardFrame.js";
 import type { Clock, Span } from "../trace/types.js";
 import type { ChannelIO, IncomingMessage, StatusHandle } from "../types.js";
 import type { ResumeContext } from "./admission.js";
-import { refusalOf, type Refusal } from "../refusal.js";
+import { refusalOf, type Guess, type Refusal } from "../refusal.js";
 import { REFUSAL_SENTENCES } from "./reply.js";
 
 /** What the gates read off the dispatcher's dependencies. `CoreDeps` extends
@@ -40,6 +42,14 @@ export interface AuthorizeDeps {
    * Injectable so tests assert the note without a network call.
    */
   fetchPrHead?: (pr: { repo: string; number: number }) => Promise<string | undefined>;
+  /**
+   * The resident registry listing, for the not-onboarded gate's best guess
+   * (record 0054): one bounded call — the probe's timeout, skipped inside a
+   * probe-outage window — whose failure leaves the question without a guess.
+   * Default: the production lister over the configured resident. Injectable so
+   * tests assert the guess without a network call.
+   */
+  residentSlugs?: ResidentSlugs;
 }
 
 /** How a gate ended: the request goes on, or it was refused — the thread has
@@ -210,6 +220,38 @@ export function profileRefusalReply(agentName: string, refusal: ProfileRefusal, 
   return `🚫 \`${agentName}\` runs on a \`${refusal.needs}\` machine; ${who} only ${allowed}. ${capitalize(how)}.`;
 }
 
+/** Escape a literal for a regular expression. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The person's message with the rejected slug corrected — the line the
+ *  question shows them to type. The whole token, case-insensitively; a message
+ *  that does not carry the slug has no line to correct, so there is no guess. */
+function correctedMessage(msg: IncomingMessage, slug: string, match: string): IncomingMessage | undefined {
+  const pattern = new RegExp(`(^|[^A-Za-z0-9._/-])${escapeRegExp(slug)}(?![A-Za-z0-9._/-])`, "gi");
+  const text = msg.text.replace(pattern, (_m, lead: string) => `${lead}${match}`);
+  return text === msg.text ? undefined : { ...msg, text };
+}
+
+/**
+ * The not-onboarded gate's best guess (record 0054): one registry call for the
+ * resident list — bounded like the probe and skipped inside a probe-outage
+ * window, both the lister's own — then one near-match pass. No list, no unique
+ * match, or a message that does not carry the slug → no guess; the question
+ * still stands without one.
+ */
+async function onboardedGuess(deps: AuthorizeDeps, msg: IncomingMessage, slug: string): Promise<Guess | undefined> {
+  const list = deps.residentSlugs ?? residentSlugsLister(deps.config.config.execution?.resident);
+  const candidates = await list?.().catch(() => undefined);
+  if (!candidates || candidates.length === 0) return undefined;
+  const near = nearMatch(slug, candidates);
+  if (!near.guess) return undefined;
+  const proposal = correctedMessage(msg, slug, near.guess);
+  if (!proposal) return undefined;
+  return { proposal, line: proposal.text, evidence: `${near.reason ?? `\`${near.guess}\``}, which is onboarded` };
+}
+
 /**
  * The repository gates, once the target has landed and the ack card is up: a
  * repo-needing agent whose bare slug its vet refused — the resident registry's
@@ -278,8 +320,13 @@ export async function authorizeRepo(
     const onboardHint = deps.config.canManageRepos(chatActorOf(deps.config, msg))
       ? `Onboard it (\`repo onboard ${slug}\`)`
       : `Ask ${deps.config.adminsHint()} to onboard it (\`repo onboard ${slug}\`)`;
+    const guess = await onboardedGuess(deps, msg, slug);
     await refuse(
-      refusalOf("repo_not_onboarded", REFUSAL_SENTENCES.repo_not_onboarded({ slug, agent: agent.name, onboardHint })),
+      refusalOf(
+        "repo_not_onboarded",
+        REFUSAL_SENTENCES.repo_not_onboarded({ slug, agent: agent.name, onboardHint }),
+        guess ? { guess } : undefined,
+      ),
       () =>
         card.done(
           shell.close({ kind: "not_started", icon: "📦", reason: "repo not onboarded", ...closeLines(clock(), false) }),

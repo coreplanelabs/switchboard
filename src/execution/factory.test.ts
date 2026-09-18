@@ -1374,6 +1374,20 @@ describe("makeExecutor resident selection", () => {
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
+  it("404 not-onboarded with the registry answering names the resident the typed repo is near (record 0054)", async () => {
+    stubEnvs();
+    vi.stubEnv("RESIDENT_ADMIN_TOKEN", "atok");
+    resetResidentProbeCache();
+    const { fn } = stubFetch(
+      { status: 404, body: { error: "unknown resource" } },
+      { body: { residents: [{ resource: "repo:jshttp/vary" }, { resource: "repo:acme/api" }] } },
+    );
+    const { note } = await makeExecutor(residentOpts(), { ...ctxOf(AGENTS.coding), repo: "jshttp/var", ref: "master" });
+    expect(note).toContain("did you mean `jshttp/vary`?");
+    expect(fn).toHaveBeenCalledTimes(2);
+    vi.unstubAllEnvs();
+  });
+
   it("resident configured but its token env unset → legible error", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "");

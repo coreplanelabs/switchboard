@@ -5,6 +5,7 @@
 // lookups; the hand-off (coordinator/handOff.ts) carries what this decides.
 
 import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
+import { nearMatch } from "../nearMatch.js";
 import { resolveBaseRef, type PullRequestFacts, type RepoShipInfo } from "../../execution/githubPulls.js";
 import type { RepoContext } from "../repoContext.js";
 import { parseShipPlanRequest, isUnitBranch } from "./coordinator.js";
@@ -108,6 +109,10 @@ export interface ShipPreflightInput {
   prFacts: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
   /** PUBLIC_BASE_URL, for the run-page pointer in the channel refusal. */
   runsBase?: string;
+  /** The onboarded repositories (record 0054): the list the no-repo refusal
+   *  guesses against when the request named a repository that is not one.
+   *  Undefined or empty → the sentence stands without a guess. */
+  repoCandidates?: readonly string[];
 }
 
 const refuse = (code: RefusalCode, where: string, card: string, reply: string): ShipPreflightResult => ({
@@ -117,6 +122,25 @@ const refuse = (code: RefusalCode, where: string, card: string, reply: string): 
   reply,
   refusal: refusalOf(code, reply),
 });
+
+/** An `owner/name` token in the request text — the shape a person names a
+ *  repository in. Deliberately the same shape repoContext binds. */
+const REPO_TOKEN = /(?:^|[^\w./-])([A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*)(?![\w./-])/;
+
+/** The no-repo refusal's best guess (record 0054): the request's own repo token
+ *  against the onboarded list, appended to the sentence as the question — the
+ *  corrected line to type and the evidence. Nothing to correct, no list, or no
+ *  unique match → the sentence unchanged. */
+function noRepoQuestion(input: ShipPreflightInput): string {
+  const candidates = input.repoCandidates ?? [];
+  if (candidates.length === 0) return "";
+  const typed = REPO_TOKEN.exec(input.requestText)?.[1];
+  if (!typed) return "";
+  const near = nearMatch(typed, candidates);
+  if (!near.guess) return "";
+  const line = input.requestText.replace(typed, near.guess);
+  return `\nDid you mean:\n\`${line}\`\n\n${near.reason ?? `\`${near.guess}\``}, which is onboarded`;
+}
 
 /**
  * Every check that must refuse BEFORE round 0, in order: channel, compound
@@ -160,7 +184,8 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       "ship_preflight_no_repo",
       "no repo",
       "not started (no repository)",
-      "🚫 `agent:ship` needs a target repository — name it in the request, e.g. `agent:ship in owner/repo: <task>`.",
+      "🚫 `agent:ship` needs a target repository — name it in the request, e.g. `agent:ship in owner/repo: <task>`." +
+        noRepoQuestion(input),
     );
   }
   // The repository lookup is advisory: it names the default branch, the PR
