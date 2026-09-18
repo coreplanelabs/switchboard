@@ -167,18 +167,22 @@ export function isTransientRefusal(answer: { status: number; data: Record<string
 }
 
 /** An attach this executor did not open: the run's lease is inside its
- *  write-up reserve (`attachBoundWithinRun` said `exhausted`; execution.md item
- *  9). Typed `refused` — no wait clears it, so the harness's one more command
- *  never holds a run inside its reserve on it — and read apart by class where
- *  the run's end is decided: a relaunch's re-attach ends the run on its budget
- *  (`WorkspaceReattachLeaseSpentError` in the factory); inside a harness's
- *  loop it cannot arise, since the loop ends before the reserve, and on the
- *  wind-down's and the post-steps' commands it is that command's own failure,
- *  never the container's verdict (`identity` answers no name on a `refused`). */
+ *  write-up reserve, or has less past it than an attach needs
+ *  (`attachBoundWithinRun` said `exhausted`; execution.md item 9). Thrown by
+ *  every attach this executor opens for the run — a relaunch's re-attach, the
+ *  wake wait's re-attach, the recovery attaches an `/exec`, `/read` or
+ *  `/write` opens on `needs: attach`, a control reset or a replaced runtime.
+ *  Typed `refused` — no wait clears it, so the harness's one more command
+ *  never holds a run on it — and read apart by class where the run's end is
+ *  decided: a relaunch's re-attach ends the run on its budget
+ *  (`WorkspaceReattachLeaseSpentError` in the factory); on a command of the
+ *  wind-down or a post-step it is that command's own failure, never the
+ *  container's verdict (`identity` answers no name on a `refused`). `note` is
+ *  the bound's own sentence, worded by the bound that refused. */
 export class ResidentLeaseSpentError extends ExecInfraError {
   constructor(
     route: string,
-    note: string,
+    readonly note: string,
     /** The run's wall clock left when the attach was not opened. */
     readonly leftMs: number,
   ) {
@@ -1053,10 +1057,12 @@ export class ResidentExecutor implements Executor {
    *  whether it carries the run's clock (execution.md item 9): the attach's own
    *  default clipped to the run's remaining wall clock (`attachBoundWithinRun`),
    *  or the default alone — `attachOnce`'s — with no run clock, or before the
-   *  lease has started. Inside the write-up reserve no request is opened: the
-   *  typed `refused`, which no wait clears, naming the run's clock — the
-   *  resident would run the attach to its end for a run that is ending, and a
-   *  deadline on an opened request reads as waitable. */
+   *  lease has started. Inside the write-up reserve, or with less past it than
+   *  an attach needs (`ATTACH_REQUEST_MIN_MS`), no request is opened: the typed
+   *  `refused` (`ResidentLeaseSpentError`), which no wait clears, naming the
+   *  run's clock and the bound that refused — the resident would run the
+   *  attach to its end for a run that is ending, and a request cut short would
+   *  be struck as a rollout. */
   private attachBoundMs(route: string): number | undefined {
     const left = this.opts.remainingMs?.();
     if (left === undefined) return undefined;

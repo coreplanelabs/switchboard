@@ -3707,10 +3707,23 @@ describe("the run control's lease clock — started by the run loop on the harne
     };
     const seen: Array<number | undefined> = [];
     let opens = 0;
-    // The first open dies with its container after leaving its facts; a second
-    // open would be the relaunch the decision must not make.
+    // The first open submits a PR description (the model's, before the death —
+    // what the tail's PR post-step would act on) and dies with its container
+    // after leaving its facts; a second open would be the relaunch the decision
+    // must not make.
     const replaced = leasing(piHarness, 30_000, seen, (run) => {
       if (opens++ > 0) return;
+      run.toolContext.onPrDescription?.({
+        title: "fix(x): the thing",
+        tldr: "Does the thing. It matters.",
+        why: "Because.",
+        pointers: [{ label: "The thing", text: "Here.", anchor: { path: "src/x.ts", from: 1, to: 2 } }],
+        feedbackWanted: "Nothing.",
+        verified: "Tests.",
+        decisions: [],
+        risk: "none",
+        validation: { criteria: [] },
+      });
       run.saveFacts?.(facts);
       throw new HarnessContainerReplacedError(
         "the container running pi was replaced (vm-a → vm-b)",
@@ -3742,11 +3755,14 @@ describe("the run control's lease clock — started by the run loop on the harne
     const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun }));
     expect(opens).toBe(1);
     expect(seen).toEqual([undefined, 30_000]);
-    // The budget's plain answer — the "without finishing" form, no label around empty text.
-    expect(out.answer).toMatch(/^Stopped at the \d+-minute budget without finishing\./);
-    expect(out.answer).not.toContain("the container was replaced");
+    // The budget's plain answer — the "without finishing" form, no label around
+    // empty text — and nothing appended by a PR post-step that ran on an
+    // observation that never happened.
+    expect(out.answer).toBe(
+      `Stopped at the ${s.ctx.agent.maxMinutes}-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`,
+    );
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
-    // Nothing drove the replaced container's executor after the end: no workspace observation, no salvage.
+    // Nothing drove the replaced container's executor after the end: no workspace observation, no salvage, no post-step.
     expect(execs).toEqual([]);
     s.ending.drain(undefined);
     await s.writer.settled();
@@ -3754,11 +3770,112 @@ describe("the run control's lease clock — started by the run loop on the harne
       (e) => e.type === "run_note",
     );
     expect(notes.filter((n) => n.kind === "time_budget_exhausted").map((n) => n.summary)).toEqual([
-      "the container was replaced with 30s of the run's lease left, inside the write-up reserve; no re-attach was opened and no write-up ran",
+      "the container was replaced under the run: the run has 30s of wall clock left, inside the 60s write-up reserve, so no attach was opened; no write-up ran",
     ]);
+    // The whole tail is skipped, as a hard stop skips it: no salvage, no
+    // work-left-behind note, no PR post-step outcome for a tree nobody looked at.
     expect(
-      notes.some((n) => n.kind === "resumed" || n.kind === "sandbox_restarted" || n.kind === "budget_salvage"),
+      notes.some(
+        (n) =>
+          n.kind === "resumed" ||
+          n.kind === "sandbox_restarted" ||
+          n.kind === "budget_salvage" ||
+          n.kind === "work_left_behind",
+      ),
     ).toBe(false);
+    expect(out.prNote).toBeUndefined();
+    expect((recorded().events as Array<{ type: string }>).some((e) => e.type === "pr_opened")).toBe(false);
+  });
+
+  it("a container replaced with a REVIEW run inside its write-up reserve: the review half of the tail is skipped too — no head settle on the replaced container, no verdict turn, no GitHub post of the budget's answer as a verdict", async () => {
+    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const record: HarnessRecord = {
+      messages: [],
+      compactions: [],
+      settlements: [],
+      turn: 1,
+      inboxConsumedSeq: 0,
+      deadline: NOW + 30_000,
+    };
+    const facts: HarnessFacts = {
+      harness: "pi",
+      pid: 4242,
+      logOffset: 0,
+      root: "/tmp/switchboard-pi-run-l",
+      container: "vm-a",
+      relaunches: 0,
+    };
+    const seen: Array<number | undefined> = [];
+    let opens = 0;
+    // The executor's commands, and how many had run when the container died:
+    // the review's baseline reading diff runs before the model (start of the
+    // run); nothing may run after the end.
+    const execs: string[] = [];
+    let execsAtDeath = -1;
+    // The first open dies with its container before any verdict, leaving its
+    // facts; a second open would be the relaunch the decision must not make.
+    const replaced = leasing(piHarness, 30_000, seen, (run) => {
+      if (opens++ > 0) return;
+      execsAtDeath = execs.length;
+      run.saveFacts?.(facts);
+      throw new HarnessContainerReplacedError(
+        "the container running pi was replaced (vm-a → vm-b)",
+        "the sandbox restarted under the run (waited 42 s)",
+        "vm-a",
+        "vm-b",
+        record,
+      );
+    });
+    // A PR review on the resident: its round has a workspace to re-attach, and
+    // its tail would settle the reviewed head (`git rev-parse HEAD` on the
+    // replaced container's executor), ask the model for a verdict it never gave,
+    // and post the answer to the pull request as a not-approving verdict.
+    const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
+    const s = setup("unused", {
+      agent: "review",
+      yaml: YAML + "harness:\n  review: pi\n",
+      harness: harnessDeps(replaced),
+      repoCtx: { repo: "o/r", pr: 42, ref: "fix/the-pr-head", refFromPr: true, baseRef: "main" } as RepoContext,
+      binding: { ref: "fix/the-pr-head", sha: HEAD, workspace: "/srv/wt/pr-42" } as ResidentBinding,
+      executor: {
+        exec: async (command) => {
+          execs.push(command);
+          return `${HEAD}\n`;
+        },
+      },
+      review: { head: HEAD, post: async (target, body) => void posts.push({ target, body }) },
+    });
+    const { ledgerRun, record: recorded } = recordingLedgerRun();
+    const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun }));
+    expect(opens).toBe(1);
+    expect(seen).toEqual([undefined, 30_000]);
+    expect(out.answer).toBe(
+      `Stopped at the ${s.ctx.agent.maxMinutes}-minute budget without finishing. Partial work may exist in the workspace — narrow the task and try again.`,
+    );
+    // Nothing drove the replaced container's executor after the end: the
+    // settle's HEAD read would have been a `needs: attach` the recovery refuses.
+    // (The baseline reading diff ran before the model, as it does on every review.)
+    expect(execsAtDeath).toBeGreaterThanOrEqual(0);
+    expect(execs.slice(0, execsAtDeath).every((c) => c.startsWith("git diff "))).toBe(true);
+    expect(execs.slice(execsAtDeath)).toEqual([]);
+    // No verdict turn asked the model, and nothing reached the pull request:
+    // the budget's answer is not a verdict.
+    expect(posts).toEqual([]);
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const events = recorded().events as Array<{ type: string; kind?: string; summary?: string }>;
+    expect(
+      events.filter((e) => e.type === "run_note" && e.kind === "time_budget_exhausted").map((e) => e.summary),
+    ).toEqual([
+      "the container was replaced under the run: the run has 30s of wall clock left, inside the 60s write-up reserve, so no attach was opened; no write-up ran",
+    ]);
+    expect(events.some((e) => e.type === "review_posted")).toBe(false);
+    // No post outcome either way: the step never ran, so the record carries
+    // neither a `review_posted` nor a `review_not_posted` verdict on a review
+    // that gave none.
+    expect(events.some((e) => e.type === "run_note" && e.kind === "review_not_posted")).toBe(false);
+    expect(recorded().reviewPost).toBeUndefined();
   });
 });
 

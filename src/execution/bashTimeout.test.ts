@@ -81,23 +81,25 @@ describe("attachBoundWithinRun", () => {
     });
   });
 
-  it("exhausted inside the write-up reserve — at its edge, within it, past the lease — and under an attach's floor past it (61 s left is not a bound an attach can finish under, and a request cut mid-clone would be struck as a rollout); the note names the run's clock and the floor, so no request is opened for a run that cannot wait", () => {
-    for (const left of [
-      RUN_DEADLINE_RESERVE_MS + ATTACH_REQUEST_MIN_MS - 1,
-      RUN_DEADLINE_RESERVE_MS + 1_000,
-      RUN_DEADLINE_RESERVE_MS + 500,
-      RUN_DEADLINE_RESERVE_MS,
-      30_000,
-      0,
-      -5_000,
-    ]) {
+  it("exhausted inside the write-up reserve — at its edge, within it, past the lease — and under an attach's floor past it (61 s left is not a bound an attach can finish under, and a request cut mid-clone would be struck as a rollout); the one note names the run's clock and the bound that refused", () => {
+    // Inside the reserve (its edge included): the reserve refused.
+    for (const left of [RUN_DEADLINE_RESERVE_MS, 30_000, 0, -5_000]) {
       const bound = attachBoundWithinRun(left);
       expect(bound.kind, `${left}`).toBe("exhausted");
       if (bound.kind === "exhausted") {
-        expect(bound.note).toContain(`${Math.max(0, Math.round(left / 1000))}s of wall clock left`);
-        expect(bound.note).toContain(`inside the ${RUN_DEADLINE_RESERVE_MS / 1000}s write-up reserve`);
-        expect(bound.note).toContain(`under the ${ATTACH_REQUEST_MIN_MS / 1000}s an attach needs`);
-        expect(bound.note).toContain("no attach was opened");
+        expect(bound.note).toBe(
+          `the run has ${Math.max(0, Math.round(left / 1000))}s of wall clock left, inside the ${RUN_DEADLINE_RESERVE_MS / 1000}s write-up reserve, so no attach was opened`,
+        );
+      }
+    }
+    // Past the reserve but under the floor: the floor refused, and the note says by how much.
+    for (const past of [ATTACH_REQUEST_MIN_MS - 1, 1_000, 500]) {
+      const bound = attachBoundWithinRun(RUN_DEADLINE_RESERVE_MS + past);
+      expect(bound.kind, `${past}`).toBe("exhausted");
+      if (bound.kind === "exhausted") {
+        expect(bound.note).toBe(
+          `the run has ${Math.round((RUN_DEADLINE_RESERVE_MS + past) / 1000)}s of wall clock left, only ${Math.round(past / 1000)}s past the ${RUN_DEADLINE_RESERVE_MS / 1000}s write-up reserve — under the ${ATTACH_REQUEST_MIN_MS / 1000}s an attach needs — so no attach was opened`,
+        );
       }
     }
   });

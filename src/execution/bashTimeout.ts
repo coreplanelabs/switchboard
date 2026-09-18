@@ -82,19 +82,32 @@ export function bashBudgetWithinRun(wantedMs: number, remainingMs: number): RunB
  *  struck as a rollout), `exhausted`: the request is not opened at all — the
  *  resident would run the attach to its end server-side for a run that is
  *  ending, and the caller would get a deadline it could read as waitable — and
- *  the note names the run's clock. The command's own budget never bounds an
- *  attach: the attach is not the command, and the command's one-second floor
- *  is the model's to choose. */
+ *  the note names the run's clock and the bound that refused (the reserve, or
+ *  the floor past it): it is the one sentence every reader carries, the
+ *  executor's refusal and the relaunch's note alike. The command's own budget
+ *  never bounds an attach: the attach is not the command, and the command's
+ *  one-second floor is the model's to choose. */
 export type AttachBound = { kind: "bounded"; timeoutMs: number } | { kind: "exhausted"; note: string };
 
 export function attachBoundWithinRun(remainingMs: number): AttachBound {
   const left = Math.trunc(remainingMs - RUN_DEADLINE_RESERVE_MS);
-  if (left < ATTACH_REQUEST_MIN_MS) {
+  // The one sentence every reader of an exhausted bound carries — the
+  // executor's refusal, the relaunch's note — worded by the bound that refused.
+  if (left <= 0) {
     return {
       kind: "exhausted",
       note:
         `the run has ${secs(remainingMs)}s of wall clock left, inside the ${secs(RUN_DEADLINE_RESERVE_MS)}s ` +
-        `write-up reserve or under the ${secs(ATTACH_REQUEST_MIN_MS)}s an attach needs, so no attach was opened`,
+        "write-up reserve, so no attach was opened",
+    };
+  }
+  if (left < ATTACH_REQUEST_MIN_MS) {
+    return {
+      kind: "exhausted",
+      note:
+        `the run has ${secs(remainingMs)}s of wall clock left, only ${secs(left)}s past the ` +
+        `${secs(RUN_DEADLINE_RESERVE_MS)}s write-up reserve — under the ${secs(ATTACH_REQUEST_MIN_MS)}s an attach needs — ` +
+        "so no attach was opened",
     };
   }
   return { kind: "bounded", timeoutMs: Math.min(BASH_TIMEOUT_MS, left) };
