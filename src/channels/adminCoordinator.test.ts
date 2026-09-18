@@ -138,6 +138,8 @@ function harness(
     /** The operator's model prices: the runs service prices each child, and `read-record` answers the dollars. */
     prices?: ModelPriceTable;
     checks?: CommitChecks | Error;
+    /** The head's self-declared fix-up commit subjects (the ending's facts read). */
+    fixups?: string[] | Error;
     merge?: MergeResult | Error;
     /** The runs page base the plan route answers (agent-ship item 12). */
     runPageBase?: string;
@@ -226,6 +228,10 @@ function harness(
     fetchCommitChecks: async () => {
       if (over.checks instanceof Error) throw over.checks;
       return over.checks;
+    },
+    fixupCommitSubjects: async () => {
+      if (over.fixups instanceof Error) throw over.fixups;
+      return over.fixups;
     },
     mergePullRequest: async (pr, opts) => {
       merges.push({ pr, opts });
@@ -1985,6 +1991,10 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     const withChecks = await planHarness({
       pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },
       checks: { total: 3, pending: ["ci / web"], failed: ["ci / package"] },
+      // The ready state rides beside the checks (agent-ship item 9): the pull
+      // request's own mergeable state and the head's self-declared fix-ups.
+      prFacts: { state: "open", sameRepoHead: true, mergeableState: "dirty" },
+      fixups: ["fixup! fix the login"],
     });
     expect(
       (await call(withChecks, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", checks: true })).body,
@@ -1992,10 +2002,20 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       state: "open",
       headSha: "abc123",
       checks: { total: 3, pending: ["ci / web"], failed: ["ci / package"] },
+      mergeableState: "dirty",
+      fixupCommits: ["fixup! fix the login"],
     });
+    // Without the flag nothing is asked: the plain answer above carried none of
+    // the fact fields even though the harness could have answered them.
+    const plain = await call(withChecks, "pr-check", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
+    expect(plain.body).not.toHaveProperty("checks");
+    expect(plain.body).not.toHaveProperty("mergeableState");
+    expect(plain.body).not.toHaveProperty("fixupCommits");
     const unreadable = await planHarness({
       pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: "abc123" },
       checks: new Error("GitHub 502"),
+      prFacts: new Error("GitHub 502"),
+      fixups: new Error("GitHub 502"),
     });
     const noChecks = await call(unreadable, "pr-check", {
       parentInstanceId: PLAN_INSTANCE.id,
@@ -2004,6 +2024,8 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
     expect(noChecks.status).toBe(200);
     expect(noChecks.body).not.toHaveProperty("checks");
+    expect(noChecks.body).not.toHaveProperty("mergeableState");
+    expect(noChecks.body).not.toHaveProperty("fixupCommits");
   });
 
   it("pr-check for a unit whose branch only a merged pull request heads answers merged and remembers that pull request on the row, so the row reads like a unit the runner merged", async () => {

@@ -349,6 +349,12 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
         ...(typeof headSha === "string" ? { headSha } : {}),
         ...(typeof a.body.autoMergeEnabled === "boolean" ? { autoMergeEnabled: a.body.autoMergeEnabled } : {}),
         ...(isCommitChecks(a.body.checks) ? { checks: a.body.checks } : {}),
+        // The ready-state facts beside the checks (agent-ship item 9): the
+        // pull request's mergeable state and its self-declared fix-up commits.
+        ...(typeof a.body.mergeableState === "string" ? { mergeableState: a.body.mergeableState } : {}),
+        ...(Array.isArray(a.body.fixupCommits) && a.body.fixupCommits.every((s: unknown) => typeof s === "string")
+          ? { fixupCommits: a.body.fixupCommits as string[] }
+          : {}),
       },
       at,
     };
@@ -600,6 +606,11 @@ async function runUnit(
                 // The checks at the approved head (record 0055): the report's
                 // headline is a claim about them, never "merge-ready" over a red one.
                 ...(check.pr.checks !== undefined ? { checks: check.pr.checks } : {}),
+                // The ready state beside them (agent-ship item 9): a conflicting
+                // head, or one carrying an unsquashed fix-up commit, is reported
+                // approved-but-not-merge-ready, never "merge-ready".
+                ...(check.pr.mergeableState !== undefined ? { mergeableState: check.pr.mergeableState } : {}),
+                ...(check.pr.fixupCommits !== undefined ? { fixupCommits: check.pr.fixupCommits } : {}),
               };
           } catch {
             // the report simply omits the fact

@@ -529,6 +529,12 @@ export type PrCheck =
       autoMergeEnabled?: boolean;
       /** The check runs at the head, when the read asked for them (the ending's facts). */
       checks?: CommitChecksFacts;
+      /** GitHub's `mergeable_state`, when the read asked for the facts — `dirty`
+       *  keeps the report from calling a conflicting head merge-ready (item 9). */
+      mergeableState?: string;
+      /** The head's self-declared fix-up commit subjects (`fixup!`/`squash!`/`amend!`),
+       *  when the read asked for the facts — a head carrying one is not in the ready state. */
+      fixupCommits?: string[];
     }
   | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string };
 
@@ -1745,6 +1751,14 @@ export interface MergeReadyFacts {
   merged?: { sha: string; mergedAt: string };
   /** The check runs at the approved head as the merge door reads them (record 0055). */
   checks?: CommitChecksFacts;
+  /** GitHub's `mergeable_state` for the pull request — `dirty` is a conflict
+   *  with the base, and the report says so instead of "merge-ready", exactly
+   *  as the merge door refuses it before reading the checks (agent-ship item 9). */
+  mergeableState?: string;
+  /** The subjects of the head's commits that mark themselves as fix-ups
+   *  (git's autosquash prefixes `fixup!`, `squash!`, `amend!`): a head
+   *  carrying one is by its own words not in the ready state. */
+  fixupCommits?: string[];
 }
 
 /** The check runs at one commit: how many, which still run, which failed. */
@@ -1755,9 +1769,19 @@ export interface CommitChecksFacts {
 }
 
 /** The merge-ready report's headline is a claim about the approved head
- *  (record 0055): a failed check is never called merge-ready, a pending one
- *  is named, green is said, and without the fact the line is unchanged. */
-function mergeReadyHeadline(rounds: string, url: string, checks: CommitChecksFacts | undefined): string {
+ *  (record 0055, agent-ship item 9): a head that conflicts with its base is
+ *  never called merge-ready and neither is one carrying an unsquashed fix-up
+ *  commit — the ready state is read beside the checks, in the merge door's
+ *  order (the conflict first) — then a failed check is never called
+ *  merge-ready, a pending one is named, green is said, and without any fact
+ *  the line is unchanged. */
+function mergeReadyHeadline(rounds: string, url: string, base: string, facts: MergeReadyFacts | undefined): string {
+  if (facts?.mergeableState === "dirty")
+    return `⚠️ Approved but not merge-ready after ${rounds}: ${url} — the head conflicts with \`${base}\`: rebase onto \`${base}\`, push, and re-review. The approved work stands.`;
+  const fixups = facts?.fixupCommits ?? [];
+  if (fixups.length > 0)
+    return `⚠️ Approved but not merge-ready after ${rounds}: ${url} — ${fixups.length} unsquashed fix-up commit${fixups.length === 1 ? "" : "s"} on the head (${fixups.join("; ")}): squash into the unit's commit, push, and re-review.`;
+  const checks = facts?.checks;
   if (checks === undefined) return `✅ Merge-ready after ${rounds}: ${url}`;
   if (checks.failed.length > 0) {
     const pending = checks.pending.length > 0 ? `; pending: ${checks.pending.join(", ")}` : "";
@@ -1823,7 +1847,7 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
         // A merge that already happened outranks the checks: there is no head left to gate.
         facts?.merged
           ? `✅ Merge-ready after ${rounds}: ${e.pr.url}`
-          : mergeReadyHeadline(rounds, e.pr.url, facts?.checks),
+          : mergeReadyHeadline(rounds, e.pr.url, s.input.base, facts),
         verdictLine,
         levelLine,
         grantLine,

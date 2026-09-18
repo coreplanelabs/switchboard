@@ -102,6 +102,7 @@ import {
   createBranchRef,
   fetchCommitChecks,
   fetchPullRequestFacts,
+  fixupCommitSubjects,
   fetchPullRequestReviews,
   findMergedPrByHead,
   findOpenPrByHead,
@@ -761,6 +762,9 @@ export async function runBot(): Promise<void> {
       // The merge step (record 0031's merge grant): the pull request as GitHub has it, the checks at its head, the squash.
       fetchPrFacts: fetchPullRequestFacts,
       fetchCommitChecks,
+      // The ready state beside the checks (agent-ship item 9): the head's
+      // self-declared fix-up commits, read on the ending's facts pr-check.
+      fixupCommitSubjects,
       mergePullRequest,
       selfIdentity: resolveGithubIdentity,
       runHistoryWriter,

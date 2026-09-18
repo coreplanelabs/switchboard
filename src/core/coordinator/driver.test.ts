@@ -1414,6 +1414,52 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     expect(end.codingRunId).toBeUndefined();
   });
 
+  it("the ending's facts read carries the ready state beside the checks (agent-ship item 9): a conflicting head is reported approved-but-not-merge-ready naming the rebase — over green checks, before the red-check line — and the unsquashed fix-up commits it carries ride the facts the same way", async () => {
+    const s = steps({ "task/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [
+        ok({
+          ok: true,
+          repo: "acme/api",
+          base: "main",
+          merge: "person",
+          generated: true,
+          caps: { maxRounds: 2, maxMinutes: 240 },
+          units: [
+            row("task", {
+              slug: "task",
+              branch: "ship/fix-the-login-abc123",
+              resume: { pr: 7, headSha: HEAD, url: PR_URL },
+            }),
+          ],
+        }),
+      ],
+      "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0", branch: "ship/fix-the-login-abc123", base: "main" })],
+      spawn: [spawned("run-r1")],
+      "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
+      // The head conflicts with the base while every check is green, and it
+      // still carries a self-declared fix-up commit: neither is merge-ready.
+      "pr-check": [
+        prOpen(T0 + 5 * MIN, {
+          mergeableState: "dirty",
+          fixupCommits: ["fixup! fix the login"],
+          checks: { total: 2, pending: [], failed: [] },
+        }),
+      ],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 5 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 5 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, "ship-run-s");
+    expect(summary).toEqual({ instance: "ship-run-s", units: { task: "merge_ready" }, outcome: "completed" });
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
+    expect(end.ending.kind).toBe("merge_ready");
+    expect(end.ending.report).toContain(`⚠️ Approved but not merge-ready after 1 review round: ${PR_URL}`);
+    expect(end.ending.report).toContain("the head conflicts with `main`: rebase onto `main`, push, and re-review");
+    expect(end.ending.report).not.toContain("✅ Merge-ready");
+    expect(end.ending.report).not.toContain("checks green");
+  });
+
   it("the ending's facts read can find the pull request already merged — auto-merge fired, or a person merged, between the approval and the ending: the unit still ends merge_ready (the machine's ending stands) and the report names the merge by commit and time instead of a gate that has passed", async () => {
     const s = steps({ "task/1/review/wait/1": "event" });
     const b = bot({
