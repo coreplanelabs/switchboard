@@ -75,7 +75,7 @@
   "src/execution/residentInstanceId.ts": 2,
   "src/execution/residentRefresh.ts": 4,
   "src/execution/residentWake.ts": 1,
-  "src/execution/sandboxErrors.ts": 2,
+  "src/execution/sandboxErrors.ts": 3,
   "src/execution/sandboxIdle.ts": 4,
   "src/execution/sandboxLifecycle.ts": 1,
   "src/execution/seedPlan.ts": 4,
