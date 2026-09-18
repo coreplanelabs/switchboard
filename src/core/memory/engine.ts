@@ -94,6 +94,104 @@ export function planWrite(
   return { action: "insert", record: mint(cand), ...(target ? { supersede: target } : {}) };
 }
 
+// ---- The write gate (docs/reference/specs/memory.md item 13) -----------------
+// Status — the state of one pull request at one moment — and change
+// descriptions — what one change did, which the spec and the diff already say —
+// must never become facts: the prompt has asked for that since the write path
+// shipped, and a rule a model is asked to follow is a rule it follows on
+// average. The gate is therefore code, pure and total, and lives HERE in the
+// shared engine so the bot's write path and the Worker's sweep run the exact
+// same rule. A summary is never gated (episodic by definition).
+
+/** A delivery predicate: words that say a change LANDED — one moment's news,
+ *  never a lesson. Shared by the `delivery` marker and the reference marker's
+ *  same-clause test. The auxiliary may sit up to two words from the participle
+ *  ("is fixed and pushed"). */
+const DELIVERY_PREDICATE =
+  /\b(?:(?:was|were|is|are)\s+(?:\w+\s+){0,2}?(?:pushed|merged|approved)|all\s+green|lgtm|ready\s+for\s+review|awaits?\s+ci|is\s+complete)\b/i;
+
+/** A pull-request / issue / unit reference in subject position: the fact opens
+ *  with the noun and a number, so the reference is what the fact is ABOUT. */
+const REFERENCE_SUBJECT = /^\s*(?:pr|pull\s+request|issue|unit)s?\s*#?\d+\b/i;
+
+/** A reference elsewhere (`#n`, `pull/n`, `issues/n`) rejects only beside a
+ *  delivery predicate in the same clause — a citation inside a lesson ("the
+ *  staged rebuild (issue 170) must budget the swap") is not status. */
+const REFERENCE_IN_CLAUSE = /#\d+|\b(?:pull|issues)\/\d+/i;
+
+/** A commit sha: 7–40 hex chars with at least one digit AND one letter, bounded
+ *  by non-alphanumerics — the letter keeps a timestamp or a plain count out,
+ *  the digit keeps "defaced" and "accede" out. An all-digit or all-letter sha
+ *  is missed and accepted as the cost. */
+const COMMIT_SHA = /(?<![a-z0-9])(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}(?![a-z0-9])/i;
+
+/** A run id (`run` + 8 hex chars) or a branch by its path-like name. */
+const RUN_OR_BRANCH = /\brun\s+[0-9a-f]{8}\b|\bbranch\s+\S*\/\S+/i;
+
+/** `now` + a present-tense verb (one intervening word allowed): what a change
+ *  "now does" is a change description, not a lesson. */
+const NOW_VERB =
+  /\bnow\s+(?:\w+\s+)?(?:documents|preserves|displays|includes|carries|has|is|supports|shows|maps|controls|applies|uses)\b/i;
+
+/** A passive change participle: "was implemented", "has been fixed", … */
+const CHANGE_PARTICIPLE =
+  /\b(?:was|were|has\s+been|have\s+been)\s+(?:implemented|added|updated|fixed|documented|removed|renamed|introduced|extended)\b/i;
+
+/** A plan-unit reference. */
+const PLAN_UNIT = /\bunit\s+u?\d+\b/i;
+
+/** "spec row" / "spec rows": what a spec row documents is the spec's to say. */
+const SPEC_ROW = /\bspec\s+rows?\b/i;
+
+/** The words that make a nearby number a test/check count… */
+const COUNT_NOUNS = new Set(["test", "tests", "checks", "rows"]);
+/** …and the outcome words that make that count status. */
+const COUNT_OUTCOME = /\b(?:pass(?:es|ing|ed)?|green|fail(?:s|ing|ed)?)\b/i;
+
+/** A clause: the unit within which the reference and count markers look for
+ *  their second half. */
+function clausesOf(text: string): string[] {
+  return text.split(/[;.!?\n—]+/);
+}
+
+/** A number within three words of a count noun, with an outcome word in the
+ *  same clause — in either order ("all 12 tests passing", "green across 12
+ *  checks"). */
+function hasCountMarker(clause: string): boolean {
+  if (!COUNT_OUTCOME.test(clause)) return false;
+  const words = clause
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  return words.some(
+    (w, i) => /^\d+$/.test(w) && words.slice(Math.max(0, i - 3), i + 4).some((neighbour) => COUNT_NOUNS.has(neighbour)),
+  );
+}
+
+/** The status and change-description markers a fact text carries, by name —
+ *  a table of named patterns, each firing independently. A non-empty answer
+ *  rejects the fact (`parseReflection`) and, later, sweeps the stored row; the
+ *  names are safe to log (never the text). Pure and total: never throws, and
+ *  empty text carries no markers (it is rejected upstream as empty). */
+export function rejectionMarkers(text: string): string[] {
+  const clauses = clausesOf(text);
+  const table: Array<[name: string, hit: boolean]> = [
+    [
+      "reference",
+      REFERENCE_SUBJECT.test(text) || clauses.some((c) => REFERENCE_IN_CLAUSE.test(c) && DELIVERY_PREDICATE.test(c)),
+    ],
+    ["sha", COMMIT_SHA.test(text)],
+    ["count", clauses.some(hasCountMarker)],
+    ["delivery", DELIVERY_PREDICATE.test(text)],
+    ["identifier", RUN_OR_BRANCH.test(text)],
+    ["now", NOW_VERB.test(text)],
+    ["changed", CHANGE_PARTICIPLE.test(text)],
+    ["unit", PLAN_UNIT.test(text)],
+    ["spec-row", SPEC_ROW.test(text)],
+  ];
+  return table.filter(([, hit]) => hit).map(([name]) => name);
+}
+
 /** Build the record a store persists for a candidate. Ids are namespaced per
  *  AGENTS.md invariant 4 (`mem:<scopeKey>:<seq>`); keywords default to the
  *  text's tokens so keyword retrieval always has something to hit. */

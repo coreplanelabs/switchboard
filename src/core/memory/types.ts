@@ -54,6 +54,23 @@ export interface MemoryCandidate {
   supersedes?: string;
 }
 
+/** What one `write` batch actually did, per candidate action — the seam's
+ *  receipt (the counters on the `[memory]` outcome line are these plus the
+ *  parse gate's own). `restated` stays 0 until the restate action lands on the
+ *  write plan; it is on the shape now so every store answers the same fields. */
+export interface WriteCounts {
+  /** Candidates minted as new active records. */
+  inserted: number;
+  /** Candidates whose normalized text bumped an existing active record. */
+  deduped: number;
+  /** Candidates that bumped the shown record they restate (no insert). */
+  restated: number;
+  /** Records flipped to `superseded` by a candidate's pointer. */
+  superseded: number;
+  /** Records the per-scope cap evicted inside the same batch. */
+  evicted: number;
+}
+
 /** A retrieval request: which resource, what to match, how many at most. */
 export interface MemoryQuery {
   scopeKey: string;
@@ -71,8 +88,10 @@ export interface MemoryStore {
   retrieve(q: MemoryQuery, trace?: TraceOptions): Promise<MemoryRecord[]>;
   /** Persist distilled candidates. Dedup (identical normalized text → bump
    *  `useCount`) and supersede (`supersedes` id → old record soft-deleted) live
-   *  inside the store. Driven by the post-run reflection pass (reflection.ts). */
-  write(scopeKey: string, records: MemoryCandidate[]): Promise<void>;
+   *  inside the store. Driven by the post-run reflection pass (reflection.ts).
+   *  Answers what the batch did (`WriteCounts`), so the caller's outcome line
+   *  reports the store's actions, never a guess. */
+  write(scopeKey: string, records: MemoryCandidate[]): Promise<WriteCounts>;
   /** Human view: a scope's ACTIVE records, newest first, at most
    *  `limit`. Unlike `retrieve` this never bumps usage. */
   /** `query`: when given, only records that a query token hits

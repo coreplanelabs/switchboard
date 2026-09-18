@@ -1,4 +1,4 @@
-import type { MemoryCandidate, MemoryQuery, MemoryRecord, MemoryStore } from "./types.js";
+import type { MemoryCandidate, MemoryQuery, MemoryRecord, MemoryStore, WriteCounts } from "./types.js";
 import { tracedFetch } from "../trace/tracedFetch.js";
 import type { Span, TraceOptions } from "../trace/types.js";
 
@@ -85,18 +85,28 @@ export class WorkerMemoryStore implements MemoryStore {
   }
 
   /** Writes come from the background reflection pass, which catches and warns;
-   *  so a failure here is thrown with enough detail to diagnose. */
-  async write(scopeKey: string, records: MemoryCandidate[]): Promise<void> {
-    if (records.length === 0) return;
+   *  so a failure here is thrown with enough detail to diagnose. A 2xx answer's
+   *  counters are parsed into `WriteCounts` (a counter the Worker does not
+   *  send — an older generation — reads 0); an empty batch skips the round
+   *  trip and answers zeros. */
+  async write(scopeKey: string, records: MemoryCandidate[]): Promise<WriteCounts> {
+    if (records.length === 0) return { inserted: 0, deduped: 0, restated: 0, superseded: 0, evicted: 0 };
     const res = await this.post("/write", {
       scopeKey,
       records,
       ...(this.opts.cap !== undefined ? { cap: this.opts.cap } : {}),
     });
+    const data = await parseBody(res);
     if (!res.ok) {
-      const data = await parseBody(res);
       throw new Error(`memory worker /write HTTP ${res.status}${data.error ? `: ${String(data.error)}` : ""}`);
     }
+    return {
+      inserted: asCount(data.inserted),
+      deduped: asCount(data.deduped),
+      restated: asCount(data.restated),
+      superseded: asCount(data.superseded),
+      evicted: asCount(data.evicted),
+    };
   }
 
   /** Human command: failures THROW — a person asked to see the list, so
@@ -148,6 +158,11 @@ async function parseBody(res: Response): Promise<Record<string, unknown>> {
   } catch {
     return {};
   }
+}
+
+/** A non-negative finite number off the wire; anything else reads 0. */
+function asCount(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
 }
 
 /** Structural check on a record coming back over the wire — the Worker is

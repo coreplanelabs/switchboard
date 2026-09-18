@@ -5,7 +5,7 @@ import type { ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";
 import { InMemoryMemoryStore } from "./stores.js";
 import { narrowestVisibility } from "./reflection.js";
-import type { MemoryQuery, MemoryRecord, MemoryStore } from "./types.js";
+import type { MemoryQuery, MemoryRecord, MemoryStore, WriteCounts } from "./types.js";
 import {
   buildReflectionInput,
   MAX_REFLECTION_FACTS,
@@ -104,6 +104,15 @@ describe("REFLECTION_SYSTEM — ephemera", () => {
     expect(REFLECTION_SYSTEM).toMatch(/PR[^\n]*ephemeral|ephemeral[^\n]*PR/i);
     expect(REFLECTION_SYSTEM).toMatch(/SHA/);
     expect(REFLECTION_SYSTEM).toMatch(/test counts?/i);
+  });
+
+  // Feature: docs/reference/specs/memory.md item 13 — the lesson shape: the
+  // extractor is asked for cause and remedy, not descriptions of one change.
+  it("asks for each fact in the lesson shape — what fails or surprises, why, and what to do", () => {
+    expect(REFLECTION_SYSTEM).toMatch(/what fails or surprises, why, and what to do/i);
+    expect(REFLECTION_SYSTEM).toMatch(/remedy/i);
+    // The JSON envelope is untouched by the rewrite.
+    expect(REFLECTION_SYSTEM).toContain('{"facts":[{"text":');
   });
 });
 
@@ -319,6 +328,63 @@ describe("parseReflection", () => {
   });
 });
 
+// Feature: docs/reference/specs/memory.md item 13 — the write gate inside
+// parseReflection: a fact carrying any rejection marker is dropped before
+// authorization and write; a summary is never gated; the parse reports what
+// was offered and what the gate refused.
+describe("parseReflection — the status gate", () => {
+  const none = new Set<string>();
+
+  it("drops a marked fact, keeps the lesson and the summary, and reports offered/rejected", () => {
+    const out = parseReflection(
+      JSON.stringify({
+        facts: [
+          { text: "pull request 1423 was pushed at sha 3f9ab2c1d with all 449 tests passing", confidence: 0.9 },
+          { text: "npm ci must run before the license check after a version bump", confidence: 0.9 },
+        ],
+        summary: "The dependency check order was explained.",
+      }),
+      PROVENANCE,
+      none,
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.offered).toBe(2);
+    expect(out.rejected).toBe(1);
+    expect(out.candidates.map((c) => c.kind)).toEqual(["fact", "summary"]);
+    expect(out.candidates[0].text).toBe("npm ci must run before the license check after a version bump");
+  });
+
+  it("never gates a summary — a status-shaped summary survives (episodic by definition)", () => {
+    const out = parseReflection(
+      JSON.stringify({ facts: [], summary: "Pull request 1423 was pushed with all tests passing." }),
+      PROVENANCE,
+      none,
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.offered).toBe(0);
+    expect(out.rejected).toBe(0);
+    expect(out.candidates.map((c) => c.kind)).toEqual(["summary"]);
+  });
+
+  it("a fact the confidence gate drops is not counted as a gate rejection", () => {
+    const out = parseReflection(
+      JSON.stringify({
+        facts: [{ text: "pull request 1423 was pushed at sha 3f9ab2c1d", confidence: 0.1 }],
+        summary: "",
+      }),
+      PROVENANCE,
+      none,
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.offered).toBe(1);
+    expect(out.rejected).toBe(0);
+    expect(out.candidates).toEqual([]);
+  });
+});
+
 describe("reflect (one extractor call → store.write)", () => {
   const goodReply = JSON.stringify({
     facts: [{ text: "the deploy command is now npm run ship", confidence: 0.9, supersedes: "mem:org:acme:0" }],
@@ -427,7 +493,7 @@ describe("reflect (one extractor call → store.write)", () => {
       store: new InMemoryMemoryStore(),
       onInfo: (m) => wrote.push(m),
     });
-    expect(wrote).toEqual(["reflection wrote 1 fact(s), summary"]);
+    expect(wrote).toEqual(["reflection offered 1, rejected 0, restated 0, inserted 2, deduped 0, summary"]);
 
     const factsOnly: string[] = [];
     const twoFacts = JSON.stringify({
@@ -443,7 +509,7 @@ describe("reflect (one extractor call → store.write)", () => {
       store: new InMemoryMemoryStore(),
       onInfo: (m) => factsOnly.push(m),
     });
-    expect(factsOnly).toEqual(["reflection wrote 2 fact(s)"]);
+    expect(factsOnly).toEqual(["reflection offered 2, rejected 0, restated 0, inserted 2, deduped 0"]);
 
     const nothing: string[] = [];
     const empty = fakeProvider(JSON.stringify({ facts: [], summary: "" }));
@@ -472,7 +538,9 @@ describe("reflect (one extractor call → store.write)", () => {
       store: new InMemoryMemoryStore(),
       onInfo: (m) => cut.push(m),
     });
-    expect(cut).toEqual(["reflection wrote 1 fact(s), summary (truncated at 1024 max tokens)"]);
+    expect(cut).toEqual([
+      "reflection offered 1, rejected 0, restated 0, inserted 2, deduped 0, summary (truncated at 1024 max tokens)",
+    ]);
 
     const odd: string[] = [];
     await reflect({
@@ -495,6 +563,42 @@ describe("reflect (one extractor call → store.write)", () => {
     ]);
   });
 
+  // Feature: docs/reference/specs/memory.md items 8 + 12 — the counters on the
+  // outcome line are the store's answer plus the gate's, and the line never
+  // carries a fact's text.
+  it("the outcome line carries every counter from the gate and the store's answer, and never a fact's text", async () => {
+    const infos: string[] = [];
+    const store = new InMemoryMemoryStore([existing()]);
+    const reply = JSON.stringify({
+      facts: [
+        { text: "pull request 1423 was pushed at sha 3f9ab2c1d with all 449 tests passing", confidence: 0.9 },
+        { text: "npm ci must run before the license check after a version bump", confidence: 0.9 },
+        { text: existing().text, confidence: 0.9 }, // exact dedup against the shown record
+      ],
+      summary: "The dependency check order was explained.",
+    });
+    await reflect({ ...base, provider: fakeProvider(reply), store, onInfo: (m) => infos.push(m) });
+    expect(infos).toEqual(["reflection offered 3, rejected 1, restated 0, inserted 2, deduped 1, summary"]);
+    for (const fragment of ["1423", "3f9ab2c1d", "license check", "deploy command"]) {
+      expect(infos[0]).not.toContain(fragment);
+    }
+  });
+
+  it("a pass whose every fact the gate rejected still reports its counters — never a bare `nothing to write`", async () => {
+    const infos: string[] = [];
+    const reply = JSON.stringify({
+      facts: [{ text: "pull request 1423 was pushed at sha 3f9ab2c1d", confidence: 0.9 }],
+      summary: "",
+    });
+    await reflect({
+      ...base,
+      provider: fakeProvider(reply),
+      store: new InMemoryMemoryStore(),
+      onInfo: (m) => infos.push(m),
+    });
+    expect(infos).toEqual(["reflection offered 1, rejected 1, restated 0, inserted 0, deduped 0"]);
+  });
+
   it("bounds the existing-records lookup query so a long answer can never overrun the Worker's query cap", async () => {
     // The Worker caps `query` at MAX_QUERY_CHARS; an over-long query 400s and
     // the store swallows it to [], so reflection would run blind. Regression
@@ -505,7 +609,9 @@ describe("reflect (one extractor call → store.write)", () => {
         queries.push(q.query);
         return [];
       },
-      async write(): Promise<void> {},
+      async write(): Promise<WriteCounts> {
+        return { inserted: 0, deduped: 0, restated: 0, superseded: 0, evicted: 0 };
+      },
       async list(): Promise<MemoryRecord[]> {
         return [];
       },
