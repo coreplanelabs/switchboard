@@ -58,6 +58,7 @@ import {
   wrapUpInstruction,
   wrapUpNote,
   toolCutNote,
+  unlabelledAnswer,
 } from "../windDown.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
@@ -1869,7 +1870,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             ? turnGuardAnswer(text, writeUp.pace, writeUpFailed)
             : writeUp?.kind === "soft" || stopMode === "soft"
               ? softStopAnswer(text, writeUpFailed)
-              : text || "_(no response)_";
+              : // A wrap-up pi never saw clears the label, never the failure the
+                // reader had (harness-pi item 16): the model's own text with the
+                // failure after it, or the failure alone when pi wrote nothing.
+                unlabelledAnswer(text, writeUpFailed);
     }
     // The loop is over: its `run.agent` ends here, as the native loop's does,
     // before any follow-up turn — each of those opens a `run.agent` of its own.
@@ -2109,7 +2113,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         if (writeUp?.kind === "time") return timeBudgetAnswer(text, input.maxMinutes, writeUpFailed);
         if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
         if (writeUp?.kind === "soft") return softStopAnswer(text, writeUpFailed);
-        return text || "_(no response)_";
+        return unlabelledAnswer(text, writeUpFailed);
       } catch (err) {
         turnFailed = true;
         // The same fail-by-name as the loop's: the note carries the vanished

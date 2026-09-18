@@ -13,6 +13,8 @@ import {
   HARD_STOP_MESSAGE,
   SOFT_STOP_INSTRUCTION,
   timeBudgetInstruction,
+  unlabelledAnswer,
+  windDownFailureNote,
   wrapUpUndeliveredNote,
   wrapUpWriteFailedNote,
   turnGuardInstruction,
@@ -3210,6 +3212,43 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(inTurn.some((c) => c.type === "prompt" && c.streamingBehavior === "steer")).toBe(false); // nor its P1
     expect(turnPromptSeenAt! - turnStartedAt).toBeLessThan(PROMPT_ECHO_WAIT_MS); // at once, not at P1's bound
     expect(w.notes).not.toContain(finaleTimedOutNote("turn"));
+  });
+
+  it("the loop's wind-down steer still held when the loop ends, and the model call that settles the loop failing on the provider: the answer wears no label for a wrap-up pi never saw, but keeps the failure the reader had — the failure alone when pi wrote nothing — beside the wrap_up note and the wind-down's own failure note", async () => {
+    // The same shape as above (the turn guard's steer held behind P1 in doubt),
+    // except that pi does not settle on an answer: its next model call fails
+    // on the provider under the decided write-up, which is `writeUpFailed`
+    // and a `harness_error` note. The dropped wrap-up clears the label — and
+    // must not clear the failure with it.
+    const w = tickingWorld({ agent: { maxTurns: 0 } });
+    scriptedPi(w.container, () => {});
+    w.container.failSendType = { type: "prompt", error: controlReset() }; // P1 in doubt, holding the gate
+    const realRead = w.container.readLog.bind(w.container);
+    let failed = false;
+    let polls = 0;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (!failed && resumedSummaries(w).length > 0 && ++polls >= 6) {
+        failed = true;
+        w.container.emit(
+          {
+            type: "message_end",
+            message: { role: "assistant", content: [], stopReason: "error", errorMessage: "503" },
+          },
+          { type: "agent_settled" },
+        );
+        return realRead(path, offset, max);
+      }
+      return chunk;
+    };
+    const session = await w.open();
+    expect(noteKinds(w)).toContain("turn_budget_exhausted");
+    expect(w.container.commands().some((c) => c.type === "steer")).toBe(false); // the wind-down steer never reached pi
+    expect(w.notes).toContain(wrapUpUndeliveredNote("turns"));
+    expect(w.notes).toContain(windDownFailureNote("503"));
+    // No label for a wrap-up that never went — but the failure the record holds reaches the thread too.
+    expect(session.answer).toBe(unlabelledAnswer("", "503"));
   });
 
   it("a catch-up burst is no time under a ticking clock: the records pi wrote during the reset come back in one chunk and are consumed one slow ledger write at a time for longer than the bound, the prompt's echo last among them — the prompt in doubt is never re-sent, since the gate reads its clock only once the reader has caught up", async () => {
