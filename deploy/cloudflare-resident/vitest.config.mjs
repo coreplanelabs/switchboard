@@ -40,6 +40,7 @@ export default defineConfig({
       "instanceSizing.test.ts",
       "refresh.test.ts",
       "instanceStep.test.ts",
+      "stagedBuild.test.ts",
       "lifecycle.test.ts",
       "runtimeUnreachable.test.ts",
       "runtimeBusy.test.ts",

@@ -180,8 +180,11 @@ import {
   type StoredTestOverrides,
 } from "./gc";
 import {
+  CHECKOUT_FETCH_COMMAND,
   checkoutUpdateCommand,
   classifyRefreshFailure,
+  stageCheckoutScript,
+  swapCheckoutScript,
   restoreFailureDisposition,
   isRuntimeUnreachableSignal,
   killStaleBuildProcessesCommand,
@@ -486,6 +489,18 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  *  DO storage is). Thread worktrees hang off the same mirror; keep these paths stable. */
 const MIRROR_DIR = "/workspace/mirror"; // bare mirror, owned by root
 const CHECKOUT_DIR = "/workspace/checkout"; // default-branch working tree + deps + build, owned by BUILD_USER
+/** The staged rebuild's side trees (resident-repos.md item 47): the refresh
+ *  builds into `staging` OUTSIDE the mirror lock and swaps it into
+ *  CHECKOUT_DIR under it (two renames); `retired` holds the replaced checkout
+ *  between the swap and its off-lock removal. Same filesystem as the
+ *  checkout, so both moves are renames and `cp -al` hardlinks. */
+const STAGING_CHECKOUT_DIR = "/workspace/checkout.staging";
+const RETIRED_CHECKOUT_DIR = "/workspace/checkout.retired";
+const CHECKOUT_SWAP_DIRS = {
+  checkout: CHECKOUT_DIR,
+  staging: STAGING_CHECKOUT_DIR,
+  retired: RETIRED_CHECKOUT_DIR,
+} as const;
 const RESIDENT_STATE_DIR = "/workspace/.resident"; // mode 700 root:root — worker users cannot traverse
 const CRED_FILE = `${RESIDENT_STATE_DIR}/git-credentials`; // one-shot token file, deleted after each git command
 const READY_MARKER = `${RESIDENT_STATE_DIR}/ready`; // holds the sha the disk was hydrated to
@@ -2210,18 +2225,24 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   /** Run one command-table entry as the unprivileged build user in the warm
-   *  checkout. Never root. Never a GitHub token — the env
-   *  is whatever `su` grants the target user, nothing injected. */
-  private async buildUserRun(command: string, step: ResidentStepLabelKey, timeoutMs: number): Promise<string> {
-    // Steps on the checkout are sequential, so a live build-user process
-    // INSIDE it here is a leftover (a step whose wait was abandoned, or one
+   *  checkout (or the staged rebuild's tree, item 47). Never root. Never a
+   *  GitHub token — the env is whatever `su` grants the target user, nothing
+   *  injected. */
+  private async buildUserRun(
+    command: string,
+    step: ResidentStepLabelKey,
+    timeoutMs: number,
+    dir: string = CHECKOUT_DIR,
+  ): Promise<string> {
+    // Steps on one tree are sequential, so a live build-user process INSIDE
+    // it here is a leftover (a step whose wait was abandoned, or one
     // orphaned by a Worker-only deploy resetting the DO) — and it is writing
-    // into the tree this step is about to clean or build. Scoped to the
-    // checkout: the same user's deps-store installs run in their own scratch
+    // into the tree this step is about to clean or build. Scoped to that
+    // tree: the same user's deps-store installs run in their own scratch
     // trees, in parallel, and are live work (killStaleBuildProcessesCommand).
-    const swept = await this.runOk(killStaleBuildProcessesCommand(BUILD_USER, CHECKOUT_DIR), `${step}-stale-sweep`);
+    const swept = await this.runOk(killStaleBuildProcessesCommand(BUILD_USER, dir), `${step}-stale-sweep`);
     if (swept.trim()) console.log(`${step}: ${swept.trim()}`);
-    return this.runOk(["su", "-s", "/bin/bash", BUILD_USER, "-c", `cd ${CHECKOUT_DIR} && ${command}`], step, {
+    return this.runOk(["su", "-s", "/bin/bash", BUILD_USER, "-c", `cd ${dir} && ${command}`], step, {
       timeoutMs,
     });
   }
@@ -2564,9 +2585,10 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  /** Bring the checkout to `sha` and build it, under the mirror mutex. The
-   *  disk markers decide (planBuild over the refresh planner): a checkout
-   *  whose HEAD, deps and build markers all name the target is done. */
+  /** Bring the checkout to `sha` and build it — staged outside the mirror
+   *  mutex, swapped in under it (item 47). The disk markers decide (planBuild
+   *  over the refresh planner): a checkout whose HEAD, deps and build markers
+   *  all name the target is done. */
   async runBuild(input: {
     sha: string;
     factsSha: string;
@@ -2578,47 +2600,116 @@ export class ResidentDO extends Sandbox<Env> {
     const { sha, lockfileKey } = input;
     const plan = planBuild({ sha, factsSha: input.factsSha, lockfileKey, disk: await this.readRefreshDisk() });
     if (plan.action === "done") return { done: true, why: plan.why };
-    // Serialize the CHECKOUT_DIR mutation on the mirror mutex:
-    // materializeThreadDeps reads CHECKOUT_DIR via `cp -al` under the same
-    // lock, so an attach/op dep-copy can never hardlink a half-rebuilt
-    // checkout into a thread tree (torn cache → false ❌ from `repo test`).
-    // No wait timeout, exactly like the fetch lock: the background refresh
-    // queues behind an in-flight attach instead of flipping to degraded on
+    // The mirror mutex is held only to STAGE and later to SWAP — never for
+    // the build (item 47): a heavy build under the lock pushed concurrent
+    // attaches past ATTACH_MUTEX_WAIT_MS into mirror-busy 503s and cold
+    // fallbacks. The stage lock covers the two reads the mutex actually
+    // protects: a consistent hardlink copy of the warm checkout (exactly
+    // materializeThreadDeps' torn-cache guarantee, which the `cp -al` under
+    // the same lock keeps — CHECKOUT_DIR now changes only by rename under
+    // this mutex) and the fetch from the mirror into the staging tree (an
+    // attach's `fetch --prune` could delete a ref under it). No wait
+    // timeout, exactly like the fetch lock: the background refresh queues
+    // behind an in-flight attach instead of flipping to degraded on
     // transient lock contention. Token-free: repo code runs during the build.
+    // Off the lock, before the stage lease: a failed or interrupted off-lock
+    // build leaves a full staging tree — deps view plus partial build output,
+    // hundreds of thousands of inodes — and the retry 30 s later would
+    // otherwise hold the mirror lock through its removal, the contention
+    // class the staged rebuild exists to remove. The tree is private to this
+    // rebuild, so its stale writers are killed and the tree dropped without
+    // the lock; the retired tree's heal-then-remove stays in the staged
+    // script under the lease, where the checkout path's consistency needs it.
+    const swept = await this.runOk(
+      killStaleBuildProcessesCommand(BUILD_USER, STAGING_CHECKOUT_DIR),
+      "checkout-stage-stale-sweep",
+    );
+    if (swept.trim()) console.log(`checkout-stage: ${swept.trim()}`);
+    await this.runOk(["rm", "-rf", STAGING_CHECKOUT_DIR], "checkout-stage-clear", {
+      timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+    });
     await this.withMirrorLock(
       async () => {
-        // Isolation invariant (review 1b): attached, sha-pinned thread
-        // worktrees hold hardlinks to the store entry's FILE inodes, and so
-        // does the checkout. A build that writes THROUGH an existing inode —
-        // many bundlers do (e.g. .next incremental manifests open+truncate
-        // rather than recreate) — would mutate every consumer's pinned
-        // artifacts. The `-x` clean removes the checkout's build output so
-        // the build allocates FRESH inodes; the entry's own files are
-        // owner-read-only (deps-harden), so a write through them fails
-        // loudly instead of silently reaching the store; the tool caches
-        // inside node_modules are the checkout's private copies (item 18).
-        //
-        // Install gate: when the committed lockfile key is unchanged,
-        // node_modules (the view) is excluded from the clean and no deps
-        // work happens; a changed key re-links the view to the new entry —
-        // which is also what drops deps the new lockfile no longer has.
-        await this.buildUserRun(checkoutUpdateCommand(sha, plan.clean), "checkout-update", GIT_NETWORK_TIMEOUT_MS);
+        await this.runOk(["sh", "-c", stageCheckoutScript(CHECKOUT_SWAP_DIRS)], "checkout-stage", {
+          timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+        });
+        await this.buildUserRun(
+          CHECKOUT_FETCH_COMMAND,
+          "checkout-update",
+          GIT_NETWORK_TIMEOUT_MS,
+          STAGING_CHECKOUT_DIR,
+        );
+      },
+      0,
+      // The lease is the section's own budget (resident-repos.md item 22) —
+      // the backstop by which a taker judges this holder dead. The section
+      // runs two commands each budgeted GIT_NETWORK_TIMEOUT_MS (the stage
+      // script and the mirror fetch), so the lease is their sum: a lease of
+      // one budget let a taker steal the lock mid-stage and race its
+      // `fetch --prune` against the staging fetch's negotiation.
+      { step: "checkout-stage", budgetMs: 2 * GIT_NETWORK_TIMEOUT_MS },
+    );
+    // Outside the lock, in the staging tree. Isolation invariant (review 1b):
+    // attached, sha-pinned thread worktrees hold hardlinks to the store
+    // entry's FILE inodes, and so does the staged copy. A build that writes
+    // THROUGH an existing inode — many bundlers do (e.g. .next incremental
+    // manifests open+truncate rather than recreate) — would mutate every
+    // consumer's pinned artifacts. The `-x` clean removes the staged copy's
+    // build output so the build allocates FRESH inodes; the entry's own files
+    // are owner-read-only (deps-harden), so a write through them fails loudly
+    // instead of silently reaching the store; the tool caches inside
+    // node_modules are the checkout's private copies (item 18).
+    //
+    // Install gate: when the committed lockfile key is unchanged, node_modules
+    // (the view) is excluded from the clean and no deps work happens; a
+    // changed key re-links the view to the new entry — which is also what
+    // drops deps the new lockfile no longer has.
+    await this.buildUserRun(
+      checkoutUpdateCommand(sha, plan.clean),
+      "checkout-update",
+      GIT_NETWORK_TIMEOUT_MS,
+      STAGING_CHECKOUT_DIR,
+    );
+    if (plan.install && input.depsEntry) {
+      // The old view (a resumed install's keep-deps clean leaves it in
+      // place, item 57) makes way for the new entry's: hardlinks only,
+      // the entry's inodes are untouched.
+      await this.runOk(["rm", "-rf", `${STAGING_CHECKOUT_DIR}/node_modules`], "unlink-deps-view");
+      await this.linkDepsView(
+        `${input.depsEntry}/node_modules`,
+        STAGING_CHECKOUT_DIR,
+        BUILD_USER,
+        STAGING_CHECKOUT_DIR,
+      );
+    }
+    await this.buildUserRun(input.buildCmd, "build", REFRESH_BUILD_TIMEOUT_MS, STAGING_CHECKOUT_DIR);
+    // The swap: two renames — milliseconds — and the markers written with the
+    // tree they vouch for, under one short lease.
+    await this.withMirrorLock(
+      async () => {
+        // A leftover writer inside the old checkout would keep writing into
+        // the retired tree while it is removed.
+        const swept = await this.runOk(
+          killStaleBuildProcessesCommand(BUILD_USER, CHECKOUT_DIR),
+          "checkout-swap-stale-sweep",
+        );
+        if (swept.trim()) console.log(`checkout-swap: ${swept.trim()}`);
+        await this.runOk(["sh", "-c", swapCheckoutScript(CHECKOUT_SWAP_DIRS)], "checkout-swap", {
+          timeoutMs: GIT_NETWORK_TIMEOUT_MS,
+        });
         if (plan.install) {
-          // The old view (a resumed install's keep-deps clean leaves it in
-          // place, item 57) makes way for the new entry's: hardlinks only,
-          // the entry's inodes are untouched.
-          if (input.depsEntry) {
-            await this.runOk(["rm", "-rf", `${CHECKOUT_DIR}/node_modules`], "unlink-deps-view");
-            await this.linkDepsView(`${input.depsEntry}/node_modules`, CHECKOUT_DIR, BUILD_USER);
-          }
           await this.writeDiskMarkers({ depsKey: lockfileKey });
           await this.runOk(["rm", "-f", INSTALLING_MARKER], "clear-installing-marker");
         }
-        await this.buildUserRun(input.buildCmd, "build", REFRESH_BUILD_TIMEOUT_MS);
         await this.writeDiskMarkers({ builtSha: sha });
       },
       0,
-      { step: "build", budgetMs: GIT_NETWORK_TIMEOUT_MS + REFRESH_BUILD_TIMEOUT_MS },
+      { step: "checkout-swap", budgetMs: GIT_NETWORK_TIMEOUT_MS },
+    );
+    // Off the lock: the replaced tree's removal (hardlinks — mostly link
+    // drops). A failure here is a log line; the next stage's seed sweeps it.
+    await this.runOk(["rm", "-rf", RETIRED_CHECKOUT_DIR], "checkout-retire").catch((err: unknown) =>
+      console.log(`checkout-retire: ${errMsg(err)} — the next staged rebuild sweeps it`),
     );
     return { done: false, why: plan.why };
   }
@@ -2710,7 +2801,10 @@ export class ResidentDO extends Sandbox<Env> {
     // (item 61: the SDK's presigned restore mounts) — `rm -rf` on a mount
     // point is "Device or resource busy". Unmount first, every time.
     await this.runOk(["sh", "-c", unmountAllRestoresScript()], "unmount-restores");
-    await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-before-restore");
+    await this.runOk(
+      ["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, STAGING_CHECKOUT_DIR, RETIRED_CHECKOUT_DIR, ...DISK_MARKERS],
+      "clean-before-restore",
+    );
     try {
       // The restore pair IS the cold-wake critical path. Sequential on purpose:
       // the SDK serializes backup operations anyway (one queue), so a
@@ -2963,7 +3057,10 @@ export class ResidentDO extends Sandbox<Env> {
         });
       }
       await this.runOk(["sh", "-c", unmountAllRestoresScript()], "unmount-restores");
-      await this.runOk(["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, ...DISK_MARKERS], "clean-workspace");
+      await this.runOk(
+        ["rm", "-rf", MIRROR_DIR, CHECKOUT_DIR, STAGING_CHECKOUT_DIR, RETIRED_CHECKOUT_DIR, ...DISK_MARKERS],
+        "clean-workspace",
+      );
       await this.ensureGitSetup();
       await this.withMirrorLock(() =>
         this.gitWithCred(
@@ -6215,20 +6312,26 @@ export class ResidentDO extends Sandbox<Env> {
     return mech;
   }
 
-  /** The view itself, for callers already holding the mirror lock (the
-   *  refresh rebuild and provisioning link the CHECKOUT this way). */
+  /** The view itself, lock-agnostic: provisioning links the CHECKOUT under
+   *  the mirror lock it already holds; the staged rebuild links its staging
+   *  tree OFF the lock — safe because the tree is private to the rebuild and
+   *  the store entry's inodes are immutable (deps-harden). */
   private async linkDepsView(
     entryNodeModules: string | null,
     tree: string,
     user: string,
+    /** The build dirs' source. The staged rebuild passes its own tree (its
+     *  clean just removed them — nothing to copy; the WARM checkout's build
+     *  output must never seed the tree that is about to rebuild it). */
+    from: string = CHECKOUT_DIR,
   ): Promise<DepCacheMaterialization | "none"> {
     const parsed = await this.runDepScript(
-      depCacheScript(CHECKOUT_DIR, tree, user, entryNodeModules ? { nodeModulesSrc: entryNodeModules } : {}),
+      depCacheScript(from, tree, user, entryNodeModules ? { nodeModulesSrc: entryNodeModules } : {}),
       "deps-materialize",
       REFRESH_BUILD_TIMEOUT_MS,
     );
     await this.swapMutableCaches(
-      entryNodeModules ?? `${CHECKOUT_DIR}/node_modules`,
+      entryNodeModules ?? `${from}/node_modules`,
       `${tree}/node_modules`,
       user,
       parsed.mutableListing,
