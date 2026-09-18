@@ -308,8 +308,12 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
     for (const e of events)
       expect(["tool_call", "tool_result", "run_note", "assistant", "input", "lease"]).toContain(e.type);
     expect(events.some((e) => e.type === "lease")).toBe(true); // the harness started the lease (harness-pi item 15)
-    // The conversation clause: the run answered; the record mirrored steps.
-    expect(session.answer.length).toBeGreaterThan(0);
+    // The conversation clause: the run's answer is the last step's text — the
+    // row the tailer's refill delivers after `session.execution.succeeded`,
+    // which the loop reads before it settles (a length check would pass on
+    // `_(no response)_`); the record mirrored every step, the answer's included.
+    expect(session.answer).toBe("all done from the real model");
+    expect(steps.at(-1)?.turns.at(-1)?.content).toEqual([{ type: "text", text: "all done from the real model" }]);
     expect(steps.length).toBeGreaterThan(0);
     // The survival clause: the row's facts name OpenCode.
     expect(facts[0]?.harness).toBe("opencode");
@@ -383,11 +387,22 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
     // `OpenCodeRequestRefusedError: OpenCode refused the session import (400):
     // {"_tag":"InvalidRequestError","message":"Missing key\n  at ["messages"][1]["content"][0]["state"]["error"]["type"]","kind":"Payload"}`.
     const run = await driveRealRun("run-real-rebuild", (_results, chunks) => chunks.text("carried on"), resume);
-    const { session, events, modelSeen } = run;
+    const { session, events, steps, modelSeen } = run;
     expect(notesOf(events).filter((n) => n.kind === "harness_error")).toEqual([]);
     // The continue ran on the imported record: the model was asked under the
-    // run bearer and the session's own execution ended `succeeded`.
+    // run bearer, the session's own execution ended `succeeded`, and its answer
+    // — the row the refill after that event carries — is the run's, with the
+    // step after the rebuild the settlement turn at the seed index, then it.
     expect(modelSeen.authOk).toBe(true);
+    expect(session.answer).toBe("carried on");
+    expect(steps.length).toBeGreaterThan(0);
+    expect(steps[0].firstIdx).toBe(4);
+    expect(steps[0].turns[0].content[0]).toEqual({
+      type: "tool_result",
+      toolUseId: "c-flight",
+      content: "The container was replaced while this bash call was in flight; its result was lost.",
+      isError: true,
+    });
     const feed = (await readFeed(run))
       .split("\n")
       .map(parseFeedRecord)

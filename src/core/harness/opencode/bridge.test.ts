@@ -939,6 +939,24 @@ describe("the loop — a refused request, a silent server, and a hung turn", () 
     expect(harnessErrors(r)).toEqual([]);
   });
 
+  it("the refill the execution's end owed fails in the tailer: the loop settles on the tailer's failure note for that reason, not on the event and not never — the run ends on what landed, the failure on the card", async () => {
+    const r = await openCodeDriver({ terminalRefillFails: true }).run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "g1", name: "grep", input: { pattern: "needle" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "the last word" }], stopReason: "end_turn" },
+      ],
+    });
+    // The last step's own refill still landed (after the terminal event), so the answer is read;
+    // the terminal reason's refill is the one the tailer failed, and its note is the settle.
+    expect(r.outcome.kind).toBe("answered");
+    expect(answered(r)).toBe("the last word");
+    expect(r.stopRequested).toBeUndefined();
+    expect(r.progress.some((p) => p.includes("message refill failed"))).toBe(true);
+  });
+
   it("a model call that fails outside the wind-down fails the run by the provider's words at once — the execution settled on the failure, nothing awaited past it, the process ended", async () => {
     const r = await run({ ...oneTurn, failModelCall: 1 });
     expect(r.outcome.kind).toBe("failed");
@@ -1102,6 +1120,27 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
     expect(dead.bypass).toBeUndefined();
     expect(events.filter((e) => e.type === "tool_result").map((e) => e.callId)).toEqual(["c-dead"]);
     expect(notes(events)).toEqual([]);
+  });
+
+  it("the dead generation's end, replayed while catching up, owes this loop no refill: a later refill of the same terminal kind settles nothing, and only the loop's own end is paid by its refill", () => {
+    const { bridge } = harness();
+    const refill = (reason: string): OpenCodeFeedRecord => ({
+      feed: "messages",
+      at: NOW,
+      sessionID: "ses_c",
+      reason,
+      data: [],
+    });
+    bridge.observing = "catching-up";
+    const replayed = bridge.observe(ev("session.execution.succeeded", { sessionID: "ses_c" }));
+    // Catching up, the end is history: the loop discards its `settled`, and nothing dangles from it.
+    expect(replayed.settled).toBe(true);
+    bridge.observing = "own";
+    expect(bridge.observe(refill("session.execution.succeeded")).settled).toBe(false);
+    // The loop's own end owes its refill; the event alone settles nothing, the refill does.
+    expect(bridge.observe(ev("session.execution.succeeded", { sessionID: "ses_c" })).settled).toBe(false);
+    expect(bridge.observe(refill("session.step.ended")).settled).toBe(false);
+    expect(bridge.observe(refill("session.execution.succeeded")).settled).toBe(true);
   });
 
   it("a settle whose step this loop never saw start — an earlier execution's, landing however late, no hand-over needed — is set aside in own mode under a settle_set_aside note naming the call and the step, while a settle of the loop's own step with no decision is still the bypass it always was", () => {

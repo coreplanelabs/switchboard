@@ -461,6 +461,13 @@ export class OpenCodeBridge {
   turns = 0;
   toolCalls = 0;
   private answerText: string | undefined;
+  /** The terminal event whose store refill the tailer owes (`REFILL_ON`): the
+   *  loop's own execution ended `succeeded` or `interrupted`, and the row that
+   *  carries the answer reaches the feed only in the refill written after that
+   *  event (the tailer's GET for the last step answers after the server has
+   *  ended the execution). The settle is the refill stamped with this reason —
+   *  or the tailer's note that the refill failed — never the event alone. */
+  private settleOwedTo: string | undefined;
   /** Narration text seen since the last turn's start, emitted beside its call. */
   private pendingNarration: string | undefined;
   /** A model call is under way: a step OpenCode started and has not ended.
@@ -903,12 +910,37 @@ export class OpenCodeBridge {
         // and the pinned binary drops them at the interrupt anyway.
         if (this.observing === "earlier") return { replies: [], settled: false };
         return this.onPermissionsRefill(record.data);
-      case "messages":
-        return this.onMessagesRefill(record.data);
+      case "messages": {
+        const out = this.onMessagesRefill(record.data);
+        // The refill the terminal event owed has landed (the tailer stamps it
+        // with the event's type): every row of the ended execution is in the
+        // store — the last step's, written just before it — so the loop settles.
+        // The pairing is by reason alone — the tailer stamps no execution on a
+        // refill — on the assumption that one owed refill of a kind is in
+        // flight at a time: the tailer refills in event order, so the cut
+        // execution's `interrupted` refill is written before the loop's own end
+        // can owe one of the same kind. An execution stamp on the refill, if
+        // the tailer ever grows one, would replace this assumption.
+        if (this.settleOwedTo !== undefined && record.reason === this.settleOwedTo) {
+          this.settleOwedTo = undefined;
+          out.settled = true;
+        }
+        return out;
+      }
       case "tailer":
         // A dropped stream is a note; the refill that follows repairs the record.
         if (record.note === "stream closed" || record.note.includes("failed"))
           this.deps.onProgress?.(`opencode feed: ${redactAndCap(record.note, 120)}`);
+        // The refill the terminal event owed will not come — the tailer says its
+        // store read failed for that reason — so the loop settles on what landed.
+        if (
+          this.settleOwedTo !== undefined &&
+          (record.note === "message refill failed" || record.note === "refill failed") &&
+          record.reason === this.settleOwedTo
+        ) {
+          this.settleOwedTo = undefined;
+          return { replies: [], settled: true };
+        }
         return { replies: [], settled: false };
     }
   }
@@ -1083,7 +1115,18 @@ export class OpenCodeBridge {
         }
         if (earlier) break;
         this.stepOpen = false;
-        out.settled = true;
+        // The tailer refills the store after `succeeded` and `interrupted`, and
+        // the last step's refill — the row that carries the answer — lands
+        // after the event too: the settle is that refill's (`settleOwedTo`),
+        // read off the feed, never the event's. `session.idle` causes no
+        // refill, so it settles here. Only the loop's own end owes a refill:
+        // the dead generation's end, replayed while catching up, is history
+        // the loop discards (its `settled` is never read), and arming the
+        // owed settle there would leave it dangling into the live generation
+        // — the death may have cut the feed inside the tailer's GET window —
+        // for an earlier execution's refill of the same kind to pay.
+        if (event.type === "session.idle" || this.observing !== "own") out.settled = true;
+        else this.settleOwedTo = event.type;
         break;
       default:
         break;
