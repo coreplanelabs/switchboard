@@ -3,9 +3,9 @@ import { computed, ref } from "vue";
 import type { ViewablePerson } from "@core/channels/webSeed.js";
 import { enterViewAs } from "../../lib/viewAs";
 
-// The view-as picker (record 0053): a combobox over the people the page can
-// name — the requesters of its rows, by name — with a typed Slack id accepted
-// too (Enter on text the list lacks offers it as an item). Picking posts the
+// The view-as picker (record 0053): a combobox over the people the seed offers
+// — the installation's known people and the page's requesters, by name — with a
+// typed Slack id accepted too (Enter on text the list lacks offers it as an item). Picking posts the
 // choice and the index reloads as that person. Drawn only when the seed offers
 // `viewAs`, which the server sets for a session holding every grant.
 

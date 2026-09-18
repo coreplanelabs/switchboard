@@ -497,6 +497,15 @@ describe("grantsFor — the grants the policy table decides on", () => {
     expect(more.canRunAgent("slack:URANDOM", "coding")).toBe(false);
   });
 
+  it("grantedPeople lists the Slack people the grants table names, in its order, whatever they hold — never a credential, a surface star or a schedule", () => {
+    const s = store(
+      withGrants(
+        `  "slack:*": { actions: [runs:read] }\n  "access:op-1": { actions: all, channels: all, repos: all }\n  "http:ops": { actions: [runs:read] }\n`,
+      ),
+    );
+    expect(s.grantedPeople()).toEqual(["slack:UADMIN", "slack:UDEV"]);
+  });
+
   it("adminsHint names people, never a surface: `slack:*` holding everything makes everyone an admin, and the hint still points at UADMIN", async () => {
     const s = store(withGrants(`  "slack:*": { actions: all, channels: all, repos: all }\n`));
     expect(s.grantsFor("slack:URANDOM")).toEqual(ALL_GRANTS);

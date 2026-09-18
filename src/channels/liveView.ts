@@ -28,9 +28,16 @@ import { STORE_UNAVAILABLE_BANNER } from "../core/commandRegistry.js";
 import { buildScheduledRows, type FiringsState } from "./scheduledPanel.js";
 import type { ShellRenderer } from "./webShell.js";
 import { holdsAll } from "../core/authz/viewAs.js";
-import { refuseWhileViewing, requestersOf } from "./viewAs.js";
+import { peopleOf, refuseWhileViewing } from "./viewAs.js";
 import { WEB_HTML_HEADERS } from "./webShell.js";
-import type { RunIndexRowSeed, RunsIndexSeed, ScheduledSeed, UnitRunRowSeed, UnitSeed } from "./webSeed.js";
+import type {
+  RunIndexRowSeed,
+  RunsIndexSeed,
+  ViewablePerson,
+  ScheduledSeed,
+  UnitRunRowSeed,
+  UnitSeed,
+} from "./webSeed.js";
 export { FAVICON_ICO_SVG, FAVICON_IDLE, FAVICON_LIVE, faviconSvg } from "./favicon.js";
 import {
   nodeSseSink,
@@ -227,6 +234,11 @@ export interface LiveViewDeps {
   /** The configured run-history retention, for the index toggle's tooltip; null
    *  when history is off (store: null). */
   retention: { retentionDays: number } | null;
+  /** The people a viewer holding `all` may view the dashboard as (record 0053): the installation's
+   *  known people as `peopleSource` (viewAs.ts) last computed them — a cache the source refreshes
+   *  in the background, so a paint never waits on the store or Slack — merged with the page's own
+   *  requesters. Absent, the picker offers the page's requesters alone. */
+  people?: () => readonly ViewablePerson[];
   /** Receives one entry per allowed page/events history read and per refused
    *  tokenless read. Default: console.log. */
   audit?: (entry: HistoryReadAudit) => void;
@@ -555,6 +567,11 @@ export function createLiveViewHandler(
       }
       const live = index.listActive().filter((s) => matchesPredicate(visibleTo, s));
       const render = (page: IndexPage) => {
+        // A session holding `all` may view the dashboard as a person (record 0053): the picker
+        // offers the installation's people as the source last computed them and the page's
+        // requesters — a cache read, so the paint waits on nothing; the seed says nothing to
+        // anyone else.
+        const people = holdsAll(ctx.actor) ? peopleOf(page.rows, deps.people?.() ?? []) : undefined;
         const liveCount = page.rows.filter((r) => !r.finished).length;
         // The tab title carries the live count (item 21); the page keeps it
         // current from the feed after this first paint.
@@ -564,9 +581,7 @@ export function createLiveViewHandler(
           all,
           mine,
           ...(ctx.actor.asUser ? { asUser: ctx.actor.asUser } : {}),
-          // A session holding `all` may view the dashboard as a person (record 0053): the
-          // picker offers the requesters this page names; the seed says nothing to anyone else.
-          ...(holdsAll(ctx.actor) ? { viewAs: { people: requestersOf(page.rows) } } : {}),
+          ...(people ? { viewAs: { people } } : {}),
           retentionDays: deps.retention ? deps.retention.retentionDays : null,
           now: now(),
           rows: [...page.rows],

@@ -37,7 +37,8 @@ import { buildMcp } from "./mcp/index.js";
 import { NullMcpToolSource } from "./mcp/source.js";
 import { buildConfirmationStore } from "./core/confirmations.js";
 import { createMcpConnectViewHandler, isConnectPath } from "./channels/mcpConnectView.js";
-import { createViewAsHandler, viewAsFromCookie } from "./channels/viewAs.js";
+import { createViewAsHandler, peopleSource, viewAsFromCookie } from "./channels/viewAs.js";
+import { RUN_LIST_MAX_LIMIT } from "./core/runRecord.js";
 import { resolvePersonByEmail, resolveUserEmail, resolveUserName } from "./channels/slack/lookups.js";
 import { slackNames } from "./channels/slackNames.js";
 import { NO_NAMES, type NameDirectory } from "./core/names.js";
@@ -884,10 +885,22 @@ export async function runBot(): Promise<void> {
     // /docs* sends every caller to the project's published docs
     // (src/core/docsLink.ts): the site is the project's, not a feature an
     // installation deploys a copy of.
+    // The view-as picker's people (record 0053): everyone the grants table names and every
+    // requester in run history, named through the directory — computed off the request behind a
+    // cache the index reads, primed now so the first admin paint after startup already has them.
+    const viewAsPeople = peopleSource({
+      granted: () => config.grantedPeople(),
+      requesters: async () =>
+        (await runsService.listRuns({ status: "all", visibleTo: { kind: "all" }, limit: RUN_LIST_MAX_LIMIT })).runs,
+      name: personName,
+    });
+    void viewAsPeople.refresh();
     const liveView = createLiveViewHandler({
       shell,
       service: runsService,
       index: defaultRunRegistry,
+      // The view-as picker's people (record 0053): the cache `viewAsPeople` keeps.
+      people: () => viewAsPeople.current(),
       retention:
         capabilities.runHistory && runHistoryCfg
           ? { retentionDays: retentionPolicyOf(runHistoryCfg).retentionDays }
