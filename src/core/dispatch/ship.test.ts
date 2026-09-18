@@ -6,6 +6,7 @@ import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { parseDirectives } from "../../directives.js";
+import type { Verbosity } from "../verbosity.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import type { PullRequestFacts } from "../../execution/githubPulls.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
@@ -72,7 +73,14 @@ function configStore(extra = ""): ConfigStore {
  *  and the runner's seams — its records, its shim — as doubles. */
 function setup(
   userId: string,
-  over: { text?: string; repoCtx?: Record<string, unknown>; configExtra?: string; minutes?: number } = {},
+  over: {
+    text?: string;
+    repoCtx?: Record<string, unknown>;
+    configExtra?: string;
+    minutes?: number;
+    /** The request's verbosity (item 28); the ack is verbose material, so most tests ask for `verbose`. */
+    verbosity?: Verbosity;
+  } = {},
 ) {
   const config = configStore(over.configExtra ?? "");
   const store = new InMemoryRunStore();
@@ -119,6 +127,7 @@ function setup(
     modelRef: "anthropic/general-model",
     agentSource: "directive" as const,
     label: "*ship* · acme/api",
+    verbosity: over.verbosity ?? ("verbose" as const),
     startedAt: NOW,
     card: {
       handle: { channel: "CX", ts: "1.5" },
@@ -195,8 +204,10 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect("resume" in unit!).toBe(false);
     expect(s.replies).toHaveLength(1);
     expect(s.replies[0]).toMatch(
-      /^🧭 Handed to the plan runner `plan-fix-the-login-redirect-6435ec`: plan `fix-the-login-redirect-6435ec`, 1 unit in dependency order — U1\. the unit runs on `plan\//,
+      /^🧭 Handed to the plan runner\.\n• plan `fix-the-login-redirect-6435ec`\n• the unit runs on `plan\//,
     );
+    // The instance id is the operator's handle: debug material, absent at verbose.
+    expect(s.replies[0]).not.toContain("plan-fix-the-login-redirect-6435ec");
     expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed", agent: "ship" });
     expect(s.registry.snapshot("run-s", "tok")?.events.map((e) => e.type)).toContain("answer");
     expect(s.closes).toHaveLength(1);
@@ -346,6 +357,22 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     s.ending.drain(undefined);
     await s.writer.settled();
     expect((await s.store.get("run-s"))!.status).toBe("failed");
+  });
+
+  it("at quiet (the default) the hand-off posts no ack: the card closes, the run completes, the thread hears from the unit's own thread; at debug the ack ends with the runner instance's id (item 28)", async () => {
+    const quiet = setup("slack:UADMIN", { verbosity: "quiet" });
+    await runShipBranch(quiet.deps, quiet.msg, quiet.io, quiet.ctx);
+    expect(quiet.replies).toEqual([]);
+    expect(quiet.created).toEqual(["plan-fix-the-login-redirect-6435ec"]);
+    expect(quiet.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed", agent: "ship" });
+    expect(JSON.stringify(quiet.closes[0])).toContain("✅");
+    const debug = setup("slack:UADMIN", { verbosity: "debug" });
+    await runShipBranch(debug.deps, debug.msg, debug.io, debug.ctx);
+    expect(debug.replies).toHaveLength(1);
+    expect(debug.replies[0]!.endsWith("\n• runner instance `plan-fix-the-login-redirect-6435ec`")).toBe(true);
+    expect(
+      debug.replies[0]!.startsWith("🧭 Handed to the plan runner.\n• plan `fix-the-login-redirect-6435ec`\n"),
+    ).toBe(true);
   });
 
   it("a final reply that throws writes the run record `failed`, never `completed` — the thread never saw where the plan runs", async () => {

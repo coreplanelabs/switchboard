@@ -30,6 +30,34 @@ import {
 import { REFERENCE_REFUSAL } from "./references.js";
 import { FOLLOW_UP_DROPPED_BY_STOP } from "./settle.js";
 import type { ChannelIO } from "../types.js";
+import { replyAck } from "./reply.js";
+
+// Feature: docs/reference/specs/routing-and-config.md item 28 — an acknowledgement
+// is `verbose` material: the seam every ack goes through sends it at verbose
+// and debug and swallows it at quiet, so the person on the default hears the
+// result and nothing before it.
+describe("replyAck — acknowledgements speak at verbose and above", () => {
+  const capture = () => {
+    const replies: string[] = [];
+    const io: ChannelIO = {
+      ...nullChannelIO("slack:CX:1.0", () => {}),
+      reply: async (t: string) => void replies.push(t),
+    };
+    return { io, replies };
+  };
+
+  it("quiet: nothing is sent; verbose and debug: the ack goes out as given", async () => {
+    const quiet = capture();
+    await replyAck(quiet.io, "quiet", "↪ Folded into the run");
+    expect(quiet.replies).toEqual([]);
+    const verbose = capture();
+    await replyAck(verbose.io, "verbose", "↪ Folded into the run");
+    expect(verbose.replies).toEqual(["↪ Folded into the run"]);
+    const debug = capture();
+    await replyAck(debug.io, "debug", "🧭 Handed to the plan runner.");
+    expect(debug.replies).toEqual(["🧭 Handed to the plan runner."]);
+  });
+});
 import { nullChannelIO } from "../nullChannelIo.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -401,6 +429,8 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       "directive_budget",
       "directive_severity",
       "directive_renewals",
+      // directives.test.ts proves the verbosity directive's refusal (item 28).
+      "directive_verbosity",
       "provider_unknown",
       // resolve.test.ts proves the card's refusal sentence — the model, the
       // refused control and the card's why (record 0052).

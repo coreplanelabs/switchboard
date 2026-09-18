@@ -4,10 +4,11 @@ import { MIN_BOUNDARY_MINUTES } from "./config/validate.js";
 import { GRANT_RENEWALS_MAX } from "./core/budgets.js";
 import { EFFORT_LEVELS_HINT, isEffort, type Effort } from "./effort.js";
 import { ADDRESS_SEVERITIES, isAddressSeverity, type AddressSeverity } from "./core/shipPipeline.js";
+import { isVerbosity, VERBOSITY_LEVELS_HINT, type Verbosity } from "./core/verbosity.js";
 
 // Per-request directives are inline tokens at the start (or anywhere) in the
 // message:  "@switchboard agent:review model:openai/gpt-5 effort:low budget:30 look at the failing test"
-// Recognized keys: agent, model, effort, budget, severity, renewals. Unknown keys are left in the text untouched.
+// Recognized keys: agent, model, effort, budget, severity, renewals, verbosity. Unknown keys are left in the text untouched.
 
 export interface RequestDirectives {
   agent?: string;
@@ -28,13 +29,17 @@ export interface RequestDirectives {
    *  One request's, like `budget:`; it sets the grant's count and keeps the
    *  cost cap the scopes set. Never sticky. */
   renewals?: number;
+  /** `verbosity:<level>` — how much of itself the bot says in this thread
+   *  (docs/reference/specs/routing-and-config.md item 28): `quiet`, `verbose`
+   *  or `debug`. Sticky like the effort: a later turn without one keeps it. */
+  verbosity?: Verbosity;
   /** message text with directive tokens removed */
   text: string;
 }
 
 /** The directive values a thread carries forward (stickiness,
- *  docs/reference/specs/routing-and-config.md item 3): the model and the effort
- *  from the thread's user turns, and the agent from the thread's transcript —
+ *  docs/reference/specs/routing-and-config.md item 3): the model, the effort
+ *  and the verbosity from the thread's user turns, and the agent from the thread's transcript —
  *  the agent of its newest finished run with a session log, read by the
  *  dispatcher (`stickyAgentOf`), never from an `agent:` token in the history.
  *  A budget is a property of one request and is never carried. */
@@ -42,9 +47,10 @@ export interface ThreadDirectives {
   agent?: string;
   model?: string;
   effort?: Effort;
+  verbosity?: Verbosity;
 }
 
-const DIRECTIVE_RE = /(?:^|\s)(agent|model|effort|budget|severity|renewals)[:=](\S+)/g;
+const DIRECTIVE_RE = /(?:^|\s)(agent|model|effort|budget|severity|renewals|verbosity)[:=](\S+)/g;
 
 /** `budget:<minutes>` takes a whole number of minutes, at least the boundary
  *  minimum (the bash tool keeps a 60-second reserve, so a shorter run could
@@ -56,7 +62,7 @@ function parseBudgetMinutes(value: string): number | undefined {
 }
 
 /**
- * The last model and effort directives mentioned in earlier thread messages
+ * The last model, effort and verbosity directives mentioned in earlier thread messages
  * (user turns only, last one wins) — used to keep follow-ups on the model and
  * effort a thread already established instead of falling back to the global
  * default. The agent is not read here: a thread's agent is the one whose
@@ -74,6 +80,7 @@ export function lastThreadDirectives(history: Array<{ role: string; text: string
     for (const m of h.text.matchAll(DIRECTIVE_RE)) {
       if (m[1] === "model") out.model = m[2];
       else if (m[1] === "effort" && isEffort(m[2])) out.effort = m[2];
+      else if (m[1] === "verbosity" && isVerbosity(m[2])) out.verbosity = m[2];
     }
   }
   return out;
@@ -148,6 +155,16 @@ export function parseDirectives(input: string): RequestDirectives {
         );
       }
       out.renewals = count;
+    } else if (f.key === "verbosity") {
+      if (!isVerbosity(f.value)) {
+        throw new RefusalError(
+          refusalOf(
+            "directive_verbosity",
+            `Unknown verbosity "${f.value}". verbosity:<level> takes one of ${VERBOSITY_LEVELS_HINT} — how much of itself the bot says in this thread.`,
+          ),
+        );
+      }
+      out.verbosity = f.value;
     }
     text = text.replace(f.match, " ");
   }

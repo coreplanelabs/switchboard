@@ -6,10 +6,10 @@ description: Drives development with tests using the red-green-refactor loop.
   you're about to modify existing functionality.
 agents:
   - coding
-source: https://github.com/addyosmani/agent-skills/blob/6ca0cd7db39b41b1c37e26d335c507ee92382c6d/skills/test-driven-development/SKILL.md
+source: https://github.com/addyosmani/agent-skills/blob/c004a74784a08295d52749b04cda634125b9a581/skills/test-driven-development/SKILL.md
 upstream:
   repo: https://github.com/addyosmani/agent-skills
-  commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
+  commit: c004a74784a08295d52749b04cda634125b9a581
   path: skills/test-driven-development/SKILL.md
   bodySha256: f2d1d98b7cbbc08775e0acae1779e1122bc24e2458542396133f026b803dc69f
 ---

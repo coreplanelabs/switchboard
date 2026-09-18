@@ -49,6 +49,7 @@ import type { RunEnding } from "../runEnding.js";
 import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, type StatusHandle } from "../types.js";
 import { refusalOf, type Refusal } from "../refusal.js";
 import { renderRefusal, replyAck } from "./reply.js";
+import { shows, type Verbosity } from "../verbosity.js";
 import { REFUSAL_SENTENCES } from "./reply.js";
 
 /** What the ship branch reads: the run slice (the config, the registry and
@@ -109,6 +110,9 @@ export interface ShipContext {
    *  called; the runner's children resolve their own per-agent models. */
   modelRef: string;
   label: string;
+  /** The request's level (routing-and-config item 28): the hand-off's ack is
+   *  `verbose` material, the runner instance's id `debug`. */
+  verbosity: Verbosity;
   startedAt: number;
   /** The coalesced ack card; the ship branch owns its close from here, and the
    *  runner's `round` route redraws it from the boundaries the machine reports. */
@@ -541,7 +545,18 @@ export async function runShipBranch(
       root.span("post.card_close", () => card.done(shell.close({ kind: "done", icon, ...doneLines(shipDiagnosis) }))),
     () =>
       root.span("post.reply", () =>
-        outcome.refusal ? renderRefusal(outcome.refusal, io) : replyAck(io, outcome.reply),
+        outcome.refusal
+          ? renderRefusal(outcome.refusal, io)
+          : replyAck(io, ctx.verbosity, handOffAck(outcome, ctx.verbosity)),
       ),
   );
+}
+
+/** The accepted hand-off's ack: its reply, and at `debug` the runner
+ *  instance's id under it — the handle an operator re-issues or reads the
+ *  Workflow by, and noise for anyone else. */
+export function handOffAck(outcome: HandOffOutcome, verbosity: Verbosity): string {
+  return outcome.instanceId !== undefined && shows(verbosity, "debug")
+    ? `${outcome.reply}\n• runner instance \`${outcome.instanceId}\``
+    : outcome.reply;
 }

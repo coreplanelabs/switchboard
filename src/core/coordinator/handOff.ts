@@ -287,17 +287,29 @@ function rowsFor(
     }));
 }
 
-/** The reply's account of where a plan runs: the plan id, the units, and where
- *  each runs — this thread for a generated plan, a thread of its own for a
- *  seeded one. */
-function planWhere(p: Planned, units: readonly CoordinatorUnit[], mergedBefore: readonly string[]): string {
+/** The reply's account of where a plan runs, one bullet per fact: the plan,
+ *  the units, and where each runs — this thread for a generated plan, a
+ *  thread of its own for a seeded one. Short lines a person reads at a
+ *  glance, never one sentence carrying every id. */
+function planWhere(
+  p: Planned,
+  units: readonly CoordinatorUnit[],
+  mergedBefore: readonly string[],
+  /** A later attempt of the same plan: named on the first line (`attempt 2 of plan …`). */
+  attempt?: number,
+): string[] {
   const at = p.path !== undefined ? ` (\`${p.path}\` at \`${p.base}\`)` : "";
   const count = `${units.length} unit${units.length === 1 ? "" : "s"}`;
   const left = mergedBefore.length > 0 ? ` left` : "";
-  const merged = mergedBefore.length > 0 ? `; merged before: ${mergedBefore.join(", ")}` : "";
-  const head = `plan \`${p.planId}\`${at}, ${count}${left} in dependency order — ${units.map((u) => u.unit).join(", ")}${merged}.`;
-  if (p.path !== undefined)
-    return `${head} Each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread.`;
+  const lines = [`${attempt !== undefined ? `attempt ${attempt} of ` : ""}plan \`${p.planId}\`${at}`];
+  if (p.path !== undefined) {
+    lines.push(`${count}${left} in dependency order: ${units.map((u) => u.unit).join(", ")}`);
+    if (mergedBefore.length > 0) lines.push(`merged before: ${mergedBefore.join(", ")}`);
+    lines.push(
+      "each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread",
+    );
+    return lines;
+  }
   const branch = units[0]?.branch ?? "";
   const url = (of: { pr: number; url?: string } | undefined) =>
     of?.url ?? (of !== undefined ? `https://github.com/${p.identity.repo}/pull/${of.pr}` : undefined);
@@ -307,11 +319,10 @@ function planWhere(p: Planned, units: readonly CoordinatorUnit[], mergedBefore: 
       : p.adopt !== undefined
         ? `the unit adopts ${url(p.adopt)}: it runs on \`${branch}\` — the pull request's own head — in this thread under your grants, no new branch`
         : `the unit runs on \`${branch}\` in this thread under your grants`;
+  lines.push(`${runs}; this card follows it and the report lands here`);
   // The pull request's own auto-merge fact, named at entry (agent-ship item 9).
-  const autoMerge = p.autoMergeEnabled
-    ? " Auto-merge is on for this pull request: the approval merges it once checks pass."
-    : "";
-  return `${head} ${runs}; this card follows it and the report lands here.${autoMerge}`;
+  if (p.autoMergeEnabled) lines.push("auto-merge is on for this pull request: the approval merges it once checks pass");
+  return lines;
 }
 
 /**
@@ -410,8 +421,14 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
       ...(attempt > 1 ? { attempt } : {}),
     };
     log(`[ship] ${input.msg.threadKey}: ${latest.id} has records but no instance — replacing the earlier attempt's`);
-    const prefix = attempt > 1 ? `attempt ${attempt} of ` : "";
-    return start(deps, input, instance, units, `${prefix}${planWhere(p, units, mergedBefore)}`, "replace");
+    return start(
+      deps,
+      input,
+      instance,
+      units,
+      planWhere(p, units, mergedBefore, attempt > 1 ? attempt : undefined),
+      "replace",
+    );
   }
   // Ended: the next attempt reruns what the earlier attempts did not merge.
   const nextId = planInstanceId(p.planId, attempt + 1);
@@ -424,7 +441,7 @@ export async function handOffToCoordinator(deps: HandOffDeps, input: HandOffInpu
     merge: p.merge,
     attempt: attempt + 1,
   };
-  return start(deps, input, instance, units, `attempt ${attempt + 1} of ${planWhere(p, units, mergedBefore)}`, "put");
+  return start(deps, input, instance, units, planWhere(p, units, mergedBefore, attempt + 1), "put");
 }
 
 /** The records, then the instance, then the reply. */
@@ -433,7 +450,7 @@ async function start(
   input: HandOffInput,
   instance: CoordinatorInstance,
   units: CoordinatorUnit[],
-  where: string,
+  where: readonly string[],
   write: "put" | "replace",
 ): Promise<HandOffOutcome> {
   const log = deps.log ?? console.log;
@@ -467,10 +484,10 @@ async function start(
     case "created": {
       log(`[ship] ${input.msg.threadKey}: handed to the plan runner ${instance.id} (${units.length} unit(s))`);
       const replaced =
-        write === "replace" ? " The records of an earlier attempt that never started were replaced." : "";
+        write === "replace" ? ["the records of an earlier attempt that never started were replaced"] : [];
       return {
         status: "completed",
-        reply: `🧭 Handed to the plan runner \`${instance.id}\`: ${where}${replaced}`,
+        reply: handedOff([...where, ...replaced]),
         instanceId: instance.id,
       };
     }
@@ -491,4 +508,10 @@ async function start(
         `⚠️ The plan runner could not be started: ${answer.reason}. Nothing ran; re-issue the request to try again.`,
       );
   }
+}
+
+/** The accepted hand-off's reply (routing-and-config item 28, `verbose`
+ *  material): the headline, then one bullet per fact of `planWhere`. */
+export function handedOff(facts: readonly string[]): string {
+  return ["🧭 Handed to the plan runner.", ...facts.map((f) => `• ${f}`)].join("\n");
 }

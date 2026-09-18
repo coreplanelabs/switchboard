@@ -9,10 +9,10 @@ description: Subjects every non-trivial decision to a fresh-context adversarial
   cheaper to verify now than to debug later.
 agents:
   - coding
-source: https://github.com/addyosmani/agent-skills/blob/6ca0cd7db39b41b1c37e26d335c507ee92382c6d/skills/doubt-driven-development/SKILL.md
+source: https://github.com/addyosmani/agent-skills/blob/c004a74784a08295d52749b04cda634125b9a581/skills/doubt-driven-development/SKILL.md
 upstream:
   repo: https://github.com/addyosmani/agent-skills
-  commit: 6ca0cd7db39b41b1c37e26d335c507ee92382c6d
+  commit: c004a74784a08295d52749b04cda634125b9a581
   path: skills/doubt-driven-development/SKILL.md
   bodySha256: 938cf9d31522ad5650bdf0959d2d09251a1071fbcc52bd9da8883c37948793cd
 ---

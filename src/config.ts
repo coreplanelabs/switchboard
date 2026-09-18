@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { TracingLogLevel } from "./core/trace/sinks.js";
 import { dirname, resolve } from "node:path";
 import type { Effort } from "./effort.js";
+import { resolveVerbosity, type Verbosity } from "./core/verbosity.js";
 import YAML from "yaml";
 import type { ProviderConfig } from "./core/provider.js";
 import type { MemoryConfig } from "./core/memory/types.js";
@@ -42,6 +43,7 @@ import {
   validateMcpServers,
   validateRestrict,
   validateScopeEfforts,
+  validateScopeVerbosity,
   type IntakeMode,
   type RouteAnswerMode,
 } from "./config/validate.js";
@@ -77,6 +79,16 @@ export interface Scope {
   effort?: Effort;
   /** Per-agent effort overrides for this scope (same shape as `models`). */
   efforts?: Record<string, Effort>;
+  /**
+   * How much of itself the bot says in this scope (docs/reference/specs/
+   * routing-and-config.md item 28): `quiet` (only what needs the person),
+   * `verbose` (plus every acknowledgement of what it is doing) or `debug`
+   * (plus the router's reason and the ledger's word). The same ladder as
+   * `effort`: a `verbosity:<level>` directive > user > channel >
+   * `defaults.verbosity` > `quiet`. Set with `config set me|channel
+   * --verbosity <level>`. Validated at load and on write.
+   */
+  verbosity?: Verbosity;
   /**
    * Which harness drives each preset's fresh runs requested in this scope, by
    * the roster's word — `pi` or `opencode` (docs/reference/specs/harness.md
@@ -253,6 +265,9 @@ export interface AppConfig {
     /** default effort per agent, e.g. { coding: "medium" }; unset → the agent
      *  definition's effort, else the provider's default */
     efforts?: Record<string, Effort>;
+    /** The installation's verbosity (docs/reference/specs/routing-and-config.md
+     *  item 28); unset → `quiet`. A channel's, a user's or a request's word wins. */
+    verbosity?: Verbosity;
     maxTokens?: number;
     /** Org-wide MCP servers pinned by the operator (docs/reference/specs/mcp-tools.md item 11). */
     mcpServers?: Record<string, McpServerEntry>;
@@ -682,6 +697,10 @@ export interface ResolvedRequest {
   /** Resolved through the config layers only; undefined = no layer set it (the
    *  agent definition, then the provider default, decide downstream). */
   effort?: Effort;
+  /** How much of itself the bot says for this request (item 28): the request's
+   *  word, else user > channel > `defaults.verbosity`, else `quiet` — always
+   *  set, since every message site reads it. */
+  verbosity: Verbosity;
   /** The boundaries on the request's path, intersected (`defaults`, then the
    *  channel, then the user — each axis naming the scope whose cap won).
    *  Absent when no layer sets one: the request then resolves exactly as it
@@ -845,6 +864,7 @@ export class ConfigStore {
     doc.users ??= {};
     validateInstructions(doc, `overrides (${this.backing.describe()})`);
     validateScopeEfforts(doc, `overrides (${this.backing.describe()})`);
+    validateScopeVerbosity(doc, `overrides (${this.backing.describe()})`);
     validateBoundaries(doc, `overrides (${this.backing.describe()})`);
     // A stored grant is held to the same rule as a static one (decision 0046).
     validateScopeBlocks(doc, `overrides (${this.backing.describe()})`);
@@ -1019,6 +1039,9 @@ export class ConfigStore {
    * Model:    request directive > (user > channel) forced model
    *           > (user > channel > defaults) per-agent model.
    * Effort:   the same ladder as model; unset at every layer → undefined.
+   * Verbosity: request directive > user > channel > defaults; unset at every
+   *           layer → `quiet` (`verbosityFor`, which the stages that speak
+   *           before resolution — admission, a unit-owned thread — read too).
    * Harness:  the per-agent ladder without the request layer — user > channel
    *           > the deployment's top-level `harness` block — each naming the
    *           scope whose word won; no directive, no thread stickiness; unset
@@ -1032,7 +1055,7 @@ export class ConfigStore {
   resolve(opts: {
     channelId: string;
     userId: string;
-    request: { agent?: string; model?: string; effort?: Effort };
+    request: { agent?: string; model?: string; effort?: Effort; verbosity?: Verbosity };
   }): ResolvedRequest {
     const ch = this.channelScope(opts.channelId);
     const us = this.userScope(opts.userId);
@@ -1075,9 +1098,25 @@ export class ConfigStore {
       agentLayer,
       modelRef,
       ...(effort !== undefined ? { effort } : {}),
+      verbosity: this.verbosityFor(opts.channelId, opts.userId, opts.request.verbosity),
       ...(boundary !== undefined ? { boundary } : {}),
       ...(harness !== undefined ? { harness } : {}),
     };
+  }
+
+  /** The verbosity for a request through the layers (docs/reference/specs/
+   *  routing-and-config.md item 28): the request's own word, else the user's
+   *  scope, the channel's, `defaults.verbosity`, else `quiet`. `resolve()`
+   *  reads it; so do the stages that reply before a request resolves — the
+   *  admission steer and a unit-owned thread's ack — with the message's own
+   *  directive as the request word. */
+  verbosityFor(channelId: string, userId: string, request?: Verbosity): Verbosity {
+    return resolveVerbosity({
+      request,
+      user: this.userScope(userId).verbosity,
+      channel: this.channelScope(channelId).verbosity,
+      defaults: this.config.defaults.verbosity,
+    });
   }
 
   /** The harness word for a preset through the scopes (docs/reference/specs/harness.md
@@ -1305,6 +1344,7 @@ export class ConfigStore {
         agent: resolved.agentName,
         model: resolved.modelRef,
         ...(resolved.effort ? { effort: resolved.effort } : {}),
+        verbosity: resolved.verbosity,
         ...(resolved.boundary ? { boundary: resolved.boundary } : {}),
         ...(confirm.scope !== "built-in" ? { confirm } : {}),
         ...(Object.keys(harness).length > 0 ? { harness } : {}),
@@ -1313,6 +1353,7 @@ export class ConfigStore {
         agent: this.config.defaults.agent,
         models: this.config.defaults.models,
         ...(this.config.defaults.efforts ? { efforts: this.config.defaults.efforts } : {}),
+        ...(this.config.defaults.verbosity ? { verbosity: this.config.defaults.verbosity } : {}),
         ...(this.config.harness ? { harness: this.config.harness } : {}),
       },
       channel,
@@ -1373,6 +1414,8 @@ export interface ConfigDescription {
     agent: string;
     model: string;
     effort?: Effort;
+    /** Item 28: the level the caller's plain messages here run at — always set. */
+    verbosity: Verbosity;
     boundary?: EffectiveBoundary;
     confirm?: EffectiveConfirm;
     harness?: Record<string, ResolvedHarness>;
@@ -1382,6 +1425,7 @@ export interface ConfigDescription {
     agent: string;
     models: Record<string, string>;
     efforts?: Record<string, Effort>;
+    verbosity?: Verbosity;
     harness?: Record<string, HarnessName>;
   };
   channel: Scope;
@@ -1396,12 +1440,13 @@ export interface ConfigDescription {
 
 /** The `config show` text (chat + CLI) for a `ConfigDescription`. */
 export function formatConfigDescription(d: ConfigDescription): string {
-  const effective = `agent \`${d.effective.agent}\`, model \`${d.effective.model}\`${d.effective.effort ? `, effort \`${d.effective.effort}\`` : ""}`;
+  const effective = `agent \`${d.effective.agent}\`, model \`${d.effective.model}\`${d.effective.effort ? `, effort \`${d.effective.effort}\`` : ""}, verbosity \`${d.effective.verbosity}\``;
   const defaults =
     `agent \`${d.defaults.agent}\`, models ${fmtModels(d.defaults.models)}` +
     (d.defaults.efforts && Object.keys(d.defaults.efforts).length > 0
       ? `, efforts ${fmtModels(d.defaults.efforts)}`
       : "") +
+    (d.defaults.verbosity ? `, verbosity \`${d.defaults.verbosity}\`` : "") +
     (d.defaults.harness && Object.keys(d.defaults.harness).length > 0
       ? `, harness ${fmtModels(d.defaults.harness)}`
       : "");
@@ -1437,6 +1482,7 @@ function fmtScope(s: Scope): string {
   if (s.models && Object.keys(s.models).length > 0) parts.push(`models ${fmtModels(s.models)}`);
   if (s.effort) parts.push(`effort \`${s.effort}\``);
   if (s.efforts && Object.keys(s.efforts).length > 0) parts.push(`efforts ${fmtModels(s.efforts)}`);
+  if (s.verbosity) parts.push(`verbosity \`${s.verbosity}\``);
   if (s.harness && Object.keys(s.harness).length > 0) parts.push(`harness ${fmtModels(s.harness)}`);
   if (s.mcpServers && Object.keys(s.mcpServers).length > 0)
     parts.push(

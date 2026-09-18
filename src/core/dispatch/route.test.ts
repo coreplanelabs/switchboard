@@ -27,8 +27,7 @@ import {
   route,
   ROUTE_PART_LINE_CAP,
   ROUTE_PART_TEXT_CAP,
-  ROUTED_CARD_FOOTER,
-  routedLabel,
+  routeReasonLabel,
   routedPartLines,
   routeRequest,
   ROUTE_MIN_OUTPUT_TOKENS,
@@ -676,19 +675,14 @@ describe("providerRouteModel — the live seam over a provider", () => {
 });
 
 describe("the card's words", () => {
-  it("the label reads as specified", () => {
-    expect(routedLabel("a PR URL")).toBe("routed: a PR URL");
+  it("the route note reads `route reason: <reason>` — the words of an explanation, never a repeat of the request", () => {
+    expect(routeReasonLabel("a PR URL")).toBe("route reason: a PR URL");
   });
 
-  it("a collapsed compound's line names the collapse after the reason, the part presets joined by +", () => {
-    expect(routedLabel("a review and a fix", { presets: ["review", "ship"] })).toBe(
-      "routed: a review and a fix (compound collapsed: review+ship)",
+  it("a collapsed compound's note names the collapse after the reason, the part presets joined by +", () => {
+    expect(routeReasonLabel("a review and a fix", { presets: ["review", "ship"] })).toBe(
+      "route reason: a review and a fix (compound collapsed: review+ship)",
     );
-  });
-
-  it("the routed card's closing line says how to run the request another way — plain text, no backticks (the Slack card body is literal)", () => {
-    expect(ROUTED_CARD_FOOTER).toBe("wrong preset? reply agent:<preset> to run it another way");
-    expect(ROUTED_CARD_FOOTER).not.toContain("`");
   });
 });
 

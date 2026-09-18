@@ -11,7 +11,8 @@ import { redactSecrets, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import type { LiveThread } from "./threadAdmission.js";
 import type { RecordDeps } from "./dispatch/record.js";
-import { cardLines, errorReply, renderRefusal } from "./dispatch/reply.js";
+import { cardLines, errorReply, renderRefusal, replyAck } from "./dispatch/reply.js";
+import type { Verbosity } from "./verbosity.js";
 import { causeOf, refusalOf, RefusalError, type Refusal, type RefusalCause, type RefusalCode } from "./refusal.js";
 import {
   admit,
@@ -170,6 +171,8 @@ async function answerUnitOwnedThread(
     text: string;
     owner: { instanceId: string; unit: CoordinatorUnit };
     clock: () => number;
+    /** The request's level (routing-and-config item 28): the ack is `verbose` material. */
+    verbosity: Verbosity;
   },
 ): Promise<"acked" | "route-fresh"> {
   const { msg, io, owner } = ctx;
@@ -250,13 +253,19 @@ async function answerUnitOwnedThread(
     console.warn(
       `[dispatch] ${msg.threadKey}: unit ${unitKey} nudge failed (${reason}) — event ${appended.seq} stays queued`,
     );
-    await io.reply(
+    await replyAck(
+      io,
+      ctx.verbosity,
       `📌 Noted for unit ${owner.unit.unit} (\`${unitKey}\`): the pipeline could not be nudged — your message is queued for its next step.`,
     );
     return "acked";
   }
   console.log(`[dispatch] ${msg.threadKey}: event ${appended.seq} appended to unit ${unitKey}, instance nudged`);
-  await io.reply(`📌 Noted for unit ${owner.unit.unit} (\`${unitKey}\`) — the pipeline folds it into its next step.`);
+  await replyAck(
+    io,
+    ctx.verbosity,
+    `📌 Noted for unit ${owner.unit.unit} (\`${unitKey}\`) — the pipeline folds it into its next step.`,
+  );
   return "acked";
 }
 
@@ -619,7 +628,14 @@ export async function dispatch(
         // named way, before anything is appended. "Run" includes "is heard by".
         if ((await authorizeAgent(deps, { msg, io, refuse, agentName: "coding" })).kind === "refused") return ended;
         const answer = await root.span("dispatch.unit_owned_thread", () =>
-          answerUnitOwnedThread(deps, { msg, io, text: directives.text, owner, clock }),
+          answerUnitOwnedThread(deps, {
+            msg,
+            io,
+            text: directives.text,
+            owner,
+            clock,
+            verbosity: deps.config.verbosityFor(msg.channelId, msg.userId, directives.verbosity),
+          }),
         );
         if (answer === "acked") return ended;
         // `route-fresh`: the instance is gone — the row was ended `terminated`
@@ -656,7 +672,7 @@ export async function dispatch(
     // A sticky-by-transcript follow-up in a routed thread carries the thread's
     // decision (routing-and-config item 21): the router was rightly not asked
     // — the preset is the transcript's — but the card still says why the
-    // preset was chosen (` · routed: <reason>` and the override footer), the
+    // preset was chosen (the `route reason:` note at debug, item 28), the
     // row's `meta.route` repaints it on a resume or reclaim, and the record's
     // `route` field hands it to the next follow-up. No `route` event and
     // `agentSource` stays `sticky`: the router made no new decision here.
@@ -851,7 +867,7 @@ export async function dispatch(
     // (dispatch/provision.ts). Before the ship fork: a ship pipeline's wall
     // clock is its clipped budget too, and its card says so.
     const clip = budgetClipLabel(agent, profile, directives.budget, { coordinator: opts.coordinator !== undefined });
-    if (clip) shell.setLabel(`${shell.label} · ${clip}`);
+    if (clip) shell.note("verbose", clip);
 
     // agent:ship fork (docs/reference/specs/agent-ship.md): after agent resolution and the
     // repo gates above, BEFORE the top-level attach — ship attaches nothing
@@ -868,6 +884,7 @@ export async function dispatch(
         profile,
         modelRef: resolved.modelRef,
         label: shell.label,
+        verbosity: resolved.verbosity,
         startedAt,
         card,
         directives,
@@ -1127,7 +1144,7 @@ export async function dispatch(
           ),
           at: clock(),
         });
-        shell.setLabel(`${shell.label} · untracked by the ledger`);
+        shell.note("debug", "untracked by the ledger");
       }
     }
 
@@ -1359,7 +1376,8 @@ export async function dispatch(
     // attach; the head settle (item 12) advances it after the model turn.
     const reviewHead = prompt.reviewHead;
 
-    if (note) shell.setLabel(`${shell.label} · ${oneLine(note)}`);
+    // The workspace the run is on — `verbose` material (routing-and-config item 28).
+    if (note) shell.note("verbose", oneLine(note));
     // A run that went to a cold sandbox says why on its stream too (resident-
     // repos item 24): the card is not the only witness — the run page would
     // otherwise show resident steps grafted under an attach that ended on the
@@ -1442,7 +1460,7 @@ export async function dispatch(
       ...(session ? { seedLog: session.log } : {}),
       // A promotion gone untracked marks the card as the reserve-time path
       // above does — the label, not the bot log alone, says the run's row is gone.
-      markUntracked: () => shell.setLabel(`${shell.label} · untracked by the ledger`),
+      markUntracked: () => shell.note("debug", "untracked by the ledger"),
       ...(seedActors !== undefined ? { seedActors } : {}),
     });
     // The run's reach into its own session log (session-log item 10): the

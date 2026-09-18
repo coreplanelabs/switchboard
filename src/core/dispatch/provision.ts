@@ -66,7 +66,7 @@ import {
 } from "./reply.js";
 import { refusalOf } from "../refusal.js";
 import { contextMessageTexts, type TextTurn } from "./messages.js";
-import { ROUTED_CARD_FOOTER, routedLabel, routedPartLines, type RouteDecided } from "./route.js";
+import { routeReasonLabel, routedPartLines, type RouteDecided } from "./route.js";
 import type { HarnessProcessDeps } from "./run.js";
 import { harnessNamed } from "../harness/roster.js";
 import type { ReferencedConversation } from "../references/types.js";
@@ -199,9 +199,8 @@ export interface AckCardContext {
   root: Span;
   trace: RequestTrace;
   /** The router's decision when it chose the preset (routing-and-config item
-   *  21): the card's label gains ` · routed: <reason>`, a compound's parts
-   *  lead its detail, one line each, and every close ends with how to run the
-   *  request another way. */
+   *  21): the card's label gains a `debug` note ` · route reason: <reason>`
+   *  and a compound's parts lead its detail, one line each. */
   route?: RouteDecided;
 }
 
@@ -214,20 +213,20 @@ export interface AckCardContext {
 export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Promise<AckCard> {
   const { io, agent, resolved, startedAt, clock, root, trace, route } = ctx;
   // One builder for every paint of this card (statusCardFrame.ts): the ack,
-  // the spinner frames, the closes before the run starts, the done frame. A
-  // routed run says so from its first paint: `*review* on `m` · routed: <reason>`;
-  // a routed compound lists its parts under the label, `<preset>: <text>`; a
-  // compound answer the parse collapsed onto a write preset names the collapse
-  // on the label; and a routed card's every close ends with the override — the
-  // one place the hint is actionable, since a reply into the live thread is a
-  // follow-up.
+  // the spinner frames, the closes before the run starts, the done frame. The
+  // card speaks at the request's verbosity (routing-and-config item 28): the
+  // label is `*review* on `m`` for everyone; a routed run's reason is a `debug`
+  // note on it (`· route reason: <reason>`, the collapse of a compound answer
+  // named after it), and a routed compound lists its parts under the label,
+  // `<preset>: <text>`, at every level — they say what was asked.
   const shell = createCardShell({
-    label: `*${agent.name}* on \`${resolved.modelRef}\`${route ? ` · ${routedLabel(route.reason, route.collapsed)}` : ""}`,
+    label: `*${agent.name}* on \`${resolved.modelRef}\``,
     startedAt,
     now: clock,
+    verbosity: resolved.verbosity,
     ...(route?.parts ? { lead: routedPartLines(route.parts) } : {}),
-    ...(route ? { footer: ROUTED_CARD_FOOTER } : {}),
   });
+  if (route) shell.note("debug", routeReasonLabel(route.reason, route.collapsed));
   // Coalesced: the run below refreshes it on every event, the channel sees at
   // most one edit per STATUS_UPDATE_MIN_MS, always the newest frame.
   const card = coalesceStatus(

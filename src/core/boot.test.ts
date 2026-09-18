@@ -148,42 +148,6 @@ describe("reclaimRuns", () => {
     expect(ledger.live.has("r-ship")).toBe(false);
   });
 
-  it("a closed run whose run_meta says the router chose its preset is marked routed, so its card close can carry the override footer (routing-and-config item 21); a run a person or the default chose is not", async () => {
-    const { ledger, run } = harness();
-    for (const [id, agentSource] of [
-      ["routed", "route"],
-      ["typed", "directive"],
-    ] as const) {
-      await ledger.claim(claim(id, `slack:C1:${id}`));
-      await ledger.seed(id, "g1", [{ idx: 0, message: user("go") }]);
-      await ledger.step(id, "g1", seedRecord(1), []);
-      await ledger.seed(id, "g1", [{ idx: 1, message: assistant("half") }]);
-      await ledger.append(id, "g1", [
-        { type: "input", messageId: "m1", text: "go", at: 1_000, seq: 1 },
-        { type: "run_meta", agent: "coding", model: "p/m", agentSource, at: 1_001, seq: 2 },
-      ]);
-    }
-    const outcome = await run();
-    const byId = Object.fromEntries(outcome.closed.map((c) => [c.runId, c]));
-    expect(byId.routed).toMatchObject({ status: "interrupted", routed: true });
-    expect(byId.typed.status).toBe("interrupted");
-    expect(byId.typed).not.toHaveProperty("routed");
-  });
-
-  it("a row whose meta carries the router's decision (item 35) is marked routed off the row, with no run_meta event to read", async () => {
-    const { ledger, run } = harness();
-    const c = claim("byrow", "slack:C1:byrow");
-    await ledger.claim({
-      ...c,
-      meta: { ...c.meta, route: { preset: "coding", reason: "terse order", model: "p/fast" } },
-    });
-    await ledger.seed("byrow", "g1", [{ idx: 0, message: user("go") }]);
-    await ledger.step("byrow", "g1", seedRecord(1), []);
-    await ledger.seed("byrow", "g1", [{ idx: 1, message: assistant("half") }]);
-    const outcome = await run();
-    expect(outcome.closed.find((x) => x.runId === "byrow")).toMatchObject({ status: "interrupted", routed: true });
-  });
-
   it("closes a run the rule refuses (a partial step write) `interrupted` with a record built from the ledger's events, meta and identity; the row, steps and transcript go; the reason is the verdict", async () => {
     const { ledger, run, logs } = harness();
     await ledger.claim(claim("r1", "slack:C1:1.0"));

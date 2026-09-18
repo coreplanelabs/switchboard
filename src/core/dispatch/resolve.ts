@@ -124,6 +124,7 @@ export function resolveRun(
       agent: directives.agent ?? sticky.agent,
       model: directives.model ?? sticky.model,
       effort: directives.effort ?? sticky.effort,
+      verbosity: directives.verbosity ?? sticky.verbosity,
     },
   });
   // The layer that set the agent, told apart at the request layer: the

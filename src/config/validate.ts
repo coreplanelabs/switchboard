@@ -4,6 +4,7 @@
 
 import { TRACING_LOG_LEVELS } from "../core/trace/sinks.js";
 import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
+import { isVerbosity, VERBOSITY_LEVELS_HINT } from "../core/verbosity.js";
 import { WIRES, WIRE_ALIASES, parseModelRef, type ProviderConfig } from "../core/provider.js";
 import { catalogExists } from "../core/installedModelRegistry.js";
 import type { SelfImprovementConfig } from "../core/selfImprovement.js";
@@ -309,6 +310,7 @@ export function validateConfig(cfg: AppConfig): void {
   // exists; either way it must not read as a working setting.
   for (const key of unknownKeys(cfg, CONFIG_KEYS)) throw new Error(`config.yaml: unknown key \`${key}\``);
   validateScopeEfforts(cfg, "config.yaml");
+  validateScopeVerbosity(cfg, "config.yaml");
   validateBoundaries(cfg, "config.yaml");
   validateScopeBlocks(cfg, "config.yaml");
   validateHarnessWords(cfg, "config.yaml");
@@ -853,6 +855,32 @@ export function validateScopeBlocks(
       const problem = grantProblem(`${kind}.${id}.ship.grant`, grant);
       if (problem) throw new Error(`${source}: ${problem}`);
     }
+  }
+}
+
+/** Reject a verbosity outside VERBOSITY_LEVELS wherever config can carry one
+ *  (docs/reference/specs/routing-and-config.md item 28: `defaults.verbosity`,
+ *  a static scope, a hand-edited overrides document). The chat command
+ *  validates on write; this holds the files to the same rule at load, so a
+ *  typo never reads as "the default". */
+export function validateScopeVerbosity(
+  layer: {
+    channels?: Record<string, Scope>;
+    users?: Record<string, Scope>;
+    defaults?: { verbosity?: unknown };
+  },
+  source: string,
+): void {
+  const check = (path: string, value: unknown) => {
+    if (value !== undefined && !isVerbosity(value))
+      throw new Error(`${source}: ${path} is "${String(value)}" — valid verbosity levels: ${VERBOSITY_LEVELS_HINT}`);
+  };
+  check("defaults.verbosity", layer.defaults?.verbosity);
+  for (const [kind, scopes] of [
+    ["channels", layer.channels],
+    ["users", layer.users],
+  ] as const) {
+    for (const [id, scope] of Object.entries(scopes ?? {})) check(`${kind}.${id}.verbosity`, scope.verbosity);
   }
 }
 
