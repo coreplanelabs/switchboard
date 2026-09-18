@@ -75,7 +75,7 @@ The state is the rollout's last step, the confirm default at destructive; until 
 4. Authorization checks `config.set` for this person in this channel; the class is evaluated over the bound input, `scope: me` is write, below destructive, so it runs at once and the receipt names the line. The same command bound with `scope: channel` would be destructive and show the button.
 5. The plan goes to the runner with `repo` on each unit. The runner cuts `plan/<id>/u1` in `acme/console` and `plan/<id>/u2` in `acme/cli`, each at its own default branch, and its receipt in the thread names both repositories before any round starts.
 6. Unit one attaches to the console resident, whose git door mints a token pinned to `acme/console`; unit two attaches to the cli resident and gets one pinned to `acme/cli`.
-7. The runner spawns each coding child with the card the decision chose: the console change is a state-machine edit on a described file, so the fast card; the cli change touches a provider contract, so the strong card. Each child has its own working session; the thread session gets one turn per child report.
+7. The runner spawns each coding child with the card the decision chose: the console change is a state-machine edit on a described file, so the fast card; the cli change touches a provider contract, so the strong card. Each unit has a working session per lane that its later rounds continue; the thread session gets one turn per child report.
 8. The person replies "actually make the console button say Connect a repository". The operator reads the two live units in the session and returns a steer into unit one's run; the runner folds it at the child's next boundary.
 9. Unit two's review round finds the checks red at the head; the runner reports "not ready, `ci / test` red" under the unit's card in the same thread.
 10. The person replies "merge the cli one". The operator binds `merge` on unit two's pull request; the class is destructive, so the button appears with the exact line and the risk, and the click runs it.
@@ -87,7 +87,7 @@ The property the trace proves: one interpreter with the thread's memory turns a 
 ## The difficulty map
 
 1. **Writes bound from prose without a button** (most likely wrong): the misbind rate on writes has never been measured, and the operator binds from text that includes untrusted READMEs and child reports. Section: the write bar.
-2. **One session per thread while children stay isolated**: the key moves to the thread for the operator and to the run for a child; the fold and the migration are where a transcript could be lost or doubled. Section: the thread session.
+2. **One session per thread while children stay isolated**: the key moves to the thread for the operator and to the unit and lane for a child's working session; the fold and the migration are where a transcript could be lost or doubled. Section: the thread session.
 3. **Deleting the readers without losing their cases** (most work, with 4): every shape they handled becomes a fixture. Section: the deletion.
 4. **Cross-repository plans**: per-unit repository, resident, token and preflight, with the cold path waiting on record 0048. Section: the unit's repository.
 5. **The card at spawn**: least risk, least code. Section: cards.
@@ -118,11 +118,13 @@ The constraint: the session log already is the memory the maintainer describes, 
 
 The design gives a thread one **thread session**, keyed by the thread alone, that the operator reads and writes: every event from every connector, every child's final report, every question the door asked and every answer is a turn in it. A child run gets a **working session**, keyed by its run, seeded from the brief the parent composed plus the turns of the thread session the parent hands down, and it writes into the thread session only through its report. The isolation record 0034 keyed by agent now hangs on the run, which the runner's coordinator tag already identifies, so the constraint that killed one thread per plan goes with the key. The thread-wide artifact read that hands every finished run's typed results to a seed today applies to the thread session only; a working session carries what its parent handed down and nothing of its siblings.
 
+**Amendment, 2026-09-18, while proposed: a working session is keyed by unit and lane.** A peer read against the runner found the key above undoes record 0034's rule for ship, that a unit's findings round continues the coding child's session so the agent that wrote the code answers the review with its own reasons, which the runner's findings step keeps today. Corrected: a working session is keyed by the unit and its lane, `<unit>:coding` and `<unit>:review`. The first run of a lane seeds it from the brief the parent composed plus the turns of the thread session the parent hands down; every later coding round of the unit continues `<unit>:coding` and every review round continues `<unit>:review`. Isolation hangs on the unit: runs of different units never share a working session, and within a unit the rounds of one lane share one. The fold below stays keyed by the child's run id. This supersedes record 0055's "One session per agent" trade, where a person's `agent:review` run in the unit's thread shared `<thread>:review` with the runner's re-review: under this record the person's run has its own lane in the thread session and the runner's review lane is the unit's.
+
 The fold is one write keyed by the child's run id, `<thread>/<runId>`, in the shape record 0046's segments use, so a runner reclaimed between a child's end and its fold writes the report once. The operator's turn takes the tail within the seed budget, newest first, with folded reports kept whole ahead of the person's older turns, since a later bind needs what a child did more than what was said before it.
 
 Migration: an old thread's `<thread>:<agent>` logs are not rewritten. On the first event after cutover the thread session is built once from their tails, rows interleaved by their timestamps, and the old keys stay read-only for recall until they retire by the deletion precedent record 0035 cites.
 
-Invariants: a thread has one thread session for its life; a child report enters it once, under the child's run id, at the child's end; a working session is read by no run but its parent, through the report; the operator reads the tail and nothing else about the thread.
+Invariants: a thread has one thread session for its life; a child report enters it once, under the child's run id, at the child's end; a unit has one working session per lane and every round of that lane continues it; runs of different units never share a working session; a working session is read by no run but its parent, through the report; the operator reads the tail and nothing else about the thread.
 
 Failure modes: a compaction summarizes a folded report into a sentence and a later bind needs the detail; recall over the log answers it, as for runs today. Two connectors append in the same second: the log is append-only under the thread's object, so the order is the object's.
 
@@ -148,6 +150,8 @@ Failure modes: the operator binds a PR URL to the wrong number; the fixture catc
 ## The unit's repository
 
 The constraint: the promise fails if a plan cannot ship to every repository in the org from one thread. Today a plan instance has one `repo`, a unit has none, the runner cut a branch in the wrong repository when the ask addressed another, and the coding child pushed with a token pinned to the wrong repository and fell back to attaching a patch. The bot's own installation token is scoped by permission, not by repository; the pin is the resident's: each resident's git door mints `repositories: [<its own repo>]`. On the cold path a write run holds the installation's full grant until record 0048's git door lands.
+
+**Amendment, 2026-09-18, while proposed: the resident's pin is the code's contract.** The mint above is what the resident's git door is written to do; its live receipt is still open, so the record states it as the contract, not as a proven fact.
 
 The design puts `repo` on the unit. The operator's plan bind names a repository per unit from the cards; the runner cuts each unit's branch in its own repository, attaches each unit's children to that repository's resident, and lets that resident's git door mint the pinned token, so a child on a resident never holds a credential for a repository it does not work in. A preflight per unit runs before any coding round: the resident exists or a cold sandbox can be provisioned, the installation can see the repository, the default branch is known; a unit that fails preflight is a question with the corrected line, never fifteen minutes of coding and a patch. Dependencies between units cross repositories the way they cross units today, by order.
 
@@ -176,6 +180,8 @@ Every peer tool that has solved model choice chooses per agent at invocation, ne
 ## Boundaries
 
 The CLI, MCP and HTTP adapters keep the grammar. Authorization, the policy table and record 0007's identity rules read the bound call, as today. Record 0054's seam and fence survive as written; its guess sites become evidence in the operator's turn, and its third unit is reshaped to that. The repository card is deterministic text from the README, built in the resident as record 0054's cards unit sizes it, never a model digest. Record 0048's git door is a dependency of the cold path, not this record's work. Compatibility: nothing a person typed stops working, since every deleted shape is a fixture the operator binds.
+
+**Amendment, 2026-09-18, while proposed: the spec rows this changes.** The searchable transcripts become the thread session plus the working sessions by unit and lane, so live-view item 28 (the unit page's session search, which today derives `<unitThread>:coding` and `<unitThread>:review`), session-log item 11 and agent-ship item 17 change in the same pull request as the code, per the same-PR rule.
 
 ## What would change our mind
 
