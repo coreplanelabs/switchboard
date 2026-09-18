@@ -1,5 +1,52 @@
 # Changelog
 
+## [1.250.0](https://github.com/coreplanelabs/switchboard/compare/v1.249.1...v1.250.0) (2026-09-18)
+
+
+### Features
+
+* **core:** decide whether a thread reply addressed the bot ([#1776](https://github.com/coreplanelabs/switchboard/issues/1776)) ([de96b36](https://github.com/coreplanelabs/switchboard/commit/de96b36970212560dbe59c448e904adff54841bd))
+* **dispatcher:** a reply into a unit-owned thread reaches its unit ([#1768](https://github.com/coreplanelabs/switchboard/issues/1768)) ([4fa71de](https://github.com/coreplanelabs/switchboard/commit/4fa71de9eaefb80157ebd71cf3066be2b5013d8c))
+* **dispatcher:** every refusal is a run record with its code and cause ([#1803](https://github.com/coreplanelabs/switchboard/issues/1803)) ([5420a57](https://github.com/coreplanelabs/switchboard/commit/5420a579549be6a80a9033e18a3bdf6addd7aedf))
+* **harness:** the model proxy serves /v1/responses for Responses blocks ([#1777](https://github.com/coreplanelabs/switchboard/issues/1777)) ([f1c8011](https://github.com/coreplanelabs/switchboard/commit/f1c80112893dc3b9ea5e3040fa81948f04d64b1d))
+* **load:** add --limit N flag to load history command ([#1775](https://github.com/coreplanelabs/switchboard/issues/1775)) ([8bab8ad](https://github.com/coreplanelabs/switchboard/commit/8bab8ad4dfe5b8da464e741769355067f7177951))
+* **providers:** providers check reports drift from the pinned card ([#1804](https://github.com/coreplanelabs/switchboard/issues/1804)) ([eef5930](https://github.com/coreplanelabs/switchboard/commit/eef593068b4e9a441ea817e2c64213654a6442ac))
+* **runs:** authored session rows carry each turn's actor id ([#1785](https://github.com/coreplanelabs/switchboard/issues/1785)) ([3e39d4a](https://github.com/coreplanelabs/switchboard/commit/3e39d4a221f30deb671df06858927bb9ca0f8ad9))
+* **runs:** the run ledger stores intake receipts, pruned and retried ([#1809](https://github.com/coreplanelabs/switchboard/issues/1809)) ([57acdee](https://github.com/coreplanelabs/switchboard/commit/57acdee950bf527d9c50664eb4476067e2c01216))
+* **ship:** the plan driver retries a not_host answer as passing ([#1805](https://github.com/coreplanelabs/switchboard/issues/1805)) ([f91bd8c](https://github.com/coreplanelabs/switchboard/commit/f91bd8ca344c9fd561fad0ec7514a2af24e7e980))
+
+
+### Bug fixes
+
+* **commands:** repo command refusals carry a Guess for Yes/No ([#1795](https://github.com/coreplanelabs/switchboard/issues/1795)) ([bd294f0](https://github.com/coreplanelabs/switchboard/commit/bd294f012eedf075c5e9ba2f85d0e530966fa598))
+* **deploy:** the execution images lift the Node heap cap to 8 GiB ([#1813](https://github.com/coreplanelabs/switchboard/issues/1813)) ([6480313](https://github.com/coreplanelabs/switchboard/commit/648031307e304d725f5b7c33118219132c0392c1))
+* **deploy:** the lift line says whether a drain stood ([#1761](https://github.com/coreplanelabs/switchboard/issues/1761)) ([6fb3ca3](https://github.com/coreplanelabs/switchboard/commit/6fb3ca39c9851d67483025c828c9255080028b46))
+* **dispatcher:** run-and-report sandbox asks route to explore, not ship ([#1781](https://github.com/coreplanelabs/switchboard/issues/1781)) ([63db9d9](https://github.com/coreplanelabs/switchboard/commit/63db9d95447f553316ce4ef6b04baa5fed87f2dd))
+* **harness:** re-prompt the model after an OpenCode decline cascade ([#1808](https://github.com/coreplanelabs/switchboard/issues/1808)) ([5c3241f](https://github.com/coreplanelabs/switchboard/commit/5c3241f1a90b005a17358c63c95808f65a94b95d))
+* **harness:** resolve enqueued steer fate from inbox events ([#1801](https://github.com/coreplanelabs/switchboard/issues/1801)) ([1683d6f](https://github.com/coreplanelabs/switchboard/commit/1683d6f1ac081ade4757286388dc177532cb425d))
+* **runs:** abandon reserved row when promotion claim goes untracked ([#1788](https://github.com/coreplanelabs/switchboard/issues/1788)) ([af67dfd](https://github.com/coreplanelabs/switchboard/commit/af67dfdfd15915eaee8f9885ee499f71f801ecc8))
+* **ship:** the fit check runs before the ledger claim — issue [#1760](https://github.com/coreplanelabs/switchboard/issues/1760) ([#1783](https://github.com/coreplanelabs/switchboard/issues/1783)) ([97de649](https://github.com/coreplanelabs/switchboard/commit/97de649f010ca2e4a74522238e8429e8300b4cef))
+* **slack:** the relay footer names a requester only from a listed app ([#1762](https://github.com/coreplanelabs/switchboard/issues/1762)) ([59f984e](https://github.com/coreplanelabs/switchboard/commit/59f984ec5c3854033169b5d5c9e1c410eecc6021))
+* **tools:** a description refusal quotes the cut and is on the record ([#1792](https://github.com/coreplanelabs/switchboard/issues/1792)) ([d1a5d75](https://github.com/coreplanelabs/switchboard/commit/d1a5d750fbfeb7b7263cb520efcda43c3d1299f5))
+
+
+### Documentation
+
+* **docs:** plan for record 0060, a ship pipeline is a live run ([#1797](https://github.com/coreplanelabs/switchboard/issues/1797)) ([a2942d7](https://github.com/coreplanelabs/switchboard/commit/a2942d70fd2291c6b1e1d480645ad3d6d272d09f))
+* **docs:** record 0054 is accepted on the seam cut ([#1790](https://github.com/coreplanelabs/switchboard/issues/1790)) ([3c20a10](https://github.com/coreplanelabs/switchboard/commit/3c20a10c7aaf36fe5fe936ede00ed3f52086ea71))
+* **docs:** record 0060, the ship pipeline is a live run all its life ([#1789](https://github.com/coreplanelabs/switchboard/issues/1789)) ([414ccf5](https://github.com/coreplanelabs/switchboard/commit/414ccf5e089f58887b6b2cae9f257e60df428318))
+* **docs:** the harness write names the biller's own provider ([#1802](https://github.com/coreplanelabs/switchboard/issues/1802)) ([d836276](https://github.com/coreplanelabs/switchboard/commit/d836276c949334d1195c7e109f0e8174ed656b5f))
+* **docs:** the operator plan for record 0057, sixteen units, five cuts ([#1771](https://github.com/coreplanelabs/switchboard/issues/1771)) ([f6af93c](https://github.com/coreplanelabs/switchboard/commit/f6af93cddef77486454f21c869571e0a24f79a7e))
+* **docs:** the program plan marks the card units built ([#1766](https://github.com/coreplanelabs/switchboard/issues/1766)) ([41c8ce0](https://github.com/coreplanelabs/switchboard/commit/41c8ce06d573b3cf091ff42dc67a886986739cb2))
+* orchestration ledger hygiene (U42 built, U37 receipts) ([#1784](https://github.com/coreplanelabs/switchboard/issues/1784)) ([0508559](https://github.com/coreplanelabs/switchboard/commit/0508559250db00c9432fe7837b3bc538de823e8c))
+* reconcile U26/U27/U28 status in the orchestration ledger ([#1794](https://github.com/coreplanelabs/switchboard/issues/1794)) ([222f4be](https://github.com/coreplanelabs/switchboard/commit/222f4be47437ee3deacfe706b483091560548897))
+* **ship:** record 0055 accepted; amended for what shipped and 0057/0058 ([#1774](https://github.com/coreplanelabs/switchboard/issues/1774)) ([ef7276b](https://github.com/coreplanelabs/switchboard/commit/ef7276bd24cb3924ed108c4422a61d8957ac931b))
+
+
+### Refactoring
+
+* **load:** extract operationsTable() from renderMarkdown ([#1773](https://github.com/coreplanelabs/switchboard/issues/1773)) ([b52120e](https://github.com/coreplanelabs/switchboard/commit/b52120eafa4a520f7e91d105ef594bc2708ed48a))
+
 ## [1.249.1](https://github.com/coreplanelabs/switchboard/compare/v1.249.0...v1.249.1) (2026-09-18)
 
 
