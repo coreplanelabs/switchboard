@@ -998,6 +998,17 @@ describe("executor provisioning by agent resources", () => {
     expect(replies.some((r) => r.includes("sandbox worker unreachable"))).toBe(true);
   });
 
+  it("an uncaught throw in dispatch() is the catch-all: the ⚠️ reply as today, the outcome carrying `uncaught` and `cause: system` (record 0054)", async () => {
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, capturingProvider());
+    const { io, replies } = fakeIO();
+    io.history = () => {
+      throw new Error("history exploded");
+    };
+    const ended = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
+    expect(replies.some((r) => r.includes("⚠️ history exploded"))).toBe(true);
+    expect(ended).toMatchObject({ status: "failed", refusal: "uncaught", cause: "system" });
+  });
+
   it("a setup failure carrying remote text closes the card with one redacted line and redacts the reply (resident-repos item 62)", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -9918,7 +9929,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.finished.get("run-l")).toMatchObject({ id: "run-l", status: "completed", ...tag });
     expect(isRunRecord(ledger.finished.get("run-l")!)).toBe(true);
     expect(replies.at(-1)).toBe("done");
-    expect(secondOutcome).toEqual({ status: "refused", refusal: "coordinator_thread_live" });
+    expect(secondOutcome).toEqual({ status: "refused", refusal: "coordinator_thread_live", cause: "system" });
     expect(second.replies).toEqual([]);
     expect(ledger.live.size).toBe(0);
     expect(warnings).toEqual([]);
@@ -12788,16 +12799,21 @@ describe("no gaps: every awaited step runs inside a span (docs/reference/specs/t
     expect(log.ended("dispatch.workspace.attach")!.attrs).toEqual({ backend: "sandbox" });
   });
 
-  it("a refusal (the agent allowlist): the reply is a dispatch.refuse span, the root ends refused with no run", async () => {
+  it("a refusal (the agent allowlist): the reply is a dispatch.refuse span carrying the code and its cause, the root ends refused carrying both, no run", async () => {
     const { ticks, log, deps, io } = traced(capturingProvider());
-    await dispatch(deps, msg("agent:coding fix it"), io); // slack:UX may not run coding
+    const ended = await dispatch(deps, msg("agent:coding fix it"), io); // slack:UX may not run coding
     expect(ticks.map((t) => [t.dep, t.span])).toEqual([
       ["io.history", "dispatch.history"],
       ["io.reply", "dispatch.refuse"],
     ]);
     const root = log.ended("request")!;
-    expect(root.attrs).toEqual({ channel: "slack", status: "refused" });
-    expect(log.ended("dispatch.refuse")!.attrs).toEqual({ outcome: "agent_allowlist" });
+    expect(root.attrs).toEqual({ channel: "slack", status: "refused", refusal: "agent_allowlist", cause: "policy" });
+    expect(log.ended("dispatch.refuse")!.attrs).toEqual({
+      outcome: "agent_allowlist",
+      refusal: "agent_allowlist",
+      cause: "policy",
+    });
+    expect(ended).toMatchObject({ status: "refused", refusal: "agent_allowlist", cause: "policy" });
     const p = check(log, ticks, { start: root.startedAt, end: root.endedAt! });
     expect(p).toMatchObject({ gettingReadyMs: 2000, overheadMs: 0 });
   });
@@ -12846,7 +12862,8 @@ describe("no gaps: every awaited step runs inside a span (docs/reference/specs/t
     const roots = log.ends.filter((r) => r.name === "request");
     expect(roots.map((r) => r.attrs)).toEqual([
       { channel: "slack", status: "completed", queuedBeforeMs: 5_000 }, // the follow-up's own dispatch: steered; its platform delay is its own
-      { channel: "slack", runId: "r1", status: "failed" },
+      // A provider explosion is the catch-all's uncaught refusal on the root (record 0054).
+      { channel: "slack", runId: "r1", status: "failed", refusal: "uncaught", cause: "system" },
       { channel: "slack", runId: "r2", status: "completed", queuedBehindMs: expect.any(Number) },
     ]);
     const [, firstRoot, fresh] = roots;
@@ -16209,7 +16226,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     });
     expect(registry.snapshotById("r3")).toBeNull();
     const second = await click(deps, "confirm", id, requester);
-    expect(second.outcome).toEqual({ status: "refused", refusal: "confirmation_used" });
+    expect(second.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
     expect(second.replies).toEqual([OFFER_USED_LINE]);
     expect(deps.invoked).toEqual(["config.set"]);
     expect(registry.snapshotById("r3")).toBeNull();
@@ -16220,7 +16237,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     const { offers } = await offered(deps);
     tick(CONFIRMATION_TTL_MS);
     const late = await click(deps, "confirm", offers[0]!.id, requester);
-    expect(late.outcome).toEqual({ status: "refused", refusal: "confirmation_expired" });
+    expect(late.outcome).toEqual({ status: "refused", refusal: "confirmation_expired", cause: "request" });
     expect(late.replies).toEqual([OFFER_EXPIRED_LINE]);
     expect(deps.invoked).toEqual([]);
     expect(codingModelIn(deps)).toBe("anthropic/coding-model");
@@ -16230,7 +16247,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     const { deps, audits } = wired();
     const { offers } = await offered(deps);
     const foreign = await click(deps, "confirm", offers[0]!.id, stranger);
-    expect(foreign.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign" });
+    expect(foreign.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign", cause: "policy" });
     expect(foreign.replies).toEqual([OFFER_FOREIGN_LINE]);
     expect(deps.invoked).toEqual([]);
     expect(audits).toEqual([]);
@@ -16253,13 +16270,13 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     const one = wired();
     const first = await offered(one.deps);
     const strangerCancel = await click(one.deps, "cancel", first.offers[0]!.id, stranger);
-    expect(strangerCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign" });
+    expect(strangerCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_foreign", cause: "policy" });
     expect(strangerCancel.replies).toEqual([OFFER_FOREIGN_LINE]);
     const cancelled = await click(one.deps, "cancel", first.offers[0]!.id, requester);
     expect(cancelled.outcome).toEqual({ status: "completed" });
     expect(cancelled.replies).toEqual([OFFER_CANCELLED_LINE]);
     const afterCancel = await click(one.deps, "confirm", first.offers[0]!.id, requester);
-    expect(afterCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_used" });
+    expect(afterCancel.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
     expect(one.deps.invoked).toEqual([]);
     expect(codingModelIn(one.deps)).toBe("anthropic/coding-model");
     const two = wired();
@@ -16268,7 +16285,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
       status: "completed",
     });
     const afterConfirm = await click(two.deps, "cancel", second.offers[0]!.id, requester);
-    expect(afterConfirm.outcome).toEqual({ status: "refused", refusal: "confirmation_used" });
+    expect(afterConfirm.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
     expect(afterConfirm.replies).toEqual([OFFER_USED_LINE]);
     expect(two.deps.invoked).toEqual(["config.set"]);
   });
@@ -16287,7 +16304,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const res = await click(deps, "confirm", offers[0]!.id, requester);
-      expect(res.outcome).toEqual({ status: "refused", refusal: "confirmation_unreadable" });
+      expect(res.outcome).toEqual({ status: "refused", refusal: "confirmation_unreadable", cause: "system" });
       expect(res.replies).toEqual([OFFER_UNREADABLE_LINE]);
       expect(deps.invoked).toEqual([]);
     } finally {

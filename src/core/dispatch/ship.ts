@@ -42,6 +42,8 @@ import { defaultRunRegistry, REPLAY_EVERYTHING } from "../runRegistry.js";
 import { createCardShell } from "../statusCardFrame.js";
 import type { RunEnding } from "../runEnding.js";
 import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, type StatusHandle } from "../types.js";
+import { refusalOf, type Refusal } from "../refusal.js";
+import { REFUSAL_SENTENCES } from "./reply.js";
 
 /** What the ship branch reads: the run slice (the config, the registry and
  *  history writers, the GitHub client the hand-off reads the plan with), the
@@ -111,8 +113,9 @@ export interface ShipContext {
   trace: RequestTrace;
   /** The card's shape and queued lines at a close, from the dispatch's window. */
   closeLines: (end: number, finished: boolean, owner?: RunOwner) => { shape?: string; queued?: string };
-  /** A refusal as one `dispatch.refuse` span. */
-  refuse: <T>(outcome: string, fn: () => Promise<T>) => Promise<T>;
+  /** A refusal as one `dispatch.refuse` span: the site's `Refusal`, the side
+   *  work inside the span, the sentence rendered in one place. */
+  refuse: (refusal: Refusal, side?: () => Promise<void>) => Promise<void>;
   /** The done card's shape and queued lines, from the finish-site diagnosis. */
   doneLines: (diagnosis: FrictionDiagnosis | undefined) => { shape?: string; queued?: string };
   /** How the ship preset was chosen (`run_meta.agentSource`). */
@@ -162,10 +165,9 @@ export async function runShipBranch(
   );
   if (!pre.ok) {
     console.log(`[ship] ${msg.threadKey} not started: ${pre.where}`);
-    await refuse("ship_preflight", async () => {
-      await card.done(shell.close({ kind: "refused", icon: "🚫", reason: pre.card, ...closeLines(clock(), false) }));
-      await io.reply(pre.reply);
-    });
+    await refuse(refusalOf("ship_preflight", pre.reply), () =>
+      card.done(shell.close({ kind: "refused", icon: "🚫", reason: pre.card, ...closeLines(clock(), false) })),
+    );
     return;
   }
   const entry = pre.entry;
@@ -331,14 +333,19 @@ export async function runShipBranch(
   if (!held.ok) {
     const reason = `budget ${caps.maxMinutes} min cannot hold the ship loop (${caps.maxRounds} review rounds need ${held.need} min)`;
     console.log(`[ship] ${msg.threadKey} not started: ${reason}`);
-    await refuse("ship_budget", async () => {
-      await card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) }));
-      await io.reply(
-        `🚫 Ship cannot start under a ${caps.maxMinutes}-minute budget: the loop it allows (${caps.maxRounds} review rounds) needs ${held.need} minutes — ` +
-          `${ALLOWANCES.provision} to provision, the coding child's ${ASKS.coding}, and the reserve for the rounds after it at their floors. ` +
-          `Widen the budget or the boundary that clipped it, or run \`agent:coding\` for a single pass without the review loop.`,
-      );
-    });
+    await refuse(
+      refusalOf(
+        "ship_budget",
+        REFUSAL_SENTENCES.ship_budget({
+          maxMinutes: caps.maxMinutes,
+          maxRounds: caps.maxRounds,
+          need: held.need,
+          provision: ALLOWANCES.provision,
+          coding: ASKS.coding,
+        }),
+      ),
+      () => card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
+    );
     return;
   }
   // The severity to address, resolved once here — the request's

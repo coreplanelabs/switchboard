@@ -11,7 +11,8 @@ import { redactSecrets, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import type { LiveThread } from "./threadAdmission.js";
 import type { RecordDeps } from "./dispatch/record.js";
-import { cardLines, errorReply } from "./dispatch/reply.js";
+import { cardLines, errorReply, renderRefusal } from "./dispatch/reply.js";
+import { causeOf, refusalOf, type Refusal, type RefusalCause, type RefusalCode } from "./refusal.js";
 import {
   admit,
   adoptCarriedRun,
@@ -241,10 +242,38 @@ export async function dispatch(
   // A refusal — a close and a reply that end the request without a run — is
   // one `dispatch.refuse` span naming why.
   let refused = false;
-  const refuse = <T>(outcome: string, fn: () => Promise<T>) => {
+  // The count's first home (record 0054): the code and its cause on the
+  // refuse span AND the request's root, so the telemetry query the forensics
+  // recipe uses can count refusals from root spans alone.
+  const stampRefusal = (outcome: RefusalCode): RefusalCause => {
     refused = true;
+    const cause = causeOf(outcome);
     ended.refusal ??= outcome;
-    return root.span("dispatch.refuse", fn, { attrs: { outcome } });
+    ended.cause ??= cause;
+    root.setAttrs({ refusal: outcome, cause });
+    return cause;
+  };
+  // A gate refusal is the site's `Refusal` — its own sentence, the cause from
+  // the one table — stamped, the side work (a card close, a release) run
+  // inside the span, and the sentence rendered by the ONE renderer.
+  const refuse = async (refusal: Refusal, side?: () => Promise<void>) => {
+    const cause = stampRefusal(refusal.code);
+    await root.span(
+      "dispatch.refuse",
+      async () => {
+        await side?.();
+        await renderRefusal(refusal, io);
+      },
+      { attrs: { outcome: refusal.code, refusal: refusal.code, cause } },
+    );
+  };
+  // A refusal nothing is said for — a coordinator spawn (the thread must not
+  // hear a bot-to-bot retry), a lost workspace whose card says it, the
+  // catch-all's card close (the error reply follows on its own path): stamped
+  // and counted like any other, rendered by nobody.
+  const refuseSilently = <T>(outcome: RefusalCode, side: () => Promise<T>) => {
+    const cause = stampRefusal(outcome);
+    return root.span("dispatch.refuse", side, { attrs: { outcome, refusal: outcome, cause } });
   };
   // The card's shape and queued lines at a close (docs/reference/specs/tracing.md item 5):
   // a runless close reads the root's children so far over a live window; a
@@ -513,6 +542,7 @@ export async function dispatch(
       clock,
       root,
       refuse,
+      refuseSilently,
       admission,
       hooks: {
         reservation: reservationHooks,
@@ -955,7 +985,7 @@ export async function dispatch(
         const request = await abandonLostWorkspace({
           msg,
           io,
-          refuse,
+          refuse: refuseSilently,
           card,
           shell,
           closeLines,
@@ -1363,6 +1393,13 @@ export async function dispatch(
     return ended;
   } catch (err) {
     caught = true;
+    // The catch-all is the last line (record 0054): an uncaught throw is a
+    // `system`/`uncaught` refusal on the trace, counted like any other.
+    ended.refusal ??= "uncaught";
+    ended.cause ??= "system";
+    // A throw inside a gate's own refusal must not overwrite the root's
+    // already-stamped code: the root and the outcome tell the same story.
+    if (!refused) root.setAttrs({ refusal: "uncaught", cause: "system" });
     const errMsg = err instanceof Error ? err.message : String(err);
     // A card left spinning after a setup failure looks like a hang; close it.
     // Only a card still in setup — a run failure was already closed by the run
@@ -1371,7 +1408,7 @@ export async function dispatch(
     // body) — one redacted line on the card, a redacted reply in the thread.
     if (setupCard && setupShell) {
       const [failedCard, failedShell] = [setupCard, setupShell];
-      await refuse("setup_failed", () =>
+      await refuseSilently("setup_failed", () =>
         failedCard.done(
           failedShell.close({
             kind: "setup_failed",
@@ -1388,18 +1425,26 @@ export async function dispatch(
     // already sealed and written by its own wrap; this is a no-op for it.
     // A run's failure reply is a `post.reply`; a setup failure's is the refusal.
     const replyName = root.record().attrs.runId !== undefined ? "post.reply" : "dispatch.refuse";
+    const replyAttrs =
+      replyName === "dispatch.refuse"
+        ? ({ attrs: { outcome: "uncaught", refusal: "uncaught", cause: "system" } } as const)
+        : undefined;
     await ending
       .sealAfterReply(
         async () => {},
         () =>
-          root.span(replyName, () => {
-            // The failure reply carries the run link when a run started: the
-            // card scrolls away, and a failed run's transcript should be one
-            // click from the thread.
-            const line = redactSecrets(stripAnsi(errorReply(err)));
-            const link = admitted?.runLink;
-            return io.reply(link ? `${line}\n\n[Live run](${link})` : line);
-          }),
+          root.span(
+            replyName,
+            () => {
+              // The failure reply carries the run link when a run started: the
+              // card scrolls away, and a failed run's transcript should be one
+              // click from the thread.
+              const line = redactSecrets(stripAnsi(errorReply(err)));
+              const link = admitted?.runLink;
+              return io.reply(link ? `${line}\n\n[Live run](${link})` : line);
+            },
+            replyAttrs,
+          ),
       )
       .catch(() => {});
   } finally {
@@ -1554,10 +1599,16 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     registry: deps.runRegistry ?? defaultRunRegistry,
     onFinished: (id) => void deps.runBearers?.revoke(id),
   });
-  const refuse = (outcome: string, text: string) => {
+  const refuse = (refusal: Refusal) => {
     refused = true;
-    ended.refusal = outcome;
-    return root.span("dispatch.refuse", () => io.reply(text), { attrs: { outcome } });
+    ended.refusal = refusal.code;
+    ended.cause = refusal.cause;
+    root.setAttrs({ refusal: refusal.code, cause: refusal.cause });
+    // The one renderer (record 0054): the click's named line goes out as a
+    // `Refusal`, byte-identical to the line the store named.
+    return root.span("dispatch.refuse", () => renderRefusal(refusal, io), {
+      attrs: { outcome: refusal.code, refusal: refusal.code, cause: refusal.cause },
+    });
   };
   try {
     if (click.kind === "cancel") {
@@ -1565,7 +1616,7 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
       if (res.kind === "refused")
         await ending.sealAfterReply(
           async () => {},
-          () => refuse(res.refusal, res.text),
+          () => refuse(refusalOf(res.refusal, res.text)),
         );
       else
         await ending.sealAfterReply(
@@ -1578,7 +1629,7 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     if (res.kind === "refused") {
       await ending.sealAfterReply(
         async () => {},
-        () => refuse(res.refusal, res.text),
+        () => refuse(refusalOf(res.refusal, res.text)),
       );
       return ended;
     }

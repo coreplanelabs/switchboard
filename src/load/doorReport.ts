@@ -9,6 +9,7 @@
 // the per-run events are the inputs, and a store that cannot be read is said
 // so on the report rather than guessed around.
 import { COMMAND_RUN_AGENT } from "../core/runOwner.js";
+import { causeOf, REFUSAL_CODES, type RefusalCause, type RefusalCode } from "../core/refusal.js";
 import { RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { RunListCursor, RunsService, RunView } from "../core/runsService.js";
@@ -24,6 +25,18 @@ export interface DoorRow {
   pastes: number;
 }
 
+/** One day's refusal count for one code (record 0054): a run whose `route`
+ *  event carries `outcome: "refused"` and the code, counted by day, cause and code.
+ *  No writer produces such records yet ([run-history.md] item 2's gap: the confirm
+ *  path's refusals return no row to record), so this section counts zero until it
+ *  lands; the report's footer names the recordless gate refusals meanwhile. */
+export interface RefusalRow {
+  day: string;
+  cause: RefusalCause | "unknown";
+  code: string;
+  count: number;
+}
+
 export interface DoorReport {
   handBacks: number;
   /** Pastes whose hand-back is among the hand-backs read. */
@@ -37,6 +50,8 @@ export interface DoorReport {
   storeUnavailable: boolean;
   /** Sorted by day, then command. */
   rows: DoorRow[];
+  /** Refused records, sorted by day, then cause, then code. */
+  refusals: RefusalRow[];
 }
 
 export interface DoorReportOptions {
@@ -105,9 +120,22 @@ export async function doorReport(
   const listed = await commandRuns(runs, opts);
   const handBacks = new Map<string, { day: string; command: string }>();
   const pastes: string[] = [];
+  const refusalBuckets = new Map<string, RefusalRow>();
   for (const run of listed.runs) {
     const route = await routeOf(runs, run.id);
-    if (!route || route.command === undefined) continue;
+    if (!route) continue;
+    if (route.outcome === "refused") {
+      // The record's cause comes from the one code→cause table; a code the
+      // table does not know (a record from a newer bot) counts as `unknown`.
+      const code = route.refusalCode ?? "unknown";
+      const cause = (REFUSAL_CODES as readonly string[]).includes(code) ? causeOf(code as RefusalCode) : "unknown";
+      const id = `${dayOf(run)}/${cause}/${code}`;
+      const row = refusalBuckets.get(id) ?? { day: dayOf(run), cause, code, count: 0 };
+      row.count++;
+      refusalBuckets.set(id, row);
+      continue;
+    }
+    if (route.command === undefined) continue;
     if (route.outcome === "hand_back") handBacks.set(run.id, { day: dayOf(run), command: route.command });
     else if (route.outcome === "pasted" && route.handBackRunId !== undefined) pastes.push(route.handBackRunId);
   }
@@ -132,7 +160,11 @@ export async function doorReport(
   const rows = [...buckets.values()].sort((a, b) =>
     a.day === b.day ? (a.command < b.command ? -1 : a.command > b.command ? 1 : 0) : a.day < b.day ? -1 : 1,
   );
+  const refusals = [...refusalBuckets.values()].sort(
+    (a, b) => a.day.localeCompare(b.day) || a.cause.localeCompare(b.cause) || a.code.localeCompare(b.code),
+  );
   return {
+    refusals,
     handBacks: handBacks.size,
     pastes: joined,
     unmatchedPastes: pastes.length - joined,
@@ -165,7 +197,23 @@ export function renderDoor(report: DoorReport): string[] {
         `  - ${r.command}: hand-backs ${r.handBacks}, pastes ${r.pastes} (${pasteRate(r.handBacks, r.pastes)})`,
       );
   }
+  // The refusals the store recorded (record 0054): per day, per cause and
+  // per code. Only refusals after a command was bound are records; the rest are
+  // root spans — the footer names the telemetry query that counts those.
+  if (report.refusals.length > 0) {
+    const total = report.refusals.reduce((n, r) => n + r.count, 0);
+    lines.push(`refusals recorded: ${total}`);
+    const refusalDays = new Map<string, RefusalRow[]>();
+    for (const row of report.refusals) refusalDays.set(row.day, [...(refusalDays.get(row.day) ?? []), row]);
+    for (const [day, rows] of refusalDays) {
+      lines.push(`- ${day}: ${rows.reduce((n, r) => n + r.count, 0)} refusal(s)`);
+      for (const r of rows) lines.push(`  - ${r.cause}/${r.code}: ${r.count}`);
+    }
+  }
   if (report.storeUnavailable)
     lines.push("the run store could not be read: the counts above are the live registry's alone");
+  lines.push(
+    "gate refusals (no record): count root spans with the `refusal` and `cause` attributes over the retention window",
+  );
   return lines;
 }

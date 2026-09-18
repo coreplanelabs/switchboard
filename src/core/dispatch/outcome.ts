@@ -10,4 +10,6 @@
 export interface DispatchOutcome {
   status: "completed" | "refused" | "failed" | "stopped";
   refusal?: string;
+  /** The refusal's cause, from the one code→cause table (src/core/refusal.ts). */
+  cause?: "request" | "policy" | "system";
 }

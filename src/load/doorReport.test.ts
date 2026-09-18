@@ -94,6 +94,22 @@ const FIXTURE: RunRecord[] = [
   commandRecord("agent-1", DAY_TWO + 300_000, undefined, { agent: "review", label: "review · #ops" }),
 ];
 
+/** Refused records over two days, three codes, two causes (record 0054). */
+const REFUSED: RunRecord[] = [
+  commandRecord("r-1", DAY_ONE, decision("config.set", { outcome: "refused", refusalCode: "confirmation_expired" })),
+  commandRecord(
+    "r-2",
+    DAY_ONE + 30_000,
+    decision("config.set", { outcome: "refused", refusalCode: "confirmation_expired" }),
+  ),
+  commandRecord(
+    "r-3",
+    DAY_ONE + 60_000,
+    decision("mcp.add", { outcome: "refused", refusalCode: "confirmation_foreign" }),
+  ),
+  commandRecord("r-4", DAY_TWO, decision("repo.offboard", { outcome: "refused", refusalCode: "confirmation_used" })),
+];
+
 describe("doorReport — hand-backs, the pastes that followed and the rate, per day and per command", () => {
   it("counts a hand-back under its day and command, joins a paste to its hand-back by id (the hand-back's bucket, whatever day the paste landed), keeps a paste whose hand-back is outside the window apart, and ignores a routed read and a typed run", async () => {
     const report = await doorReport(await serviceOver(FIXTURE));
@@ -103,6 +119,7 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
       unmatchedPastes: 1,
       commandRuns: 7,
       storeUnavailable: false,
+      refusals: [],
       rows: [
         { day: "1999-01-03", command: "config.set", handBacks: 1, pastes: 1 },
         { day: "1999-01-03", command: "mcp.add", handBacks: 1, pastes: 0 },
@@ -120,12 +137,36 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
       "  - mcp.add: hand-backs 1, pastes 0 (0%)",
       "- 1999-01-04: hand-backs 1, pastes 0 (0%)",
       "  - repo.offboard: hand-backs 1, pastes 0 (0%)",
+      "gate refusals (no record): count root spans with the `refusal` and `cause` attributes over the retention window",
     ]);
     const nothing = renderDoor(await doorReport(await serviceOver([])));
     expect(nothing).toEqual([
       "door: 0 hand-back(s), 0 paste(s) joined (— pasted), 0 paste(s) whose hand-back is outside the window; 0 command run(s) read",
+      "gate refusals (no record): count root spans with the `refusal` and `cause` attributes over the retention window",
     ]);
     expect(nothing.join("\n")).not.toMatch(/NaN|Infinity/);
+  });
+
+  it("counts refused records per day, per cause and per code (record 0054) — two days, three codes, two causes — and an empty store prints zero refusal lines", async () => {
+    const report = await doorReport(await serviceOver(REFUSED));
+    expect(report.refusals).toEqual([
+      { day: "1999-01-03", cause: "policy", code: "confirmation_foreign", count: 1 },
+      { day: "1999-01-03", cause: "request", code: "confirmation_expired", count: 2 },
+      { day: "1999-01-04", cause: "request", code: "confirmation_used", count: 1 },
+    ]);
+    const lines = renderDoor(report);
+    expect(lines).toContain("refusals recorded: 4");
+    expect(lines).toContain("- 1999-01-03: 3 refusal(s)");
+    expect(lines).toContain("  - policy/confirmation_foreign: 1");
+    expect(lines).toContain("  - request/confirmation_expired: 2");
+    expect(lines).toContain("- 1999-01-04: 1 refusal(s)");
+    expect(lines).toContain("  - request/confirmation_used: 1");
+    // The footer names the telemetry query for the gate refusals that never bind a command.
+    expect(lines.at(-1)).toBe(
+      "gate refusals (no record): count root spans with the `refusal` and `cause` attributes over the retention window",
+    );
+    const empty = renderDoor(await doorReport(await serviceOver([])));
+    expect(empty.filter((l) => l.includes("refusal(s)") || l.startsWith("refusals recorded"))).toEqual([]);
   });
 
   it("`sinceMs` bounds the window: a hand-back before it is not read, so its later paste is the unmatched kind", async () => {
@@ -161,7 +202,7 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
     const report = await doorReport(service);
     expect(report.storeUnavailable).toBe(true);
     expect(report.handBacks).toBe(0);
-    expect(renderDoor(report).at(-1)).toBe(
+    expect(renderDoor(report).at(-2)).toBe(
       "the run store could not be read: the counts above are the live registry's alone",
     );
   });
