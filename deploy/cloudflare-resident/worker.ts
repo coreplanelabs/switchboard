@@ -4937,6 +4937,7 @@ export class ResidentDO extends Sandbox<Env> {
         state: s.state,
         stateReason: s.reason,
         reason: s.reason,
+        cause: "system",
       };
     }
     // `resourceId` was read by the caller a moment ago (item 15 of the audit:
@@ -4952,7 +4953,12 @@ export class ResidentDO extends Sandbox<Env> {
     // Typed `reason` beside the words: the client reads the field — a refusal no
     // wait clears, unlike the restore window's 503s — never the sentence.
     if (!record || !facts)
-      return { error: "not-serviceable: registry record or repo facts missing", status: 503, reason: "unregistered" };
+      return {
+        error: "not-serviceable: registry record or repo facts missing",
+        status: 503,
+        reason: "unregistered",
+        cause: "system",
+      };
 
     // The binding's ref wins for the thread's whole life, with one exception
     // (item 16): a thread bound to the repo default for want of a named branch
@@ -4981,6 +4987,7 @@ export class ResidentDO extends Sandbox<Env> {
         status: 409,
         needs: "ref",
         defaultRef: facts.defaultRef,
+        cause: "request",
       };
     }
     const worktreePath = prior?.worktreePath ?? (await threadWorktreePath(threadKey, ref));
@@ -5102,7 +5109,14 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
+        return {
+          error: errMsg(err),
+          status: 503,
+          state: s.state,
+          stateReason: s.reason,
+          reason: "mirror-busy",
+          cause: "system",
+        };
       }
       return catchAllErr(err, "attach-failed");
     }
@@ -5404,17 +5418,30 @@ export class ResidentDO extends Sandbox<Env> {
         return { error: `reuse-refused: ${err.why}`, status: 409, needs: "recreate" };
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
+        return {
+          error: errMsg(err),
+          status: 503,
+          state: s.state,
+          stateReason: s.reason,
+          reason: "mirror-busy",
+          cause: "system",
+        };
       }
       if (err instanceof StepError && err.step === "unknown-ref") {
-        return { error: `unknown-ref: ${err.message}`, status: 400 };
+        return { error: `unknown-ref: ${err.message}`, status: 400, cause: "request" };
       }
       if (err instanceof StepError && err.step === "stale-tip") {
         // Item 51: not a resident fault and not a caller fault — a fact about
         // the mirror at this instant. 409 with the state, so the bot's named
         // fallback runs cold at the commit it asked for.
         const s = await this.getStatus();
-        return { error: `stale-tip: ${err.message}`, status: 409, state: s.state, reason: "stale-tip" };
+        return {
+          error: `stale-tip: ${err.message}`,
+          status: 409,
+          state: s.state,
+          reason: "stale-tip",
+          cause: "system",
+        };
       }
       return this.attachFailed(err);
     }
@@ -5449,7 +5476,14 @@ export class ResidentDO extends Sandbox<Env> {
       // worktree lock above, so the bot-side fallback can retry.
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
+        return {
+          error: errMsg(err),
+          status: 503,
+          state: s.state,
+          stateReason: s.reason,
+          reason: "mirror-busy",
+          cause: "system",
+        };
       }
       return this.attachFailed(err);
     }
@@ -6293,6 +6327,7 @@ export class ResidentDO extends Sandbox<Env> {
         state: s.state,
         stateReason: s.reason,
         reason: s.reason,
+        cause: "system",
       };
     }
     const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
@@ -6928,6 +6963,7 @@ export class ResidentDO extends Sandbox<Env> {
         state: s.state,
         stateReason: s.reason,
         reason: s.reason,
+        cause: "system",
       };
     }
     // One storage round trip for the two facts; the registry lookup stays (an
@@ -6939,7 +6975,12 @@ export class ResidentDO extends Sandbox<Env> {
     // Typed `reason` beside the words: the client reads the field — a refusal no
     // wait clears, unlike the restore window's 503s — never the sentence.
     if (!record || !facts)
-      return { error: "not-serviceable: registry record or repo facts missing", status: 503, reason: "unregistered" };
+      return {
+        error: "not-serviceable: registry record or repo facts missing",
+        status: 503,
+        reason: "unregistered",
+        cause: "system",
+      };
     const command = record.commands[op];
     if (!command) return { error: `op-unavailable: the command table has no "${op}" entry`, status: 400 };
 
@@ -7035,10 +7076,17 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof MirrorBusyError) {
         const s = await this.getStatus();
-        return { error: errMsg(err), status: 503, state: s.state, stateReason: s.reason, reason: "mirror-busy" };
+        return {
+          error: errMsg(err),
+          status: 503,
+          state: s.state,
+          stateReason: s.reason,
+          reason: "mirror-busy",
+          cause: "system",
+        };
       }
       if (err instanceof StepError && err.step === "unknown-ref") {
-        return { error: `unknown-ref: ${err.message}`, status: 400 };
+        return { error: `unknown-ref: ${err.message}`, status: 400, cause: "request" };
       }
       // A step that failed is named and deterministic; a throw no step named is
       // typed by the one builder every such 500 goes through.
@@ -8239,6 +8287,7 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
             `exact name (GitHub's token API answers the same 422 for both). An org admin adds it under the ` +
             `App's installation settings (Settings → GitHub Apps → Configure → Repository access), ` +
             `then retry (${errMsg(err)})`,
+          cause: "policy",
         },
         403,
       );

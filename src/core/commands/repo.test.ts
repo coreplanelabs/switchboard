@@ -109,6 +109,7 @@ interface BindOptions {
   canUseRepo?: (callerId: string, slug: string) => boolean;
   inspect?: RepoInspector;
   sleep?: (ms: number) => Promise<void>;
+  installationRepos?: () => Promise<string[] | undefined>;
 }
 
 function depsOf(opts: BindOptions = {}): RepoCommandDeps {
@@ -120,6 +121,7 @@ function depsOf(opts: BindOptions = {}): RepoCommandDeps {
       canUseRepo: async (callerId: string, slug: string) => (opts.canUseRepo ? opts.canUseRepo(callerId, slug) : true),
       ...(opts.inspect ? { inspect: opts.inspect } : {}),
       ...(opts.sleep ? { sleep: opts.sleep } : {}),
+      ...(opts.installationRepos ? { installationRepos: opts.installationRepos } : {}),
     },
   };
 }
@@ -528,6 +530,32 @@ describe("repo onboard", () => {
     expect(res).toMatchObject({ ok: false, error: "unavailable" });
     expect(text).toBe(`unavailable: HTTP 403: ${refusal}`);
     expect(text).not.toContain("…");
+  });
+
+  it("a name the installation does not hold with one near match asks the question before the mint (record 0054)", async () => {
+    const c = mockClient();
+    const commands = bind({ admin: c, installationRepos: async () => ["acme/infrastructure", "acme/api"] });
+    const { res, text } = await say(commands, "repo onboard acme/infra", admin);
+    expect(res).toMatchObject({ ok: false, error: "not_found" });
+    expect(text).toContain("`acme/infra` is not in the GitHub App installation's repository list.");
+    expect(text).toContain("Did you mean:");
+    expect(text).toContain("`repo onboard acme/infrastructure`");
+    expect(text).toContain("which is onboarded");
+    expect(c.onboard).not.toHaveBeenCalled();
+  });
+
+  it("a name the installation HOLDS that the mint still refuses reads the Worker's `cause: policy` and keeps the admin's way forward (record 0054)", async () => {
+    const refusal =
+      "not-in-installation: the GitHub App cannot mint a token scoped to repo:acme/api — " +
+      "the repository is not in the App installation's repository list, or does not exist under that exact name. " +
+      "An org admin adds it under the App's installation settings, then retry";
+    const c = mockClient({ onboard: ok({ error: refusal, cause: "policy" }, 403) });
+    const commands = bind({ admin: c, installationRepos: async () => ["acme/api"] });
+    const { res, text } = await say(commands, "repo onboard acme/api", admin);
+    expect(res).toMatchObject({ ok: false, error: "unauthorized", status: 403 });
+    expect(text).toContain(`HTTP 403: ${refusal}`);
+    expect(text).toContain("An org admin adds it under the App's installation settings");
+    expect(c.onboard).toHaveBeenCalled();
   });
 
   it("--evict-coldest opts the onboard into LRU eviction; an evicting onboard says which resident went", async () => {
