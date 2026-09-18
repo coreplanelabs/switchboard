@@ -1405,6 +1405,7 @@ async function answerHandBack(
   try {
     row = await store.put(
       {
+        kind: "run",
         id: newConfirmationId(),
         message: confirmationMessageOf(msg),
         command: def.id,

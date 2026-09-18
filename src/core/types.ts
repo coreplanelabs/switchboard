@@ -235,6 +235,11 @@ export interface ConfirmationOffer {
   risk: string;
   footer: string;
   expiresAt: number;
+  /** Present on a question's offer (record 0054): the refusal's sentence,
+   *  shown above the line, and the evidence naming the match, shown under it.
+   *  A channel that offers labels the same two actions Yes and No instead of
+   *  Run and Cancel; Yes redispatches the stored proposal, No cancels. */
+  question?: { text: string; evidence: string };
 }
 
 export interface ChannelIO {

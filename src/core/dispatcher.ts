@@ -203,6 +203,12 @@ export interface DispatchOptions {
    *  after the REVIEW TARGET block — so both children hold one object. Absent
    *  for every other request. */
   contract?: ChildContract;
+  /** Set by `dispatchClick` alone, for a Yes on a question's `redispatch` row
+   *  (record 0054): the question's refusal code — the run's record names it
+   *  in a `run_note` ([run-history.md](../../docs/reference/specs/run-history.md) item 2)
+   *  — and the click's one drain slot is handed over: this dispatch counts no
+   *  second one. Absent for every other request. */
+  redispatch?: { code: string };
 }
 
 /** How a request ended, for whoever started it (dispatch/outcome.ts): the
@@ -270,7 +276,10 @@ export async function dispatch(
       "dispatch.refuse",
       async () => {
         await side?.();
-        await renderRefusal(refusal, io);
+        // The store rides along so a question with a guess can mint its Yes
+        // (record 0054): the renderer offers Yes and No where the channel can
+        // show them, and the line to type everywhere else.
+        await renderRefusal(refusal, io, { confirmations: deps.confirmations });
       },
       { attrs: { outcome: refusal.code, refusal: refusal.code, cause } },
     );
@@ -302,8 +311,11 @@ export async function dispatch(
   // that lands between the channel's 👀 ack and the first status card used to
   // see "0 run(s) in flight" and exit at once, abandoning an acked run.
   // Config commands and refusals hold the slot for their few hundred
-  // milliseconds too — cheaper than a second gap.
-  activeRuns++;
+  // milliseconds too — cheaper than a second gap. A redispatched request
+  // (record 0054's Yes) arrives holding the click's slot: `dispatchClick`
+  // counted it and decrements it after this dispatch returns, so counting it
+  // again would read one click as two runs in flight.
+  if (!opts.redispatch) activeRuns++;
   // How this dispatch's runs end (runEnding.ts; docs/reference/specs/tracing.md): a run is
   // SEALED once its first reply attempt has completed, and its record — its
   // inputs (the registry snapshot, the diagnosis) captured synchronously at
@@ -840,6 +852,16 @@ export async function dispatch(
     // before the first turn — the run is not changed by it.
     for (const summary of seedNotes)
       registry.publish(run.id, { type: "run_note", kind: "seed", summary: oneLine(summary), at: clock() });
+    // A redispatched request's record names the question it answered
+    // (record 0054; run-history item 2): the code the refusal carried, so the
+    // Yes-run is traceable to the question whose proposal it ran.
+    if (opts.redispatch)
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "redispatch",
+        summary: `confirmed after question ${opts.redispatch.code}`,
+        at: clock(),
+      });
     // A new run of a spawned thread's child has its row: its parent hears the
     // reply now, with the run that answers it named.
     await tellLineage({ kind: "started", runId });
@@ -1575,7 +1597,7 @@ export async function dispatch(
     // The ledger heartbeat stops with the run (the finish write, in flight
     // through the writer, closes the row itself).
     void ledgerRun?.close();
-    activeRuns--;
+    if (!opts.redispatch) activeRuns--;
   }
   // Reached from the catch alone (every path in the try returns): the failed
   // request's outcome, its status stamped by the finally above.
@@ -1621,6 +1643,9 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
   const actorIds = actorIdsOf(click.actor);
   let caught = false;
   let refused = false;
+  // A Yes that redispatched: the click's outcome is the redispatched
+  // request's own, stamped in the finally over the click's default.
+  let redispatched: DispatchOutcome | undefined;
   // Counted in flight from the first line to the reply, like a dispatch: a
   // SIGTERM between the click and the command's run must not abandon it.
   activeRuns++;
@@ -1654,7 +1679,18 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
         );
       return ended;
     }
-    const res = await consumeAndRun(deps, { id: click.id, actorIds }, io, ending, trace);
+    // A question's Yes (record 0054): the consumed `redispatch` row goes back
+    // through `dispatch()` whole — the proposal as the requester's own message,
+    // the click's drain slot handed over, the question's code on the record.
+    const res = await consumeAndRun(deps, { id: click.id, actorIds }, io, ending, trace, (row) =>
+      dispatch(deps, row.message, io, { redispatch: { code: row.code } }),
+    );
+    if (res.kind === "redispatched") {
+      redispatched = res.outcome;
+      if (res.outcome.refusal !== undefined) ended.refusal = res.outcome.refusal;
+      if (res.outcome.cause !== undefined) ended.cause = res.outcome.cause;
+      return ended;
+    }
     if (res.kind === "refused") {
       const refusal = refusalOf(res.refusal, res.text);
       // A refusal after a command was bound is a run record (record 0054;
@@ -1663,7 +1699,7 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
       // nothing invoked, no surface told — with `outcome: "refused"` and the
       // code, so the door report counts it. `used` and an unreadable store
       // name no row and are counted from the trace alone.
-      if (res.row) {
+      if (res.row && res.row.kind === "run") {
         const row = res.row;
         await recordRoutedDecision(
           deps,
@@ -1711,7 +1747,7 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
   } finally {
     // The backstop, as in dispatch(): a finished run no reply reached is sealed and written.
     ending.drain(undefined);
-    ended.status = caught ? "failed" : refused ? "refused" : "completed";
+    ended.status = caught ? "failed" : refused ? "refused" : (redispatched?.status ?? "completed");
     root.end(caught ? "error" : "ok", { status: ended.status });
     activeRuns--;
   }

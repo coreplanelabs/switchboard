@@ -7,7 +7,8 @@
 import { buildReviewChannelReply, type ReviewPost, type ReviewVerdict } from "../reviewVerdict.js";
 import { visibilityOf } from "../authz/channelDirectory.js";
 import type { ChannelIO, ConfirmationOffer, DocumentAttachment, ImageAttachment } from "../types.js";
-import { renderOffer } from "../confirmations.js";
+import { confirmationMessageOf, newConfirmationId, renderOffer, type ConfirmationStore } from "../confirmations.js";
+import { CONFIRMATION_TTL_MS } from "../budgets.js";
 import type { ParsedChatCommand } from "../commandChat.js";
 import { cliWords } from "../commandSurface.js";
 import { toMarkdownDocument } from "../markdownDocument.js";
@@ -372,17 +373,63 @@ export function errorReply(err: unknown): string {
  * in `text` or `wayForward`. A `policy` refusal appends its way forward when
  * the producer set one apart from the text; a `system` refusal renders the
  * text as the error it is and never an offer or a Yes; a `request` refusal
- * without a guess renders the text — which names what the door needs — and
- * gains its question and offer in a later unit of record 0054.
+ * without a guess renders the text — which names what the door needs.
  */
-export async function renderRefusal(refusal: Refusal, io: ChannelIO): Promise<void> {
+export async function renderRefusal(
+  refusal: Refusal,
+  io: ChannelIO,
+  ctx: { confirmations?: ConfirmationStore } = {},
+): Promise<void> {
   // A `request` refusal that holds a guess is one question: the producer's
   // sentence, the marker, the corrected line to type and the evidence that
   // names the match. A channel that offers gets Yes and No on the same
-  // question in the unit that lands the button; until then the line to type is
-  // what the person reads (the record's channel-without-offer shape).
-  if (refusal.cause === "request" && refusal.guess) return io.reply(refusalQuestion(refusal));
+  // question (record 0054's button): the proposal is stored as a `redispatch`
+  // row and Yes hands it to `dispatch()` as the requester — a button showing
+  // the exact line, as record 0044's Run is. A channel without `offer`, a
+  // process without the store, or a store that cannot be reached at mint
+  // costs the button and nothing else: the line to type is what the person
+  // reads (the record's channel-without-offer shape).
+  if (refusal.cause === "request" && refusal.guess) {
+    if (await offerQuestion(refusal, io, ctx.confirmations)) return;
+    return io.reply(refusalQuestion(refusal));
+  }
   return io.reply(refusalLine(refusal));
+}
+
+/** Mint the question's `redispatch` row and show Yes and No on the channel's
+ *  offer; answers whether the offer went out. */
+async function offerQuestion(refusal: Refusal, io: ChannelIO, store: ConfirmationStore | undefined): Promise<boolean> {
+  const guess = refusal.guess;
+  if (!guess || !io.offer || !store) return false;
+  const proposal = confirmationMessageOf(guess.proposal);
+  let row;
+  try {
+    row = await store.put(
+      {
+        kind: "redispatch",
+        id: newConfirmationId(),
+        message: proposal,
+        line: guess.line,
+        evidence: guess.evidence,
+        code: refusal.code,
+      },
+      CONFIRMATION_TTL_MS,
+    );
+  } catch (err) {
+    console.warn(
+      `[reply] ${proposal.threadKey} confirmation store unreachable at the question's mint, rendering the line to type: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return false;
+  }
+  await io.offer({
+    id: row.id,
+    line: guess.line,
+    risk: "",
+    footer: "",
+    expiresAt: row.expiresAt,
+    question: { text: refusal.text, evidence: guess.evidence },
+  });
+  return true;
 }
 /**
  * The one question a `request` refusal with a guess renders (record 0054): the
