@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.249.1](https://github.com/coreplanelabs/switchboard/compare/v1.249.0...v1.249.1) (2026-09-18)
+
+
+### Bug fixes
+
+* **resident:** a slow status probe falls cold once, never as an outage ([#1751](https://github.com/coreplanelabs/switchboard/issues/1751)) ([dd782f2](https://github.com/coreplanelabs/switchboard/commit/dd782f2c0c1cc70da1f3feff11a9057e9eaccb02))
+* **resident:** the refresh cycle yields to a busy container ([#1756](https://github.com/coreplanelabs/switchboard/issues/1756)) ([ede94be](https://github.com/coreplanelabs/switchboard/commit/ede94beda8a8a15ab15b80eb8df7e97d7ebd3568))
+* **ship:** a conflicting approved PR is merged by hand, never re-run ([#1750](https://github.com/coreplanelabs/switchboard/issues/1750)) ([d6212ae](https://github.com/coreplanelabs/switchboard/commit/d6212aecdd2852919c51a3273cd2756559e686c2))
+
+
+### Documentation
+
+* **docs:** record 0057 takes the adversarial round as dated amendments ([#1757](https://github.com/coreplanelabs/switchboard/issues/1757)) ([870d58d](https://github.com/coreplanelabs/switchboard/commit/870d58d9490e153683ae05d41bd4575c24c05d47))
+* **docs:** the intake gate plan; record 0058 accepted ([#1758](https://github.com/coreplanelabs/switchboard/issues/1758)) ([6eaccf0](https://github.com/coreplanelabs/switchboard/commit/6eaccf0c77c3aa6226ef21f5eb7eb9367c39567c))
+* **harness:** record 0038 stage-end amendment: the live reads ([#1755](https://github.com/coreplanelabs/switchboard/issues/1755)) ([9dd7e3e](https://github.com/coreplanelabs/switchboard/commit/9dd7e3e53dbb47b1bf6a2e498f7529c7d5b4cfa5))
+* the 0051 plan names the halves record 0057's operator replaces ([78a2ef9](https://github.com/coreplanelabs/switchboard/commit/78a2ef9edb71ff56dfc04ee4be2c07a02afb8416))
+* the 0051 plan names the halves record 0057's operator replaces ([#1753](https://github.com/coreplanelabs/switchboard/issues/1753)) ([78a2ef9](https://github.com/coreplanelabs/switchboard/commit/78a2ef9edb71ff56dfc04ee4be2c07a02afb8416))
+
 ## [1.249.0](https://github.com/coreplanelabs/switchboard/compare/v1.248.0...v1.249.0) (2026-09-18)
 
 
