@@ -23,7 +23,8 @@ import type { RunsService } from "../runsService.js";
 import type { ConfirmationStore } from "../confirmations.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RecordDeps } from "./record.js";
-import { replyCommandOutput } from "./reply.js";
+import { renderRefusal, replyCommandOutput } from "./reply.js";
+import { commandRefusalCode, refusalOf, type Guess } from "../refusal.js";
 // The command-run machinery the fast path and the router's command branch
 // share (commandRun.ts): invoked through the registry as the message's user,
 // recorded as an inline run when the command does work.
@@ -173,11 +174,30 @@ export async function answerChatCommand(deps: FastPathDeps, ctx: RequestContext)
     if (chatCmd) {
       const route = await pastedRoute(deps, msg, chatCmd);
       const res = await runChatCommand(deps, msg, io, chatCmd, ending, trace, route ? { route } : {});
+      // A failed command that carries a guess is one question (record 0054):
+      // `renderRefusal` offers Yes and No on channels with `offer`, or replies
+      // the line to type on channels without one. The typed path has no receipt —
+      // `renderRefusal` handles the full reply. The proposal is the original
+      // message with its text replaced by the corrected line (the form `dispatch()`
+      // would run on Yes — a typed command whose correction is the corrected line).
+      const replyFn =
+        !res.ok && res.guess && res.error
+          ? () => {
+              const hint = res.guess!;
+              const guess: Guess = {
+                proposal: { ...msg, text: hint.line },
+                line: hint.line,
+                evidence: hint.evidence,
+              };
+              return root.span("post.reply", () =>
+                renderRefusal(refusalOf(commandRefusalCode(res.error!), res.text, { guess }), io, {
+                  confirmations: deps.confirmations,
+                }),
+              );
+            }
+          : () => root.span("post.reply", () => replyCommandOutput(io, chatCmd, res.text));
       // The command run (if the command made one) seals after its reply.
-      await ending.sealAfterReply(
-        async () => {},
-        () => root.span("post.reply", () => replyCommandOutput(io, chatCmd, res.text)),
-      );
+      await ending.sealAfterReply(async () => {}, replyFn);
       if (res.followUp) postSettledOutcome(res.followUp, io, root);
       return true;
     }

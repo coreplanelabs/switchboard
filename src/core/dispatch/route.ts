@@ -90,7 +90,8 @@ import { repoFromThread } from "../repoContext.js";
 import type { ConversationReader } from "../references/types.js";
 import { quotableReferences } from "./references.js";
 import { postSettledOutcome, recordRoutedDecision, runChatCommand, type RouteEventFields } from "./commandRun.js";
-import { renderConfirmationOffer } from "./reply.js";
+import { renderConfirmationOffer, renderRefusal } from "./reply.js";
+import { commandRefusalCode, refusalOf, type Guess } from "../refusal.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { maxChildrenOf } from "./spawn.js";
 
@@ -1346,11 +1347,41 @@ async function answerCommand(
     route,
     source: "route",
   });
-  const text = res.ok ? `${receiptLine}\n${res.text}` : `${receiptLine}\n${res.text}\n${ROUTED_CARD_FOOTER}`;
-  await ending.sealAfterReply(
-    async () => {},
-    () => root.span("post.reply", () => io.reply(text)),
-  );
+  // A failed command that carries a guess is one question (record 0054): the
+  // receipt leads as it does for any command reply, then `renderRefusal` offers
+  // Yes and No on channels with `offer`, or replies the line to type otherwise.
+  // The receipt goes out first; the footer is not appended — the question carries
+  // the error sentence and `renderRefusal` handles the full offer or text form.
+  // The proposal is the original message with its text replaced by the corrected
+  // line (the slug replaced in the original prose, so a Yes runs the right request).
+  if (!res.ok && res.guess && res.error) {
+    const hint = res.guess;
+    // For a routed command, synthesise the proposal from the original message:
+    // replace the typed slug with the corrected one in the prose, so a Yes runs
+    // the corrected version of what the person asked. The corrected line (`hint.line`)
+    // is the chat form of the fixed command (e.g. `repo test owner/repo ref`);
+    // the proposal's text is that corrected line, which `dispatch()` will re-route.
+    const guess: Guess = {
+      proposal: { ...msg, text: hint.line },
+      line: hint.line,
+      evidence: hint.evidence,
+    };
+    const refusal = refusalOf(commandRefusalCode(res.error), res.text, { guess });
+    await ending.sealAfterReply(
+      async () => {},
+      () =>
+        root.span("post.reply", async () => {
+          await io.reply(`${receiptLine}\n${ROUTED_CARD_FOOTER}`);
+          await renderRefusal(refusal, io, { confirmations: deps.confirmations });
+        }),
+    );
+  } else {
+    const text = res.ok ? `${receiptLine}\n${res.text}` : `${receiptLine}\n${res.text}\n${ROUTED_CARD_FOOTER}`;
+    await ending.sealAfterReply(
+      async () => {},
+      () => root.span("post.reply", () => io.reply(text)),
+    );
+  }
   if (res.ok && res.followUp) postSettledOutcome(res.followUp, io, root);
   return { kind: "command", command: def.id, outcome: res.ok ? "ok" : "error" };
 }
