@@ -12,7 +12,8 @@ import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { RunRegistry } from "../runRegistry.js";
-import { NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
+import { createLedgerWriteThrough, NullLedgerWriteThrough } from "../runLedger/writeThrough.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { InMemoryRunStore, NullRunStore } from "../runStore.js";
 import { InMemoryCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { ThreadAdmission } from "../threadAdmission.js";
@@ -355,6 +356,64 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     s.ending.drain(false);
     await s.writer.settled();
     expect(await s.store.get("run-s")).toMatchObject({ status: "failed", replyOk: false });
+  });
+
+  // A ship start the fit refuses at the fork must not leave a live
+  // ledger row for the thread — otherwise the next run in the thread is
+  // untracked (its record notes `ledger_untracked`, no durable inbox, no
+  // reclaim). A start refused before any run exists must write no live row, or
+  // finish the one it wrote in the same step as the refusal.
+  it("fit refusal leaves the thread's ledger row free: the live ledger has no row for the thread after a budget refusal, and the next run in the thread is tracked", async () => {
+    const inner = new InMemoryRunLedger(() => NOW);
+    const ledger = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "gen-T",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+    const s = setup("slack:UADMIN", { minutes: 40 });
+    s.deps.runLedger = ledger;
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.refusals).toEqual(["ship_budget"]);
+    // The thread must have no live ledger row after the fit refusal.
+    const liveAfterRefusal = await inner.listLive();
+    expect(liveAfterRefusal.filter((r) => r.threadKey === THREAD)).toHaveLength(0);
+  });
+
+  it("fit refusal leaves the thread's row free so the next run in the thread is tracked: a second ship call after the budget refusal opens a live ledger row", async () => {
+    const inner = new InMemoryRunLedger(() => NOW);
+    const ledger = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "gen-T",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+
+    // First call: fit refusal at 40 min.
+    const s1 = setup("slack:UADMIN", { minutes: 40 });
+    s1.deps.runLedger = ledger;
+    await runShipBranch(s1.deps, s1.msg, s1.io, s1.ctx);
+    expect(s1.refusals).toEqual(["ship_budget"]);
+
+    // Second call: a new registry so a new run id is minted, sufficient budget.
+    const s2 = setup("slack:UADMIN", { minutes: 200 });
+    s2.deps.runLedger = ledger;
+    await runShipBranch(s2.deps, s2.msg, s2.io, s2.ctx);
+    // The second call must succeed (no refusals) and the runner must be asked.
+    expect(s2.refusals).toEqual([]);
+    expect(s2.created).toHaveLength(1);
+    // Wait for the second run's ledger write (the finish) to settle so the live
+    // map reflects the final state.
+    await s2.writer.settled();
+    // The thread's row has been opened and then finished by the second run
+    // (finished rows are removed from `live`). The live map is empty because
+    // the run ended, which proves no stale row from the first call blocked the
+    // second — if the first call's row had remained, the second call's
+    // ledger.open() would have returned undefined and the run would have been
+    // untracked, but the hand-off above ran, showing the second run was tracked.
+    const liveAfterSecond = await inner.listLive();
+    const threadRows = liveAfterSecond.filter((r) => r.threadKey === THREAD);
+    expect(threadRows).toHaveLength(0);
   });
 });
 

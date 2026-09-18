@@ -190,6 +190,37 @@ export async function runShipBranch(
   }
   const entry = pre.entry;
 
+  // The runner's caps (agent-ship.md item 8): the rounds cap is the config
+  // block's; the wall clock is the parent's effective budget — the preset's
+  // declared `ship.maxMinutes` as a boundary or a `budget:` directive clipped
+  // it — so every child round the runner spawns is clipped to what remains of THAT.
+  const caps = { ...resolveShipCaps(deps.config.config.ship), maxMinutes: profile.minutes };
+  // The fit at the fork (agent-ship item 8, decision 0046): a boundary or a
+  // `budget:` directive that clipped the pipeline under the loop it allows is
+  // refused here with the sum on the card, never carved into a child that
+  // cannot do useful work. The check runs BEFORE the run record or ledger row
+  // is created, so a refused start writes no live row and the thread's next
+  // run is tracked.
+  const held = fit(caps);
+  if (!held.ok) {
+    const reason = `budget ${caps.maxMinutes} min cannot hold the ship loop (${caps.maxRounds} review rounds need ${held.need} min)`;
+    console.log(`[ship] ${msg.threadKey} not started: ${reason}`);
+    await refuse(
+      refusalOf(
+        "ship_budget",
+        REFUSAL_SENTENCES.ship_budget({
+          maxMinutes: caps.maxMinutes,
+          maxRounds: caps.maxRounds,
+          need: held.need,
+          provision: ALLOWANCES.provision,
+          coding: ASKS.coding,
+        }),
+      ),
+      () => card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
+    );
+    return;
+  }
+
   // The one run record: registered and stamped exactly like the main
   // path — input, run_meta, bounded context, the tombstone.
   const registry = deps.runRegistry ?? defaultRunRegistry;
@@ -338,34 +369,6 @@ export async function runShipBranch(
   shell.setLink(liveUrl ? { url: liveUrl, label: "Live run" } : undefined);
   let outcome: HandOffOutcome | undefined;
   let shipDiagnosis: FrictionDiagnosis | undefined;
-  // The runner's caps (agent-ship.md item 8): the rounds cap is the config
-  // block's; the wall clock is the parent's effective budget — the preset's
-  // declared `ship.maxMinutes` as a boundary or a `budget:` directive clipped
-  // it — so every child round the runner spawns is clipped to what remains of THAT.
-  const caps = { ...resolveShipCaps(deps.config.config.ship), maxMinutes: profile.minutes };
-  // The fit at the fork (agent-ship item 8, decision 0046): a boundary or a
-  // `budget:` directive that clipped the pipeline under the loop it allows is
-  // refused here with the sum on the card, never carved into a child that
-  // cannot do useful work.
-  const held = fit(caps);
-  if (!held.ok) {
-    const reason = `budget ${caps.maxMinutes} min cannot hold the ship loop (${caps.maxRounds} review rounds need ${held.need} min)`;
-    console.log(`[ship] ${msg.threadKey} not started: ${reason}`);
-    await refuse(
-      refusalOf(
-        "ship_budget",
-        REFUSAL_SENTENCES.ship_budget({
-          maxMinutes: caps.maxMinutes,
-          maxRounds: caps.maxRounds,
-          need: held.need,
-          provision: ALLOWANCES.provision,
-          coding: ASKS.coding,
-        }),
-      ),
-      () => card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
-    );
-    return;
-  }
   // The severity to address, resolved once here — the request's
   // `severity:` directive over the user's scope over the channel's over the
   // org's — and handed to the runner on the instance beside `merge`.
