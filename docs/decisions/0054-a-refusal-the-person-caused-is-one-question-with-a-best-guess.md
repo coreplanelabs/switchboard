@@ -17,7 +17,7 @@ The decision comes in two cuts, and the maintainer may take the smaller: the **f
 
 The bet: one type and one renderer for every refusal, with the cause deciding whether the bot asks or reports, so a refusal the person caused becomes a question with a best guess instead of a dead end, and no rule of 0039 or 0044 bends because an answer re-enters the door as a request rather than running anything. Today the bot refuses through 19 mechanisms across 71 inventory rows, one of them a question; on 2026-09-17 one typo (`acme/infra` for `acme/infrastructure`) cost two dead ends although two lists in the codebase named the right repository and neither is read where the refusals fire. The design is a `Refusal` object (cause, code, the sentence, an optional guess holding the corrected request and its evidence), produced from every layer, rendered in one place and fenced by a lint rule that forbids replying or throwing to the person in the producing modules; Yes and No ride 0044's confirmation store under a second row kind, and the next typed message is read against the question by the router the thread already pays for, with no keyword. The cost is one migration of 19 mechanisms, one more registry call at the repository gate, a cancel-by-thread on the store and a marker in the bot's own question. Decided: the seam, the fence, the three causes, the two answer paths, deterministic guesses before model guesses, and no write without a button; open: how close a near match must be, whether a policy refusal may carry a guess, and how long the button lives; unknown, and counted by the first plan unit: how often people hit a request-caused refusal at all.
 
-## Today at `5c897438`
+## Today at `64d8b7ee`
 
 The delta from what a veteran expects; the appendix has the groups.
 
@@ -166,7 +166,7 @@ Every row is `[gap]` today and names the plan's unit by title.
 | The replay's answer row: over fixtures holding a pending question and a plain yes, a yes-but, a no-but or a fresh ask, the router answers `accept`, `amend`, `decline` or nothing respectively, with at most one fresh ask in twenty read as `accept`; the replay's clarify row: fixtures whose right answer is a question get one and no bind fixture does | `[gap]` the words unit and the router's question unit: `src/load/routeReplay.test.ts` and the replay's checked-in fixtures |
 | Live, human-gated: the trace's message on a wrong repository name answers one question with the right repository; Yes starts ship there; "yes but on staging" shows a new question with staging in the line | `[gap]` posted on the receipts tracker |
 
-## Appendix: the inventory at `5c897438`
+## Appendix: the inventory at `64d8b7ee`
 
 Seventy-one rows in the inventory of 2026-09-17, grouped; a row may cover several throw sites.
 
@@ -191,5 +191,5 @@ Mechanisms: 19. Clarifying questions among refusals: 1. Request-caused rows: abo
 
 - The maintainer and a colleague, 2026-09-17, quoted in the ask; the colleague's thread of 2026-09-17 08:27Z (the trace).
 - [0044](0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md) (the confirmation store, the button, the requester rule reused), [0039](0039-the-front-door-writes-nothing-from-prose-and-never-routes-twice.md) (a failed command asks; never a second route), [0036](0036-one-front-door-the-router-offers-every-command-and-ship.md) (the router and its thread-repository line), [0002](0002-dispatcher-is-the-only-orchestrator.md) (the dispatcher renders every reply).
-- The refusal inventory of 2026-09-17 at `5c897438`, summarised in the appendix; the correctness review of this record, which corrected its counts.
+- The refusal inventory of 2026-09-17 at `64d8b7ee`, summarised in the appendix; the correctness review of this record, which corrected its counts.
 - The `no-raw-env` lint rule in `eslint.config.mjs` and its test, the fence pattern borrowed.
