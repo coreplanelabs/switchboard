@@ -15,6 +15,8 @@
 
 import { randomBytes } from "node:crypto";
 import type { Identity } from "../../../agents/registry.js";
+import { EFFORT_LEVELS, type Effort } from "../../../effort.js";
+import type { ModelCard } from "../../modelCard.js";
 import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import type { ProviderConfig } from "../../provider.js";
 import type { Clock } from "../../trace/types.js";
@@ -28,7 +30,7 @@ import {
   type HarnessResponse,
 } from "../container.js";
 import type { OpenCodeHarnessFacts } from "../contract.js";
-import { HARNESS_URL_ENV, PROXY_PROVIDER, RUN_BEARER_ENV } from "../pi/process.js";
+import { HARNESS_URL_ENV, PROXY_PROVIDER, RUN_BEARER_ENV, takesAdaptiveThinking } from "../pi/process.js";
 import {
   OPENCODE_ROUTES,
   OPENCODE_VERSION,
@@ -235,6 +237,12 @@ export interface OpenCodeLaunchSpec {
   system: string;
   /** The harness's own tools the plugin will register, so the prompt can name them. */
   relayTools: readonly string[];
+  /** The run's resolved model card (record 0052): what the configuration says
+   *  of the model — `limit.context` from the window, `capabilities.input` from
+   *  the inputs, one `variants` entry per tier whose `body` overlay spells the
+   *  wire's word, the cap field — in place of the invented one. Absent (a
+   *  hand-built spec), the defaults stand and no variants are declared. */
+  card?: ModelCard;
   compaction?: OpenCodeCompactionConfig;
 }
 
@@ -253,6 +261,51 @@ export function openCodeProviderPackage(providerType: ProviderConfig["type"]): s
  *  for either. */
 export function openCodeProviderBaseUrl(harnessUrl: string): string {
   return `${harnessUrl.replace(/\/$/, "")}/v1`;
+}
+
+/** The card's effort tiers as the model's `variants` (record 0052): one entry
+ *  per tier the card does not refuse, the tier as the variant's id — the word
+ *  a session selects the tier by (`model.variant`; the harness's `effort()`
+ *  answers the tier itself) — and a `body` overlay that spells the wire's own
+ *  word for it, so the word on the wire is the card's and never one the
+ *  harness chose: `reasoning_effort` on the completions dialect;
+ *  `output_config.effort` with adaptive thinking on the Anthropic dialect,
+ *  where only a model that takes adaptive thinking carries an effort word at
+ *  all (a budget model has no word to spell, so it gets no variants and the
+ *  tier is left to the provider's default). Unknown levels are the identity
+ *  map — the asked tier's own word, unvouched, never a silent clamp. */
+export function openCodeVariants(
+  model: { id: string; providerType: ProviderConfig["type"] },
+  card: ModelCard | undefined,
+): Array<{ id: string; body: Record<string, unknown> }> | undefined {
+  if (card === undefined) return undefined;
+  const anthropic = model.providerType === "anthropic";
+  if (anthropic && !takesAdaptiveThinking(model.id)) return undefined;
+  const variants: Array<{ id: string; body: Record<string, unknown> }> = [];
+  for (const tier of EFFORT_LEVELS) {
+    const level = card.levels === "unknown" ? undefined : card.levels[tier];
+    if (level === "refused") continue;
+    const word = level === undefined ? tier : level.word;
+    variants.push({
+      id: tier,
+      body: anthropic
+        ? { thinking: { type: "adaptive" }, output_config: { effort: word } }
+        : { reasoning_effort: word },
+    });
+  }
+  return variants.length > 0 ? variants : undefined;
+}
+
+/** The variant a run's tier selects on the session's model ref: the tier
+ *  itself, exactly when the configuration declares it (`openCodeVariants`), so
+ *  a session never names a variant the document does not carry. */
+export function openCodeVariantId(
+  effort: Effort | undefined,
+  model: { id: string; providerType: ProviderConfig["type"] },
+  card: ModelCard | undefined,
+): string | undefined {
+  if (effort === undefined) return undefined;
+  return openCodeVariants(model, card)?.some((v) => v.id === effort) ? effort : undefined;
 }
 
 /** What the system prompt gains under OpenCode: the workspace tools are
@@ -294,7 +347,10 @@ export function openCodeSystemPrompt(spec: OpenCodeLaunchSpec): string {
  *  OpenCode at load (`packages/core/src/config/variable.ts:27-33`; a provider with
  *  `settings.apiKey` needs no credential-store entry,
  *  `packages/core/src/model-resolver.ts:262`) and a zero rate card because the
- *  proxy meters; that model as the default; the `switchboard` agent as the
+ *  proxy meters — the entry the run's card (record 0052): `limit.context` from
+ *  the card's window, `capabilities.input` from its inputs, one `variants`
+ *  entry per tier with the wire's word (`openCodeVariants`), the cap field as
+ *  `compatibility.maxTokensField` on the completions dialect; that model as the default; the `switchboard` agent as the
  *  default agent, primary, with the composed prompt and the gate's rules; the
  *  `title` agent removed (`packages/core/src/config/plugin/agent.ts:97-100`), or
  *  every session's first prompt spends one more model call — a proxy turn — on a
@@ -305,10 +361,20 @@ export function openCodeSystemPrompt(spec: OpenCodeLaunchSpec): string {
  *  the compaction thresholds when the deployment sets them. */
 export function openCodeConfig(spec: OpenCodeLaunchSpec): Record<string, unknown> {
   const { id, maxTokens, providerType, contextTokens } = spec.model;
+  const card = spec.card;
   const compaction = {
     ...(spec.compaction?.buffer !== undefined ? { buffer: spec.compaction.buffer } : {}),
     ...(spec.compaction?.keepTokens !== undefined ? { keep: { tokens: spec.compaction.keepTokens } } : {}),
   };
+  const variants = openCodeVariants(spec.model, card);
+  // The cap field the completions dialect spells the output cap with, the
+  // card's word when it is one the schema takes (`compatibility.maxTokensField`
+  // knows the two chat spellings; the Anthropic dialect's cap is always
+  // `max_tokens` and the Responses route is a later slice's).
+  const capField =
+    providerType !== "anthropic" && (card?.capField === "max_completion_tokens" || card?.capField === "max_tokens")
+      ? card.capField
+      : undefined;
   return {
     providers: {
       [PROXY_PROVIDER]: {
@@ -318,7 +384,18 @@ export function openCodeConfig(spec: OpenCodeLaunchSpec): Record<string, unknown
         models: {
           [id]: {
             name: id,
-            limit: { context: contextTokens ?? OPENCODE_DEFAULT_CONTEXT_TOKENS, output: maxTokens },
+            limit: { context: card?.window ?? contextTokens ?? OPENCODE_DEFAULT_CONTEXT_TOKENS, output: maxTokens },
+            ...(card !== undefined
+              ? {
+                  capabilities: {
+                    tools: true,
+                    input: card.inputs.image === false ? ["text"] : ["text", "image"],
+                    output: ["text"],
+                  },
+                }
+              : {}),
+            ...(variants !== undefined ? { variants } : {}),
+            ...(capField !== undefined ? { compatibility: { maxTokensField: capField } } : {}),
             cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
           },
         },

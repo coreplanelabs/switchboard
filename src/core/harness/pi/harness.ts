@@ -869,6 +869,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         paths,
         model: { id: run.model.id, providerType: run.model.providerType, maxTokens: run.agent.maxTokens },
         harnessUrl: deps.harnessUrl,
+        ...(run.card ? { card: run.card } : {}),
         ...(run.effort ? { effort: run.effort } : {}),
         identity: run.agent.identity,
         system: run.system,

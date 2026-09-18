@@ -42,8 +42,11 @@ import {
   openCodeRunPaths,
   openCodeRunPathsAt,
   openCodeTailerEnv,
+  openCodeVariantId,
+  openCodeVariants,
   type OpenCodeLaunchSpec,
 } from "./process.js";
+import type { ModelCard } from "../../modelCard.js";
 import { OPENCODE_SERVE_PID_ENV, OPENCODE_TAILER_SOURCE } from "./tailerSource.js";
 
 // Feature: docs/reference/specs/harness.md, the OpenCode process item — how a
@@ -84,10 +87,51 @@ const generalSpec: OpenCodeLaunchSpec = {
   relayTools: ["web_fetch", "update_status", "github_repos"],
 };
 
+/** A card fixture (record 0052): the wire-default card, overridable per test. */
+const cardOf = (over: Partial<ModelCard>): ModelCard => ({
+  ref: "openrouter/acme/m1",
+  block: "openrouter",
+  model: "acme/m1",
+  vendor: "acme",
+  wire: "openai-chat",
+  levels: "unknown",
+  capField: "max_completion_tokens",
+  window: 128_000,
+  inputs: { image: "unknown", document: "unknown" },
+  cache: "unknown",
+  provenance: { levels: "wire", capField: "wire", window: "wire", inputs: "wire", cache: "wire", price: "wire" },
+  ...over,
+});
+
+/** A card whose registry names every tier (`max` refused), caps under
+ *  `max_tokens` and knows the window — the known-card scenario. */
+const knownCard = cardOf({
+  levels: {
+    low: { word: "low", named: true },
+    medium: { word: "medium", named: true },
+    high: { word: "high", named: true },
+    xhigh: { word: "high", named: false },
+    max: "refused",
+  },
+  capField: "max_tokens",
+  window: 131_072,
+  inputs: { image: true, document: false },
+  provenance: {
+    levels: "registry",
+    capField: "registry",
+    window: "registry",
+    inputs: "registry",
+    cache: "wire",
+    price: "wire",
+  },
+});
+
 const SPECS: Array<[string, OpenCodeLaunchSpec]> = [
   ["write on the Anthropic dialect", spec],
   ["read on the completions dialect", reviewSpec],
   ["none on the Anthropic dialect", generalSpec],
+  ["a card on the completions dialect", { ...reviewSpec, card: knownCard }],
+  ["a card on the Anthropic dialect", { ...spec, card: cardOf({ wire: "anthropic-messages", cache: "markers" }) }],
 ];
 
 /** OpenCode's own judgement, as its evaluator makes it (`findLast` over the
@@ -330,6 +374,67 @@ describe("the configuration writer", () => {
     expect(completions.model).toBe("switchboard/gpt-x-large");
     const loopback = openCodeConfig(generalSpec) as any;
     expect(loopback.providers.switchboard.settings.baseURL).toBe("http://127.0.0.1:8080/v1");
+  });
+
+  // The card written into the document (record 0052): the word on the wire is
+  // the card's, never one the harness chose.
+  const modelEntry = (s: OpenCodeLaunchSpec) => (openCodeConfig(s) as any).providers[PROXY_PROVIDER].models[s.model.id];
+
+  it("a known card writes its window as limit.context, its inputs as capabilities.input, its cap field, and one variant per tier it does not refuse", () => {
+    const entry = modelEntry({ ...reviewSpec, card: knownCard });
+    expect(entry.limit).toEqual({ context: 131072, output: 32000 });
+    expect(entry.capabilities).toEqual({ tools: true, input: ["text", "image"], output: ["text"] });
+    expect(entry.compatibility).toEqual({ maxTokensField: "max_tokens" });
+    // `max` is refused on the card, so no variant declares it; the fallback
+    // tier's overlay spells the card's word (`high`), never the tier's own.
+    expect(entry.variants).toEqual([
+      { id: "low", body: { reasoning_effort: "low" } },
+      { id: "medium", body: { reasoning_effort: "medium" } },
+      { id: "high", body: { reasoning_effort: "high" } },
+      { id: "xhigh", body: { reasoning_effort: "high" } },
+    ]);
+  });
+
+  it("an unknown card writes the identity variants — five tiers, each overlay the tier's own word, unvouched — and its window", () => {
+    const entry = modelEntry({ ...reviewSpec, card: cardOf({}) });
+    expect(entry.limit.context).toBe(128000);
+    expect(entry.capabilities.input).toEqual(["text", "image"]);
+    expect(entry.variants.map((v: { id: string }) => v.id)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(entry.variants[3].body).toEqual({ reasoning_effort: "xhigh" });
+    // The wire's own field, still spelled explicitly: the document says what
+    // the card decided, default or not.
+    expect(entry.compatibility).toEqual({ maxTokensField: "max_completion_tokens" });
+  });
+
+  it("the Anthropic dialect spells the tier as adaptive output_config.effort, and its cap field stays the dialect's own", () => {
+    const entry = modelEntry({ ...spec, card: cardOf({ wire: "anthropic-messages", capField: "max_tokens" }) });
+    expect(entry.variants[4]).toEqual({
+      id: "max",
+      body: { thinking: { type: "adaptive" }, output_config: { effort: "max" } },
+    });
+    expect(entry).not.toHaveProperty("compatibility");
+  });
+
+  it("a card that says no images narrows capabilities.input to text; no card declares no capabilities and no variants", () => {
+    const entry = modelEntry({ ...reviewSpec, card: cardOf({ inputs: { image: false, document: "unknown" } }) });
+    expect(entry.capabilities.input).toEqual(["text"]);
+    const bare = modelEntry(reviewSpec);
+    expect(bare).not.toHaveProperty("capabilities");
+    expect(bare).not.toHaveProperty("variants");
+  });
+
+  it("a budget Anthropic model has no adaptive word to spell, so it gets no variants and no session variant", () => {
+    const budget = { id: "claude-sonnet-4", providerType: "anthropic" as const, maxTokens: 64000 };
+    expect(openCodeVariants(budget, cardOf({ wire: "anthropic-messages" }))).toBeUndefined();
+    expect(openCodeVariantId("high", budget, cardOf({ wire: "anthropic-messages" }))).toBeUndefined();
+  });
+
+  it("the session's variant is the tier exactly when the document declares it: a refused tier and a card-less run select none", () => {
+    const model = { id: "gpt-x-large", providerType: "openai-compatible" as const, maxTokens: 32000 };
+    expect(openCodeVariantId("xhigh", model, knownCard)).toBe("xhigh");
+    expect(openCodeVariantId("max", model, knownCard)).toBeUndefined();
+    expect(openCodeVariantId("high", model, undefined)).toBeUndefined();
+    expect(openCodeVariantId(undefined, model, knownCard)).toBeUndefined();
   });
 
   it("carries no secret: the bearer is a variable's name in the file, never its value", () => {

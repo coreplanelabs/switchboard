@@ -16,6 +16,7 @@ import { chatActorOf } from "../authz/actor.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
+import type { ModelCard } from "../modelCard.js";
 import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
 import {
   HarnessContainerReplacedError,
@@ -239,6 +240,10 @@ export interface RunLoopContext {
    *  the harness hands it to pi as its provider key. Absent without a store —
    *  then no run can start here, and the loop says so by name. */
   bearer?: string;
+  /** The run's resolved model card (record 0052), the dispatcher's resolve
+   *  stage's answer: the harness writes it into its process's configuration in
+   *  place of an invented one. Absent on a hand-built context (a test). */
+  modelCard?: ModelCard;
 }
 
 /**
@@ -1014,6 +1019,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             agent,
             ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
             model: { id: modelId, provider: providerName, providerType: providerCfg.type },
+            ...(ctx.modelCard ? { card: ctx.modelCard } : {}),
             system,
             messages,
             tools: mergeTools(TOOLSETS[agent.toolset] ?? [], mcpForRun?.tools),

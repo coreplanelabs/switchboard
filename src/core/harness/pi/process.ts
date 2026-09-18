@@ -8,7 +8,8 @@
 // extension. Pure: strings and records; the container seam writes and runs them.
 
 import type { Identity } from "../../../agents/registry.js";
-import type { Effort } from "../../../effort.js";
+import { EFFORT_LEVELS, type Effort } from "../../../effort.js";
+import type { ModelCard } from "../../modelCard.js";
 import type { ProviderConfig } from "../../provider.js";
 import type { PiCompactionConfig } from "../../../config.js";
 import type { HarnessPaths, HarnessStart } from "../container.js";
@@ -135,6 +136,12 @@ export interface PiLaunchSpec {
   system: string;
   /** The harness's own tools the extension registers, so the prompt can name them. */
   relayTools: readonly string[];
+  /** The run's resolved model card (record 0052): what `models.json` says of
+   *  the model — the level map, the window, the cap field, the cache rule —
+   *  in place of the invented one, so the word on the wire is the card's and
+   *  never one pi chose. Absent (a hand-built spec), the wire-default card
+   *  stands: the identity level map, pi's unknown window, the wire's cap field. */
+  card?: ModelCard;
   /** A session file to continue from (a resume after the container's pi died). */
   sessionPath?: string;
   /** The deployment's compaction thresholds for pi's settings (`pi.compaction`
@@ -212,16 +219,59 @@ export function takesAdaptiveThinking(modelId: string): boolean {
   return major > 4 || (major === 4 && minor >= 6);
 }
 
+/** The card's level map as pi's `thinkingLevelMap`: each tier the wire's word
+ *  the card resolved (a fallback's word included, so pi clamps nothing the
+ *  card did not), `null` for a refused tier — the dispatcher refuses such a
+ *  run before pi exists; the null keeps pi honest if one slips by. Unknown
+ *  levels (no layer names them) are the identity map: the asked tier's own
+ *  word goes out unvouched, never pi's silent clamp of `xhigh` to `high`. */
+export function piThinkingLevelMap(levels: ModelCard["levels"] | undefined): Record<string, string | null> {
+  const map: Record<string, string | null> = {};
+  for (const tier of EFFORT_LEVELS) {
+    const level = levels === undefined || levels === "unknown" ? undefined : levels[tier];
+    map[tier] = level === "refused" ? null : level === undefined ? tier : level.word;
+  }
+  return map;
+}
+
+/** The two spellings pi's completions compat takes for the output cap; the
+ *  card's field is written only when it is one of them (`max_output_tokens`
+ *  belongs to the Responses route, which pi's completions shape never posts). */
+const PI_MAX_TOKENS_FIELDS = ["max_completion_tokens", "max_tokens"] as const;
+type PiMaxTokensField = (typeof PI_MAX_TOKENS_FIELDS)[number];
+function piMaxTokensField(capField: string | undefined): PiMaxTokensField | undefined {
+  return (PI_MAX_TOKENS_FIELDS as readonly string[]).includes(capField ?? "")
+    ? (capField as PiMaxTokensField)
+    : undefined;
+}
+
 /** pi's `models.json`: one provider, the bot's proxy, on the wire shape the
  *  run's provider speaks — `anthropic-messages` posts `/v1/messages` under the
  *  base, `openai-completions` posts `/chat/completions` under `<base>/v1` —
- *  with the key read from the bearer's variable at request time, the thinking
- *  payload the model takes on the Anthropic shape (`takesAdaptiveThinking`;
- *  the completions shape has no such switch), and a zero rate card, because
- *  pi's `usage.cost` is never what a page shows: the proxy meters. */
+ *  with the key read from the bearer's variable at request time and a zero
+ *  rate card, because pi's `usage.cost` is never what a page shows: the proxy
+ *  meters. The model entry is the run's card (record 0052), never one pi
+ *  invents: the resolved level map (`piThinkingLevelMap`; the identity map
+ *  when no layer names the levels, so pi clamps nothing), the card's window
+ *  as `contextWindow`, the card's inputs, the cap field as
+ *  `compat.maxTokensField` and `compat.cacheControlFormat: "anthropic"` when
+ *  the card's cache rule is markers (an Anthropic vendor through an
+ *  aggregator) on the completions shape, and the thinking payload the model
+ *  takes on the Anthropic shape (`takesAdaptiveThinking`). */
 export function piModelsJson(spec: PiLaunchSpec): string {
   const anthropic = spec.model.providerType === "anthropic";
   const base = spec.harnessUrl.replace(/\/$/, "");
+  const card = spec.card;
+  const capField = piMaxTokensField(card?.capField);
+  const completionsCompat = {
+    ...(capField !== undefined ? { maxTokensField: capField } : {}),
+    ...(card?.cache === "markers" ? { cacheControlFormat: "anthropic" } : {}),
+  };
+  const compat = anthropic
+    ? { forceAdaptiveThinking: takesAdaptiveThinking(spec.model.id) }
+    : Object.keys(completionsCompat).length > 0
+      ? completionsCompat
+      : undefined;
   return (
     JSON.stringify(
       {
@@ -235,9 +285,10 @@ export function piModelsJson(spec: PiLaunchSpec): string {
                 id: spec.model.id,
                 name: spec.model.id,
                 reasoning: true,
-                ...(anthropic ? { compat: { forceAdaptiveThinking: takesAdaptiveThinking(spec.model.id) } } : {}),
-                input: ["text", "image"],
-                contextWindow: 200_000,
+                ...(card !== undefined ? { thinkingLevelMap: piThinkingLevelMap(card.levels) } : {}),
+                ...(compat !== undefined ? { compat } : {}),
+                input: card?.inputs.image === false ? ["text"] : ["text", "image"],
+                contextWindow: card?.window ?? 200_000,
                 maxTokens: spec.model.maxTokens,
                 cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
               },

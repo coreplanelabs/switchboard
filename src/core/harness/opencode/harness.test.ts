@@ -88,8 +88,8 @@ describe("OpenCodeHarness — the contract's object", () => {
     expect(object.builtinTools("write")).not.toContain("glob");
   });
 
-  it("leaves the effort tier to OpenCode's default in stage A (no reasoning variants declared)", () => {
-    expect(object.effort("high")).toBeUndefined();
+  it("answers the effort tier as the variant id — the configuration declares one variant per tier from the card (record 0052)", () => {
+    expect(object.effort("high")).toBe("high");
     expect(object.effort(undefined)).toBeUndefined();
   });
 
