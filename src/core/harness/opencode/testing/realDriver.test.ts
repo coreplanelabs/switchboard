@@ -20,6 +20,7 @@ import {
   openThroughSeam,
   type HarnessDeps,
   type HarnessFacts,
+  type HarnessResume,
   type HarnessRun,
   type HarnessSession,
 } from "../../contract.js";
@@ -185,8 +186,10 @@ interface RealRun {
 }
 
 /** A run driven end to end through the real `OpenCodeHarness` against the
- *  real binary, the bot's routes and the scripted model behind the run bearer. */
-async function driveRealRun(runId: string, script: ModelScript): Promise<RealRun> {
+ *  real binary, the bot's routes and the scripted model behind the run bearer;
+ *  with a `resume`, the run is a rebuild from that record — the real server
+ *  is handed the record as an import (harness.md item 6). */
+async function driveRealRun(runId: string, script: ModelScript, resume?: HarnessResume): Promise<RealRun> {
   const clock = () => Date.now();
   const bearers = new RunBearerStore({ clock });
   const bearer = bearers.mint(grantFor(runId, clock));
@@ -243,6 +246,7 @@ async function driveRealRun(runId: string, script: ModelScript): Promise<RealRun
     onProgress: () => {},
     onStep: async (r) => void steps.push(r),
     saveFacts: (f) => void facts.push(f),
+    ...(resume ? { resume } : {}),
   };
   const deps: HarnessDeps = {
     container,
@@ -338,6 +342,82 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
     );
     expect(joined.length).toBeGreaterThan(0);
 
+    await session.end();
+  }, 120_000);
+
+  // Feature: docs/reference/specs/harness.md item 6 (survival) — the rebuild is
+  // an import the real server decodes against its session-message schema. A
+  // record that holds a tool call that ran and failed and a call in flight at
+  // the death authors two error tool contents; the real binary accepts them
+  // (each carries the `error: { type, message }` its schema requires), lists
+  // them back as its own rows, and runs the continue to its end on them.
+  it("a re-attach after a failed tool call imports: the real server accepts a record holding a failed call and a call in flight, and the run continues from it", async () => {
+    const resume: HarnessResume = {
+      messages: [
+        { role: "user", content: [{ type: "text", text: "carry on" }] },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "c-failed", name: "bash", input: { command: "make" } }],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", toolUseId: "c-failed", content: "make: *** [all] Error 2", isError: true }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "c-flight", name: "bash", input: { command: "make clean all" } }],
+        },
+      ],
+      settlements: [
+        {
+          toolUse: { type: "tool_use", id: "c-flight", name: "bash", input: { command: "make clean all" } },
+          action: "synthetic",
+          text: "The container was replaced while this bash call was in flight; its result was lost.",
+        },
+      ],
+      remainingMs: 5 * 60_000,
+      turn: 2,
+      inboxConsumedSeq: 0,
+    };
+    // Before every error tool content carried `error.type`, this open threw
+    // `OpenCodeRequestRefusedError: OpenCode refused the session import (400):
+    // {"_tag":"InvalidRequestError","message":"Missing key\n  at ["messages"][1]["content"][0]["state"]["error"]["type"]","kind":"Payload"}`.
+    const run = await driveRealRun("run-real-rebuild", (_results, chunks) => chunks.text("carried on"), resume);
+    const { session, events, modelSeen } = run;
+    expect(notesOf(events).filter((n) => n.kind === "harness_error")).toEqual([]);
+    // The continue ran on the imported record: the model was asked under the
+    // run bearer and the session's own execution ended `succeeded`.
+    expect(modelSeen.authOk).toBe(true);
+    const feed = (await readFeed(run))
+      .split("\n")
+      .map(parseFeedRecord)
+      .filter((r) => r !== undefined);
+    expect(feed.some((r) => r.feed === "event" && r.event.type === "session.execution.succeeded")).toBe(true);
+    // The server lists the imported rows back as its own, the two failed calls
+    // as error tool contents typed in its words (`Session.StructuredError`).
+    const listed = feed.find((r) => r.feed === "messages" && r.data.length > 0);
+    expect(listed?.feed).toBe("messages");
+    const rows = listed?.feed === "messages" ? listed.data : [];
+    const errorStates = rows
+      .filter((m) => m.type === "assistant")
+      .flatMap((m) => {
+        const content = (m as { content?: unknown }).content;
+        return Array.isArray(content) ? (content as unknown[]) : [];
+      })
+      .filter(
+        (p): p is { type: "tool"; state: { status: string; error: unknown } } =>
+          typeof p === "object" && p !== null && (p as { type?: unknown }).type === "tool",
+      )
+      .map((p) => p.state)
+      .filter((s) => s.status === "error")
+      .map((s) => s.error);
+    expect(errorStates).toEqual([
+      { type: "tool.execution", message: "make: *** [all] Error 2" },
+      {
+        type: "aborted",
+        message: "The container was replaced while this bash call was in flight; its result was lost.",
+      },
+    ]);
     await session.end();
   }, 120_000);
 

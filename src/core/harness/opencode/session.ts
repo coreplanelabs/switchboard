@@ -11,7 +11,9 @@
 //     leading store messages — skips exactly the seed;
 //   • an assistant turn's tool calls become the message's `tool` contents, each
 //     in `state: "completed"` carrying the result the following user turn held,
-//     or, for a call in flight when the bot died, the settlement note;
+//     or in `state: "error"` — with the `error: { type, message }` the schema
+//     requires of that state — for a result the record marked an error and for
+//     a call in flight when the bot died (the settlement note);
 //   • each compaction becomes a `compaction` message with the stored summary;
 //   • every assistant message carries `time.completed` (import keeps only
 //     settled messages, `packages/core/src/session/transfer.ts:166`).
@@ -67,17 +69,39 @@ function textOf(content: readonly ContentPart[]): string {
     .join("\n\n");
 }
 
+/** How a call the record holds ended: it answered (`completed`), it ran and
+ *  answered an error (`failed`, the record's `isError` result), or it was in
+ *  flight at a death and its result was lost (`interrupted`, settled by a note). */
+export type OpenCodeToolOutcome = "completed" | "failed" | "interrupted";
+
+/** The `error` of an error-state tool content (`Session.StructuredError`
+ *  requires `type` and `message`; the import refuses a state without them).
+ *  The type is OpenCode's own word for the same ending: `tool.execution` for a
+ *  tool that ran and failed, `aborted` for a call cut by a death (what it
+ *  writes on a tool it interrupts). The message is the result text — the
+ *  output the record holds, or the settlement note — which the store's
+ *  projection and the model read; empty, it is the words OpenCode writes. */
+export function openCodeToolError(
+  outcome: Exclude<OpenCodeToolOutcome, "completed">,
+  text: string,
+): { type: string; message: string } {
+  return outcome === "failed"
+    ? { type: "tool.execution", message: text || "The tool call failed" }
+    : { type: "aborted", message: text || "Tool execution interrupted" };
+}
+
 /** One OpenCode tool content for a call the record holds a result for
- *  (`Session.Message.ToolState`): a real result in `state: completed`, a
- *  settlement note for a call in flight at a death in `state: error` (the call
- *  was interrupted, its result lost — a failed tool the record and the rebuilt
- *  transcript both read as `isError`, so the next model call sees a result for
- *  every call). The content is a non-empty text array, as the schema requires. */
+ *  (`Session.Message.ToolState`): a real result in `state: completed`; a result
+ *  the record marked an error, or the settlement note for a call in flight at a
+ *  death, in `state: error` carrying the `error: { type, message }` the schema
+ *  requires — so the rebuilt transcript reads a result for every call and the
+ *  import accepts every part. The content is a non-empty text array, as the
+ *  schema requires. */
 export function openCodeToolContent(
   toolUse: Extract<ContentPart, { type: "tool_use" }>,
   resultText: string,
   at: number,
-  isError = false,
+  outcome: OpenCodeToolOutcome = "completed",
 ): Record<string, unknown> {
   const input = isRecord(toolUse.input) ? toolUse.input : {};
   const content = [{ type: "text", text: resultText || "(no output)" }];
@@ -85,9 +109,10 @@ export function openCodeToolContent(
     type: "tool",
     id: toolUse.id,
     name: toolUse.name,
-    state: isError
-      ? { status: "error", input, error: { message: resultText || "the call was interrupted" }, content }
-      : { status: "completed", input, content },
+    state:
+      outcome === "completed"
+        ? { status: "completed", input, content }
+        : { status: "error", input, error: openCodeToolError(outcome, resultText), content },
     time: { created: at, completed: at },
   };
 }
@@ -126,6 +151,23 @@ export interface OpenCodeImportOptions {
  *  place, never a re-run. */
 export type OpenCodeSettlements = ReadonlyMap<string, string>;
 
+/** Whether a turn writes a store message of its own: a user turn with anything
+ *  but tool results (a turn of tool results alone is folded into the assistant
+ *  turn before it), or an assistant turn with a text or tool-use part. */
+export function openCodeWritesStoreMessage(message: ChatMessage): boolean {
+  if (message.role === "user")
+    return !(message.content.length > 0 && message.content.every((p) => p.type === "tool_result"));
+  return message.content.some((p) => p.type === "text" || p.type === "tool_use");
+}
+
+/** The store rows an import of these turns writes, plus one per compaction
+ *  appended after them: what the mirror skips as the seed. Fewer than the turns
+ *  whenever one holds only tool results — so a rebuild's store skip is this
+ *  count, never the ledger's turn count. */
+export function openCodeStoreRowCount(messages: readonly ChatMessage[], compactions = 0): number {
+  return messages.filter(openCodeWritesStoreMessage).length + compactions;
+}
+
 /** The transcript as OpenCode store messages, one per non-tool-result turn:
  *  a user turn of text is a `user` message; an assistant turn is an `assistant`
  *  message whose `content` is its text and its tool calls (each a completed
@@ -148,11 +190,11 @@ export function openCodeStoreMessages(
   const agent = opts.agent ?? "switchboard";
   const at = opts.clock ?? tickingClock(opts.at);
 
-  // The result each in-flight call is settled with (by tool-use id): the
-  // following user turn's tool_result (an error only when it was one), else the
-  // settlement note for a call in flight at the death, which is always an error
-  // — the call was interrupted and its result lost.
-  const resultOf = (toolUseId: string, from: number): { text: string; isError: boolean } => {
+  // The result each call is settled with (by tool-use id): the following user
+  // turn's tool_result (`failed` when the record marked it an error), else the
+  // settlement note for a call in flight at the death — `interrupted`, its
+  // result lost.
+  const resultOf = (toolUseId: string, from: number): { text: string; outcome: OpenCodeToolOutcome } => {
     for (let i = from; i < messages.length; i++) {
       const turn = messages[i];
       if (turn.role !== "user") break;
@@ -162,21 +204,25 @@ export function openCodeStoreMessages(
             typeof part.content === "string"
               ? part.content
               : part.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n");
-          return { text, isError: part.isError === true };
+          return { text, outcome: part.isError === true ? "failed" : "completed" };
         }
       }
     }
-    return { text: opts.settlements?.get(toolUseId) ?? "", isError: true };
+    return { text: opts.settlements?.get(toolUseId) ?? "", outcome: "interrupted" };
   };
 
   messages.forEach((message, i) => {
+    // A user turn that is only tool results is the previous assistant's
+    // results, already folded in; an assistant turn with nothing to say writes
+    // no row either (`openCodeWritesStoreMessage` is the one word on both).
+    if (!openCodeWritesStoreMessage(message)) return;
     if (message.role === "user") {
-      // A user turn that is only tool results is the previous assistant's
-      // results, already folded in; a user turn with text is a store message.
-      const text = textOf(message.content);
-      const onlyResults = message.content.length > 0 && message.content.every((p) => p.type === "tool_result");
-      if (onlyResults) return;
-      out.push({ id: `msg_${opts.sessionID}_u${i}`, type: "user", text, time: { created: at() } });
+      out.push({
+        id: `msg_${opts.sessionID}_u${i}`,
+        type: "user",
+        text: textOf(message.content),
+        time: { created: at() },
+      });
       return;
     }
     const content: Record<string, unknown>[] = [];
@@ -184,10 +230,9 @@ export function openCodeStoreMessages(
       if (part.type === "text") content.push({ type: "text", text: part.text });
       else if (part.type === "tool_use") {
         const result = resultOf(part.id, i + 1);
-        content.push(openCodeToolContent(part, result.text, at(), result.isError));
+        content.push(openCodeToolContent(part, result.text, at(), result.outcome));
       }
     }
-    if (content.length === 0) return;
     const now = at();
     out.push({
       id: `msg_${opts.sessionID}_a${i}`,
