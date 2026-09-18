@@ -50,12 +50,20 @@ describe("reasonOf — the machine token inside a client's error", () => {
     // String(value) path: the token is found even when no Error object is thrown
     expect(reasonOf("runtime-replaced: a newer runtime took over")).toBe("runtime-replaced");
     expect(reasonOf({ toString: () => "needs-ref: branch was not supplied" })).toBe("needs-ref");
+    expect(reasonOf("disk-pressure: volume full")).toBe("disk-pressure");
+    expect(reasonOf("completely unrecognized")).toBe("unknown");
   });
 
   it("a known token beats the timeout rule when both appear in the same message", () => {
     // KNOWN_REASONS scan runs before the /TimeoutError|timed out|timeout/i branch;
     // `not-attached` wins even though the message also reads as a timeout
     expect(reasonOf(new Error("not-attached: sandbox timed out waiting for attach"))).toBe("not-attached");
+  });
+
+  it("the error's .name is included in the scan so a known token there is recognized", () => {
+    const e = new Error("attach step failed");
+    e.name = "mirror-busy";
+    expect(reasonOf(e)).toBe("mirror-busy");
   });
 });
 
