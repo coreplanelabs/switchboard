@@ -7,6 +7,7 @@ import type { ChatMessage } from "../../chatMessage.js";
 import {
   abortFailedAfterEndNote,
   abortReaskedNote,
+  abortUnheardAtEndNote,
   abortWriteFailedNote,
   finaleTimedOutNote,
   HARD_STOP_MESSAGE,
@@ -22,6 +23,7 @@ import type { RunnableTool } from "../../../tools/runnableTool.js";
 import { bearerHashOf, RunBearerStore } from "../../modelProxy/runBearers.js";
 import type { RunEvent } from "../../runEvents.js";
 import { RunControl } from "../../runRegistry/runControl.js";
+import { RunRegistry } from "../../runRegistry.js";
 import { recordingSink } from "../../testing/recordingSink.js";
 import { FollowUpInbox } from "../../threadAdmission.js";
 import { createTracer } from "../../trace/tracer.js";
@@ -1935,6 +1937,45 @@ describe("runPiHarness — the container replaced under a live run", () => {
   const noteSummaries = (w: ReturnType<typeof world>) =>
     w.events.filter((e) => e.type === "run_note").map((e) => (e as { summary: string }).summary);
 
+  it("a container replaced with a stop still in flight gets its own last word: the loop's-end cut's abort hangs in its write when the alive probe answers replaced, no kill runs, and the session's end says the container was replaced with the stop still out and the relaunch carries on — never that the kill ended pi", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 20 } });
+    piMidCall(w, (c) => {
+      // The container rolls under the run while the cut's abort is still being written.
+      c.vm = "vm-new";
+      c.alive = async () => {
+        throw new ExecSandboxRestartedError(
+          "the sandbox restarted under the run (waited 42 s); the worktree is main@abc1234",
+          42_000,
+        );
+      };
+    });
+    const realWrite = w.container.writeLine.bind(w.container);
+    let abortHung = false;
+    w.container.writeLine = async (p, line) => {
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort") {
+        abortHung = true;
+        await new Promise<void>(() => {}); // the stop's write blocks through the executor's wake
+      }
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let cut = false;
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (!cut && chunk.length === 0 && w.container.commands().some((c) => c.type === "prompt")) {
+        cut = true;
+        w.clock.now += 13 * MINUTE_MS; // the loop's time is up with the tool running: the cut's abort goes, and hangs
+      }
+      return chunk;
+    };
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiContainerReplacedError);
+    expect(abortHung).toBe(true);
+    expect(w.container.killed).toEqual([]); // no kill on a replaced container
+    expect(noteSummaries(w)).toContain(abortUnheardAtEndNote("run", 0, "replaced")); // the stop was still out when the container was replaced
+    expect(noteSummaries(w).some((n) => n.includes("the kill ended pi"))).toBe(false); // never a kill that did not run
+  });
+
   it("the resident's ExecSandboxRestartedError from the alive probe is a replaced container: the call in flight is settled with the restart note and its span ends, a sandbox_restarted note names both containers and the executor's words, the run ends by the redispatch path — never 'pi exited before the run settled' — and nothing is killed or removed in the container the executor reaches now", async () => {
     const w = world({ withSpans: true });
     piMidCall(w, (c) => {
@@ -3735,6 +3776,152 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     ]);
   });
 
+  it("a stop still in flight when the session ends is said on the record BEFORE the run is marked finished, through the registry's own gate: the hard stop's abort hangs past the kill, end() writes the unheard line while the run is live, the run loop finishes, and the stop's late failure adds nothing — the registry drops content on a finished run, so nothing of the stop depends on that race", async () => {
+    const w = world();
+    // The real registry's gate, as the run loop wires it: every harness event is
+    // published into a live run, and the run loop marks the run finished once
+    // the harness has answered — after that, content is dropped.
+    const registry = new RunRegistry();
+    const handle = registry.create("run-7");
+    w.run.onEvent = (e) => registry.publish(handle.id, e);
+    scriptedPi(w.container, (n, c) => {
+      const msg = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sleep 300" } }]);
+      c.emit(
+        { type: "message_end", message: msg },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "sleep 300" } },
+      );
+      setTimeout(() => w.control.requestStop("hard"), 30); // the operator stops the run mid-command
+    });
+    const realWrite = w.container.writeLine.bind(w.container);
+    let failAbort: ((err: Error) => void) | undefined;
+    w.container.writeLine = async (p, line) => {
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort") {
+        await new Promise<void>((_, reject) => (failAbort = reject)); // the stop's write hangs past the kill, then fails
+      }
+      return realWrite(p, line);
+    };
+    const answer = await w.start(); // the closed form: the loop, then end() — the kill completes with the stop still in flight
+    expect(answer).toBe(HARD_STOP_MESSAGE);
+    // The window the end's guard exists for: the stop's write fails AFTER the
+    // end spoke for it but BEFORE the run loop marks the run finished, when a
+    // line from the landing would still reach the record — it must add none.
+    failAbort!(controlReset());
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(w.notes.filter((n) => /still in flight|the stop's write failed|the abort's write failed/.test(n))).toEqual([
+      abortUnheardAtEndNote("run"),
+    ]); // exactly one stop line, the end's — the landing after it said nothing
+    registry.finish(handle.id, "completed"); // the run loop's finish: content stops here
+    const recorded = registry
+      .snapshot(handle.id, handle.token)!
+      .events.filter((e) => e.type === "run_note")
+      .map((e) => (e as { summary: string }).summary);
+    expect(recorded).toContain(abortUnheardAtEndNote("run")); // on the record, before the finish
+    expect(recorded.filter((s) => s.includes("still in flight"))).toHaveLength(1); // once
+    expect(recorded).not.toContain(abortFailedAfterEndNote("run")); // the late failure is nobody's line
+    expect(recorded.filter((s) => s.includes("the abort's write failed"))).toEqual([]); // and never the live loop's
+    expect(w.container.killed).toEqual([4242]); // the kill is what ended pi
+  });
+
+  it("one stop in flight per series, whatever asks: a tick where a stop is owed AND the finale bound fires sends the re-ask alone — the finale's own abort is covered by the stop already out — so one abort lands, one stop_landed line closes the series, and no second failure line is written for a stop pi already had", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 20 } });
+    scriptedPi(w.container, (_n, c) => {
+      // pi opens a bash call and leaves it running: the loop's end will cut it.
+      const msg = assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sleep 300" } }]);
+      c.emit(
+        { type: "turn_start" },
+        { type: "message_end", message: msg },
+        { type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "sleep 300" } },
+      );
+      authorizeToolCall(w.registry.get("run-7")!, { toolCallId: "c1", tool: "bash", input: { command: "sleep 300" } });
+    });
+    const realWrite = w.container.writeLine.bind(w.container);
+    let failAborts = true;
+    w.container.writeLine = async (p, line) => {
+      if (failAborts && (JSON.parse(line) as Record<string, unknown>).type === "abort") throw controlReset(); // the cut's abort and every re-ask fail until the finale
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase: "run" | "cut" | "finale" = "run";
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === "run" && w.container.commands().some((c) => c.type === "prompt")) {
+        phase = "cut"; // the loop's time is up with the tool running: the wrap-up steer goes, the cut's abort fails
+        w.clock.now += 13 * MINUTE_MS;
+      } else if (
+        phase === "cut" &&
+        w.notes.includes(abortWriteFailedNote()) &&
+        w.container.commands().some((c) => c.type === "steer" && c.message === timeBudgetInstruction())
+      ) {
+        phase = "finale"; // the stop is owed and the finale allowance elapses: the next tick has both the re-ask and the finale's bound
+        failAborts = false;
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000;
+      }
+      return chunk;
+    };
+    const answer = await w.start();
+    expect(answer).toMatch(/20-minute budget/);
+    expect(w.notes).toContain(finaleTimedOutNote()); // the finale bound did fire on that tick
+    expect(w.container.commands().filter((c) => c.type === "abort")).toHaveLength(1); // one stop landed, not two
+    const stopNotes = w.notes.filter((n) => /the abort|the stop/.test(n));
+    expect(stopNotes).toHaveLength(2);
+    expect(stopNotes[0]).toBe(abortWriteFailedNote());
+    expect(stopNotes[1]).toMatch(/^the stop landed after the run asked pi to stop again (once|\d+ times)$/);
+  });
+
+  it("the session's end says every series' stop still in flight, not the last series' alone: the loop's finale abort hangs in its write, pi settles by itself, a follow-up turn starts behind the hung write and is hard-stopped, and end() says the RUN's stop and the TURN's stop were both in flight when the kill ended pi — their late failures after the finish add nothing", async () => {
+    const w = tickingWorld({ agent: { maxMinutes: 20 } });
+    scriptedPi(w.container, () => {});
+    const realWrite = w.container.writeLine.bind(w.container);
+    let failAbort: ((err: Error) => void) | undefined;
+    w.container.writeLine = async (p, line) => {
+      if ((JSON.parse(line) as Record<string, unknown>).type === "abort" && failAbort === undefined) {
+        // The loop's finale abort hangs in its write, past the session's end;
+        // the transport's one chain holds every later write behind it.
+        await new Promise<void>((_, reject) => (failAbort = reject));
+      }
+      return realWrite(p, line);
+    };
+    const realRead = w.container.readLog.bind(w.container);
+    let phase: "run" | "wrapUp" | "finale" | "settled" | "turn" | "stopping" = "run";
+    w.container.readLog = async (path, offset, max) => {
+      const chunk = await realRead(path, offset, max);
+      if (chunk.length > 0) return chunk;
+      if (phase === "run" && w.container.commands().some((c) => c.type === "prompt")) {
+        phase = "wrapUp";
+        w.clock.now += 13 * MINUTE_MS;
+      } else if (
+        phase === "wrapUp" &&
+        w.container.commands().some((c) => c.type === "steer" && c.message === timeBudgetInstruction())
+      ) {
+        phase = "finale";
+        w.clock.now += ALLOWANCES.writeUp * MINUTE_MS + 1_000;
+      } else if (phase === "finale" && failAbort !== undefined) {
+        phase = "settled"; // the finale's abort is hanging: pi ends its turn by itself
+        w.container.emit({ type: "agent_settled" });
+        return realRead(path, offset, max);
+      } else if (phase === "turn") {
+        phase = "stopping"; // the turn's prompt is queued behind the hung write: the operator stops the run
+        w.control.requestStop("hard");
+      }
+      return chunk;
+    };
+    const session = await w.open();
+    expect(session.answer).toMatch(/20-minute budget/);
+    phase = "turn";
+    const answer = await session.followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } });
+    expect(answer).toBe(HARD_STOP_MESSAGE); // the turn's own series: its hard stop's abort, queued behind the hung write
+    const notesBeforeEnd = w.notes.length;
+    await session.end();
+    expect(w.notes.slice(notesBeforeEnd)).toEqual([abortUnheardAtEndNote("run"), abortUnheardAtEndNote("turn")]); // each series' stop, said at the end, once each
+    expect(w.container.killed).toEqual([4242]);
+    failAbort!(controlReset()); // the hung write fails after the session ended; the turn's abort runs and lands
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(w.notes.slice(notesBeforeEnd)).toEqual([abortUnheardAtEndNote("run"), abortUnheardAtEndNote("turn")]); // nothing more
+  });
+
   it("a stop the loop still owed when it ended is not the next turn's to ask: the finale's abort failing on every write while pi ends its finale by itself, the loop closes the debt at its end, and a follow-up turn that meets a reset carries no abort among the writes its re-attach re-sends and asks none on its ticks — nothing of the dead loop's stop reaches the turn's pi", async () => {
     const w = tickingWorld({ agent: { maxMinutes: 20 } });
     scriptedPi(w.container, (n, c) => {
@@ -3796,7 +3983,7 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     expect(w.notes.slice(notesBefore).filter((n) => n.includes("abort") || n.includes("the stop"))).toEqual([]);
   });
 
-  it("the recovery's deadline abort on the run path was sent while the loop was live, so its landing is still heard after the run ended by the throw — for the record alone: the hung write failing after the run ended, the abort's step behind it failing too, one line says the stop's write failed after the run ended and no stop is owed — a run that has ended asks nothing again", async () => {
+  it("the recovery's deadline abort on the run path is still in flight behind the hung write when the run ends by the throw, so the session's end says so before the run fails — the kill ended pi — and the stop's failure after the failed run adds nothing: no stop is owed, a run that has ended asks nothing again", async () => {
     const w = tickingWorld({ agent: { maxMinutes: 2 } });
     scriptedPi(w.container, () => {});
     const realWrite = w.container.writeLine.bind(w.container);
@@ -3826,7 +4013,8 @@ describe("runPiHarness — the resident's control plane reset under a live pi", 
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
     expect(abortWrites).toBe(1); // the deadline's stop was sent
-    expect(w.notes.slice(notesAtFailure)).toEqual([abortFailedAfterEndNote("run")]); // its failure is seen, once; nothing owed, nothing re-asked
+    expect(w.notes.slice(0, notesAtFailure)).toContain(abortUnheardAtEndNote("run")); // said before the run failed: the stop was still in flight at the kill
+    expect(w.notes.slice(notesAtFailure)).toEqual([]); // its failure after the failed run says nothing more; nothing owed, nothing re-asked
   });
 
   it("a hard stop's abort whose write fails with the reset is seen, never assumed: the tick that sends it also breaks the loop, and the stop's failure lands after the answer — one harness_error line says the stop's write failed after the run ended, no debt is owed, and pi is ended by the kill", async () => {
