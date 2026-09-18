@@ -307,6 +307,14 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
   };
 }
 
+/** The check runs a pr-check answer carries at the head (agent-ship item 9), shape-checked. */
+function isCommitChecks(v: unknown): v is { total: number; pending: string[]; failed: string[] } {
+  if (typeof v !== "object" || v === null) return false;
+  const c = v as Record<string, unknown>;
+  const names = (x: unknown) => Array.isArray(x) && x.every((n) => typeof n === "string");
+  return typeof c.total === "number" && names(c.pending) && names(c.failed);
+}
+
 function prCheckReturn(step: string, a: BotAnswer): StepReturn {
   const { ok, state, prNumber, url, headSha, sha, mergedAt, at } = a.body;
   if (ok === true && state === "none") {
@@ -334,6 +342,7 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
         url,
         ...(typeof headSha === "string" ? { headSha } : {}),
         ...(typeof a.body.autoMergeEnabled === "boolean" ? { autoMergeEnabled: a.body.autoMergeEnabled } : {}),
+        ...(isCommitChecks(a.body.checks) ? { checks: a.body.checks } : {}),
       },
       at,
     };
@@ -564,13 +573,20 @@ async function runUnit(
               `${prefix}/end/pr-facts`,
               answerOf(
                 "pr-check",
-                await step.do(`${prefix}/end/pr-facts`, STEP_CONFIG, () => call(bot, "pr-check", tag)),
+                await step.do(`${prefix}/end/pr-facts`, STEP_CONFIG, () =>
+                  call(bot, "pr-check", { ...tag, checks: true }),
+                ),
               ),
             );
             if (check.type === "pr-check" && check.pr.state === "merged")
               endFacts = { merged: { sha: check.pr.sha, mergedAt: check.pr.mergedAt } };
-            else if (check.type === "pr-check" && check.pr.state === "open" && check.pr.autoMergeEnabled !== undefined)
-              endFacts = { autoMergeEnabled: check.pr.autoMergeEnabled };
+            else if (check.type === "pr-check" && check.pr.state === "open")
+              endFacts = {
+                ...(check.pr.autoMergeEnabled !== undefined ? { autoMergeEnabled: check.pr.autoMergeEnabled } : {}),
+                // The checks at the approved head (record 0055): the report's
+                // headline is a claim about them, never "merge-ready" over a red one.
+                ...(check.pr.checks !== undefined ? { checks: check.pr.checks } : {}),
+              };
           } catch {
             // the report simply omits the fact
           }

@@ -941,6 +941,14 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     const open = await deps.findOpenPrByHead(instance.repo, branch);
     if (open) {
       await remember({ number: open.number, url: open.htmlUrl });
+      // The check runs at the head, as the merge door reads them, only when
+      // the caller asks (`checks: true`: the ending's facts read, agent-ship
+      // item 9; record 0055): a merge-ready report is a claim about the head,
+      // so it names the checks it read. GitHub unreadable leaves the field out.
+      const checks =
+        body.checks === true && open.headSha !== undefined
+          ? await deps.fetchCommitChecks(instance.repo, open.headSha).catch(() => undefined)
+          : undefined;
       return json(200, {
         ok: true,
         state: "open",
@@ -950,6 +958,7 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         // The pull request's own auto-merge fact (agent-ship item 9), so a
         // merge_ready ending can name it at the approved head.
         ...(open.autoMergeEnabled !== undefined ? { autoMergeEnabled: open.autoMergeEnabled } : {}),
+        ...(checks !== undefined ? { checks } : {}),
         at,
       });
     }

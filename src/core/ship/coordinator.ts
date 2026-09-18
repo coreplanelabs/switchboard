@@ -510,7 +510,15 @@ export type PrCheck =
        *  (agent-ship item 12); absent, the fact is unknown and never claimed. */
       aheadOfBase?: number;
     }
-  | { state: "open"; prNumber: number; url: string; headSha?: string; autoMergeEnabled?: boolean }
+  | {
+      state: "open";
+      prNumber: number;
+      url: string;
+      headSha?: string;
+      autoMergeEnabled?: boolean;
+      /** The check runs at the head, when the read asked for them (the ending's facts). */
+      checks?: CommitChecksFacts;
+    }
   | { state: "merged"; prNumber: number; url: string; sha: string; mergedAt: string };
 
 /** What a step answered. Every bot answer carries `at`, the bot's clock — the machine's time. */
@@ -1677,6 +1685,30 @@ function splitReport(s: UnitPipelineState): string {
 export interface MergeReadyFacts {
   autoMergeEnabled?: boolean;
   merged?: { sha: string; mergedAt: string };
+  /** The check runs at the approved head as the merge door reads them (record 0055). */
+  checks?: CommitChecksFacts;
+}
+
+/** The check runs at one commit: how many, which still run, which failed. */
+export interface CommitChecksFacts {
+  total: number;
+  pending: string[];
+  failed: string[];
+}
+
+/** The merge-ready report's headline is a claim about the approved head
+ *  (record 0055): a failed check is never called merge-ready, a pending one
+ *  is named, green is said, and without the fact the line is unchanged. */
+function mergeReadyHeadline(rounds: string, url: string, checks: CommitChecksFacts | undefined): string {
+  if (checks === undefined) return `✅ Merge-ready after ${rounds}: ${url}`;
+  if (checks.failed.length > 0) {
+    const pending = checks.pending.length > 0 ? `; pending: ${checks.pending.join(", ")}` : "";
+    return `⚠️ Approved but not merge-ready after ${rounds}: ${url} — CI is red at the approved head: ${checks.failed.join(", ")}${pending}. Fix it and re-review, or rerun a flake; the runner calls a head merge-ready only over green checks.`;
+  }
+  if (checks.pending.length > 0)
+    return `✅ Approved after ${rounds}: ${url} — checks pending at the approved head: ${checks.pending.join(", ")}; merge-ready once they pass.`;
+  if (checks.total === 0) return `✅ Merge-ready after ${rounds}: ${url} — no check reported at the approved head.`;
+  return `✅ Merge-ready after ${rounds}: ${url} — ${checks.total} check${checks.total === 1 ? "" : "s"} green at the approved head.`;
 }
 
 export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts): string {
@@ -1730,7 +1762,10 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
       return `✅ Already on \`${s.input.base}\`: the unit's scope landed before this attempt — ${e.landed.map((l) => `${l.what} (${l.where})`).join("; ")}. The coding child (run ${e.runId}) found it there and pushed nothing of its own: \`${s.input.unit.branch}\` has no commits over \`${s.input.base}\`, so there is no pull request to open or review. The unit is done and its dependents start on a base that carries it.`;
     case "merge_ready":
       return [
-        `✅ Merge-ready after ${rounds}: ${e.pr.url}`,
+        // A merge that already happened outranks the checks: there is no head left to gate.
+        facts?.merged
+          ? `✅ Merge-ready after ${rounds}: ${e.pr.url}`
+          : mergeReadyHeadline(rounds, e.pr.url, facts?.checks),
         verdictLine,
         levelLine,
         grantLine,
