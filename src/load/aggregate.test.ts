@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateSlo, percentile, renderMarkdown, summarize, type Sample } from "./aggregate.js";
+import { evaluateSlo, operationsTable, percentile, renderMarkdown, summarize, type Sample } from "./aggregate.js";
 
 // The load harness's result math (docs/reference/specs/load-harness.md items 1–3): every
 // command records one Sample per operation and this module turns them into the
@@ -114,6 +114,24 @@ describe("evaluateSlo — the D10 lines", () => {
   it("a latency check on an op with no samples fails with `no samples` instead of passing vacuously", () => {
     const checks = evaluateSlo(summary, { latencyMs: [{ op: "write", p: 95, maxMs: 1 }] });
     expect(checks[0]).toMatchObject({ pass: false, actual: "no samples" });
+  });
+});
+
+describe("operationsTable — the per-op table section", () => {
+  it("renders a two-operation report with exact header and one row per op, using — for non-finite latency", () => {
+    const summary = summarize([
+      s("attach", 100),
+      s("attach", 200),
+      s("clone", 1, { ok: false, reason: "mirror-busy" }),
+    ]);
+    const lines = operationsTable(summary.ops);
+    expect(lines[0]).toBe("## Operations");
+    expect(lines[1]).toBe("");
+    expect(lines[2]).toBe("| Op | Count | OK | Failed | p50 ms | p95 ms | p99 ms | Max ms |");
+    expect(lines[3]).toBe("|---|---|---|---|---|---|---|---|");
+    expect(lines[4]).toBe("| attach | 2 | 2 | 0 | 100 | 200 | 200 | 200 |");
+    expect(lines[5]).toBe("| clone | 1 | 0 | 1 | — | — | — | — |");
+    expect(lines.length).toBe(6);
   });
 });
 
