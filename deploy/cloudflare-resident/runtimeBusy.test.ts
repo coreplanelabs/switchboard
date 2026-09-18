@@ -65,3 +65,61 @@ describe("the thread data plane answers the word as the 503 with the token", () 
     );
   });
 });
+
+describe("the refresh cycle yields to the busy container", () => {
+  // The cycle's own execs meet the same typed word from `run()`: a run's
+  // command has the container's cores. Nothing ran and nothing about the
+  // repository is known, so the cycle YIELDS — `stopped (runtime-busy)`, the
+  // state it found put back, the lease released — and is never recorded as
+  // `degraded`, never a rung of item 67's ladder (three such cycles used to
+  // destroy the container under the very run that kept it busy).
+  it("the instance step answers a busy verdict as stopped — after the classifier, before any failure is recorded", () => {
+    const body = method("runInstanceStep");
+    const verdict = body.indexOf("const failure = await this.classifyCycleError(err);");
+    const yields = body.indexOf("if (failure.busy) {");
+    const records = body.indexOf("await this.refreshFailed(failure,");
+    expect(verdict).toBeGreaterThan(-1);
+    expect(yields).toBeGreaterThan(verdict);
+    expect(records).toBeGreaterThan(yields);
+    const branch = body.slice(yields, records);
+    expect(branch).toMatch(/await this\.yieldCycle\(instance\);/);
+    expect(branch).toMatch(
+      /return \{ status: "stopped", why: RUNTIME_BUSY_REASON, startedAt, trace: trace\.steps\(\) \};/,
+    );
+    expect(branch).not.toMatch(/refreshFailed|noteInfraStreak|recordRefreshError|setResidentState\("degraded"/);
+  });
+
+  it("the yield releases the cycle's lease and puts back the settled state the cycle found under its `refreshing`, never a `degraded` of its own", () => {
+    const body = method("yieldCycle");
+    expect(body).toMatch(/await this\.clearInstanceLease\(instance\);/);
+    expect(body).toMatch(/if \(status\.state !== "refreshing"\) return;/);
+    expect(body).toMatch(/this\.ctx\.storage\.get<RefreshingFrom>\(REFRESHING_FROM_KEY\)/);
+    expect(body).toMatch(/await this\.setResidentState\(from\.state, from\.reason\);/);
+    expect(body).not.toMatch(/setResidentState\("degraded"|INFRA_STREAK_KEY|DEGRADED_STREAK_KEY|refreshFailed/);
+  });
+
+  it("the fetch step remembers the state it is about to cover before writing `refreshing`, and its catch rethrows the busy word before naming GitHub", () => {
+    const body = method("refreshFetch");
+    const remembered = body.indexOf("await this.ctx.storage.put(REFRESHING_FROM_KEY,");
+    const refreshing = body.indexOf('await this.setResidentState("refreshing");');
+    expect(remembered).toBeGreaterThan(-1);
+    expect(remembered).toBeLessThan(refreshing);
+    const classified = body.indexOf('const failure = await this.classifyFailure("fetch", message);');
+    const rethrown = body.indexOf("if (failure.busy) throw err;");
+    const github = body.indexOf("const reason = `github-unreachable: ${message}`;");
+    expect(classified).toBeGreaterThan(-1);
+    expect(rethrown).toBeGreaterThan(classified);
+    expect(github).toBeGreaterThan(rethrown);
+  });
+
+  it("the classifier's disk probe is skipped on a busy verdict — another exec against the same container would only meet the same refusal", () => {
+    expect(method("classifyFailure")).toMatch(
+      /if \(direct\.diskFull \|\| direct\.interrupted \|\| direct\.busy\) return direct;/,
+    );
+  });
+
+  it("the Workflow skips the housekeeping steps on a busy cycle — they exec on the same container", () => {
+    const refresh = readSource("refresh.ts");
+    expect(refresh).toMatch(/if \(cycle\.outcome !== "offboarded" && cycle\.outcome !== RUNTIME_BUSY_REASON\) \{/);
+  });
+});

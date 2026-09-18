@@ -21,6 +21,7 @@ import {
 } from "../../src/execution/residentInstanceId.js";
 import { RESTORE_MAX_MS, type RefreshPlan } from "../../src/execution/residentRefresh.js";
 import { residentText } from "../../src/execution/residentText.js";
+import { RUNTIME_BUSY_REASON } from "../../src/execution/sandboxErrors.js";
 import { graftResidentSteps } from "../../src/execution/residentTrace.js";
 import {
   DEFAULT_EXEC_TIMEOUT_MS,
@@ -288,9 +289,10 @@ export class ResidentRefresh extends WorkflowEntrypoint<Env, RefreshInstancePara
       }
       // Housekeeping rides on every instance whatever the cycle's verdict — a
       // parked resident still releases its idle bindings and re-measures, and
-      // neither step wakes a slept container — except an offboarded one:
-      // nothing is left to keep.
-      if (cycle.outcome !== "offboarded") {
+      // neither step wakes a slept container — except an offboarded one
+      // (nothing is left to keep) and one whose container turned the cycle
+      // away (item 68: the sweep and the measure exec on that same container).
+      if (cycle.outcome !== "offboarded" && cycle.outcome !== RUNTIME_BUSY_REASON) {
         const swept = await step.do("sweep", { retries, timeout: stepTimeoutMs(REFRESH_SWEEP_STEP_BUDGET_MS) }, () =>
           stub.refreshInstanceSweep({ resource, instance }),
         );

@@ -22,6 +22,7 @@
  *  interrupted one stopped instead of redoing the whole rebuild. */
 
 import { DISK_FULL_FREE_KIB, diskFullReason, isDiskFullMessage } from "./residentDisk.js";
+import { carriesRuntimeBusyToken } from "./sandboxErrors.js";
 
 export interface RefreshDisk {
   /** `git rev-parse HEAD` of the warm checkout; null when unreadable. */
@@ -121,6 +122,9 @@ export function checkoutUpdateCommand(sha: string, clean: CleanScope): string {
  *  repository: the container's control port never answered the SDK's connect
  *  (`runtimeUnreachableReason`), so no command ran at all — the resident
  *  escalates on its persisted count instead of recording a command failure.
+ *  `busy` is the third: the container did not accept the cycle's connect
+ *  inside the platform's allowance (`runtime-busy`, resident-repos item 68) —
+ *  a run's command has its cores; nothing ran, and the cycle yields to it.
  *  Everything else is the repo's own build failing. */
 export interface RefreshFailure {
   /** The reason. An interruption's is prefixed `refresh-interrupted:` and is
@@ -130,7 +134,8 @@ export interface RefreshFailure {
    *  `disk-full:` (`residentDisk.ts` — the cycle's entry gate and the recycle
    *  decision key on it); an unanswered control port is `runtime-unreachable:`
    *  with the attempt count (the ladder below decides what the resident does
-   *  about it); real failures keep `<step>-failed:`. */
+   *  about it); a busy container's is `refresh-yielded:` (the cycle ends
+   *  `stopped`, the state it found put back); real failures keep `<step>-failed:`. */
   reason: string;
   /** The step that failed, as the caller named it (`refresh` for a failure
    *  between steps): item 67 reads whether it ran the repository's own command
@@ -139,6 +144,7 @@ export interface RefreshFailure {
   interrupted: boolean;
   diskFull: boolean;
   runtimeUnreachable: boolean;
+  busy: boolean;
 }
 
 /** Root argv that kills every process the build user still owns and waits
@@ -290,7 +296,22 @@ export function classifyRefreshFailure(input: {
       interrupted: false,
       diskFull: false,
       runtimeUnreachable: true,
+      busy: false,
       reason: runtimeUnreachableReason(input.runtimeUnreachable.count),
+    };
+  }
+  // Item 68: the token the Worker's `run()` named the refused connect with,
+  // anywhere in the text — a wrapper (a StepError, the fetch's mint prefix)
+  // keeps it. Decided before the disk inference: no command ran, so a low
+  // free-disk reading says nothing about this failure.
+  if (carriesRuntimeBusyToken(message)) {
+    return {
+      step,
+      interrupted: false,
+      diskFull: false,
+      runtimeUnreachable: false,
+      busy: true,
+      reason: `refresh-yielded: ${step} ${message}`,
     };
   }
   if (isDiskFullMessage(message)) {
@@ -299,6 +320,7 @@ export function classifyRefreshFailure(input: {
       interrupted: false,
       diskFull: true,
       runtimeUnreachable: false,
+      busy: false,
       reason: diskFullReason({ step, message, freeKiB: input.freeKiB ?? null }),
     };
   }
@@ -309,6 +331,7 @@ export function classifyRefreshFailure(input: {
       interrupted: true,
       diskFull: false,
       runtimeUnreachable: false,
+      busy: false,
       reason: `refresh-interrupted: ${step} ${message}`,
     };
   }
@@ -318,6 +341,7 @@ export function classifyRefreshFailure(input: {
       interrupted: false,
       diskFull: true,
       runtimeUnreachable: false,
+      busy: false,
       reason: diskFullReason({ step, message, freeKiB: input.freeKiB }),
     };
   }
@@ -326,6 +350,7 @@ export function classifyRefreshFailure(input: {
     interrupted: false,
     diskFull: false,
     runtimeUnreachable: false,
+    busy: false,
     reason: `${step}-failed: ${message}`,
   };
 }

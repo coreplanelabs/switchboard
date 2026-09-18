@@ -403,6 +403,14 @@ export function isRuntimeBusyError(err: unknown): boolean {
   return s.name === RUNTIME_BUSY_ERROR_NAME || !!s.message?.startsWith(`${RUNTIME_BUSY_REASON}:`);
 }
 
+/** Does a failure's text carry the token anywhere — the typed error's own
+ *  message, or that message behind a wrapper's prefix (a `StepError` built
+ *  from it, the fetch step's mint prefix)? The refresh cycle's classifier
+ *  reads this: the token decides, never the platform's words. */
+export function carriesRuntimeBusyToken(message: string): boolean {
+  return new RegExp(`(?:^|[\\s;(])${RUNTIME_BUSY_REASON}: `).test(message);
+}
+
 /** The `/read` and `/write` answer (sent as HTTP 503): the token and the text. */
 export function runtimeBusyAnswer(message: string): { error: string; reason: typeof RUNTIME_BUSY_REASON } {
   return { error: message, reason: RUNTIME_BUSY_REASON };
