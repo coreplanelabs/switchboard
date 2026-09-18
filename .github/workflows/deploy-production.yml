@@ -33,13 +33,13 @@
 # registry-to-registry transfer over HTTPS: nothing is installed for it, and
 # the Cloudflare token needs Containers Edit.
 #
-# A busy bot is not busy (docs/reference/specs/release-and-deploy.md item 13). Since the
-# run ledger's handoff (run-history item 39) the bot hands its runs to the next
-# container on SIGTERM and exits within seconds, so the bot preflight no longer
-# refuses for runs in flight and this job never waits on them or re-dispatches
-# itself. The preflight still refuses while a container rollout is in progress
-# (`deploy all` waits that out for its default budget) and fails closed when
-# the bot cannot be consulted; any failure is red, for a person.
+# A deploy never rolls over a live run (docs/reference/specs/release-and-deploy.md
+# item 13). The bot preflight refuses while runs are in flight or a container
+# rollout is in progress, and fails closed when the bot cannot be consulted;
+# `deploy all` retries a refusal every minute for its default budget and then
+# fails by name — it never proceeds over what refused, and this job never
+# re-dispatches itself. Any failure is red, for a person: once the runs finish,
+# `gh run rerun RUN_ID --failed` deploys.
 #
 # Secrets — declared below so a caller in another repository passes them by
 # name (`secrets:`); this repository's own call passes `secrets: inherit`. Set
@@ -95,7 +95,7 @@ on:
         type: string
         default: affected
       force:
-        description: Bypass the bot/resident preflights — deploy over a rollout in progress, or blind when a bot cannot be consulted (in-flight bot runs hand off regardless)
+        description: Bypass the bot/resident preflights — deploy over a rollout in progress, over runs in flight (this kills the ones no resume recovers), or blind when a bot cannot be consulted
         type: boolean
         default: false
       profile:
@@ -143,7 +143,7 @@ on:
         type: string
         default: affected
       force:
-        description: Bypass the bot/resident preflights — deploy over a rollout in progress, or blind when a bot cannot be consulted (in-flight bot runs hand off regardless)
+        description: Bypass the bot/resident preflights — deploy over a rollout in progress, over runs in flight (this kills the ones no resume recovers), or blind when a bot cannot be consulted
         type: boolean
         default: false
 
@@ -364,8 +364,9 @@ jobs:
           ARGS: ${{ steps.selection.outputs.args }}
           CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
         run: |
-          # Any non-zero exit is a real failure and fails here: since the
-          # handoff (run-history item 39) a bot with runs in flight is not busy.
+          # Any non-zero exit is a real failure and fails here: a preflight
+          # still refusing at the end of its budget (runs in flight, a rollout
+          # in progress) is one — the deploy did not proceed; re-run the job.
           # shellcheck disable=SC2086
           $CLI deploy all $ARGS --allow-branch
       # What production serves now, whatever happened above — the receipt.

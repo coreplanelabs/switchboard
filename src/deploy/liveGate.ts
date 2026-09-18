@@ -187,6 +187,41 @@ export function decideRestarted(
   });
 }
 
+/** The words of a wait that ran out, per command: what was not done, how to
+ *  run it again, what `--force` would do instead. */
+export interface GaveUpWords {
+  notDone: string;
+  rerun: string;
+  force: string;
+}
+
+/** `deploy all`'s words: the release job is re-run once the runs finish. */
+export const DEPLOY_GAVE_UP_WORDS: GaveUpWords = {
+  notDone: "NOT deployed",
+  rerun: "re-run the deploy once they finish (a CI job: `gh run rerun RUN_ID --failed`)",
+  force: "--force to deploy over them (kills the runs in flight that no resume recovers)",
+};
+
+/** `deploy restart`'s words. */
+export const RESTART_GAVE_UP_WORDS: GaveUpWords = {
+  notDone: "NOT restarted",
+  rerun: "re-run `deploy restart` once they finish",
+  force: "--force to stop over them (kills the runs in flight that no resume recovers)",
+};
+
+/** The failure a preflight still refusing at the end of the wait budget
+ *  produces. The wait is only how long to hold before failing: it never ends
+ *  in a deploy over what refused (a rolled container kills the runs it drives,
+ *  and a handoff is a recovery, not a guarantee), so the line names the budget,
+ *  the refusal, that nothing was done, and the two ways forward. */
+export function preflightGaveUpLine(
+  waitMaxMs: number,
+  reason: string,
+  words: GaveUpWords = DEPLOY_GAVE_UP_WORDS,
+): string {
+  return `preflight still refusing after ${waitMaxMs / 60_000} min (${reason}) — ${words.notDone}; ${words.rerun}, or ${words.force}`;
+}
+
 /** The line printed on every preflight retry, so a long wait is never silent.
  *  `tag` names the command waiting (`deploy:all`, `deploy:restart`). */
 export function heartbeatLine(

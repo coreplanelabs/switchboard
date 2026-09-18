@@ -53,20 +53,21 @@ export const RESTART_SCOPE = "deploy:write";
 export interface RestartVerdict {
   allow: boolean;
   forced: boolean;
-  /** What refuses (fail-closed: no JSON body, an impossible count). */
+  /** What refuses: runs in flight (a stop rolls the container under them), and the fail-closed cases (no JSON body, an impossible count). */
   problems: string[];
-  /** What is said but does not refuse: runs in flight (they hand off), a drain under way. */
+  /** What is said but does not refuse: a drain under way with nothing in flight. */
   warnings: string[];
   message: string;
 }
 /**
  * Whether the container may be stopped now — the deploy preflight's rules
  * (deploy/cloudflare/preflight.mjs `decide`) minus the rollout-state check (a
- * restart is not a rollout). Since the handoff (docs/reference/specs/run-history.md item
- * 39) runs in flight and a drain under way are WARNINGS, not refusals: SIGTERM
- * hands every resumable run to the next generation. Fail closed on a body
- * that is not JSON or an impossible count; `force` allows those anyway, with
- * the warning.
+ * restart is not a rollout). Runs in flight REFUSE: the stop rolls the
+ * container under them, and the handoff (docs/reference/specs/run-history.md
+ * item 39) is a recovery the next generation may fail, not a guarantee — the
+ * CLI waits the 409 out instead. A drain under way with nothing in flight is a
+ * warning. Fail closed on a body that is not JSON or an impossible count;
+ * `force` allows everything anyway, flagged, naming what it kills.
  */
 export function decideRestart(body: HealthzBody | undefined, opts: { force: boolean }): RestartVerdict {
   const problems: string[] = [];
@@ -79,8 +80,8 @@ export function decideRestart(body: HealthzBody | undefined, opts: { force: bool
     if (!Number.isInteger(body.inFlight) || (body.inFlight as number) < 0) {
       problems.push(`bot reports an impossible inFlight=${JSON.stringify(body.inFlight)} (counter bug or old Worker)`);
     } else if ((body.inFlight as number) > 0) {
-      warnings.push(
-        `${body.inFlight} run(s) in flight — handed to the next generation on SIGTERM (run-history item 39); they continue there`,
+      problems.push(
+        `${body.inFlight} run(s) in flight — a stop rolls the bot container under them (a handoff is a recovery, not a guarantee)`,
       );
     }
     if (body.draining === true)
@@ -98,14 +99,14 @@ export function decideRestart(body: HealthzBody | undefined, opts: { force: bool
       forced: true,
       problems,
       warnings,
-      message: `restart WARNING: stopping by force despite —\n${detail}`,
+      message: `restart WARNING: stopping by force despite —\n${detail}\n  this WILL kill the runs in flight that no resume recovers`,
     };
   return {
     allow: false,
     forced: false,
     problems,
     warnings,
-    message: `restart REFUSED —\n${detail}\n  wait and retry, or pass --force to stop blind`,
+    message: `restart REFUSED —\n${detail}\n  wait for them to finish and retry, or pass --force to stop over them`,
   };
 }
 

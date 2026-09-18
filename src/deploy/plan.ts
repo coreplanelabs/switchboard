@@ -6,10 +6,10 @@
 // Why this order (README "Deploying on Cloudflare Containers"):
 //   1. memory   — the state Worker: Durable Object migrations must exist before
 //                 the bot writes to them (friction ledger, memory, schedule firings).
-//   2. bot      — the container shim; its own preflight refuses over a rollout in
-//                 progress and only warns about runs in flight, which are handed
-//                 to the next generation on SIGTERM
-//                 (docs/decisions/0019-durable-run-ledger-resume-after-kill.md).
+//   2. bot      — the container shim; its own preflight refuses while runs are
+//                 in flight (a rollout rolls the container under them; the
+//                 handoff of docs/decisions/0019-durable-run-ledger-resume-after-kill.md
+//                 is a recovery, not a guarantee) and over a rollout in progress.
 //   3. resident — per-repo DOs; its preflight refuses while a resident has work
 //                 in flight; needs the admin bearer in the env.
 //   4. sandbox  — the per-thread exec proxy; stateless per run, no preflight.

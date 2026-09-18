@@ -6,6 +6,7 @@ import {
   heartbeatLine,
   LIVE_GATE_DEADLINE_MS,
   parseHealthz,
+  preflightGaveUpLine,
   sameCommit,
 } from "./liveGate.js";
 
@@ -207,6 +208,28 @@ describe("heartbeatLine", () => {
     );
     expect(heartbeatLine("bot", undefined, 120_000, 30 * 60_000)).toBe(
       "[deploy:all] bot: still waiting — /healthz not answering, waited 2m of 30m",
+    );
+  });
+});
+
+describe("preflightGaveUpLine", () => {
+  it("a preflight still refusing at the end of the wait budget FAILS by name: the budget, what still refuses, that nothing was rolled, and the two ways forward (re-run the job, or --force over the runs)", () => {
+    const line = preflightGaveUpLine(10 * 60_000, "2 run(s) in flight — a rollout would roll the container under them");
+    expect(line).toMatch(/^preflight still refusing after 10 min \(2 run\(s\) in flight — /);
+    expect(line).toContain("NOT deployed");
+    expect(line).toContain("gh run rerun RUN_ID --failed");
+    expect(line).toMatch(/--force/);
+    expect(line).toMatch(/kill/);
+  });
+
+  it("the restart's line carries its own words (what was not done, how to re-run, what --force does), same shape", () => {
+    const line = preflightGaveUpLine(2 * 60_000, "1 run(s) in flight — a stop kills it", {
+      notDone: "NOT restarted",
+      rerun: "re-run `deploy restart` once it finishes",
+      force: "--force to stop over it (kills the run)",
+    });
+    expect(line).toBe(
+      "preflight still refusing after 2 min (1 run(s) in flight — a stop kills it) — NOT restarted; re-run `deploy restart` once it finishes, or --force to stop over it (kills the run)",
     );
   });
 });

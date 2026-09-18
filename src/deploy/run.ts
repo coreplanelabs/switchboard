@@ -11,6 +11,8 @@ import {
   decideLive,
   decideRestarted,
   heartbeatLine,
+  preflightGaveUpLine,
+  RESTART_GAVE_UP_WORDS,
   LIVE_GATE_DEADLINE_MS,
   LIVE_GATE_POLL_MS,
   parseHealthz,
@@ -947,12 +949,9 @@ async function deployStepTraced(
     }
     if (outcome.kind === "preflight-refused" && step.retryOnPreflightRefusal) {
       const left = deadline - deps.now();
-      if (left <= 0)
-        return {
-          ok: false,
-          live: "not deployed",
-          reason: `preflight still refusing after ${waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to deploy over it`,
-        };
+      // The budget ran out with the refusal standing: the step FAILS by name,
+      // never a deploy over what refused (liveGate.ts `preflightGaveUpLine`).
+      if (left <= 0) return { ok: false, live: "not deployed", reason: preflightGaveUpLine(waitMaxMs, outcome.reason) };
       // Never a silent wait: say what is in flight and how far into the budget we are.
       const body = step.healthUrl ? await fetchHealthz(step.healthUrl) : undefined;
       io.log(
@@ -1251,10 +1250,10 @@ async function fetchHealthzWith(deps: RestartRunnerDeps, url: string): Promise<H
 
 /**
  * Restart the bot container without a build: POST the Worker's `/admin/restart`
- * (bearer from `plan.tokenEnv`); a 409 (the bot not answering with JSON — the
- * fail-closed cases; runs in flight hand off and never refuse, run-history item
- * 39) is waited out with a heartbeat and retried every `pollMs` up to `waitMaxMs`
- * — never forced unless the plan says so; then poll `/healthz` until a
+ * (bearer from `plan.tokenEnv`); a 409 (runs in flight — a stop would roll the
+ * container under them — or the bot not answering with JSON, the fail-closed
+ * cases) is waited out with a heartbeat and retried every `pollMs` up to
+ * `waitMaxMs`, then FAILS by name — never forced unless the plan says so; then poll `/healthz` until a
  * non-draining container reports a `startedAt` later than the old one's
  * (`decideRestarted`), logging every poll so the drain is visible.
  */
@@ -1323,7 +1322,7 @@ export async function runBotRestart(
           ok: false,
           target: plan.target,
           waitedMs: deps.now() - started,
-          reason: `still refusing after ${plan.waitMaxMs / 60_000} min (${outcome.reason}); re-run later, or --force to stop blind`,
+          reason: preflightGaveUpLine(plan.waitMaxMs, outcome.reason, RESTART_GAVE_UP_WORDS),
         };
       const body = await fetchHealthzWith(deps, plan.healthUrl);
       io.log(heartbeatLine(plan.target, body, deps.now() - started, plan.waitMaxMs, tag));

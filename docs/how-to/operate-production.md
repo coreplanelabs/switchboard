@@ -22,11 +22,11 @@ Nothing runs: it prints which Workers are stale, why, and each preflight. `GET /
 npx @coreplane/switchboard deploy all --affected
 ```
 
-`deploy all` is the only runner: memory, bot, resident, sandbox, never the four by hand. A refusing preflight is retried every 60 s (`--wait-max` minutes); `--force` bypasses it.
+`deploy all` is the only runner: memory, bot, resident, sandbox, never the four by hand. A refusing preflight is retried every 60 s (`--wait-max` minutes), then the deploy fails by name — it never rolls over what refused; re-run it once the runs finish (`gh run rerun RUN_ID --failed` for a CI job). `--force` bypasses the preflight and kills the runs in flight that no resume recovers.
 
 | Preflight | Refuses while |
 |---|---|
-| bot | the container is mid-rollout |
+| bot | the bot has runs in flight, or the container is mid-rollout |
 | resident | any resident has work in flight (needs `RESIDENT_READ_TOKEN`) |
 
 ## Change the config without a release
