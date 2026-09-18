@@ -77,13 +77,17 @@ import {
 } from "../../src/core/runLedger/decisions.ts";
 import {
   IDEMPOTENCY_KEY_PATTERN,
+  capThreadEvent,
   INSTANCE_ID_PATTERN,
   isCoordinatorInstance,
   isCoordinatorUnit,
+  isThreadEvent,
   sendRunFinished,
+  UNIT_PATTERN,
   type CoordinatorInstance,
   type CoordinatorUnit,
   type RunFinishedSend,
+  type ThreadEvent,
 } from "../../src/core/coordinator/contract.ts";
 import {
   GEN_PATTERN,
@@ -1537,6 +1541,20 @@ export class RunHistoryDO extends DurableObject<Env> {
         PRIMARY KEY (instance_id, unit)
       );
     `);
+    // The thread events of a unit-owned thread (record 0051's reply-as-event rule): a
+    // sibling table of the unit rows, never a field on them — `putUnits`
+    // replaces a row whole, so an append landing between a route's read and
+    // its put would be lost. Consumption is a column of its own, set once.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS coordinator_unit_events (
+        instance_id TEXT NOT NULL,
+        unit TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        json TEXT NOT NULL,
+        consumed_by TEXT,
+        PRIMARY KEY (instance_id, unit, seq)
+      );
+    `);
   }
 
   // ---- the coordinator's parent records (run-history item 49) -----------------
@@ -1611,6 +1629,68 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ? ORDER BY rowid`, instanceId)
       .toArray()
       .map((r) => JSON.parse(r.json) as CoordinatorUnit);
+  }
+
+  // ---- the thread events of a unit-owned thread (record 0051's reply-as-event rule) --------------
+
+  /** The next sequence assigned in one transaction, the per-event cap applied
+   *  (attachments dropped whole, the row saying how many). */
+  async appendUnitEvent(
+    instanceId: string,
+    unit: string,
+    event: Omit<ThreadEvent, "seq">,
+  ): Promise<{ ok: true; seq: number }> {
+    let seq = 1;
+    this.ctx.storage.transactionSync(() => {
+      const max = this.sql
+        .exec<{
+          m: number | null;
+        }>(`SELECT MAX(seq) AS m FROM coordinator_unit_events WHERE instance_id = ? AND unit = ?`, instanceId, unit)
+        .toArray()[0];
+      seq = (max?.m ?? 0) + 1;
+      const capped = capThreadEvent({ ...event, seq });
+      this.sql.exec(
+        `INSERT INTO coordinator_unit_events (instance_id, unit, seq, json) VALUES (?, ?, ?, ?)`,
+        instanceId,
+        unit,
+        seq,
+        JSON.stringify(capped),
+      );
+    });
+    return { ok: true, seq };
+  }
+
+  /** The unit's events in sequence order; `unconsumedOnly` filters to the rows nothing has consumed. */
+  async listUnitEvents(instanceId: string, unit: string, unconsumedOnly: boolean): Promise<ThreadEvent[]> {
+    return this.sql
+      .exec<{ json: string; consumed_by: string | null }>(
+        `SELECT json, consumed_by FROM coordinator_unit_events WHERE instance_id = ? AND unit = ?${
+          unconsumedOnly ? " AND consumed_by IS NULL" : ""
+        } ORDER BY seq ASC`,
+        instanceId,
+        unit,
+      )
+      .toArray()
+      .map((r) => {
+        const e = JSON.parse(r.json) as ThreadEvent;
+        return r.consumed_by !== null ? { ...e, consumedBy: r.consumed_by } : e;
+      });
+  }
+
+  /** Consumption set once — idempotent: a row already consumed keeps its first consumer. */
+  async markUnitEventsConsumed(instanceId: string, unit: string, seqs: number[], by: string): Promise<{ ok: true }> {
+    this.ctx.storage.transactionSync(() => {
+      for (const seq of seqs) {
+        this.sql.exec(
+          `UPDATE coordinator_unit_events SET consumed_by = ? WHERE instance_id = ? AND unit = ? AND seq = ? AND consumed_by IS NULL`,
+          by,
+          instanceId,
+          unit,
+          seq,
+        );
+      }
+    });
+    return { ok: true };
   }
 
   // ---- the live-run ledger (run-history items 28–34) --------------------------
@@ -3538,6 +3618,9 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/get",
   "/runs/coordinator/units/put",
   "/runs/coordinator/units/list",
+  "/runs/coordinator/events/append",
+  "/runs/coordinator/events/list",
+  "/runs/coordinator/events/mark-consumed",
   "/runs/claim",
   "/runs/heartbeat",
   "/runs/append",
@@ -3925,6 +4008,38 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))
       return json({ error: "instanceId must be a Workflow instance id" }, 400);
     return json({ units: await stub.listUnits(b.instanceId) });
+  }
+  // The thread events of a unit-owned thread (record 0051's reply-as-event rule): append assigns
+  // the sequence, list filters unconsumed, mark-consumed is idempotent.
+  if (pathname.startsWith("/runs/coordinator/events/")) {
+    if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))
+      return json({ error: "instanceId must be a Workflow instance id" }, 400);
+    if (typeof b.unit !== "string" || !UNIT_PATTERN.test(b.unit)) return json({ error: "unit must be a unit id" }, 400);
+    if (pathname === "/runs/coordinator/events/append") {
+      if (!isThreadEvent({ ...(b.event as Record<string, unknown>), seq: 1 }))
+        return json({ error: "event must be a thread event (without its seq)" }, 400);
+      // The store assigns the sequence and the consumer: a caller's `seq` or
+      // `consumedBy` is dropped, so no row is born consumed in its JSON while
+      // its column still lists it unconsumed.
+      const { seq: _ignored, consumedBy: _fresh, ...event } = b.event as ThreadEvent;
+      const r = await stub.appendUnitEvent(b.instanceId, b.unit, event as Omit<ThreadEvent, "seq" | "consumedBy">);
+      console.log(`[runs/coordinator/events/append] ${key.value} ${b.instanceId}:${b.unit} seq ${r.seq}`);
+      return json(r);
+    }
+    if (pathname === "/runs/coordinator/events/list") {
+      return json({ events: await stub.listUnitEvents(b.instanceId, b.unit, b.unconsumedOnly === true) });
+    }
+    if (pathname === "/runs/coordinator/events/mark-consumed") {
+      if (!Array.isArray(b.seqs) || !b.seqs.every((s) => typeof s === "number" && Number.isInteger(s) && s >= 1))
+        return json({ error: "seqs must be an array of sequence numbers" }, 400);
+      if (typeof b.by !== "string" || b.by.length === 0 || b.by.length > 200)
+        return json({ error: "by must name the consumer" }, 400);
+      const r = await stub.markUnitEventsConsumed(b.instanceId, b.unit, b.seqs as number[], b.by);
+      console.log(
+        `[runs/coordinator/events/mark-consumed] ${key.value} ${b.instanceId}:${b.unit} ${b.seqs.length} row(s) by ${b.by}`,
+      );
+      return json(r);
+    }
   }
 
   const runId = parseRunId(b.runId);
