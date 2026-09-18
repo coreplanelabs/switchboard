@@ -390,11 +390,11 @@ describe("every named refusal carries the seam's cause beside its words (record 
   });
 });
 
-// Feature: docs/reference/specs/resident-repos.md item 68 — a loaded container
-// that did not accept the connection is a wait on the resident too: the DO's
+// Feature: docs/reference/specs/resident-repos.md item 68 — a container that
+// did not accept the connection is a wait on the resident too: the DO's
 // typed word at the spawn becomes the 503 with the token, wherever the throw
 // was met, and the platform's bare words never are the token by themselves.
-describe("a loaded container's refusal (runtime-busy)", () => {
+describe("a refused connect (runtime-busy)", () => {
   const PLATFORM =
     "Container is taking too long to accept the connection; the application could be overwhelmed with load";
   const busy = () => new SandboxRuntimeBusyError({ containerId: "c1", cause: PLATFORM });

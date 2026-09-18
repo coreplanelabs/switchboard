@@ -846,12 +846,13 @@ function isRuntimeUnreachable(err: unknown): boolean {
   return false;
 }
 
-/** Did the platform refuse the connect because the container is loaded
+/** Did the platform refuse the connect inside its own accept allowance
  *  (docs/reference/specs/resident-repos.md item 68; execution.md item 28)? The
  *  platform's own wording — a plain `Error`, the SDK hands it on unwrapped —
- *  anywhere in the cause chain. Asked only of a spawn-phase error, after
- *  `isRuntimeReplacement`: a loaded container is neither replaced nor silent
- *  for good, and a command's own output never gets here. */
+ *  anywhere in the cause chain; its words blame load, which the platform never
+ *  measured and an idle container has disproved. Asked only of a spawn-phase
+ *  error, after `isRuntimeReplacement`: such a container is neither replaced
+ *  nor silent for good, and a command's own output never gets here. */
 function isRuntimeBusy(err: unknown): boolean {
   for (const link of selfAndCauses(err)) if (isRuntimeBusySignal(link)) return true;
   return false;
@@ -6437,7 +6438,7 @@ export class ResidentDO extends Sandbox<Env> {
       // container is unchanged, so no `replacedExecAnswer` gate applies.
       if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return this.replacedExecAnswer(err);
-      // A loaded container at the command's spawn (item 68): the wait token,
+      // A refused connect at the command's spawn (item 68): the wait token,
       // the command never started.
       if (err instanceof SandboxRuntimeBusyError) return runtimeBusyErr(err);
       throw err;

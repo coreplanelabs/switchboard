@@ -838,9 +838,9 @@ describe("CloudflareSandboxExecutor seed", () => {
   });
 });
 
-// Feature: docs/reference/specs/execution.md item 28 — a loaded container that did
-// not accept the connection is waited on like a full fleet: the identical
-// request re-sent on a denser ladder, inside the operation's own budget.
+// Feature: docs/reference/specs/execution.md item 28 — a container that did not
+// accept the connection is waited on like a full fleet: the identical request
+// re-sent on a denser ladder, inside the operation's own budget.
 describe("CloudflareSandboxExecutor runtime-busy wait", () => {
   const BUSY_EXEC = runtimeBusyExecAnswer(
     runtimeBusyMessage({
@@ -868,7 +868,7 @@ describe("CloudflareSandboxExecutor runtime-busy wait", () => {
     vi.useRealTimers();
   });
 
-  it("re-sends the SAME request after 3 s, 5 s, then 10 s while the container is loaded, and returns the eventual result", async () => {
+  it("re-sends the SAME request after 3 s, 5 s, then 10 s while the container refuses the connect, and returns the eventual result", async () => {
     const { calls } = scriptedFetch([{ body: BUSY_EXEC }, { body: BUSY_EXEC }, { body: BUSY_EXEC }, { body: OK }]);
     const ex = new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs: async () => ({ GH_TOKEN: "ghs_x" }) });
     const p = ex.exec("kill -0 44 && echo alive", { timeoutMs: 60_000 });
@@ -898,7 +898,7 @@ describe("CloudflareSandboxExecutor runtime-busy wait", () => {
     });
   });
 
-  it("gives up once the wait reaches the command's own budget with ExecCapacityError naming the load, never ExecInfraError", async () => {
+  it("gives up once the wait reaches the command's own budget with ExecCapacityError naming the refusal, never ExecInfraError", async () => {
     const { calls } = scriptedFetch([{ body: BUSY_EXEC }]);
     const outcome = new CloudflareSandboxExecutor(OPTS)
       .exec("tail -c +1 log", { timeoutMs: 60_000 })
@@ -908,7 +908,7 @@ describe("CloudflareSandboxExecutor runtime-busy wait", () => {
     expect(err).toBeInstanceOf(ExecCapacityError);
     expect(err).not.toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toBe(
-      "sandbox busy — the thread's container did not accept a connection within 60s (a command already running in it has every core); wait for it to finish, then retry",
+      "sandbox busy — the thread's container did not accept a connection within 60s (the platform refused every connect of the wait; a command saturating its cores is one cause, an idle container has met it too); retry",
     );
     // 3 + 5 + 10×5 + 2 (clipped to the budget) = 60 s → 8 waits, 9 sends, then no more
     expect(calls).toHaveLength(9);

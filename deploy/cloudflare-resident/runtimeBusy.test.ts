@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { methodOf, readSource } from "./testing/sourceScan";
 
-// A loaded container that did not accept the connection is a wait on the
+// A container that did not accept the connection is a wait on the
 // resident too (docs/reference/specs/resident-repos.md item 68; the thread
 // sandbox's execution.md item 28): the platform's accept refusal is named at
 // the exec choke point's SPAWN alone — nothing ran — as the typed
@@ -20,7 +20,7 @@ function method(name: string): string {
   return body!;
 }
 
-describe("the loaded container is named at the spawn alone", () => {
+describe("the refused connect is named at the spawn alone", () => {
   it("run() throws the typed word from its spawn catch — after the reset and the replacement, before the unreachable count — and its collect catch never names it", () => {
     const run = method("run");
     const split = run.indexOf("await this.clearRuntimeUnreachable();");

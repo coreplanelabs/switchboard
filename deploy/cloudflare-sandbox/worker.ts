@@ -187,10 +187,11 @@ function isRuntimeUnreachable(err: unknown): boolean {
   return false;
 }
 
-/** Did the platform refuse the connect because the container is loaded
+/** Did the platform refuse the connect inside its own accept allowance
  *  (docs/reference/specs/execution.md item 28)? The platform's own wording,
  *  anywhere in the cause chain; a plain `Error`, so the wording is all there
- *  is. Asked only of a failure met before a process was started. */
+ *  is — and its words blame load the platform never measured. Asked only of
+ *  a failure met before a process was started. */
 function isRuntimeBusy(err: unknown): boolean {
   for (const link of selfAndCauses(err)) if (isRuntimeBusySignal(link)) return true;
   return false;
@@ -336,7 +337,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
         );
       } catch (err) {
         // The warm-up's own failure, handed on by the gate: a full fleet, a
-        // loaded container or a silent control port keeps its name; anything
+        // refused connect or a silent control port keeps its name; anything
         // else propagates. Nothing ran — the warm-up is a spawn.
         return this.spawnFailure(err, startedAt);
       }
@@ -358,8 +359,8 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     try {
       proc = await createExtensionProcessSandbox(this).exec(argv, { env: envVars, timeout: backstopMs });
     } catch (err) {
-      // The process was never started: a loaded container's refusal is the
-      // wait token here and only here (item 28) — the executor re-sends, and
+      // The process was never started: a refused connect is the wait token
+      // here and only here (item 28) — the executor re-sends, and
       // nothing runs twice.
       return this.spawnFailure(err, startedAt);
     }
@@ -650,8 +651,8 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   }
 
   /** A failure met BEFORE a process was started — the spawn, or the gate's
-   *  warm-up: a loaded container that did not accept the connection is named
-   *  with its wait token (docs/reference/specs/execution.md item 28), since
+   *  warm-up: a container that did not accept the connection is named with
+   *  its wait token (docs/reference/specs/execution.md item 28), since
    *  nothing ran and the identical request is safe to re-send. Every other
    *  failure is classified as after a start (`execFailure`). A failure of a
    *  running command's output never comes here: the process exists, and a
@@ -692,7 +693,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
     });
   }
 
-  /** The typed, named error for a loaded container that did not accept the
+  /** The typed, named error for a container that did not accept the
    *  connection (item 28), with this container's id — thrown across the RPC
    *  boundary to the fetch handler on the file routes, matched by name. */
   private runtimeBusy(cause: string): SandboxRuntimeBusyError {
@@ -700,7 +701,7 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   }
 
   /** A file operation with its runtime failures named for the fetch handler:
-   *  a loaded container (item 28) and a silent control port (item 9) become
+   *  a refused connect (item 28) and a silent control port (item 9) become
    *  the typed errors; a missing file is the refusal the route answers 404.
    *  The SDK's other errors propagate. A file operation that met either
    *  never reached the runtime, so the executor's re-send does nothing twice. */
@@ -926,8 +927,8 @@ export default {
       // op never reached a runtime, so a 503 the executor's transport retry
       // re-sends, with the named reason and the container in the text.
       if (isRuntimeUnreachableError(err)) return json(runtimeUnreachableAnswer(msg), 503);
-      // The container is loaded and did not accept the connection (item 28):
-      // the file op never reached it either — a 503 with the wait token.
+      // The container did not accept the connection (item 28): the file op
+      // never reached it either — a 503 with the wait token.
       if (isRuntimeBusyError(err)) return json(runtimeBusyAnswer(msg), 503);
       // A full fleet (docs/reference/specs/execution.md item 14): no container
       // instance for this thread's Durable Object, so the file op never

@@ -2356,10 +2356,10 @@ describe("ResidentExecutor.probeStatus — the seed handle", () => {
   });
 });
 
-// Feature: docs/reference/specs/resident-repos.md item 68 — a loaded container
-// that did not accept the connection is waited out: the identical request is
+// Feature: docs/reference/specs/resident-repos.md item 68 — a container that
+// did not accept the connection is waited out: the identical request is
 // re-sent on the token, inside the command's own budget.
-describe("ResidentExecutor waits out a loaded container (item 68)", () => {
+describe("ResidentExecutor waits out a refused connect (item 68)", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
@@ -2379,7 +2379,7 @@ describe("ResidentExecutor waits out a loaded container (item 68)", () => {
   };
   const OK = { stdout: "alive", stderr: "", exitCode: 0, truncated: false };
 
-  /** A fetch stub whose LAST canned answer repeats: a container that stays loaded. */
+  /** A fetch stub whose LAST canned answer repeats: a container that keeps refusing the connect. */
   function repeatingFetch(responses: Array<{ status?: number; body: unknown }>) {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
@@ -2391,7 +2391,7 @@ describe("ResidentExecutor waits out a loaded container (item 68)", () => {
     return { fn, calls };
   }
 
-  it("re-sends the SAME /exec request after 3 s, 5 s, then 10 s while the container is loaded, and returns the eventual result", async () => {
+  it("re-sends the SAME /exec request after 3 s, 5 s, then 10 s while the container refuses the connect, and returns the eventual result", async () => {
     const { calls } = repeatingFetch([{ body: BUSY_EXEC }, { body: BUSY_EXEC }, { body: BUSY_EXEC }, { body: OK }]);
     const p = new ResidentExecutor(OPTS).exec("kill -0 44 && echo alive", { timeoutMs: 60_000 });
     void p.then(
@@ -2414,7 +2414,7 @@ describe("ResidentExecutor waits out a loaded container (item 68)", () => {
     expect(sentBody(calls[3])).toMatchObject({ command: "kill -0 44 && echo alive", timeoutMs: 60_000 });
   });
 
-  it("gives up once the wait reaches the command's own budget with ExecCapacityError naming the load — never ExecInfraError, never a re-attach", async () => {
+  it("gives up once the wait reaches the command's own budget with ExecCapacityError naming the refusal — never ExecInfraError, never a re-attach", async () => {
     const { calls } = repeatingFetch([{ body: BUSY_EXEC }]);
     const outcome = new ResidentExecutor(OPTS).exec("tail -c +1 log", { timeoutMs: 60_000 }).catch((e: unknown) => e);
     await vi.advanceTimersByTimeAsync(60_000);
@@ -2422,7 +2422,7 @@ describe("ResidentExecutor waits out a loaded container (item 68)", () => {
     expect(err).toBeInstanceOf(ExecCapacityError);
     expect(err).not.toBeInstanceOf(ExecInfraError);
     expect((err as Error).message).toBe(
-      "sandbox busy — the thread's container did not accept a connection within 60s (a command already running in it has every core); wait for it to finish, then retry",
+      "sandbox busy — the thread's container did not accept a connection within 60s (the platform refused every connect of the wait; a command saturating its cores is one cause, an idle container has met it too); retry",
     );
     // 3 + 5 + 10×5 + 2 (clipped to the budget) = 60 s → 8 waits, 9 sends, then no more
     expect(calls).toHaveLength(9);
@@ -2472,7 +2472,7 @@ describe("ResidentExecutor waits out a loaded container (item 68)", () => {
     const err = await outcome;
     expect(err).toBeInstanceOf(ExecInfraError);
     expect((err as ExecInfraError).reason).toBe("aborted");
-    expect((err as Error).message).toContain("stopped waiting for a loaded container");
+    expect((err as Error).message).toContain("stopped waiting for the container to accept the connection");
     await vi.advanceTimersByTimeAsync(60_000);
     expect(calls).toHaveLength(1);
   });
