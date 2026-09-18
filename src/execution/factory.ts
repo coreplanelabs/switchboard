@@ -33,6 +33,7 @@ import {
   type ResidentStatusProbe,
 } from "./resident.js";
 import { repoResourceId } from "../core/residentAdmin.js";
+import { nearMatch } from "../core/nearMatch.js";
 import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
 import { isServiceable } from "./residentState.js";
 import { systemClock } from "../core/trace/clock.js";
@@ -475,10 +476,14 @@ export async function makeExecutor(
       // not-onboarded is the ordinary per-thread case — but still make the cold
       // fall-through visible: the user needs to know coding ran cold in a
       // per-thread sandbox instead of on a warm, deps-ready resident, and how to
-      // fix it. Routing is unchanged; only the note is added.
+      // fix it. Routing is unchanged; only the note is added. Record 0054: the
+      // note names the resident they probably meant, when the registry answers
+      // with one near match (one bounded read; silence changes nothing).
+      const near = await nearOnboarded(resident, ctx.repo);
       note =
         `repo not onboarded as a resident — running in a cold per-thread sandbox; ` +
-        `onboard it (\`repo onboard ${ctx.repo}\`) for a warm, deps-ready environment`;
+        `onboard it (\`repo onboard ${ctx.repo}\`) for a warm, deps-ready environment` +
+        (near ? ` (did you mean \`${near}\`?)` : "");
     }
     if (reason !== undefined) {
       // The seed (docs/reference/specs/execution.md item 26): the resident could
@@ -869,6 +874,17 @@ export function residentSlugsLister(
       .filter((resource) => resource.startsWith("repo:"))
       .map((resource) => resource.slice("repo:".length).toLowerCase());
   };
+}
+
+/** The one resident a typed repo name is near (record 0054), over the same
+ *  bounded listing the resolver uses: `undefined` when the list does not
+ *  answer, when no candidate is within budget, or when several tie — the cold
+ *  fall-through note then names only the fix, never a wrong repo. */
+async function nearOnboarded(cfg: ResidentExecutionConfig | undefined, typed: string): Promise<string | undefined> {
+  const list = residentSlugsLister(cfg);
+  const candidates = await list?.().catch(() => undefined);
+  if (!candidates || candidates.length === 0) return undefined;
+  return nearMatch(typed, candidates).guess;
 }
 
 /** /status probe through the negative cache: inside an outage window the

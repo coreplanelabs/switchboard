@@ -198,6 +198,33 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     expect(res).toMatchObject({ ok: true, entry: { branch: "feat/rate-limit", base: "release/1.x" } });
   });
 
+  it("the no-repo refusal guesses the one resident the request's repo token is near (record 0054) — the corrected line and the evidence ride the sentence — and stays without a guess when two tie", async () => {
+    const near = await shipPreflight(
+      input({
+        repoCtx: {},
+        requestText: "in acme/infra: add the onboarding link",
+        repoCandidates: ["acme/infrastructure", "acme/api"],
+      }),
+    );
+    expect(near.ok).toBe(false);
+    if (near.ok) return;
+    expect(near.refusal.code).toBe("ship_preflight_no_repo");
+    expect(near.reply).toContain("Did you mean:");
+    expect(near.reply).toContain("`in acme/infrastructure: add the onboarding link`");
+    expect(near.reply).toContain("which is onboarded");
+
+    const tie = await shipPreflight(
+      input({
+        repoCtx: {},
+        requestText: "in acme/infra: add the onboarding link",
+        repoCandidates: ["acme/infrastructure", "acme/infra-tools"],
+      }),
+    );
+    expect(tie.ok).toBe(false);
+    if (tie.ok) return;
+    expect(tie.reply).not.toContain("Did you mean:");
+  });
+
   it("a failed repository lookup with a fresh unit proceeds with no base — the hand-off's own refusal names it later; a repository with auto-merge allowed proceeds too (no repository-level check remains)", async () => {
     const fresh = await shipPreflight(input({ repoInfo: async () => undefined }));
     expect(fresh).toEqual({ ok: true, entry: { repo: "acme/api", base: undefined } });

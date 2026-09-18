@@ -17,7 +17,8 @@ import type { LedgerRun } from "../runLedger/writeThrough.js";
 import { systemClock } from "../trace/index.js";
 import type { RunOwner } from "../trace/streamSpans.js";
 import type { RequestTrace } from "../requestTrace.js";
-import type { RepoContext } from "../repoContext.js";
+import type { RepoContext, ResidentSlugs } from "../repoContext.js";
+import { residentSlugsLister } from "../../execution/factory.js";
 import { fetchPullRequestFacts, fetchRepoShipInfo, type PullRequestFacts } from "../../execution/githubPulls.js";
 import { processSecrets } from "../../secrets.js";
 import { handOffToCoordinator, type HandOffOutcome } from "../coordinator/handOff.js";
@@ -78,6 +79,14 @@ export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegi
    * Default: `fetchInstanceStatusViaShim` over the same base URL and token map.
    */
   fetchCoordinatorInstanceStatus?: (id: string) => Promise<InstanceStatusAnswer>;
+  /**
+   * The resident registry listing, for the no-repo refusal's best guess
+   * (record 0054): one bounded call — the probe's timeout, skipped inside a
+   * probe-outage window — whose failure leaves the question without a guess.
+   * Default: the production lister over the configured resident. Injectable so
+   * tests assert the guess without a network call.
+   */
+  residentSlugs?: ResidentSlugs;
 }
 
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
@@ -149,12 +158,17 @@ export async function runShipBranch(
   const clock = deps.clock ?? systemClock;
   // The same one-builder card shell as the main path, on the same label and clock.
   const shell = createCardShell({ label, startedAt: ctx.startedAt, now: clock });
+  // Record 0054: only a request that resolved NO repository pays for the
+  // registry listing, and only to guess the one the person meant.
+  const listSlugs = deps.residentSlugs ?? residentSlugsLister(deps.config.config.execution?.resident);
+  const repoCandidates = repoCtx.repo ? undefined : await listSlugs?.().catch(() => undefined);
   const pre = await root.span("dispatch.ship_preflight", () =>
     shipPreflight({
       channelId: msg.channelId,
       threadKey: msg.threadKey,
       requestText: directives.text,
       repoCtx,
+      ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates } : {}),
       gates: {
         canRunAgent: (a) => deps.config.canRunAgent(chatActorOf(deps.config, msg), a),
         adminsHint: () => deps.config.adminsHint(),
