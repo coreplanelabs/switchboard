@@ -273,6 +273,8 @@ describe("piModelsJson", () => {
 
   it("a known card writes its level map, its cap field and its window into the run's entry", () => {
     const card = cardOf({
+      ref: "local/acme/m1",
+      block: "local",
       levels: {
         low: { word: "low", named: true },
         medium: { word: "medium", named: true },
@@ -298,7 +300,11 @@ describe("piModelsJson", () => {
   });
 
   it("an unknown card writes the identity map — pi clamps nothing — pi's unknown window and the wire's cap field", () => {
-    const entry = modelOf({ ...spec, model: { ...spec.model, providerType: "openai-compatible" }, card: cardOf({}) });
+    const entry = modelOf({
+      ...spec,
+      model: { ...spec.model, providerType: "openai-compatible" },
+      card: cardOf({ ref: "local/acme/m1", block: "local" }),
+    });
     expect(entry.thinkingLevelMap).toEqual({ low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" });
     expect(entry.contextWindow).toBe(128_000);
     expect(entry.compat).toEqual({ maxTokensField: "max_completion_tokens" });
@@ -308,6 +314,70 @@ describe("piModelsJson", () => {
     const card = cardOf({ vendor: "anthropic", cache: "markers" });
     const entry = modelOf({ ...spec, model: { ...spec.model, providerType: "openai-compatible" }, card });
     expect((entry.compat as Record<string, unknown>).cacheControlFormat).toBe("anthropic");
+  });
+
+  // The biller's own compat words (record 0052's amendment, U45): pi through
+  // the proxy sees the bot's URL, so the words its own detection keys on the
+  // aggregator's identity must ride the file — from the biller table, never a
+  // URL sniff at run time.
+  it("an aggregator block's entry carries the biller's four compat words beside the card's own", () => {
+    const card = cardOf({
+      ref: "openrouter/anthropic/claude-sonnet-4",
+      model: "anthropic/claude-sonnet-4",
+      vendor: "anthropic",
+      cache: "markers",
+      window: 200_000,
+    });
+    const entry = modelOf({
+      ...spec,
+      model: { ...spec.model, id: "anthropic/claude-sonnet-4", providerType: "openai-compatible" },
+      card,
+    });
+    expect(entry.compat).toEqual({
+      maxTokensField: "max_completion_tokens",
+      cacheControlFormat: "anthropic",
+      thinkingFormat: "openrouter",
+      sessionAffinityFormat: "openrouter",
+      supportsDeveloperRole: true,
+    });
+    expect(entry.contextWindow).toBe(200_000);
+    expect(entry.thinkingLevelMap).toEqual({ low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" });
+  });
+
+  it("the developer role follows the aggregator's id: its Anthropic and OpenAI ids carry it, any other id is told not to claim it — as pi's own detection says against the aggregator directly", () => {
+    const roleOf = (id: string) =>
+      (
+        modelOf({
+          ...spec,
+          model: { ...spec.model, id, providerType: "openai-compatible" },
+          card: cardOf({ ref: `openrouter/${id}`, model: id, vendor: id.split("/")[0] }),
+        }).compat as Record<string, unknown>
+      ).supportsDeveloperRole;
+    expect(roleOf("anthropic/claude-sonnet-4")).toBe(true);
+    expect(roleOf("openai/gpt-5.4")).toBe(true);
+    expect(roleOf("deepseek/deepseek-v4.1-flash")).toBe(false);
+  });
+
+  it("an Anthropic block carries none of the four aggregator words — its compat is the thinking payload alone", () => {
+    const card = cardOf({ ref: "anthropic/claude-fable-5", block: "anthropic", wire: "anthropic-messages" });
+    const entry = modelOf({ ...spec, card });
+    expect(entry.compat).toEqual({ forceAdaptiveThinking: true });
+  });
+
+  it("a generic block's markers card carries none of the four — no harness-side provider vouches for the biller, and its cache row is already degraded", () => {
+    const card = cardOf({
+      ref: "local/anthropic/claude-sonnet-4",
+      block: "local",
+      model: "anthropic/claude-sonnet-4",
+      vendor: "anthropic",
+      cache: "markers",
+    });
+    const entry = modelOf({
+      ...spec,
+      model: { ...spec.model, id: "anthropic/claude-sonnet-4", providerType: "openai-compatible" },
+      card,
+    });
+    expect(entry.compat).toEqual({ maxTokensField: "max_completion_tokens" });
   });
 
   it("the Anthropic shape keeps its own compat beside the card: the window and the map are the card's, the cap field and the markers are the shape's own", () => {

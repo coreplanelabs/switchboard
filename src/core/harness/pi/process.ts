@@ -10,7 +10,7 @@
 import type { Identity } from "../../../agents/registry.js";
 import { EFFORT_LEVELS, type Effort } from "../../../effort.js";
 import type { ModelCard } from "../../modelCard.js";
-import { WIRE_ALIASES, type ProviderConfig, type Wire } from "../../provider.js";
+import { billerHarnessProvider, WIRE_ALIASES, type ProviderConfig, type Wire } from "../../provider.js";
 import type { PiCompactionConfig } from "../../../config.js";
 import type { HarnessPaths, HarnessStart } from "../container.js";
 import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
@@ -261,19 +261,37 @@ function piMaxTokensField(capField: string | undefined): PiMaxTokensField | unde
  *  invents: the resolved level map (`piThinkingLevelMap`; the identity map
  *  when no layer names the levels, so pi clamps nothing), the card's window
  *  as `contextWindow`, the card's inputs, the cap field as
- *  `compat.maxTokensField` and `compat.cacheControlFormat: "anthropic"` when
- *  the card's cache rule is markers (an Anthropic vendor through an
- *  aggregator) on the completions shape, and the thinking payload the model
- *  takes on the Anthropic shape (`takesAdaptiveThinking`). */
+ *  `compat.maxTokensField` on the completions shape, and the thinking payload
+ *  the model takes on the Anthropic shape (`takesAdaptiveThinking`). A
+ *  completions block whose biller a harness speaks natively
+ *  (`billerHarnessProvider`, record 0052's amendment) carries the biller's own
+ *  compat words beside the card's, so pi through the proxy behaves as pi does
+ *  against the biller directly — through the proxy pi sees the bot's URL, and
+ *  its own detection would take the biller for a generic endpoint:
+ *  `cacheControlFormat: "anthropic"` when the card's cache rule is markers (an
+ *  Anthropic vendor through the aggregator), `thinkingFormat` and
+ *  `sessionAffinityFormat` from the biller's table row, and
+ *  `supportsDeveloperRole` said either way from the biller's id prefixes. A
+ *  markers card on a biller no harness speaks natively carries no marker word:
+ *  its cache row is already `degraded` (`decideControls`), never a silent
+ *  marker no endpoint honours. */
 export function piModelsJson(spec: PiLaunchSpec): string {
   const wire = piRunWire(spec);
   const anthropic = wire === "anthropic-messages";
   const base = spec.harnessUrl.replace(/\/$/, "");
   const card = spec.card;
   const capField = wire === "openai-chat" ? piMaxTokensField(card?.capField) : undefined;
+  const biller = wire === "openai-chat" ? billerHarnessProvider(card?.block) : undefined;
   const completionsCompat = {
     ...(capField !== undefined ? { maxTokensField: capField } : {}),
-    ...(wire === "openai-chat" && card?.cache === "markers" ? { cacheControlFormat: "anthropic" } : {}),
+    ...(biller !== undefined && card?.cache === "markers" ? { cacheControlFormat: "anthropic" } : {}),
+    ...(biller !== undefined
+      ? {
+          thinkingFormat: biller.piCompat.thinkingFormat,
+          sessionAffinityFormat: biller.piCompat.sessionAffinityFormat,
+          supportsDeveloperRole: biller.piCompat.developerRoleIdPrefixes.some((p) => spec.model.id.startsWith(p)),
+        }
+      : {}),
   };
   const compat = anthropic
     ? { forceAdaptiveThinking: takesAdaptiveThinking(spec.model.id) }

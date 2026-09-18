@@ -223,13 +223,34 @@ export interface BillerHarnessProvider {
   /** The AI SDK package OpenCode's configuration names for the biller
    *  (`openCodeProviderPackage` adds the `aisdk:` prefix). */
   openCodePackage: string;
+  /** The compat words pi keys on the biller's identity, copied once from pi's
+   *  own completions detection of that biller and never inferred from a URL at
+   *  run time: through the proxy pi sees the bot's URL, so `piModelsJson` must
+   *  say the words the biller's own base URL would have made pi detect. */
+  piCompat: {
+    /** How the wire spells reasoning: `reasoning: { effort }` under
+     *  `"openrouter"`, never the completions shape's flat `reasoning_effort`. */
+    thinkingFormat: string;
+    /** How a session id would ride the headers, were affinity ever turned on. */
+    sessionAffinityFormat: string;
+    /** The vendor-qualified id prefixes the biller grants the developer role:
+     *  any other id is told `supportsDeveloperRole: false`, as pi's own
+     *  detection would say against the biller directly. */
+    developerRoleIdPrefixes: readonly string[];
+  };
 }
 
-/** The biller-to-provider table: one row per biller a harness speaks natively.
- *  pi's compat words for the same billers ride this table in a later slice
- *  (U45). */
+/** The biller-to-provider table: one row per biller a harness speaks natively
+ *  — OpenCode's package (U44) and pi's compat words (U45) side by side. */
 export const BILLER_HARNESS_PROVIDERS: Readonly<Record<string, BillerHarnessProvider>> = {
-  openrouter: { openCodePackage: "@openrouter/ai-sdk-provider" },
+  openrouter: {
+    openCodePackage: "@openrouter/ai-sdk-provider",
+    piCompat: {
+      thinkingFormat: "openrouter",
+      sessionAffinityFormat: "openrouter",
+      developerRoleIdPrefixes: ["anthropic/", "openai/"],
+    },
+  },
 };
 
 /** The biller's harness-side provider, or undefined when it is served generically. */
