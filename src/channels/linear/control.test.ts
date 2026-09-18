@@ -10,6 +10,90 @@ import { InMemoryRunStore, NullRunStore } from "../../core/runStore.js";
 import { nullChannelIO } from "../../core/nullChannelIo.js";
 
 describe("Linear stop authorization", () => {
+  it("authorizes durable queued cancellation through the same self and channel-wide stop rules", async () => {
+    const inbox = { cancelPending: vi.fn(async () => 1) };
+    const runs = createRunsService({ registry: new RunRegistry(), store: new NullRunStore() });
+    const input = {
+      kind: "stop" as const,
+      threadKey: "linear:org:s",
+      channelId: "linear:org:team",
+      userId: "linear:org:alice",
+      receivedAt: 100,
+    };
+    const done = vi.fn(async () => {});
+    const io = {
+      ...nullChannelIO("test"),
+      reply: vi.fn(async () => {}),
+      status: vi.fn(async () => ({ update: vi.fn(), done })),
+    };
+    await stopLinearSession({ runs, inbox, config: { grantsFor: () => NO_GRANTS } }, input, io);
+    expect(inbox.cancelPending).not.toHaveBeenCalled();
+    await stopLinearSession({ runs, inbox, config: { grantsFor: (id) => grantsFor(id, {}) } }, input, io);
+    expect(inbox.cancelPending).toHaveBeenLastCalledWith({
+      organizationId: "org",
+      sessionId: "s",
+      userId: "alice",
+      receivedAt: 100,
+    });
+    await stopLinearSession({ runs, inbox, config: { grantsFor: () => ALL_GRANTS } }, input, io);
+    expect(inbox.cancelPending).toHaveBeenLastCalledWith({ organizationId: "org", sessionId: "s", receivedAt: 100 });
+    await stopLinearSession(
+      {
+        runs,
+        inbox,
+        config: {
+          grantsFor: () => ({ ...NO_GRANTS, actions: new Set(["runs:write"]), channels: new Set(["linear:org:team"]) }),
+        },
+      },
+      input,
+      io,
+    );
+    expect(inbox.cancelPending).toHaveBeenLastCalledWith({ organizationId: "org", sessionId: "s", receivedAt: 100 });
+    inbox.cancelPending.mockClear();
+    await stopLinearSession(
+      {
+        runs,
+        inbox,
+        config: {
+          grantsFor: () => ({
+            ...NO_GRANTS,
+            actions: new Set(["runs:write"]),
+            channels: new Set(["linear:org:other"]),
+          }),
+        },
+      },
+      input,
+      io,
+    );
+    expect(inbox.cancelPending).not.toHaveBeenCalled();
+    expect(io.reply).not.toHaveBeenCalled();
+    expect(done).toHaveBeenCalledTimes(3);
+  });
+  it("retries unavailable queued cancellation before acknowledging or stopping active work", async () => {
+    const inbox = {
+      cancelPending: vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    };
+    const runs = createRunsService({ registry: new RunRegistry(), store: new NullRunStore() });
+    const listing = vi.spyOn(runs, "listRuns");
+    const io = { ...nullChannelIO("test"), reply: vi.fn(async () => {}) };
+    await expect(
+      stopLinearSession(
+        { runs, inbox, config: { grantsFor: () => ALL_GRANTS } },
+        {
+          kind: "stop",
+          threadKey: "linear:org:s",
+          channelId: "linear:org:team",
+          userId: "linear:org:alice",
+          receivedAt: 100,
+        },
+        io,
+      ),
+    ).rejects.toThrow("offline");
+    expect(listing).not.toHaveBeenCalled();
+    expect(io.reply).not.toHaveBeenCalled();
+  });
   it("cancels only the authorized current question and never closes a newer or another person's session", async () => {
     const registry = new RunRegistry({ now: () => 150 });
     const store = new InMemoryRunStore({ now: () => 150 });

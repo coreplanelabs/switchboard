@@ -13,7 +13,7 @@ import {
   type LinearUpload,
   type LinearOpenedThread,
 } from "./api.js";
-import type { LinearDelivery, LinearInbox } from "./inbox.js";
+import type { LinearDelivery, LinearInbox, LinearPendingStop } from "./inbox.js";
 import { boundedBody } from "./webhook.js";
 import type { WorkItemRequest, WorkItemResult } from "../../core/workItems.js";
 import type { LinearWorkItemActor } from "./workItems.js";
@@ -166,6 +166,9 @@ export class RemoteLinearInbox {
   complete(key: string, lease: string): Promise<boolean> {
     return call(this.transport, { op: "complete", key, lease });
   }
+  cancelPending(input: LinearPendingStop): Promise<number> {
+    return call(this.transport, { op: "cancelPending", ...input });
+  }
 }
 
 const answer = (status: number, value: unknown) =>
@@ -237,6 +240,7 @@ export async function handleLinearBridge(
       "retry",
       "defer",
       "complete",
+      "cancelPending",
       "session",
       "canRead",
       "files",
@@ -264,7 +268,26 @@ export async function handleLinearBridge(
     else if (op === "retry")
       result = await deps.inbox.retry(required(body.key), required(body.lease), now + LINEAR_TIMING.progressMs);
     else if (op === "complete") result = await deps.inbox.complete(required(body.key), required(body.lease), now);
-    else {
+    else if (op === "cancelPending") {
+      const organizationId = required(body.organizationId),
+        sessionId = required(body.sessionId);
+      if (
+        ![organizationId, sessionId, ...(body.userId === undefined ? [] : [body.userId])].every(
+          (id) => typeof id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(id),
+        ) ||
+        typeof body.receivedAt !== "number" ||
+        !Number.isSafeInteger(body.receivedAt) ||
+        body.receivedAt < 0 ||
+        body.receivedAt > now
+      )
+        return answer(400, { error: "invalid_pending_stop" });
+      result = await deps.inbox.cancelPending({
+        organizationId,
+        sessionId,
+        receivedAt: body.receivedAt,
+        ...(typeof body.userId === "string" ? { userId: body.userId } : {}),
+      });
+    } else {
       const api = await deps.api(required(body.organizationId)),
         id = required(body.sessionId);
       if (op === "canRead") return answer(200, { result: await api.canRead(id, required(body.userId)) });

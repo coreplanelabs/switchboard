@@ -22,6 +22,44 @@ function fixture() {
 }
 
 describe("Linear edge bridge", () => {
+  it("relays scoped queued cancellation only over the authenticated bridge with an elapsed cutoff", async () => {
+    const { inbox, transport, deps } = fixture();
+    const pending = {
+      key: "pending",
+      receivedAt: 50,
+      payload: {
+        type: "AgentSessionEvent",
+        action: "created",
+        organizationId: "org",
+        agentSession: { id: "s", creatorId: "alice" },
+      },
+    };
+    await inbox.accept(pending);
+    const remote = new RemoteLinearInbox(transport);
+    const input = { organizationId: "org", sessionId: "s", userId: "alice", receivedAt: 100 };
+    for (const bad of [
+      { ...input, receivedAt: 101 },
+      { ...input, userId: "" },
+      { ...input, userId: "alice:other" },
+      { ...input, receivedAt: -1 },
+      { ...input, sessionId: "s/other" },
+    ])
+      await expect(remote.cancelPending(bad)).rejects.toThrow("linear_bridge_unavailable");
+    expect(
+      (
+        await handleLinearBridge(
+          new Request("https://bot.example/internal/linear", {
+            method: "POST",
+            body: JSON.stringify({ op: "cancelPending", ...input }),
+          }),
+          deps,
+        )
+      ).status,
+    ).toBe(401);
+    expect(await remote.cancelPending(input)).toBe(1);
+    expect(await remote.claim()).toBeUndefined();
+    expect(await remote.cancelPending(input)).toBe(0);
+  });
   it("carries caller cancellation through the bridge request into the active file copy", async () => {
     const { api, transport } = fixture();
     const stop = new AbortController();

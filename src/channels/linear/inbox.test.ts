@@ -28,6 +28,47 @@ function sqlStore() {
 for (const kind of ["memory", "sqlite"] as const) {
   describe(`Linear event inbox — ${kind}`, () => {
     const make = () => (kind === "memory" ? new InMemoryLinearInbox() : sqlStore().inbox);
+    it("cancels only older unbegun requests in the authorized session and invalidates their leases", async () => {
+      const inbox = make();
+      const pending = (key: string, userId = "alice", receivedAt = 100, sessionId = "s", organizationId = "org") => ({
+        key,
+        receivedAt,
+        payload: {
+          type: "AgentSessionEvent",
+          action: "prompted",
+          organizationId,
+          agentSession: { id: sessionId },
+          agentActivity: { userId, content: { type: "prompt", body: "work" } },
+        },
+      });
+      await inbox.accept(pending("copy"));
+      expect((await inbox.claim(200, 100, "copy-lease"))?.event.key).toBe("copy");
+      await inbox.accept(pending("queued"));
+      await inbox.accept(pending("other-person", "bob"));
+      await inbox.accept(pending("later", "alice", 151));
+      await inbox.accept(pending("other-session", "alice", 100, "other"));
+      await inbox.accept(pending("other-org", "alice", 100, "s", "other"));
+      const stop = pending("stop");
+      Object.assign(stop.payload.agentActivity, { signal: "stop" });
+      await inbox.accept(stop);
+      expect(
+        await inbox.cancelPending({ organizationId: "org", sessionId: "s", receivedAt: 150, userId: "alice" }),
+      ).toBe(2);
+      expect(await inbox.begin("copy", "copy-lease")).toBe(false);
+      expect(await inbox.retry("copy", "copy-lease", 200)).toBe(false);
+      expect(await inbox.renew("copy", "copy-lease", 500)).toBe(false);
+      expect(await inbox.accept(pending("copy"))).toBe(false);
+      expect(
+        await inbox.cancelPending({ organizationId: "org", sessionId: "s", receivedAt: 150, userId: "alice" }),
+      ).toBe(0);
+      expect((await inbox.claim(200, 100, "bob"))?.event.key).toBe("other-person");
+      expect(await inbox.begin("other-person", "bob")).toBe(true);
+      expect(await inbox.cancelPending({ organizationId: "org", sessionId: "s", receivedAt: 200 })).toBe(1);
+      expect(await inbox.bind("other-person", "bob", "run")).toBe(true);
+      expect((await inbox.claim(200, 100, "next"))?.event.key).toBe("other-session");
+      expect((await inbox.claim(200, 100, "next-org"))?.event.key).toBe("other-org");
+      expect((await inbox.claim(200, 100, "control"))?.event.key).toBe("stop");
+    });
     it("defers only an unbound claim, preserves FIFO and lets stop bypass waiting prompts", async () => {
       const inbox = make();
       await inbox.accept(event);
@@ -140,6 +181,21 @@ for (const kind of ["memory", "sqlite"] as const) {
 }
 
 describe("durable Linear event recovery", () => {
+  it("retains a cancelled preparation across restart and invalidates a pending acknowledgement", async () => {
+    const { sql, inbox } = sqlStore();
+    const created = { ...event, payload: { ...event.payload, agentSession: { id: "session", creatorId: "alice" } } };
+    await inbox.accept(created, { acknowledge: true });
+    await inbox.claimAck(200, 100, "ack");
+    expect(
+      await inbox.cancelPending({ organizationId: "org", sessionId: "session", userId: "alice", receivedAt: 200 }),
+    ).toBe(1);
+    const restored = new SqlLinearInbox(sql);
+    expect(await restored.acknowledge(created.key, "ack", 210)).toBe(false);
+    expect(await restored.begin(created.key, "ack")).toBe(false);
+    expect(await restored.hasPendingAcks()).toBe(false);
+    expect(await restored.claim(500, 100, "new")).toBeUndefined();
+    expect(await restored.accept(created)).toBe(false);
+  });
   it("restores an unfinished acknowledgement before making its request dispatchable", async () => {
     const { sql, inbox } = sqlStore();
     await inbox.accept(event, { acknowledge: true });

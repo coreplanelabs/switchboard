@@ -114,8 +114,13 @@ publish an automatic PR or review verdict. Questions survive a bot restart.
 
 Native Stop lets a person cancel their own active work through the shared
 `runs:stop` policy. Stopping another person's work requires `runs:write` and
-visibility of that run. Stop can also end your current waiting question; its
-cancellation is durable, so a restart does not resume that coordinator question. A denied
+visibility of that run. Cancellation also covers your earlier requests still waiting to enter dispatch,
+including requests loading attachments. The durable queue invalidates their
+leases so a late file response cannot start them. An operator's channel grant
+can cancel other people's queued requests; merely using a session does not grant
+that authority. Begun requests continue through active-run cancellation. Stop can also
+end your current waiting question; that cancellation is durable, so a restart does not
+resume the coordinator question. A denied
 or stale Stop leaves the session unchanged. A Linear session does not establish team-wide membership;
 configure an operator's channel grants explicitly. Revocation and access removal are
 infrastructure cancellations and require no new grant from the former requester.

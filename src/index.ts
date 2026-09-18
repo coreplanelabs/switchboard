@@ -600,6 +600,7 @@ export async function runBot(): Promise<void> {
     if (!ledgerClient) throw new Error("LINEAR_BRIDGE_TOKEN requires durable run history and its run ledger");
     linearTransport = { baseUrl, token: linearBearer.reveal(), fetch };
     const transport = linearTransport;
+    const linearInbox = new RemoteLinearInbox(transport);
     linearConsumer = new LinearConsumer({
       ...(artifacts
         ? {
@@ -607,12 +608,12 @@ export async function runBot(): Promise<void> {
               config.config.artifacts?.inbound?.maxBytesPerMessage ?? ARTIFACT_DEFAULTS.maxBytesPerMessage,
           }
         : {}),
-      inbox: new RemoteLinearInbox(transport),
+      inbox: linearInbox,
       api: (organizationId) => new RemoteLinearApi(transport, organizationId),
       clock: systemClock,
       warn: (message) => console.warn(message),
       dispatch: (msg, io) => dispatch(deps, msg, io),
-      stop: (input, io) => stopLinearSession({ config, runs: runsService }, input, io),
+      stop: (input, io) => stopLinearSession({ config, runs: runsService, inbox: linearInbox }, input, io),
       recover: (delivery, msg) => recoverLinearDelivery({ ledger: ledgerClient, store: runStore }, delivery, msg),
       other: (event) =>
         handleLinearLifecycle(

@@ -3,6 +3,11 @@ import { LinearConsumer, type LinearConsumerDeps } from "./consumer.js";
 import { InMemoryLinearInbox } from "./inbox.js";
 import type { LinearApi } from "./api.js";
 import type { LinearWebhookEvent } from "./webhook.js";
+import { stopLinearSession } from "./control.js";
+import { grantsFor } from "../../core/authz/grants.js";
+import { RunRegistry } from "../../core/runRegistry.js";
+import { createRunsService } from "../../core/runsService.js";
+import { NullRunStore } from "../../core/runStore.js";
 
 const event = (id = "s"): LinearWebhookEvent => ({
   key: `org:${id}:created`,
@@ -47,7 +52,7 @@ function fixture(maxStagedBytes?: number) {
     clock: () => now,
     warn: vi.fn(),
     dispatch: vi.fn<LinearConsumerDeps["dispatch"]>(async () => {}),
-    stop: vi.fn(async () => {}),
+    stop: vi.fn<LinearConsumerDeps["stop"]>(async () => {}),
     recover: vi.fn(async (): Promise<"handled" | "unknown"> => "unknown"),
     other: vi.fn(async () => {}),
     leaseLost: vi.fn(),
@@ -66,6 +71,52 @@ function fixture(maxStagedBytes?: number) {
 afterEach(() => vi.useRealTimers());
 
 describe("Linear event consumer", () => {
+  it("does not dispatch a file-hydrating request cancelled durably by a later Stop", async () => {
+    const f = fixture();
+    const preparing = event();
+    preparing.payload.promptContext = "Read [notes.txt](https://uploads.linear.app/org/notes)";
+    let finishFiles!: () => void;
+    vi.mocked(f.api.files).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishFiles = () => resolve([]);
+        }),
+    );
+    await f.store.accept(preparing);
+    await f.consumer.poll();
+    await vi.waitFor(() => expect(f.api.files).toHaveBeenCalledOnce());
+    const runs = createRunsService({ registry: new RunRegistry(), store: new NullRunStore() });
+    f.deps.stop.mockImplementationOnce((input, io) =>
+      stopLinearSession({ runs, inbox: f.store, config: { grantsFor: (id) => grantsFor(id, {}) } }, input, io),
+    );
+    const stop = event();
+    stop.key = "stop";
+    stop.receivedAt = 150;
+    stop.payload.action = "prompted";
+    stop.payload.agentActivity = {
+      id: "stop",
+      agentSessionId: "s",
+      userId: "alice",
+      signal: "stop",
+      content: { type: "prompt", body: "Stop" },
+    };
+    await f.store.accept(stop);
+    await f.consumer.poll();
+    await vi.waitFor(() => expect(f.inbox.complete).toHaveBeenCalledWith("stop", expect.any(String)));
+    finishFiles();
+    await f.consumer.settled();
+    expect(f.deps.dispatch).not.toHaveBeenCalled();
+    expect(f.deps.recover).not.toHaveBeenCalled();
+    expect(f.deps.warn).not.toHaveBeenCalled();
+    f.advance(200_000);
+    const next = event();
+    next.key = "new-request";
+    next.receivedAt = 200_100;
+    await f.store.accept(next);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.dispatch).toHaveBeenCalledOnce();
+  });
   it("passes staged metadata and the configured byte budget into dispatch under the original message id", async () => {
     const f = fixture(1000);
     const ev = event();

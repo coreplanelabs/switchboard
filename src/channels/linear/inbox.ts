@@ -11,6 +11,15 @@ export interface LinearDelivery {
   runId?: string;
 }
 
+/** Selection authorized by the bot's shared run-stop policy. An omitted user
+ * covers the session; an explicit user is its signed, unnamespaced sender. */
+export interface LinearPendingStop {
+  organizationId: string;
+  sessionId: string;
+  receivedAt: number;
+  userId?: string;
+}
+
 export interface LinearInbox {
   accept(event: LinearWebhookEvent, options?: { acknowledge?: boolean }): Promise<boolean>;
   claim(now: number, leaseMs: number, lease: string): Promise<LinearDelivery | undefined>;
@@ -25,6 +34,7 @@ export interface LinearInbox {
   defer(key: string, lease: string, at: number): Promise<boolean>;
   complete(key: string, lease: string, at: number): Promise<boolean>;
   cancelOrganization(organizationId: string, at: number): Promise<void>;
+  cancelPending(input: LinearPendingStop): Promise<number>;
   prune(completedBefore: number): Promise<void>;
 }
 
@@ -240,6 +250,29 @@ export class SqlLinearInbox implements LinearInbox {
       organizationId,
     );
   }
+  async cancelPending(input: LinearPendingStop): Promise<number> {
+    return this.sql
+      .exec(
+        `UPDATE linear_deliveries SET phase = 'done', payload = NULL, lease = NULL, finished_at = ?
+       WHERE phase != 'done' AND begun = 0 AND run_id IS NULL AND received_at <= ?
+       AND json_extract(payload, '$.type') = 'AgentSessionEvent'
+       AND json_extract(payload, '$.organizationId') = ?
+       AND json_extract(payload, '$.agentSession.id') = ?
+       AND COALESCE(json_extract(payload, '$.agentActivity.signal'), '') != 'stop'
+       AND json_extract(payload, '$.action') IN ('created', 'prompted')
+       AND (? IS NULL OR CASE json_extract(payload, '$.action')
+         WHEN 'created' THEN json_extract(payload, '$.agentSession.creatorId')
+         WHEN 'prompted' THEN json_extract(payload, '$.agentActivity.userId') END = ?)
+       RETURNING event_key`,
+        input.receivedAt,
+        input.receivedAt,
+        input.organizationId,
+        input.sessionId,
+        input.userId ?? null,
+        input.userId ?? null,
+      )
+      .toArray().length;
+  }
 }
 
 type MemoryRow = {
@@ -383,5 +416,31 @@ export class InMemoryLinearInbox implements LinearInbox {
       row.lease = undefined;
       row.finishedAt = at;
     }
+  }
+  async cancelPending(input: LinearPendingStop): Promise<number> {
+    let cancelled = 0;
+    for (const row of this.rows.values()) {
+      const event = row.event;
+      if (!event || row.begun || row.runId || row.phase === "done" || event.receivedAt > input.receivedAt) continue;
+      const payload = event.payload,
+        session = object(payload.agentSession),
+        activity = object(payload.agentActivity);
+      if (
+        payload.type !== "AgentSessionEvent" ||
+        payload.organizationId !== input.organizationId ||
+        session.id !== input.sessionId ||
+        activity.signal === "stop" ||
+        !["created", "prompted"].includes(String(payload.action))
+      )
+        continue;
+      const user = payload.action === "created" ? session.creatorId : activity.userId;
+      if (input.userId !== undefined && input.userId !== user) continue;
+      row.phase = "done";
+      row.event = undefined;
+      row.lease = undefined;
+      row.finishedAt = input.receivedAt;
+      cancelled++;
+    }
+    return cancelled;
   }
 }

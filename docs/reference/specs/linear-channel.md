@@ -77,6 +77,12 @@ the human assignee.
     policy: people can cancel their own work, while another person's work
     needs the operator's write grant and visibility. It never stops a later
     run created after the control event arrived.
+    Before looking up active runs, Stop cancels authorized requests still waiting
+    for dispatch admission, including a claimed request hydrating its files.
+    The durable queue invalidates their leases before acknowledging cancellation;
+    a late file response cannot pass `begin`. Only earlier requests in the same
+    session are affected. Self-stop covers the signed requester; stopping other
+    queued people requires the shared run-stop policy for that channel.
     Only the original requester may steer an active run. Another person's
     prompt stays in the durable queue until it can run under their own identity;
     unknown ownership fails closed across host generations. A proven admission
@@ -215,6 +221,11 @@ the copy. Proving or replacing that local transport remains an acceptance gap.
 
 | Criterion | Proof |
 |---|---|
+| Stop invalidates queued leases only within the authorized session, requester and arrival cutoff, leaving begun work and control events intact | `[unit]` `src/channels/linear/inbox.test.ts::Linear event inbox — memory::cancels only older unbegun requests in the authorized session and invalidates their leases`, `src/channels/linear/inbox.test.ts::Linear event inbox — sqlite::cancels only older unbegun requests in the authorized session and invalidates their leases` |
+| Cancelled preparation survives restart and cannot be revived by an acknowledgement | `[unit]` `src/channels/linear/inbox.test.ts::durable Linear event recovery::retains a cancelled preparation across restart and invalidates a pending acknowledgement` |
+| A late file response after Stop cannot start the cancelled request, while a new request still runs | `[unit]` `src/channels/linear/consumer.test.ts::Linear event consumer::does not dispatch a file-hydrating request cancelled durably by a later Stop` |
+| Queued cancellation uses shared self and channel-wide policy and fails closed on unavailable storage | `[unit]` `src/channels/linear/control.test.ts::Linear stop authorization::authorizes durable queued cancellation through the same self and channel-wide stop rules`, `src/channels/linear/control.test.ts::Linear stop authorization::retries unavailable queued cancellation before acknowledging or stopping active work` |
+| The queued-cancellation bridge requires authentication and a bounded, elapsed selection | `[unit]` `src/channels/linear/bridge.test.ts::Linear edge bridge::relays scoped queued cancellation only over the authenticated bridge with an elapsed cutoff` |
 | Hard Stop reaches incoming file copies and prevents cancelled file receipts and pulls | `[unit]` `src/core/dispatch/staging.test.ts::staging — copy then pull::passes hard cancellation into a channel copy and never publishes or pulls the cancelled file` |
 | A stopped initial copy cannot start the model or pull a workspace file | `[unit]` `src/core/dispatcher.test.ts::inbound staging (record 0033)::a hard stop cancels an admitted file copy before any model turn or workspace pull` |
 | The bridge forwards cancellation into the authenticated copy | `[unit]` `src/channels/linear/bridge.test.ts::Linear edge bridge::carries caller cancellation through the bridge request into the active file copy` |
