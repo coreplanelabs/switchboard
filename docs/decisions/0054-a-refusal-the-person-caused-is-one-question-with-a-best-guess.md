@@ -115,6 +115,8 @@ Failure modes: the router asks when it should have bound: one extra turn, measur
 
 The alternative it beat is the verifier as a gate, which rejected 8 of 26 correct paraphrases on the replay; as a question, the same disagreement costs one click.
 
+**Amendment, 2026-09-18, while proposed: the task may live in a referenced thread.** A second case from the same day. The maintainer wrote, in a project channel, "in `acme/product` ship this (read the whole thread)" with a link to a thread where an explore run had already laid out the change. The router chose the general agent with the reason "no ship without knowing what to ship"; that agent read the thread, summarised it, and ended with a line for the person to type: `agent:ship in acme/product: implement option B …`. Two turns and a paste for one ask, and the second turn is the prose this record exists to remove. Under this record the referenced thread, which [record 0037](0037-a-linked-thread-is-quoted-not-joined.md) quotes into the request, is a source the router may build the full command from: confident, it binds `ship` with the task derived from the quote and the routed write meets 0044's rules; not confident, it answers `clarify` with that full line as the proposal, so the person's next turn is Yes or a correction rather than a paste. The plan's router-question unit carries a fixture for this shape, and the replay's clarify row measures it.
+
 ## The cause
 
 The constraint: one symptom can have two causes, and the reply must not guess the cause from the text. GitHub's 422 on a mint means "not in the installation" or "no such repository"; the resident's "not serviceable" means starting or gone.
