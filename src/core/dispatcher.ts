@@ -1,3 +1,9 @@
+import {
+  coordinatorClarificationFor,
+  coordinatorClarificationContract,
+  CoordinatorClarificationRefusal,
+  type CoordinatorClarification,
+} from "./coordinator/clarification.js";
 import { getAgent } from "../agents/registry.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { systemClock } from "./trace/index.js";
@@ -30,7 +36,7 @@ import { actorIdsOf, cancelPending, consumeAndRun } from "./dispatch/confirm.js"
 import { postSettledOutcome } from "./dispatch/commandRun.js";
 import type { Actor } from "./authz/types.js";
 import { NO_REFERENCES, readReferences, REFERENCE_REFUSAL, type ReferenceDeps } from "./dispatch/references.js";
-import { resolveChatActor } from "./authz/actor.js";
+import { chatActorOf, resolveChatActor } from "./authz/actor.js";
 import { referencesOn } from "../config.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
 import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps } from "./dispatch/route.js";
@@ -67,7 +73,7 @@ import {
   type ProvisionDeps,
 } from "./dispatch/provision.js";
 import type { FrictionDiagnosis } from "./runFriction.js";
-import { claimRun, type RunDeps } from "./dispatch/run.js";
+import { claimRun, githubCapabilityFor, type RunDeps } from "./dispatch/run.js";
 import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { writeTombstone } from "./dispatch/record.js";
@@ -390,6 +396,27 @@ export async function dispatch(
       opts.parent || opts.coordinator || resume || restart || history.length === 0
         ? undefined
         : await readThread(runsService, msg.threadKey);
+    let clarification: CoordinatorClarification | undefined;
+    try {
+      clarification = await coordinatorClarificationFor({
+        newest: thread?.[0],
+        msg,
+        directives,
+        instances: deps.coordinatorInstances,
+        now: clock(),
+      });
+    } catch (error) {
+      if (!(error instanceof CoordinatorClarificationRefusal)) throw error;
+      // A refused reply must not close another person's waiting Linear session.
+      await refuse("coordinator_clarification", () =>
+        io.question ? io.question(error.message) : io.reply(error.message),
+      );
+      return ended;
+    }
+    if (clarification?.remainingMinutes !== undefined)
+      directives.budget = Math.min(directives.budget ?? Number.POSITIVE_INFINITY, clarification.remainingMinutes);
+    if (clarification?.instance.addressSeverity !== undefined)
+      directives.severity = clarification.instance.addressSeverity;
     const lineage = lineageOf(thread?.[0]);
     const parent: ParentRun | undefined = opts.parent ?? (lineage ? lineageParent(lineage) : undefined);
     const tellLineage = async (heard: LineageHeard) => {
@@ -414,7 +441,7 @@ export async function dispatch(
     // the thread's newest finished run with a session log (routing-and-config
     // item 3) — else the config scopes; the model and the effort from the
     // thread's user turns, then the scopes.
-    const stickyAgent = thread ? stickyAgentOf(thread) : undefined;
+    const stickyAgent = clarification?.preset ?? (thread ? stickyAgentOf(thread) : undefined);
     // The same page names the pull request the thread's work lives on
     // (resident-repos item 29): the one its newest finished run opened, for
     // the target resolution below.
@@ -590,14 +617,14 @@ export async function dispatch(
     // STARTED here (dispatch/resolve.ts) so the GitHub round trip overlaps the
     // memory read below; awaited after the ack.
     const { needsRepo, repoCtxP } = resolveTarget(deps, {
-      msg,
-      history,
+      msg: clarification ? { ...msg, text: clarification.targetText } : msg,
+      history: clarification ? [] : history,
       agent,
       profile,
       resolved,
       resume,
       root,
-      ...(threadPr ? { records: { pr: threadPr } } : {}),
+      ...(threadPr && !clarification ? { records: { pr: threadPr } } : {}),
     });
 
     // Cross-session memory — READ path, started here (dispatch/provision.ts) so
@@ -700,8 +727,16 @@ export async function dispatch(
     // compound's first turn is its brief (dispatch/route.ts): the message as
     // typed, then the parts for the conductor to spawn — the record's `input`
     // stays the message, its `route` event carries the parts.
-    const contractBlock = opts.contract
-      ? renderContract(opts.contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text
+    const contract =
+      opts.contract ??
+      (clarification
+        ? await coordinatorClarificationContract(clarification, {
+            github: githubCapabilityFor(deps, chatActorOf(deps.config, msg)).api,
+            runs: runsService,
+          })
+        : undefined);
+    const contractBlock = contract
+      ? renderContract(contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text
       : undefined;
     const requestText = route?.parts ? compoundBrief(directives.text, route.parts) : directives.text;
     // Where the conversation starts (run-history item 52), and every row and
@@ -782,7 +817,8 @@ export async function dispatch(
     // the spawn's dispatch options are gone with the process that spawned it,
     // so the tag is rebuilt from the adopted row's meta and the
     // `coordinator_tag` event the spawning dispatch published.
-    const coordinator = opts.coordinator ?? (resume ? carriedCoordinatorTag(resume.row, resume.events) : undefined);
+    const coordinator =
+      opts.coordinator ?? clarification?.tag ?? (resume ? carriedCoordinatorTag(resume.row, resume.events) : undefined);
     const registration = await registerRun(deps, {
       msg,
       io,

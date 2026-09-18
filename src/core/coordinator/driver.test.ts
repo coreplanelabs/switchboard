@@ -1431,7 +1431,7 @@ describe("coordinator driver clarification", () => {
       "read-record": [
         record({ id: "run-c0", finished: true, status: "completed", awaitingInput: true }, T0 + MIN),
         record({ id: "run-c0", finished: true, status: "completed", awaitingInput: true }, T0 + 2 * MIN),
-        codingDone("run-c0", T0 + 10 * MIN),
+        codingDone("run-answer", T0 + 10 * MIN),
         reviewApproved("run-r1", T0 + 20 * MIN),
       ],
       "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],

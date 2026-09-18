@@ -802,6 +802,58 @@ function reviewPostedByRecord(
   return same ? { reviewPosted: true } : undefined;
 }
 
+/** The round key stays fixed when a person answers a child question. Read only
+ * siblings with that exact identity; unrelated work in the thread cannot settle it. */
+async function coordinatorRoundRuns(
+  runs: RunsService,
+  original: RunView,
+): Promise<{ current: RunView; earlierCost: number | null }> {
+  if (!original.threadKey || !original.idempotencyKey || !original.parentInstanceId || !original.finished)
+    return { current: original, earlierCost: 0 };
+  const members = new Map<string, RunView>([[original.id, original]]);
+  let cursor: { before: number; beforeId: string } | undefined;
+  for (let page = 0; page < FINISHED_LOOKBACK_PAGES; page++) {
+    const result = await runs.listRuns({
+      status: "all",
+      visibleTo: EVERY_RUN,
+      threadKey: original.threadKey,
+      limit: RUN_LIST_MAX_LIMIT,
+      ...(cursor ?? {}),
+    });
+    for (const row of result.runs) {
+      if (
+        row.parentInstanceId === original.parentInstanceId &&
+        row.idempotencyKey === original.idempotencyKey &&
+        row.userId === original.userId &&
+        row.authenticatedAs === original.authenticatedAs &&
+        row.channelId === original.channelId &&
+        row.threadKey === original.threadKey
+      )
+        members.set(row.id, row);
+    }
+    cursor = result.nextBefore ? { before: result.nextBefore.finishedAt, beforeId: result.nextBefore.id } : undefined;
+    if (!cursor) break;
+  }
+  const newest = original.awaitingInput
+    ? [...members.values()].sort((a, b) => b.startedAt - a.startedAt)[0]!
+    : original;
+  const current = newest.id === original.id ? original : await runs.getRun(newest.id);
+  if ("ok" in current && !current.ok) throw new Error("The coordinator continuation is temporarily unavailable");
+  const view = "ok" in current ? current.value : current;
+  if (!view.finished) return { current: view, earlierCost: 0 };
+  // A bounded listing or an unpriced/missing question turn is unknown cost,
+  // never zero: a continuation must not reset a capped grant's spend.
+  let earlierCost: number | null = cursor ? null : 0;
+  for (const row of members.values()) {
+    if (row.id === view.id || !row.awaitingInput || row.startedAt > view.startedAt) continue;
+    const prior = await runs.getRun(row.id);
+    const usd = prior.ok && prior.value.finished ? prior.value.cost?.usd : undefined;
+    if (usd == null) earlierCost = null;
+    else if (earlierCost !== null) earlierCost += usd;
+  }
+  return { current: view, earlierCost };
+}
+
 async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -814,13 +866,14 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   // (authorization.md: a denied read reveals nothing).
   const res = await deps.runs.getRun(body.runId);
   if (!res.ok || res.value.parentInstanceId !== id.value) return json(404, { ok: false, error: "not_found" });
-  const view = res.value;
+  const { current: view, earlierCost } = await coordinatorRoundRuns(deps.runs, res.value);
   if (!view.finished) return json(200, { ok: true, run: coordinatorRunView(view, id.value, undefined), at });
   // Finished: the final reply and the typed artifacts the record carries — the
   // coding child's pull request, the review child's verdict and whether it
   // stands on the pull request, the coding run's dispositions.
-  const full = await deps.runs.getRun(body.runId, { include: "messages" });
-  const record = full.ok ? full.value : view;
+  const full = await deps.runs.getRun(view.id, { include: "messages" });
+  if (!full.ok) throw new Error("The coordinator result is temporarily unavailable");
+  const record = full.value;
   const finalReply = finalReplyOf(record.events);
   // A question is a completed turn, not a completed unit. Earlier artifacts
   // are deliberately withheld until the continuation supplies its result.
@@ -863,7 +916,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
       // What the child cost, as the runs service prices it (costs.md item 4c):
       // null when unknown — no usage on the record, or a model without a price
       // — so a capped grant never renews on an understated total.
-      costUsd: record.cost?.usd ?? null,
+      costUsd: record.cost?.usd == null || earlierCost === null ? null : record.cost.usd + earlierCost,
       ...(record.handoff !== undefined ? { handoffLists: record.handoff } : {}),
     },
     at,

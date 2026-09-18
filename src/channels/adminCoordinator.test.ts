@@ -2633,6 +2633,100 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
 });
 
 describe("coordinator question records", () => {
+  it.each([false, true])(
+    "includes every earlier question's cost in the settled round (missing price: %s)",
+    async (missing) => {
+      const h = harness({
+        prices: parseModelPrices({ "anthropic/claude-fable-5": { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } }),
+      });
+      const usage = {
+        turns: 1,
+        byModel: {
+          "anthropic/claude-fable-5": {
+            turns: 1,
+            inputTokens: 1_000_000,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        },
+      };
+      await h.store.put(record("run-question", { ...TAG, awaitingInput: true, usage: missing ? undefined : usage }));
+      await h.store.put(
+        record("run-another-question", {
+          ...TAG,
+          awaitingInput: true,
+          usage,
+          startedAt: NOW - 7_000,
+          finishedAt: NOW - 6_000,
+        }),
+      );
+      await h.store.put(record("run-answer", { ...TAG, usage, startedAt: NOW - 5_000, finishedAt: NOW - 4_000 }));
+      // Both the initial question and an already-followed continuation expose the same total.
+      for (const runId of ["run-question", "run-answer"]) {
+        const reply = await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+            parentInstanceId: INSTANCE.id,
+            runId,
+          }),
+          h.deps,
+        );
+        expect(reply).toMatchObject({ status: 200, body: { run: { id: "run-answer", costUsd: missing ? null : 9 } } });
+      }
+    },
+  );
+
+  it("follows only a continuation with the same instance, round, thread and requester", async () => {
+    const h = harness();
+    await h.store.put(record("run-question", { ...TAG, awaitingInput: true }));
+    await h.store.put(
+      record("run-answer", {
+        ...TAG,
+        startedAt: NOW - 5_000,
+        finishedAt: NOW - 4_000,
+        events: [{ type: "answer", text: "The requested behavior is implemented.", seq: 1 }],
+      }),
+    );
+    await h.store.put(
+      record("run-foreign", { ...TAG, userId: "slack:UBOB", startedAt: NOW - 3_000, finishedAt: NOW - 2_000 }),
+    );
+    await h.store.put(
+      record("run-other-credential", {
+        ...TAG,
+        authenticatedAs: "http:other",
+        startedAt: NOW - 2_000,
+        finishedAt: NOW - 1_000,
+      }),
+    );
+    await h.store.put(
+      record("run-other-round", {
+        ...TAG,
+        idempotencyKey: `${INSTANCE.id}:U20/0/coding`,
+        startedAt: NOW - 1_000,
+        finishedAt: NOW,
+      }),
+    );
+    const reply = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+        parentInstanceId: INSTANCE.id,
+        runId: "run-question",
+      }),
+      h.deps,
+    );
+    expect(reply).toMatchObject({
+      status: 200,
+      body: {
+        run: {
+          id: "run-answer",
+          finished: true,
+          status: "completed",
+          finalReply: "The requested behavior is implemented.",
+          costUsd: null,
+        },
+      },
+    });
+  });
+
   it("returns the question marker without exposing earlier verdict or PR artifacts", async () => {
     const h = harness();
     await h.store.put(

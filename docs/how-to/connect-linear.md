@@ -13,10 +13,11 @@ the same conversation after retries. The creation webhook does not start a
 second child run; subsequent human replies and Stop remain native session events.
 Conductors report child questions as waiting for input and point to the child's
 session for the answer. Coding/review coordinators also wait when a child asks a
-question, withholding earlier PR or review results. Routing the human reply back
-into that coordinator's unit and live acceptance remain unfinished; these workflows
-still need verification before
-the integration is ready for end users.
+question, withholding earlier PR or review results. The original requester's
+answer resumes that unit under fresh permission checks, retaining its branch or
+PR and remaining time budget. The coordinator follows the resumed run and counts
+the question turns toward its total cost. Waiting-session cancellation and live
+acceptance still need verification before the integration is ready for end users.
 
 ## Register the application
 

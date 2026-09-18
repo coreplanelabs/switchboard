@@ -25,7 +25,7 @@ import { InMemoryArtifactStore } from "../artifacts/store.js";
 import { ExecInfraError, ExecSandboxRestartedError } from "../execution/executor.js";
 import { classifyError } from "./trace/classify.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
-import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
+import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusUpdate } from "./types.js";
 import { activeRunCount, dispatch, dispatchClick, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
 import { CONFIRMATION_TTL_MS } from "./budgets.js";
 import type { AuditEntry } from "./commandRegistry.js";
@@ -16554,4 +16554,139 @@ describe("clarification through dispatch", () => {
     expect(JSON.stringify(requests.at(-1)?.messages)).toContain("Which repository?");
     expect(JSON.stringify(requests.at(-1)?.messages)).toContain("Use acme/api");
   });
+});
+
+describe("coordinator clarification replies", () => {
+  it.each([false, true])(
+    "continues the same branch and coordinator tag, with fresh repository access (denied=%s)",
+    async (denied) => {
+      vi.stubEnv("SANDBOX_TOKEN", "tok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const provider = capturingProvider("The answer is incorporated.");
+      const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+      const registry = new RunRegistry({ genId: () => "run-answer", genToken: () => "token" });
+      deps.runRegistry = registry;
+      await threadWithFinishedRun(deps, "coding", {
+        awaitingInput: true,
+        parentInstanceId: "plan-answer",
+        idempotencyKey: "plan-answer:U10/0/coding",
+      });
+      const writer = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
+      deps.runHistoryWriter = writer;
+      const instances = new InMemoryCoordinatorInstanceStore();
+      await instances.put({
+        id: "plan-answer",
+        kind: "ship",
+        userId: "slack:UADMIN",
+        channelId: "slack:CX",
+        threadKey: "slack:CX:1.0",
+        repo: "acme/api",
+        branch: "plan/answer/u1",
+        base: "main",
+        createdAt: Date.now(),
+        plan: { id: "answer", path: "plan.md" },
+        caps: { maxRounds: 2, maxMinutes: 120 },
+      });
+      await instances.putUnits([
+        {
+          instanceId: "plan-answer",
+          unit: "U10",
+          slug: "u1",
+          branch: "plan/answer/u1",
+          dependsOn: [],
+          rounds: [],
+          threadKey: "slack:CX:1.0",
+          startedAt: Date.now(),
+        },
+      ]);
+      deps.coordinatorInstances = instances;
+      const api = new InMemoryGithubApi({
+        "acme/api": {
+          files: {
+            "plan.md":
+              "# Plan\n\n### U10. Preserve behavior\n\n- **Goal**: Retain the existing API behavior.\n- **Dependencies**: none\n",
+          },
+        },
+      });
+      const readFile = vi.spyOn(api, "readFile");
+      deps.githubApi = api;
+      const resolve = vi.fn(async (_request: IncomingMessage) => ({ repo: "acme/api", ref: "plan/answer/u1" }));
+      deps.resolveRepoContext = resolve;
+      if (denied) vi.spyOn(deps.config, "canUseRepo").mockReturnValue(false);
+      else
+        vi.mocked(makeExecutor).mockResolvedValueOnce({
+          executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" },
+        });
+      const { io, replies } = fakeIO([{ role: "assistant", text: "Which behavior do you want?" }]);
+      const outcome = await dispatch(deps, msg("Keep the existing behavior", "slack:UADMIN"), io);
+      await writer.settled();
+      if (denied) {
+        expect(outcome.status).toBe("refused");
+        expect(provider.requests).toEqual([]);
+        expect(readFile).not.toHaveBeenCalled();
+      } else {
+        expect(outcome.status, replies.join("\n")).toBe("completed");
+        const record = await deps.runStore.get("run-answer");
+        expect(record).toMatchObject({
+          agent: "coding",
+          repo: "acme/api",
+          parentInstanceId: "plan-answer",
+          idempotencyKey: "plan-answer:U10/0/coding",
+        });
+        expect(record?.events).toContainEqual(expect.objectContaining({ type: "coordinator_tag", base: "main" }));
+        expect(JSON.stringify(provider.requests)).toContain("Retain the existing API behavior");
+        expect(resolve.mock.calls[0]?.[0]).toMatchObject({
+          userId: "slack:UADMIN",
+          text: expect.stringContaining("plan/answer/u1"),
+        });
+        expect(JSON.stringify(provider.requests)).toContain("Keep the existing behavior");
+      }
+    },
+  );
+
+  it.each(["coding", "review"] as const)(
+    "resolves the original %s preset before fresh authorization instead of treating an answer as general chat",
+    async (preset) => {
+      const provider = capturingProvider();
+      const deps = makeDeps(YAML_FIXTURE.replace("agents: [coding]", "agents: [coding, review]"), provider);
+      await threadWithFinishedRun(deps, preset, {
+        userId: "slack:UX",
+        awaitingInput: true,
+        parentInstanceId: "plan-answer",
+        idempotencyKey: `plan-answer:U10/0/${preset}`,
+      });
+      const instances = new InMemoryCoordinatorInstanceStore();
+      await instances.put({
+        id: "plan-answer",
+        kind: "ship",
+        userId: "slack:UX",
+        channelId: "slack:CX",
+        threadKey: "slack:CX:1.0",
+        repo: "acme/api",
+        branch: "plan/answer/u1",
+        createdAt: Date.now(),
+        plan: { id: "answer", path: "plan.md" },
+        caps: { maxRounds: 2, maxMinutes: 120 },
+      });
+      await instances.putUnits([
+        {
+          instanceId: "plan-answer",
+          unit: "U10",
+          slug: "u1",
+          branch: "plan/answer/u1",
+          dependsOn: [],
+          rounds: [],
+          threadKey: "slack:CX:1.0",
+          startedAt: Date.now(),
+          reviewThread: { threadKey: "slack:CX:1.0" },
+          pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        },
+      ]);
+      deps.coordinatorInstances = instances;
+      const { io } = fakeIO([{ role: "assistant", text: "Which behavior do you want?" }]);
+      const outcome = await dispatch(deps, msg("Keep the existing behavior"), io);
+      expect(outcome).toMatchObject({ status: "refused", refusal: "agent_allowlist" });
+      expect(provider.requests).toEqual([]);
+    },
+  );
 });

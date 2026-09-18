@@ -1894,6 +1894,20 @@ describe("the severity gate — an approve's findings held to the level in force
 });
 
 describe("coordinator child clarification", () => {
+  it("follows a continuing run and keeps the final run id for later round briefs", () => {
+    const d = fresh(input());
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(d, "run-question", finished({ status: "completed", awaitingInput: true }), T0 + MIN);
+    d.answer({ type: "sleep" });
+    d.answer({ type: "read-record", run: { finished: false, runId: "run-answer" }, at: T0 + 2 * MIN });
+    expect(d.action).toMatchObject({ type: "wait", runId: "run-answer" });
+    expect(d.state.lastCodingRunId).toBe("run-answer");
+    d.answer({ type: "wait", outcome: "event" });
+    d.answer({ type: "read-record", run: finished({ runId: "run-answer", status: "completed" }), at: T0 + 3 * MIN });
+    expect(d.action.type).toBe("pr-check");
+    expect(d.state.lastCodingRunId).toBe("run-answer");
+  });
+
   it.each(["coding", "review"])("waits durably for a %s question without acting on earlier artifacts", (agent) => {
     const d = fresh(input());
     if (agent === "review") throughRoundZero(d);
