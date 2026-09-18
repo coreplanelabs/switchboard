@@ -233,9 +233,10 @@ export interface CoordinatorUnit {
   /** The unit's thread, once opened; a generated plan's is the requesting thread from the start. */
   threadKey?: string;
   sourceUrl?: string;
-  /** The unit's review thread, opened once beside the unit's thread: every
-   *  review round runs there (record 0034), so the review child's worktree is
-   *  readonly and its own and no round wipes the coding thread's. */
+  /** Retired (record 0055): a bot before it opened a review thread beside the
+   *  unit's and ran every review round there. A row that carries one keeps its
+   *  review rounds there; a new row never gets one — every child of the unit
+   *  runs in the unit's thread. */
   reviewThread?: { threadKey: string; sourceUrl?: string };
   /** The unit's board issue in the repository, when one titled by the unit id exists — the handoff's destination. */
   issue?: number;

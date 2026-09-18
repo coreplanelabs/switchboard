@@ -380,7 +380,7 @@ const isGenerated = (instance: CoordinatorInstance): boolean => instance.plan?.p
 
 /** The thread a unit's coding children run in, and where its findings are
  *  dispatched: the unit's own once opened, the requesting thread for a
- *  generated plan's unit. The review child's thread is `ensureReviewThread`. */
+ *  generated plan's unit — the thread every child of the unit runs in (record 0055). */
 function unitThread(instance: CoordinatorInstance, row: CoordinatorUnit | undefined) {
   const threadKey = row?.threadKey ?? (row === undefined || isGenerated(instance) ? instance.threadKey : undefined);
   const sourceUrl = row?.sourceUrl ?? (threadKey === instance.threadKey ? instance.sourceUrl : undefined);
@@ -413,25 +413,6 @@ async function openThreadFromRequester(
   } catch (err) {
     return { ok: false, response: json(502, { ok: false, error: "thread_failed", message: describe(err), at }) };
   }
-}
-
-/** The unit's review thread (run-history item 50's `reviewThread`), opened once
- *  beside the unit's thread and written on the row: by `unit-start`, or by the
- *  first review spawn of a row written before the field existed. Every review
- *  round runs there, so the review child's worktree is its own and readonly
- *  and no round wipes the coding thread's (record 0034). */
-async function ensureReviewThread(
-  deps: AdminCoordinatorDeps,
-  instance: CoordinatorInstance,
-  row: CoordinatorUnit,
-  at: number,
-): Promise<{ ok: true; row: CoordinatorUnit; thread: OpenedThreadRef } | { ok: false; response: IngressResponse }> {
-  if (row.reviewThread !== undefined) return { ok: true, row, thread: row.reviewThread };
-  const opened = await openThreadFromRequester(deps, instance, reviewLead(instance, row), at);
-  if (!opened.ok) return opened;
-  const updated: CoordinatorUnit = { ...row, reviewThread: opened.thread };
-  await deps.instances.putUnits([updated]);
-  return { ok: true, row: updated, thread: opened.thread };
 }
 
 /** The whole door: WHO (the bearer in the token map — 401/503) and WHETHER (the
@@ -558,21 +539,19 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   // thread to run in — a passing condition (the runner asks again), stamped
   // like every answer.
   if (own.threadKey === undefined) return json(409, { ok: false, error: "unit_not_started", unit: req.unit, at });
-  // The thread the child runs in: a review child's is the unit's review thread,
-  // opened here for a row written before the field existed; a coding child and
-  // the findings step's run share the unit's own thread, whose coding session
-  // the findings continue.
-  let row = unit.row;
-  let thread: OpenedThreadRef = {
+  // The thread the child runs in: the unit's own, for every child (record
+  // 0055) — the review child seeds from its own session (`<thread>:review`)
+  // and attaches a tree of its own life, so nothing needs a second thread; a
+  // coding child and the findings step's run continue the coding session
+  // there. A row a bot wrote before record 0055 names a review thread; its
+  // review rounds stay there, so a unit in flight across the release keeps
+  // its review session where it began.
+  const row = unit.row;
+  const legacy = req.preset === "review" ? row?.reviewThread : undefined;
+  const thread: OpenedThreadRef = legacy ?? {
     threadKey: own.threadKey,
     ...(own.sourceUrl !== undefined ? { sourceUrl: own.sourceUrl } : {}),
   };
-  if (req.preset === "review" && row !== undefined) {
-    const review = await ensureReviewThread(deps, instance, row, at);
-    if (!review.ok) return review.response;
-    row = review.row;
-    thread = review.thread;
-  }
   const threadKey = thread.threadKey;
   const key = idempotencyKeyFor(instance.id, req.step);
   // Retry-safe before anything starts: the step's child, live or finished, or
@@ -1067,10 +1046,9 @@ async function unitIssueOf(deps: AdminCoordinatorDeps, repo: string, unit: strin
 }
 
 /** A unit starts: its thread is opened by the requesting thread's channel (a
- *  task's is the requesting thread itself), its review thread beside it, its
- *  board issue looked up, and the row says so. Idempotent: a unit with its
- *  threads answers them again. A review thread whose open fails leaves the
- *  unit thread on the row, so the retry opens the review thread alone. */
+ *  task's is the requesting thread itself), its board issue looked up, and the
+ *  row says so. Idempotent: a started unit answers its thread again. No review
+ *  thread is opened (record 0055): every child of the unit runs in this one. */
 async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -1095,28 +1073,16 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
       row = { ...row, ...opened.thread };
     }
   }
-  if (row.reviewThread === undefined) {
-    const review = await ensureReviewThread(deps, instance, row, at);
-    if (!review.ok) {
-      // The unit thread stands: written, so the retry does not open a second one.
-      if (row !== unit.row) await deps.instances.putUnits([row]);
-      return review.response;
-    }
-    row = review.row;
-  }
   if (row.issue === undefined && !isGenerated(instance)) {
     const issue = await unitIssueOf(deps, instance.repo, row.unit);
     if (issue !== undefined) row = { ...row, issue };
   }
   row = { ...row, startedAt: row.startedAt ?? at };
   await deps.instances.putUnits([row]);
-  (deps.log ?? console.log)(
-    `[coordinator] ${instance.id} ${row.unit}: started in ${row.threadKey}, review in ${row.reviewThread?.threadKey}`,
-  );
+  (deps.log ?? console.log)(`[coordinator] ${instance.id} ${row.unit}: started in ${row.threadKey}`);
   return json(200, {
     ok: true,
     threadKey: row.threadKey,
-    reviewThreadKey: row.reviewThread?.threadKey,
     branch: row.branch,
     base: instance.base ?? "main",
     ...(row.issue !== undefined ? { issue: row.issue } : {}),
@@ -1129,14 +1095,6 @@ function unitLead(instance: CoordinatorInstance, row: CoordinatorUnit): string {
   const who = instance.userName ?? instance.userId;
   const from = instance.sourceUrl !== undefined ? `[the *ship* run](${instance.sourceUrl})` : "the *ship* run";
   return `↳ *ship* unit ${row.unit}${row.title ? ` — ${row.title}` : ""} for ${who}, from ${from}: \`${row.branch}\` in ${instance.repo}`;
-}
-
-/** The lead of a unit's review thread: the same reader, told this thread holds the unit's review rounds. */
-function reviewLead(instance: CoordinatorInstance, row: CoordinatorUnit): string {
-  const who = instance.userName ?? instance.userId;
-  const from = instance.sourceUrl !== undefined ? `[the *ship* run](${instance.sourceUrl})` : "the *ship* run";
-  const what = isGenerated(instance) ? "the task" : `unit ${row.unit}${row.title ? ` — ${row.title}` : ""}`;
-  return `↳ *ship* review of ${what} for ${who}, from ${from}: \`${row.branch}\` in ${instance.repo}`;
 }
 
 /** Round 0's pipeline branch: `refs/heads/<branch>` at the base's tip, on
