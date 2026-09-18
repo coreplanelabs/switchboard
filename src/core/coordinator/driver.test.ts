@@ -62,7 +62,7 @@ const planAnswer = (
       merge,
       repo: "acme/api",
       base: "main",
-      caps: { maxRounds: 2, maxMinutes: 120 },
+      caps: { maxRounds: 2, maxMinutes: 240 },
       units,
       ...extra,
     },
@@ -236,9 +236,9 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
         unit: "U10",
         step: "U10/0/coding",
         preset: "coding",
-        // The coding preset's 45 clipped to the 45-minute wall clock minus the
-        // loop's reserve (two review rounds and the merge poll, 11 min).
-        budget: 45,
+        // The coding preset's whole 90: the plan's 240-minute wall clock minus
+        // the loop's reserve (two reviews, a fix and the merge, 44 min) holds it.
+        budget: 90,
         brief: { kind: "contract", unit: "U10", rebase: { branch: "plan/fixture/u10", onto: "main" } },
       },
       {
@@ -562,7 +562,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
         merge: "person",
         repo: "acme/api",
         base: "main",
-        caps: { maxRounds: 2, maxMinutes: 120 },
+        caps: { maxRounds: 2, maxMinutes: 240 },
         units,
       };
       return bot({
@@ -611,7 +611,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
               planId: "fixture",
               repo: "acme/api",
               base: "main",
-              caps: { maxRounds: 2, maxMinutes: 120 },
+              caps: { maxRounds: 2, maxMinutes: 240 },
               units,
             })
           : planAnswer(units, T0, merge);
@@ -893,16 +893,15 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     ]);
     expect(s.names().some((n) => /\/fix\b/.test(n))).toBe(false);
     expect(b.of("unit-start")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10" }]);
-    // The budgets are the presets' own clipped to the plan's 45-minute wall clock:
-    // 25 left at the findings step (T0 + 20) minus the fix reserve (the re-review
-    // and the merge poll, 8 min — never the round-0 child's 11), 15 at the
-    // re-review (T0 + 30).
+    // The budgets are the presets' own: at the findings step (T0 + 20) the plan's
+    // 240 leaves 220 minus the fix reserve (the re-review and the merge, 18 min —
+    // never the round-0 child's 44), so the whole 90; the re-review its whole 25.
     expect(b.of("spawn")[2]).toEqual({
       parentInstanceId: INSTANCE,
       unit: "U10",
       step: "U10/1/findings",
       preset: "coding",
-      budget: 45,
+      budget: 90,
       brief: { kind: "findings", unit: "U10", pr: 7, reviewRunId: "run-r1" },
     });
     expect(b.of("spawn")[3]).toEqual({
@@ -1052,13 +1051,13 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
         ok: true,
         repo: "acme/api",
         base: "main",
-        caps: { maxRounds: 2, maxMinutes: 120 },
+        caps: { maxRounds: 2, maxMinutes: 240 },
       },
       {
         ok: true,
         repo: "acme/api",
         base: "main",
-        caps: { maxRounds: 2, maxMinutes: 120 },
+        caps: { maxRounds: 2, maxMinutes: 240 },
         units: [{ unit: "U10" }],
       },
       { ok: true, repo: "acme/api", base: "main", units: [row("U10")] },
@@ -1120,25 +1119,25 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
           merge: "person",
           repo: "acme/api",
           base: "main",
-          caps: { maxRounds: 2, maxMinutes: 120 },
+          caps: { maxRounds: 2, maxMinutes: 240 },
           units: [row("U10")],
         }),
       ],
       "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0" })],
       branch: [ok({ ok: true })],
       spawn: [spawned("run-c0")],
-      "read-record": [codingDone("run-c0", T0 + 85 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 205 * MIN)],
       // The pre-check, then the round's check: the pull request is open at the child's head with 35 minutes
-      // left — the review holds 31 for the fix, the re-review and the merge, so it falls under its floor of 5.
-      "pr-check": [prNone(), prOpen(T0 + 85 * MIN)],
+      // left — the review holds 36 for the fix, the re-review and the merge, so it falls under its floor of 5.
+      "pr-check": [prNone(), prOpen(T0 + 205 * MIN)],
       round: [acked(), acked()],
       "unit-end": [acked()],
       finish: [acked()],
     });
     const summary = await runPlan(s.runner, b.client, INSTANCE);
     expect(summary.units).toEqual({ U10: "review_pending" });
-    // The coding child's directive is its carve: 120 minus the 39 held for two reviews, a fix and the merge leaves room for its whole 45.
-    expect(b.of("spawn")[0]).toMatchObject({ step: "U10/0/coding", preset: "coding", budget: 45 });
+    // The coding child's directive is its carve: 240 minus the 44 held for two reviews, a fix and the merge leaves room for its whole 90.
+    expect(b.of("spawn")[0]).toMatchObject({ step: "U10/0/coding", preset: "coding", budget: 90 });
     const [end] = b.of("unit-end") as Array<{
       ending: { kind: string; report: string };
       pr: unknown;
@@ -1148,7 +1147,7 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
     expect(end.pr).toEqual({ number: 7, url: PR_URL });
     expect(end.headSha).toBe(HEAD);
     expect(end.ending.report).toContain("⏳ Review pending");
-    expect(end.ending.report).toContain("Budget split (120 min):");
+    expect(end.ending.report).toContain("Budget split (240 min):");
   });
 
   it("a unit row carrying lastPush starts the attempt at the review round when the pre-check finds the open pull request still at that head: no branch and no coding child run again on the shipped pull request", async () => {
@@ -1161,7 +1160,7 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
           merge: "person",
           repo: "acme/api",
           base: "main",
-          caps: { maxRounds: 2, maxMinutes: 120 },
+          caps: { maxRounds: 2, maxMinutes: 240 },
           units: [row("U10", { lastPush: HEAD })],
         }),
       ],
@@ -1200,7 +1199,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
           ok: true,
           repo: "acme/api",
           base: "main",
-          caps: { maxRounds: 2, maxMinutes: 120 },
+          caps: { maxRounds: 2, maxMinutes: 240 },
           units: [
             row("task", {
               slug: "task",
@@ -1271,7 +1270,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
           ok: true,
           repo: "acme/api",
           base: "main",
-          caps: { maxRounds: 2, maxMinutes: 120 },
+          caps: { maxRounds: 2, maxMinutes: 240 },
           units: [
             row("task", {
               slug: "task",

@@ -1053,7 +1053,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       merge: "person",
       // No `plan.path` on the record: the mark of a generated plan, answered for the machine's report.
       generated: true,
-      caps: { maxRounds: 3, maxMinutes: 120 },
+      caps: { maxRounds: 3, maxMinutes: 240 },
       units: [],
     });
     expect("planId" in body).toBe(false);

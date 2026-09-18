@@ -754,7 +754,7 @@ export const WAIT_MARGIN_MS = SHIP_WAIT.marginMinutes * MIN;
  *  one chunk of the runner's time, not the child's whole budget. Five minutes
  *  is the machine's one cadence for asking the bot what it cannot be told (the
  *  margin and the merge poll are the same number), and it keeps a round to a
- *  few steps: a coding child's 45 minutes are ten waits and ten reads. */
+ *  few steps: a coding child's 90 minutes are eighteen waits and eighteen reads. */
 export const WAIT_CHUNK_MS = SHIP_WAIT.chunkMinutes * MIN;
 /** The merge wait is a round of its own: its minutes are carved from the
  *  pipeline's remainder when the door is first asked (the merge wait's ask and

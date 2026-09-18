@@ -4,7 +4,7 @@ Takes a task from Slack, scopes fast, implements the change in its sandbox, push
 
 - **Code**: `src/agents/registry.ts` (`CODING_SYSTEM`; resident-path variant `CODING_SYSTEM_RESIDENT`; seeded-sandbox variant `CODING_SYSTEM_SEEDED`), `src/tools/attach.ts` (`attach_file`: a run's file into the conversation)
 - **Docs**: [The agents and their toolsets](../../explanation/agents-and-toolsets.md)
-- **Budgets**: 45 min / 64k tokens (the turn guard is derived: 270, six a minute — [harness-pi.md](harness-pi.md) item 15) · no built-in effort — set it per deployment/channel/user/thread/message through the config layers ([routing-and-config.md](routing-and-config.md) item 2; e.g. `config set channel efforts.coding=medium` — the wall clock is the real budget, and a 31-min live run at the model's default effort spent 97 % of it thinking between one-line greps) · toolset `full`
+- **Budgets**: 90 min / 64k tokens (the turn guard is derived: 540, six a minute — [harness-pi.md](harness-pi.md) item 15) · no built-in effort — set it per deployment/channel/user/thread/message through the config layers ([routing-and-config.md](routing-and-config.md) item 2; e.g. `config set channel efforts.coding=medium` — the wall clock is the real budget, and a 31-min live run at the model's default effort spent 97 % of it thinking between one-line greps) · toolset `full`
 
 ## Behavior
 
@@ -33,7 +33,7 @@ Takes a task from Slack, scopes fast, implements the change in its sandbox, push
 
 | Criterion | Proof |
 |---|---|
-| Budgets and toolset as specified; no built-in effort; the turn guard derived from the wall clock | `[unit]` `src/agents/registry.test.ts::coding: full toolset, 45 min, no built-in effort (config layers decide)`, `::the turn cap is a runaway guard derived from the wall clock…::*`; the budget mechanics are [harness-pi.md](harness-pi.md) item 15's rows. |
+| Budgets and toolset as specified; no built-in effort; the turn guard derived from the wall clock | `[unit]` `src/agents/registry.test.ts::coding: full toolset, 90 min, no built-in effort (config layers decide)`, `::the turn cap is a runaway guard derived from the wall clock…::*`; the budget mechanics are [harness-pi.md](harness-pi.md) item 15's rows. |
 | Resident variant: ready worktree, no clone/install/gh instructions; push-then-submit, PR creation not its job; fallback prompt unchanged | `[unit]` `src/agents/registry.test.ts::resident prompt variants` (incl. `::coding variant pushes the branch and submits the description; PR creation is not its job`); selection wiring in `src/core/dispatcher.test.ts::repo/ref resolution + resident prompt selection …`. |
 | Seeded variant (item 12): names the seeded checkout, forbids a second clone and any install, keeps `gh`; push-then-submit | `[unit]` `src/agents/registry.test.ts::seeded prompt variants::*` |
 | Push then submit, never open/merge/approve (both prompts): the branch is pushed, the description submitted through `submit_pr_description`, the PR is never opened by the agent, the curl `POST /pulls` step is gone, and never-merge/never-approve is explicit | `[unit]` `src/agents/registry.test.ts::coding prompts: push then submit_pr_description (opening the PR is the system's job)` (4: `::both coding prompts instruct pushing the branch, then submitting the typed description`, `::neither coding prompt tells the agent to open the PR itself`, `::the resident prompt no longer carries the curl POST /pulls instruction`, `::both coding prompts forbid merging and approving (mirrors the review prompts' wording)`). |

@@ -690,7 +690,7 @@ describe("budgetClipLabel — the card's budget line", () => {
   it("names the source when the plan runner hands a coding child a budget directive under the preset's own — the ship child's card line", () => {
     const coding = getAgent("coding");
     expect(budgetClipLabel(coding, { ...declaredProfile(coding), minutes: 28, boundedBy: "directive" }, 28)).toBe(
-      "budget 28 min (budget directive; preset asks 45)",
+      "budget 28 min (budget directive; preset asks 90)",
     );
   });
 
@@ -706,16 +706,16 @@ describe("budgetClipLabel — the card's budget line", () => {
     const coding = getAgent("coding");
     const clipped = { ...declaredProfile(coding), minutes: 45, boundedBy: "directive" as const };
     expect(budgetClipLabel(coding, clipped, 45, { coordinator: true })).toBe(
-      "budget 45 min (carved by the plan runner from the pipeline's remaining clock; preset asks 45)",
+      "budget 45 min (carved by the plan runner from the pipeline's remaining clock; preset asks 90)",
     );
     expect(budgetClipLabel(coding, clipped, 45, { coordinator: false })).toBe(
-      "budget 45 min (budget directive; preset asks 45)",
+      "budget 45 min (budget directive; preset asks 90)",
     );
     expect(
       budgetClipLabel(coding, { ...declaredProfile(coding), minutes: 30, boundedBy: "channel" }, undefined, {
         coordinator: true,
       }),
-    ).toBe("budget 30 min (channel boundary; preset asks 45)");
+    ).toBe("budget 30 min (channel boundary; preset asks 90)");
   });
 
   it("says when a directive narrowed nothing — alone against the preset, or beside the boundary that clipped tighter", () => {

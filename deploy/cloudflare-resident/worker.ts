@@ -628,7 +628,7 @@ const ATTACH_MUTEX_WAIT_MS = 60_000;
  *  20-minute ceiling (`BASH_TIMEOUT_MAX_MS`) — clamped server-side by
  *  `clampBashTimeout` in handleExec, never trusting the client's number. The
  *  heartbeat keeps every HTTP hop alive for the whole budget; the ceiling
- *  stays far inside the bot's 45-min run budget. Work beyond 20 minutes
+ *  stays far inside the bot's 90-min coding budget. Work beyond 20 minutes
  *  belongs in background jobs.
  *
  *  /op runs (test/build) get the flat 20-minute ceiling — the deterministic op

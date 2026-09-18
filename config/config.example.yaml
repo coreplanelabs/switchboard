@@ -347,7 +347,7 @@ workspaceDir: ./workspaces
 # `ship` fails the load by name.
 # ship:
 #   maxRounds: 3      # review rounds per unit
-#   maxMinutes: 120   # the ship preset's wall-clock budget in minutes (the registry's default)
+#   maxMinutes: 240   # the ship preset's wall-clock budget in minutes (the registry's default)
 
 # Which harness each preset's runs are driven by, deployment-wide
 # (docs/reference/specs/harness.md item 8): a mapping of preset to a harness's

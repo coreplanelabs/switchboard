@@ -9,7 +9,7 @@ import {
   bashTimeoutNote,
   clampBashTimeout,
 } from "./bashTimeout.js";
-import { ATTACH_REQUEST_MIN_MS } from "../core/budgets.js";
+import { ASKS, ATTACH_REQUEST_MIN_MS, MINUTE_MS } from "../core/budgets.js";
 
 // Feature: docs/reference/specs/execution.md item 11 — the per-call bash timeout policy.
 // One clamp, shared by the tool layer, every executor, and both deploy
@@ -18,11 +18,11 @@ import { ATTACH_REQUEST_MIN_MS } from "../core/budgets.js";
 // NaN, a string) falls back to the 5-minute default.
 
 describe("bash timeout constants", () => {
-  it("default 5 min, floor 1s, ceiling 20 min — ceiling far inside the 45-min run budget", () => {
+  it("default 5 min, floor 1s, ceiling 20 min — ceiling far inside the coding run's ask", () => {
     expect(BASH_TIMEOUT_MS).toBe(5 * 60_000);
     expect(BASH_TIMEOUT_MIN_MS).toBe(1_000);
     expect(BASH_TIMEOUT_MAX_MS).toBe(20 * 60_000);
-    expect(BASH_TIMEOUT_MAX_MS).toBeLessThan(45 * 60_000);
+    expect(BASH_TIMEOUT_MAX_MS).toBeLessThan(ASKS.coding * MINUTE_MS);
     expect(EXEC_CALL_MARGIN_MS).toBeGreaterThan(0);
   });
 });

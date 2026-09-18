@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { ASKS } from "../budgets.js";
 import { ConfigStore } from "../../config.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
@@ -1069,7 +1070,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
           async complete() {
             // The budget runs out with this call under way: the harness notes it
             // and steers the write-up before the answer lands.
-            clock.now = NOW + 46 * 60_000;
+            clock.now = NOW + (ASKS.coding + 1) * 60_000;
             for (let i = 0; i < 200 && pi.steers.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
             return { content: [{ type: "text", text: "half done" }], stopReason: "end_turn" };
           },
@@ -1122,7 +1123,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     // The answer is composed after the salvage (harness-pi item 6): it names
     // the branch and the head the salvage pushed, never "partial work may exist".
     expect(pushed.out.answer).toBe(
-      `⚠️ _Hit the 45-minute budget before finishing. What the tree held was pushed to \`${BRANCH}\` at \`${HEAD.slice(0, 7)}\` by the budget salvage, unreviewed — a follow-up starts from it. No PR description was submitted. Findings so far:_\n\nhalf done`,
+      `⚠️ _Hit the ${ASKS.coding}-minute budget before finishing. What the tree held was pushed to \`${BRANCH}\` at \`${HEAD.slice(0, 7)}\` by the budget salvage, unreviewed — a follow-up starts from it. No PR description was submitted. Findings so far:_\n\nhalf done`,
     );
     expect(pushed.commands).toContain("git add -u");
     expect(pushed.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
@@ -1135,7 +1136,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     // Nothing pushed: the answer says what the tree held and its fate — a
     // resident's tree is discarded at the run's end — never that work may exist.
     expect(lost.out.answer).toBe(
-      `⚠️ _Hit the 45-minute budget before finishing. 1 uncommitted change(s) and 0 unpushed commit(s) were left in the tree and discarded at the run's end. No PR description was submitted. Findings so far:_\n\nhalf done`,
+      `⚠️ _Hit the ${ASKS.coding}-minute budget before finishing. 1 uncommitted change(s) and 0 unpushed commit(s) were left in the tree and discarded at the run's end. No PR description was submitted. Findings so far:_\n\nhalf done`,
     );
     expect(lost.commands.some((c) => c.startsWith("git push") || c.startsWith("git commit"))).toBe(false);
     expect(lost.salvage).toEqual([
@@ -1177,7 +1178,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
           if (n === 0) {
             // The budget runs out with the loop's first call under way: the
             // write-up is steered and answered with nothing (n === 1).
-            clock.now = NOW + 46 * 60_000;
+            clock.now = NOW + (ASKS.coding + 1) * 60_000;
             for (let i = 0; i < 200 && pi.steers.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
           }
           if (n <= 1) return { content: [{ type: "text", text: "" }], stopReason: "end_turn" };
@@ -1241,7 +1242,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     );
     // The card reads what the ending established, in that order.
     expect(out.answer).toBe(
-      `Stopped at the 45-minute budget without finishing. The tree was clean and \`${BRANCH}\` held no unpushed commits — its head \`${HEAD.slice(0, 7)}\` is on the remote. The PR description was submitted.`,
+      `Stopped at the ${ASKS.coding}-minute budget without finishing. The tree was clean and \`${BRANCH}\` held no unpushed commits — its head \`${HEAD.slice(0, 7)}\` is on the remote. The PR description was submitted.`,
     );
     expect(out.answer).not.toContain("Partial work may exist");
     // The record's answer event carries the same words.
@@ -1779,7 +1780,7 @@ describe("the pi harness — the container replaced under a living bot: the rela
       "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s))",
     );
     expect(notes[1]!.summary).toBe(
-      "relaunched after the container was replaced (vm-fake → vm-new): the row's pi (pid 4242) went with the old container and was neither probed nor ended here; pi restarted in the container the run holds on the mirrored transcript — 1 call(s) were in flight: 1 lost with the container, each answered with a restart note; 45 min of budget left",
+      `relaunched after the container was replaced (vm-fake → vm-new): the row's pi (pid 4242) went with the old container and was neither probed nor ended here; pi restarted in the container the run holds on the mirrored transcript — 1 call(s) were in flight: 1 lost with the container, each answered with a restart note; ${ASKS.coding} min of budget left`,
     );
     expect(record.events.find((e) => e.type === "tool_result")).toMatchObject({
       tool: "bash",
