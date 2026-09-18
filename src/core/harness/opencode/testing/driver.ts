@@ -324,6 +324,13 @@ export interface FakeServeOptions {
    *  and the interrupt answers `interrupted: true` at once — so the stop is on
    *  the control, unread by the loop's next check, when the answer lands. */
   hardStopBeforeCutAnswer?: boolean;
+  /** The hung tool (`hangToolCall`) completes on its own while the loop-end
+   *  interrupt is in flight, the execution moves on to its NEXT step — a model
+   *  call, begun after the interrupt was posted — and the interrupt lands on
+   *  that step: its tail (the new step failing `aborted`, the end) serialized
+   *  before the answer (`interruptAnswersAfterTail` alongside), `interrupted:
+   *  true`. The play the cut stopped continues at the turn after the cut step. */
+  cutLandsOnNextStep?: boolean;
   /** The cut tool's own outcome (`hangToolCall`) rides the interrupted
    *  execution's tail itself — before the next execution starts, in the
    *  bridge's `earlier` mode — instead of landing after that start
@@ -545,6 +552,11 @@ class ScriptedServe {
   private readonly hardStopOnCutInterrupt: boolean;
   private readonly lateTailAfterNextStart: boolean;
   private readonly interruptAnswersAfterTail: boolean;
+  private readonly cutLandsOnNextStep: boolean;
+  /** The execution has moved on to the step the interrupt will cut (`cutLandsOnNextStep`). */
+  private nextStepHanging = false;
+  /** The 0-based turn the run's first play hung in: the play the cut stopped resumes at the turn after it. */
+  private hungTurn = -1;
   private readonly owedEndNeverSerialized: boolean;
   private readonly hangAtAsk: number | undefined;
   private readonly hardStopBeforeCutAnswer: boolean;
@@ -662,6 +674,7 @@ class ScriptedServe {
     this.hardStopOnCutInterrupt = options.hardStopOnCutInterrupt === true;
     this.lateTailAfterNextStart = options.lateTailAfterNextStart === true;
     this.interruptAnswersAfterTail = options.interruptAnswersAfterTail === true;
+    this.cutLandsOnNextStep = options.cutLandsOnNextStep === true;
     this.owedEndNeverSerialized = options.owedEndNeverSerialized === true;
     this.hangAtAsk = options.hangAtAsk;
     this.hardStopBeforeCutAnswer = options.hardStopBeforeCutAnswer === true;
@@ -1241,6 +1254,17 @@ class ScriptedServe {
           return j(200, { interrupted: false });
         })();
       }
+      if (this.hanging && this.cutLandsOnNextStep && !this.nextStepHanging) {
+        // The tool completes in the round-trip and the execution moves on to
+        // its next step (`cutLandsOnNextStep`): the interrupt lands on that
+        // step — the request is read again once it has opened, the ordinary
+        // cut from there, its tail first when `interruptAnswersAfterTail`.
+        this.hungSettled = true;
+        return (async () => {
+          for (let i = 0; i < 400 && !this.nextStepHanging; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+          return this.onRequest(req);
+        })();
+      }
       // From here the interrupt lands on the live execution: it ends where it is.
       this.interrupted = true;
       // An operator's hard stop lands while the interrupt is in flight: requested
@@ -1267,7 +1291,11 @@ class ScriptedServe {
         // Decided here, on the request: the write-up's queued prompt lands right
         // after and starts the next play, which continues after the cut turn.
         this.cutPlay = this.hangingPlay;
-        this.resumeTurn = (this.hungTool?.turn ?? -1) + 1;
+        // A hung tool's or a pending ask's cut, or the cut landing on the step
+        // after the tool: the write-up continues the conversation at the turn
+        // after the cut one. A hung model call's interrupt is the finale's, and
+        // the post-turn that follows replays the script whole.
+        this.resumeTurn = this.hungTool !== undefined || this.nextStepHanging ? this.hungTurn + 1 : 0;
         if (this.interruptSettlesLate !== undefined && !tailFirst) this.lateSettle = true;
       }
       for (const [requestID, resolve] of this.replies) {
@@ -1567,6 +1595,7 @@ class ScriptedServe {
           throw new Error("hangModelCall needs the driver's clock: hand the serve `advanceClock` and `finaleMs`");
         this.recordModelCall();
         this.hungStep = this.stepId(t);
+        this.hungTurn = t;
         this.emitEvent("session.step.started", {
           sessionID: this.sessionID,
           assistantMessageID: this.stepId(t),
@@ -1840,6 +1869,7 @@ class ScriptedServe {
       for (let i = 0; i < 8; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
       this.hungTool = { callId, assistantMessageID, turn: turnIndex };
       this.hungStep = assistantMessageID;
+      this.hungTurn = turnIndex;
       this.hangingPlay = this.plays;
       this.hanging = true;
       this.deps.spendBudget();
@@ -1937,6 +1967,7 @@ class ScriptedServe {
       // prompt before this play has ticked on.
       this.hungTool = { callId, assistantMessageID, turn: turnIndex };
       this.hungStep = assistantMessageID;
+      this.hungTurn = turnIndex;
       this.hangingPlay = this.plays;
       this.hanging = true;
       this.deps.spendBudget();
@@ -1955,6 +1986,24 @@ class ScriptedServe {
           content: [{ type: "text", text: "slept" }],
           executed: true,
         });
+        if (this.cutLandsOnNextStep) {
+          // The execution moves on: the next step — the model call after the
+          // tool — opens, begun after the interrupt was posted, and the
+          // interrupt lands on it (the route waits for this step, then cuts).
+          const next = this.stepId(turnIndex + 1);
+          this.hungStep = next;
+          this.hungTurn = turnIndex + 1;
+          this.emitEvent("session.step.started", {
+            sessionID: this.sessionID,
+            assistantMessageID: next,
+            agent: "switchboard",
+          });
+          this.hangingPlay = this.plays;
+          this.hanging = true;
+          this.nextStepHanging = true;
+          for (let i = 0; i < 2000 && this.cutPlay === undefined; i++) await this.deps.sleep(this.deps.tickMs ?? 1);
+          this.hanging = false;
+        }
         return this.toolContent(callId, ask.name, input, "completed", [{ type: "text", text: "slept" }]);
       }
       return this.toolContent(callId, ask.name, input, "running", []);
