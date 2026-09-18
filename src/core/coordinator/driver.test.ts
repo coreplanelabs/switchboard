@@ -658,6 +658,27 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(await report(undefined)).toContain("the unit runs again when the plan is re-issued");
   });
 
+  it("the plan answer's runPageBase reaches the machine: an aborted unit's report links the coding child's run page instead of repeating its write-up (issue 1806)", async () => {
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "person", { runPageBase: "https://bot.example/runs" })],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [
+        record({ id: "run-c0", finished: true, status: "completed", finalReply: "Which login flow?" }, T0 + 10 * MIN),
+      ],
+      "pr-check": [prNone(), prNone(T0 + 10 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const t = steps({ "U10/0/coding/wait/1": "event" });
+    expect((await runPlan(t.runner, b.client, INSTANCE)).units).toEqual({ U10: "aborted" });
+    const [end] = b.of("unit-end") as Array<{ ending: { report: string } }>;
+    expect(end!.ending.report).toContain("https://bot.example/runs/run-c0");
+    expect(end!.ending.report).not.toContain("Which login flow?");
+  });
+
   it("the instance's field decides, never the branch's name: a plan branch whose route answers merge: person ends merge_ready with no merge step asked, and a plan answer without the field is a person's merge the same way", async () => {
     const script = (merge?: "runner" | "person") => {
       const units = [row("U10")];

@@ -139,6 +139,8 @@ function harness(
     prices?: ModelPriceTable;
     checks?: CommitChecks | Error;
     merge?: MergeResult | Error;
+    /** The runs page base the plan route answers (agent-ship item 12). */
+    runPageBase?: string;
   } = {},
 ) {
   let n = 0;
@@ -176,6 +178,7 @@ function harness(
     tokens: "tokens" in over ? over.tokens : TOKENS,
     grantsFor: (id) => GRANTS[id] ?? NO_GRANTS,
     instances,
+    ...(over.runPageBase !== undefined ? { runPageBase: over.runPageBase } : {}),
     runs,
     dispatch: async (msg, dispatchIo, opts) => {
       dispatched.push({ msg, opts });
@@ -1113,6 +1116,18 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       units: [],
     });
     expect("planId" in body).toBe(false);
+  });
+
+  it("plan answers the runs page base when the deps carry one — the unit-end report links a child's write-up to its run page with it — and leaves it out otherwise (issue 1806)", async () => {
+    const withBase = await planHarness({ runPageBase: "https://bot.example/runs" });
+    const answered = (await call(withBase, "plan", { parentInstanceId: PLAN_INSTANCE.id })).body as Record<
+      string,
+      unknown
+    >;
+    expect(answered.runPageBase).toBe("https://bot.example/runs");
+    const without = await planHarness();
+    const bare = (await call(without, "plan", { parentInstanceId: PLAN_INSTANCE.id })).body as Record<string, unknown>;
+    expect("runPageBase" in bare).toBe(false);
   });
 
   /** A requesting thread's channel that opens threads: each lead gets the next key, and the leads are kept. */

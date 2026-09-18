@@ -122,6 +122,11 @@ export interface AdminCoordinatorDeps {
   grantsFor: GrantsLookup;
   /** The parent ship records (run-history item 49). */
   instances: CoordinatorInstanceStore;
+  /** The runs page base (`<PUBLIC_BASE_URL>/runs`), answered to the plan
+   *  runner so a unit-end report can link a child's write-up to its run page
+   *  (agent-ship item 12); absent without PUBLIC_BASE_URL — the report names
+   *  the run id instead. */
+  runPageBase?: string;
   /** The one runs service every surface reads: the live and finished runs of the instance's thread. */
   runs: RunsService;
   /** `dispatch()` bound over the process's deps: the child as the requesting
@@ -1070,6 +1075,9 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
     grantSource: instance.grantSource ?? "org",
     // The mark (item 16): the machine's report keys its re-issue line on it.
     generated: isGenerated(instance),
+    // The runs page base: the report's pointer at a child's write-up links its
+    // run page with it (agent-ship item 12); left out, the run id is named.
+    ...(deps.runPageBase !== undefined ? { runPageBase: deps.runPageBase } : {}),
     repo: instance.repo,
     base: instance.base ?? "main",
     caps: instance.caps ?? resolveShipCaps(undefined),

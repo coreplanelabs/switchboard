@@ -1093,7 +1093,8 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     });
     expect(noPr.rounds()).toEqual(["0 coding started", "0 coding aborted"]);
     const noPrReport = renderUnitReport(noPr.state);
-    expect(noPrReport).toContain("Which login flow?");
+    expect(noPrReport).not.toContain("Which login flow?");
+    expect(noPrReport).toContain("run run-c0");
     expect(noPrReport).toContain("⚠️ Ship ended at round 0: the coding round ended without opening a pull request");
 
     const noBranch = fresh(input());
@@ -1302,7 +1303,8 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(d.rounds().at(-1)).toBe("1 review no_verdict");
     const report = renderUnitReport(d.state);
     expect(report).toContain("Review round 1 ended without a submitted verdict");
-    expect(report).toContain("ran out of budget");
+    expect(report).not.toContain("ran out of budget");
+    expect(report).toContain("run run-r1");
   });
 
   it("an approve whose post did not land is an honest abort, never merge-ready — the report carries the child's recorded reason and says how to continue in the runner's words", () => {
@@ -2031,5 +2033,118 @@ describe("the severity gate — an approve's findings held to the level in force
       T0 + 20 * MIN,
     );
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "round_cap", maxRounds: 1 } });
+  });
+});
+
+// Feature: docs/reference/specs/agent-ship.md item 12 — the unit-end report
+// points at the child's write-up instead of repeating it (issue 1806): the
+// child's own message in the thread is the single copy of the detail, and the
+// report's pointer is the run page when the plan named the base, the run id
+// otherwise. The ending lines (the reason, the renewal, the re-issue prompt)
+// are unchanged.
+describe("the unit report — the child's write-up is pointed at, never repeated (issue 1806)", () => {
+  const BASE = "https://bot.example/runs";
+
+  it("an abort's report drops the coding child's final reply and points at its run page, with the reason, the ending and the re-issue lines still there", () => {
+    const d = fresh(input({ merge: "person", generated: true, runPageBase: BASE }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(d, "run-c0", finished({ status: "completed", finalReply: "Which login flow?" }), T0 + 5 * MIN);
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 5 * MIN });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    const report = renderUnitReport(d.state);
+    expect(report).not.toContain("Which login flow?");
+    expect(report).toContain(`${BASE}/run-c0`);
+    expect(report).toContain("⚠️ Ship ended at round 0: the coding round ended without opening a pull request");
+    expect(report).toContain("⚠️ Ship aborted after 0 review rounds.");
+    expect(report).toContain("To continue, re-issue `agent:ship` in this thread");
+  });
+
+  it("without a runPageBase the pointer names the run id and never fabricates a link", () => {
+    const d = fresh(input({ merge: "person" }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(d, "run-c0", finished({ status: "completed", finalReply: "Which login flow?" }), T0 + 5 * MIN);
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 5 * MIN });
+    const report = renderUnitReport(d.state);
+    expect(report).not.toContain("Which login flow?");
+    expect(report).toContain("run run-c0");
+    expect(report).not.toContain("https://");
+  });
+
+  it("a stop's report points at the round's child — the coding child on a round-0 stop, the review child on a review stop", () => {
+    const soft = fresh(input({ merge: "person", runPageBase: BASE }));
+    soft.answer({ type: "branch", ok: true, at: T0 });
+    runChild(soft, "run-c0", finished({ status: "stopped_soft", finalReply: "stopping now" }), T0 + 5 * MIN);
+    const softReport = renderUnitReport(soft.state);
+    expect(softReport).toContain("⏹ Ship stopped by operator (soft stop) after 0 review rounds.");
+    expect(softReport).not.toContain("stopping now");
+    expect(softReport).toContain(`${BASE}/run-c0`);
+
+    const hard = fresh(input({ merge: "person", runPageBase: BASE }));
+    throughRoundZero(hard);
+    runChild(hard, "run-r1", finished({ status: "stopped_hard", finalReply: "cut mid-review" }), T0 + 20 * MIN);
+    const hardReport = renderUnitReport(hard.state);
+    expect(hardReport).not.toContain("cut mid-review");
+    expect(hardReport).toContain(`${BASE}/run-r1`);
+    expect(hardReport).toContain("review child's write-up");
+  });
+
+  it("a no-verdict report points at the review child's run instead of quoting its final message", () => {
+    const d = fresh(input({ merge: "person", runPageBase: BASE }));
+    throughRoundZero(d);
+    runChild(d, "run-r1", finished({ status: "completed", finalReply: "ran out of budget" }), T0 + 20 * MIN);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "no_verdict" } });
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("Review round 1 ended without a submitted verdict");
+    expect(report).not.toContain("ran out of budget");
+    expect(report).toContain(`${BASE}/run-r1`);
+  });
+
+  it("a review-round abort (an approve whose post did not land) points at the review child's run, never the coding child's", () => {
+    const d = fresh(input({ merge: "person", runPageBase: BASE }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "x", findings: [] },
+        reviewPosted: false,
+        reviewPostReason: "digest covered 3 of 5 files",
+        reviewHead: HEAD_A,
+        finalReply: "approved but the post failed",
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+    const report = renderUnitReport(d.state);
+    expect(report).not.toContain("approved but the post failed");
+    expect(report).toContain("review child's write-up");
+    expect(report).toContain(`${BASE}/run-r1`);
+    expect(report).not.toContain(`${BASE}/run-c0`);
+  });
+
+  it("a continued segment's report keeps the segment and budget lines but points at the segment's coding run instead of embedding its checkpoint", () => {
+    const d = fresh(
+      input({ merge: "person", generated: true, grant: { renewals: 6 }, grantSource: "channel", runPageBase: BASE }),
+    );
+    d.answer({ type: "branch", ok: true, at: T0 });
+    const branch = d.state.input.unit.branch;
+    runChild(
+      d,
+      "run-c0",
+      finished({
+        status: "completed",
+        finalReply: "Budget reached: pushed the parser, the tests are next.",
+        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 40 * MIN }],
+        leaseStartedAt: T0,
+      }),
+      T0 + 45 * MIN,
+    );
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "continued", runId: "run-c0" } });
+    const report = renderUnitReport(d.state);
+    expect(report).not.toContain("Budget reached: pushed the parser");
+    expect(report).toContain(`${BASE}/run-c0`);
+    expect(report).toContain("🔁 Segment 1 ended at its lease with the unit unfinished");
   });
 });

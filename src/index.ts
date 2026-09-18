@@ -735,6 +735,11 @@ export async function runBot(): Promise<void> {
       tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
       grantsFor: (id) => config.grantsFor(id),
       instances: coordinatorInstances,
+      // The runs page base (agent-ship item 12): a unit-end report links a
+      // child's write-up to its run page; without PUBLIC_BASE_URL it names the run id.
+      ...(process.env.PUBLIC_BASE_URL?.trim()
+        ? { runPageBase: `${process.env.PUBLIC_BASE_URL.trim().replace(/\/+$/, "")}/runs` }
+        : {}),
       runs: runsService,
       dispatch: (msg, io, opts) => dispatch(deps, msg, io, opts),
       ioFor: (thread) => threadIoFor(thread),

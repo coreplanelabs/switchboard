@@ -172,6 +172,8 @@ interface PlanFacts {
   grantSource: GrantSource;
   /** The instance's mark as the plan route answers it: a generated one-unit plan (a `plan` with no `path`). */
   generated: boolean;
+  /** The runs page base the bot answered: the report links a child's write-up to its run page with it. */
+  runPageBase?: string;
   repo: string;
   base: string;
   caps: ShipCaps;
@@ -217,6 +219,7 @@ function readPlan(a: BotAnswer): PlanFacts {
     grantSource:
       b.grantSource === "run" || b.grantSource === "user" || b.grantSource === "channel" ? b.grantSource : "org",
     generated: b.generated === true,
+    ...(typeof b.runPageBase === "string" && b.runPageBase.length > 0 ? { runPageBase: b.runPageBase } : {}),
     repo: b.repo,
     base: b.base,
     caps: { maxRounds: b.caps.maxRounds, maxMinutes: b.caps.maxMinutes },
@@ -537,6 +540,7 @@ async function runUnit(
       grant: plan.grant,
       grantSource: plan.grantSource,
       generated: plan.generated,
+      ...(plan.runPageBase !== undefined ? { runPageBase: plan.runPageBase } : {}),
       ...(resume !== undefined ? { resume } : {}),
       ...(lastPush !== undefined ? { lastPush } : {}),
       ...(session !== undefined ? { session } : {}),
