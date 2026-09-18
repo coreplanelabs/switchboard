@@ -1148,6 +1148,8 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         // Absent on the record too: zero renewals, no cap, the org's — nothing renews.
         grant: { renewals: 0 },
         grantSource: "org",
+        // Absent on the record: the runner speaks at the default, quiet (routing-and-config item 28).
+        verbosity: "quiet",
         generated: false,
         repo: "acme/api",
         base: "main",
@@ -2217,6 +2219,16 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(u11.ending).toBeUndefined();
     expect(u11.segments).toEqual([{ index: 2, from: "a".repeat(40), runId: "run-c0", at: NOW }]);
     expect(segReplies.map((r) => r.text)).toEqual([continued.ending.report, continued.ending.report]);
+    // The thread's copy (routing-and-config item 28): posted when the driver
+    // sends one; an empty copy — a quiet segment boundary — posts nothing and
+    // still counts as told, since nothing was owed to the thread at that level.
+    expect(await call(seg, "unit-end", { ...continued, ending: { ...continued.ending, threadReport: "" } })).toEqual({
+      status: 200,
+      body: { ok: true, told: true, at: NOW },
+    });
+    expect(segReplies).toHaveLength(2);
+    await call(seg, "unit-end", { ...continued, ending: { ...continued.ending, threadReport: "🔁 the short form" } });
+    expect(segReplies.at(-1)?.text).toBe("🔁 the short form");
     expect(
       (
         await call(seg, "unit-end", {

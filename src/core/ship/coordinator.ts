@@ -30,6 +30,7 @@
 // arrive in the input rather than from the agent registry.
 
 import type { ShipRoundOutcome } from "../runEvents.js";
+import { shows, type Verbosity } from "../verbosity.js";
 import type { Handoff, HandoffLanded } from "./handoff.js";
 import { progressOf, renderRenewal, renewalDecision, type PushedHeadFact, type RenewalDecision } from "./renewal.js";
 import type { RunStatus } from "../runRecord.js";
@@ -704,6 +705,9 @@ export interface UnitPipelineInput {
    *  it yet: the renewal decision is the segment's end, not this unit's. */
   grant?: Grant;
   grantSource?: GrantSource;
+  /** The request's verbosity (routing-and-config item 28): the level the
+   *  thread's copy of the unit report is rendered at; absent reads as quiet. */
+  verbosity?: Verbosity;
   /** The segment this pipeline runs (decision 0046, Renewal): absent for the
    *  first; a renewal's carries its number, the renewals spent before it, the
    *  session's spend so far, the sha it continues from and the previous
@@ -1793,9 +1797,21 @@ function mergeReadyHeadline(rounds: string, url: string, base: string, facts: Me
   return `✅ Merge-ready after ${rounds}: ${url} — ${checks.total} check${checks.total === 1 ? "" : "s"} green at the approved head.`;
 }
 
-export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts): string {
+export function renderUnitReport(
+  s: UnitPipelineState,
+  facts?: MergeReadyFacts,
+  /** The level the report speaks at (routing-and-config item 28). The default
+   *  is the full report — the row's and the board's copy; the thread's copy is
+   *  rendered at the request's level, where the asides about the machinery
+   *  (the level in force, the grant, the write-up pointer, the budget split,
+   *  a segment boundary) are `verbose` and the outcome, the verdict, the
+   *  findings left below the gate, the declined ones and what to do next are
+   *  everyone's. */
+  verbosity: Verbosity = "verbose",
+): string {
   const e = s.ending;
   if (!e) return "";
+  const aside = (line: string | undefined) => (shows(verbosity, "verbose") ? line : undefined);
   const rounds = `${e.reviewRounds} review round${e.reviewRounds === 1 ? "" : "s"}`;
   const prUrl = s.pr?.url;
   const prLine = prUrl ? ` PR: ${prUrl}` : "";
@@ -1833,11 +1849,13 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
       return [
         `✅ Merged after ${rounds}: ${e.pr.url} (squash \`${e.sha.slice(0, 7)}\`) — merged by the plan runner under \`plan:merge\`: the review approved at this head and the guards were green.`,
         verdictLine,
-        levelLine,
-        grantLine,
-        ...(skippedLine ? [skippedLine] : []),
+        aside(levelLine),
+        aside(grantLine),
+        skippedLine,
         declinedLine,
-      ].join("\n");
+      ]
+        .filter(Boolean)
+        .join("\n");
     case "already_landed":
       // No compare link, no renewal line, no re-issue prompt: there was
       // nothing to ship, so none of them has a question to answer.
@@ -1849,9 +1867,9 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
           ? `✅ Merge-ready after ${rounds}: ${e.pr.url}`
           : mergeReadyHeadline(rounds, e.pr.url, s.input.base, facts),
         verdictLine,
-        levelLine,
-        grantLine,
-        ...(skippedLine ? [skippedLine] : []),
+        aside(levelLine),
+        aside(grantLine),
+        skippedLine,
         declinedLine,
         // What the driver read at the approved head when it composed this
         // ending (agent-ship item 9): a merge that already happened is named
@@ -1861,7 +1879,9 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
           : facts?.autoMergeEnabled
             ? "Auto-merge is on for this pull request: the approval merges it once checks pass."
             : "Remaining gate: a person's merge — the runner merges only when the instance's `merge` field says runner, and ship never approves.",
-      ].join("\n");
+      ]
+        .filter(Boolean)
+        .join("\n");
     case "merge_refused":
       // The approved work is on the branch, so the remedy is a person's hand
       // merge, never a re-run: a seeded plan re-issued afterwards finds the
@@ -1884,23 +1904,25 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
     case "wall_clock_cap":
       return join([
         `🧢 Ship stopped at a cap: the remaining pipeline time (~${Math.max(0, Math.round(e.remainingMs / MIN))} min of the ${s.input.caps.maxMinutes}-minute budget) cannot hold another round${e.refused ? ` (the ${e.refused.round} round would get ${e.refused.minutes} min, under its floor of ${e.refused.floor})` : ""} — no approval after ${rounds}.${prLine}`,
-        budgetSplitLine(e.spent, s.input.caps.maxMinutes),
+        aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
         splitReport(s),
         reissue,
       ]);
     case "review_pending":
       return join([
         `⏳ Review pending: the coding child shipped ${e.pr.url}${e.headSha !== undefined ? ` (head \`${e.headSha.slice(0, 7)}\`)` : ""} but the remaining pipeline time cannot hold the review round — the work stands, only the review is missing. The next attempt starts at the review round while the pull request still heads at the child's own last push.`,
-        budgetSplitLine(e.spent, s.input.caps.maxMinutes),
+        aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
         reissue,
       ]);
     case "stopped":
       return join([
         `${e.mode === "hard" ? "⛔" : "⏹"} Ship stopped by operator (${e.mode} stop) after ${rounds}.${prLine}`,
-        writeUpPointer(
-          s,
-          e.round.kind,
-          e.round.kind === "review" ? s.reviewRunByRound[e.round.index] : s.lastCodingRunId,
+        aside(
+          writeUpPointer(
+            s,
+            e.round.kind,
+            e.round.kind === "review" ? s.reviewRunByRound[e.round.index] : s.lastCodingRunId,
+          ),
         ),
         e.postedReview
           ? "ℹ️ A changes-requested review was posted this round before the stop — its findings stand on the PR."
@@ -1910,25 +1932,31 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
     case "aborted":
       return join([
         e.reason,
-        writeUpPointer(
-          s,
-          e.round?.kind ?? "coding",
-          e.round?.kind === "review" ? s.reviewRunByRound[e.round.index] : s.lastCodingRunId,
+        aside(
+          writeUpPointer(
+            s,
+            e.round?.kind ?? "coding",
+            e.round?.kind === "review" ? s.reviewRunByRound[e.round.index] : s.lastCodingRunId,
+          ),
         ),
         e.renewal !== undefined ? `🔁 Not renewed: ${e.renewal.line}.` : undefined,
         `⚠️ Ship aborted after ${rounds}.`,
         reissue,
       ]);
     case "continued":
+      // A segment boundary is the runner continuing — an acknowledgement, verbose
+      // material (item 28); the thread's copy is empty at quiet, and the row keeps
+      // no ending either way (decision 0046).
+      if (!shows(verbosity, "verbose")) return "";
       return join([
         writeUpPointer(s, e.round.kind, e.runId),
         `🔁 Segment ${e.segment - 1} ended at its lease with the unit unfinished — ${e.line}. Segment ${e.segment} opens in this thread${e.from !== undefined ? ` from \`${e.from.slice(0, 7)}\`` : ""} under a fresh ${s.input.caps.maxMinutes}-minute lease, with this segment's write-up as its request; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`,
-        budgetSplitLine(e.spent, s.input.caps.maxMinutes),
+        aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
       ]);
     case "no_verdict":
       return join([
         `⚠️ Review round ${e.round.index} ended without a submitted verdict (budget, refusal, or stop) — ship never converts that into a request for changes, so no findings step ran.`,
-        writeUpPointer(s, e.round.kind, s.reviewRunByRound[e.round.index]),
+        aside(writeUpPointer(s, e.round.kind, s.reviewRunByRound[e.round.index])),
         `⚠️ Ship aborted after ${rounds}.`,
         reissue,
       ]);

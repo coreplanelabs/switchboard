@@ -34,6 +34,7 @@
 // the shim Worker imports this by relative path.
 
 import { DEFAULT_GRANT, GRANT_RENEWALS_MAX, type Grant, type GrantSource } from "../budgets.js";
+import { DEFAULT_VERBOSITY, isVerbosity, type Verbosity } from "../verbosity.js";
 import {
   applyReturn,
   cursorFinished,
@@ -177,6 +178,8 @@ interface PlanFacts {
   /** The grant beside them (decision 0046): what a renewal could spend, and which layer granted it. */
   grant: Grant;
   grantSource: GrantSource;
+  /** The request's verbosity as the plan route answers it (routing-and-config item 28): what the unit threads hear. */
+  verbosity: Verbosity;
   /** The instance's mark as the plan route answers it: a generated one-unit plan (a `plan` with no `path`). */
   generated: boolean;
   /** The runs page base the bot answered: the report links a child's write-up to its run page with it. */
@@ -225,6 +228,7 @@ function readPlan(a: BotAnswer): PlanFacts {
     grant: readGrant(b.grant),
     grantSource:
       b.grantSource === "run" || b.grantSource === "user" || b.grantSource === "channel" ? b.grantSource : "org",
+    verbosity: isVerbosity(b.verbosity) ? b.verbosity : DEFAULT_VERBOSITY,
     generated: b.generated === true,
     ...(typeof b.runPageBase === "string" && b.runPageBase.length > 0 ? { runPageBase: b.runPageBase } : {}),
     repo: b.repo,
@@ -603,6 +607,7 @@ async function runUnit(
       addressSeveritySource: plan.addressSeveritySource,
       grant: plan.grant,
       grantSource: plan.grantSource,
+      verbosity: plan.verbosity,
       generated: plan.generated,
       ...(plan.runPageBase !== undefined ? { runPageBase: plan.runPageBase } : {}),
       ...(resume !== undefined ? { resume } : {}),
@@ -669,7 +674,13 @@ async function runUnit(
         // ending (agent-ship item 14).
         const body = {
           ...tag,
-          ending: { kind: note.ending.kind, report: renderUnitReport(state, endFacts) },
+          // Two copies (routing-and-config item 28): the full report for the
+          // row and the board, and the thread's at the request's verbosity.
+          ending: {
+            kind: note.ending.kind,
+            report: renderUnitReport(state, endFacts),
+            threadReport: renderUnitReport(state, endFacts, state.input.verbosity ?? DEFAULT_VERBOSITY),
+          },
           ...(state.pr !== undefined ? { pr: state.pr } : {}),
           // A review_pending ending names the child's own last push so the next
           // attempt's pre-check can start at the review round (the row's lastPush).

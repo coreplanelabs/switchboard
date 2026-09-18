@@ -462,6 +462,7 @@ export async function runShipBranch(
               caps,
               addressSeverity,
               grant,
+              verbosity: ctx.verbosity,
               ...(card.handle !== undefined ? { card: card.handle } : {}),
               now: clock(),
             },

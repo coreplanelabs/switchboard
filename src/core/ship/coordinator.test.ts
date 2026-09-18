@@ -2171,6 +2171,17 @@ describe("the severity gate — an approve's findings held to the level in force
     expect(report).toContain("Findings below major, left as-is: F1 (minor) — naming; F2 (nit) — t");
     // The grant, as the instance carries it: absent reads as the org's zero.
     expect(report).toContain("Renewals: 0 of 0 spent (granted by org).");
+    // The thread's copy at quiet (routing-and-config item 28): the outcome,
+    // the verdict, the findings left below the gate and the declined ones
+    // stay; the level in force and the grant are asides for verbose.
+    const quiet = renderUnitReport(d.state, undefined, "quiet");
+    expect(quiet).toContain("✅ Merge-ready after");
+    expect(quiet).toContain("Verdict: LGTM");
+    expect(quiet).toContain("Findings below major, left as-is: F1 (minor) — naming; F2 (nit) — t");
+    expect(quiet).toContain("Declined findings:");
+    expect(quiet).not.toContain("Severity addressed");
+    expect(quiet).not.toContain("Renewals:");
+    expect(renderUnitReport(d.state, undefined, "verbose")).toBe(report);
   });
 
   it("the report names the grant the instance carries — renewals spent of granted, the cap and who granted it — while nothing renews yet", () => {

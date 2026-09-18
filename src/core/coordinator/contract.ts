@@ -9,6 +9,7 @@
 // routes decide on.
 //
 import type { Grant, GrantSource } from "../budgets.js";
+import { isVerbosity, type Verbosity } from "../verbosity.js";
 import { isAddressSeverity, type AddressSeverity, type AddressSeveritySource } from "../ship/coordinator.js";
 
 // A coordinator is a Workflow instance in the shim Worker whose children are
@@ -323,6 +324,11 @@ export interface CoordinatorInstance {
    *  decision reads it. */
   grant?: Grant;
   grantSource?: GrantSource;
+  /** The request's verbosity (routing-and-config item 28), resolved once by
+   *  the ship fork and written here beside `merge`: what the runner says in
+   *  the unit threads it owns — the unit-ending report's asides and the
+   *  segment lines are `verbose` material. Absent reads as `quiet`. */
+  verbosity?: Verbosity;
   /** The pipeline's caps as the profile gate clipped them: the rounds cap and the wall clock per unit. */
   caps?: { maxRounds: number; maxMinutes: number };
   /** The status card in the requesting thread, when the channel has one — what
@@ -445,6 +451,7 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
     return false;
   if (r.card !== undefined && !(isObject(r.card) && isText(r.card.channel) && isText(r.card.ts))) return false;
   if (!isOptionalText(r.runId) || !isOptionalText(r.label)) return false;
+  if (r.verbosity !== undefined && !isVerbosity(r.verbosity)) return false;
   if (r.attempt !== undefined && !(Number.isInteger(r.attempt) && (r.attempt as number) >= 2)) return false;
   return true;
 }
