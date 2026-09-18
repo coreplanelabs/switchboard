@@ -4,6 +4,8 @@
 
 import { TRACING_LOG_LEVELS } from "../core/trace/sinks.js";
 import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
+import { WIRES, WIRE_ALIASES, parseModelRef, type ProviderConfig } from "../core/provider.js";
+import { catalogExists } from "../core/installedModelRegistry.js";
 import type { SelfImprovementConfig } from "../core/selfImprovement.js";
 import type { RunHistoryConfig } from "../core/runStore.js";
 import {
@@ -316,6 +318,7 @@ export function validateConfig(cfg: AppConfig): void {
   if (!cfg.providers || Object.keys(cfg.providers).length === 0) {
     throw new Error("config.yaml must define at least one provider");
   }
+  validateProviders(cfg, "config.yaml");
   if (!cfg.defaults?.agent || !cfg.defaults?.models) {
     throw new Error("config.yaml must define defaults.agent and defaults.models");
   }
@@ -479,6 +482,133 @@ function validateReferences(references: ReferencesConfig): void {
     throw new Error("config.yaml: references.enabled must be true or false");
 }
 
+/** The `providers` block's keys, held equal to `ProviderConfig` the way the
+ *  top-level keys are. */
+const PROVIDER_KEYS: Record<keyof ProviderConfig, true> = {
+  type: true,
+  wire: true,
+  vendor: true,
+  catalog: true,
+  models: true,
+  passthrough: true,
+  apiKeyEnv: true,
+  baseUrl: true,
+};
+
+/** A `models.<id>` override's keys, and the shapes they are held to. */
+const MODEL_OVERRIDE_KEYS: Record<string, true> = {
+  levels: true,
+  capField: true,
+  window: true,
+  inputs: true,
+  cache: true,
+  price: true,
+};
+const INPUT_KINDS: Record<string, true> = { image: true, document: true };
+const PRICE_KINDS: Record<string, true> = { input: true, output: true, cacheRead: true, cacheWrite: true };
+export const CACHE_RULES = ["automatic", "markers", "none", "unknown"] as const;
+
+/** One `models.<id>` override held to its shape: a malformed `levels` (an
+ *  unknown tier, a non-word), a bad cap field, window, input kind, cache rule
+ *  or price kind is refused by name, never read as absent. */
+export function validateModelOverride(path: string, raw: unknown): void {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error(`${path} must be a mapping`);
+  const m = raw as Record<string, unknown>;
+  for (const key of unknownKeys(m, MODEL_OVERRIDE_KEYS)) throw new Error(`${path}.${key} is not a known key`);
+  if (m.levels !== undefined) {
+    if (typeof m.levels !== "object" || m.levels === null || Array.isArray(m.levels))
+      throw new Error(`${path}.levels must be a mapping of effort → wire word or null`);
+    for (const [tier, word] of Object.entries(m.levels as Record<string, unknown>)) {
+      if (!isEffort(tier))
+        throw new Error(`${path}.levels.${tier} is not an effort — valid efforts: ${EFFORT_LEVELS_HINT}`);
+      if (word !== null && (typeof word !== "string" || word === ""))
+        throw new Error(`${path}.levels.${tier} must be a wire word or null`);
+    }
+  }
+  if (m.capField !== undefined && (typeof m.capField !== "string" || m.capField === ""))
+    throw new Error(`${path}.capField must be the body field the output cap is spelled with`);
+  if (m.window !== undefined && (!Number.isInteger(m.window) || (m.window as number) <= 0))
+    throw new Error(`${path}.window must be a positive integer of tokens`);
+  if (m.inputs !== undefined) {
+    if (typeof m.inputs !== "object" || m.inputs === null || Array.isArray(m.inputs))
+      throw new Error(`${path}.inputs must be a mapping of input kind → true or false`);
+    for (const [kind, v] of Object.entries(m.inputs as Record<string, unknown>)) {
+      if (!Object.hasOwn(INPUT_KINDS, kind))
+        throw new Error(`${path}.inputs.${kind} is not a known input kind (image, document)`);
+      if (typeof v !== "boolean") throw new Error(`${path}.inputs.${kind} must be true or false`);
+    }
+  }
+  if (m.cache !== undefined && !(CACHE_RULES as readonly unknown[]).includes(m.cache))
+    throw new Error(`${path}.cache must be ${CACHE_RULES.join(", ")}`);
+  if (m.price !== undefined) {
+    if (typeof m.price !== "object" || m.price === null || Array.isArray(m.price))
+      throw new Error(`${path}.price must be a mapping of kind → USD per million tokens`);
+    for (const [kind, v] of Object.entries(m.price as Record<string, unknown>)) {
+      if (!Object.hasOwn(PRICE_KINDS, kind))
+        throw new Error(`${path}.price.${kind} is not a known kind (input, output, cacheRead, cacheWrite)`);
+      if (typeof v !== "number" || !Number.isFinite(v) || v < 0)
+        throw new Error(`${path}.price.${kind} must be a finite number of USD per million tokens, 0 or more`);
+    }
+  }
+}
+
+/**
+ * Every provider block held to the new grammar (record 0052): `wire`
+ * declared (with `type` still loading as its alias for one release, but not
+ * beside it), a vendor that is a name or `model`, a `catalog` naming a file
+ * the pi registry ships or `none`, and every `models.<id>` override well
+ * formed. The legacy `type` is derived for the consumers that still read it,
+ * so nothing downstream changes in this slice.
+ */
+export function validateProviders(cfg: AppConfig, source: string): void {
+  for (const [name, block] of Object.entries(cfg.providers ?? {})) {
+    const path = `${source}: providers.${name}`;
+    if (typeof block !== "object" || block === null || Array.isArray(block))
+      throw new Error(`${path} must be a mapping`);
+    const b = block as unknown as Record<string, unknown>;
+    for (const key of unknownKeys(b, PROVIDER_KEYS)) throw new Error(`${path}.${key} is not a known key`);
+    if (b.type === undefined && b.wire === undefined)
+      throw new Error(`${path} must declare wire (${WIRES.join(", ")}); type is its legacy alias for one release`);
+    if (b.type !== undefined && b.wire !== undefined)
+      throw new Error(
+        `${path} declares both type and wire; declare wire alone (type: ${String(b.type)} loads as its alias for one release)`,
+      );
+    if (b.type !== undefined && b.type !== "anthropic" && b.type !== "openai-compatible")
+      throw new Error(`${path}.type must be anthropic or openai-compatible; wire is the new spelling`);
+    if (b.wire !== undefined && !(WIRES as readonly unknown[]).includes(b.wire))
+      throw new Error(`${path}.wire must be ${WIRES.join(", ")}`);
+    if (b.vendor !== undefined && (typeof b.vendor !== "string" || b.vendor === ""))
+      throw new Error(`${path}.vendor must be a vendor name or "model"`);
+    if (b.catalog !== undefined) {
+      if (typeof b.catalog !== "string" || b.catalog === "")
+        throw new Error(`${path}.catalog must be a registry file name or "none"`);
+      if (!catalogExists(b.catalog))
+        throw new Error(`${path}.catalog names "${b.catalog}", which the pi registry does not ship (or "none")`);
+    }
+    if (
+      b.passthrough !== undefined &&
+      (typeof b.passthrough !== "object" || b.passthrough === null || Array.isArray(b.passthrough))
+    )
+      throw new Error(`${path}.passthrough must be a mapping of body fields`);
+    if (b.apiKeyEnv !== undefined && typeof b.apiKeyEnv !== "string")
+      throw new Error(`${path}.apiKeyEnv must be a string`);
+    if (b.baseUrl !== undefined && typeof b.baseUrl !== "string") throw new Error(`${path}.baseUrl must be a string`);
+    if (b.models !== undefined) {
+      if (typeof b.models !== "object" || b.models === null || Array.isArray(b.models))
+        throw new Error(`${path}.models must be a mapping of model id → overrides`);
+      for (const [id, raw] of Object.entries(b.models as Record<string, unknown>)) {
+        if (b.vendor === "model" && !id.includes("/"))
+          throw new Error(`${path}.models.${id}: a vendor: model block names its models <vendor>/<id>`);
+        validateModelOverride(`${path}.models.${id}`, raw);
+      }
+    }
+    // Derive the legacy word for every consumer that still reads `type` (the
+    // proxy's shape, the harness card) — this slice changes no run's outcome.
+    const derived = b.wire ?? WIRE_ALIASES[String(b.type)];
+    (block as ProviderConfig).type = derived === "anthropic-messages" ? "anthropic" : "openai-compatible";
+  }
+}
+
 /** The `routing` block's keys, held equal to `RoutingConfig` the way the top-level keys are. */
 const ROUTING_KEYS: Record<keyof RoutingConfig, true> = { auto: true, model: true, answer: true };
 
@@ -499,7 +629,7 @@ function validateRouting(routing: RoutingConfig, providers: Record<string, unkno
   if (routing.model !== undefined) {
     if (typeof routing.model !== "string" || !routing.model.includes("/"))
       throw new Error("config.yaml: routing.model must be a <provider>/<model> ref");
-    const provider = routing.model.slice(0, routing.model.indexOf("/"));
+    const provider = parseModelRef(routing.model).provider;
     if (!providers || !Object.hasOwn(providers, provider))
       throw new Error(`config.yaml: routing.model names provider "${provider}", which providers does not define`);
   }

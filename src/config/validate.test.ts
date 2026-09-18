@@ -1,6 +1,85 @@
 import { describe, expect, it } from "vitest";
-import type { Scope } from "../config.js";
-import { boundaryProblem, validateBoundaries } from "./validate.js";
+import type { AppConfig, Scope } from "../config.js";
+import { boundaryProblem, validateBoundaries, validateProviders } from "./validate.js";
+import { wireOf, type ProviderConfig } from "../core/provider.js";
+
+const providers = (blocks: Record<string, unknown>): AppConfig => ({ providers: blocks }) as unknown as AppConfig;
+
+// Feature: docs/reference/specs/model-proxy.md item 11 and
+// docs/reference/specs/routing-and-config.md item 2 — the block's declaration
+// (record 0052): `wire` is the spelling, `type` loads as its alias for one
+// release, and a malformed override is refused by name.
+describe("validateProviders — the block's declaration", () => {
+  it("loads `type: openai-compatible` as `wire: openai-chat` and `type: anthropic` as `wire: anthropic-messages`", () => {
+    const cfg = providers({
+      anthropic: { type: "anthropic", apiKeyEnv: "ANTHROPIC_API_KEY" },
+      openai: { type: "openai-compatible", baseUrl: "https://api.openai.com/v1" },
+    });
+    validateProviders(cfg, "config.yaml");
+    expect(wireOf(cfg.providers.anthropic as ProviderConfig)).toBe("anthropic-messages");
+    expect(wireOf(cfg.providers.openai as ProviderConfig)).toBe("openai-chat");
+  });
+
+  it("derives the legacy type from `wire` alone, so a block that declares wire keeps loading", () => {
+    const cfg = providers({ openai: { wire: "openai-responses", baseUrl: "https://api.openai.com/v1" } });
+    validateProviders(cfg, "config.yaml");
+    expect((cfg.providers.openai as ProviderConfig).type).toBe("openai-compatible");
+    expect(wireOf(cfg.providers.openai as ProviderConfig)).toBe("openai-responses");
+  });
+
+  it("refuses a block that declares neither, both, an unknown wire, a catalog the registry does not ship, or a vendor: model block with a slashless model", () => {
+    expect(() => validateProviders(providers({ a: {} }), "config.yaml")).toThrow(/providers\.a must declare wire/);
+    expect(() =>
+      validateProviders(providers({ a: { type: "anthropic", wire: "anthropic-messages" } }), "config.yaml"),
+    ).toThrow(/declares both type and wire/);
+    expect(() => validateProviders(providers({ a: { wire: "openai-json" } }), "config.yaml")).toThrow(
+      /providers\.a\.wire must be anthropic-messages, openai-chat, openai-responses/,
+    );
+    expect(() => validateProviders(providers({ a: { wire: "openai-chat", catalog: "nope" } }), "config.yaml")).toThrow(
+      /providers\.a\.catalog names "nope"/,
+    );
+    expect(() =>
+      validateProviders(
+        providers({ a: { wire: "openai-chat", vendor: "model", models: { "gpt-5": {} } } }),
+        "config.yaml",
+      ),
+    ).toThrow(/providers\.a\.models\.gpt-5: a vendor: model block names its models <vendor>\/<id>/);
+  });
+
+  it("refuses a malformed models.<id>.levels by name", () => {
+    expect(() =>
+      validateProviders(
+        providers({ a: { wire: "openai-chat", models: { "m-1": { levels: { turbo: "high" } } } } }),
+        "config.yaml",
+      ),
+    ).toThrow(/providers\.a\.models\.m-1\.levels\.turbo is not an effort/);
+    expect(() =>
+      validateProviders(
+        providers({ a: { wire: "openai-chat", models: { "m-1": { levels: { high: 3 } } } } }),
+        "config.yaml",
+      ),
+    ).toThrow(/providers\.a\.models\.m-1\.levels\.high must be a wire word or null/);
+  });
+
+  it("accepts a well-formed override: levels as words or null, a window, inputs, a cache rule and a price", () => {
+    const cfg = providers({
+      a: {
+        wire: "openai-chat",
+        models: {
+          "v/m-1": {
+            levels: { high: "high", xhigh: null },
+            capField: "max_tokens",
+            window: 1_048_576,
+            inputs: { image: true, document: false },
+            cache: "automatic",
+            price: { input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
+          },
+        },
+      },
+    });
+    expect(() => validateProviders(cfg, "config.yaml")).not.toThrow();
+  });
+});
 
 /** A scope as a stored document carries it — any shape, typed as nothing yet — so the test can hand the validator the words it must refuse. */
 const stored = (boundary: Record<string, unknown>): Scope => ({ boundary }) as unknown as Scope;

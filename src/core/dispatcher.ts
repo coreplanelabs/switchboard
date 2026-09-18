@@ -603,7 +603,12 @@ export async function dispatch(
     // The provider behind the model ref, and the target repo/ref/PR resolution
     // STARTED here (dispatch/resolve.ts) so the GitHub round trip overlaps the
     // memory read below; awaited after the ack.
-    const { needsRepo, repoCtxP } = resolveTarget(deps, {
+    const {
+      needsRepo,
+      repoCtxP,
+      modelCard,
+      decisions: cardDecisions,
+    } = resolveTarget(deps, {
       msg,
       history,
       agent,
@@ -824,6 +829,8 @@ export async function dispatch(
       seed,
       ...(seedTurns ? { seedTurns } : {}),
       agentSource,
+      modelCard,
+      cardDecisions,
       ...(routeEvent ? { route: routeEvent } : {}),
       ...(references.conversations.length > 0 ? { references } : {}),
     });

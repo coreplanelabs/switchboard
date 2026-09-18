@@ -9,37 +9,63 @@ organization: acme
 
 providers:
   anthropic:
-    type: anthropic
+    wire: anthropic-messages
     apiKeyEnv: ANTHROPIC_API_KEY
-  # OpenAI itself runs on the same compatible adapter: any preset's model may
-  # be openai/<model-id> anywhere a model is accepted. The adapter speaks Chat
-  # Completions, not the Responses API, sends no reasoning control (our effort
-  # tiers do not reach these models), and meters tokens without pricing them.
-  # A first-class OpenAI block is a plan's business, not this file's.
+  # OpenAI itself runs on its Responses API (record 0052): every first-party
+  # OpenAI card in pi's registry is `openai-responses`, OpenAI recommends the
+  # wire for new projects, and its chat route loses tool calling with any
+  # effort above `none` from GPT-5.4. The wire is a declaration here; the proxy
+  # serves the Responses route in a later unit, and until then a run on this
+  # block meets the provider's own answer. `type: openai-compatible` keeps
+  # loading as `wire: openai-chat` for one release.
   openai:
-    type: openai-compatible
+    wire: openai-responses
     baseUrl: https://api.openai.com/v1
     apiKeyEnv: OPENAI_API_KEY
   # groq:
-  #   type: openai-compatible
+  #   wire: openai-chat
   #   baseUrl: https://api.groq.com/openai/v1
   #   apiKeyEnv: GROQ_API_KEY
-  # OpenRouter: one key, many vendors' models, on the same compatible adapter.
-  # Its model ids already carry the vendor, so any preset's model may be
-  # openrouter/<vendor>/<model> — e.g. openrouter/anthropic/claude-sonnet-4:
+  # OpenRouter: one key, many vendors' models, an aggregator (`vendor: model`
+  # reads the vendor off the model id's first segment, so the card is per block
+  # AND vendor: a tier the OpenRouter file refuses may be native direct).
+  # `catalog: openrouter` names the pi registry file its cards come from; a
+  # block named unlike its catalog still reads that file. Any preset's model
+  # may be openrouter/<vendor>/<model> — e.g. openrouter/anthropic/claude-sonnet-4:
   # the first slash names this block, the rest is the model id passed through.
   # OPENROUTER_API_KEY is read at the first model call, never at load, so
   # without it every other block runs as today and only a run on this one
-  # fails, by that name. Effort tiers, documents and prompt caching ride the
-  # compatible adapter as far as it carries them: pi applies its OpenRouter
-  # rules (prompt-cache markers included); a document becomes a text note.
-  # `switchboard init` keeps this block only with --openrouter-key.
+  # fails, by that name. `switchboard init` keeps this block only with
+  # --openrouter-key.
   openrouter:
-    type: openai-compatible
+    wire: openai-chat
+    vendor: model
+    catalog: openrouter
     baseUrl: https://openrouter.ai/api/v1
     apiKeyEnv: OPENROUTER_API_KEY
+    # The operator's layer over the registry card: what a run needs that no
+    # layer names goes out unvouched (and a note says so on the record) until
+    # an override like this pins it. `providers check` (a later unit) reads the
+    # provider's own endpoint to fill these in.
+    # models:
+    #   deepseek/deepseek-v4.1-flash:
+    #     window: 1048576
+    #     capField: max_tokens
+    #     levels:
+    #       high: high
+    #       xhigh: xhigh
+    #     inputs:
+    #       image: true
+    #     cache: automatic
+    # A passthrough is merged into the request body on the wires whose adapter
+    # takes one — a vendor-only feature such as OpenRouter's routing, never a
+    # control: it is not decided, not noted and not in the matrix, and a wrong
+    # one surfaces as the provider's own error on the first turn.
+    # passthrough:
+    #   provider:
+    #     sort: throughput
   # local:
-  #   type: openai-compatible
+  #   wire: openai-chat
   #   baseUrl: http://localhost:11434/v1   # Ollama
 
 defaults:

@@ -3,6 +3,7 @@
 // tsconfigs — importing prDescription.ts would drag zod into those graphs.
 import type { PrDescription, RenderedPointer } from "./prDescriptionTypes.js";
 import type { HarnessScope } from "./harness/scope.js";
+import type { ModelCard } from "./modelCard.js";
 
 /** The `pr_description` review artifact minus the event envelope
  *  (docs/reference/specs/reading-diff.md item 7). */
@@ -122,6 +123,12 @@ export type RunNoteKind =
    *  (docs/reference/specs/run-history.md item 37); the summary says how many calls were
    *  in flight at the kill and how each was settled. Published by the runner. */
   | "resumed"
+  /** A control was decided against the model card and is not native (record
+   *  0052): a fallback (`applied` differs from `asked`, `vouched` true) or
+   *  an unvouched send (`vouched` false). One note per degraded control,
+   *  published by the dispatcher before the first turn. `why` says what the
+   *  card could not vouch for; `summary` is the human line. */
+  | "control_degraded"
   /** What the run's session seed could not do (docs/reference/specs/session-log.md
    *  item 9): the log could not be read so the run seeds from the channel, the
    *  newest turn alone was over the seed budget, the previous run's end was
@@ -269,6 +276,7 @@ export const RUN_NOTE_KINDS = [
   "mcp_unavailable",
   "follow_up",
   "resumed",
+  "control_degraded",
   "seed",
   "description_turn",
   "verdict_turn",
@@ -389,6 +397,7 @@ export function isHeadMaterial(event: RunEvent): boolean {
         event.kind === "mcp_unavailable" ||
         event.kind === "spans_dropped" ||
         event.kind === "cold_sandbox" ||
+        event.kind === "control_degraded" ||
         event.kind === "ledger_untracked" ||
         event.kind === "rebind_refused"
       );
@@ -525,6 +534,14 @@ export type RunEvent =
       summary: string;
       mode?: StopMode;
       actor?: RunActor;
+      /** On a `control_degraded` note only (record 0052): which control,
+       *  the word asked, the word applied, whether a layer vouched for the
+       *  applied word, and what the card could not vouch for. */
+      control?: string;
+      asked?: string;
+      applied?: string;
+      vouched?: boolean;
+      why?: string;
       /** On a `spans_dropped` note only (docs/reference/specs/tracing.md): the runner-clock
        *  interval the dropped setup records covered — a `not recorded` loss. */
       from?: number;
@@ -624,6 +641,12 @@ export type RunEvent =
        *  written before the word was a scope setting. */
       harnessScope?: HarnessScope;
       effort?: string;
+      /** The model card this run resolved before its first call (record
+       *  0052): the wire, vendor, levels, cap field, window, inputs, cache rule
+       *  and price source, each with the layer that named it. Absent on a
+       *  command run and on a record written before the card existed.
+       *  Additive. */
+      card?: ModelCard;
       repo?: string;
       ref?: string;
       pr?: number;

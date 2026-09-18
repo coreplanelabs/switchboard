@@ -107,7 +107,12 @@ describe("planInit — the files", () => {
     });
     const config = parseAppConfigText(fileAt(plan, CONFIG_PATH).text);
     expect(config.providers).toEqual({
-      openai: { type: "openai-compatible", baseUrl: "https://api.groq.com/openai/v1", apiKeyEnv: "OPENAI_API_KEY" },
+      openai: {
+        type: "openai-compatible",
+        wire: "openai-chat", // the endpoint's own wire, not the example's Responses declaration
+        baseUrl: "https://api.groq.com/openai/v1",
+        apiKeyEnv: "OPENAI_API_KEY",
+      },
     });
     expect(config.defaults.models).toEqual({
       general: "openai/llama-3.3-70b",
@@ -127,7 +132,11 @@ describe("planInit — the files", () => {
       model: "llama3",
     });
     const config = parseAppConfigText(fileAt(plan, CONFIG_PATH).text);
-    expect(config.providers.openai).toEqual({ type: "openai-compatible", baseUrl: "http://localhost:11434/v1" });
+    expect(config.providers.openai).toEqual({
+      type: "openai-compatible",
+      wire: "openai-chat",
+      baseUrl: "http://localhost:11434/v1",
+    });
     expect(parseEnv(fileAt(plan, ENV_PATH).text).OPENAI_API_KEY).toBeUndefined();
   });
 
@@ -155,6 +164,9 @@ describe("planInit — the files", () => {
     expect(Object.keys(withKey.config.providers)).toEqual(["anthropic", "openrouter"]);
     expect(withKey.config.providers.openrouter).toEqual({
       type: "openai-compatible",
+      wire: "openai-chat",
+      vendor: "model",
+      catalog: "openrouter",
       baseUrl: "https://openrouter.ai/api/v1",
       apiKeyEnv: "OPENROUTER_API_KEY",
     });

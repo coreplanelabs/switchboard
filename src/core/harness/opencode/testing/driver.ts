@@ -43,7 +43,7 @@ import type { AgentDef, Identity } from "../../../../agents/registry.js";
 import type { Executor } from "../../../../execution/executor.js";
 import { updateStatusTool } from "../../../../tools/status.js";
 import type { ChatMessage, ContentPart } from "../../../chatMessage.js";
-import type { CompletionRequest, ProviderConfig, ToolDef } from "../../../provider.js";
+import { parseModelRef, type CompletionRequest, type ProviderConfig, type ToolDef } from "../../../provider.js";
 import type { RunEvent } from "../../../runEvents.js";
 import type { StepReport } from "../../../runLedger/stepReport.js";
 import { RunControl } from "../../../runRegistry/runControl.js";
@@ -2515,7 +2515,7 @@ export function scriptOpenCodeServe(
       agents?: Record<string, { system?: string }>;
     };
     const modelRef = config.model ?? "";
-    const id = modelRef.slice(modelRef.indexOf("/") + 1);
+    const id = modelRef.includes("/") ? parseModelRef(modelRef).model : modelRef;
     const provider = Object.values(config.providers ?? {})[0];
     return {
       runId,

@@ -291,6 +291,12 @@ function configFile(a: InitAnswers, template: string): PlannedFile {
   if (a.openrouterKey === undefined) doc.deleteIn(["providers", OPENROUTER_PROVIDER]);
   if (a.openaiCompatible === undefined) doc.deleteIn(["providers", OPENAI_PROVIDER]);
   else {
+    // A generic compatible endpoint (Groq, Ollama, …) speaks Chat Completions;
+    // the example's `openai` block declares OpenAI's own Responses wire, which
+    // only api.openai.com serves — so the written block declares the wire the
+    // endpoint actually speaks.
+    if (a.openaiCompatible !== "https://api.openai.com/v1")
+      doc.setIn(["providers", OPENAI_PROVIDER, "wire"], "openai-chat");
     doc.setIn(["providers", OPENAI_PROVIDER, "baseUrl"], a.openaiCompatible);
     if (a.modelKey === undefined) doc.deleteIn(["providers", OPENAI_PROVIDER, "apiKeyEnv"]);
   }

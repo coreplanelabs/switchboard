@@ -1208,6 +1208,9 @@ describe("the example config's provider blocks", () => {
   const EXAMPLE = readFileSync(join(process.cwd(), "config/config.example.yaml"), "utf8");
   const OPENROUTER = {
     type: "openai-compatible",
+    wire: "openai-chat",
+    vendor: "model",
+    catalog: "openrouter",
     baseUrl: "https://openrouter.ai/api/v1",
     apiKeyEnv: "OPENROUTER_API_KEY",
   };
