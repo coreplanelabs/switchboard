@@ -89,6 +89,7 @@ import { createSpanLog } from "./core/trace/spanLog.js";
 import { handleAdminRestartAuthorize } from "./channels/adminRestartAuthorize.js";
 import { RESTART_AUTHORIZE_PATH } from "./deploy/restart.js";
 import { DRAIN_DEADLINE_MS, HANDOFF_BUDGET_MS } from "./core/drain.js";
+import { MINUTE_MS } from "./core/budgets.js";
 import { startProcessRoot } from "./core/requestTrace.js";
 import { configureInternalHosts, internalHostsOf } from "./core/trace/internalHosts.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
@@ -1439,6 +1440,19 @@ export async function runBot(): Promise<void> {
     const runsHeld = () => defaultRunRegistry.listActive().filter((r) => !r.finished && !handed.has(r.id)).length;
     const stillHere = () => runsHeld() + pendingReflectionCount() + pendingHistoryWrites();
     const deadline = drainStartedAt + (runsHeld() > 0 ? DRAIN_DEADLINE_MS : HANDOFF_BUDGET_MS);
+    // The hold names what it waits on: the registry runs still active and not
+    // handed off — not the dispatcher's `inFlight` counter, which a run whose
+    // dispatch returned has already left — so a drain that runs to its deadline
+    // says which run ids held it.
+    if (runsHeld() > 0) {
+      const held = defaultRunRegistry
+        .listActive()
+        .filter((r) => !r.finished && !handed.has(r.id))
+        .map((r) => r.id);
+      console.log(
+        `[drain] waiting up to ${Math.round(DRAIN_DEADLINE_MS / MINUTE_MS)} min for ${held.length} run(s) still active and not handed off: ${held.join(", ")}`,
+      );
+    }
     while (stillHere() > 0 && systemClock() < deadline) {
       await new Promise((r) => setTimeout(r, 500));
     }
