@@ -4,6 +4,7 @@ import {
   createBranchRef,
   fetchPullRequestFacts,
   fetchCommitChecks,
+  fixupCommitSubjects,
   fetchPullRequestReviews,
   fetchRepoShipInfo,
   findMergedPrByHead,
@@ -715,6 +716,41 @@ describe("githubPulls", () => {
         throw new Error("offline");
       });
       expect(await fetchCommitChecks("acme/api", "c".repeat(40))).toBeUndefined();
+    });
+
+    it("fixupCommitSubjects names the head's self-declared fix-ups (git's fixup!/squash!/amend! prefixes, the subject line only); an empty list is a positive fact and a failed fetch or a foreign answer is undefined, never a throw", async () => {
+      stubToken();
+      const calls = stubFetch(
+        () =>
+          new Response(
+            JSON.stringify([
+              { commit: { message: "feat(ship): the change itself\n\nfixup! not a subject line" } },
+              { commit: { message: "fixup! feat(ship): the change itself" } },
+              { commit: { message: "squash! tidy the tests\n\na body" } },
+              { commit: { message: "amend! feat(ship): the change itself" } },
+              { commit: { message: "fixup:a colon is not the marker" } },
+              { commit: {} },
+              {},
+            ]),
+            { status: 200 },
+          ),
+      );
+      expect(await fixupCommitSubjects({ repo: "acme/api", number: 7 })).toEqual([
+        "fixup! feat(ship): the change itself",
+        "squash! tidy the tests",
+        "amend! feat(ship): the change itself",
+      ]);
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls/7/commits?per_page=100");
+      stubFetch(() => new Response(JSON.stringify([{ commit: { message: "feat: clean" } }]), { status: 200 }));
+      expect(await fixupCommitSubjects({ repo: "acme/api", number: 7 })).toEqual([]);
+      stubFetch(() => new Response("nope", { status: 502 }));
+      expect(await fixupCommitSubjects({ repo: "acme/api", number: 7 })).toBeUndefined();
+      stubFetch(() => new Response(JSON.stringify({ not: "a list" }), { status: 200 }));
+      expect(await fixupCommitSubjects({ repo: "acme/api", number: 7 })).toBeUndefined();
+      vi.stubGlobal("fetch", async () => {
+        throw new Error("offline");
+      });
+      expect(await fixupCommitSubjects({ repo: "acme/api", number: 7 })).toBeUndefined();
     });
   });
 });

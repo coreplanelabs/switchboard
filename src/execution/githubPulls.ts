@@ -610,6 +610,40 @@ export async function fetchCommitChecks(repo: string, sha: string): Promise<Comm
   return out;
 }
 
+/** Git's autosquash prefixes: a commit that names itself with one is, by its
+ *  own words, meant to be squashed before merge — a head carrying one is not
+ *  in the ready state, and the merge-ready report says so (agent-ship item 9). */
+const FIXUP_SUBJECT = /^(fixup|squash|amend)! /;
+
+/** `GET /repos/{repo}/pulls/{n}/commits` (one page of 100) → the subjects of
+ *  the commits that mark themselves as fix-ups (`fixup!`/`squash!`/`amend!`),
+ *  or undefined when GitHub cannot be read or the answer is not the route's.
+ *  An empty list is a positive fact: no commit on the head calls itself a
+ *  fix-up. Never throws — the caller leaves an unknown fact out of its answer. */
+export async function fixupCommitSubjects(pr: { repo: string; number: number }): Promise<string[] | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}/commits?per_page=100`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as unknown;
+  if (!Array.isArray(data)) return undefined;
+  const subjects: string[] = [];
+  for (const row of data as Array<{ commit?: { message?: unknown } }>) {
+    const message = row?.commit?.message;
+    if (typeof message !== "string") continue;
+    const subject = message.split("\n", 1)[0];
+    if (FIXUP_SUBJECT.test(subject)) subjects.push(subject);
+  }
+  return subjects;
+}
+
 /** One review on a pull request as the coordinator reads it back: who posted
  *  it, GitHub's state, the head it was pinned to and its body — enough to tell
  *  whether the bot's own verdict stands on the pull request at a given head. */

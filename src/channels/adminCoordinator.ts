@@ -175,6 +175,10 @@ export interface AdminCoordinatorDeps {
    *  read when nothing heads the unit's branch (issue 1799). */
   fetchPrFacts: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
   fetchCommitChecks: (repo: string, sha: string) => Promise<CommitChecks | undefined>;
+  /** The head's self-declared fix-up commits (githubPulls.fixupCommitSubjects):
+   *  read on the ending's facts pr-check so the merge-ready report can name an
+   *  unsquashed head instead of calling it ready (agent-ship item 9). */
+  fixupCommitSubjects: (pr: { repo: string; number: number }) => Promise<string[] | undefined>;
   mergePullRequest: (
     pr: { repo: string; number: number },
     opts: { sha: string; title: string },
@@ -997,6 +1001,14 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         body.checks === true && open.headSha !== undefined
           ? await deps.fetchCommitChecks(instance.repo, open.headSha).catch(() => undefined)
           : undefined;
+      // The ready state beside the checks (agent-ship item 9): the pull
+      // request's own mergeable state — the open-PR listing does not carry it,
+      // so the facts are read whole — and the head's self-declared fix-up
+      // commits. Read only on the ending's facts read (`checks: true`);
+      // GitHub unreadable leaves each field out, never fails the check.
+      const prRef = { repo: instance.repo, number: open.number };
+      const facts = body.checks === true ? await deps.fetchPrFacts(prRef).catch(() => undefined) : undefined;
+      const fixups = body.checks === true ? await deps.fixupCommitSubjects(prRef).catch(() => undefined) : undefined;
       return json(200, {
         ok: true,
         state: "open",
@@ -1007,6 +1019,8 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         // merge_ready ending can name it at the approved head.
         ...(open.autoMergeEnabled !== undefined ? { autoMergeEnabled: open.autoMergeEnabled } : {}),
         ...(checks !== undefined ? { checks } : {}),
+        ...(facts?.mergeableState !== undefined ? { mergeableState: facts.mergeableState } : {}),
+        ...(fixups !== undefined ? { fixupCommits: fixups } : {}),
         at,
       });
     }

@@ -452,6 +452,82 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(both).toContain("pending: ci / web");
   });
 
+  it("the ready state decides the headline beside the checks (item 9): a head that conflicts with its base is approved-but-not-merge-ready naming the rebase — before the checks, as the merge door reads — an unsquashed fix-up commit is named the same way, and a clean mergeable state leaves the line as the checks say", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+    // A conflicting head is never called merge-ready, whatever the checks say
+    // — even green ones — and the line names the base to rebase onto.
+    const dirty = renderUnitReport(d.state, {
+      mergeableState: "dirty",
+      checks: { total: 3, pending: [], failed: [] },
+    });
+    expect(dirty).toContain(
+      "⚠️ Approved but not merge-ready after 1 review round: https://github.com/acme/api/pull/7 — the head conflicts with `main`: rebase onto `main`, push, and re-review. The approved work stands.",
+    );
+    expect(dirty).not.toContain("✅ Merge-ready");
+    expect(dirty).toContain("Verdict: LGTM — clean");
+    // The conflict outranks a red check, exactly as the door refuses it before
+    // reading the checks; the ending kind is unchanged either way.
+    const dirtyRed = renderUnitReport(d.state, {
+      mergeableState: "dirty",
+      checks: { total: 3, pending: [], failed: ["ci / package"] },
+    });
+    expect(dirtyRed).toContain("the head conflicts with `main`");
+    expect(dirtyRed).not.toContain("CI is red at the approved head");
+    // An unsquashed fix-up commit — one that names itself with git's
+    // autosquash prefixes — is not the ready state either: named, with the
+    // squash as the remedy, never "merge-ready".
+    const fixup = renderUnitReport(d.state, {
+      fixupCommits: ["fixup! fix the login"],
+      checks: { total: 3, pending: [], failed: [] },
+    });
+    expect(fixup).toContain(
+      "⚠️ Approved but not merge-ready after 1 review round: https://github.com/acme/api/pull/7 — 1 unsquashed fix-up commit on the head (fixup! fix the login): squash into the unit's commit, push, and re-review.",
+    );
+    expect(fixup).not.toContain("✅ Merge-ready");
+    const fixups = renderUnitReport(d.state, {
+      fixupCommits: ["fixup! fix the login", "squash! tidy"],
+    });
+    expect(fixups).toContain("2 unsquashed fix-up commits on the head (fixup! fix the login; squash! tidy)");
+    // The conflict outranks the fix-up: the rebase resolves first.
+    const dirtyFixup = renderUnitReport(d.state, {
+      mergeableState: "dirty",
+      fixupCommits: ["fixup! fix the login"],
+    });
+    expect(dirtyFixup).toContain("the head conflicts with `main`");
+    expect(dirtyFixup).not.toContain("unsquashed fix-up");
+    // A clean mergeable state and an empty fix-up list change nothing: the
+    // checks decide the headline as before.
+    const clean = renderUnitReport(d.state, {
+      mergeableState: "clean",
+      fixupCommits: [],
+      checks: { total: 3, pending: [], failed: [] },
+    });
+    expect(clean).toContain("✅ Merge-ready after 1 review round");
+    expect(clean).toContain("3 checks green at the approved head");
+    // A merge that already happened still outranks everything: there is no
+    // head left to gate, conflicting or not.
+    const merged = renderUnitReport(d.state, {
+      mergeableState: "dirty",
+      merged: { sha: "abcdef0123456789abcdef0123456789abcdef01", mergedAt: "2026-09-16T00:46:19Z" },
+    });
+    expect(merged).toContain("✅ Merge-ready after 1 review round");
+    expect(merged).toContain("Already merged:");
+    expect(merged).not.toContain("conflicts with");
+  });
+
   it("findings round trip: request_changes → the findings step, a coding child briefed with the review's run, never a `fix` round → re-review with the prior review run and the coding run that answered it → approve; the declined disposition rides the report", () => {
     const d = fresh(input({ merge: "person" }));
     throughRoundZero(d);
