@@ -37,14 +37,16 @@ describe("decideRestart", () => {
     expect(decideRestart(idle, { force: false })).toMatchObject({ allow: true, forced: false, problems: [] });
   });
 
-  it("runs in flight → allow with a WARNING naming the count and the handoff (run-history item 39); --force changes nothing here", () => {
+  it("runs in flight → REFUSE naming the count (the 409 the CLI waits out); --force stops anyway, flagged, naming what it kills", () => {
     const d = decideRestart({ ...idle, inFlight: 2 }, { force: false });
-    expect(d).toMatchObject({ allow: true, forced: false, problems: [] });
-    expect(d.warnings).toEqual([expect.stringMatching(/^2 run\(s\) in flight — handed to the next generation/)]);
-    expect(d.message).toMatch(/restart ok/);
-    expect(d.message).toContain("\n  - 2 run(s) in flight"); // a real newline before each warning, never a literal \n
-    expect(d.message).not.toMatch(/REFUSED|WILL be killed/);
-    expect(decideRestart({ ...idle, inFlight: 2 }, { force: true })).toMatchObject({ allow: true, forced: false });
+    expect(d).toMatchObject({ allow: false, forced: false, warnings: [] });
+    expect(d.problems).toEqual([expect.stringMatching(/^2 run\(s\) in flight — /)]);
+    expect(d.message).toMatch(/^restart REFUSED/);
+    expect(d.message).toContain("\n  - 2 run(s) in flight"); // a real newline before each problem, never a literal \n
+    const forced = decideRestart({ ...idle, inFlight: 2 }, { force: true });
+    expect(forced).toMatchObject({ allow: true, forced: true });
+    expect(forced.message).toMatch(/WARNING/);
+    expect(forced.message).toContain("2 run(s) in flight");
   });
 
   it("already draining → allow with a WARNING even at 0 in flight (the bot is restarting on its own; a second stop is harmless)", () => {
