@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.248.0](https://github.com/coreplanelabs/switchboard/compare/v1.247.0...v1.248.0) (2026-09-18)
+
+
+### Features
+
+* **dispatcher:** fence raw refusals and give every producer a cause ([#1701](https://github.com/coreplanelabs/switchboard/issues/1701)) ([0ccb4bb](https://github.com/coreplanelabs/switchboard/commit/0ccb4bb44591d74b624164ed5937d8da1b8bfe65))
+* **harness:** a bash timeout past the loop's end is refused, not cut ([#1700](https://github.com/coreplanelabs/switchboard/issues/1700)) ([8378caf](https://github.com/coreplanelabs/switchboard/commit/8378caf20929bc6679f899383ac5edd2ae7926df))
+
+
+### Bug fixes
+
+* **core:** a repo named at the start of a line is the request's target ([#1702](https://github.com/coreplanelabs/switchboard/issues/1702)) ([cb1aeee](https://github.com/coreplanelabs/switchboard/commit/cb1aeee57fd8c5165de9cec2efb46c98a94db6a7))
+* **harness:** shell events are the tool's own; a kind is noted once ([#1703](https://github.com/coreplanelabs/switchboard/issues/1703)) ([44d9339](https://github.com/coreplanelabs/switchboard/commit/44d933952f3b45a297809abd64c484832d77a492))
+
+
+### Documentation
+
+* **docs:** record 0054 takes the referenced-thread case ([#1696](https://github.com/coreplanelabs/switchboard/issues/1696)) ([6c412c3](https://github.com/coreplanelabs/switchboard/commit/6c412c3be1d97b61bd768879cda4bd551be24db5))
+* **docs:** the refusal-seam plan bans unit tokens in code and specs ([#1704](https://github.com/coreplanelabs/switchboard/issues/1704)) ([8ce6e80](https://github.com/coreplanelabs/switchboard/commit/8ce6e80727234c45cc586051957f041f5bfc1854))
+
 ## [1.247.0](https://github.com/coreplanelabs/switchboard/compare/v1.246.0...v1.247.0) (2026-09-18)
 
 
