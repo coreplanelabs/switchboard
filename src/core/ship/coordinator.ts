@@ -715,6 +715,10 @@ export interface UnitPipelineInput {
    *  pre-check finds the open pull request still at exactly this head, there is
    *  nothing to code and the attempt starts at the review round. */
   lastPush?: string;
+  /** The runs page base (`<PUBLIC_BASE_URL>/runs`), the plan route's answer:
+   *  the report's pointer at a child's write-up links its run page with it and
+   *  names the run id without it — the machine never reads an environment. */
+  runPageBase?: string;
 }
 
 type Phase =
@@ -1689,6 +1693,18 @@ function dispositionFor(s: UnitPipelineState, finding: Finding, round: number): 
   return undefined;
 }
 
+/** Where a child's write-up lives, for the report's pointer (agent-ship item
+ *  12): the child's own message in the thread is the single copy of the detail
+ *  — posted moments before the unit-end — so the report points at it instead
+ *  of repeating it: the run page when the plan named the base, the run id
+ *  otherwise. Undefined when no run is known to point at. */
+function writeUpPointer(s: UnitPipelineState, kind: RoundKind, runId: string | undefined): string | undefined {
+  if (runId === undefined) return undefined;
+  const base = s.input.runPageBase;
+  const at = base !== undefined ? `${base.replace(/\/+$/, "")}/${encodeURIComponent(runId)}` : `run ${runId}`;
+  return `The ${presetOf(kind)} child's write-up is its own message above in this thread — the single copy of the detail (${at}).`;
+}
+
 /** How the budget went, in the card's words: coding, review, waiting minutes. */
 function budgetSplitLine(spent: ShipBudgetSpent, maxMinutes: number): string {
   const min = (ms: number) => Math.round(ms / MIN);
@@ -1857,7 +1873,11 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
     case "stopped":
       return join([
         `${e.mode === "hard" ? "⛔" : "⏹"} Ship stopped by operator (${e.mode} stop) after ${rounds}.${prLine}`,
-        e.finalReply,
+        writeUpPointer(
+          s,
+          e.round.kind,
+          e.round.kind === "review" ? s.reviewRunByRound[e.round.index] : s.lastCodingRunId,
+        ),
         e.postedReview
           ? "ℹ️ A changes-requested review was posted this round before the stop — its findings stand on the PR."
           : undefined,
@@ -1865,22 +1885,26 @@ export function renderUnitReport(s: UnitPipelineState, facts?: MergeReadyFacts):
       ]);
     case "aborted":
       return join([
-        e.finalReply,
         e.reason,
+        writeUpPointer(
+          s,
+          e.round?.kind ?? "coding",
+          e.round?.kind === "review" ? s.reviewRunByRound[e.round.index] : s.lastCodingRunId,
+        ),
         e.renewal !== undefined ? `🔁 Not renewed: ${e.renewal.line}.` : undefined,
         `⚠️ Ship aborted after ${rounds}.`,
         reissue,
       ]);
     case "continued":
       return join([
-        e.finalReply,
+        writeUpPointer(s, e.round.kind, e.runId),
         `🔁 Segment ${e.segment - 1} ended at its lease with the unit unfinished — ${e.line}. Segment ${e.segment} opens in this thread${e.from !== undefined ? ` from \`${e.from.slice(0, 7)}\`` : ""} under a fresh ${s.input.caps.maxMinutes}-minute lease, with this segment's write-up as its request; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`,
         budgetSplitLine(e.spent, s.input.caps.maxMinutes),
       ]);
     case "no_verdict":
       return join([
         `⚠️ Review round ${e.round.index} ended without a submitted verdict (budget, refusal, or stop) — ship never converts that into a request for changes, so no findings step ran.`,
-        e.finalReply ? `Review round's final message:\n\n${e.finalReply}` : undefined,
+        writeUpPointer(s, e.round.kind, s.reviewRunByRound[e.round.index]),
         `⚠️ Ship aborted after ${rounds}.`,
         reissue,
       ]);
