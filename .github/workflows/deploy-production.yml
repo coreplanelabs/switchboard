@@ -171,10 +171,13 @@ jobs:
       cancel-in-progress: false
     # GitHub's own deployment records (`gh api repos/…/deployments?environment=production`).
     environment: production
-    # The image builds, the preflight wait for a rollout still settling (10 min
-    # by default), and the live gates (the drain deadline a non-resumable run
-    # may still use in full, plus a cold start).
-    timeout-minutes: 90
+    # The bot preflight's own wait budget (BOT_WAIT_MAX_MS, 90 min — the
+    # longest coding lease), plus the image builds, the live gates (the drain
+    # deadline a non-resumable run may still use in full, plus a cold start)
+    # and the resident step's wait (RESIDENT_WAIT_MAX_MS, 30 min). Sized so a
+    # full bot hold fails by name (the preflight's gave-up line, item 13 of
+    # release-and-deploy.md), never as a runner cancellation.
+    timeout-minutes: 135
     env:
       # wrangler reads CLOUDFLARE_API_TOKEN; it is the deploy token when one exists.
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DEPLOY_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}

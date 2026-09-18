@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { DRAIN_DEADLINE_MS } from "../core/drain.js";
+import { DRAIN_DEADLINE_MS, type HeldRun } from "../core/drain.js";
 import type { ProcessMetrics } from "./processMetrics.js";
 import type { CatchUpStatus } from "./slackCatchUpStatus.js";
 import type { SlackSocketStatus } from "./slackSocketStatus.js";
@@ -63,6 +63,10 @@ export interface HealthState {
   draining: boolean;
   /** Epoch ms when the drain began; only reported while `draining`. */
   drainStartedAt?: number;
+  /** The registry-active runs holding the drain — id and why (`not handed off`).
+   *  The dispatcher's `inFlight` can read 0 while a registry row still holds
+   *  the drain, so the deploy CLI's still-draining line names these instead. */
+  held?: readonly HeldRun[];
   /** The reconnect catch-up's record (`getCatchUpStatus()`); `{}` before the first scan. */
   catchUp?: CatchUpStatus;
   /** The Socket Mode state (`getSocketStatus()`): `{connected:false}` from
@@ -101,6 +105,9 @@ export interface HealthPayload {
   drainDeadlineMs: number;
   /** ISO timestamp of the drain start; present only while draining. */
   drainStartedAt?: string;
+  /** The registry-active runs holding the drain (id and why); present only
+   *  while draining with at least one — what the wait is actually for. */
+  held?: HeldRun[];
   /** Present whenever `HealthState.catchUp` is given. The bot process always
    *  passes `getCatchUpStatus()` (`{}` before the first scan), so on the live
    *  `/healthz` it is unconditionally present; a caller that omits the state
@@ -136,6 +143,9 @@ export function healthPayload(state: HealthState): HealthPayload {
   };
   if (state.draining && state.drainStartedAt !== undefined) {
     payload.drainStartedAt = new Date(state.drainStartedAt).toISOString();
+  }
+  if (state.draining && state.held && state.held.length > 0) {
+    payload.held = state.held.map((r) => ({ id: r.id, why: r.why }));
   }
   if (state.catchUp) {
     const catchUp: Record<string, unknown> = {};

@@ -19,6 +19,32 @@
  *  (docs/reference/specs/run-history.md item 39); this is the wait for the rest. */
 export const DRAIN_DEADLINE_MS = 15 * 60_000;
 
+/** One run holding a drain: the registry-active run's id and why it holds.
+ *  The drain is held by the RUN REGISTRY's live rows, not by the dispatcher's
+ *  in-flight count — the two can disagree (a registry row whose dispatcher-side
+ *  run is gone still holds the drain for its full deadline) — so the lines an
+ *  operator reads name these rows, never the count from the other ledger. */
+export interface HeldRun {
+  id: string;
+  why: string;
+}
+
+/** Why a registry-active run holds the drain: the handoff (run-history item 39)
+ *  did not mark it for the next generation, so this process must wait for it. */
+export const HELD_NOT_HANDED_OFF = "not handed off";
+
+/** One `id (why)` per held run, comma-separated — shared by the drain's hold
+ *  line here and the deploy CLI's still-draining line (src/deploy/liveGate.ts). */
+export function heldRunsText(held: readonly HeldRun[]): string {
+  return held.map((r) => `${r.id} (${r.why})`).join(", ");
+}
+
+/** The drain's hold line (slack-channel.md item 8): what actually holds the
+ *  exit, by run id and reason — printed once the handoff has settled who stays. */
+export function drainHoldLine(held: readonly HeldRun[]): string {
+  return `[drain] holding for ${held.length} registry-active run(s): ${heldRunsText(held)}`;
+}
+
 /** The handoff's own budget (plan D8): after every resumable run is marked
  *  `handoff`, the drain waits this long for pending history writes and
  *  reflections, then exits — the next generation takes the runs. */

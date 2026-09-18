@@ -96,6 +96,13 @@ describe("healthPayload", () => {
       "drainStartedAt",
     );
   });
+
+  it("adds `held` — the registry-active runs holding the drain, id and why — only while draining and non-empty (the deploy CLI names them instead of the dispatcher's inFlight)", () => {
+    const held = [{ id: "slack:C1:1.2", why: "not handed off" }];
+    expect(healthPayload({ inFlight: 0, draining: true, held })).toMatchObject({ held });
+    expect(healthPayload({ inFlight: 0, draining: false, held })).not.toHaveProperty("held");
+    expect(healthPayload({ inFlight: 0, draining: true, held: [] })).not.toHaveProperty("held");
+  });
 });
 
 // Feature: docs/reference/specs/slack-channel.md item 7 — /healthz also carries the
