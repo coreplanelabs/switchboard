@@ -481,18 +481,25 @@ export async function runCodingPrPostStep(input: {
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
   /** The open PR whose head is the branch, or null (githubPulls.ts'
    *  findOpenPrByHead — the lookup open-or-edit itself starts with). Asked
-   *  ONLY when a proven-pushed branch comes with no description: the push may
-   *  have updated a PR that already exists, and the note must say so instead
-   *  of sending the reader to open a duplicate. A lookup failure degrades to
-   *  the "no PR was opened" note (logged, never thrown). */
+   *  when a proven-pushed branch comes with no description — the push may
+   *  have updated a PR that already exists — and when a description comes
+   *  with a push the observation cannot prove (unpushed commits over a
+   *  remote branch that exists, or an unobservable head): the budget
+   *  wind-down ends runs exactly there, and "no PR was opened" for a branch
+   *  an open PR heads would send the reader to open a duplicate. Never asked
+   *  for a branch the remote said is absent (no same-repo open PR can head
+   *  it). A lookup failure degrades to the "no PR was opened" note (logged,
+   *  never thrown). */
   findOpenPr: (repo: string, branch: string) => Promise<OpenPrRef | null>;
   /** Edit a pull request the caller knows by number (githubPulls.ts'
-   *  updatePullRequest). Asked ONLY when a description arrives from a
-   *  workspace sitting on the base — or on the pull request's own head branch
-   *  once it is merged or closed, with nothing pushed past its head — while
-   *  the thread's own pull request is known (`target.ownPr`): the run pushed
-   *  nothing for it, and the description is for that pull request. A failure
-   *  is reported in the note, never thrown. */
+   *  updatePullRequest). Asked when a description arrives from a workspace
+   *  sitting on the base — or on the pull request's own head branch once it
+   *  is merged or closed, with nothing pushed past its head — while the
+   *  thread's own pull request is known (`target.ownPr`): the run pushed
+   *  nothing for it, and the description is for that pull request. Also asked
+   *  when a description comes with an unproven push whose branch the lookup
+   *  above found heading an open PR — the body rendered at THAT pull
+   *  request's head. A failure is reported in the note, never thrown. */
   updatePullRequest: (repo: string, number: number, patch: { title: string; body: string }) => Promise<void>;
   /** The repo's default branch — the PR base of last resort, fetched via
    *  GitHub (githubPulls.ts' fetchRepoShipInfo; shared with agent:ship's own
@@ -690,6 +697,57 @@ export async function runCodingPrPostStep(input: {
     });
     return `⚠️ A PR description was submitted but the branch \`${branch}\`${branchNote} is the base branch the pull request would target, so no PR was opened — a pull request needs a head branch other than its base.`;
   }
+  /** Issue 1807 — the budget wind-down's honest endings, made honest about an
+   *  existing pull request too: a run cut mid-work leaves its push unproven
+   *  (a rebase in flight rewrote the tree past the pushed head; a probe the
+   *  cut broke left the head unobservable), yet the branch may already head
+   *  an open pull request the run pushed minutes earlier — and "no PR was
+   *  opened" would send the reader to open a duplicate. So before either of
+   *  those notes, ask GitHub whether an open PR heads the branch (the same
+   *  lookup the description-less path uses below) and, found, render the
+   *  description at ITS head — as GitHub reports it, never the workspace's
+   *  unproven tip — and edit it by number; without that head, or on a failed
+   *  edit, the note still names the PR and says the description was not
+   *  re-rendered. Null or a failed lookup → undefined: the honest "no PR was
+   *  opened" note stands. `pr_opened` carries no `head`, like the ownPr edit
+   *  above: nothing proves this run pushed, so the release has no branch to
+   *  remember. `caveat`: the workspace state the note must not lose. */
+  const editOpenPrHeadedBy = async (headBranch: string, caveat: string): Promise<string | undefined> => {
+    if (!prDescription) return undefined;
+    const existing = await input.findOpenPr(repo, headBranch).catch((err: unknown) => {
+      console.error(
+        `[pr-post] ${logKey} open-PR lookup failed for ${repo} ${headBranch}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    });
+    if (!existing) return undefined;
+    const url = existing.htmlUrl;
+    const prHead = existing.headSha;
+    if (prHead === undefined) {
+      console.log(
+        `[pr-post] ${logKey} ${repo}#${existing.number} heads ${headBranch}, but GitHub named no head commit to render at — description not re-rendered`,
+      );
+      return `⚠️ A PR description was submitted and the open pull request ${url} heads \`${headBranch}\`${branchNote}, but its description was not re-rendered (GitHub named no head commit to render at); ${caveat}.`;
+    }
+    try {
+      const body = renderPrDescriptionMarkdown(prDescription, { repo, headSha: prHead });
+      await input.updatePullRequest(repo, existing.number, { title: prDescription.title, body });
+      console.log(
+        `[pr-post] ${logKey} updated ${repo}#${existing.number} — the open PR heading ${headBranch} (rendered at its head ${prHead.slice(0, 7)}; the run's own push unproven)`,
+      );
+      input.publish({ type: "pr_opened", url, number: existing.number, created: false, at: systemClock() });
+      input.publish({
+        type: "review_artifact",
+        ...submittedPrDescriptionArtifact(prDescription, { repo, pr: existing.number, headSha: prHead, body }),
+        at: systemClock(),
+      });
+      return `🔀 PR updated: ${url} — body re-rendered at its head \`${prHead.slice(0, 7)}\`; ${caveat}`;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.error(`[pr-post] ${logKey} update failed for ${repo}#${existing.number}: ${reason}`);
+      return `⚠️ A PR description was submitted and the open pull request ${url} heads \`${headBranch}\`${branchNote}, but its description was not re-rendered (${reason}); ${caveat}.`;
+    }
+  };
   if (prDescription && branch !== undefined && headSha !== undefined && !pushed) {
     // A commit sits on a non-base branch, but nothing proves it reached the
     // remote: the remote has no such branch, or holds it at an older commit.
@@ -699,6 +757,15 @@ export async function runCodingPrPostStep(input: {
       remoteHead === undefined
         ? "was not found on the remote"
         : `has unpushed commits (the remote branch is at ${remoteHead.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`;
+    if (remoteHead !== undefined) {
+      // The remote holds the branch, so an open PR may head it (issue 1807);
+      // a branch the remote said is absent heads nothing and is never asked.
+      const note = await editOpenPrHeadedBy(
+        branch,
+        `the branch \`${branch}\`${branchNote} has unpushed commits the pull request does not carry (the remote is at ${remoteHead.slice(0, 7)}, the workspace at ${headSha.slice(0, 7)})`,
+      );
+      if (note !== undefined) return note;
+    }
     console.log(
       `[pr-post] ${logKey} skipped: push not observed (repo ${repo}, branch ${branchLog}, head ${headSha.slice(0, 7)}, remote ${remoteHead?.slice(0, 7) ?? "none"})`,
     );
@@ -751,9 +818,18 @@ export async function runCodingPrPostStep(input: {
     // A description was submitted but the pushed head — or the branch itself
     // (a failed probe, a detached checkout) — could not be observed: the
     // checkout is not a repo, or HEAD moved off the pushed branch and its
-    // local ref is gone too. Never render anchors at a guessed commit, and
-    // never leave the submission dangling silently: say plainly that no PR
-    // was opened.
+    // local ref is gone too. Never render anchors at a guessed commit — but
+    // when the branch is known, ask whether an open PR heads it first (issue
+    // 1807: the wind-down ends runs here with the PR's own head to render
+    // at) — and never leave the submission dangling silently: say plainly
+    // that no PR was opened.
+    if (branch !== undefined) {
+      const note = await editOpenPrHeadedBy(
+        branch,
+        `the pushed head of \`${branch}\`${branchNote} could not be observed in the workspace`,
+      );
+      if (note !== undefined) return note;
+    }
     console.log(
       `[pr-post] ${logKey} skipped: push unobservable (repo ${repo}, branch ${branchLog}, head ${headSha ?? "unknown"})`,
     );

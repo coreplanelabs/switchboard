@@ -828,6 +828,158 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     );
   });
 
+  // The budget wind-down ends a run exactly here (issue 1807): the tree holds
+  // work past the pushed head (a rebase in flight, a commit the wind-down cut
+  // before its push), so the push reads as unproven or unobservable — but the
+  // branch already heads an open pull request, and "no PR was opened" would
+  // send the reader to open a duplicate. The post-step asks GitHub first (the
+  // same lookup the description-less path uses) and edits that PR at ITS head.
+  it("description + unproven push (unpushed commits) + the branch heads an open PR → that PR is edited, the body rendered at ITS head, pr_opened created:false with no head, the note says updated and names the unpushed work; no open call", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const spy = openSpy();
+    const updates: Array<{ repo: string; number: number; title: string; body: string }> = [];
+    const published: RunEvent[] = [];
+    const findOpenPr = vi.fn(async (): Promise<OpenPrRef | null> => ({
+      number: 700,
+      htmlUrl: "https://github.com/acme/api/pull/700",
+      headSha: PR_HEAD,
+    }));
+    const note = await runCodingPrPostStep({
+      observed: observation({ remoteHead: PR_HEAD }),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: "main" },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr,
+      updatePullRequest: async (repo, number, patch) => void updates.push({ repo, number, ...patch }),
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(findOpenPr).toHaveBeenCalledWith("acme/api", "feat/x");
+    expect(spy.calls).toHaveLength(0);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ repo: "acme/api", number: 700, title: DESCRIPTION.title });
+    // rendered at the PULL REQUEST's head, never the workspace's unproven tip
+    expect(updates[0].body).toContain(`https://github.com/acme/api/blob/${PR_HEAD}/src/login.ts#L10-L20`);
+    expect(updates[0].body).not.toContain(HEAD);
+    expect(published.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
+    expect(published[0]).toEqual({
+      type: "pr_opened",
+      url: "https://github.com/acme/api/pull/700",
+      number: 700,
+      created: false,
+      at: expect.any(Number),
+    });
+    expect(published[1]).toMatchObject({ artifact: "pr_description", origin: "submitted", pr: 700, headSha: PR_HEAD });
+    expect(note).toContain("🔀 PR updated: https://github.com/acme/api/pull/700");
+    expect(note).toContain(`re-rendered at its head \`${PR_HEAD.slice(0, 7)}\``);
+    expect(note).toContain(`has unpushed commits the pull request does not carry`);
+    expect(note).toContain(`the remote is at ${PR_HEAD.slice(0, 7)}, the workspace at ${HEAD.slice(0, 7)}`);
+    expect(note).not.toContain("no PR was opened");
+  });
+
+  it("description + unobservable pushed head + the branch heads an open PR → the same edit at the PR's head; the note says updated and that the head could not be observed", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const updates: Array<{ repo: string; number: number; title: string; body: string }> = [];
+    const published: RunEvent[] = [];
+    const findOpenPr = vi.fn(async (): Promise<OpenPrRef | null> => ({
+      number: 700,
+      htmlUrl: "https://github.com/acme/api/pull/700",
+      headSha: PR_HEAD,
+    }));
+    const note = await runCodingPrPostStep({
+      observed: observation({ head: undefined, remoteHead: undefined }),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: "main" },
+      openPullRequest: openSpy().fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr,
+      updatePullRequest: async (repo, number, patch) => void updates.push({ repo, number, ...patch }),
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(findOpenPr).toHaveBeenCalledWith("acme/api", "feat/x");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].body).toContain(`https://github.com/acme/api/blob/${PR_HEAD}/src/login.ts#L10-L20`);
+    expect(published.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
+    expect(note).toContain("🔀 PR updated: https://github.com/acme/api/pull/700");
+    expect(note).toContain(`re-rendered at its head \`${PR_HEAD.slice(0, 7)}\``);
+    expect(note).toContain("could not be observed in the workspace");
+    expect(note).not.toContain("no PR was opened");
+  });
+
+  it("description + unproven push + the lookup answers with no head commit → the note names the PR and says the description was not re-rendered; nothing edited, no event", async () => {
+    const updates: unknown[] = [];
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ remoteHead: "b".repeat(40) }),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: "main" },
+      openPullRequest: openSpy().fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: async () => ({ number: 700, htmlUrl: "https://github.com/acme/api/pull/700" }),
+      updatePullRequest: async (...args) => void updates.push(args),
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(updates).toEqual([]);
+    expect(published).toEqual([]);
+    expect(note).toContain("https://github.com/acme/api/pull/700");
+    expect(note).toContain("heads `feat/x`");
+    expect(note).toContain("was not re-rendered");
+    expect(note).not.toContain("PR updated:");
+    expect(note).not.toContain("no PR was opened");
+  });
+
+  it("description + unproven push + the edit fails → the note names the PR and the reason, the description not re-rendered, no event, never a fabricated success", async () => {
+    const published: RunEvent[] = [];
+    const note = await runCodingPrPostStep({
+      observed: observation({ remoteHead: "b".repeat(40) }),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: "main" },
+      openPullRequest: openSpy().fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: async () => ({
+        number: 700,
+        htmlUrl: "https://github.com/acme/api/pull/700",
+        headSha: "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432",
+      }),
+      updatePullRequest: async () => {
+        throw new Error("PR update failed: HTTP 403");
+      },
+      publish: (e) => void published.push(e),
+      logKey: "t",
+    });
+    expect(published).toEqual([]);
+    expect(note).toContain("https://github.com/acme/api/pull/700");
+    expect(note).toContain("was not re-rendered");
+    expect(note).toContain("PR update failed: HTTP 403");
+    expect(note).not.toContain("PR updated:");
+  });
+
+  it("description + unproven push onto a fresh branch (no open PR heads it, or the lookup throws) → the honest 'no PR was opened' note stands", async () => {
+    const run = async (findOpenPr: () => Promise<OpenPrRef | null>) =>
+      runCodingPrPostStep({
+        observed: observation({ remoteHead: "b".repeat(40) }),
+        description: DESCRIPTION,
+        target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: "main" },
+        openPullRequest: openSpy().fn,
+        fetchRepoInfo: unreachable,
+        findOpenPr,
+        updatePullRequest: noUpdate,
+        publish: () => {},
+        logKey: "t",
+      });
+    const fresh = await run(noOpenPr);
+    expect(fresh).toContain("has unpushed commits");
+    expect(fresh).toContain("no PR was opened");
+    const failed = await run(async () => {
+      throw new Error("PR lookup failed: HTTP 502");
+    });
+    expect(failed).toContain("no PR was opened");
+    expect(failed).not.toContain("/pull/");
+  });
+
   it("no description and nothing pushed → nothing to report (undefined note), no GitHub fetch", async () => {
     const spy = openSpy();
     const note = await runCodingPrPostStep({
@@ -984,7 +1136,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(events.map((e) => e.type)).toEqual(["pushed_head"]);
   });
 
-  it("the open-PR lookup is asked ONLY for a description-less proven push — never when a description was submitted or the push is unproven", async () => {
+  it("the open-PR lookup is never asked when open-or-edit will do its own (a proven push with a description), when the remote lacks the branch (no open PR can head it), or when the workspace sat on the base", async () => {
     const findOpenPr = vi.fn(noOpenPr);
     const common = {
       target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
@@ -997,8 +1149,14 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     };
     // a description: open-or-edit does its own lookup
     await runCodingPrPostStep({ ...common, observed: observation(), description: DESCRIPTION });
-    // no description, but the branch is not on the remote
+    // the remote said the branch is absent — a same-repo open PR cannot head
+    // it, so "not found on the remote" stands unasked, description or not
     await runCodingPrPostStep({ ...common, observed: observation({ remoteHead: undefined }), description: undefined });
+    await runCodingPrPostStep({
+      ...common,
+      observed: observation({ remoteHead: undefined }),
+      description: DESCRIPTION,
+    });
     // no description, the workspace sat on the base branch
     await runCodingPrPostStep({
       ...common,
