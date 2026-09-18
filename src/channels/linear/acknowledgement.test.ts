@@ -20,6 +20,7 @@ function fixture() {
   let now = 100;
   const inbox = new InMemoryLinearInbox();
   const api: LinearApi = {
+    openThread: vi.fn(),
     workItems: vi.fn(),
     files: vi.fn(async () => []),
     canRead: vi.fn(async () => true),

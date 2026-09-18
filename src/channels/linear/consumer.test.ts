@@ -30,6 +30,7 @@ function fixture() {
     complete: vi.fn((key: string, lease: string) => store.complete(key, lease, now)),
   };
   const api: LinearApi = {
+    openThread: vi.fn(),
     workItems: vi.fn(),
     files: vi.fn(async () => []),
     canRead: vi.fn(async () => true),
@@ -64,6 +65,33 @@ function fixture() {
 afterEach(() => vi.useRealTimers());
 
 describe("Linear event consumer", () => {
+  it("consumes a managed child's creation without a second dispatch but accepts human follow-ups", async () => {
+    const f = fixture();
+    vi.mocked(f.api.session).mockResolvedValue({ id: "s", appUserId: "bot", creatorId: "bot", managedChild: true });
+    const created = event();
+    (created.payload.agentSession as Record<string, unknown>).creatorId = "bot";
+    await f.store.accept(created);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.dispatch).not.toHaveBeenCalled();
+    expect(f.api.activity).not.toHaveBeenCalled();
+    const follow = event();
+    follow.key = "follow";
+    follow.payload.action = "prompted";
+    follow.payload.agentActivity = {
+      id: "prompt",
+      agentSessionId: "s",
+      userId: "alice",
+      content: { type: "prompt", body: "Please continue" },
+    };
+    await f.store.accept(follow);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "linear:org:alice", text: "Please continue" }),
+      expect.anything(),
+    );
+  });
   it("leaves access refusal to dispatch and never claims a denied file was read", async () => {
     const f = fixture();
     const ev = event();

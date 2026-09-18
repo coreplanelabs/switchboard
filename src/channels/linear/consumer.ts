@@ -143,6 +143,12 @@ export class LinearConsumer {
         if (!owned) return;
         const api = this.deps.api(required(event.payload.organizationId));
         const session = await api.session(required(object(event.payload.agentSession).id));
+        if (event.payload.action === "created" && session.managedChild) {
+          // openThread's caller starts this child through the shared dispatcher.
+          // The creation webhook is notification, not a second request to run it.
+          if (owned) ready = await inbox.complete(event.key, lease);
+          return;
+        }
         let input: LinearInput;
         try {
           input = linearMessage(event, session, session.appUserId);

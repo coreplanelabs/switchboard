@@ -30,6 +30,7 @@ export const LINEAR_TIMING = {
   apiTimeoutMs: 10_000,
   /** One authenticated batch can read 20 files, each with its own API deadline. */
   fileBridgeTimeoutMs: 4 * MINUTE_MS,
+  childBridgeTimeoutMs: 2 * MINUTE_MS,
   progressMs: 5_000,
   oauthStateMs: 10 * MINUTE_MS,
   refreshMarginMs: 5 * MINUTE_MS,

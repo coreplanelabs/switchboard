@@ -339,6 +339,8 @@ export interface ChannelIO {
    * channel (HTTP, MCP) has no thread to open, and a spawn from such a channel
    * is refused by name (`spawn_unsupported`); it never falls back to the
    * parent's own thread.
+   * A durable caller may supply an idempotency key for adapters that can
+   * reconcile thread creation across retries; the lead must stay the same.
    */
-  openThread?(lead: string): Promise<OpenedThread>;
+  openThread?(lead: string, options?: { idempotencyKey: string }): Promise<OpenedThread>;
 }

@@ -32,6 +32,7 @@ describe("Linear lifecycle", () => {
   });
   const fixture = () => {
     const api: LinearApi = {
+      openThread: vi.fn(),
       workItems: vi.fn(),
       files: vi.fn(async () => []),
       canRead: vi.fn(async () => true),

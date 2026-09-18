@@ -6,6 +6,14 @@ files, inline incoming files, issue tools and lifecycle cancellation are wired.
 Large-file staging and live deployment verification remain in progress. Do not install the app for end users until the completed channel
 is deployed. See the [delivery plan](../plans/2026-09-17-001-linear-channel.md).
 
+Child work can open a separate native session on a new comment on the same issue.
+It retains the requesting person's permissions and leaves the issue's assignee
+and delegate unchanged. Coordinator thread creation uses durable keys to recover
+the same conversation after retries. The creation webhook does not start a
+second child run; subsequent human replies and Stop remain native session events.
+Child-workflow clarification and live acceptance still need verification before
+the integration is ready for end users.
+
 ## Register the application
 
 In Linear's API settings, create a private OAuth application named after your

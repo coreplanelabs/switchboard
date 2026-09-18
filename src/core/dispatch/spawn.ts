@@ -217,7 +217,7 @@ function watchedChild(
   if (io.isolateFollowUps) watched.isolateFollowUps = true;
   if (io.acknowledge) watched.acknowledge = (text) => io.acknowledge!(text);
   if (io.runFinished) watched.runFinished = (receipt) => io.runFinished!(receipt);
-  if (io.openThread) watched.openThread = (lead) => io.openThread!(lead);
+  if (io.openThread) watched.openThread = (lead, options) => io.openThread!(lead, options);
   return watched;
 }
 

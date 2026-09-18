@@ -9,6 +9,7 @@ import {
   type LinearContent,
   type LinearSession,
   type LinearUpload,
+  type LinearOpenedThread,
 } from "./api.js";
 import type { LinearDelivery, LinearInbox } from "./inbox.js";
 import { boundedBody } from "./webhook.js";
@@ -18,6 +19,10 @@ import type { LinearWorkItemActor } from "./workItems.js";
 export const LINEAR_BRIDGE_PATH = "/internal/linear";
 
 const WORK_ITEM_ERRORS: Readonly<Record<string, number>> = {
+  linear_child_denied: 403,
+  linear_invalid_child: 400,
+  linear_child_conflict: 409,
+  linear_child_creation_uncertain: 409,
   linear_work_item_denied: 403,
   linear_file_denied: 403,
   linear_invalid_files: 400,
@@ -45,7 +50,13 @@ async function call<T>(transport: LinearTransport, body: Record<string, unknown>
     response = await transport.fetch(url, {
       method: "POST",
       redirect: "error",
-      signal: AbortSignal.timeout(body.op === "files" ? LINEAR_TIMING.fileBridgeTimeoutMs : LINEAR_TIMING.apiTimeoutMs),
+      signal: AbortSignal.timeout(
+        body.op === "files"
+          ? LINEAR_TIMING.fileBridgeTimeoutMs
+          : body.op === "openThread"
+            ? LINEAR_TIMING.childBridgeTimeoutMs
+            : LINEAR_TIMING.apiTimeoutMs,
+      ),
       headers: { "content-type": "application/json", authorization: `Bearer ${transport.token}` },
       body: JSON.stringify(body),
     });
@@ -66,6 +77,9 @@ export class RemoteLinearApi implements LinearApi {
     private readonly transport: LinearTransport,
     private readonly organizationId: string,
   ) {}
+  openThread(sessionId: string, userId: string, input: { id: string; lead: string }): Promise<LinearOpenedThread> {
+    return call(this.transport, { op: "openThread", organizationId: this.organizationId, sessionId, userId, input });
+  }
   files(sessionId: string, userId: string, urls: string[], history = false): Promise<LinearFile[]> {
     return call(this.transport, { op: "files", organizationId: this.organizationId, sessionId, userId, urls, history });
   }
@@ -195,6 +209,7 @@ export async function handleLinearBridge(
       "link",
       "upload",
       "workItems",
+      "openThread",
     ].includes(String(op))
   )
     return answer(400, { error: "unknown_operation" });
@@ -221,7 +236,13 @@ export async function handleLinearBridge(
       const session = await api.session(id);
       if (op === "session") result = session;
       else if (session.dismissedAt) return answer(409, { error: "session_dismissed" });
-      else if (op === "files")
+      else if (op === "openThread") {
+        const input = object(body.input);
+        result = await api.openThread(id, required(body.userId), {
+          id: required(input.id),
+          lead: required(input.lead),
+        });
+      } else if (op === "files")
         result = await api.files(id, required(body.userId), body.urls as string[], body.history === true);
       else if (op === "activities") result = await api.activities(id);
       else if (op === "activity") {
@@ -256,7 +277,7 @@ export async function handleLinearBridge(
     return answer(200, { result: result ?? null });
   } catch (error) {
     if (
-      (op === "workItems" || op === "files") &&
+      (op === "workItems" || op === "files" || op === "openThread") &&
       error instanceof Error &&
       Object.hasOwn(WORK_ITEM_ERRORS, error.message)
     )

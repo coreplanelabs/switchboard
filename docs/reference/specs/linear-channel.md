@@ -5,8 +5,8 @@ Its OAuth app is the API identity; the dispatch actor is the authenticated perso
 the session. Native delegation names the app in `Issue.delegate` and preserves
 the human assignee.
 
-- **Code**: `src/channels/startup.ts`, `src/core/dispatch/reply.ts`, `src/channels/linear/files.ts`, `src/channels/attachmentTypes.ts`, `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/channels/linear/api.ts`, `src/channels/linear/session.ts`, `src/channels/linear/io.ts`, `src/channels/linear/bridge.ts`, `src/channels/linear/consumer.ts`, `src/channels/linear/acknowledgement.ts`, `src/channels/linear/control.ts`, `src/channels/linear/recovery.ts`, `src/channels/linear/lifecycle.ts`, `src/channels/linear/workItems.ts`, `src/channels/linear/access.ts`, `src/core/dispatch/channelAccess.ts`, `src/core/question.ts`, `src/tools/question.ts`, `src/core/workItems.ts`, `src/tools/workItems.ts`, `src/tools/toolsets.ts`, `src/tools/runnableTool.ts`, `src/core/dispatch/runLoop.ts`, `src/core/authz/policy.ts`, `src/index.ts`, `src/core/authz/actor.ts`, `src/core/authz/grants.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
-- **Tests**: `src/channels/startup.test.ts`, `src/core/dispatch/reply.test.ts`, `src/channels/linear/files.test.ts`, `src/channels/linear/oauth.test.ts`, `src/channels/linear/store.test.ts`, `src/channels/linear/webhook.test.ts`, `src/channels/linear/inbox.test.ts`, `src/channels/linear/api.test.ts`, `src/channels/linear/session.test.ts`, `src/channels/linear/io.test.ts`, `src/channels/linear/bridge.test.ts`, `src/channels/linear/consumer.test.ts`, `src/channels/linear/acknowledgement.test.ts`, `src/channels/linear/control.test.ts`, `src/channels/linear/recovery.test.ts`, `src/channels/linear/lifecycle.test.ts`, `src/channels/linear/workItems.test.ts`, `src/tools/workItems.test.ts`, `src/tools/question.test.ts`, `src/core/dispatch/runLoop.test.ts`, `src/core/authz/actor.test.ts`.
+- **Code**: `src/channels/linear/children.ts`, `src/channels/adminCoordinator.ts`, `src/core/types.ts`, `src/core/dispatch/spawn.ts`, `src/channels/startup.ts`, `src/core/dispatch/reply.ts`, `src/channels/linear/files.ts`, `src/channels/attachmentTypes.ts`, `src/channels/linear/oauth.ts`, `src/channels/linear/store.ts`, `src/channels/linear/webhook.ts`, `src/channels/linear/inbox.ts`, `src/channels/linear/api.ts`, `src/channels/linear/session.ts`, `src/channels/linear/io.ts`, `src/channels/linear/bridge.ts`, `src/channels/linear/consumer.ts`, `src/channels/linear/acknowledgement.ts`, `src/channels/linear/control.ts`, `src/channels/linear/recovery.ts`, `src/channels/linear/lifecycle.ts`, `src/channels/linear/workItems.ts`, `src/channels/linear/access.ts`, `src/core/dispatch/channelAccess.ts`, `src/core/question.ts`, `src/tools/question.ts`, `src/core/workItems.ts`, `src/tools/workItems.ts`, `src/tools/toolsets.ts`, `src/tools/runnableTool.ts`, `src/core/dispatch/runLoop.ts`, `src/core/authz/policy.ts`, `src/index.ts`, `src/core/authz/actor.ts`, `src/core/authz/grants.ts`, `src/core/budgets.ts`, `deploy/cloudflare/linear.ts`, `deploy/cloudflare/worker.ts`, `deploy/cloudflare/wrangler.template.jsonc`.
+- **Tests**: `src/channels/linear/children.test.ts`, `src/channels/linear/api.children.test.ts`, `src/channels/adminCoordinator.test.ts`, `src/channels/startup.test.ts`, `src/core/dispatch/reply.test.ts`, `src/channels/linear/files.test.ts`, `src/channels/linear/oauth.test.ts`, `src/channels/linear/store.test.ts`, `src/channels/linear/webhook.test.ts`, `src/channels/linear/inbox.test.ts`, `src/channels/linear/api.test.ts`, `src/channels/linear/session.test.ts`, `src/channels/linear/io.test.ts`, `src/channels/linear/bridge.test.ts`, `src/channels/linear/consumer.test.ts`, `src/channels/linear/acknowledgement.test.ts`, `src/channels/linear/control.test.ts`, `src/channels/linear/recovery.test.ts`, `src/channels/linear/lifecycle.test.ts`, `src/channels/linear/workItems.test.ts`, `src/tools/workItems.test.ts`, `src/tools/question.test.ts`, `src/core/dispatch/runLoop.test.ts`, `src/core/authz/actor.test.ts`.
 - **Docs**: [Delivery plan](../../plans/2026-09-17-001-linear-channel.md).
 
 ## Behavior
@@ -156,10 +156,22 @@ to the public origin in combined deployments, fails fast on invalid origins,
 and permits HTTPS or HTTP loopback only. Session run-page links follow the same
 transport restriction and never carry URL credentials.
 
+Child work opens its own root comment and native session on the parent's issue.
+The adapter rechecks the human requester, while the shared dispatcher remains
+responsible for child-agent authorization and execution. A durable creation intent
+binds the comment UUID to the installation, parent, requester and lead. Only one
+session-creation mutation may be attempted per intent; an uncertain response is
+reconciled from the comment's session instead of creating another session. The
+app-created session's creation webhook is consumed without redispatching the child;
+human prompts and Stop continue through normal intake. Rebuilt channel handles
+retain this behavior after a restart.
+
 ## Proof
 
 | Criterion | Proof |
 |---|---|
+| Native child creation durability | `[unit]` `src/channels/linear/children.test.ts::*`, `src/channels/linear/api.children.test.ts::*` |
+| Native child wiring and coordinator access | `[unit]` `src/channels/linear/io.test.ts::Linear channel output::opens an isolated native child with the checked requester and a stable coordinator key`, `src/channels/linear/consumer.test.ts::Linear event consumer::consumes a managed child's creation without a second dispatch but accepts human follow-ups`, `src/channels/linear/bridge.test.ts::Linear edge bridge::relays native child creation with a fixed identity and creation id`, `src/channels/adminCoordinator.test.ts::the plan runner's steps — plan, unit-start, branch, round, unit-end, finish (item 9)::checks the requester before opening coordinator threads and gives each retry a stable channel key` |
 | Local origins and run links | `[unit]` `src/channels/startup.test.ts::channel startup::routes Linear intake to a separate local edge while keeping the bot's public origin`, `src/channels/startup.test.ts::channel startup::rejects missing or unsafe Linear bridge configuration before starting the consumer`, `src/channels/linear/bridge.test.ts::Linear edge bridge::accepts local run-page links while rejecting remote plaintext and credential-bearing links` |
 | 1–3: OAuth and token lifecycle | `[unit]` `src/channels/linear/oauth.test.ts::*` |
 | 4: storage semantics | `[unit]` `src/channels/linear/store.test.ts::*` |

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { Secret } from "../secrets.js";
 import { AGENTS } from "../agents/registry.js";
@@ -1081,6 +1081,22 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       },
     };
   }
+
+  it("checks the requester before opening coordinator threads and gives each retry a stable channel key", async () => {
+    const io = openingIo([]);
+    const checkAccess = vi.fn(async () => false);
+    const openThread = vi.fn(io.openThread!);
+    const h = await planHarness({ ioFor: () => ({ ...io, checkAccess, openThread }) });
+    const denied = await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
+    expect(denied).toMatchObject({ status: 403, body: { error: "channel_access_denied" } });
+    expect(checkAccess).toHaveBeenCalledWith(PLAN_INSTANCE.userId);
+    expect(openThread).not.toHaveBeenCalled();
+    checkAccess.mockResolvedValue(true);
+    expect((await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).status).toBe(200);
+    expect(openThread).toHaveBeenCalledTimes(2);
+    for (const [lead, options] of openThread.mock.calls)
+      expect(options).toEqual({ idempotencyKey: `${PLAN_INSTANCE.id}:${lead}` });
+  });
 
   it("unit-start opens a plan unit's thread and, beside it, the unit's review thread through the requesting thread's channel, finds the board issue titled by the unit id, and writes both threads on the row; a second start answers the same threads and opens none; a task unit runs in the requesting thread with a review thread of its own; an unknown unit is 404", async () => {
     const opened: string[] = [];

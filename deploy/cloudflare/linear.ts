@@ -8,6 +8,7 @@ import {
 import { DirectLinearApi } from "../../src/channels/linear/api.js";
 import { handleLinearBridge, LINEAR_BRIDGE_PATH } from "../../src/channels/linear/bridge.js";
 import { StoredLinearStore, type LinearOAuthState } from "../../src/channels/linear/store.js";
+import { StoredLinearChildStore } from "../../src/channels/linear/children.js";
 import { SqlLinearInbox } from "../../src/channels/linear/inbox.js";
 import { LinearAcknowledgements } from "../../src/channels/linear/acknowledgement.js";
 import { revokeLinearInstallation } from "../../src/channels/linear/lifecycle.js";
@@ -96,6 +97,7 @@ export class LinearState extends DurableObject<LinearEnv> {
     return new DirectLinearApi({
       organizationId,
       appUserId: installation.appUserId,
+      children: new StoredLinearChildStore(this.ctx.storage),
       token: () => this.tokens.accessToken(organizationId),
       fetch: (input, init) => fetch(input, init),
     });

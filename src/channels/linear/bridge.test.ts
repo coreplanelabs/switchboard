@@ -6,6 +6,7 @@ import type { LinearApi } from "./api.js";
 function fixture() {
   const inbox = new InMemoryLinearInbox();
   const api: LinearApi = {
+    openThread: vi.fn(),
     workItems: vi.fn(),
     files: vi.fn(async () => []),
     canRead: vi.fn(async () => true),
@@ -21,6 +22,44 @@ function fixture() {
 }
 
 describe("Linear edge bridge", () => {
+  it("allows child creation to complete across several upstream requests", async () => {
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), ms);
+      return controller.signal;
+    });
+    try {
+      const child = { organizationId: "org", sessionId: "child" };
+      const fetch = vi.fn<typeof globalThis.fetch>(
+        (_url, init) =>
+          new Promise((resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+            setTimeout(() => resolve(Response.json({ result: child })), 15_000);
+          }),
+      );
+      const remote = new RemoteLinearApi({ baseUrl: "https://bot.example", token: "bridge", fetch }, "org");
+      const check = expect(
+        remote.openThread("parent", "linear:org:alice", { id: "creation", lead: "Review" }),
+      ).resolves.toEqual(child);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await check;
+    } finally {
+      timeout.mockRestore();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+  it("relays native child creation with a fixed identity and creation id", async () => {
+    const { api, transport } = fixture();
+    vi.mocked(api.openThread).mockResolvedValue({ organizationId: "org", sessionId: "child" });
+    const remote = new RemoteLinearApi(transport, "org");
+    expect(await remote.openThread("parent", "linear:org:alice", { id: "creation", lead: "Review" })).toEqual({
+      organizationId: "org",
+      sessionId: "child",
+    });
+    expect(api.openThread).toHaveBeenCalledWith("parent", "linear:org:alice", { id: "creation", lead: "Review" });
+  });
   it("accepts local run-page links while rejecting remote plaintext and credential-bearing links", async () => {
     const { api, transport } = fixture();
     const remote = new RemoteLinearApi(transport, "org");

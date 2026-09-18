@@ -5,6 +5,7 @@ import type { LinearApi } from "./api.js";
 function fixture() {
   let now = 100;
   const api: LinearApi = {
+    openThread: vi.fn(),
     workItems: vi.fn(),
     files: vi.fn(async () => []),
     canRead: vi.fn(async () => true),
@@ -25,6 +26,29 @@ function fixture() {
 }
 
 describe("Linear channel output", () => {
+  it("opens an isolated native child with the checked requester and a stable coordinator key", async () => {
+    const { api, io } = fixture();
+    vi.mocked(api.openThread).mockResolvedValue({
+      organizationId: "org",
+      sessionId: "child",
+      url: "https://linear.app/session/child",
+    });
+    await expect(io.openThread("Review")).rejects.toThrow("linear_child_requester_required");
+    expect(api.openThread).not.toHaveBeenCalled();
+    await io.checkAccess("linear:org:alice");
+    const child = await io.openThread("Review", { idempotencyKey: "instance/unit/review" });
+    expect(child.thread).toEqual({ threadKey: "linear:org:child", sourceUrl: "https://linear.app/session/child" });
+    const first = vi.mocked(api.openThread).mock.calls[0]![2].id;
+    await io.openThread("Review", { idempotencyKey: "instance/unit/review" });
+    expect(vi.mocked(api.openThread).mock.calls[1]![2].id).toBe(first);
+    await io.openThread("Review", { idempotencyKey: "instance/other/review" });
+    expect(vi.mocked(api.openThread).mock.calls[2]![2].id).not.toBe(first);
+    await child.io.reply("Child result");
+    expect(api.activity).toHaveBeenLastCalledWith("child", { type: "response", body: "Child result" }, undefined);
+    vi.mocked(api.canRead).mockResolvedValue(false);
+    await io.checkAccess("linear:org:bob");
+    await expect(io.openThread("Review")).rejects.toThrow("linear_child_requester_required");
+  });
   it("restores an initial mention's comment attachment when no user activity was created", async () => {
     const { api, io } = fixture();
     const url = "https://uploads.linear.app/org/log";

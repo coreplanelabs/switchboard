@@ -8,6 +8,7 @@ import type {
   StatusHandle,
   StatusUpdate,
   UploadTicket,
+  OpenedThread,
 } from "../../core/types.js";
 import type { Clock } from "../../core/trace/types.js";
 import { LINEAR_TIMING } from "../../core/budgets.js";
@@ -54,6 +55,42 @@ export class LinearChannelIO implements ChannelIO {
     const actions = effectiveGrants(actor).actions;
     const identity = { id: actor.id, actions: actions === "all" ? ("all" as const) : [...actions] };
     return { request: (input) => this.deps.api.workItems(this.deps.sessionId, identity, input) };
+  }
+
+  async openThread(lead: string, options?: { idempotencyKey: string }): Promise<OpenedThread> {
+    const requester = this.requesterId;
+    if (!requester) throw new Error("linear_child_requester_required");
+    let id: string = crypto.randomUUID();
+    if (options) {
+      if (!options.idempotencyKey || options.idempotencyKey.length > 8192) throw new Error("linear_invalid_child_key");
+      // A coordinator can repeat the same durable step on a rebuilt handle.
+      // Scope its key to the requesting person and parent session.
+      const bytes = new Uint8Array(
+        await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(JSON.stringify([this.deps.sessionId, requester, options.idempotencyKey])),
+        ),
+      ).slice(0, 16);
+      bytes[6] = (bytes[6]! & 15) | 64;
+      bytes[8] = (bytes[8]! & 63) | 128;
+      const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    }
+    const child = await this.deps.api.openThread(this.deps.sessionId, requester, { id, lead });
+    return {
+      thread: {
+        threadKey: `linear:${child.organizationId}:${child.sessionId}`,
+        ...(child.url ? { sourceUrl: child.url } : {}),
+      },
+      io: new LinearChannelIO({
+        api: this.deps.api,
+        sessionId: child.sessionId,
+        appUserId: this.deps.appUserId,
+        clock: this.deps.clock,
+        warn: this.deps.warn,
+        uploadFetch: this.deps.uploadFetch,
+      }),
+    };
   }
 
   private enqueue(work: () => Promise<void>): Promise<void> {

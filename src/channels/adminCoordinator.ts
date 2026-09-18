@@ -397,7 +397,9 @@ async function openThreadFromRequester(
   const parent = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId });
   if (!parent?.openThread) return { ok: false, response: json(503, { ok: false, error: "no_channel", at }) };
   try {
-    const opened = await parent.openThread(lead);
+    if (parent.checkAccess && !(await parent.checkAccess(instance.userId)))
+      return { ok: false, response: json(403, { ok: false, error: "channel_access_denied", at }) };
+    const opened = await parent.openThread(lead, { idempotencyKey: `${instance.id}:${lead}` });
     return {
       ok: true,
       thread: {
@@ -539,7 +541,7 @@ function watched(io: ChannelIO, on: { started: (id: string) => void; replied: (t
   if (io.isolateFollowUps) out.isolateFollowUps = true;
   if (io.acknowledge) out.acknowledge = (text) => io.acknowledge!(text);
   if (io.runFinished) out.runFinished = (receipt) => io.runFinished!(receipt);
-  if (io.openThread) out.openThread = (lead) => io.openThread!(lead);
+  if (io.openThread) out.openThread = (lead, options) => io.openThread!(lead, options);
   return out;
 }
 

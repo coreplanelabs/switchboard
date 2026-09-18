@@ -10,6 +10,13 @@ import { contentTypeFor } from "../../artifacts/contentType.js";
 import type { WorkItemRequest, WorkItemResult } from "../../core/workItems.js";
 import { linearPerson, linearTeamAllows } from "./access.js";
 import { linearWorkItems, type LinearWorkItemActor } from "./workItems.js";
+import type { LinearChildStore } from "./children.js";
+
+export interface LinearOpenedThread {
+  organizationId: string;
+  sessionId: string;
+  url?: string;
+}
 
 export interface LinearUpload {
   uploadUrl: string;
@@ -23,6 +30,8 @@ export interface LinearSession {
   creatorId?: string;
   url?: string;
   dismissedAt?: string;
+  /** Created through the channel's durable child intent, never webhook text. */
+  managedChild?: true;
   comment?: { body: string };
   issue?: {
     id: string;
@@ -48,6 +57,7 @@ export interface LinearActivity {
 
 /** Bound to one installation. Implementations keep its token at the edge. */
 export interface LinearApi {
+  openThread(sessionId: string, userId: string, input: { id: string; lead: string }): Promise<LinearOpenedThread>;
   files(sessionId: string, userId: string, urls: string[], history?: boolean): Promise<LinearFile[]>;
   canRead(sessionId: string, userId: string): Promise<boolean>;
   session(id: string): Promise<LinearSession>;
@@ -69,7 +79,7 @@ export function required(value: unknown): string {
 
 const SESSION_QUERY = `query SwitchboardSession($id: String!) {
   organization { id }
-  agentSession(id: $id) { id url dismissedAt appUser { id } creator { id } comment { body }
+  agentSession(id: $id) { id url dismissedAt appUser { id } creator { id } comment { id body user { id } }
     issue { id identifier title description team { id } delegate { id } } }
 }`;
 const HISTORY_QUERY = `query SwitchboardHistory($id: String!, $before: String) {
@@ -91,10 +101,124 @@ export class DirectLinearApi implements LinearApi {
     private readonly deps: {
       organizationId: string;
       appUserId: string;
+      children?: LinearChildStore;
       token(): Promise<string>;
       fetch: typeof fetch;
     },
   ) {}
+
+  async openThread(
+    parentSessionId: string,
+    requesterId: string,
+    input: { id: string; lead: string },
+  ): Promise<LinearOpenedThread> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.id) ||
+      typeof input.lead !== "string" ||
+      !input.lead.trim() ||
+      input.lead.length > 4000
+    )
+      throw new Error("linear_invalid_child");
+    const store = this.deps.children;
+    if (!store) throw new Error("linear_children_unavailable");
+    if (!(await this.canRead(parentSessionId, requesterId))) throw new Error("linear_child_denied");
+    const parent = await this.session(parentSessionId);
+    if (!parent.issue || parent.dismissedAt) throw new Error("linear_child_denied");
+    const org = this.deps.organizationId,
+      issueId = parent.issue.id,
+      commentId = input.id;
+    await store.ensure({
+      organizationId: org,
+      appUserId: this.deps.appUserId,
+      parentSessionId,
+      requesterId,
+      issueId,
+      commentId,
+      lead: input.lead,
+    });
+    const sessionFields = "id url dismissedAt appUser { id } comment { id } issue { id }";
+    const observe = async (): Promise<Record<string, unknown> | undefined> => {
+      const data = await this.query(
+        `query SwitchboardChildComment($issue: String!, $comment: ID!) {
+        organization { id } issue(id: $issue) { id comments(first: 1, filter: { id: { eq: $comment } }) {
+          nodes { id body user { id } agentSession { ${sessionFields} } }
+        } }
+      }`,
+        { issue: issueId, comment: commentId },
+      );
+      const issue = object(data.issue),
+        nodes = object(issue.comments).nodes;
+      if (object(data.organization).id !== org || issue.id !== issueId || !Array.isArray(nodes) || nodes.length > 1)
+        throw new Error("linear_child_conflict");
+      if (!nodes.length) return undefined;
+      const comment = object(nodes[0]);
+      if (comment.id !== commentId || object(comment.user).id !== this.deps.appUserId)
+        throw new Error("linear_child_conflict");
+      return comment;
+    };
+    const accept = async (value: unknown): Promise<LinearOpenedThread> => {
+      const child = object(value);
+      if (
+        object(child.appUser).id !== this.deps.appUserId ||
+        object(child.comment).id !== commentId ||
+        object(child.issue).id !== issueId ||
+        child.dismissedAt
+      )
+        throw new Error("linear_child_conflict");
+      const session = { id: required(child.id), ...(string(child.url) ? { url: required(child.url) } : {}) };
+      await store.finish(org, commentId, session);
+      return { organizationId: org, sessionId: session.id, ...(session.url ? { url: session.url } : {}) };
+    };
+    let comment = await observe();
+    if (!comment) {
+      // The caller-chosen UUID makes retrying this comment write idempotent.
+      // If its response is lost, read the comment before proceeding.
+      try {
+        const made = await this.query(
+          `mutation SwitchboardCreateChildComment($input: CommentCreateInput!) {
+          commentCreate(input: $input) { success comment { id } }
+        }`,
+          { input: { id: commentId, issueId, body: input.lead } },
+        );
+        const result = object(made.commentCreate);
+        if (result.success !== true || object(result.comment).id !== commentId)
+          throw new Error("linear_invalid_response");
+      } catch {
+        comment = await observe();
+        if (!comment) throw new Error("linear_child_creation_uncertain");
+      }
+      // Creating the comment can itself trigger a session. Observe it before
+      // asking Linear to create one explicitly, and verify the comment owner.
+      comment ??= await observe();
+      if (!comment) throw new Error("linear_child_creation_uncertain");
+    }
+    if (comment?.agentSession) {
+      // A session may already exist on the comment. Record that fact without
+      // attempting another creation, including when the comment triggered it.
+      await store.beginSession(org, commentId);
+      return accept(comment.agentSession);
+    }
+    if (!(await store.beginSession(org, commentId))) {
+      const found = await observe();
+      if (found?.agentSession) return accept(found.agentSession);
+      throw new Error("linear_child_creation_uncertain");
+    }
+    try {
+      const made = await this.query(
+        `mutation SwitchboardCreateChildSession($input: AgentSessionCreateOnComment!) {
+        agentSessionCreateOnComment(input: $input) { success agentSession { ${sessionFields} } }
+      }`,
+        { input: { commentId } },
+      );
+      const result = object(made.agentSessionCreateOnComment);
+      if (result.success !== true) throw new Error("linear_invalid_response");
+      return await accept(result.agentSession);
+    } catch {
+      const found = await observe();
+      if (found?.agentSession) return accept(found.agentSession);
+      throw new Error("linear_child_creation_uncertain");
+    }
+  }
 
   async canRead(sessionId: string, userId: string): Promise<boolean> {
     const data = await this.query(
@@ -226,9 +350,18 @@ export class DirectLinearApi implements LinearApi {
       throw new Error("linear_wrong_installation");
     if (session.id !== id) throw new Error("linear_invalid_response");
     const issue = object(session.issue);
+    const childComment = string(object(session.comment).id);
+    const child = childComment ? await this.deps.children?.get(this.deps.organizationId, childComment) : undefined;
+    const managedChild =
+      child &&
+      child.appUserId === this.deps.appUserId &&
+      object(object(session.comment).user).id === this.deps.appUserId &&
+      child.issueId === issue.id &&
+      (!child.session || child.session.id === id);
     return {
       id,
       appUserId: this.deps.appUserId,
+      ...(managedChild ? { managedChild: true as const } : {}),
       ...(string(object(session.creator).id) ? { creatorId: string(object(session.creator).id) } : {}),
       ...(string(session.url) ? { url: string(session.url) } : {}),
       ...(string(session.dismissedAt) ? { dismissedAt: string(session.dismissedAt) } : {}),
