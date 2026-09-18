@@ -444,8 +444,10 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
   // cascade, a `permission.replied` `reject` published for it), so the bot's
   // `once` for it answers 404 (`:198-201`); the sibling fails `aborted` (`The
   // user declined this tool call`), the step fails `aborted` (`Step
-  // interrupted`) and the execution ends `interrupted` — no next model call.
-  it("a step with two shell calls, one refused and one allowed: the reply to the sibling meets 404 and is read as the ask withdrawn — one ask_withdrawn note, no reply-failed error, no bypass on the server's own reject echo — and the run ends by the server's own end, the sibling declined with the step", async () => {
+  // interrupted`) and the execution ends `interrupted`. The loop then
+  // re-prompts the model with the refusal (harness.md item 2): a new
+  // execution starts, the model continues, and its text is the run's answer.
+  it("a step with two shell calls, one refused and one allowed: the reply to the sibling meets 404 and is read as the ask withdrawn — one ask_withdrawn note, no reply-failed error, no bypass on the server's own reject echo — and the loop re-prompts the model with the refusal (a decline_cascade note), so the next step runs and its text is the run's answer", async () => {
     const twoCalls: ModelScript = (results, chunks) =>
       results === 0
         ? chunks.toolCall("call_status", "update_status", { checklist: "○ first step" })
@@ -507,9 +509,16 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
     expect(siblingEvents.some((e) => /^session\.tool\.failed .*"aborted"/.test(e))).toBe(true);
     expect(siblingEvents.some((e) => e.startsWith("session.tool.success"))).toBe(false);
     expect(sibling).toMatchObject({ ok: false });
-    // The step with the declined call ended the execution `interrupted`: the
-    // run ended by the server's own end, with no further model call.
-    expect(stepEvents.at(-1)).toBe("session.execution.interrupted");
+    // The step with the declined call ended its execution `interrupted` — the
+    // server's own end after the cascade — and the loop re-prompted the model
+    // with the refusal: a new execution started and succeeded, its text the
+    // run's answer, the re-prompt on the record as a `decline_cascade` note.
+    const interruptedAt = stepEvents.indexOf("session.execution.interrupted");
+    expect(interruptedAt).toBeGreaterThan(-1);
+    expect(stepEvents.slice(interruptedAt + 1)).toContain("session.execution.started");
+    expect(stepEvents.at(-1)).toBe("session.execution.succeeded");
+    expect(notes.some((n) => n.kind === "decline_cascade")).toBe(true);
+    expect(session.answer).toBe("all done after the two-call step");
 
     await session.end();
   }, 120_000);
