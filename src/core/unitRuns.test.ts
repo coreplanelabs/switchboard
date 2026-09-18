@@ -92,6 +92,24 @@ describe("unitRunsOf — a unit's runs cut at its round boundaries, in time orde
     ]);
   });
 
+  it("a unit with one thread (record 0055) cuts the thread's runs by agent: review runs at the review rounds, the rest at the coding rounds", () => {
+    const one: CoordinatorUnit = { ...unit, reviewThread: undefined };
+    const inOneThread = [
+      coding[0],
+      run("r1", T0 + 12_000, { agent: "review" }),
+      coding[1],
+      run("r2", T0 + 32_000, { agent: "review" }),
+    ];
+    expect(unitRunsOf(one, { coding: inOneThread, review: [] }).map((r) => [r.id, r.round, r.thread])).toEqual([
+      ["c0", 0, "coding"],
+      ["r1", 1, "review"],
+      ["c1", 1, "coding"],
+      ["r2", 2, "review"],
+    ]);
+    // Runs handed as the review thread's contribute nothing when the row names no such thread.
+    expect(unitRunsOf(one, { coding: [coding[0]], review }).map((r) => r.id)).toEqual(["c0"]);
+  });
+
   it("a person's run in a unit thread belongs to the round in flight when it started; a run from before the unit's first round is not the unit's", () => {
     const detour = run("d", T0 + 15_000, { agent: "explore" }); // during review round 1, in the coding thread
     const earlier = run("old", T0 - 60_000, { agent: "general" }); // the requesting thread's past, before round 0

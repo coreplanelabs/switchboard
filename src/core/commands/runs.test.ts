@@ -832,7 +832,7 @@ describe("runs unit / runs children / runs search — the unit is the reading un
     expect(chat.split("\n")[1]).toMatch(/^• `c0` — coding · completed · \S+ · round 0 coding$/);
     expect(chat.split("\n").filter((l) => /\S {2,}\S/.test(l))).toEqual([]);
     expect(renderText(cmd, { unit: "plan-p-1:U17", instanceId: "plan-p-1", threads: {}, rounds: [], runs: [] })).toBe(
-      "unit plan-p-1:U17 — coding thread not opened yet, review thread not opened yet\n(none)",
+      "unit plan-p-1:U17 — thread not opened yet\n(none)",
     );
   });
 

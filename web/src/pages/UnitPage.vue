@@ -14,7 +14,7 @@ import type { UnitThread } from "@core/core/unitRuns.js";
 
 // The unit page (agent-ship item 17; record 0034, "the unit is the reading
 // unit"): one ship unit's story on one page — the runs of its coding thread
-// and its review thread laid out in time order at the round boundaries the
+// (and, on a row written before record 0055, its review thread) laid out in time order at the round boundaries the
 // runner recorded (coding 0, review 1, coding 1 …), each a row that opens to
 // the run's own timeline in place. The header states what the unit is (the
 // plan's line for it, its branch, its pull request), where its two threads
@@ -87,7 +87,9 @@ const STANDING_CLS: Record<string, string> = {
 /** The round count the runner drew: distinct round indexes over both threads. */
 const roundCount = computed(() => new Set(view?.rounds.map((r) => r.index) ?? []).size);
 
-/** The sessions the search reads, one per thread the row names: `<thread key>:<agent>`. */
+/** The sessions the search reads, `<thread key>:<agent>`: both agents' on the
+ *  unit's thread (record 0055), the review's on its own thread when a row
+ *  written before that names one. */
 const sessions = computed<SearchSession[]>(() => {
   if (!view) return [];
   const out: SearchSession[] = [];
@@ -98,7 +100,7 @@ const sessions = computed<SearchSession[]>(() => {
     out.push({ thread, key: known ?? `${key}:${thread}` });
   };
   add("coding", view.threads.coding);
-  add("review", view.threads.review);
+  add("review", view.threads.review ?? view.threads.coding);
   return out;
 });
 
@@ -200,7 +202,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
           <span v-else-if="view.threads.coding" class="text-muted" :title="view.threads.coding">coding thread</span>
           <span v-else class="text-dimmed">coding thread not opened yet</span>
         </span>
-        <span class="thread flex items-center gap-1.5" data-thread="review">
+        <span v-if="view.threads.review" class="thread flex items-center gap-1.5" data-thread="review">
           <SlackMark />
           <a
             v-if="reviewUrl"
@@ -211,8 +213,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             title="open the review thread"
             >review thread</a
           >
-          <span v-else-if="view.threads.review" class="text-muted" :title="view.threads.review">review thread</span>
-          <span v-else class="text-dimmed">review thread not opened yet</span>
+          <span v-else class="text-muted" :title="view.threads.review">review thread</span>
         </span>
         <span class="rounds tabular-nums">{{ roundCount }} round{{ roundCount === 1 ? "" : "s" }}</span>
       </div>
