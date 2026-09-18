@@ -357,3 +357,37 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect(await s.store.get("run-s")).toMatchObject({ status: "failed", replyOk: false });
   });
 });
+
+// Feature: record 0051 R2 (run-history item 2) — the live ship run's record
+// names its instance from the moment the hand-off creates it: the branch
+// publishes `ship_handoff` after a successful hand-off and none after a refusal.
+describe("runShipBranch — the ship_handoff event (record 0051 R2)", () => {
+  beforeEach(() => vi.stubEnv("PUBLIC_BASE_URL", ""));
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("a successful hand-off publishes one ship_handoff naming the instance, before the answer, and the record projects it as instanceId", async () => {
+    const s = setup("slack:UADMIN");
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    const events = s.registry.snapshot("run-s", "tok")?.events ?? [];
+    const types = events.map((e) => e.type);
+    expect(types.indexOf("ship_handoff")).toBeGreaterThanOrEqual(0);
+    expect(types.indexOf("ship_handoff")).toBeLessThan(types.indexOf("answer"));
+    expect(events.filter((e) => e.type === "ship_handoff")).toEqual([
+      expect.objectContaining({ instanceId: "plan-fix-the-login-redirect-6435ec" }),
+    ]);
+    s.ending.drain(true);
+    await s.writer.settled();
+    expect(await s.store.get("run-s")).toMatchObject({ instanceId: "plan-fix-the-login-redirect-6435ec" });
+  });
+
+  it("a refused hand-off publishes none and the record carries no instanceId", async () => {
+    const s = setup("slack:UADMIN", { minutes: 40 }); // the fit refusal: no instance opens
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    const events = s.registry.snapshot("run-s", "tok")?.events ?? [];
+    expect(events.map((e) => e.type)).not.toContain("ship_handoff");
+    s.ending.drain(true);
+    await s.writer.settled();
+    const record = await s.store.get("run-s");
+    expect(record === null || record.instanceId === undefined).toBe(true);
+  });
+});

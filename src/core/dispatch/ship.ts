@@ -20,10 +20,13 @@ import type { RequestTrace } from "../requestTrace.js";
 import type { RepoContext, ResidentSlugs } from "../repoContext.js";
 import { residentSlugsLister } from "../../execution/factory.js";
 import { fetchPullRequestFacts, fetchRepoShipInfo, type PullRequestFacts } from "../../execution/githubPulls.js";
-import { processSecrets } from "../../secrets.js";
 import { handOffToCoordinator, type HandOffOutcome } from "../coordinator/handOff.js";
 import { ALLOWANCES, ASKS, fit } from "../budgets.js";
-import { createInstanceViaShim, fetchInstanceStatusViaShim } from "../coordinator/instancesClient.js";
+import {
+  createInstanceViaShim,
+  fetchInstanceStatusViaShim,
+  processShimOptions,
+} from "../coordinator/instancesClient.js";
 import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../coordinator/instancesRoute.js";
 import { resolveAddressSeverity, resolveGrant, resolveShipCaps } from "../shipPipeline.js";
@@ -383,10 +386,7 @@ export async function runShipBranch(
     user: scopes.user.ship?.grant,
     run: directives.renewals,
   });
-  const shim = () => ({
-    baseUrl: process.env.PUBLIC_BASE_URL,
-    tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
-  });
+  const shim = processShimOptions;
   try {
     // The hand-off (agent-ship.md item 16): the request — a plan, a task, or a
     // resume at review — becomes a plan runner instance; the bot writes the
@@ -418,6 +418,11 @@ export async function runShipBranch(
         },
       ),
     );
+    // The instance the hand-off created enters the stream first (record 0051
+    // R2): projected onto `RunRecord.instanceId`, it is how the thread's owner
+    // rule finds the plan runner from the page's ship run. None after a refusal.
+    if (outcome.instanceId !== undefined)
+      registry.publish(run.id, { type: "ship_handoff", instanceId: outcome.instanceId, at: clock() });
     // The run record is the source of truth: the answer enters the stream
     // BEFORE finish() below (a publish on a finished run is a no-op).
     publishText("answer", outcome.reply);

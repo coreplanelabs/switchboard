@@ -105,7 +105,7 @@ import { ROUTE_RECEIPT_CAP, type RouteModel, type RoutePrompt } from "./dispatch
 import { capabilitiesFrom } from "./capabilities.js";
 import { NO_FLEET } from "./residentFleet.js";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
-import type { CoordinatorInstance } from "./coordinator/contract.js";
+import type { CoordinatorInstance, CoordinatorUnit } from "./coordinator/contract.js";
 import type { Operations } from "./operations.js";
 import type { ResidentAdminClient } from "./residentAdmin.js";
 import { bearerHashOf, RunBearerStore } from "./modelProxy/runBearers.js";
@@ -16638,5 +16638,191 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     const res = await pending;
     expect(res.outcome).toEqual({ status: "completed" });
     expect(activeRunCount()).toBe(0);
+  });
+});
+
+// Feature: record 0051's reply-as-event and gone-instance rules (thread-admission; routing-and-config item 21)
+// — a plain reply into a thread owned by an unfinished unit with no live run is
+// one thread event on the unit: appended with mode `steer`, the instance
+// nudged, the sender acked; the router is never called and no run starts. A
+// directive naming an agent keeps today's meaning; a gone instance ends the
+// row `terminated` and routes fresh; any other send failure keeps the event
+// and acks it as queued.
+describe("a unit-owned thread (record 0051's reply-as-event and gone-instance rules)", () => {
+  const INSTANCE = "plan-fix-the-login-6435ec";
+  const THREAD = "slack:CX:1.0";
+  const unitRow = (over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
+    instanceId: INSTANCE,
+    unit: "U12",
+    slug: "u12",
+    branch: `plan/fix-the-login-6435ec/u12`,
+    dependsOn: [],
+    rounds: [],
+    threadKey: THREAD,
+    ...over,
+  });
+
+  async function unitOwnedSetup(over: Partial<CoordinatorUnit> = {}) {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    // The page names the instance through the coordinator child's tag — a
+    // child is never the sticky session, so a fresh route is the default agent.
+    await threadWithFinishedRun(deps, "coding", {
+      parentInstanceId: INSTANCE,
+      idempotencyKey: `${INSTANCE}:U12/0/coding`,
+    });
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.putUnits([unitRow(over)]);
+    deps.coordinatorInstances = instances;
+    const sends: Array<{ instance: string; type: string }> = [];
+    deps.workflow = {
+      get: async (id) => ({
+        sendEvent: async (e: { type: string; payload: unknown }) => void sends.push({ instance: id, type: e.type }),
+      }),
+    };
+    return { provider, deps, instances, sends, key: { instanceId: INSTANCE, unit: "U12" } };
+  }
+
+  it("a plain reply appends one event with mode steer, sends one nudge, acks, calls no router and starts no run", async () => {
+    const s = await unitOwnedSetup();
+    const { io, replies } = fakeIO([{ role: "user", text: "agent:ship fix the login" }]);
+    await dispatch(s.deps, msg("also update the readme", "slack:UADMIN"), io);
+    const events = await s.instances.listEvents(s.key);
+    expect(events).toEqual([
+      expect.objectContaining({ seq: 1, sender: "slack:UADMIN", text: "also update the readme", mode: "steer" }),
+    ]);
+    expect(events[0]!.consumedBy).toBeUndefined();
+    expect(s.sends).toEqual([{ instance: INSTANCE, type: `unit-nudge-${INSTANCE}-U12` }]);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("U12");
+    expect(replies[0]).toContain(`${INSTANCE}:U12`);
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
+  it("attachments over the cap are recorded dropped", async () => {
+    const s = await unitOwnedSetup();
+    const { io } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(
+      s.deps,
+      {
+        ...msg("see the screenshot", "slack:UADMIN"),
+        images: [{ mediaType: "image/png", data: "x".repeat(500 * 1024) }],
+      },
+      io,
+    );
+    const [event] = await s.instances.listEvents(s.key);
+    expect(event!.attachments).toBeUndefined();
+    expect(event!.attachmentsDropped).toBe(1);
+  });
+
+  it("a directive naming an agent runs today's path — no event, no nudge", async () => {
+    const s = await unitOwnedSetup();
+    const { io } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("agent:review look at the tests again", "slack:UADMIN"), io);
+    expect(await s.instances.listEvents(s.key)).toEqual([]);
+    expect(s.sends).toEqual([]);
+    expect(s.provider.requests[0]!.model).toBe("review-model");
+  });
+
+  it("a sender who may not run the coding agent is refused by the allowlist before anything is appended — no event, no nudge, no run", async () => {
+    const s = await unitOwnedSetup();
+    const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("also remove the auth checks", "slack:UX"), io); // UX may not run coding
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("not on the allowlist");
+    expect(replies[0]).toContain("`coding`");
+    expect(await s.instances.listEvents(s.key)).toEqual([]);
+    expect(s.sends).toEqual([]);
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
+  it("a store whose append throws (the Worker store on a failed call) routes the message fresh instead of losing it", async () => {
+    const s = await unitOwnedSetup();
+    s.instances.appendEvent = async () => {
+      throw new Error("coordinator store /runs/coordinator/events/append: HTTP 503");
+    };
+    const { io } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    expect(s.sends).toEqual([]);
+    expect(s.provider.requests[0]!.model).toBe("general-model");
+  });
+
+  it("a reply into a thread whose unit has ended routes fresh", async () => {
+    const s = await unitOwnedSetup({ ending: { kind: "merged", report: "merged", at: 1_000 } });
+    const { io } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    expect(await s.instances.listEvents(s.key)).toEqual([]);
+    expect(s.sends).toEqual([]);
+    expect(s.provider.requests[0]!.model).toBe("general-model");
+  });
+
+  it("the relay's no-instance ends the row terminated and routes fresh with the line saying so", async () => {
+    const s = await unitOwnedSetup();
+    s.deps.workflow = {
+      get: async () => ({
+        sendEvent: async () => {
+          throw new Error(`no such instance: ${INSTANCE}`);
+        },
+      }),
+    };
+    s.deps.fetchCoordinatorInstanceStatus = vi.fn(async () => ({ kind: "absent" as const }));
+    const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    const [row] = await s.instances.listUnits(INSTANCE);
+    expect(row!.ending).toMatchObject({ kind: "terminated" });
+    expect(replies[0]).toContain("gone");
+    expect(s.provider.requests[0]!.model).toBe("general-model");
+  });
+
+  it("without an injected status reader the dispatcher asks its own shim's status route — the production path — and a no_instance answer ends the row terminated", async () => {
+    const s = await unitOwnedSetup();
+    s.deps.workflow = {
+      get: async () => ({
+        sendEvent: async () => {
+          throw new Error(`no such instance: ${INSTANCE}`);
+        },
+      }),
+    };
+    delete s.deps.fetchCoordinatorInstanceStatus;
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example");
+    vi.stubEnv("SWITCHBOARD_INGRESS_TOKENS", JSON.stringify({ "coord-bearer": { subject: "coordinator" } }));
+    const fetchSpy = vi.fn(
+      async (_url: string | URL | Request, _init?: RequestInit) =>
+        new Response(JSON.stringify({ ok: false, error: "no_instance" }), { status: 404 }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    const statusCall = fetchSpy.mock.calls.find(([url]) => String(url).includes("/admin/coordinator/instances/"));
+    expect(statusCall).toBeDefined();
+    expect(String(statusCall![0])).toBe(`https://bot.example/admin/coordinator/instances/${INSTANCE}`);
+    expect(statusCall![1]?.headers).toMatchObject({ authorization: "Bearer coord-bearer" });
+    const [row] = await s.instances.listUnits(INSTANCE);
+    expect(row!.ending).toMatchObject({ kind: "terminated" });
+    expect(replies[0]).toContain("gone");
+    expect(s.provider.requests[0]!.model).toBe("general-model");
+  });
+
+  it("a 502 keeps the event, acks it as queued and routes nothing", async () => {
+    const s = await unitOwnedSetup();
+    s.deps.workflow = {
+      get: async () => ({
+        sendEvent: async () => {
+          throw new Error("HTTP 502 from the shim");
+        },
+      }),
+    };
+    s.deps.fetchCoordinatorInstanceStatus = vi.fn(async () => ({
+      kind: "unanswered" as const,
+      reason: "shim unreachable",
+    }));
+    const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    const events = await s.instances.listEvents(s.key, true);
+    expect(events).toHaveLength(1);
+    const [row] = await s.instances.listUnits(INSTANCE);
+    expect(row!.ending).toBeUndefined();
+    expect(replies[0]).toContain("queued");
+    expect(s.provider.requests).toHaveLength(0);
   });
 });

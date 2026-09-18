@@ -95,7 +95,7 @@ import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { createAdminCoordinatorHandler, isCoordinatorAdminPath } from "./channels/adminCoordinator.js";
 import { createGithubWebhookHandler, GITHUB_WEBHOOK_PATH } from "./channels/githubWebhook.js";
 import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
-import { shimWorkflowSender } from "./core/coordinator/instancesClient.js";
+import { processShimOptions, shimWorkflowSender } from "./core/coordinator/instancesClient.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
 import {
   commitsOverBase,
@@ -439,6 +439,10 @@ export async function runBot(): Promise<void> {
       config.config.opencode?.compaction ? { compaction: config.config.opencode.compaction } : {},
     ),
   };
+  // The Workflow sender over the shim's event relay (http-ingress item 12,
+  // record 0051's nudge): built once — the check-run intake's checks-settled send
+  // and the dispatcher's unit nudge go through the same door.
+  const workflowSender = shimWorkflowSender(processShimOptions());
   const deps: CoreDeps = {
     config,
     completions,
@@ -461,6 +465,7 @@ export async function runBot(): Promise<void> {
     runHistoryWriter,
     // The coordinator's instance records and unit rows (run-history items 49 and 50): what the ship branch writes when it hands an `agent:ship` request to the plan runner.
     coordinatorInstances,
+    workflow: workflowSender,
     runStore,
     threadsElsewhere,
     runLedger,
@@ -715,10 +720,7 @@ export async function runBot(): Promise<void> {
     // in-memory on purpose — a restart loses it and the driver's bounded merge
     // wait re-asks the door on its own cadence.
     const mergeWaits = createMergeWaitRegistry();
-    const checksWorkflow = shimWorkflowSender({
-      baseUrl: process.env.PUBLIC_BASE_URL,
-      tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
-    });
+    const checksWorkflow = workflowSender;
     const githubWebhook = createGithubWebhookHandler({
       secret: processSecrets.get("GITHUB_WEBHOOK_SECRET")?.reveal(),
       checksSettled: async (repo, headSha) => {

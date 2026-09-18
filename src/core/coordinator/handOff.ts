@@ -96,6 +96,9 @@ export interface HandOffDeps {
 export interface HandOffOutcome {
   status: "completed" | "aborted";
   reply: string;
+  /** The instance the hand-off created — a completed outcome's alone (record
+   *  0051 R2): what the ship branch publishes as the run's `ship_handoff`. */
+  instanceId?: string;
   /** An aborted hand-off's refusal (record 0054): the reply's own sentence
    *  with its code and cause; the ship branch renders it through the seam. */
   refusal?: Refusal;
@@ -465,7 +468,11 @@ async function start(
       log(`[ship] ${input.msg.threadKey}: handed to the plan runner ${instance.id} (${units.length} unit(s))`);
       const replaced =
         write === "replace" ? " The records of an earlier attempt that never started were replaced." : "";
-      return { status: "completed", reply: `🧭 Handed to the plan runner \`${instance.id}\`: ${where}${replaced}` };
+      return {
+        status: "completed",
+        reply: `🧭 Handed to the plan runner \`${instance.id}\`: ${where}${replaced}`,
+        instanceId: instance.id,
+      };
     }
     case "duplicate": {
       // The platform holds an instance the state Worker has no record of — a

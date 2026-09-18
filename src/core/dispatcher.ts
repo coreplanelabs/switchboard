@@ -80,6 +80,7 @@ import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { writeTombstone } from "./dispatch/record.js";
 import { runShipBranch, type ShipDeps } from "./dispatch/ship.js";
+import { fetchInstanceStatusViaShim, processShimOptions } from "./coordinator/instancesClient.js";
 import { shipPresetFor } from "./shipPipeline.js";
 import { resolveAddressSeverity } from "./reviewVerdict.js";
 import { DEFAULT_CONTRACT_MAX_CHARS, renderContract, type ChildContract } from "./ship/contract.js";
@@ -95,12 +96,12 @@ import { workspaceBindingFor } from "../execution/factory.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
-import { readThread, stickyAgentOf, threadPrOf, threadRouteOf } from "./dispatch/thread.js";
+import { ownerOf, readThread, stickyAgentOf, threadPrOf, threadRouteOf } from "./dispatch/thread.js";
 import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import { createRunsService, type RunsService } from "./runsService.js";
-import type { CoordinatorTag } from "./coordinator/contract.js";
+import { unitKeyOf, unitNudgeEventType, type CoordinatorTag, type CoordinatorUnit } from "./coordinator/contract.js";
 import type { DispatchOutcome } from "./dispatch/outcome.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
@@ -147,6 +148,116 @@ export interface CoreDeps
    * because `CoreDeps` is the one place a process declares what it runs with.
    */
   issueTracker?: IssueTracker;
+}
+
+/** A plain reply into a thread an unfinished unit owns (record 0051's reply-as-event and gone-instance rules):
+ *  the message becomes one thread event on the unit's list — the mode read
+ *  off the owner's state, `steer` between rounds — the instance is nudged
+ *  through the shim's event relay, and the sender is acked with where the
+ *  message went; the router is never called. `route-fresh` when the instance
+ *  is gone — the relay's "no such instance", or a status of complete, errored
+ *  or terminated — with the row ended `terminated` and the thread told, or
+ *  when no durable store could hold the event: the request runs on as if the
+ *  thread were unowned. Any other send failure keeps the event appended and
+ *  acks it as queued for the pipeline's next step (which reads the unconsumed
+ *  list whether or not a nudge arrived), and nothing routes fresh. */
+async function answerUnitOwnedThread(
+  deps: CoreDeps,
+  ctx: {
+    msg: IncomingMessage;
+    io: ChannelIO;
+    /** The directive-free text — what the pipeline's next step folds in. */
+    text: string;
+    owner: { instanceId: string; unit: CoordinatorUnit };
+    clock: () => number;
+  },
+): Promise<"acked" | "route-fresh"> {
+  const { msg, io, owner } = ctx;
+  const store = deps.coordinatorInstances!;
+  const key = { instanceId: owner.instanceId, unit: owner.unit.unit };
+  const unitKey = unitKeyOf(key);
+  const at = ctx.clock();
+  // No run exists here, so the event's id is the platform's own message id when the channel gave one.
+  const messageId = msg.messageId;
+  // The mode is a receipt of the owner's state at append (record 0051), never the
+  // text's: no live run and no idle mark on the row — the pipeline is between
+  // rounds — so the event is a `steer`. The store's append enforces the
+  // per-event cap: attachments over it are dropped whole and the row says how many.
+  const attachments = [...(msg.images ?? []), ...(msg.documents ?? [])].map((a) => ({
+    mediaType: a.mediaType,
+    data: a.data,
+    ...(a.name !== undefined ? { name: a.name } : {}),
+  }));
+  // No durable store to hold the event — the null store's `unavailable`, or
+  // the Worker store's throw on a failed call (a 5xx, a timeout, a body it
+  // cannot read): the thread cannot be owned durably, so the request runs as
+  // today rather than vanish, unacked and unrouted, into the adapter's error path.
+  const appended = await store
+    .appendEvent(key, {
+      ...(messageId !== undefined ? { id: messageId } : {}),
+      sender: msg.userId,
+      ...(msg.userName !== undefined ? { senderName: msg.userName } : {}),
+      text: ctx.text,
+      ...(attachments.length > 0 ? { attachments } : {}),
+      mode: "steer",
+      at,
+    })
+    .catch((err: unknown) => {
+      console.warn(
+        `[dispatch] ${msg.threadKey}: unit ${unitKey} event append failed (${err instanceof Error ? err.message : String(err)}) — routing fresh`,
+      );
+      return { ok: false as const, reason: "unavailable" as const };
+    });
+  if (!appended.ok) return "route-fresh";
+  // The nudge (record 0051): every append nudges, so the send doubles as the liveness probe.
+  try {
+    if (deps.workflow === undefined) throw new Error("no workflow sender in this process");
+    const handle = await deps.workflow.get(owner.instanceId);
+    await handle.sendEvent({ type: unitNudgeEventType(key), payload: {} });
+  } catch (err) {
+    // The gone instance (record 0051): the relay's "no such instance", or an instance that already ended,
+    // ends the row `terminated` — the thread is unowned from then on — and
+    // the message routes fresh. The engine's refusal texts vary, so the
+    // instance's own status route decides, fail-safe: unanswered is a send
+    // failure, never an absence. The reader is the injected one when a test
+    // wires it, else the process's own shim — the same address the ship
+    // branch creates and reads instances at — so production reaches the route.
+    const readStatus =
+      deps.fetchCoordinatorInstanceStatus ?? ((id: string) => fetchInstanceStatusViaShim(processShimOptions(), id));
+    const status = await readStatus(owner.instanceId);
+    const gone =
+      status.kind === "absent" ||
+      (status.kind === "status" && ["complete", "errored", "terminated"].includes(status.status));
+    if (gone) {
+      const why = status.kind === "absent" ? "no such instance" : status.status;
+      await store.putUnits([
+        {
+          ...owner.unit,
+          ending: {
+            kind: "terminated",
+            report: `the plan runner instance is gone (${why}) — the thread is unowned from here`,
+            at,
+          },
+        },
+      ]);
+      console.log(`[dispatch] ${msg.threadKey}: unit ${unitKey} ended terminated (${why}) — routing fresh`);
+      await io.reply(
+        `⚠️ Unit ${owner.unit.unit}'s plan runner instance \`${owner.instanceId}\` is gone (${why}) — the unit's row is closed and this message runs fresh.`,
+      );
+      return "route-fresh";
+    }
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[dispatch] ${msg.threadKey}: unit ${unitKey} nudge failed (${reason}) — event ${appended.seq} stays queued`,
+    );
+    await io.reply(
+      `📌 Noted for unit ${owner.unit.unit} (\`${unitKey}\`): the pipeline could not be nudged — your message is queued for its next step.`,
+    );
+    return "acked";
+  }
+  console.log(`[dispatch] ${msg.threadKey}: event ${appended.seq} appended to unit ${unitKey}, instance nudged`);
+  await io.reply(`📌 Noted for unit ${owner.unit.unit} (\`${unitKey}\`) — the pipeline folds it into its next step.`);
+  return "acked";
 }
 
 // In-flight run tracking so the process can drain before exiting (restarts
@@ -468,6 +579,33 @@ export async function dispatch(
     const threadLive =
       admission.get(msg.threadKey) !== undefined ||
       (!resume && !restart && deps.threadsElsewhere.get(msg.threadKey) !== undefined);
+    // The thread's owner (record 0051's owner rule): computed here, where the
+    // dispatcher already decides `threadLive`, from the page it already read
+    // plus at most one read of the instance's unit rows. A plain reply into a
+    // thread owned by an unfinished unit with no live run is one thread event
+    // on that unit — appended with the mode read off the row, the instance
+    // nudged, the sender acked — and the router never runs (the gate does).
+    // A directive naming an agent falls through to today's path: `agent:review
+    // <url>` in a pipeline thread still means what it says. A live thread is
+    // the live run's (admission steers below); a session or no owner is the
+    // sticky path and the router, exactly as before.
+    if (thread && !threadLive && directives.agent === undefined && deps.coordinatorInstances !== undefined) {
+      const owner = await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey);
+      if (owner.kind === "unit") {
+        // The same gate a live steer passes (admission's allowlist check): the
+        // event is read by the unit's next coding child — a write-identity run
+        // — so its sender must be allowed to run `coding`, refused the same
+        // named way, before anything is appended. "Run" includes "is heard by".
+        if ((await authorizeAgent(deps, { msg, io, refuse, agentName: "coding" })).kind === "refused") return ended;
+        const answer = await root.span("dispatch.unit_owned_thread", () =>
+          answerUnitOwnedThread(deps, { msg, io, text: directives.text, owner, clock }),
+        );
+        if (answer === "acked") return ended;
+        // `route-fresh`: the instance is gone — the row was ended `terminated`
+        // and the thread told — so the request runs on as if the thread were
+        // unowned by any unit.
+      }
+    }
     const routing = await routeRequest(deps, {
       msg,
       directives,
