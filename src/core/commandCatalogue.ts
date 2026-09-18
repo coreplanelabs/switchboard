@@ -46,6 +46,8 @@ import {
 import type { Capabilities } from "./capabilities.js";
 import { publicEnv, type Secrets } from "../secrets.js";
 import { registerCoreCommands, type CoreCommandDeps } from "./commands/all.js";
+import { configuredModelRefs } from "./commands/providers.js";
+import { installedModelRegistry } from "./installedModelRegistry.js";
 import type { StatusSnapshot } from "./commands/status.js";
 import { packageVersion } from "../packageRoot.js";
 import { selectFrictionLedger, type FrictionLedger } from "./frictionLedger.js";
@@ -378,6 +380,16 @@ export function buildCoreCommands(
     contract: { readFile: readOptionalFile },
     delivery: { service: delivery },
     costs: { service: costs },
+    // `providers check`: the loaded blocks and refs, the installed pi registry
+    // (the very catalog the dispatcher resolves cards against), the real fetch.
+    providers: {
+      configured: async () => {
+        const config = (await cfg()).config;
+        return { blocks: config.providers, refs: configuredModelRefs(config) };
+      },
+      registry: () => installedModelRegistry,
+      fetch: (url) => fetch(url),
+    },
   };
   return bindCommands(registry, deps);
 }

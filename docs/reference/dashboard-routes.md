@@ -87,6 +87,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/delivery.report` | `GET`, `POST` | `delivery:read` | Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written. |
 | `/api/costs.by` | `GET`, `POST` | `costs:read` | What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written. |
 | `/api/costs.snapshot` | `POST` | `costs:write` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. |
+| `/api/providers.check` | `GET`, `POST` | `providers:read` | Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each. |
 
 <!-- /generated:api-routes -->
 

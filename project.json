@@ -127,6 +127,10 @@
       "does": "Every copy of the project's names, repository, docs URL and contact address equals `project.json`; its description, topics and npm package fit their rules.",
       "when": "After editing `project.json` or a community file; part of `check:consistency`."
     },
+    "check:registry-drift": {
+      "does": "Every example-config model ref still resolves against the pinned pi registry.",
+      "when": "After a pi bump; part of `check:consistency`."
+    },
     "skills:sync": {
       "does": "Vendors the skills listed in `skills/manifest.yaml`.",
       "when": "After changing the manifest; part of `fix`."

@@ -163,6 +163,12 @@ One table per group, in registration order. "Surfaces" is where that command can
 | `costs by <user\|thread\|channel\|agent\|model> [--days <integer>] [--group <string>]` | What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written. | every surface |
 | `costs snapshot` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. | every surface |
 
+### `providers`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `providers check` | Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each. | every surface |
+
 ### `artifacts`
 
 | Command | What it does | Surfaces |

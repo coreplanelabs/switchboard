@@ -995,6 +995,20 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "providers:read",
+    "args": [],
+    "effect": "read",
+    "id": "providers.check",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "repo:exec",
     "args": [
       {

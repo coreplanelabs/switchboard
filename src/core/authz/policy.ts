@@ -91,6 +91,12 @@ export const POLICY: readonly Rule[] = [
   // `all` and a named `grants` entry hold it).
   { action: "costs:write", resource: "command", when: [grant("costs:write")] },
 
+  // ── providers ────────────────────────────────────────────────────────────
+  // `providers check` reads the provider's own endpoints on request: a browser
+  // session's read baseline, a grant everywhere else — an on-request provider
+  // read is never a chat baseline, like the costs reads.
+  { action: "providers:read", resource: "command", when: [grant("providers:read")] },
+
   // ── repos ────────────────────────────────────────────────────────────────
   { action: "repo:read", resource: "command", when: [grant("repo:read")] },
   { action: "repo:write", resource: "repo", when: [grant("repo:write")] },
