@@ -1,6 +1,8 @@
-// The three harness routes (docs/reference/specs/harness-pi.md item 7): what a
+// The four harness routes (docs/reference/specs/harness-pi.md item 7): what a
 // run's pi extension asks the bot over the run's own bearer — `GET
-// /harness/tools`, `POST /harness/authorize`, `POST /harness/tool`. The door
+// /harness/tools`, `POST /harness/authorize`, `POST /harness/tool`, `POST
+// /harness/compaction` (how the compaction pi is about to write is written:
+// pi's own summary, or the bot's pointer after one that failed for good). The door
 // is the model proxy's: the bearer names its run and verifies against the
 // store, so an unknown run, a wrong secret, an expired or revoked bearer are
 // refused before a byte of the body is read; past it, the run must be one this
@@ -17,7 +19,9 @@
 
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import type { RunBearerStore } from "../core/modelProxy/runBearers.js";
+import { compactionAskOf } from "../core/harness/pi/compactionFallback.js";
 import {
+  answerCompaction,
   authorizeToolCall,
   relayToolCall,
   relayedToolDefinitions,
@@ -31,7 +35,13 @@ import { readBody } from "./http.js";
 export const HARNESS_TOOLS_PATH = "/harness/tools";
 export const HARNESS_AUTHORIZE_PATH = "/harness/authorize";
 export const HARNESS_TOOL_PATH = "/harness/tool";
-export const HARNESS_PATHS = [HARNESS_TOOLS_PATH, HARNESS_AUTHORIZE_PATH, HARNESS_TOOL_PATH] as const;
+export const HARNESS_COMPACTION_PATH = "/harness/compaction";
+export const HARNESS_PATHS = [
+  HARNESS_TOOLS_PATH,
+  HARNESS_AUTHORIZE_PATH,
+  HARNESS_TOOL_PATH,
+  HARNESS_COMPACTION_PATH,
+] as const;
 /** A tool input can carry a whole PR description; a call never carries a file's bytes. */
 export const MAX_HARNESS_BODY_BYTES = 4 * 1024 * 1024;
 
@@ -49,11 +59,12 @@ export function isHarnessPath(path: string): boolean {
   return (HARNESS_PATHS as readonly string[]).includes(path);
 }
 
-/** The route as a log line names it: one of three words, never the request's own text. */
+/** The route as a log line names it: one of four words, never the request's own text. */
 const ROUTE_WORD: Record<string, string> = {
   [HARNESS_TOOLS_PATH]: "tools",
   [HARNESS_AUTHORIZE_PATH]: "authorize",
   [HARNESS_TOOL_PATH]: "tool",
+  [HARNESS_COMPACTION_PATH]: "compaction",
 };
 
 export interface HarnessRouteDeps {
@@ -189,6 +200,15 @@ export async function handleHarnessRequest(deps: HarnessRouteDeps, req: HarnessR
   if (!door.ok) return door.response;
   const harness = deps.harnesses.get(door.runId)!;
   if (wantsGet) return { status: 200, body: { tools: relayedToolDefinitions(harness) } };
+  if (req.path === HARNESS_COMPACTION_PATH) {
+    const compaction = compactionAskOf(req.body);
+    if (!compaction) return { status: 400, body: { error: "invalid_body" } };
+    const answer = answerCompaction(harness, compaction);
+    deps.log?.(
+      `[harness] run=${door.runId} compaction ${compaction.reason} → ${answer.summary !== undefined ? "the bot's pointer" : "pi's own summary"}`,
+    );
+    return { status: 200, body: { ...answer } };
+  }
   const ask = askOf(req.body);
   if (!ask) return { status: 400, body: { error: "invalid_body" } };
   if (req.path === HARNESS_AUTHORIZE_PATH) {

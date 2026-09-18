@@ -26,6 +26,7 @@ import type { CompactionEntry } from "../../runLedger/types.js";
 import type { Clock, Span } from "../../trace/types.js";
 import { type Disposition, SAID_ONCE_SUFFIX } from "../contract.js";
 import { MODEL_CALL_IN_FLIGHT } from "../windDown.js";
+import { POINTER_SUMMARY_PREFIX } from "./compactionFallback.js";
 import { BLOCKED_AT_DOOR_PREFIX, BLOCKED_UNAVAILABLE_PREFIX } from "./extensionSource.js";
 import { piAnsweredWithoutRunning, type PiEvent } from "./protocol.js";
 
@@ -108,6 +109,10 @@ export interface BridgeObservation {
    *  appends to the session log (docs/reference/specs/session-log.md item 6). Absent
    *  when the compaction failed, was aborted, or carried no summary. */
   compaction?: CompactionEntry;
+  /** pi's compaction failed — not aborted — with these words: the harness
+   *  judges whether the next one is written with its pointer summary
+   *  (harness-pi item 7). */
+  compactionFailed?: string;
 }
 
 export interface BridgeDeps {
@@ -439,19 +444,24 @@ export class PiBridge {
   private onCompactionEnd(event: PiEvent, out: BridgeObservation): void {
     const result = isRecord(event.result) ? event.result : undefined;
     if (event.aborted === true || !result) {
+      const why = typeof event.errorMessage === "string" ? event.errorMessage : undefined;
       this.note(
         "harness_error",
-        `pi's compaction ${event.aborted === true ? "was aborted" : "failed"}${typeof event.errorMessage === "string" ? `: ${redactAndCap(event.errorMessage, 200)}` : ""}`,
+        `pi's compaction ${event.aborted === true ? "was aborted" : "failed"}${why !== undefined ? `: ${redactAndCap(why, 200)}` : ""}`,
       );
+      if (event.aborted !== true) out.compactionFailed = why ?? "compaction failed";
       return;
     }
     const before = typeof result.tokensBefore === "number" ? result.tokensBefore : undefined;
     const after = typeof result.estimatedTokensAfter === "number" ? result.estimatedTokensAfter : undefined;
     const retries = this.summarizationRetries;
     this.summarizationRetries = 0;
+    // The bot's pointer summary opens with its fixed prefix (harness-pi item
+    // 7): the note says whose summary the window now carries.
+    const pointer = typeof result.summary === "string" && result.summary.startsWith(POINTER_SUMMARY_PREFIX);
     this.note(
       "compacted",
-      `pi compacted the context (${str(event.reason)}): ${before ?? "?"} → about ${after ?? "?"} tokens; the transcript keeps the originals${retries > 0 ? `; ${retries} summarization retr${retries === 1 ? "y" : "ies"}` : ""}`,
+      `pi compacted the context (${str(event.reason)})${pointer ? " with the bot's pointer summary, pi's own having failed" : ""}: ${before ?? "?"} → about ${after ?? "?"} tokens; the transcript keeps the originals${retries > 0 ? `; ${retries} summarization retr${retries === 1 ? "y" : "ies"}` : ""}`,
     );
     // The entry for the session log (session-log item 6): pi's own id for the
     // first kept entry rides along for forensics; the mirror has no map from

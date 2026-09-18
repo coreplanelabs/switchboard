@@ -33,6 +33,7 @@ import { textTurnsOf } from "../../dispatch/textTurns.js";
 import { HARNESS_URL_ENV, RUN_BEARER_ENV, piRunPaths, piRunPathsAt, type PiRunPaths } from "./process.js";
 import {
   HarnessRegistry,
+  answerCompaction,
   authorizeToolCall,
   relayToolCall,
   runRelayedTool,
@@ -41,6 +42,7 @@ import {
   type RelayProgress,
   type RelayedToolAnswer,
 } from "./relay.js";
+import { POINTER_SUMMARY_PREFIX } from "./compactionFallback.js";
 import { judgeToolCall, type ToolRuleContext } from "./toolRules.js";
 import {
   ExecHarnessContainer,
@@ -687,6 +689,71 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(String(steer!.message)).toContain("Your notes for this thread are empty");
     expect(String(steer!.message)).toContain("`notes`");
     expect(compactionSteer(undefined)).toBe(String(steer!.message));
+  });
+
+  // docs/reference/specs/harness-pi.md item 7: a compaction that failed for good arms the bot's pointer.
+  it("a compaction that failed for good — the summary refused under the provider's policy — arms the bot's pointer summary for the next one, handed out once through the live registration; a transient failure arms nothing; a compaction that landed clears it; the pointer's compaction is noted as the bot's and steers the notes like any other", async () => {
+    const w = world({ notepad: async () => ({ text: "decided: keep the helper", updatedAt: 1 }) });
+    const refusal =
+      "Auto-compaction failed: Turn prefix summarization failed: refused under the provider's usage policy";
+    const ask = { reason: "threshold", tokensBefore: 187_000, readFiles: [], modifiedFiles: ["src/a.ts"] };
+    const failed = (c: FakeHarnessContainer, errorMessage: string) =>
+      c.emit({ type: "compaction_end", reason: "threshold", result: undefined, aborted: false, errorMessage });
+    const noted = (text: string) =>
+      w.events.some((e) => e.type === "run_note" && (e as { summary: string }).summary.includes(text));
+    /** Runs `then` once the harness has read the events up to the note that carries `text`. */
+    const once = (text: string, then: () => void) => {
+      const tick = () => (noted(text) ? then() : setTimeout(tick, 2));
+      tick();
+    };
+    const answers: ReturnType<typeof answerCompaction>[] = [];
+    scriptedPi(w.container, (n, c) => {
+      bashTurn(w, "c1", "npm test", "1 failed");
+      failed(c, refusal);
+      once("pi's compaction failed: Auto-compaction failed", () => {
+        const live = w.registry.get("run-7")!;
+        // The extension's ask for the next compaction: the pointer, once.
+        answers.push(answerCompaction(live, ask), answerCompaction(live, ask));
+        // pi writes the pointer compaction the bot handed it.
+        c.emit({
+          type: "compaction_end",
+          reason: "threshold",
+          result: {
+            summary: answers[0].summary,
+            firstKeptEntryId: "e9",
+            tokensBefore: 187_000,
+            estimatedTokensAfter: 20_000,
+          },
+          aborted: false,
+        });
+        once("with the bot's pointer summary", () => {
+          // A transient failure arms nothing; a compaction that landed cleared the earlier one.
+          failed(c, "Auto-compaction failed: 529 overloaded");
+          once("529 overloaded", () => {
+            answers.push(answerCompaction(live, ask));
+            finalTurn(c, "done");
+          });
+        });
+      });
+    });
+    expect(await w.start()).toBe("done");
+    expect(answers).toHaveLength(3);
+    expect(answers[0].summary?.startsWith(POINTER_SUMMARY_PREFIX)).toBe(true);
+    expect(answers[0].summary).toContain(refusal);
+    expect(answers[0].summary).toContain("<modified-files>\nsrc/a.ts\n</modified-files>");
+    expect(answers[1]).toEqual({});
+    expect(answers[2]).toEqual({});
+    const notes = w.events
+      .filter((e) => e.type === "run_note")
+      .map((e) => `${(e as { kind: string }).kind}: ${(e as { summary: string }).summary}`);
+    expect(notes).toEqual([
+      expect.stringContaining(`harness_error: pi's compaction failed: ${refusal}`.slice(0, 120)),
+      "compacted: pi compacted the context (threshold) with the bot's pointer summary, pi's own having failed: 187000 → about 20000 tokens; the transcript keeps the originals",
+      "harness_error: pi's compaction failed: Auto-compaction failed: 529 overloaded",
+    ]);
+    const steers = w.container.commands().filter((c) => c.type === "steer");
+    expect(steers).toHaveLength(1);
+    expect(String(steers[0]!.message)).toContain("decided: keep the helper");
   });
 
   it("a notepad read that fails at compaction time costs the steer its notes, never the run: the steer says the notes could not be read, a harness_error note says why, and the run answers", async () => {

@@ -148,6 +148,73 @@ describe("the harness extension", () => {
     await expect(pi.tools[1].execute("c2", {})).rejects.toThrow("the description is missing its title");
   });
 
+  it("the session_before_compact hook asks the bot once with the preparation's facts — the trigger, the size, the previous summary, pi's own file lists — and hands pi the bot's summary as the extension's compaction under pi's kept entry and size; a bot that leaves the summary to pi, or cannot be reached, answers nothing and is not asked again", async () => {
+    let summary: string | undefined = "POINTER";
+    const bot = fakeBot({
+      "/harness/tools": TOOLS,
+      "/harness/compaction": () => (summary === undefined ? {} : { summary }),
+    });
+    const pi = fakePi();
+    await (
+      await load()
+    )(pi.api);
+    const hook = pi.handlers.get("session_before_compact")!;
+    const preparation = {
+      firstKeptEntryId: "e9",
+      messagesToSummarize: [],
+      turnPrefixMessages: [],
+      isSplitTurn: true,
+      tokensBefore: 187_000,
+      previousSummary: "so far: two tests fail",
+      fileOps: {
+        read: new Set(["src/a.ts", "src/b.ts"]),
+        edited: new Set(["src/b.ts"]),
+        written: new Set(["src/c.ts"]),
+      },
+      settings: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
+    };
+    const event = (signal = new AbortController().signal) => ({
+      type: "session_before_compact",
+      preparation,
+      branchEntries: [],
+      reason: "threshold",
+      willRetry: false,
+      signal,
+    });
+    await expect(hook(event(), {})).resolves.toEqual({
+      compaction: {
+        summary: "POINTER",
+        firstKeptEntryId: "e9",
+        tokensBefore: 187_000,
+        details: { readFiles: ["src/a.ts"], modifiedFiles: ["src/b.ts", "src/c.ts"] },
+      },
+    });
+    expect(bot.calls.filter((c) => c.path === "/harness/compaction").map((c) => c.body)).toEqual([
+      {
+        reason: "threshold",
+        tokensBefore: 187_000,
+        previousSummary: "so far: two tests fail",
+        readFiles: ["src/a.ts"],
+        modifiedFiles: ["src/b.ts", "src/c.ts"],
+      },
+    ]);
+    // The bot leaves it to pi: nothing.
+    summary = undefined;
+    await expect(hook(event(), {})).resolves.toBeUndefined();
+    // No previous summary: the key is not sent.
+    await hook({ ...event(), preparation: { ...preparation, previousSummary: undefined } }, {});
+    expect(bot.calls.at(-1)?.body).not.toHaveProperty("previousSummary");
+    // The bot cannot be reached: pi's own compaction, at once — one ask, no wait.
+    vi.unstubAllGlobals();
+    const dead = fakeBot({}, { fail: () => true });
+    await expect(hook(event(), {})).resolves.toBeUndefined();
+    expect(dead.calls).toEqual([]);
+    // A refusal at the door is the same answer.
+    vi.unstubAllGlobals();
+    fakeBot({});
+    await expect(hook(event(), {})).resolves.toBeUndefined();
+  });
+
   it("the tool_call hook asks the bot and lets an allowed call run, or blocks with the bot's own reason", async () => {
     const bot = fakeBot({
       "/harness/tools": TOOLS,
