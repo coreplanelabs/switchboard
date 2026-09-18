@@ -96,6 +96,7 @@ import {
   turnGuardInstruction,
   turnGuardNote,
   turnGuardPace,
+  unlabelledAnswer,
   windDownFailureNote,
   wrapUpInstruction,
   wrapUpNeverPostedNote,
@@ -2873,12 +2874,17 @@ export async function driveOpenCode(
   // A write-up the wind-down decided and never posted (the loop-end interrupt
   // found — or will find — the session idle, and nothing steered it since):
   // the model never saw the instruction, so the answer is its own, unlabelled,
-  // and the record says why — the same rule as pi's undelivered wrap-up. Read
-  // off the posts made, not the interrupt's answer: the loop may settle on the
-  // execution's own end before that answer lands.
-  const neverPosted = writeUp !== undefined && !writeUpPosted;
-  if (writeUp !== undefined && neverPosted) note("wrap_up", wrapUpNeverPostedNote(writeUp.kind));
-  const answer = writeUpAnswer(neverPosted ? undefined : writeUp, text, run.agent.maxMinutes, writeUpFailed);
+  // and the record says why — the same rule as pi's undelivered wrap-up — and
+  // how that execution ended: finished, or failed on the provider in the
+  // round-trip, the failure the wind-down's note holds (`writeUpFailed`)
+  // reaching the thread in the unlabelled answer too. Read off the posts made,
+  // not the interrupt's answer: the loop may settle on the execution's own end
+  // before that answer lands.
+  if (writeUp !== undefined && !writeUpPosted) {
+    note("wrap_up", wrapUpNeverPostedNote(writeUp.kind, "run", writeUpFailed !== undefined ? "failed" : "finished"));
+    writeUp = undefined;
+  }
+  const answer = writeUpAnswer(writeUp, text, run.agent.maxMinutes, writeUpFailed);
   return { answer, remainingMs: remaining, hardStopped: false, ...handOver() };
 }
 
@@ -2897,5 +2903,7 @@ function writeUpAnswer(
   if (writeUp?.kind === "time") return timeBudgetAnswer(text, maxMinutes, writeUpFailed);
   if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
   if (writeUp?.kind === "soft") return softStopAnswer(text, writeUpFailed);
-  return text || "_(no response)_";
+  // No label — the wind-down's instruction never reached the model — but a
+  // model call that failed under it is still said.
+  return unlabelledAnswer(text, writeUpFailed);
 }

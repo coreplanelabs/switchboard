@@ -331,6 +331,11 @@ export interface FakeServeOptions {
    *  before the answer (`interruptAnswersAfterTail` alongside), `interrupted:
    *  true`. The play the cut stopped continues at the turn after the cut step. */
   cutLandsOnNextStep?: boolean;
+  /** The write-up's own execution (the play after the cut) opens a step that
+   *  fails `aborted` — a step begun after the interrupt landed, the write-up's
+   *  own — and the execution then fails on the provider: the step's failure is
+   *  the harness's to say, no cut's abort. */
+  writeUpStepAborts?: boolean;
   /** The cut tool's own outcome (`hangToolCall`) rides the interrupted
    *  execution's tail itself — before the next execution starts, in the
    *  bridge's `earlier` mode — instead of landing after that start
@@ -553,6 +558,7 @@ class ScriptedServe {
   private readonly lateTailAfterNextStart: boolean;
   private readonly interruptAnswersAfterTail: boolean;
   private readonly cutLandsOnNextStep: boolean;
+  private readonly writeUpStepAborts: boolean;
   /** The execution has moved on to the step the interrupt will cut (`cutLandsOnNextStep`). */
   private nextStepHanging = false;
   /** The 0-based turn the run's first play hung in: the play the cut stopped resumes at the turn after it. */
@@ -675,6 +681,7 @@ class ScriptedServe {
     this.lateTailAfterNextStart = options.lateTailAfterNextStart === true;
     this.interruptAnswersAfterTail = options.interruptAnswersAfterTail === true;
     this.cutLandsOnNextStep = options.cutLandsOnNextStep === true;
+    this.writeUpStepAborts = options.writeUpStepAborts === true;
     this.owedEndNeverSerialized = options.owedEndNeverSerialized === true;
     this.hangAtAsk = options.hangAtAsk;
     this.hardStopBeforeCutAnswer = options.hardStopBeforeCutAnswer === true;
@@ -1531,6 +1538,24 @@ class ScriptedServe {
     if (this.script.unknownEventKind) this.emitEvent(this.script.unknownEventKind, { sessionID: this.sessionID });
     const from = this.resumeTurn;
     this.resumeTurn = 0;
+    // The write-up's own step aborting (`writeUpStepAborts`): the play the cut
+    // stopped is continued by the write-up's, whose first step fails `aborted`
+    // and whose execution then fails on the provider.
+    if (this.writeUpStepAborts && this.cutPlay !== undefined && play === this.cutPlay + 1) {
+      const assistantMessageID = this.stepId(from);
+      this.recordModelCall();
+      this.emitEvent("session.step.started", { sessionID: this.sessionID, assistantMessageID, agent: "switchboard" });
+      this.emitEvent("session.step.failed", {
+        sessionID: this.sessionID,
+        assistantMessageID,
+        error: { type: "aborted", message: "Step interrupted" },
+        rawFinish: "tool_calls",
+        cost: 0,
+        tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+      });
+      this.failExecution("provider.error", FAILED_MODEL_CALL_ERROR);
+      return;
+    }
     for (let t = from; t < this.script.turns.length && !this.interrupted; t++) {
       // A hard stop before this model call (`hardStopBeforeModelCall`): request
       // it, then wait for the loop to see it and interrupt the session (the

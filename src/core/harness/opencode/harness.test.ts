@@ -29,6 +29,7 @@ import {
   MODEL_CALL_IN_FLIGHT,
   timeBudgetAnswer,
   toolCutNote,
+  unlabelledAnswer,
   windDownFailureNote,
   wrapUpNeverPostedNote,
 } from "../windDown.js";
@@ -1391,6 +1392,51 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     // The tool completed before the interrupt landed: its own success, unmarked; the model call was what the cut met.
     expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:false"]);
     expect(callsInFlight(o.events, "completed")).toEqual([]);
+    await session.end();
+  });
+
+  it("a tool that completes on its own while the loop-end interrupt is in flight, whose execution then fails on the provider before the answer lands: the failure is the wind-down's note, the write-up was never posted, and the unlabelled answer still carries the failure — the wrap_up note saying the execution failed, not finished", async () => {
+    const o = openRun(
+      { hangToolCall: 1, hungToolSettlesDuringInterrupt: true },
+      {
+        turns: [
+          {
+            content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+            stopReason: "tool_use",
+          },
+          { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+        ],
+        failModelCall: 2,
+      },
+    );
+    const session = await o.opened;
+    expect(session.answer).toBe(unlabelledAnswer("", FAILED_MODEL_CALL_ERROR));
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary),
+    ).toEqual([windDownFailureNote(FAILED_MODEL_CALL_ERROR)]);
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "wrap_up")
+        .map((n) => n.summary),
+    ).toContain(wrapUpNeverPostedNote("time", "run", "failed"));
+    expect(o.container.requests.filter((q) => q.method === "POST" && /\/prompt$/.test(q.path))).toHaveLength(1);
+    await session.end();
+  });
+
+  it("the write-up's own step failing `aborted` after the cut landed is the harness's to say: an `an OpenCode step failed` note, never swallowed as the cut's — the cut steps close at the landing — and the write-up's execution failing on the provider closes the run by the wind-down's labelled answer", async () => {
+    const o = openRun({ hangToolCall: 1, writeUpStepAborts: true }, sleepThenNever);
+    const session = await o.opened;
+    expect(session.answer).toBe(timeBudgetAnswer("", 10, FAILED_MODEL_CALL_ERROR));
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "harness_error")
+        .map((n) => n.summary),
+    ).toEqual(["an OpenCode step failed: Step interrupted", windDownFailureNote(FAILED_MODEL_CALL_ERROR)]);
+    expect(notes(o.events).filter((n) => n.kind === "wrap_up")).toEqual([]);
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:true"]);
     await session.end();
   });
 
