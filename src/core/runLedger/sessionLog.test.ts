@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../chatMessage.js";
 import { utf8ByteLength } from "../runRecord.js";
 import {
+  actorOfStoredRow,
   attachmentRefsOf,
   DEFAULT_SESSION_LOG_MAX_BYTES,
   droppedToolResultRow,
@@ -260,5 +261,23 @@ describe("attachmentRefsOf — the attachments a stored row references", () => {
 describe("the default byte policy", () => {
   it("is 200 MiB — tens of megabytes is a heavy coding session, so a session hits it only when it outgrows what any window could hold", () => {
     expect(DEFAULT_SESSION_LOG_MAX_BYTES).toBe(200 * 1024 * 1024);
+  });
+});
+
+// docs/reference/specs/session-log.md item 12: authored session rows (record 0057).
+describe("actorOfStoredRow — the author's id, absent for bot turns and old rows", () => {
+  it("a stored row with an actor field returns that actor id", () => {
+    const row = JSON.stringify({ role: "user", part: { type: "text", text: "hello" }, actor: "slack:UALICE" });
+    expect(actorOfStoredRow(row)).toBe("slack:UALICE");
+  });
+
+  it("a stored row without an actor field — an old row from before this unit — reads actor as absent (undefined)", () => {
+    const row = stored("user", { type: "text", text: "hello" }); // no actor field
+    expect(actorOfStoredRow(row)).toBeUndefined();
+  });
+
+  it("a compaction row and an unreadable row have no actor", () => {
+    expect(actorOfStoredRow(JSON.stringify({ compaction: { summary: "s" } }))).toBeUndefined();
+    expect(actorOfStoredRow("{")).toBeUndefined();
   });
 });

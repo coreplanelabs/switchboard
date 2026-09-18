@@ -107,6 +107,10 @@ export interface OpenRunRequest {
      *  at the log's tail. Named rows that do not end at the tail (the log moved
      *  under the seed) are written whole as new rows, with one warning. */
     log?: { from: number; turns: number };
+    /** Platform-namespaced author ids, parallel to `messages`, for the rows
+     *  the seed writes (absent entries and undefined mean no actor; record
+     *  0057). Machine turns and reused log rows carry none. */
+    actors?: readonly (string | undefined)[];
   };
   /** A stop another generation requested (`/runs/stop` on a different
    *  container), relayed by the heartbeat — once per mode. */
@@ -770,7 +774,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
      *  to judge the transcript against (`transcriptCompleteness`) — a row with
      *  no record at all was killed before its conversation was stored and
      *  closes `interrupted`. */
-    async seed(messages: ChatMessage[], budgetMs: number): Promise<void> {
+    async seed(messages: ChatMessage[], budgetMs: number, actors?: readonly (string | undefined)[]): Promise<void> {
       // Every row at its log index (`rowIndex`). The messages the seed reused
       // from the log (item 9) — the rows between `seedFrom` and the range's
       // start — are there already and are skipped.
@@ -778,9 +782,11 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         this.sessionRow && this.sessionRow.range !== "broken"
           ? this.sessionRow.range.from - this.sessionRow.seedFrom
           : 0;
-      const turns: TranscriptTurn[] = messages
-        .slice(reused)
-        .map((message, i) => ({ idx: this.rowIndex(reused + i), message }));
+      const turns: TranscriptTurn[] = messages.slice(reused).map((message, i) => ({
+        idx: this.rowIndex(reused + i),
+        message,
+        ...(actors?.[reused + i] !== undefined ? { actor: actors[reused + i] } : {}),
+      }));
       try {
         const seeded = await ledger.seed(this.runId, gen, turns, this.sessionRow?.key);
         if (!seeded.ok) {
@@ -1016,7 +1022,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // binding, item 54); the reserved run merges it into its own, so the
         // first patch after the claim carries it on instead of writing over it.
         if (req.state) reserved.adoptState(req.state);
-        if (req.seed) await reserved.seed(req.seed.messages, req.seed.budgetMs);
+        if (req.seed) await reserved.seed(req.seed.messages, req.seed.budgetMs, req.seed.actors);
         return reserved;
       }
       const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
@@ -1030,7 +1036,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         lastSeq: 0,
         ...(claimed.session ? { session: claimed.session } : {}),
       });
-      if (req.seed) await run.seed(req.seed.messages, req.seed.budgetMs);
+      if (req.seed) await run.seed(req.seed.messages, req.seed.budgetMs, req.seed.actors);
       run.startHeartbeat();
       live.add(run);
       return run;

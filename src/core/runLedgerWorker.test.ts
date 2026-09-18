@@ -206,6 +206,29 @@ describe("WorkerRunLedger", () => {
     expect(w.calls[8].path).toBe("/runs/transcript/write");
   });
 
+  // session-log.md item 12: the actor a turn carries rides the stored row's JSON.
+  it("a seed turn's actor rides the stored row's JSON; a turn without one stores none", async () => {
+    const w = stubWorker(() => ({ status: 200, data: { ok: true } }));
+    const key = "slack:C1:1.0:review";
+    const go: ChatMessage = { role: "user", content: [{ type: "text", text: "go" }] };
+    const ok: ChatMessage = { role: "assistant", content: [{ type: "text", text: "ok" }] };
+    expect(
+      await w.ledger.seed(
+        "r1",
+        "g1",
+        [
+          { idx: 3, message: go, actor: "slack:UALICE" },
+          { idx: 4, message: ok },
+        ],
+        key,
+      ),
+    ).toEqual({ ok: true });
+    const write = w.calls.find((c) => c.path === "/runs/session/write")!;
+    const rows = write.body.rows as { idx: number; json: string }[];
+    expect(JSON.parse(rows[0].json)).toMatchObject({ role: "user", actor: "slack:UALICE" });
+    expect("actor" in JSON.parse(rows[1].json)).toBe(false);
+  });
+
   // session-log.md item 10: the routes `recall` and `notes` read and write through.
   it("the search and notepad routes: search posts the key, query and limit and answers the hits and gaps as sent (nothing when the Worker sends none); the notepad read answers the text and time or null; the notepad write is fenced like a row write", async () => {
     const hits = [{ idx: 4, part: 0, role: "user", kind: "text", text: "fix the lockfile" }];

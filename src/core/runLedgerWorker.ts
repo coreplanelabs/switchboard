@@ -196,7 +196,12 @@ export class WorkerRunLedger implements RunLedger {
     const rows: TranscriptRow[] = [];
     const attachments: TranscriptAttachment[] = [];
     for (const t of turns) {
-      const out = turnRows(t.idx, "message" in t ? t.message : { compaction: t.compaction });
+      const out = turnRows(
+        t.idx,
+        "message" in t ? t.message : { compaction: t.compaction },
+        {},
+        "message" in t ? t.actor : undefined,
+      );
       rows.push(...out.rows);
       attachments.push(...out.attachments);
     }

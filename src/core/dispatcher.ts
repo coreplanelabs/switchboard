@@ -51,7 +51,7 @@ import {
   authorizeRepo,
   type AuthorizeDeps,
 } from "./dispatch/authorize.js";
-import { buildMessages, textTurnsOf, type TextTurn } from "./dispatch/messages.js";
+import { buildConversation, textTurnsOf, type TextTurn } from "./dispatch/messages.js";
 import {
   attachmentsLine,
   copyStaged,
@@ -904,6 +904,7 @@ export async function dispatch(
               ...(msg.images ? { images: msg.images } : {}),
               ...(msg.documents ? { documents: msg.documents } : {}),
               ...(references.blocks.length > 0 ? { references: references.blocks } : {}),
+              actor: msg.userId,
             },
           })
         : undefined,
@@ -914,9 +915,14 @@ export async function dispatch(
     const seed: RunSeed = opts.seed ? "parent" : session ? "session" : "channel";
     const seedTurns: TextTurn[] | undefined =
       opts.seed ?? (session ? textTurnsOf(session.messages.slice(0, -1)) : undefined);
-    const built = session
-      ? session.messages
-      : buildMessages(opts.seed ?? history, requestText, msg.images, msg.documents, references.blocks);
+    // The channel (and parent) seed keeps its authors too (session-log item 12):
+    // a thread's first run stores each history line's author and the request row
+    // the requester's, exactly as the session path does through SessionSeed.actors.
+    const channelBuilt = session
+      ? undefined
+      : buildConversation(opts.seed ?? history, requestText, msg.images, msg.documents, references.blocks, msg.userId);
+    const built = session ? session.messages : channelBuilt!.messages;
+    const seedActors = session ? session.actors : channelBuilt?.actors;
     const messages = resume
       ? resume.plan.messages
       : contractBlock !== undefined && agent.name !== "review"
@@ -1416,6 +1422,7 @@ export async function dispatch(
       // A promotion gone untracked marks the card as the reserve-time path
       // above does — the label, not the bot log alone, says the run's row is gone.
       markUntracked: () => shell.setLabel(`${shell.label} · untracked by the ledger`),
+      ...(seedActors !== undefined ? { seedActors } : {}),
     });
     // The run's reach into its own session log (session-log item 10): the
     // `recall` and `notes` tools over the row's place in the log, once the

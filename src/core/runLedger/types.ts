@@ -250,7 +250,10 @@ export interface CompactionEntry {
 
 /** The rows a step write carries, each at its log index: the previous step's
  *  results and this step's assistant turn as messages, and pi's compaction
- *  entry as a row of its own between them. */
-export type TranscriptTurn = { idx: number; message: ChatMessage } | { idx: number; compaction: CompactionEntry };
+ *  entry as a row of its own between them. The optional `actor` on a message
+ *  turn is the platform-namespaced id of the person who authored it (record
+ *  0057); absent for machine turns, compaction rows and pre-0057 rows. */
+export type TranscriptTurn =
+  { idx: number; message: ChatMessage; actor?: string } | { idx: number; compaction: CompactionEntry };
 
 export type AppendableEvent = RunEvent & { seq: number };

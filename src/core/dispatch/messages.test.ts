@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { HistoryItem } from "../types.js";
-import { buildMessages, contextMessageTexts, turnContent } from "./messages.js";
+import { buildConversation, buildMessages, contextMessageTexts, turnContent } from "./messages.js";
 
 // Feature: docs/reference/specs/slack-channel.md (attachment assembly),
 // docs/reference/specs/run-visibility.md (the `context` events) — the
@@ -38,6 +38,55 @@ describe("turnContent (attachment assembly)", () => {
 
   it("falls back to a placeholder when a turn has no content at all", () => {
     expect(turnContent("")).toEqual([{ type: "text", text: "(empty message)" }]);
+  });
+});
+
+// docs/reference/specs/session-log.md item 12 (record 0057): a first run's
+// channel seed carries each turn's author beside the messages, so its stored
+// rows are authored like a session seed's.
+describe("buildConversation — the channel seed's authors", () => {
+  it("the actors array parallels the messages: each user turn its author, the request the requester, machine turns none", () => {
+    const history: HistoryItem[] = [
+      { role: "user", text: "first ask", user: "slack:UALICE" },
+      { role: "assistant", text: "reply" },
+      { role: "user", text: "a second voice", user: "slack:UBOB" },
+      { role: "assistant", text: "another reply" },
+    ];
+    const built = buildConversation(history, "now this", undefined, undefined, undefined, "slack:UADMIN");
+    expect(built.messages).toEqual(buildMessages(history, "now this"));
+    expect(built.actors).toEqual(["slack:UALICE", undefined, "slack:UBOB", undefined, "slack:UADMIN"]);
+  });
+
+  it("merged consecutive user turns keep their author only when it is one person's — the requester's own last line merges with the request and stays theirs; mixed authors store none", () => {
+    const history: HistoryItem[] = [
+      { role: "user", text: "alice", user: "slack:UALICE" },
+      { role: "user", text: "bob", user: "slack:UBOB" },
+      { role: "assistant", text: "reply" },
+      { role: "user", text: "admin's own line", user: "slack:UADMIN" },
+    ];
+    const built = buildConversation(history, "the request", undefined, undefined, undefined, "slack:UADMIN");
+    expect(built.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(built.actors).toEqual([undefined, undefined, "slack:UADMIN"]);
+  });
+
+  it("a leading assistant turn is dropped and the actors stay aligned; a conversation with no author at all carries no actors array", () => {
+    const history: HistoryItem[] = [
+      { role: "assistant", text: "stray" },
+      { role: "user", text: "authored", user: "slack:UALICE" },
+      { role: "assistant", text: "reply" },
+    ];
+    const built = buildConversation(history, "go");
+    expect(built.messages.map((m) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(built.actors).toEqual(["slack:UALICE", undefined, undefined]);
+    const unauthored = buildConversation([{ role: "user", text: "plain" }], "go");
+    expect(unauthored.actors).toBeUndefined();
+  });
+
+  it("buildMessages is buildConversation's messages — the provider turns are identical with or without authors", () => {
+    const history: HistoryItem[] = [{ role: "user", text: "hi", user: "slack:UALICE" }];
+    expect(buildConversation(history, "go", undefined, undefined, undefined, "slack:UADMIN").messages).toEqual(
+      buildMessages(history, "go"),
+    );
   });
 });
 

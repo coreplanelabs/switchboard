@@ -23,10 +23,13 @@ import {
 // ~4.2 MB on the wire.
 
 /** The stored form of one part: the turn's role rides on every row so a turn
- *  is reconstructible from its rows alone. */
+ *  is reconstructible from its rows alone. The actor is the platform-namespaced
+ *  id of the person who authored the turn (e.g. `slack:U…`); absent for
+ *  machine turns and rows written before record 0057. */
 export interface StoredPart {
   role: ChatMessage["role"];
   part: ContentPart | (ContentPart & { dataRef: string });
+  actor?: string;
 }
 
 /** The stored form of a compaction row: no role, no part — the entry alone. */
@@ -46,11 +49,14 @@ const isCompaction = (v: ChatMessage | StoredCompaction): v is StoredCompaction 
 
 /** One turn → its rows (and any externalized attachments). Refuses a part the
  *  row budget cannot hold: a transcript is never truncated. A compaction entry
- *  is one row at its index, part 0. */
+ *  is one row at its index, part 0. The optional `actor` is the
+ *  platform-namespaced id of the person who authored the turn (absent for
+ *  machine turns, compaction rows and rows written before record 0057). */
 export function turnRows(
   idx: number,
   message: ChatMessage | StoredCompaction,
   opts: { partBytes?: number; attachmentRefBytes?: number } = {},
+  actor?: string,
 ): { rows: TranscriptRow[]; attachments: TranscriptAttachment[] } {
   const partBytes = opts.partBytes ?? TRANSCRIPT_PART_BYTES;
   const refBytes = opts.attachmentRefBytes ?? ATTACHMENT_REF_BYTES;
@@ -73,7 +79,11 @@ export function turnRows(
       attachments.push({ ref, mediaType: part.mediaType, data: part.data });
       stored = { ...(part as ContentPart), data: "", dataRef: ref } as StoredPart["part"];
     }
-    const json = JSON.stringify({ role: message.role, part: stored } satisfies StoredPart);
+    const json = JSON.stringify({
+      role: message.role,
+      part: stored,
+      ...(actor !== undefined ? { actor } : {}),
+    } satisfies StoredPart);
     const bytes = utf8ByteLength(json);
     if (bytes > partBytes) {
       throw new Error(`transcript: part ${i} of turn ${idx} is ${bytes} bytes, over the ${partBytes} row budget`);

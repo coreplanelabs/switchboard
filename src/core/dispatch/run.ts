@@ -253,6 +253,9 @@ export interface ClaimContext {
    *  the log the first messages of `messages` are, so the write-through
    *  appends only what follows them. */
   seedLog?: { from: number; turns: number };
+  /** The author of each seed message by index (record 0057): rides the open
+   *  request so the write-through stores the actor on the rows it writes. */
+  seedActors?: readonly (string | undefined)[];
 }
 
 /**
@@ -290,6 +293,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     route,
     seedLog,
     markUntracked,
+    seedActors,
   } = ctx;
   const { resident, binding } = selection;
   let ledgerRun = ctx.ledgerRun;
@@ -353,7 +357,12 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         // The seed carries the EFFECTIVE budget, so a resume runs on what
         // this run was admitted with, not on the preset's own number — and,
         // for a seed read from the log, the rows it reuses (session-log item 9).
-        seed: { messages, budgetMs: profile.minutes * 60_000, ...(seedLog ? { log: seedLog } : {}) },
+        seed: {
+          messages,
+          budgetMs: profile.minutes * 60_000,
+          ...(seedLog ? { log: seedLog } : {}),
+          ...(seedActors !== undefined ? { actors: seedActors } : {}),
+        },
         // A stop asked of another container (`/runs/stop` there) reaches this
         // run through its heartbeat and is honored like a local one; a fence
         // (another generation took the run) is a hard stop — nothing more may
