@@ -33,6 +33,7 @@ import {
   ROUTE_TIMEOUT_MS,
   verifierPrompt,
   type RouteDecision,
+  type RouteInput,
   type RouteModel,
   type VerifierAnswer,
 } from "../core/dispatch/route.js";
@@ -174,12 +175,18 @@ export interface ReplayResult extends ReplayRequest {
  *  text, `concurrency` at a time, results in item order, each decision timed.
  *  The decision function is the same seam the dispatcher's stage calls
  *  (`route` bound to a model); the harness never dispatches anything. */
+/** The facts a fixture puts on the router's user turn beside its text, as the
+ *  route stage puts them there in production: the thread's repository (a
+ *  command fixture's `threadRepo`) and the count of conversations the text
+ *  links that the bot could quote (an imperative fixture's `references`). */
+export type RouteFacts = Pick<RouteInput, "threadRepo" | "references">;
+
 async function decideEach<T extends { text: string }, R>(
   items: readonly T[],
-  decide: (text: string, threadRepo?: string) => Promise<RouteDecision>,
+  decide: (text: string, facts?: RouteFacts) => Promise<RouteDecision>,
   opts: { concurrency?: number; now: () => number },
   toResult: (item: T, decision: RouteDecision, ms: number) => R,
-  repoOf?: (item: T) => string | undefined,
+  factsOf?: (item: T) => RouteFacts | undefined,
 ): Promise<R[]> {
   const concurrency = Math.max(1, opts.concurrency ?? 4);
   const { now } = opts;
@@ -191,7 +198,7 @@ async function decideEach<T extends { text: string }, R>(
       if (i >= items.length) return;
       const item = items[i];
       const started = now();
-      const decision = await decide(item.text, repoOf?.(item));
+      const decision = await decide(item.text, factsOf?.(item));
       results[i] = toResult(item, decision, Math.max(0, now() - started));
     }
   };
@@ -537,17 +544,25 @@ export interface ImperativeResult extends RouteImperativeFixture {
  *  and the same prompt as the singles and the compounds. */
 export async function replayImperative(
   examples: readonly RouteImperativeFixture[],
-  decide: (text: string) => Promise<RouteDecision>,
+  decide: (text: string, facts?: RouteFacts) => Promise<RouteDecision>,
   opts: { concurrency?: number; now: () => number },
 ): Promise<ImperativeResult[]> {
-  return decideEach(examples, decide, opts, (example, decision, ms) => ({
-    ...example,
-    routed: decision.preset,
-    reason: decision.reason,
-    hit: decision.preset !== undefined && example.presets.includes(decision.preset),
-    toWrite: decision.preset !== undefined && identityOf(decision.preset) === "write",
-    ms,
-  }));
+  return decideEach(
+    examples,
+    decide,
+    opts,
+    (example, decision, ms) => ({
+      ...example,
+      routed: decision.preset,
+      reason: decision.reason,
+      hit: decision.preset !== undefined && example.presets.includes(decision.preset),
+      toWrite: decision.preset !== undefined && identityOf(decision.preset) === "write",
+      ms,
+    }),
+    // The linked conversations reach the router as the count the route stage
+    // puts on the user turn — never the quote, which no stage hands the router.
+    (example) => (example.references === undefined ? undefined : { references: example.references }),
+  );
 }
 
 /** The imperative score: the imperatives that reached the write preset, the
@@ -660,7 +675,7 @@ function stableJson(value: unknown): string {
  */
 export async function replayCommands(
   examples: readonly RouteCommandExample[],
-  decide: (text: string, threadRepo?: string) => Promise<RouteDecision>,
+  decide: (text: string, facts?: RouteFacts) => Promise<RouteDecision>,
   opts: { concurrency?: number; now: () => number },
   commands: readonly CommandDef<unknown>[],
 ): Promise<CommandReplayResult[]> {
@@ -692,7 +707,8 @@ export async function replayCommands(
         ms,
       };
     },
-    (example) => (example.kind === "decoy" ? undefined : example.threadRepo),
+    (example) =>
+      example.kind === "decoy" || example.threadRepo === undefined ? undefined : { threadRepo: example.threadRepo },
   );
 }
 

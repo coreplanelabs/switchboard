@@ -32,6 +32,7 @@ import {
   compoundExamples,
   compoundScore,
   confusionTable,
+  type RouteFacts,
   historyCompounds,
   imperativeScore,
   labelledRequests,
@@ -648,25 +649,59 @@ describe("the checked-in imperative set (src/load/routeImperativeFixtures.ts)", 
   const names = table.map((p) => p.name);
   const writers = table.filter((p) => p.identity === "write").map((p) => p.name);
 
-  it("is twenty terse imperatives expecting a write preset, five read-only decoys expecting research or general, six review-shaped asks expecting review; every preset a row of the table, every id unique", () => {
+  it("is twenty-five imperatives expecting a write preset — twenty terse, three spec-shaped on a named repository, two whose task is in a linked conversation — eight read-only decoys, six review-shaped asks expecting review; every preset a row of the table, every id unique", () => {
     const imperatives = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "imperative");
     const decoys = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "decoy");
     const reviews = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "review");
-    expect(imperatives).toHaveLength(20);
-    expect(decoys).toHaveLength(5);
+    expect(imperatives).toHaveLength(25);
+    expect(decoys).toHaveLength(8);
     expect(reviews).toHaveLength(6);
     for (const f of imperatives) expect(f.presets, f.id).toEqual(writers);
-    for (const f of decoys) expect([...f.presets].sort(), f.id).toEqual(["general", "research"]);
+    // A decoy expects read-only presets only — a question is answered, never
+    // acted on — and the five about a failure expect exactly research or general.
+    const readOnly = table.filter((p) => p.identity !== "write" && p.name !== "review").map((p) => p.name);
+    for (const f of decoys) for (const preset of f.presets) expect(readOnly, `${f.id}: ${preset}`).toContain(preset);
+    for (const f of decoys.slice(0, 5)) expect([...f.presets].sort(), f.id).toEqual(["general", "research"]);
     for (const f of reviews) expect(f.presets, f.id).toEqual(["review"]);
     for (const f of ROUTE_IMPERATIVE_FIXTURES) {
-      // Terse: the point of the set is the ask with no detail to route on.
       expect(f.text.trim().length, f.id).toBeGreaterThan(5);
-      expect(f.text.trim().length, f.id).toBeLessThanOrEqual(80);
       for (const preset of f.presets) expect(names, `${f.id}: ${preset}`).toContain(preset);
+      // `references` says how many conversations the text links: present exactly
+      // when the text carries a permalink, and then the count of them.
+      const links = (f.text.match(/https:\/\/acme\.slack\.com\//g) ?? []).length;
+      expect(f.references, f.id).toBe(links === 0 ? undefined : links);
     }
+    // Terse: twenty imperatives with no detail to route on, one short line each.
+    const terse = imperatives.filter((f) => f.references === undefined && f.text.length <= 80);
+    expect(terse.map((f) => f.id)).toEqual(Array.from({ length: 20 }, (_, i) => `i${String(i + 1).padStart(2, "0")}`));
+    // Spec-shaped: longer, on a named repository, saying how something should
+    // behave — and naming no "fix" or "implement".
+    const spec = imperatives.filter((f) => f.references === undefined && f.text.length > 80);
+    expect(spec.map((f) => f.id)).toEqual(["s01", "s02", "s03"]);
+    for (const f of spec) {
+      expect(f.text, f.id).toMatch(/\bacme\b/);
+      expect(f.text, f.id).toMatch(/\bshould\b/);
+      expect(f.text, f.id).not.toMatch(/\b(fix|implement)\b/i);
+    }
+    // Referenced: the order's verb in the sentence, the task in the linked thread.
+    const referenced = imperatives.filter((f) => f.references !== undefined);
+    expect(referenced.map((f) => f.id)).toEqual(["t01", "t02"]);
+    // The read-only decoy about a linked thread: the link alone never makes an order.
+    expect(decoys.filter((f) => f.references !== undefined).map((f) => f.id)).toEqual(["d08"]);
     expect(new Set(ROUTE_IMPERATIVE_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_IMPERATIVE_FIXTURES.length);
     // The one real misroute the replay at the flip found is on the set, verbatim.
     expect(imperatives.map((f) => f.text)).toContain("looks like the ci failed, fix it");
+    // The spec-shaped production ask that routed to explore — "do this for me",
+    // "should show", "send me screenshots", no verb of change — verbatim except
+    // the repository; and the production ask whose task was in the linked thread,
+    // routed to general — verbatim except the repository and the permalink.
+    expect(spec.find((f) => f.id === "s01")!.text).toContain("I need you to do this for me and send me screenshots");
+    expect(spec.find((f) => f.id === "s01")!.text).toContain(
+      "*On the acme repo:* the topology screen should show connect github single button if there's nothing connected (currently shows the install script)",
+    );
+    expect(referenced.find((f) => f.id === "t01")!.text).toBe(
+      "in acme ship https://acme.slack.com/archives/C1ABCDEF/p1700000000000000 - this, (read the whole thread)",
+    );
     // The one real read-to-write misroute the replay after the ship door found — a
     // pull request named with a note about the request's own history — is on the
     // set as a review-shaped ask, on a neutral repository.
@@ -729,8 +764,11 @@ describe("the imperative set through route() over a scripted model", () => {
   const byText = new Map(ROUTE_IMPERATIVE_FIXTURES.map((f) => [f.text, f]));
   const decideWith =
     (model: RouteModel) =>
-    (text: string): Promise<RouteDecision> =>
-      route({ text, recentDirectives: {}, presets, allowed, fallback: "general", compound: { maxParts: 3 } }, model);
+    (text: string, facts?: RouteFacts): Promise<RouteDecision> =>
+      route(
+        { text, recentDirectives: {}, presets, allowed, fallback: "general", compound: { maxParts: 3 }, ...facts },
+        model,
+      );
   const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1];
 
   it("a router that reads the rule: every imperative to ship, every look-alike read-only, every review-shaped ask to review — both rows pass", async () => {
@@ -739,19 +777,19 @@ describe("the imperative set through route() over a scripted model", () => {
     const results = await replayImperative(ROUTE_IMPERATIVE_FIXTURES, decideWith(knowing), { now: () => 0 });
     const score = imperativeScore(results);
     expect(score).toMatchObject({
-      imperatives: 20,
-      imperativesHit: 20,
+      imperatives: 25,
+      imperativesHit: 25,
       hitRate: 1,
-      lookalikes: 11,
+      lookalikes: 14,
       lookalikesToWrite: 0,
-      decoys: 5,
-      decoysHit: 5,
+      decoys: 8,
+      decoysHit: 8,
       reviews: 6,
       reviewsHit: 6,
       misses: [],
     });
     expect(renderImperative(score, { writePreset: "ship" })).toEqual([
-      "imperatives: 20/20 to ship (100%); look-alikes to a write preset 0/11 (decoys 5/5 read-only as expected, review-shaped 6/6 to review)",
+      "imperatives: 25/25 to ship (100%); look-alikes to a write preset 0/14 (decoys 8/8 read-only as expected, review-shaped 6/6 to review)",
       "",
       "misses: none",
     ]);
@@ -766,17 +804,32 @@ describe("the imperative set through route() over a scripted model", () => {
       writePreset: "coding",
     }).filter((c) => /imperative|look-alike/.test(c.name));
     expect(rows.map((c) => [c.pass, c.actual, c.limit])).toEqual([
-      [true, "20/20 (100%)", "≥ 90%"],
-      [true, "0/11", "0"],
+      [true, "25/25 (100%)", "≥ 90%"],
+      [true, "0/14", "0"],
     ]);
   });
 
-  it("a keyword router — fix, ci, tests, build mean ship — gets every imperative but sends the decoys to ship too: the look-alike row is what catches it", async () => {
+  it("a fixture's linked conversations reach the router's user turn as the count the route stage puts there; a fixture linking none puts no line", async () => {
+    const seen = new Map<string, string>();
+    const watching: RouteModel = async (prompt) => {
+      seen.set(byText.get(textOf(prompt))!.id, prompt.user);
+      return JSON.stringify({ preset: "general", reason: "watching" });
+    };
+    const byId = new Map(ROUTE_IMPERATIVE_FIXTURES.map((f) => [f.id, f]));
+    await replayImperative([byId.get("t01")!, byId.get("d08")!, byId.get("i01")!], decideWith(watching), {
+      now: () => 0,
+    });
+    expect(seen.get("t01")).toContain("The request links 1 conversation this bot can read");
+    expect(seen.get("d08")).toContain("The request links 1 conversation this bot can read");
+    expect(seen.get("i01")).not.toContain("conversation this bot can read");
+  });
+
+  it("a keyword router — fix, ci, tests, build, should, ship mean ship — gets every imperative but sends the decoys to ship too: the look-alike row is what catches it", async () => {
     const keyword: RouteModel = async (prompt) => {
       const text = textOf(prompt);
       const preset = /\b(pr|pull request)\b/i.test(text)
         ? "review"
-        : /fix|ci\b|tests?|build|add|rename|bump|make|green|red|lint|typecheck|docs|version|retries|delete|update/i.test(
+        : /fix|ci\b|tests?|build|add|rename|bump|make|green|red|lint|typecheck|docs|version|retries|delete|update|should|\bship\b|do (this|the above)|take care/i.test(
               text,
             )
           ? "ship"
@@ -799,7 +852,7 @@ describe("the imperative set through route() over a scripted model", () => {
       writePreset: "coding",
     }).filter((c) => /imperative|look-alike/.test(c.name));
     expect(rows.map((c) => c.pass)).toEqual([true, false]);
-    expect(rows[1].actual).toBe(`${score.lookalikesToWrite}/11`);
+    expect(rows[1].actual).toBe(`${score.lookalikesToWrite}/14`);
     expect(renderImperative(score).slice(2)[0]).toBe(`misses (${score.misses.length}):`);
   });
 
@@ -1075,7 +1128,7 @@ describe("the checked-in command set through route() over a scripted model", () 
   const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1];
   const decideWith =
     (model: RouteModel) =>
-    (text: string, threadRepo?: string): Promise<RouteDecision> =>
+    (text: string, facts?: RouteFacts): Promise<RouteDecision> =>
       route(
         {
           text,
@@ -1084,7 +1137,7 @@ describe("the checked-in command set through route() over a scripted model", () 
           allowed,
           fallback: "general",
           commands: menu,
-          ...(threadRepo ? { threadRepo } : {}),
+          ...facts,
         },
         model,
       );
@@ -1276,7 +1329,7 @@ describe("the verifier on the command replay — one more call on every write-cl
       if (bind === undefined) return JSON.stringify({ preset: "general", reason: "a judgement, not a command" });
       return { tool: mcpToolName(bind.command), input: namedOf(bind.command, bind.input) };
     };
-    return (text: string, threadRepo?: string): Promise<RouteDecision> =>
+    return (text: string, facts?: RouteFacts): Promise<RouteDecision> =>
       route(
         {
           text,
@@ -1285,7 +1338,7 @@ describe("the verifier on the command replay — one more call on every write-cl
           allowed,
           fallback: "general",
           commands: menu,
-          ...(threadRepo ? { threadRepo } : {}),
+          ...facts,
         },
         model,
       );
