@@ -85,6 +85,7 @@ import {
   HARD_STOP_MESSAGE,
   hardStopNote,
   MODEL_CALL_IN_FLIGHT,
+  type NeverPostedEnd,
   SOFT_STOP_INSTRUCTION,
   softStopAnswer,
   softStopNote,
@@ -96,6 +97,7 @@ import {
   turnGuardInstruction,
   turnGuardNote,
   turnGuardPace,
+  unlabelledAnswer,
   windDownFailureNote,
   wrapUpInstruction,
   wrapUpNeverPostedNote,
@@ -2870,15 +2872,26 @@ export async function driveOpenCode(
   // turn is the answer.
   await bridge.flush();
   const text = bridge.answer() ?? "";
-  // A write-up the wind-down decided and never posted (the loop-end interrupt
-  // found — or will find — the session idle, and nothing steered it since):
-  // the model never saw the instruction, so the answer is its own, unlabelled,
-  // and the record says why — the same rule as pi's undelivered wrap-up. Read
-  // off the posts made, not the interrupt's answer: the loop may settle on the
-  // execution's own end before that answer lands.
-  const neverPosted = writeUp !== undefined && !writeUpPosted;
-  if (writeUp !== undefined && neverPosted) note("wrap_up", wrapUpNeverPostedNote(writeUp.kind));
-  const answer = writeUpAnswer(neverPosted ? undefined : writeUp, text, run.agent.maxMinutes, writeUpFailed);
+  // A write-up the wind-down decided and never posted — the loop-end
+  // interrupt found (or will find) the session idle and nothing steered it
+  // since, or the interrupt was never answered and the finale bound ended the
+  // wait: the model never saw the instruction, so the answer is its own,
+  // unlabelled, and the record says why — the same rule as pi's undelivered
+  // wrap-up — and how the wait ended, read off the end the loop left on
+  // (`ended`, the finale) before the failure the wind-down's note holds
+  // (`writeUpFailed`, which the finale sets too): the execution finished, or
+  // failed on the provider in the round-trip, or the finale ended the wait —
+  // never an idle session or a provider failure claimed for a finale. The
+  // failure or the finale reaches the thread in the unlabelled answer too.
+  // Read off the posts made, not the interrupt's answer: the loop may settle
+  // on the execution's own end before that answer lands.
+  const neverPostedEnd: NeverPostedEnd =
+    ended === "finale" ? "finale" : writeUpFailed !== undefined ? "failed" : "finished";
+  if (writeUp !== undefined && !writeUpPosted) {
+    note("wrap_up", wrapUpNeverPostedNote(writeUp.kind, "run", neverPostedEnd));
+    writeUp = undefined;
+  }
+  const answer = writeUpAnswer(writeUp, text, run.agent.maxMinutes, writeUpFailed, neverPostedEnd);
   return { answer, remainingMs: remaining, hardStopped: false, ...handOver() };
 }
 
@@ -2893,9 +2906,13 @@ function writeUpAnswer(
   text: string,
   maxMinutes: number,
   writeUpFailed: string | undefined,
+  neverPostedEnd: NeverPostedEnd,
 ): string {
   if (writeUp?.kind === "time") return timeBudgetAnswer(text, maxMinutes, writeUpFailed);
   if (writeUp?.kind === "turns") return turnGuardAnswer(text, writeUp.pace, writeUpFailed);
   if (writeUp?.kind === "soft") return softStopAnswer(text, writeUpFailed);
-  return text || "_(no response)_";
+  // No label — the wind-down's instruction never reached the model — but what
+  // ended the wait is still said: a model call that failed under it, or the
+  // finale bound ending a wait on an interrupt never answered.
+  return unlabelledAnswer(text, writeUpFailed, neverPostedEnd === "finale" ? "finale" : "failed");
 }

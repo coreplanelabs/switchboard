@@ -202,21 +202,19 @@ export class WorkspaceReattachRefusedError extends Error {
  *  wait — so no request was made or none more will be: the resident would run
  *  an attach to its end for a run that is ending. Not a refusal: the caller
  *  ends the run on its budget instead of restarting it from its request.
- *  `leftMs` is the run's wall clock when it was decided. Thrown only where the
- *  lease has started (a relaunch's re-attach carries the run's clock); a
- *  dispatch-time resume, before the lease, never meets it. */
+ *  `leftMs` is the run's wall clock when it was decided and `note` the bound's
+ *  own sentence for it (`attachBoundWithinRun`'s, the one source — worded by
+ *  the bound that refused), which the relaunch's record carries on. Thrown
+ *  only where the lease has started (a relaunch's re-attach carries the run's
+ *  clock); a dispatch-time resume, before the lease, never meets it. */
 export class WorkspaceReattachLeaseSpentError extends Error {
-  readonly why: string;
   constructor(
     readonly recorded: WorkspaceBinding,
     readonly leftMs: number,
+    readonly note: string,
   ) {
-    const why =
-      `the run has ${Math.max(0, Math.round(leftMs / 1000))}s of its lease left, inside the ` +
-      `${Math.round(RUN_DEADLINE_RESERVE_MS / 1000)}s write-up reserve or under what an attach needs; no re-attach was opened`;
-    super(`the run's workspace on the ${recorded.backend} backend was not re-attached: ${why}`);
+    super(`the run's workspace on the ${recorded.backend} backend was not re-attached: ${note}`);
     this.name = "WorkspaceReattachLeaseSpentError";
-    this.why = why;
   }
 }
 
@@ -597,9 +595,8 @@ async function reattachWorkspace(
   const leaseSpent = (): WorkspaceReattachLeaseSpentError | undefined => {
     const left = ctx.remainingMs?.();
     if (left === undefined) return undefined;
-    return attachBoundWithinRun(left).kind === "exhausted"
-      ? new WorkspaceReattachLeaseSpentError(recorded, left)
-      : undefined;
+    const bound = attachBoundWithinRun(left);
+    return bound.kind === "exhausted" ? new WorkspaceReattachLeaseSpentError(recorded, left, bound.note) : undefined;
   };
   const spentAtEntry = leaseSpent();
   if (spentAtEntry) throw spentAtEntry;
@@ -662,11 +659,18 @@ async function reattachWorkspace(
     // The run's own stop ended the attach: the executor's typed `aborted` error
     // is that stop, never a re-attach refusal — which would close this run and
     // dispatch its request again. The lease's end under the attach's wake wait
-    // (`ResidentLeaseSpentError`: the re-attach was not opened because the run
-    // is inside its reserve) is the run's end on its budget, never a refusal
-    // either. Any other failure beside a pending stop is the refusal it is.
+    // is the run's end on its budget, never a refusal either — whether the
+    // executor said so itself (`ResidentLeaseSpentError`: the re-attach was not
+    // opened, the run inside its reserve or under the attach floor) or the
+    // attach failed some other way with the lease spent meanwhile: a wake
+    // budget struck out, a re-attach request cut short. The lease is read
+    // again here, as after the probe's wait, before any refusal. Any other
+    // failure beside a pending stop is the refusal it is.
     if (isRunStopError(err)) throw err;
-    if (err instanceof ResidentLeaseSpentError) throw new WorkspaceReattachLeaseSpentError(recorded, err.leftMs);
+    if (err instanceof ResidentLeaseSpentError)
+      throw new WorkspaceReattachLeaseSpentError(recorded, err.leftMs, err.note);
+    const spentWaking = leaseSpent();
+    if (spentWaking) throw spentWaking;
     throw refuse(err instanceof Error ? err.message : String(err));
   }
   // The tree the resident answered must be the run's: the same worktree, the

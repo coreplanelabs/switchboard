@@ -2188,7 +2188,7 @@ describe("ResidentExecutor waits for the wake (item 65: a container rollout is a
     expect((settled as ExecInfraError).reason).toBe("refused");
     expect((settled as ResidentLeaseSpentError).leftMs).toBe(30_000);
     expect((settled as Error).message).toBe(
-      "resident /exec: the run has 30s of wall clock left, inside the 60s write-up reserve or under the 30s an attach needs, so no attach was opened",
+      "resident /exec: the run has 30s of wall clock left, inside the 60s write-up reserve, so no attach was opened",
     );
     expect(classificationOf(settled)).toEqual({ kind: "infra", code: "attach" });
     expect(woke.calls.map(route)).toEqual(["/exec", "/status", "/status"]);

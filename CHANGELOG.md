@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.246.0](https://github.com/coreplanelabs/switchboard/compare/v1.245.0...v1.246.0) (2026-09-18)
+
+
+### Features
+
+* **tools:** an Actions run URL yields its jobs and a failed job's log ([#1653](https://github.com/coreplanelabs/switchboard/issues/1653)) ([647cbc9](https://github.com/coreplanelabs/switchboard/commit/647cbc90ebf5c2f0087dfb78dc16163aad992280)), closes [#1643](https://github.com/coreplanelabs/switchboard/issues/1643)
+
+
+### Bug fixes
+
+* **authz:** the /api door answers the view-as sentence too ([#1631](https://github.com/coreplanelabs/switchboard/issues/1631)) ([2caaa19](https://github.com/coreplanelabs/switchboard/commit/2caaa19bf57bb3f8b16d7996f3c0d29277399849))
+* **dispatcher:** a restart's reservation awaits the closed run's finish ([#1642](https://github.com/coreplanelabs/switchboard/issues/1642)) ([5ee00d0](https://github.com/coreplanelabs/switchboard/commit/5ee00d04be0a6d1a90044d990124014871bcd6e3))
+* **dispatcher:** an abandoned finish settles, and untracked runs say why ([#1652](https://github.com/coreplanelabs/switchboard/issues/1652)) ([1910aaa](https://github.com/coreplanelabs/switchboard/commit/1910aaaa31e2d3b3583697aab2e2bd51ec0ace85))
+* **harness:** a cut result counts without its call, the end is read once ([#1633](https://github.com/coreplanelabs/switchboard/issues/1633)) ([d59c4b1](https://github.com/coreplanelabs/switchboard/commit/d59c4b116f222b297fa6b756712bf905a43b3c36))
+* **harness:** a cut turn's abort is not the write-up's failure ([#1636](https://github.com/coreplanelabs/switchboard/issues/1636)) ([352bd08](https://github.com/coreplanelabs/switchboard/commit/352bd0845d01987df787d5c89b69b826a5b840b9))
+* **harness:** a failed abort is asked again; the gate forgets callbacks ([#1621](https://github.com/coreplanelabs/switchboard/issues/1621)) ([64d8b7e](https://github.com/coreplanelabs/switchboard/commit/64d8b7eeb6ff0d980d5e7ba68c62292a7ebe29a7))
+* **harness:** a never-posted write-up names the finale that ended it ([#1665](https://github.com/coreplanelabs/switchboard/issues/1665)) ([2191917](https://github.com/coreplanelabs/switchboard/commit/2191917a41ce7ec8b2e9482b2c25ece52439abc6))
+* **harness:** a never-posted write-up's answer keeps the failure it saw ([#1662](https://github.com/coreplanelabs/switchboard/issues/1662)) ([bde8d8f](https://github.com/coreplanelabs/switchboard/commit/bde8d8f678abe65c2a1ca8b6a19a33a29af8d403))
+* **harness:** a re-attached write is held; a stop in flight is said ([#1651](https://github.com/coreplanelabs/switchboard/issues/1651)) ([0152a87](https://github.com/coreplanelabs/switchboard/commit/0152a8764caf0c85f7b721c1110cbf28801ace82))
+* **harness:** OpenCode cuts a tool call open at the loop's end ([#1630](https://github.com/coreplanelabs/switchboard/issues/1630)) ([bf07984](https://github.com/coreplanelabs/switchboard/commit/bf0798469053ff227364737cbf74b0e745649487))
+* **harness:** OpenCode's loop-end cut reads its interrupt three ways ([#1648](https://github.com/coreplanelabs/switchboard/issues/1648)) ([6cf52e3](https://github.com/coreplanelabs/switchboard/commit/6cf52e3221c291c30fb44f915145f8904ed8282e))
+* **harness:** the cut's steps and the unposted write-up's label ([#1661](https://github.com/coreplanelabs/switchboard/issues/1661)) ([2806314](https://github.com/coreplanelabs/switchboard/commit/28063149f03f2690ddbfe2b2fe4d4e2f2dc14d2b))
+* **harness:** the loop-end cut arms at the post and ends by kind ([#1657](https://github.com/coreplanelabs/switchboard/issues/1657)) ([14e1f1d](https://github.com/coreplanelabs/switchboard/commit/14e1f1d2ca5a7c499ca637fc83dad5fe8cb7be49))
+* **resident:** a lease spent under the re-attach ends the run on budget ([#1654](https://github.com/coreplanelabs/switchboard/issues/1654)) ([af15945](https://github.com/coreplanelabs/switchboard/commit/af159452d4fe33738192c8f72993d4b23614d021))
+* **resident:** exit code 143 for a stopped container is an interruption ([#1632](https://github.com/coreplanelabs/switchboard/issues/1632)) ([3ff364b](https://github.com/coreplanelabs/switchboard/commit/3ff364bcc56884aa1ca8e5e9a1c71d0e5c5e2118))
+* **resident:** the lease is read before a refusal; the tail is skipped ([#1660](https://github.com/coreplanelabs/switchboard/issues/1660)) ([0e7ec6f](https://github.com/coreplanelabs/switchboard/commit/0e7ec6ff57ecb140a5d16c2e7926e2008ae7c301))
+* **resident:** the probe is typed, one bound per attach, one wake loop ([#1626](https://github.com/coreplanelabs/switchboard/issues/1626)) ([cccdc01](https://github.com/coreplanelabs/switchboard/commit/cccdc0137ef234ff72cbffa08072066c51f6bbd3))
+* **review:** the reply and the comment are rendered from the verdict ([#1656](https://github.com/coreplanelabs/switchboard/issues/1656)) ([0778ecf](https://github.com/coreplanelabs/switchboard/commit/0778ecf7c761b48f2fe79df0466b8f9950599e35))
+* **sandbox:** a refused container start costs seconds, not a minute ([#1627](https://github.com/coreplanelabs/switchboard/issues/1627)) ([4ac6486](https://github.com/coreplanelabs/switchboard/commit/4ac6486f11b40f281f805363123365e94d1a2cfb))
+* **ship:** a fresh branch's push of the base head no longer renews ([#1637](https://github.com/coreplanelabs/switchboard/issues/1637)) ([b858852](https://github.com/coreplanelabs/switchboard/commit/b85885234483abeefa4a7004630a245c17ffa2b8))
+* **ship:** a task's urls reach the coding child, unstripped ([#1649](https://github.com/coreplanelabs/switchboard/issues/1649)) ([3a3b0f8](https://github.com/coreplanelabs/switchboard/commit/3a3b0f802b2ee81b686ca748bb361d6b3449321a)), closes [#1647](https://github.com/coreplanelabs/switchboard/issues/1647)
+* **ship:** the severity gate names what it caught when it fires ([#1650](https://github.com/coreplanelabs/switchboard/issues/1650)) ([b2b5f1d](https://github.com/coreplanelabs/switchboard/commit/b2b5f1d68df2634776f16e670cc9235e72372666))
+* **web:** popups paint above the page, one layer for menus and lists ([#1646](https://github.com/coreplanelabs/switchboard/issues/1646)) ([8101a5b](https://github.com/coreplanelabs/switchboard/commit/8101a5b737ecfe18bb78a4c8118e17d5dad3a9d0))
+
+
+### Documentation
+
+* **dispatcher:** record 0051 is accepted, with the plan executing it ([#1628](https://github.com/coreplanelabs/switchboard/issues/1628)) ([7403892](https://github.com/coreplanelabs/switchboard/commit/740389254c8b9c9dc4c9a51f63ef6ec9d4baa1f8))
+* **docs:** plan for record 0054, the refusal seam in eight units ([#1663](https://github.com/coreplanelabs/switchboard/issues/1663)) ([06921b6](https://github.com/coreplanelabs/switchboard/commit/06921b6c766a67723e42e1f4a64fd26440b92622))
+* **docs:** record 0044 is accepted, its rows bound to their proofs ([#1645](https://github.com/coreplanelabs/switchboard/issues/1645)) ([82b2126](https://github.com/coreplanelabs/switchboard/commit/82b21264c4aadb5893faad2fc5fcd87ba8f40768))
+* **docs:** record 0053 is accepted, view-as is live-receipted ([#1641](https://github.com/coreplanelabs/switchboard/issues/1641)) ([000edf6](https://github.com/coreplanelabs/switchboard/commit/000edf65b54a8c99ee25e6a40cb9e6b9cb49994d))
+* **docs:** record 0054 pins its inventory to a sha on main ([#1659](https://github.com/coreplanelabs/switchboard/issues/1659)) ([710ab58](https://github.com/coreplanelabs/switchboard/commit/710ab588e58d0db461358d255cfd6988cfe5a76f))
+* **docs:** record 0054 proposes one seam for every refusal ([#1658](https://github.com/coreplanelabs/switchboard/issues/1658)) ([efe9fe1](https://github.com/coreplanelabs/switchboard/commit/efe9fe15ba9fb6c3e58313dc49a0794104af0f01))
+
 ## [1.245.0](https://github.com/coreplanelabs/switchboard/compare/v1.244.0...v1.245.0) (2026-09-17)
 
 

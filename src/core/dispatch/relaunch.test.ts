@@ -252,12 +252,19 @@ describe("prepareRelaunch — the relaunch decided and prepared", () => {
       remainingMs: () => 30_000,
     });
     const decision = await prepareRelaunch(d, ctx);
+    // The bound's own sentence, worded by the bound that refused: the reserve here.
     expect(decision).toEqual({
       kind: "lease_spent",
-      why: "the container was replaced with 30s of the run's lease left, inside the write-up reserve; no re-attach was opened and no write-up ran",
+      why: "the container was replaced under the run: the run has 30s of wall clock left, inside the 60s write-up reserve, so no attach was opened; no write-up ran",
     });
     expect(saves).toEqual([]);
     expect(d.runBearers.verify(old).ok).toBe(true);
+    // Past the reserve but under the attach floor: the floor refused, and the note says so — never "inside the reserve".
+    const underFloor = await prepareRelaunch(d, context({ ...ctx, remainingMs: () => 85_000 }).ctx);
+    expect(underFloor).toEqual({
+      kind: "lease_spent",
+      why: "the container was replaced under the run: the run has 85s of wall clock left, only 25s past the 60s write-up reserve — under the 30s an attach needs — so no attach was opened; no write-up ran",
+    });
     // With the lease still running (or not started) the same context is the refusal it was.
     const running = await prepareRelaunch(d, context({ ...ctx, remainingMs: () => 10 * 60_000 }).ctx);
     expect(running.kind).toBe("refused");
