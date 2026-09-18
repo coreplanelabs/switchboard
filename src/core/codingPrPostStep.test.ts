@@ -920,6 +920,47 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(events.map((e) => e.type)).toEqual(["pushed_head"]);
   });
 
+  it("no description + proven push + no open PR, and the branch has no commits over the base → the note says there is nothing to open and offers no compare link (issue 1699); a count over zero, an unread compare or no reader keeps the compare-URL note", async () => {
+    const run = async (commitsOverBase?: () => Promise<number | undefined>) => {
+      const spy = openSpy();
+      const events: RunEvent[] = [];
+      const note = await runCodingPrPostStep({
+        observed: observation(),
+        description: undefined,
+        target: { repo: "acme/api", baseRef: undefined, bindingRef: "main", resolvedRef: "main" },
+        openPullRequest: spy.fn,
+        findOpenPr: noOpenPr,
+        updatePullRequest: noUpdate,
+        fetchRepoInfo: unreachable,
+        ...(commitsOverBase !== undefined ? { commitsOverBase } : {}),
+        publish: (e) => events.push(e),
+        logKey: "t",
+      });
+      expect(spy.calls).toHaveLength(0);
+      expect(events.map((e) => e.type)).toEqual(["pushed_head"]);
+      return note;
+    };
+    const asked: Array<[string, string, string]> = [];
+    const atBase = await run(async () => 0);
+    expect(atBase).toBe(
+      "ℹ️ No PR was opened: the run pushed `feat/x` with no commits over `main`, so there is nothing to open.",
+    );
+    expect(atBase).not.toContain("compare");
+    const ahead = await run(async (...args: unknown[]) => {
+      asked.push(args as [string, string, string]);
+      return 3;
+    });
+    expect(asked).toEqual([["acme/api", "main", "feat/x"]]);
+    expect(ahead).toContain("compare & open manually: https://github.com/acme/api/compare/feat/x");
+    expect(await run(async () => undefined)).toContain("compare & open manually");
+    expect(
+      await run(async () => {
+        throw new Error("compare failed: HTTP 502");
+      }),
+    ).toContain("compare & open manually");
+    expect(await run()).toContain("compare & open manually");
+  });
+
   it("no description + proven push, the open-PR lookup throws → degrades to the compare-URL note (logged, never thrown)", async () => {
     const spy = openSpy();
     const events: RunEvent[] = [];

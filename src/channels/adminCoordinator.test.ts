@@ -131,6 +131,8 @@ function harness(
     ioFor?: (thread: { threadKey: string; userId: string; cardTs?: string }) => ChannelIO | undefined;
     /** The recover path's open-or-edit: the opened pull request, or the refusal (nothing pushed). */
     openPr?: { number: number; htmlUrl: string; created: boolean } | Error;
+    /** The branch's commits over the base (githubPulls.commitsOverBase): a count, or unread. */
+    ahead?: number | Error;
     /** The merge step's GitHub: the pull request's facts, the checks at the head, the squash's answer. */
     prFacts?: PullRequestFacts | Error;
     /** The operator's model prices: the runs service prices each child, and `read-record` answers the dollars. */
@@ -166,6 +168,7 @@ function harness(
   const written: RunRecord[] = [];
   const merges: Array<{ pr: { repo: string; number: number }; opts: { sha: string; title: string } }> = [];
   const opens: Array<{ repo: string; headBranch: string; base: string; title: string; body: string }> = [];
+  const compares: Array<[string, string, string]> = [];
   const sleeps: number[] = [];
   let reviewFetches = 0;
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
@@ -196,6 +199,11 @@ function harness(
       opens.push(target);
       if (over.openPr instanceof Error) throw over.openPr;
       return over.openPr ?? { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", created: true };
+    },
+    commitsOverBase: async (repo, base, branch) => {
+      compares.push([repo, base, branch]);
+      if (over.ahead instanceof Error) throw over.ahead;
+      return over.ahead;
     },
     github,
     createBranchRef: async (repo, branch, fromRef) => {
@@ -234,6 +242,7 @@ function harness(
   return {
     deps,
     sleeps,
+    compares,
     reviewFetches: () => reviewFetches,
     registry,
     store,
@@ -851,6 +860,53 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
       plain.deps,
     );
     expect(plain.opens).toHaveLength(0);
+  });
+});
+
+describe("pr-check none — the branch's commits over the base ride the answer (issue 1699)", () => {
+  const check = (deps: Parameters<typeof handleCoordinatorRequest>[1], body: Record<string, unknown> = {}) =>
+    handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id, ...body }),
+      deps,
+    );
+
+  it("a plain check that finds no pull request compares the branch with the instance's base and answers `aheadOfBase` — zero for a branch at the base's head, the count otherwise", async () => {
+    const zero = harness({ ahead: 0 });
+    await zero.instances.put(INSTANCE);
+    expect((await check(zero.deps)).body).toEqual({ ok: true, state: "none", aheadOfBase: 0, at: NOW });
+    expect(zero.compares).toEqual([["acme/api", "main", "plan/orchestration/u12"]]);
+    const two = harness({ ahead: 2 });
+    await two.instances.put(INSTANCE);
+    expect((await check(two.deps)).body).toEqual({ ok: true, state: "none", aheadOfBase: 2, at: NOW });
+  });
+
+  it("a compare that could not be read leaves the field out — the fact is never claimed — and the check still answers none", async () => {
+    const unread = harness();
+    await unread.instances.put(INSTANCE);
+    expect((await check(unread.deps)).body).toEqual({ ok: true, state: "none", at: NOW });
+    const thrown = harness({ ahead: new Error("compare failed: HTTP 502") });
+    await thrown.instances.put(INSTANCE);
+    expect((await check(thrown.deps)).body).toEqual({ ok: true, state: "none", at: NOW });
+  });
+
+  it("an instance with no base has nothing to compare against, and a recover check never compares — its `none` carries the recover's own reason", async () => {
+    const h = harness({ ahead: 0 });
+    const { base: _base, ...withoutBase } = INSTANCE;
+    await h.instances.put(withoutBase as typeof INSTANCE);
+    expect((await check(h.deps)).body).toEqual({ ok: true, state: "none", at: NOW });
+    expect(h.compares).toEqual([]);
+    const recover = harness({
+      ahead: 0,
+      openPr: new Error("PR create failed: HTTP 422 No commits between main and plan/orchestration/u12"),
+    });
+    await recover.instances.put(INSTANCE);
+    expect((await check(recover.deps, { recover: { runId: "11111111-1111-4111-8111-111111111111" } })).body).toEqual({
+      ok: true,
+      state: "none",
+      unrecovered: "no_commits",
+      at: NOW,
+    });
+    expect(recover.compares).toEqual([]);
   });
 });
 

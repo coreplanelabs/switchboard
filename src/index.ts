@@ -97,6 +97,7 @@ import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
 import { shimWorkflowSender } from "./core/coordinator/instancesClient.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
 import {
+  commitsOverBase,
   createBranchRef,
   fetchCommitChecks,
   fetchPullRequestFacts,
@@ -739,6 +740,10 @@ export async function runBot(): Promise<void> {
       // The recover path (agent-ship item 15): a coding child that pushed and
       // then died has its pull request opened from the branch itself.
       openPullRequest,
+      // The round-0 fact (agent-ship item 12): a branch with no commits over
+      // the base, beside a handoff naming where the scope landed, ends the
+      // unit already_landed instead of aborting it.
+      commitsOverBase,
       // The App's GitHub reads for the plan, the specs, the rules and a unit's
       // board issue; the branch create; the reviews and the identity the merge
       // gate's "the verdict stands" question is answered from.

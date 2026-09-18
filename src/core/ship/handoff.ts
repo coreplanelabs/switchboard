@@ -4,7 +4,9 @@ import { redactSecrets } from "../redact.js";
 // docs/reference/specs/agent-ship.md item 14, agent-coding.md item 9): what a
 // coding child hands back beside its pull-request description when it ran for
 // a plan unit — where it departed from the unit and why, what it found and did
-// not do, and which of the unit's criteria it could not prove. It is data, not
+// not do, which of the unit's criteria it could not prove, and what of the
+// unit was already on the base before it began (`landed`, the fact the ship
+// machine ends a unit `already_landed` on, agent-ship.md item 12). It is data, not
 // prose in a final message: the child submits it through `submit_handoff` (the
 // same tool path as the description), the run record carries it, and the
 // parent posts it to the unit's board issue, where a person decides each row's
@@ -38,10 +40,24 @@ export interface HandoffUnproven {
   why: string;
 }
 
+/** A part of the unit's scope that was already on the base when the run
+ *  began — the fact the ship machine reads at round 0 (agent-ship.md item 12):
+ *  a handoff naming where the scope landed, beside a branch with no commits
+ *  over the base, ends the unit `already_landed` instead of aborting it. */
+export interface HandoffLanded {
+  /** What of the unit was already there. */
+  what: string;
+  /** Where it landed — the pull request or commit that carries it. */
+  where: string;
+}
+
 export interface Handoff {
   deviations: HandoffDeviation[];
   followUps: HandoffFollowUp[];
   unproven: HandoffUnproven[];
+  /** Absent on a handoff that named none and on a record written before the
+   *  list existed; every reader treats absent as empty. */
+  landed?: HandoffLanded[];
 }
 
 /** The most entries one list may carry: a handoff is a summary for a person,
@@ -58,25 +74,33 @@ const FIELDS: Readonly<Record<ListKey, readonly string[]>> = {
   deviations: ["from", "to", "why"],
   followUps: ["what", "where"],
   unproven: ["criterion", "why"],
+  landed: ["what", "where"],
 };
-const LISTS: readonly ListKey[] = ["deviations", "followUps", "unproven"];
+const LISTS: readonly ListKey[] = ["deviations", "followUps", "unproven", "landed"];
+/** The lists every handoff carries; `landed` is optional (its type says so). */
+const REQUIRED: ReadonlySet<ListKey> = new Set<ListKey>(["deviations", "followUps", "unproven"]);
 
-/** A handoff under construction: each list as entries keyed by `FIELDS`. It IS
- *  a `Handoff` once every entry carries its list's fields — which the two
- *  builders below guarantee — so the one conversion at their boundary is the
- *  table above standing in for three interface declarations. */
-type FieldLists = Record<ListKey, Record<string, string>[]>;
+/** A handoff under construction: each list as entries keyed by `FIELDS`, the
+ *  optional one present only when given. It IS a `Handoff` once every entry
+ *  carries its list's fields — which the two builders below guarantee — so the
+ *  one conversion at their boundary is the table above standing in for four
+ *  interface declarations. */
+type FieldLists = Record<Exclude<ListKey, "landed">, Record<string, string>[]> & {
+  landed?: Record<string, string>[];
+};
 
 const emptyLists = (): FieldLists => ({ deviations: [], followUps: [], unproven: [] });
 const asHandoff = (lists: FieldLists): Handoff => lists as unknown as Handoff;
 const asLists = (h: Handoff): FieldLists => h as unknown as FieldLists;
+/** A list's entries, an absent optional list read as empty. */
+const listOf = (lists: FieldLists, key: ListKey): Record<string, string>[] => lists[key] ?? [];
 
 export function emptyHandoff(): Handoff {
   return asHandoff(emptyLists());
 }
 
 export function isEmptyHandoff(h: Handoff): boolean {
-  return LISTS.every((k) => h[k].length === 0);
+  return LISTS.every((k) => listOf(asLists(h), k).length === 0);
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -90,6 +114,7 @@ export function isHandoffShape(v: unknown): v is Handoff {
   if (!isRecord(v)) return false;
   return LISTS.every((key) => {
     const list = v[key];
+    if (list === undefined) return !REQUIRED.has(key);
     return (
       Array.isArray(list) &&
       list.every((entry) => isRecord(entry) && FIELDS[key].every((f) => typeof entry[f] === "string"))
@@ -105,18 +130,21 @@ const fieldList = (key: ListKey): string => {
 };
 
 /** Validate untrusted input (a tool call) into a Handoff: the three lists
- *  present (each may be empty), at most `HANDOFF_MAX_ITEMS` entries each,
- *  every field a non-empty string of at most `HANDOFF_MAX_FIELD_CHARS` once
- *  trimmed; unknown keys are dropped. A refusal is a string naming the path,
- *  never a throw, so the model can fix the object and call again. */
+ *  present (each may be empty) and `landed` when given, at most
+ *  `HANDOFF_MAX_ITEMS` entries each, every field a non-empty string of at most
+ *  `HANDOFF_MAX_FIELD_CHARS` once trimmed; unknown keys are dropped. A refusal
+ *  is a string naming the path, never a throw, so the model can fix the object
+ *  and call again. */
 export function parseHandoff(input: unknown): ParsedHandoff {
   if (!isRecord(input))
     return { ok: false, error: "handoff: must be an object with deviations, followUps and unproven" };
   const out = emptyLists();
   for (const key of LISTS) {
     const list = input[key];
+    if (list === undefined && !REQUIRED.has(key)) continue;
     if (!Array.isArray(list))
       return { ok: false, error: `${key}: must be an array (empty when there is nothing to say)` };
+    out[key] = [];
     if (list.length > HANDOFF_MAX_ITEMS) return { ok: false, error: `${key}: at most ${HANDOFF_MAX_ITEMS} entries` };
     for (let i = 0; i < list.length; i++) {
       const entry: unknown = list[i];
@@ -132,7 +160,7 @@ export function parseHandoff(input: unknown): ParsedHandoff {
           };
         clean[f] = value;
       }
-      out[key].push(clean);
+      out[key]!.push(clean);
     }
   }
   return { ok: true, handoff: asHandoff(out) };
@@ -144,12 +172,14 @@ export function parseHandoff(input: unknown): ParsedHandoff {
  *  run record or a board issue. */
 export function redactHandoff(h: Handoff, redact: (s: string) => string = redactSecrets): Handoff {
   const out = emptyLists();
+  const lists = asLists(h);
   for (const key of LISTS) {
-    for (const entry of asLists(h)[key]) {
+    if (lists[key] === undefined) continue;
+    out[key] = lists[key].map((entry) => {
       const clean: Record<string, string> = {};
       for (const f of FIELDS[key]) clean[f] = redact(entry[f]!);
-      out[key].push(clean);
-    }
+      return clean;
+    });
   }
   return asHandoff(out);
 }
@@ -193,14 +223,18 @@ function entryLines(h: Handoff): Array<{ list: ListKey; bullet: string; row: str
       const text = `${u.criterion} — ${u.why}`;
       return { list: "unproven" as const, bullet: text, row: `Unproven: ${text}` };
     }),
+    ...(h.landed ?? []).map((l) => {
+      const text = `${l.what} — ${l.where}`;
+      return { list: "landed" as const, bullet: text, row: `Landed: ${text}` };
+    }),
   ];
 }
 
 /** Each entry as one line, list by list — a deviation as `Deviation: from → to
  *  — why`, a follow-up as `what — where`, an unproven criterion as `Unproven:
- *  criterion — why` — the same words the ledger rows carry, for a reader that
- *  wants the handoff as plain lines (the thread's artifacts block). Empty for
- *  an empty handoff. */
+ *  criterion — why`, a landed part as `Landed: what — where` — the same words
+ *  the ledger rows carry, for a reader that wants the handoff as plain lines
+ *  (the thread's artifacts block). Empty for an empty handoff. */
 export function handoffLines(h: Handoff): string[] {
   return entryLines(h).map((e) => e.row);
 }
@@ -227,6 +261,7 @@ const HEADINGS: Readonly<Record<ListKey, string>> = {
   deviations: "### Deviations",
   followUps: "### Follow-ups",
   unproven: "### Unproven",
+  landed: "### Already landed",
 };
 
 /**

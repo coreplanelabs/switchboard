@@ -495,6 +495,63 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(end.ending.report).toContain("names no base branch");
   });
 
+  it("a unit whose scope already landed ends already_landed through the parse — the pr-check's `aheadOfBase` and the record's `landed` list reach the machine — the unit-end carries the report naming the landing, its dependents run on the base that carries it, and the plan finishes completed", async () => {
+    const LANDED = { what: "the empty state", where: "https://github.com/acme/api/pull/3377" };
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U11/0/coding/wait/1": "event",
+      "U11/1/review/wait/1": "event",
+    });
+    const b = bot({
+      plan: [planAnswer([row("U10"), row("U11", { dependsOn: ["U10"] })])],
+      "unit-start": [started("U10"), started("U11", T0 + 8 * MIN)],
+      branch: [branched("U10"), branched("U11", T0 + 8 * MIN)],
+      spawn: [spawned("run-c0"), spawned("run-c1", T0 + 8 * MIN), spawned("run-r1", T0 + 18 * MIN)],
+      "read-record": [
+        record(
+          {
+            id: "run-c0",
+            finished: true,
+            status: "completed",
+            finalReply: "Already on main via pull request 3377.",
+            handoff: true,
+            pushed: [{ ref: "plan/fixture/u10", sha: HEAD }],
+            handoffLists: { deviations: [], followUps: [], unproven: [], landed: [LANDED] },
+          },
+          T0 + 8 * MIN,
+        ),
+        codingDone("run-c1", T0 + 18 * MIN),
+        reviewApproved("run-r1", T0 + 28 * MIN),
+      ],
+      "pr-check": [
+        prNone(),
+        ok({ ok: true, state: "none", aheadOfBase: 0 }, T0 + 8 * MIN),
+        prNone(T0 + 8 * MIN),
+        prOpen(T0 + 18 * MIN),
+      ],
+      round: Array.from({ length: 8 }, () => acked()),
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 29 * MIN)],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 8 * MIN), ok({ ok: true, told: true }, T0 + 29 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 29 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "already_landed", U11: "merged" });
+    expect(summary.outcome).toBe("completed");
+    const [end] = b.of("unit-end") as Array<{
+      unit: string;
+      ending: { kind: string; report: string };
+      codingRunId?: string;
+    }>;
+    expect(end.unit).toBe("U10");
+    expect(end.ending.kind).toBe("already_landed");
+    expect(end.ending.report).toContain(LANDED.where);
+    expect(end.ending.report).not.toContain("compare");
+    expect(end.codingRunId).toBe("run-c0");
+    // No renewal segment was written for a unit with nothing to do.
+    expect(end).not.toHaveProperty("segment");
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
+  });
+
   it("the merge's pending wait: checks still running answer pending, the runner waits on the checks-settled event at the approved head under a bounded timeout and asks again under the next step name, and a merge GitHub refuses ends the unit merge_refused with the refusal in its report; a task string's ship branch is a person's merge — the machine ends merge-ready and never asks", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({

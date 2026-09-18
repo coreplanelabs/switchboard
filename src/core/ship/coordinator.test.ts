@@ -1167,6 +1167,107 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(declinedAll.action).toMatchObject({ type: "spawn", step: "U10/2/review" });
   });
 
+  it("a unit whose scope already landed: round 0 with a handoff naming where it landed and a branch with no commits over the base ends already_landed — the report names the landing and carries no compare link, no renewal line and no re-issue prompt; without the handoff's say-so, with commits over the base or with the fact unread the round-0 abort stands", () => {
+    const branch = input().unit.branch;
+    const LANDED = { what: "the topology page's empty state", where: "https://github.com/acme/api/pull/3377" };
+    const landedHandoff = { deviations: [], followUps: [], unproven: [], landed: [LANDED] };
+    const child = (over: Partial<Extract<ChildFacts, { finished: true }>> = {}) =>
+      finished({
+        status: "completed",
+        finalReply: "Already on main via pull request 3377 — verified at head, nothing to push.",
+        pushed: [{ ref: branch, sha: HEAD_A }],
+        handoff: true,
+        handoffLists: landedHandoff,
+        ...over,
+      });
+
+    // The incident's shape: the child pushed the branch at the base's head and
+    // handed off where the scope landed; the pr-check read no commits over the
+    // base. Under a grant of zero the old ending judged a renewal; this one
+    // never asks.
+    const done = fresh(input({ merge: "person", generated: true }));
+    done.answer({ type: "branch", ok: true, at: T0 });
+    runChild(done, "run-c0", child(), T0 + 8 * MIN);
+    expect(done.action).toMatchObject({ type: "pr-check" });
+    done.answer({ type: "pr-check", pr: { state: "none", aheadOfBase: 0 }, at: T0 + 8 * MIN });
+    expect(done.action).toEqual({
+      type: "end",
+      step: "U10/end",
+      ending: {
+        kind: "already_landed",
+        landed: [LANDED],
+        round: { index: 0, kind: "coding" },
+        runId: "run-c0",
+        reviewRounds: 0,
+      },
+    });
+    expect(done.rounds()).toEqual(["0 coding started", "0 coding completed"]);
+    const report = renderUnitReport(done.state);
+    expect(report).toMatch(/^✅ Already on `main`/);
+    expect(report).toContain(LANDED.what);
+    expect(report).toContain(LANDED.where);
+    expect(report).toContain("run-c0");
+    expect(report).toContain(`\`${branch}\` has no commits over \`main\``);
+    expect(report).not.toContain("compare");
+    expect(report).not.toContain("Not renewed");
+    expect(report).not.toContain("re-issue");
+    expect(report).not.toContain("⚠️");
+
+    // A grant with renewals: the same ending, and no renewal is judged or named.
+    const granted = fresh(input({ merge: "person", generated: true, grant: { renewals: 6 } }));
+    granted.answer({ type: "branch", ok: true, at: T0 });
+    runChild(granted, "run-c0", child(), T0 + 8 * MIN);
+    granted.answer({ type: "pr-check", pr: { state: "none", aheadOfBase: 0 }, at: T0 + 8 * MIN });
+    expect(granted.action).toMatchObject({ type: "end", ending: { kind: "already_landed" } });
+    expect(renderUnitReport(granted.state)).not.toMatch(/renew/i);
+
+    // Two landings are both named, in the handoff's order.
+    const two = fresh(input({ merge: "person" }));
+    two.answer({ type: "branch", ok: true, at: T0 });
+    const SECOND = { what: "the topology page's loading state", where: "https://github.com/acme/api/pull/3380" };
+    runChild(two, "run-c0", child({ handoffLists: { ...landedHandoff, landed: [LANDED, SECOND] } }), T0 + 8 * MIN);
+    two.answer({ type: "pr-check", pr: { state: "none", aheadOfBase: 0 }, at: T0 + 8 * MIN });
+    expect(two.action).toMatchObject({ type: "end", ending: { kind: "already_landed", landed: [LANDED, SECOND] } });
+    const twoReport = renderUnitReport(two.state);
+    expect(twoReport.indexOf(LANDED.where)).toBeLessThan(twoReport.indexOf(SECOND.where));
+    expect(twoReport).toContain("The unit is done and its dependents start on a base that carries it.");
+
+    // No commits over the base, but the handoff does not say the scope landed
+    // (a question, a give-up): the round-0 ending as before.
+    const silent = fresh(input({ merge: "person", generated: true }));
+    silent.answer({ type: "branch", ok: true, at: T0 });
+    runChild(silent, "run-c0", child({ handoffLists: { deviations: [], followUps: [], unproven: [] } }), T0 + 8 * MIN);
+    silent.answer({ type: "pr-check", pr: { state: "none", aheadOfBase: 0 }, at: T0 + 8 * MIN });
+    expect(silent.action).toMatchObject({ type: "end", ending: { kind: "aborted", round: { index: 0 } } });
+    expect(renderUnitReport(silent.state)).toContain("⚠️ Ship ended at round 0");
+
+    // The handoff says landed but the branch carries commits: a description-less
+    // push, not this ending — the round-0 abort stands.
+    const pushed = fresh(input({ merge: "person", generated: true }));
+    pushed.answer({ type: "branch", ok: true, at: T0 });
+    runChild(pushed, "run-c0", child(), T0 + 8 * MIN);
+    pushed.answer({ type: "pr-check", pr: { state: "none", aheadOfBase: 2 }, at: T0 + 8 * MIN });
+    expect(pushed.action).toMatchObject({ type: "end", ending: { kind: "aborted", round: { index: 0 } } });
+
+    // The fact unread (a bot from before it rode the answer, a compare that
+    // failed): never claimed — the abort stands.
+    const unread = fresh(input({ merge: "person", generated: true }));
+    unread.answer({ type: "branch", ok: true, at: T0 });
+    runChild(unread, "run-c0", child(), T0 + 8 * MIN);
+    unread.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 8 * MIN });
+    expect(unread.action).toMatchObject({ type: "end", ending: { kind: "aborted", round: { index: 0 } } });
+
+    // The same return applied twice changes nothing (the durable half).
+    const again = applyReturn(done.state, {
+      type: "pr-check",
+      step: "U10/0/coding/pr-check",
+      pr: { state: "none", aheadOfBase: 0 },
+      at: T0 + 9 * MIN,
+    });
+    expect(again.state).toBe(done.state);
+    expect(again.notes).toEqual([]);
+  });
+
   it("no verdict: a review child that ended without one aborts the unit naming the terminal, and no findings step starts", () => {
     const d = fresh(input({ merge: "person" }));
     throughRoundZero(d);

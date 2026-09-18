@@ -829,6 +829,15 @@ describe("coding prompts: the unit handoff (agent-coding item 9)", () => {
     }
   });
 
+  it("the optional landed list (issue 1699) is named with its fields — what of the unit was already on the base, and where — as the way a unit with nothing left to push ends done", () => {
+    for (const sys of prompts()) {
+      expect(sys).toMatch(
+        /landed \(optional\): what of the unit was already on the base when you began, and the pull request or commit that carries it \(what, where\)/,
+      );
+      expect(sys).toMatch(/push nothing of your own and open no pull request/);
+    }
+  });
+
   it("the handoff is recorded on the run and posted to the unit's board issue where a person disposes of it; the agent never edits the plan's ledger", () => {
     for (const sys of prompts()) {
       expect(sys).toMatch(/records it on the run and posts it to the unit's board issue/);

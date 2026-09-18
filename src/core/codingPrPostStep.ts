@@ -499,6 +499,13 @@ export async function runCodingPrPostStep(input: {
    *  base resolution) ONLY when a description was submitted AND none of
    *  `target`'s three fields already name a base. Never called otherwise. */
   fetchRepoInfo: (repo: string) => Promise<RepoShipInfo | undefined>;
+  /** The branch's commits over the base (githubPulls.ts' commitsOverBase).
+   *  Asked ONLY when a proven-pushed branch comes with no description and no
+   *  open pull request heads it — before the note offers a compare link: a
+   *  branch with none has nothing to open (a unit whose scope already landed,
+   *  agent-ship.md item 12), so the note says so and offers no link over an
+   *  empty diff. Absent, unread or failed, the compare link stands. */
+  commitsOverBase?: (repo: string, base: string, branch: string) => Promise<number | undefined>;
   /** True when the dispatcher already ran the description turn
    *  (descriptionTurn.ts) for this push and it still submitted nothing — the
    *  warning then says so, so the reader knows the system asked and the model
@@ -790,6 +797,25 @@ export async function runCodingPrPostStep(input: {
         ? "submit_pr_description was never called, even in the dedicated description turn this run was given"
         : "submit_pr_description was never called";
       return `⚠️ PR updated by the push: ${existing.htmlUrl} — \`${branch}\`${branchNote} is at \`${headSha.slice(0, 7)}\`, but its description was not resubmitted (${asked}): the PR may now describe an earlier state of its branch — the coding agent must re-evaluate and resubmit the description after every push`;
+    }
+    // A pushed branch with no commits over the base has nothing to open: the
+    // run found its scope already there (agent-ship.md item 12). Say so, and
+    // never send the reader to a compare over an empty diff. The fact is read
+    // only here, and a read that fails leaves the link as it was.
+    const ahead =
+      base !== undefined && input.commitsOverBase !== undefined
+        ? await input.commitsOverBase(repo, base, branch).catch((err: unknown) => {
+            console.error(
+              `[pr-post] ${logKey} compare of ${branch} over ${base} failed for ${repo}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            return undefined;
+          })
+        : undefined;
+    if (ahead === 0) {
+      console.log(
+        `[pr-post] ${logKey} skipped: no description submitted, and ${branch} has no commits over ${base} (repo ${repo})`,
+      );
+      return `ℹ️ No PR was opened: the run pushed \`${branch}\` with no commits over \`${base}\`, so there is nothing to open.`;
     }
     console.log(`[pr-post] ${logKey} skipped: no description submitted (repo ${repo}, branch ${branch})`);
     return `ℹ️ No PR was opened: the run pushed \`${branch}\` but submitted no PR description (submit_pr_description was never called) — compare & open manually: ${compareUrl}`;
