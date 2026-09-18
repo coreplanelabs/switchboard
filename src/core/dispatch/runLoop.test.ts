@@ -1944,7 +1944,7 @@ describe("the pi harness — the container replaced under a living bot: the rela
       warn: () => {},
     });
     const seed: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "fix the failing test" }] }];
-    const ledgerRun = (await ledger.open({
+    const openedLedger = await ledger.open({
       runId: "run-l",
       threadKey: THREAD,
       startedAt: NOW,
@@ -1961,7 +1961,9 @@ describe("the pi harness — the container replaced under a living bot: the rela
       system: "the system prompt",
       tools: [],
       seed: { messages: seed, budgetMs: 45 * 60_000 },
-    }))!;
+    });
+    if (openedLedger.kind !== "tracked") throw new Error("open answered untracked");
+    const ledgerRun = openedLedger.run;
     const registry = new HarnessRegistry();
     const stub: Executor = { exec: async () => "ran", readFile: async () => "", writeFile: async () => "" };
     const facts: HarnessFacts[] = [];
@@ -4117,7 +4119,7 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
       warn: () => {},
     });
     const seed: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "fix the failing test" }] }];
-    const ledgerRun = (await ledger.open({
+    const openedLedger = await ledger.open({
       runId: "run-l",
       threadKey: THREAD,
       startedAt: NOW,
@@ -4134,7 +4136,9 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
       system: "the system prompt",
       tools: [],
       seed: { messages: seed, budgetMs: 45 * 60_000 },
-    }))!;
+    });
+    if (openedLedger.kind !== "tracked") throw new Error("open answered untracked");
+    const ledgerRun = openedLedger.run;
     expect(ledgerRun).toBeDefined();
     const registry = new HarnessRegistry();
     const bearers = new RunBearerStore({ clock: () => NOW });

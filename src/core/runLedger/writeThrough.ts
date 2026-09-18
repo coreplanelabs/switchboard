@@ -156,6 +156,17 @@ export interface ReserveRunRequest {
 export type ReserveOutcome =
   { kind: "tracked"; run: LedgerRun } | { kind: "untracked"; why: string } | { kind: "fenced" } | { kind: "off" };
 
+/** How `open` ended (record 0060; the same discriminants as `ReserveOutcome`):
+ *  `tracked` with the run's handle; `untracked` with why — the machine word
+ *  `thread-live` when the thread's row refused the claim (what the ship branch
+ *  refuses by name), otherwise the reason in the words the run's record gets
+ *  (item 54); `fenced` — the row is another generation's, this process must not
+ *  drive the run; `off` — the process has no ledger. Every caller treats a
+ *  non-tracked answer as it treated `undefined` before: the run goes on
+ *  untracked. */
+export type OpenOutcome =
+  { kind: "tracked"; run: LedgerRun } | { kind: "untracked"; why: string } | { kind: "fenced" } | { kind: "off" };
+
 /** `finishing()`'s answer: `ok` — reply; `fenced` — another generation owns
  *  the run, do NOT reply (it will); `unavailable` — the ledger could not be
  *  asked or this run is untracked, reply as before (the run is this process's). */
@@ -230,14 +241,15 @@ export interface LedgerWriteThrough {
    *  The run is not resumable until `open` promotes it; a reclaim of the row
    *  restarts the run from its request. */
   reserve(req: ReserveRunRequest): Promise<ReserveOutcome>;
-  /** Claim and seed. `undefined` when the run is not tracked: the thread has a
-   *  live row already (another generation's — reclaim is the resume phase's),
-   *  the routes are missing, or the claim kept failing — or, with a
-   *  reservation, the row was taken by another generation (the reservation is
-   *  told through `onFenced`; this process must not run it). When a reservation
-   *  is given and the promotion's claim goes untracked, `onUntracked` is called
-   *  with why before returning `undefined`, and the reserved row is abandoned. */
-  open(req: OpenRunRequest): Promise<LedgerRun | undefined>;
+  /** Claim and seed. `tracked` with the run's handle; anything else and the
+   *  run is not tracked: `untracked` when the thread has a live row already
+   *  (`why: "thread-live"` — reclaim is the resume phase's), the routes are
+   *  missing, or the claim kept failing; `fenced` when, with a reservation, the
+   *  row was taken by another generation (the reservation is told through
+   *  `onFenced`; this process must not run it). When a reservation is given and
+   *  the promotion's claim goes untracked, `onUntracked` is called with why (in
+   *  the record's words) before returning, and the reserved row is abandoned. */
+  open(req: OpenRunRequest): Promise<OpenOutcome>;
   /** Take up a reclaimed run: heartbeat, steps, events and state continue
    *  under this generation with no claim and no seed. Synchronous — the row is
    *  ours since the boot reclaim, and the heartbeat must start at once. */
@@ -296,8 +308,8 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   async reserve(_req: ReserveRunRequest): Promise<ReserveOutcome> {
     return { kind: "off" };
   }
-  async open(_req: OpenRunRequest): Promise<LedgerRun | undefined> {
-    return undefined;
+  async open(_req: OpenRunRequest): Promise<OpenOutcome> {
+    return { kind: "off" };
   }
   adopt(req: AdoptRunRequest): LedgerRun {
     return new NullLedgerRun(req.runId, this.fallback);
@@ -481,9 +493,13 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     );
   };
 
-  /** `untracked` carries why, in the words the run's own record gets (item 54). */
+  /** `untracked` carries why, in the words the run's own record gets (item 54);
+   *  `refused` marks the thread-live case — the thread's row stood — apart from
+   *  the missing-route and failed-claim ones, for `open`'s answer. */
   type Claimed =
-    { outcome: "ok"; session?: RunSession } | { outcome: "fenced" } | { outcome: "untracked"; why: string };
+    | { outcome: "ok"; session?: RunSession }
+    | { outcome: "fenced" }
+    | { outcome: "untracked"; why: string; refused?: "thread-live" };
 
   /** `fenced`: the thread's row is THIS run under another generation — the
    *  reservation's lease lapsed and a reclaim took it (item 42); this process
@@ -592,7 +608,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
               ? `run ${reabandoned.runId} is this generation's own reservation that never started and still holds the thread's row: its abandon did not reach the ledger${reabandoned.failed !== undefined ? ` (${reabandoned.failed})` : ""}`
               : `the thread's live row belongs to run ${result.live.runId} (started ${new Date(result.live.startedAt).toISOString()}), whose finish is not in flight in this process — reclaim is the resume phase's`;
         warn(`[ledger] ${req.threadKey} not tracked: ${why}`);
-        return { outcome: "untracked", why };
+        return { outcome: "untracked", why, refused: "thread-live" };
       } catch (err) {
         if (err instanceof RouteMissingError) {
           routeMissing();
@@ -1001,6 +1017,13 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       return { kind: "tracked", run };
     },
     async open(req) {
+      // `untracked`'s why for the caller: the machine word for a thread-live
+      // refusal — what the ship branch refuses by name (record 0060) — the
+      // record's sentence for every other reason.
+      const untracked = (claimed: { why: string; refused?: "thread-live" }): OpenOutcome => ({
+        kind: "untracked",
+        why: claimed.refused ?? claimed.why,
+      });
       const reserved = req.reservation;
       const seed = req.seed?.messages;
       if (reserved instanceof TrackedRun) {
@@ -1010,12 +1033,12 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // fences this run (it is theirs to restart); an untracked answer means
         // the thread's row is someone else's (a stale reservation) — the run
         // goes on untracked, as an open without a reservation would.
-        if (!reserved.tracked()) return undefined;
+        if (!reserved.tracked()) return { kind: "untracked", why: "the run's reservation is already untracked" };
         const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
         if (claimed.outcome === "fenced") {
           unpromoted.delete(reserved.runId); // the row is another generation's: nothing of ours to abandon
           reserved.detach("promotion refused (fenced)");
-          return undefined;
+          return { kind: "fenced" };
         }
         if (claimed.outcome !== "ok") {
           // Abandon the row — not close (close only stops the heartbeat,
@@ -1027,7 +1050,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           // (item 54) — the safety net the pre-delete would have defeated.
           await reserved.abandon();
           req.onUntracked?.(claimed.why);
-          return undefined;
+          return untracked(claimed);
         }
         unpromoted.delete(reserved.runId); // promoted: no longer a reservation to abandon
         if (claimed.session) reserved.bindSession(claimed.session);
@@ -1036,14 +1059,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         // first patch after the claim carries it on instead of writing over it.
         if (req.state) reserved.adoptState(req.state);
         if (req.seed) await reserved.seed(req.seed.messages, req.seed.budgetMs, req.seed.actors);
-        return reserved;
+        return { kind: "tracked", run: reserved };
       }
       const claimed = await claim(req, seed ? { seed, ...(req.seed?.log ? { log: req.seed.log } : {}) } : {});
       if (claimed.outcome === "fenced") {
         warn(`[ledger] ${req.threadKey} not tracked: run ${req.runId} is live under another generation`);
-        return undefined;
+        return { kind: "fenced" };
       }
-      if (claimed.outcome !== "ok") return undefined;
+      if (claimed.outcome !== "ok") return untracked(claimed);
       const run = new TrackedRun(req, {
         stepNo: 0,
         lastSeq: 0,
@@ -1052,7 +1075,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       if (req.seed) await run.seed(req.seed.messages, req.seed.budgetMs, req.seed.actors);
       run.startHeartbeat();
       live.add(run);
-      return run;
+      return { kind: "tracked", run };
     },
     adopt(req) {
       const run = new TrackedRun(req, {

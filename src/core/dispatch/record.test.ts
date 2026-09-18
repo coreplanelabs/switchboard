@@ -522,6 +522,36 @@ describe("assembleRunRecord — the handoff on the record", () => {
     expect(isRunRecord(record)).toBe(true);
   });
 
+  // record 0060 (run-history item 36): a hosted row is claimed under the host
+  // key while its metadata names the thread — the reclaim's record files under
+  // the conversation, never under the key column's `#host` suffix.
+  it("the reclaim's close files a host-keyed row under the metadata's thread, never the ledger's key column", () => {
+    const row: LiveRunRow = {
+      runId: "run-ship",
+      threadKey: "web:s:c9#host",
+      ownerGen: "gen-NEW",
+      leaseUntil: 9_000,
+      startedAt: 1_000,
+      phase: "live",
+      stop: null,
+      meta: {
+        agent: "ship",
+        channelId: "web:s",
+        userId: "access:u1",
+        threadKey: "web:s:c9",
+        hosted: true,
+        label: "ship · acme/api",
+      },
+      card: null,
+      system: "",
+      tools: [],
+      state: {},
+    };
+    const record = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 5_000 });
+    expect(record).toMatchObject({ id: "run-ship", threadKey: "web:s:c9", status: "interrupted" });
+    expect(isRunRecord(record)).toBe(true);
+  });
+
   it("the reclaim's close carries the coordinator tag the ledger row's meta names, so the state Worker's finish still sends the parent its event", () => {
     const row: LiveRunRow = {
       runId: "run-child",

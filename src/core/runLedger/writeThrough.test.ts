@@ -15,6 +15,7 @@ import {
   NullLedgerWriteThrough,
   type LedgerRun,
   type LedgerWriteThrough,
+  type OpenOutcome,
   type OpenRunRequest,
   type ReserveOutcome,
   type ReserveRunRequest,
@@ -103,7 +104,10 @@ function harness(over: { ledger?: RunLedger; now?: () => number } = {}) {
 }
 
 /** The reservation's run, or undefined for any other outcome — the shape most tests read. */
-const runOf = (o: ReserveOutcome): LedgerRun | undefined => (o.kind === "tracked" ? o.run : undefined);
+const runOf = (o: ReserveOutcome | OpenOutcome): LedgerRun | undefined => (o.kind === "tracked" ? o.run : undefined);
+/** `open` in the pre-0060 shape most tests read: the tracked run, or undefined. */
+const openRun = async (wt: Pick<LedgerWriteThrough, "open">, req: OpenRunRequest): Promise<LedgerRun | undefined> =>
+  runOf(await wt.open(req));
 /** Reserve, recording an untracked outcome's why in `said`. */
 async function reserveSaying(wt: LedgerWriteThrough, req: ReserveRunRequest, said: string[]) {
   const o = await wt.reserve(req);
@@ -149,7 +153,7 @@ describe("mintGeneration", () => {
 describe("open — claim and seed", () => {
   it("claims the thread with the run's prompt, tools, card and meta, and seeds the transcript", async () => {
     const { ledger, wt, warnings } = harness();
-    const run = await wt.open(openReq());
+    const run = await openRun(wt, openReq());
     expect(run?.tracked()).toBe(true);
     const row = ledger.live.get("r1")!;
     expect(row).toMatchObject({
@@ -173,6 +177,38 @@ describe("open — claim and seed", () => {
     expect(warnings).toEqual([]);
   });
 
+  // record 0060: the discriminated answer, as `reserve` gives one — the
+  // ship branch refuses `thread-live` by name and hands off any other reason.
+  it("answers { kind: untracked, why: thread-live } on a refused claim, { kind: untracked, why } on missing routes, { kind: tracked } otherwise", async () => {
+    const { ledger, wt } = harness();
+    expect((await wt.open(openReq())).kind).toBe("tracked");
+    await ledger.claim({
+      runId: "older",
+      threadKey: "slack:C1:9.0",
+      gen: "gen-Z",
+      leaseMs: 30_000,
+      startedAt: 1_000,
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:9.0" },
+      system: "",
+      tools: [],
+    });
+    expect(await wt.open(openReq({ runId: "r2", threadKey: "slack:C1:9.0" }))).toEqual({
+      kind: "untracked",
+      why: "thread-live",
+    });
+    const missing = harness({
+      ledger: overriding(new InMemoryRunLedger(), {
+        claim: async () => {
+          throw new RouteMissingError("run ledger /runs/claim: route missing");
+        },
+      }),
+    });
+    expect(await missing.wt.open(openReq())).toEqual({
+      kind: "untracked",
+      why: "the state Worker has no run-ledger routes",
+    });
+  });
+
   it("a thread whose live row belongs to another run is not tracked: one warning naming that run, no row of ours", async () => {
     const { ledger, wt, warnings } = harness();
     await ledger.claim({
@@ -185,7 +221,7 @@ describe("open — claim and seed", () => {
       system: "",
       tools: [],
     });
-    const run = await wt.open(openReq());
+    const run = await openRun(wt, openReq());
     expect(run).toBeUndefined();
     expect(ledger.live.has("r1")).toBe(false);
     expect(warnings).toHaveLength(1);
@@ -202,13 +238,13 @@ describe("open — claim and seed", () => {
       },
     });
     const ok = harness({ ledger: flaky });
-    expect((await ok.wt.open(openReq()))?.tracked()).toBe(true);
+    expect((await openRun(ok.wt, openReq()))?.tracked()).toBe(true);
     expect(inner.live.has("r1")).toBe(true);
     expect(ok.warnings).toEqual([]);
 
     failures = 99;
     const dead = harness({ ledger: flaky });
-    expect(await dead.wt.open(openReq({ runId: "r2", threadKey: "slack:C1:2.0" }))).toBeUndefined();
+    expect(await openRun(dead.wt, openReq({ runId: "r2", threadKey: "slack:C1:2.0" }))).toBeUndefined();
     expect(inner.live.has("r2")).toBe(false);
     expect(dead.warnings).toHaveLength(1);
     expect(dead.warnings[0]).toMatch(/claim failed after 3 attempt/);
@@ -222,15 +258,16 @@ describe("open — claim and seed", () => {
       },
     });
     const { wt, warnings } = harness({ ledger: old });
-    expect(await wt.open(openReq())).toBeUndefined();
-    expect(await wt.open(openReq({ runId: "r2", threadKey: "t2" }))).toBeUndefined();
+    expect(await openRun(wt, openReq())).toBeUndefined();
+    expect(await openRun(wt, openReq({ runId: "r2", threadKey: "t2" }))).toBeUndefined();
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("no run-ledger routes");
   });
 
   it("a seed the transcript refuses (a part over the row budget) detaches the run — it stays claimed, so its finish still clears the row", async () => {
     const { ledger, wt, warnings, fallbackPuts } = harness();
-    const run = (await wt.open(
+    const run = (await openRun(
+      wt,
       openReq({ seed: { messages: [user("x".repeat(TRANSCRIPT_PART_BYTES + 1))], budgetMs: 600_000 } }),
     ))!;
     expect(run.tracked()).toBe(false);
@@ -252,7 +289,7 @@ describe("open — claim and seed", () => {
         record.step === 0 ? { ok: false, reason: "fenced" } : inner.step(runId, gen, record, turns),
     });
     const { wt, warnings } = harness({ ledger });
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     expect(run.tracked()).toBe(false);
     expect(warnings[0]).toMatch(/detached: seed record refused \(fenced\)/);
     expect((await inner.readSession("slack:C1:1.0:review", 0)).turns).toBe(3);
@@ -261,7 +298,7 @@ describe("open — claim and seed", () => {
 
   it("a run without a model loop of its own (a ship pipeline) is claimed without a seed", async () => {
     const { ledger, wt } = harness();
-    const run = await wt.open(openReq({ seed: undefined, system: "", tools: [] }));
+    const run = await openRun(wt, openReq({ seed: undefined, system: "", tools: [] }));
     expect(run?.tracked()).toBe(true);
     expect(ledger.live.get("r1")?.system).toBe("");
     expect(await ledger.readTranscript("r1")).toMatchObject({ complete: true, turns: 0 });
@@ -313,7 +350,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
   it("open with the reservation promotes it in place: the same tracked run, the prompt, tools, card and state on the row, phase live, the seed written, one heartbeat still — and the run is resumable from here", async () => {
     const { ledger, wt, t, warnings } = harness();
     const reserved = runOf(await wt.reserve(reserveReq()))!;
-    const run = await wt.open(openReq({ reservation: reserved, state: { checklist: [] } }));
+    const run = await openRun(wt, openReq({ reservation: reserved, state: { checklist: [] } }));
     expect(run).toBe(reserved);
     expect(run?.resumable).toBe(true);
     expect(t.heartbeats()).toBe(1);
@@ -340,7 +377,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
       await t.beat();
       expect(fenced).toBe(1);
       expect(reserved.tracked()).toBe(false);
-      expect(await wt.open(openReq({ reservation: reserved }))).toBeUndefined();
+      expect(await openRun(wt, openReq({ reservation: reserved }))).toBeUndefined();
       expect((await ledger.readTranscript("r1")).turns).toBe(0);
       expect(fenced).toBe(1);
       expect(warnings.some((w) => w.includes("fenced"))).toBe(true);
@@ -352,7 +389,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
       const reserved = runOf(await wt.reserve({ ...reserveReq(), onFenced: () => fenced++ }))!;
       ledger.live.get("r1")!.leaseUntil = 0;
       await ledger.reclaim("gen-B", 10_000, 30_000);
-      expect(await wt.open(openReq({ reservation: reserved }))).toBeUndefined();
+      expect(await openRun(wt, openReq({ reservation: reserved }))).toBeUndefined();
       expect(fenced).toBe(1);
       expect(reserved.tracked()).toBe(false);
       expect((await ledger.readTranscript("r1")).turns).toBe(0);
@@ -380,7 +417,8 @@ describe("reserve — the row before the prompt (item 42)", () => {
     // The reserved row is attaching while the promotion claim will fail repeatedly.
     expect(failing.ledger.live.get("r1")).toMatchObject({ phase: "attaching", ownerGen: "gen-A" });
     const untrackedWhys: string[] = [];
-    const opened = await failing.wt.open(
+    const opened = await openRun(
+      failing.wt,
       openReq({ reservation: reserved, onUntracked: (why) => untrackedWhys.push(why) }),
     );
     expect(opened).toBeUndefined();
@@ -421,7 +459,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
     const reserved = runOf(await wt.reserve(reserveReq()))!;
     const untrackedWhys: string[] = [];
     expect(
-      await wt.open(openReq({ reservation: reserved, onUntracked: (why) => untrackedWhys.push(why) })),
+      await openRun(wt, openReq({ reservation: reserved, onUntracked: (why) => untrackedWhys.push(why) })),
     ).toBeUndefined();
     expect(untrackedWhys).toHaveLength(1);
     // The abandon threw: the attaching row still stands, its heartbeat stopped —
@@ -507,7 +545,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
         },
       }),
     });
-    const old = (await wt.open(openReq({ runId: "old" })))!;
+    const old = (await openRun(wt, openReq({ runId: "old" })))!;
     expect(await old.finishing()).toBe("ok");
     const finish = old.sink.put(record("old")); // the writer's put: in flight, awaited by nobody in the dispatch
     const reserving = reserveSaying(wt, reserveReq(), untracked);
@@ -555,7 +593,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
       warn: () => {},
       sleep: async () => {},
     });
-    const old = (await wt.open(openReq({ runId: "old" })))!;
+    const old = (await openRun(wt, openReq({ runId: "old" })))!;
     expect(await old.finishing()).toBe("ok");
     writer.write(record("old"), { via: old.sink });
     const reserving = reserveSaying(wt, reserveReq(), untracked);
@@ -602,7 +640,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
         },
       }),
     });
-    const old = (await wt.open(openReq({ runId: "old" })))!;
+    const old = (await openRun(wt, openReq({ runId: "old" })))!;
     finish = old.sink.put(record("old"));
     const run = await reserveSaying(wt, reserveReq(), untracked);
     expect(run?.tracked()).toBe(true);
@@ -642,7 +680,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
       warn: (m) => writerWarnings.push(m),
       sleep: () => backoff,
     });
-    const old = (await wt.open(openReq({ runId: "old" })))!;
+    const old = (await openRun(wt, openReq({ runId: "old" })))!;
     expect(await old.finishing()).toBe("ok");
     writer.write(record("old"), { via: old.sink });
     await new Promise((r) => setImmediate(r));
@@ -674,7 +712,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
         },
       }),
     });
-    const closing = (await lone.wt.open(openReq({ runId: "lone" })))!;
+    const closing = (await openRun(lone.wt, openReq({ runId: "lone" })))!;
     const closingRecord = record("lone");
     await expect(closing.sink.put(closingRecord)).rejects.toThrow("HTTP 503");
     closing.sink.abandoned?.(closingRecord, "run ledger /runs/finish: HTTP 503");
@@ -740,7 +778,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
       warn: (m) => writerWarnings.push(m),
       sleep: async () => {},
     });
-    const old = (await wt.open(openReq({ runId: "old" })))!;
+    const old = (await openRun(wt, openReq({ runId: "old" })))!;
     expect(await old.finishing()).toBe("ok");
     writer.write(record("old"), { via: old.sink });
     const reserving = reserveSaying(wt, reserveReq(), untracked);
@@ -827,7 +865,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
     });
     // LANDED_MAX + 1 finishes land here, each on its own thread: the first is evicted.
     for (let i = 0; i <= LANDED_MAX; i++) {
-      const run = (await wt.open(openReq({ runId: `fin-${i}`, threadKey: `slack:C1:${i}.0`, seed: undefined })))!;
+      const run = (await openRun(wt, openReq({ runId: `fin-${i}`, threadKey: `slack:C1:${i}.0`, seed: undefined })))!;
       await run.sink.put(record(`fin-${i}`));
     }
     liveRun = "fin-0"; // evicted: a stale row
@@ -953,7 +991,7 @@ describe("adopt — a reclaimed run continues under this generation (item 37)", 
 describe("step — turns first, then the record", () => {
   it("writes the step's turns after the seed and a record numbered from 1 carrying the registry seq, the turn index after the write and the calls in flight", async () => {
     const { ledger, wt } = harness();
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     run.event({ type: "input", messageId: "m1", text: "go", at: 1 }, 1);
     run.event({ type: "run_meta", agent: "review", model: "p/m", at: 2 }, 2);
     await run.step(step());
@@ -1012,7 +1050,7 @@ describe("step — turns first, then the record", () => {
 
   it("a fenced step (the row now belongs to another generation) detaches the run and never throws into the runner", async () => {
     const { ledger, wt, warnings } = harness();
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     ledger.live.get("r1")!.ownerGen = "gen-B";
     await expect(run.step(step())).resolves.toBeUndefined();
     expect(run.tracked()).toBe(false);
@@ -1035,7 +1073,7 @@ describe("step — turns first, then the record", () => {
       },
     });
     const { wt, warnings, sleeps } = harness({ ledger });
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     await run.step(step());
     expect(calls).toHaveLength(2); // one retry, then it landed
     expect(sleeps).toEqual([200]); // after a backoff, not at once
@@ -1049,7 +1087,7 @@ describe("step — turns first, then the record", () => {
     expect(warnings.at(-1)).toMatch(/step 2 failed: timeout/);
 
     mode = "permanent";
-    const other = (await wt.open(openReq({ runId: "r2", threadKey: "t2" })))!;
+    const other = (await openRun(wt, openReq({ runId: "r2", threadKey: "t2" })))!;
     calls.length = 0;
     await other.step(step());
     expect(calls).toHaveLength(1);
@@ -1060,7 +1098,7 @@ describe("step — turns first, then the record", () => {
 describe("events, state, heartbeat", () => {
   it("events are appended in batches with the registry seq, on the flush timer or at the batch size; nothing after the finish", async () => {
     const { ledger, wt, t } = harness();
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     run.event({ type: "input", messageId: "m1", text: "go", at: 1 }, 1);
     expect(ledger.events.get("r1")).toBeUndefined(); // not yet: the timer is armed
     await t.flushTimers();
@@ -1084,7 +1122,7 @@ describe("events, state, heartbeat", () => {
       },
     });
     const { wt, warnings, sleeps } = harness({ ledger });
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     failures = 1;
     run.setState({ verdict: "approve" });
     await run.close();
@@ -1105,7 +1143,7 @@ describe("events, state, heartbeat", () => {
 
   it("state patches merge and coalesce: the row holds the newest merged state", async () => {
     const { ledger, wt } = harness();
-    const run = (await wt.open(openReq({ state: { checklist: "○ a" } })))!;
+    const run = (await openRun(wt, openReq({ state: { checklist: "○ a" } })))!;
     run.setState({ verdict: { verdict: "approve" } });
     run.setState({ checklist: "● a" });
     run.setState({ pushedBranch: "feat/x" });
@@ -1121,7 +1159,7 @@ describe("events, state, heartbeat", () => {
     let clock = 10_000;
     const { ledger, wt, t } = harness({ now: () => clock });
     const stops: string[] = [];
-    const run = (await wt.open(openReq({ onStop: (m) => stops.push(m) })))!;
+    const run = (await openRun(wt, openReq({ onStop: (m) => stops.push(m) })))!;
     expect(t.heartbeats()).toBe(1);
     clock = 25_000;
     await t.beat();
@@ -1139,7 +1177,7 @@ describe("events, state, heartbeat", () => {
 
   it("a heartbeat the ledger refuses detaches the run and stops the timer", async () => {
     const { ledger, wt, t, warnings } = harness();
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     ledger.live.get("r1")!.ownerGen = "gen-B";
     await t.beat();
     expect(run.tracked()).toBe(false);
@@ -1151,7 +1189,7 @@ describe("events, state, heartbeat", () => {
 describe("finishing and finish", () => {
   it("finishing moves the row to `finishing`; the sink's finish replaces the live rows with the record and never touches the fallback", async () => {
     const { ledger, wt, fallbackPuts, t } = harness();
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     run.event({ type: "input", messageId: "m1", text: "go", at: 1 }, 1);
     expect(await run.finishing()).toBe("ok");
     expect(ledger.live.get("r1")!.phase).toBe("finishing");
@@ -1168,7 +1206,7 @@ describe("finishing and finish", () => {
 
   it("finishing is the double-answer gate (D9): ok once; a refusal is `fenced` — another generation owns the run, the caller must not reply — and detaches; a run detached by a fence keeps answering `fenced` without asking; an unreachable ledger answers `unavailable`", async () => {
     const { wt, warnings } = harness();
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     expect(await run.finishing()).toBe("ok");
     expect(await run.finishing()).toBe("fenced"); // a second CAS is refused: someone already took finishing
     expect(warnings.some((w) => /finishing refused .* no reply from here/.test(w))).toBe(true);
@@ -1184,7 +1222,7 @@ describe("finishing and finish", () => {
         },
       }),
     });
-    const other = (await down.wt.open(openReq()))!;
+    const other = (await openRun(down.wt, openReq()))!;
     expect(await other.finishing()).toBe("unavailable"); // the run is still this process's: reply as before
     expect(other.tracked()).toBe(true);
   });
@@ -1192,7 +1230,7 @@ describe("finishing and finish", () => {
   it("a fenced write tells the run once (onFenced) — heartbeat, step or finishing — so it stops driving a run another generation owns", async () => {
     const { ledger, wt, t } = harness();
     const fenced: string[] = [];
-    const run = (await wt.open(openReq({ onFenced: () => fenced.push("hard") })))!;
+    const run = (await openRun(wt, openReq({ onFenced: () => fenced.push("hard") })))!;
     ledger.live.get("r1")!.ownerGen = "gen-B"; // reclaimed by another generation
     await t.beat();
     expect(fenced).toEqual(["hard"]);
@@ -1209,13 +1247,13 @@ describe("finishing and finish", () => {
         },
       }),
     });
-    const r3 = (await w3.open(openReq()))!;
+    const r3 = (await openRun(w3, openReq()))!;
     await r3.step(step()); // detached for good, but the run is still ours
     expect(l3.live.has("r1")).toBe(true);
     expect(await r3.finishing()).toBe("unavailable");
     const { ledger: l2, wt: w2 } = harness();
     const told: string[] = [];
-    const r2 = (await w2.open(openReq({ onFenced: () => told.push("hard") })))!;
+    const r2 = (await openRun(w2, openReq({ onFenced: () => told.push("hard") })))!;
     l2.live.get("r1")!.ownerGen = "gen-B";
     expect(await r2.finishing()).toBe("fenced");
     expect(told).toEqual(["hard"]);
@@ -1223,9 +1261,12 @@ describe("finishing and finish", () => {
 
   it("liveRuns names the runs this generation drives; handoff marks the resumable ones on the ledger and remembers it — a ship claim (no seed) and a detached run are left out; a handed run that finishes first still replies; a ledger failure is reported, not thrown", async () => {
     const { ledger, wt } = harness();
-    const a = (await wt.open(openReq()))!;
-    const ship = (await wt.open(openReq({ runId: "r2", threadKey: "t2", seed: undefined, system: "", tools: [] })))!;
-    const c = (await wt.open(openReq({ runId: "r3", threadKey: "t3" })))!;
+    const a = (await openRun(wt, openReq()))!;
+    const ship = (await openRun(
+      wt,
+      openReq({ runId: "r2", threadKey: "t2", seed: undefined, system: "", tools: [] }),
+    ))!;
+    const c = (await openRun(wt, openReq({ runId: "r3", threadKey: "t3" })))!;
     ledger.live.get("r3")!.ownerGen = "gen-B";
     await c.step(step()); // detached
     expect(
@@ -1253,13 +1294,13 @@ describe("finishing and finish", () => {
         },
       }),
     });
-    await down.wt.open(openReq());
+    await openRun(down.wt, openReq());
     expect(await down.wt.handoff()).toEqual({ marked: [], failed: "HTTP 503" });
   });
 
   it("the step record carries the inbox seq the run has consumed (run-history item 40); pushInbox hands back the ledger's seq for a live run — undefined, with a warning, when the ledger refuses or fails", async () => {
     const { ledger, wt, warnings } = harness();
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     expect(await wt.pushInbox("r1", { text: "also the numbers" })).toBe(1);
     expect(await wt.pushInbox("r1", { text: "and the dates" })).toBe(2);
     expect(ledger.inbox.get("r1")!.map((i) => [i.seq, i.message.text])).toEqual([
@@ -1283,7 +1324,7 @@ describe("finishing and finish", () => {
 
   it("a finish the ledger refuses (fenced, or a run it never tracked) goes to the fallback store — the record is never dropped", async () => {
     const { ledger, wt, fallbackPuts, warnings } = harness();
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     ledger.live.get("r1")!.ownerGen = "gen-B";
     await run.sink.put(record("r1"));
     expect(fallbackPuts.map((r) => r.id)).toEqual(["r1"]);
@@ -1302,12 +1343,12 @@ describe("finishing and finish", () => {
       },
     });
     const { wt, fallbackPuts } = harness({ ledger });
-    const a = (await wt.open(openReq()))!;
+    const a = (await openRun(wt, openReq()))!;
     await a.sink.put(record("r1"));
     expect(fallbackPuts.map((r) => r.id)).toEqual(["r1"]);
 
     fail = "transient";
-    const b = (await wt.open(openReq({ runId: "r2", threadKey: "t2" })))!;
+    const b = (await openRun(wt, openReq({ runId: "r2", threadKey: "t2" })))!;
     await expect(b.sink.put(record("r2"))).rejects.toThrow("HTTP 503");
     fail = undefined;
     await b.sink.put(record("r2")); // the writer's retry: idempotent
@@ -1327,7 +1368,7 @@ describe("the session log — a run is a range of it", () => {
 
   it("a thread's first run of an agent starts the log at 0: the seed is rows 0..n-1, the row's session names the key, seedFrom 0, the request's index and range.from 0; the seed record lands under the same key so the run is tracked and resumable; the finish closes the range and clears nothing", async () => {
     const { ledger, wt, warnings } = harness();
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     expect(ledger.live.get("r1")!.meta.session).toEqual({
       key: KEY,
       seedFrom: 0,
@@ -1380,9 +1421,10 @@ describe("the session log — a run is a range of it", () => {
 
   it("the next run of the same agent in the thread appends after the last row: seedFrom, request and range.from at the tail, its steps at seedFrom + their local index, its record's range closed there", async () => {
     const { ledger, wt } = harness();
-    const first = (await wt.open(openReq()))!;
+    const first = (await openRun(wt, openReq()))!;
     await first.sink.put(record("r1"));
-    const second = (await wt.open(
+    const second = (await openRun(
+      wt,
       openReq({ runId: "r2", seed: { messages: [user("history"), user("follow up")], budgetMs: 600_000 } }),
     ))!;
     expect(ledger.live.get("r2")!.meta.session).toEqual({ key: KEY, seedFrom: 3, request: 4, range: { from: 3 } });
@@ -1405,11 +1447,12 @@ describe("the session log — a run is a range of it", () => {
   // seedFrom + i throughout, and only what follows the tail is written.
   it("a seed that reuses the log's tail appends only what is new: seedFrom names the cut, range.from the tail, the reused rows are not written twice, and a step and the record count from the cut", async () => {
     const { ledger, wt, warnings } = harness();
-    const first = (await wt.open(openReq()))!; // rows 0..2: earlier, sure, go
+    const first = (await openRun(wt, openReq()))!; // rows 0..2: earlier, sure, go
     await first.step(step()); // row 3: looking
     await first.sink.put(record("r1"));
     // The seed reuses rows 2..3 (go, looking), then a line since and the request.
-    const second = (await wt.open(
+    const second = (await openRun(
+      wt,
       openReq({
         runId: "r2",
         seed: {
@@ -1455,9 +1498,10 @@ describe("the session log — a run is a range of it", () => {
 
   it("a seed whose named rows do not end at the log's tail is written whole as new rows, with one warning — the log moved under the seed, and the conversation stays coherent", async () => {
     const { ledger, wt, warnings } = harness();
-    const first = (await wt.open(openReq()))!; // rows 0..2
+    const first = (await openRun(wt, openReq()))!; // rows 0..2
     await first.sink.put(record("r1"));
-    const second = (await wt.open(
+    const second = (await openRun(
+      wt,
       openReq({
         runId: "r2",
         seed: {
@@ -1478,7 +1522,7 @@ describe("the session log — a run is a range of it", () => {
   // never computed beside it, so it names the very row the step wrote.
   it("logIndexOf names the log row a local index lands on — the seed's rows, a step's, the row after a reused tail — and reads back the turn written there; a run without a session names none, and so does the null run", async () => {
     const { ledger, wt } = harness();
-    const first = (await wt.open(openReq()))!; // rows 0..2: earlier, sure, go
+    const first = (await openRun(wt, openReq()))!; // rows 0..2: earlier, sure, go
     expect([0, 1, 2].map((i) => first.logIndexOf(i))).toEqual([0, 1, 2]);
     await first.step(step()); // local 3 → row 3: looking
     expect(first.logIndexOf(3)).toBe(3);
@@ -1487,7 +1531,8 @@ describe("the session log — a run is a range of it", () => {
     ]);
     await first.sink.put(record("r1"));
     // The next run reuses rows 2..3 as its seed's first two messages (log.from 2): its local 0 is row 2.
-    const second = (await wt.open(
+    const second = (await openRun(
+      wt,
       openReq({
         runId: "r2",
         seed: {
@@ -1503,7 +1548,7 @@ describe("the session log — a run is a range of it", () => {
     expect(second.logIndexOf(3)).toBe(5);
     expect((await ledger.readSession(KEY, 5, 5)).messages).toEqual([assistant("on it")]);
     // A ship pipeline has no conversation and no session: its rows are nowhere a search reaches.
-    const ship = (await wt.open(openReq({ runId: "r3", threadKey: "slack:C1:2.0", seed: undefined })))!;
+    const ship = (await openRun(wt, openReq({ runId: "r3", threadKey: "slack:C1:2.0", seed: undefined })))!;
     expect(ship.session).toBeUndefined();
     expect(ship.logIndexOf(0)).toBeUndefined();
     expect(new NullLedgerRun("r9", { put: async () => {}, abandoned: () => {} }).logIndexOf(0)).toBeUndefined();
@@ -1511,8 +1556,9 @@ describe("the session log — a run is a range of it", () => {
 
   it("two agents in one thread keep two logs; a run without a conversation of its own (a ship pipeline) has no session", async () => {
     const { ledger, wt } = harness();
-    await wt.open(openReq());
-    await wt.open(
+    await openRun(wt, openReq());
+    await openRun(
+      wt,
       openReq({
         runId: "r2",
         threadKey: "slack:C1:2.0",
@@ -1522,7 +1568,7 @@ describe("the session log — a run is a range of it", () => {
     expect(ledger.live.get("r2")!.meta.session?.key).toBe("slack:C1:2.0:coding");
     expect((await ledger.readSession("slack:C1:2.0:coding", 0)).messages).toHaveLength(3);
     expect((await ledger.readSession(KEY, 0)).messages).toHaveLength(3);
-    const ship = (await wt.open(openReq({ runId: "r3", threadKey: "slack:C1:3.0", seed: undefined })))!;
+    const ship = (await openRun(wt, openReq({ runId: "r3", threadKey: "slack:C1:3.0", seed: undefined })))!;
     expect(ledger.live.get("r3")!.meta.session).toBeUndefined();
     await ship.sink.put(record("r3"));
     expect("session" in ledger.finished.get("r3")!).toBe(false);
@@ -1536,7 +1582,7 @@ describe("the session log — a run is a range of it", () => {
         },
       }),
     });
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     // The seed's own record write goes through `step` too: it is the detach here.
     expect(run.tracked()).toBe(false);
     expect(ledger.live.get("r1")!.meta.session).toEqual({ key: KEY, seedFrom: 0, request: 2, range: { from: 0 } });
@@ -1588,7 +1634,7 @@ describe("the session log — a run is a range of it", () => {
 
   it("a step carrying pi's compaction entry writes it as the row after its turns; the step record counts it", async () => {
     const { ledger, wt } = harness();
-    const run = (await wt.open(openReq()))!;
+    const run = (await openRun(wt, openReq()))!;
     const compaction = { summary: "so far: the tests fail on X", tokensBefore: 150_000, firstKeptEntryId: "abc123" };
     await run.step(step({ turns: [user("results")], firstIdx: 3, inFlight: [], compaction }));
     expect(ledger.steps.get("r1")![1]).toMatchObject({ step: 1, turnIndex: 5, inFlight: [] });
@@ -1607,7 +1653,7 @@ describe("actor — rows carry the author's id through the write-through", () =>
     const { ledger, wt } = harness();
     const messages = [user("earlier"), assistant("sure"), user("go")];
     const actors: (string | undefined)[] = [undefined, undefined, "slack:UALICE"];
-    const run = await wt.open(openReq({ seed: { messages, budgetMs: 600_000, actors } }));
+    const run = await openRun(wt, openReq({ seed: { messages, budgetMs: 600_000, actors } }));
     expect(run?.tracked()).toBe(true);
     const log = ledger.sessions.get(KEY)!;
     // row idx=2 is user("go"), authored by UALICE
@@ -1629,14 +1675,14 @@ describe("actor — rows carry the author's id through the write-through", () =>
 });
 
 describe("NullLedgerWriteThrough — the write-through of a process without a ledger", () => {
-  it("open claims nothing (undefined — the untracked answer), nothing is live, the inbox holds nothing, the handoff marks nothing, and the generation is the process's", async () => {
+  it("open claims nothing (`off` — the no-ledger answer), nothing is live, the inbox holds nothing, the handoff marks nothing, and the generation is the process's", async () => {
     const puts: RunRecord[] = [];
     const ledger = new NullLedgerWriteThrough("20260101T000000Z-abcd", {
       put: async (r: RunRecord) => void puts.push(r),
       abandoned: () => {},
     });
     expect(ledger.gen).toBe("20260101T000000Z-abcd");
-    expect(await ledger.open({} as OpenRunRequest)).toBeUndefined();
+    expect(await ledger.open({} as OpenRunRequest)).toEqual({ kind: "off" });
     expect(ledger.liveRuns()).toEqual([]);
     expect(await ledger.pushInbox("r1", { text: "hi" })).toBeUndefined();
     expect(await ledger.readInbox("r1", 0)).toEqual([]);

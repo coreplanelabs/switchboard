@@ -311,6 +311,12 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
           "An `agent:review` request cannot start beside it — one run per thread. Wait for it to finish and re-send, or start a new thread.",
       },
       {
+        code: "ship_thread_live",
+        built: REFUSAL_SENTENCES.ship_thread_live(),
+        quoted:
+          "🚫 A pipeline is already running in this thread — one pipeline per thread. Follow the one in flight here, or start this one in a thread of its own.",
+      },
+      {
         code: "which_branch",
         built: REFUSAL_SENTENCES.which_branch({ repo: "o/r" }),
         quoted:

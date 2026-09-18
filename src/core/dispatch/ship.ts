@@ -13,7 +13,8 @@ import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
-import type { LedgerRun } from "../runLedger/writeThrough.js";
+import type { LedgerRun, OpenOutcome } from "../runLedger/writeThrough.js";
+import { hostKeyOf } from "../runLedger/hostKey.js";
 import { systemClock } from "../trace/index.js";
 import type { RunOwner } from "../trace/streamSpans.js";
 import type { RequestTrace } from "../requestTrace.js";
@@ -227,30 +228,29 @@ export async function runShipBranch(
   const channelVisibility = await root.span("dispatch.channel_visibility", () =>
     channelVisibilityOf(deps, msg.channelId),
   );
-  const run = registry.create(
-    composeRunLabel({
-      agent: agent.name,
-      repo: repoCtx.repo,
-      channelId: msg.channelId,
-      userId: msg.userId,
-      channelName: msg.channelName,
-      userName: msg.userName,
-      text: directives.text,
-    }),
-    {
-      agent: agent.name,
-      model: ctx.modelRef,
-      channelId: msg.channelId,
-      userId: msg.userId,
-      threadKey: msg.threadKey,
-      channelVisibility,
-      receivedAt: trace.receivedAt,
-      ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-      ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-      ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
-    },
-  );
+  const runLabel = composeRunLabel({
+    agent: agent.name,
+    repo: repoCtx.repo,
+    channelId: msg.channelId,
+    userId: msg.userId,
+    channelName: msg.channelName,
+    userName: msg.userName,
+    text: directives.text,
+  });
+  const run = registry.create(runLabel, {
+    hosted: true,
+    agent: agent.name,
+    model: ctx.modelRef,
+    channelId: msg.channelId,
+    userId: msg.userId,
+    threadKey: msg.threadKey,
+    channelVisibility,
+    receivedAt: trace.receivedAt,
+    ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+  });
   io.runStarted?.({ id: run.id });
   const publishText = (
     type: "input" | "context" | "answer",
@@ -317,45 +317,72 @@ export async function runShipBranch(
       { provisional: true },
     );
   }
-  // The ledger claim (run-history item 35) for the live index and the finish.
-  // The request has no model loop of its own — the runner's children each run
-  // `runAgent` as runs of their own — so it is claimed without a seed or step
-  // records and closes `interrupted` at a reclaim. Untracked (a process
-  // without a ledger included) → undefined, and the hand-off runs as before.
-  const ledgerRun: LedgerRun | undefined = await root.span("dispatch.ledger_claim", () =>
-    deps.runLedger.open({
-      runId: run.id,
-      threadKey: msg.threadKey,
-      startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? clock(),
-      meta: {
-        agent: agent.name,
-        model: ctx.modelRef,
-        channelId: msg.channelId,
-        userId: msg.userId,
-        threadKey: msg.threadKey,
-        channelVisibility,
-        ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-        ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-        ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-        ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
-        ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
-        ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
-        profile,
-      },
-      card: card.handle ?? null,
-      system: "",
-      tools: [],
-      onStop: (mode) => void run.control.requestStop(mode),
-      onFenced: () => void run.control.requestStop("hard"),
-    }),
-  );
+  // The ledger claim (run-history item 35) for the live index and the finish,
+  // under the HOST KEY (record 0060; run-history item 29): the thread key plus
+  // `#host`, while the row's metadata names the thread itself — the ledger's
+  // occupancy check never sees the parent, every listing and record files it
+  // under its conversation, and a second pipeline in the thread is the one
+  // claim the host key refuses. The request has no model loop of its own — the
+  // runner's children each run `runAgent` as runs of their own — so it is
+  // claimed without a seed or step records (and registers no session) and
+  // closes `interrupted` at a reclaim. Untracked for any reason but
+  // `thread-live` (a process without a ledger, missing routes) → the hand-off
+  // runs as before; `thread-live` on the host key is refused below by name.
+  const hostKey = (() => {
+    try {
+      return hostKeyOf(msg.threadKey);
+    } catch (err) {
+      // A thread key the suffix cannot ride (over the ledger's cap, or already
+      // suffixed): the claim the ledger would refuse anyway is never made, and
+      // the run goes on untracked, as any refused claim leaves it.
+      console.warn(`[ship] ${msg.threadKey} not tracked: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
+  })();
+  const opened: OpenOutcome = !hostKey
+    ? { kind: "untracked", why: "the thread key cannot carry the host suffix" }
+    : await root.span("dispatch.ledger_claim", () =>
+        deps.runLedger.open({
+          runId: run.id,
+          threadKey: hostKey,
+          startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? clock(),
+          meta: {
+            hosted: true,
+            label: runLabel,
+            agent: agent.name,
+            model: ctx.modelRef,
+            channelId: msg.channelId,
+            userId: msg.userId,
+            threadKey: msg.threadKey,
+            channelVisibility,
+            ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+            ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+            ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+            ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+            ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+            ...(entry.resume !== undefined ? { pr: entry.resume.pr } : {}),
+            profile,
+          },
+          card: card.handle ?? null,
+          system: "",
+          tools: [],
+          onStop: (mode) => void run.control.requestStop(mode),
+          onFenced: () => void run.control.requestStop("hard"),
+        }),
+      );
+  const ledgerRun: LedgerRun | undefined = opened.kind === "tracked" ? opened.run : undefined;
   if (ledgerRun) {
-    const opened = ledgerRun;
+    const tracked = ledgerRun;
     registry.subscribe(run.id, run.token, {
-      onEvent: (event, seq) => opened.event(event, seq),
+      onEvent: (event, seq) => tracked.event(event, seq),
       ...REPLAY_EVERYTHING,
     });
   }
+  // One pipeline per thread (record 0060; agent-ship item 16): the host key's
+  // claim answering `thread-live` means another pipeline is hosted in this
+  // thread right now — refused by name, never run untracked beside it. Every
+  // other non-tracked answer hands off as before.
+  const hostRefused = opened.kind === "untracked" && opened.why === "thread-live";
 
   const liveUrl = liveViewLink(run.id, run.token);
   ctx.live.runId = run.id;
@@ -396,31 +423,39 @@ export async function runShipBranch(
     // records, asks its shim for the Workflow, and this run ends with where the
     // plan runs. A deployment without the runner's prerequisites — run history
     // on the state Worker, `PUBLIC_BASE_URL`, the `coordinator` bearer — is
-    // refused by name here, never run some other way.
-    outcome = await root.span("dispatch.ship_hand_off", () =>
-      handOffToCoordinator(
-        {
-          readFile: (repo, path, ref, opts) =>
-            githubCapabilityFor(deps, chatActorOf(deps.config, msg)).api.readFile(repo, path, ref, opts),
-          instances: deps.coordinatorInstances ?? new NullCoordinatorInstanceStore(),
-          create: deps.createCoordinatorInstance ?? ((id) => createInstanceViaShim(shim(), id)),
-          status: deps.fetchCoordinatorInstanceStatus ?? ((id) => fetchInstanceStatusViaShim(shim(), id)),
-        },
-        {
-          entry,
-          requestText: directives.text,
-          msg,
-          agentSource: ctx.agentSource,
-          runId: run.id,
-          label,
-          caps,
-          addressSeverity,
-          grant,
-          ...(card.handle !== undefined ? { card: card.handle } : {}),
-          now: clock(),
-        },
-      ),
-    );
+    // refused by name here, never run some other way. A thread whose pipeline
+    // is live (the host key's `thread-live`) is refused the same way: an
+    // aborted outcome through the refusal seam, nothing handed to the runner.
+    outcome = hostRefused
+      ? {
+          status: "aborted",
+          reply: REFUSAL_SENTENCES.ship_thread_live(),
+          refusal: refusalOf("ship_thread_live", REFUSAL_SENTENCES.ship_thread_live()),
+        }
+      : await root.span("dispatch.ship_hand_off", () =>
+          handOffToCoordinator(
+            {
+              readFile: (repo, path, ref, opts) =>
+                githubCapabilityFor(deps, chatActorOf(deps.config, msg)).api.readFile(repo, path, ref, opts),
+              instances: deps.coordinatorInstances ?? new NullCoordinatorInstanceStore(),
+              create: deps.createCoordinatorInstance ?? ((id) => createInstanceViaShim(shim(), id)),
+              status: deps.fetchCoordinatorInstanceStatus ?? ((id) => fetchInstanceStatusViaShim(shim(), id)),
+            },
+            {
+              entry,
+              requestText: directives.text,
+              msg,
+              agentSource: ctx.agentSource,
+              runId: run.id,
+              label,
+              caps,
+              addressSeverity,
+              grant,
+              ...(card.handle !== undefined ? { card: card.handle } : {}),
+              now: clock(),
+            },
+          ),
+        );
     // The instance the hand-off created enters the stream first (record 0051
     // R2): projected onto `RunRecord.instanceId`, it is how the thread's owner
     // rule finds the plan runner from the page's ship run. None after a refusal.

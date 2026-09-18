@@ -57,7 +57,7 @@ import { meatOnPath } from "./core/meatProcess.js";
 import { buildRunLedger } from "./core/runLedgerWorker.js";
 import { createLedgerWriteThrough, mintGeneration, NullLedgerWriteThrough } from "./core/runLedger/writeThrough.js";
 import { reclaimRuns, startReclaimSweep, closeReclaimed, type ReclaimOutcome } from "./core/boot.js";
-import { launchResumes } from "./core/resumeLaunch.js";
+import { launchResumes, resumeIoTarget } from "./core/resumeLaunch.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { LedgerTakeover } from "./core/runLedger/takeover.js";
 import { nullChannelIO } from "./core/nullChannelIo.js";
@@ -1270,12 +1270,9 @@ export async function runBot(): Promise<void> {
           return undefined;
         }
       },
-      ioFor: (row) =>
-        threadIoFor({
-          threadKey: row.threadKey,
-          userId: row.meta.userId,
-          ...(row.card ? { cardTs: row.card.ts } : {}),
-        }),
+      // The handle from the row's METADATA (record 0060): a hosted row's key
+      // column carries the host suffix and names no thread of any channel.
+      ioFor: (row) => threadIoFor(resumeIoTarget(row)),
       close: async (run, why) => {
         const closed = await closeReclaimed(ledgerReclaim.client, generation, {
           row: run.row,

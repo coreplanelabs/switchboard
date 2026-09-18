@@ -165,6 +165,10 @@ export interface RunView {
    *  holds; a live run has neither, its usage is summed at finish. */
   usage?: RunUsage;
   cost?: RunCost;
+  /** A ship pipeline's parent run (record 0060): listed under its conversation
+   *  while occupying no thread — from `RunMeta.hosted` on a registry row, from
+   *  the ledger row's meta on a foreign one. */
+  hosted?: true;
   /** True once the durable store holds this run (registry flag or store row). */
   persisted?: boolean;
   /** True when this row came from the store's provisional tombstone — the
@@ -426,6 +430,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
   const activity = activityOfEvents(events);
   return {
     id: row.runId,
+    ...(m.label !== undefined ? { label: m.label } : {}),
     ...(m.agent !== undefined ? { agent: m.agent } : {}),
     ...(m.model !== undefined ? { model: m.model } : {}),
     channelId: m.channelId,
@@ -444,6 +449,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     ...(m.route !== undefined ? { route: m.route } : {}),
     ...(m.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
     ...(m.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),
+    ...(m.hosted ? { hosted: true as const } : {}),
     ...(row.stop ? { stop: { mode: row.stop, state: "stopping" as const } } : {}),
     schema: SPAN_SCHEMA, // a ledger run is a current runner's: spans carry its timing
     ownerGen: row.ownerGen,
@@ -482,6 +488,7 @@ function liveView(s: RunSummary): RunView {
     ...(s.parentRunId !== undefined ? { parentRunId: s.parentRunId } : {}),
     ...(s.parentInstanceId !== undefined ? { parentInstanceId: s.parentInstanceId } : {}),
     ...(s.idempotencyKey !== undefined ? { idempotencyKey: s.idempotencyKey } : {}),
+    ...(s.hosted ? { hosted: true as const } : {}),
     ...(s.persisted ? { persisted: true } : {}),
   };
 }

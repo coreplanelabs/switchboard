@@ -206,7 +206,10 @@ export function reclaimedRunRecord(input: {
     msg: {
       channelId: row.meta.channelId,
       userId: row.meta.userId,
-      threadKey: row.threadKey,
+      // The metadata's thread, never the ledger's key column (record 0060): a
+      // hosted row is claimed under the host key, and its record files under
+      // its conversation like every run's.
+      threadKey: row.meta.threadKey,
       sourceUrl: row.meta.sourceUrl,
       userName: row.meta.userName,
       authenticatedAs: row.meta.authenticatedAs,

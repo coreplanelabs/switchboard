@@ -3,7 +3,14 @@ import type { AgentDef } from "../agents/registry.js";
 import type { ChatMessage } from "./chatMessage.js";
 import type { ResumableRun, ResumeRun } from "./boot.js";
 import type { CoreDeps, DispatchOptions } from "./dispatcher.js";
-import { inputTextOf, knownToolsFor, launchResumes, repoContextOf, resumeMessage } from "./resumeLaunch.js";
+import {
+  inputTextOf,
+  knownToolsFor,
+  launchResumes,
+  repoContextOf,
+  resumeIoTarget,
+  resumeMessage,
+} from "./resumeLaunch.js";
 import type { LiveRunRow, StepRecord } from "./runLedger/types.js";
 import type { ChannelIO, IncomingMessage } from "./types.js";
 
@@ -133,6 +140,27 @@ describe("the pure pieces", () => {
       },
     });
     expect(resumeMessage(relayed, "")).toMatchObject({ userId: "slack:UALICE", postedBy: "slack:bot:B0CLAUDE" });
+  });
+
+  // record 0060: a hosted row's key column carries `#host`, which no channel's
+  // thread can match — the resume message and the launcher's handle are built
+  // from the METADATA's thread.
+  it("resumeMessage and resumeIoTarget name the metadata's thread for a host-keyed row, never the ledger's key column", () => {
+    const hosted = row({
+      threadKey: "web:s:c9#host",
+      card: { channel: "web:s", ts: "9.1" },
+      meta: {
+        channelId: "web:s",
+        userId: "access:u1",
+        threadKey: "web:s:c9",
+        agent: "ship",
+        hosted: true,
+        label: "ship · acme/api",
+      },
+    });
+    expect(resumeMessage(hosted, "ship it").threadKey).toBe("web:s:c9");
+    expect(resumeIoTarget(hosted)).toEqual({ threadKey: "web:s:c9", userId: "access:u1", cardTs: "9.1" });
+    expect(resumeIoTarget(row({ card: null }))).toEqual({ threadKey: "slack:C1:1.0", userId: "slack:UALICE" });
   });
 
   it("repoContextOf carries repo/ref/pr/headSha and nothing else", () => {
@@ -287,7 +315,9 @@ describe("launchResumes", () => {
       {} as CoreDeps,
       [
         resumable(),
-        resumable({ row: row({ runId: "r2", threadKey: "slack:C1:2.0" }) }),
+        resumable({
+          row: row({ runId: "r2", threadKey: "slack:C1:2.0", meta: { ...row().meta, threadKey: "slack:C1:2.0" } }),
+        }),
         resumable({ row: row({ runId: "r3", threadKey: "slack:C1:3.0", meta: { ...row().meta, agent: "nobody" } }) }),
       ],
       {
@@ -321,7 +351,12 @@ describe("launchResumes", () => {
     const warnings: string[] = [];
     const outcome = await launchResumes(
       [] as unknown as CoreDeps,
-      [resumable(), resumable({ row: row({ runId: "r2", threadKey: "slack:C1:2.0" }) })],
+      [
+        resumable(),
+        resumable({
+          row: row({ runId: "r2", threadKey: "slack:C1:2.0", meta: { ...row().meta, threadKey: "slack:C1:2.0" } }),
+        }),
+      ],
       {
         ioFor: () => ({
           reply: async () => {},

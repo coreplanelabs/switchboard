@@ -59,6 +59,14 @@ export interface LiveRunMeta {
   /** The app that relayed the request for the person (authorization.md item 14): a resume or restart keeps app ∩ person at the gates. */
   postedBy?: string;
   effort?: string;
+  /** A ship pipeline's parent (record 0060): claimed under the host key
+   *  (`hostKey.ts`) while `threadKey` here names the thread itself, so every
+   *  record, notice and rebuilt handle files by the metadata's thread and the
+   *  occupancy readers that key on the ledger's key column never see it. */
+  hosted?: true;
+  /** The run's index label (the registry sets it at create): on the row so a
+   *  hosted run listed from the ledger reads as its registry view does. */
+  label?: string;
   ref?: string;
   headSha?: string;
   pr?: number;
