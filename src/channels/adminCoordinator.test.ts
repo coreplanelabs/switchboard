@@ -103,7 +103,7 @@ function record(id: string, over: Partial<RunRecord> = {}): RunRecord {
   };
 }
 
-type Script = (msg: IncomingMessage, io: ChannelIO, opts: { coordinator: CoordinatorTag }) => Promise<DispatchOutcome>;
+type Script = (msg: IncomingMessage, io: ChannelIO, opts?: { coordinator: CoordinatorTag }) => Promise<DispatchOutcome>;
 
 /** The child registers, then its dispatch completes: the common path. */
 const registers =
@@ -153,7 +153,7 @@ function harness(
     ...(over.prices !== undefined ? { prices: over.prices } : {}),
   });
   const instances = new InMemoryCoordinatorInstanceStore();
-  const dispatched: Array<{ msg: IncomingMessage; opts: { coordinator: CoordinatorTag } }> = [];
+  const dispatched: Array<{ msg: IncomingMessage; opts?: { coordinator: CoordinatorTag } }> = [];
   const replies: string[] = [];
   const io: ChannelIO = {
     reply: async (t) => void replies.push(t),
@@ -360,13 +360,13 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
     const h = harness();
     await h.instances.put(INSTANCE);
     await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
-    expect(h.dispatched[0].opts.coordinator.base).toBe("main");
+    expect(h.dispatched[0].opts!.coordinator.base).toBe("main");
     const { base: _base, ...baseless } = INSTANCE;
     const noBase = harness();
     await noBase.instances.put(baseless);
     await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), noBase.deps);
-    expect(noBase.dispatched[0].opts.coordinator).toEqual({ parentInstanceId: INSTANCE.id, idempotencyKey: KEY });
-    expect("base" in noBase.dispatched[0].opts.coordinator).toBe(false);
+    expect(noBase.dispatched[0].opts!.coordinator).toEqual({ parentInstanceId: INSTANCE.id, idempotencyKey: KEY });
+    expect("base" in noBase.dispatched[0].opts!.coordinator).toBe(false);
   });
 
   it("an unknown parentInstanceId is refused 404 and nothing is dispatched", async () => {
@@ -1279,7 +1279,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       true,
     );
     expect(msg.text).toContain(`Review pull request acme/api#7 at head \`${"a".repeat(40)}\``);
-    expect(opts.coordinator).toEqual({
+    expect(opts!.coordinator).toEqual({
       parentInstanceId: PLAN_INSTANCE.id,
       idempotencyKey: "plan-fixture:U10/1/review",
       base: "main",
@@ -1429,7 +1429,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(msg.text.startsWith("agent:coding in acme/api on branch plan/fixture/u10: Implement unit U10")).toBe(true);
     // The child runs AT the unit branch; the tag says which branch its pull
     // request targets — the plan's base — since the thread cannot.
-    expect(opts.coordinator).toEqual({
+    expect(opts!.coordinator).toEqual({
       parentInstanceId: PLAN_INSTANCE.id,
       idempotencyKey: "plan-fixture:U10/0/coding",
       base: "main",
@@ -1483,7 +1483,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     });
     // No dispatch of this route carries a finding-id tag: the tool records what the run submits and the
     // runner matches the ids.
-    for (const d of h.dispatched) expect("fixRound" in d.opts).toBe(false);
+    for (const d of h.dispatched) expect("fixRound" in d.opts!).toBe(false);
 
     const noThread = await planHarness();
     expect(
@@ -2652,5 +2652,156 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       ).body,
     ).toMatchObject({ ok: true });
     expect(gone.logs.some((l) => l.includes("the board comment could not be posted"))).toBe(true);
+  });
+});
+
+// Feature: record 0051's fold rule (thread-admission items 4 and 5) — the fold: every
+// coding spawn carries the unit's unconsumed thread events, attributed and in
+// arrival order, and marks them consumed by the spawn's step; a review spawn
+// leaves them; leftovers at a final ending run once as one fresh turn.
+describe("the fold — a unit's thread events reach the pipeline's next step (record 0051's fold rule)", () => {
+  const call = (h: ReturnType<typeof harness>, step: string, body: Record<string, unknown>) =>
+    handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${step}`, body), h.deps);
+  const key = { instanceId: INSTANCE.id, unit: "u12" };
+  const row: CoordinatorUnit = {
+    instanceId: INSTANCE.id,
+    unit: "u12",
+    slug: "u12",
+    branch: "plan/orchestration/u12",
+    dependsOn: [],
+    rounds: [],
+    threadKey: INSTANCE.threadKey,
+  };
+  const event = (seq: number, text: string, sender = "slack:UBOB", senderName?: string) => ({
+    sender,
+    ...(senderName !== undefined ? { senderName } : {}),
+    text,
+    mode: "steer" as const,
+    at: NOW - 5_000 + seq,
+  });
+  const shot = { mediaType: "image/png", data: "aGk=", name: "shot.png" };
+  const note = { mediaType: "text/plain", data: "bm90ZQ==" };
+
+  async function foldHarness(over: Parameters<typeof harness>[0] = {}) {
+    const h = harness(over);
+    await h.instances.put(INSTANCE);
+    await h.instances.putUnits([row]);
+    return h;
+  }
+
+  it("a coding spawn folds two senders' unconsumed events into the child's request in arrival order, attributed, and marks them consumed by the spawn's step", async () => {
+    const h = await foldHarness();
+    await h.instances.appendEvent(key, {
+      ...event(1, "also update the readme", "slack:UBOB", "bob"),
+      attachments: [shot],
+    });
+    await h.instances.appendEvent(key, {
+      ...event(2, "and bump the version", "slack:UCARA", "cara"),
+      attachments: [note],
+    });
+    const res = await call(h, "spawn", {
+      parentInstanceId: INSTANCE.id,
+      step: "u12/1/fix",
+      preset: "coding",
+      prompt: "Address the findings.",
+      unit: "u12",
+    });
+    expect(res.status).toBe(200);
+    expect(h.dispatched).toHaveLength(1);
+    const text = h.dispatched[0]!.msg.text;
+    expect(text).toContain("Address the findings.");
+    expect(text.indexOf("bob: also update the readme")).toBeGreaterThan(text.indexOf("Address the findings."));
+    expect(text.indexOf("cara: and bump the version")).toBeGreaterThan(text.indexOf("bob: also update the readme"));
+    // The stored attachments ride the child's message as its own images and documents.
+    expect(h.dispatched[0]!.msg.images).toEqual([shot]);
+    expect(h.dispatched[0]!.msg.documents).toEqual([note]);
+    expect((await h.instances.listEvents(key)).map((e) => e.consumedBy)).toEqual(["u12/1/fix", "u12/1/fix"]);
+    expect(await h.instances.listEvents(key, true)).toEqual([]);
+  });
+
+  it("a review spawn leaves the events unconsumed and folds nothing", async () => {
+    const h = await foldHarness();
+    await h.instances.appendEvent(key, event(1, "also update the readme"));
+    const res = await call(h, "spawn", {
+      parentInstanceId: INSTANCE.id,
+      step: "u12/1/review",
+      preset: "review",
+      prompt: "Review the pull request.",
+      unit: "u12",
+    });
+    expect(res.status).toBe(200);
+    expect(h.dispatched[0]!.msg.text).not.toContain("also update the readme");
+    expect(h.dispatched[0]!.msg.images).toBeUndefined();
+    expect(await h.instances.listEvents(key, true)).toHaveLength(1);
+  });
+
+  it("leftovers at a final ending run once as one fresh turn in the unit's thread, attributed, their attachments carried, marked consumed — and a replayed unit-end runs nothing twice", async () => {
+    const h = await foldHarness();
+    await h.instances.appendEvent(key, {
+      ...event(1, "also update the readme", "slack:UBOB", "bob"),
+      attachments: [shot],
+    });
+    const body = {
+      parentInstanceId: INSTANCE.id,
+      unit: "u12",
+      ending: { kind: "merge_ready", report: "the unit is merge-ready" },
+    };
+    const res = await call(h, "unit-end", body);
+    expect(res.status).toBe(200);
+    // One fresh turn as the requester, no coordinator tag, no preset directive.
+    expect(h.dispatched).toHaveLength(1);
+    const { msg, opts } = h.dispatched[0]!;
+    expect(opts).toBeUndefined();
+    expect(msg.threadKey).toBe(INSTANCE.threadKey);
+    expect(msg.userId).toBe(INSTANCE.userId);
+    expect(msg.text).toBe("bob: also update the readme");
+    expect(msg.images).toEqual([shot]);
+    expect(msg.documents).toBeUndefined();
+    expect((await h.instances.listEvents(key)).map((e) => e.consumedBy)).toEqual(["unit-end:u12"]);
+    // Replayed: nothing unconsumed, nothing runs twice.
+    const again = await call(h, "unit-end", body);
+    expect(again.status).toBe(200);
+    expect(h.dispatched).toHaveLength(1);
+  });
+
+  it("leftovers at a final ending with no channel handle stay unconsumed, run no fresh turn, and the log says how many were left where", async () => {
+    const h = await foldHarness({ ioFor: () => undefined });
+    await h.instances.appendEvent(key, event(1, "also update the readme", "slack:UBOB", "bob"));
+    const res = await call(h, "unit-end", {
+      parentInstanceId: INSTANCE.id,
+      unit: "u12",
+      ending: { kind: "merge_ready", report: "the unit is merge-ready" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, told: false });
+    expect(h.dispatched).toHaveLength(0);
+    expect((await h.instances.listEvents(key, true)).map((e) => e.seq)).toEqual([1]);
+    expect(h.logs.some((l) => l.includes("1 leftover thread event(s) stay unconsumed") && l.includes("u12"))).toBe(
+      true,
+    );
+  });
+
+  it("a spawn replayed after a reclaim answers alreadySpawned before the events are read and folds nothing twice", async () => {
+    const h = await foldHarness();
+    h.registry.create("coding · child", {
+      agent: "coding",
+      channelId: INSTANCE.channelId,
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+      parentInstanceId: INSTANCE.id,
+      idempotencyKey: `${INSTANCE.id}:u12/1/fix`,
+    });
+    await h.instances.appendEvent(key, event(1, "also update the readme"));
+    const res = await call(h, "spawn", {
+      parentInstanceId: INSTANCE.id,
+      step: "u12/1/fix",
+      preset: "coding",
+      prompt: "Address the findings.",
+      unit: "u12",
+    });
+    expect(res.status).toBe(200);
+    expect((res.body as { alreadySpawned?: boolean }).alreadySpawned).toBe(true);
+    expect(h.dispatched).toHaveLength(0);
+    expect(await h.instances.listEvents(key, true)).toHaveLength(1);
   });
 });

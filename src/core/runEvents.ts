@@ -600,6 +600,13 @@ export type RunEvent =
        *  run sent rather than a person (a parent's `send_to_run`), that run's
        *  id (docs/reference/specs/agent-conductor.md item 8). */
       source?: { url?: string; channel?: string; user?: string; run?: string };
+      /** How the turn was delivered when it consumed a unit's thread events
+       *  (record 0051's mode-as-receipt rule): the mode read off the owner's state when
+       *  each event arrived — a receipt, never a switch — and the sequence
+       *  numbers consumed, so the record names the events it folded. Absent on
+       *  every run that consumed none. */
+      mode?: "steer" | "wake" | "interrupt";
+      consumed?: number[];
       seq?: number;
       at?: number;
     }
@@ -826,6 +833,13 @@ export type RunEvent =
    *  `base` is absent when the spawn knew none; the post-step then falls to
    *  the coordinator store's `instance.base`. Additive: unknown → ignored. */
   | { type: "coordinator_tag"; parentInstanceId: string; unit?: string; base?: string; seq?: number; at?: number }
+  /** The plan runner instance a ship run's hand-off created (record 0051 R2;
+   *  docs/reference/specs/run-history.md item 2): published by the ship branch
+   *  after `handOffToCoordinator` succeeds, straight to the registry like
+   *  `pr_opened`, and projected onto `RunRecord.instanceId` the way
+   *  `coordinator_tag` is — so the thread's owner rule can find the instance
+   *  from the page's ship run. Additive: unknown → ignored. */
+  | { type: "ship_handoff"; instanceId: string; seq?: number; at?: number }
   /** The review post-step's outcome when the verdict landed
    *  (docs/reference/specs/agent-review.md item 18): the pull request it was
    *  posted to, the head it was pinned to (the carried head after a rebase,

@@ -16,6 +16,11 @@ import {
   UNIT_KEY_PATTERN,
   unitKeyOf,
   unitOfIdempotencyKey,
+  UNIT_PATTERN,
+  unitNudgeEventType,
+  capThreadEvent,
+  isThreadEvent,
+  THREAD_EVENT_MAX_BYTES,
   type CoordinatorInstance,
   type CoordinatorUnit,
   type WorkflowSender,
@@ -296,5 +301,99 @@ describe("sendRunFinished — the event a terminal record sends", () => {
       type: "run-finished-run-1",
       reason: "instance is not running",
     });
+  });
+});
+
+// Feature: docs/reference/specs/http-ingress.md item 9 — the payload-free
+// nudge a thread event sends its unit's instance (record 0051's reply-as-event rule).
+describe("unitNudgeEventType — the nudge's type under the relay's alphabet", () => {
+  // The relay's own pattern (instancesRoute.ts): letters, digits, `_` and `-`, at most 100 characters.
+  const RELAY_EVENT_TYPE = /^[A-Za-z0-9_-]{1,100}$/;
+
+  it("matches the relay's pattern for the longest legal instance id and unit, and a colon never appears", () => {
+    const instanceId = `i${"x".repeat(99)}`; // 100 chars, INSTANCE_ID_PATTERN's cap
+    const unit = "U".padEnd(32, "9"); // 32 chars, UNIT_PATTERN's cap
+    expect(INSTANCE_ID_PATTERN.test(instanceId)).toBe(true);
+    expect(UNIT_PATTERN.test(unit)).toBe(true);
+    const type = unitNudgeEventType({ instanceId, unit });
+    expect(type).toMatch(RELAY_EVENT_TYPE);
+    expect(type).not.toContain(":");
+    // The unit rides whole — the send addresses the instance by id, so the
+    // type only has to name the unit within it; the instance id is the clipped half.
+    expect(type.endsWith(`-${unit}`)).toBe(true);
+    expect(type.startsWith("unit-nudge-")).toBe(true);
+  });
+
+  it("keeps short ids whole and is deterministic — both ends compute the same string", () => {
+    expect(unitNudgeEventType({ instanceId: "ship_acme_api_1", unit: "U12" })).toBe("unit-nudge-ship_acme_api_1-U12");
+    expect(unitNudgeEventType({ instanceId: "ship_acme_api_1", unit: "U12" })).toBe(
+      unitNudgeEventType({ instanceId: "ship_acme_api_1", unit: "U12" }),
+    );
+  });
+});
+
+// Feature: docs/reference/specs/thread-admission.md — a thread event's shape and its cap (record 0051's reply-as-event rule).
+describe("capThreadEvent and isThreadEvent — one event row of a unit's list", () => {
+  const event = {
+    sender: "slack:UALICE",
+    text: "also update the readme",
+    mode: "steer" as const,
+    at: 5_000,
+  };
+
+  it("keeps attachments under the cap and drops them whole over it, recording the count", () => {
+    const small = capThreadEvent({ ...event, attachments: [{ mediaType: "image/png", data: "aGk=" }] });
+    expect(small.attachments).toHaveLength(1);
+    expect(small.attachmentsDropped).toBeUndefined();
+    const big = capThreadEvent({
+      ...event,
+      attachments: [
+        { mediaType: "image/png", data: "x".repeat(THREAD_EVENT_MAX_BYTES) },
+        { mediaType: "image/png", data: "y" },
+      ],
+    });
+    expect(big.attachments).toBeUndefined();
+    expect(big.attachmentsDropped).toBe(2);
+    expect(big.text).toBe(event.text);
+    expect(big.textDropped).toBeUndefined();
+  });
+
+  it("a text alone over the cap is cut from the end until the row fits, the cut counted; the same input caps the same way twice", () => {
+    const long = { ...event, text: "é".repeat(THREAD_EVENT_MAX_BYTES) };
+    const cut = capThreadEvent(long);
+    expect(new TextEncoder().encode(JSON.stringify(cut)).length).toBeLessThanOrEqual(THREAD_EVENT_MAX_BYTES);
+    expect(cut.text.length).toBeGreaterThan(0);
+    expect(cut.text.length).toBeLessThan(long.text.length);
+    expect(cut.textDropped).toBe(long.text.length - cut.text.length);
+    expect(long.text.startsWith(cut.text)).toBe(true);
+    expect(capThreadEvent(long)).toEqual(cut);
+    // Attachments over the cap go first; the text is cut only when the row is still over without them.
+    const both = capThreadEvent({ ...long, attachments: [{ mediaType: "image/png", data: "aGk=" }] });
+    expect(both.attachmentsDropped).toBe(1);
+    expect(both.textDropped).toBeGreaterThanOrEqual(cut.textDropped!);
+    expect(new TextEncoder().encode(JSON.stringify(both)).length).toBeLessThanOrEqual(THREAD_EVENT_MAX_BYTES);
+    expect(isThreadEvent({ ...cut, seq: 1 })).toBe(true);
+    expect(isThreadEvent({ ...cut, seq: 1, textDropped: "many" })).toBe(false);
+  });
+
+  it("the counters are non-negative integers and the fixed fields are bounded, so a row's cap has a floor: a fraction, a negative, NaN or an oversized id is refused", () => {
+    const row = { ...event, seq: 1 };
+    expect(isThreadEvent({ ...row, attachmentsDropped: 0 })).toBe(true);
+    expect(isThreadEvent({ ...row, attachmentsDropped: 1.5 })).toBe(false);
+    expect(isThreadEvent({ ...row, attachmentsDropped: -1 })).toBe(false);
+    expect(isThreadEvent({ ...row, textDropped: Number.NaN })).toBe(false);
+    expect(isThreadEvent({ ...row, textDropped: -3 })).toBe(false);
+    expect(isThreadEvent({ ...row, id: "1789742775.643859" })).toBe(true);
+    expect(isThreadEvent({ ...row, id: "x".repeat(513) })).toBe(false);
+    expect(isThreadEvent({ ...row, sender: "x".repeat(513) })).toBe(false);
+    expect(isThreadEvent({ ...row, senderName: "x".repeat(513) })).toBe(false);
+  });
+
+  it("accepts a stored row and refuses a malformed one", () => {
+    expect(isThreadEvent({ ...event, seq: 1 })).toBe(true);
+    expect(isThreadEvent({ ...event, seq: 1, consumedBy: "spawn:U12/1/fix" })).toBe(true);
+    expect(isThreadEvent({ ...event, seq: 0 })).toBe(false);
+    expect(isThreadEvent({ ...event, seq: 1, mode: "queue" })).toBe(false);
+    expect(isThreadEvent({ seq: 1, text: "x", mode: "steer", at: 1 })).toBe(false); // no sender
   });
 });

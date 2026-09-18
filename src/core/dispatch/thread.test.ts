@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CoordinatorUnit } from "../coordinator/contract.js";
 import type { RunSession } from "../runRecord.js";
 import type { RunView } from "../runsService.js";
 import {
+  instanceOf,
+  ownerOf,
   previousRunOf,
   readThread,
   refusedRequestsOf,
@@ -253,5 +256,84 @@ describe("runsSince — the finished runs newer than the agent's previous run (s
   it("nothing newer than the previous run is an empty list; an empty page too", () => {
     expect(runsSince(page, "review")).toEqual([]);
     expect(runsSince([], "coding")).toEqual([]);
+  });
+});
+
+// Feature: record 0051's owner rule (routing-and-config item 21) — the thread's owner
+// for its life: the live run, else the unfinished unit of the page's instance
+// whose row names this thread, else the newest continuable session a person
+// addressed, else none. The unit read costs the page plus at most one read of
+// the instance's unit rows.
+describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rule)", () => {
+  const THREAD = "slack:C1:1.0";
+  const unit = (over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
+    instanceId: "ship_acme_api_1",
+    unit: "U12",
+    slug: "u12",
+    branch: "plan/orchestration/u12",
+    dependsOn: [],
+    rounds: [],
+    threadKey: THREAD,
+    ...over,
+  });
+
+  it("owner is the live run when one is live — before any unit or session", async () => {
+    const live = run({ id: "r-live", finished: false, instanceId: "ship_acme_api_1" });
+    const unitsOf = vi.fn(async () => [unit()]);
+    expect(await ownerOf([live, run({ id: "r-old", agent: "coding", session: closed })], unitsOf, THREAD)).toEqual({
+      kind: "live",
+      run: live,
+    });
+    expect(unitsOf).not.toHaveBeenCalled();
+  });
+
+  it("owner is the unfinished unit when the page's ship run names its instance and the row names this thread", async () => {
+    const ship = run({ id: "r-ship", agent: "ship", instanceId: "ship_acme_api_1", session: closed });
+    const unitsOf = vi.fn(async () => [unit()]);
+    expect(await ownerOf([ship], unitsOf, THREAD)).toEqual({
+      kind: "unit",
+      instanceId: "ship_acme_api_1",
+      unit: unit(),
+    });
+    expect(unitsOf).toHaveBeenCalledExactlyOnceWith("ship_acme_api_1");
+  });
+
+  it("owner is the unfinished unit when only a child's parentInstanceId names the instance", async () => {
+    const child = run({ id: "r-child", agent: "coding", parentInstanceId: "ship_acme_api_1", session: closed });
+    expect(await ownerOf([child], async () => [unit()], THREAD)).toMatchObject({ kind: "unit" });
+  });
+
+  it("owner falls to the sticky session when every unit for the thread has an ending, and a coordinator's child is never the owner", async () => {
+    const ended = unit({ ending: { kind: "merged", report: "merged", at: 2_000 } });
+    const child = run({ id: "r-child", agent: "coding", parentInstanceId: "ship_acme_api_1", session: closed });
+    const person = run({ id: "r-person", agent: "review", session: closed });
+    // The person's addressed session is the owner; the child alone owns nothing.
+    expect(await ownerOf([child, person], async () => [ended], THREAD)).toEqual({ kind: "session", agent: "review" });
+    expect(await ownerOf([child], async () => [ended], THREAD)).toEqual({ kind: "none" });
+  });
+
+  it("a unit row for another thread is not the owner, and an empty page owns nothing", async () => {
+    const ship = run({ id: "r-ship", agent: "ship", instanceId: "ship_acme_api_1", session: closed });
+    expect(await ownerOf([ship], async () => [unit({ threadKey: "slack:C1:9.9" })], THREAD)).toEqual({
+      kind: "session",
+      agent: "ship",
+    });
+    expect(await ownerOf([], async () => [], THREAD)).toEqual({ kind: "none" });
+  });
+
+  it("instanceOf reads the newest run's instance — a ship run's own instanceId or a child's parentInstanceId — and a failed unit read leaves the unit out", async () => {
+    expect(instanceOf([run({ id: "a", instanceId: "i_1" }), run({ id: "b", parentInstanceId: "i_2" })])).toBe("i_1");
+    expect(instanceOf([run({ id: "b", parentInstanceId: "i_2" })])).toBe("i_2");
+    expect(instanceOf([run({ id: "c" })])).toBeUndefined();
+    const ship = run({ id: "r-ship", agent: "ship", instanceId: "ship_acme_api_1", session: closed });
+    expect(
+      await ownerOf(
+        [ship],
+        async () => {
+          throw new Error("store down");
+        },
+        THREAD,
+      ),
+    ).toEqual({ kind: "session", agent: "ship" });
   });
 });

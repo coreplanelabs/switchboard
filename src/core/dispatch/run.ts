@@ -9,7 +9,12 @@
 import type { ConfigStore, ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import type { RouteDecided } from "./route.js";
-import { coordinatorFields, unitOfIdempotencyKey, type CoordinatorTag } from "../coordinator/contract.js";
+import {
+  coordinatorFields,
+  unitOfIdempotencyKey,
+  type CoordinatorTag,
+  type WorkflowSender,
+} from "../coordinator/contract.js";
 import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { RunProfile } from "../../config/profile.js";
 import { mergeTools, TOOLSETS } from "../../tools/toolsets.js";
@@ -114,6 +119,15 @@ export interface RunDeps
    * reported as lost.
    */
   coordinatorInstances?: CoordinatorInstanceStore;
+  /**
+   * The Workflow sender over the shim's event relay (`shimWorkflowSender`) —
+   * the sender the check-run intake already uses — through which the
+   * dispatcher nudges a unit's instance when a thread event lands on it
+   * (record 0051's reply-as-event rule). Absent (a test, a process without a shim): the
+   * nudge fails like any other send failure — the event stays appended and
+   * the sender is acked as queued.
+   */
+  workflow?: WorkflowSender;
   /**
    * The runs service behind the `list_runs` / `get_run_status` tools
    * (docs/reference/specs/agent-conductor.md item 4): the ONE service every

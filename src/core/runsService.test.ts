@@ -1959,3 +1959,22 @@ describe("RunsService.searchSession — a person's search over one session's log
     );
   });
 });
+
+// Feature: record 0051 R2 (run-history item 2) — the view exposes the plan
+// runner instance a ship run's hand-off created, off the record's projection.
+describe("RunView.instanceId — the ship run's instance (record 0051 R2)", () => {
+  it("a persisted ship record carries instanceId on the view — the get and the thread's list alike — and a record written before the event has none", async () => {
+    const { reg, tick } = testRegistry();
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const svc = createRunsService({ registry: reg, store });
+    await store.put(record("r-ship", NOW - DAY, { agent: "ship", instanceId: "plan-fix-login-6435ec" }));
+    await store.put(record("r-old", NOW - 2 * DAY, { agent: "ship" }));
+    tick(1);
+    const view = await svc.getRun("r-ship");
+    expect(view.ok && view.value.instanceId).toBe("plan-fix-login-6435ec");
+    const listed = await svc.listRuns({ status: "all", visibleTo: ALL, threadKey: "slack:C1:r-ship" });
+    expect(listed.runs[0]?.instanceId).toBe("plan-fix-login-6435ec");
+    const old = await svc.getRun("r-old");
+    expect(old.ok && "instanceId" in old.value).toBe(false);
+  });
+});
