@@ -1121,6 +1121,7 @@ export async function dispatch(
       staged.length > 0 && agent.machine !== "none"
         ? copyStaged(staged, {
             store: deps.artifacts!,
+            copyAttachment: io.copyAttachment?.bind(io),
             threadKey: msg.threadKey,
             nextIndex: nextStagedIndex,
             publish: (e) => registry.publish(runId, e),

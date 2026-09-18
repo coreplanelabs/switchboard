@@ -16,7 +16,7 @@ const event = (id = "s"): LinearWebhookEvent => ({
     promptContext: "Fix login",
   },
 });
-function fixture() {
+function fixture(maxStagedBytes?: number) {
   let now = 100,
     serial = 0;
   const store = new InMemoryLinearInbox();
@@ -41,6 +41,7 @@ function fixture() {
     link: vi.fn(async () => {}),
   };
   const deps = {
+    maxStagedBytes,
     inbox,
     api: () => api,
     clock: () => now,
@@ -65,6 +66,25 @@ function fixture() {
 afterEach(() => vi.useRealTimers());
 
 describe("Linear event consumer", () => {
+  it("passes staged metadata and the configured byte budget into dispatch under the original message id", async () => {
+    const f = fixture(1000);
+    const ev = event();
+    const url = "https://uploads.linear.app/org/archive";
+    ev.payload.promptContext = `Inspect [data.zip](${url})`;
+    vi.mocked(f.api.files).mockResolvedValue([
+      { url, name: "data.zip", staged: { size: 100, type: "application/zip" } },
+    ]);
+    await f.store.accept(ev);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.api.files).toHaveBeenCalledWith("s", "linear:org:alice", [url], false, 1000);
+    expect(f.deps.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        staged: [{ url, name: "data.zip", size: 100, type: "application/zip", messageId: ev.key }],
+      }),
+      expect.objectContaining({ copyAttachment: expect.any(Function) }),
+    );
+  });
   it("consumes a managed child's creation without a second dispatch but accepts human follow-ups", async () => {
     const f = fixture();
     vi.mocked(f.api.session).mockResolvedValue({ id: "s", appUserId: "bot", creatorId: "bot", managedChild: true });
@@ -126,7 +146,7 @@ describe("Linear event consumer", () => {
     f.advance(5000);
     await f.consumer.poll();
     await f.consumer.settled();
-    expect(f.api.files).toHaveBeenCalledWith("s", "linear:org:alice", [url]);
+    expect(f.api.files).toHaveBeenCalledWith("s", "linear:org:alice", [url], false, undefined);
     expect(f.deps.dispatch).toHaveBeenCalledWith(
       expect.objectContaining({ images: [{ name: "screen.png", mediaType: "image/png", data: "cGl4ZWxz" }] }),
       expect.anything(),

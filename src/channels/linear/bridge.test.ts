@@ -22,6 +22,21 @@ function fixture() {
 }
 
 describe("Linear edge bridge", () => {
+  it("relays an attachment copy with the session and human bound separately from file metadata", async () => {
+    const { api, transport } = fixture();
+    const file = {
+      url: "https://uploads.linear.app/org/data",
+      name: "data.zip",
+      size: 100,
+      type: "application/zip",
+      messageId: "prompt",
+    };
+    const key = "threads/linear-org-s/in/prompt/1-data.zip";
+    api.copyAttachment = vi.fn(async () => ({ key, size: 100 }));
+    const remote = new RemoteLinearApi(transport, "org");
+    expect(await remote.copyAttachment("s", "linear:org:alice", file, key)).toEqual({ key, size: 100 });
+    expect(api.copyAttachment).toHaveBeenCalledWith("s", "linear:org:alice", file, key);
+  });
   it("allows child creation to complete across several upstream requests", async () => {
     vi.useFakeTimers();
     const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
@@ -118,7 +133,7 @@ describe("Linear edge bridge", () => {
       { url: urls[0]!, name: "file.txt", document: { mediaType: "text/plain", data: "text" } },
     ]);
     expect(await remote.files("s", "linear:org:alice", urls, true)).toHaveLength(1);
-    expect(api.files).toHaveBeenCalledWith("s", "linear:org:alice", urls, true);
+    expect(api.files).toHaveBeenCalledWith("s", "linear:org:alice", urls, true, 0);
     vi.mocked(api.files).mockRejectedValueOnce(new Error("linear_file_denied"));
     await expect(remote.files("s", "linear:org:bob", urls)).rejects.toThrow("linear_file_denied");
   });

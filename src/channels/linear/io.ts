@@ -9,6 +9,7 @@ import type {
   StatusUpdate,
   UploadTicket,
   OpenedThread,
+  StagedFile,
 } from "../../core/types.js";
 import type { Clock } from "../../core/trace/types.js";
 import { LINEAR_TIMING } from "../../core/budgets.js";
@@ -118,6 +119,12 @@ export class LinearChannelIO implements ChannelIO {
 
   async attach(file: { name: string; text: string; lead: string }): Promise<void> {
     await this.reply(`${file.lead}\n\n**${file.name}**\n\n${file.text}`);
+  }
+
+  async copyAttachment(file: StagedFile, key: string): Promise<void> {
+    if (!this.requesterId || !this.deps.api.copyAttachment) throw new Error("linear_staging_unavailable");
+    const copied = await this.deps.api.copyAttachment(this.deps.sessionId, this.requesterId, file, key);
+    if (copied.key !== key || copied.size !== file.size) throw new Error("linear_file_copy_incomplete");
   }
 
   async uploadTicket(file: { name: string; size: number }): Promise<UploadTicket> {

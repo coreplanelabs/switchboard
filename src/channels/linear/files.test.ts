@@ -7,6 +7,48 @@ const text = "https://uploads.linear.app/org/code";
 const refs = fileReferences(`![screen.png](${png}) [guide.pdf](<${pdf}>) [example.ts](${text})`);
 
 describe("Linear private file ingestion", () => {
+  it("stages an image above the inline limit while leaving small images inline", async () => {
+    const size = LINEAR_FILE_LIMITS.imageBytes + 1;
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        new Response("unused", { headers: { "content-type": "image/png", "content-length": String(size) } }),
+      )
+      .mockResolvedValueOnce(
+        new Response("small", { headers: { "content-type": "image/png", "content-length": "5" } }),
+      );
+    const files = await downloadLinearFiles([refs[0]!, { url: pdf, name: "small.png" }], {
+      fetch,
+      token: async () => "secret",
+      maxStagedBytes: size,
+    });
+    expect(files[0]).toMatchObject({ staged: { size, type: "image/png" } });
+    expect(files[0]?.image).toBeUndefined();
+    expect(files[1]).toMatchObject({ image: { data: "c21hbGw=" } });
+  });
+
+  it("keeps oversized and binary files as bounded staging references without reading their bodies", async () => {
+    const cancel = vi.fn();
+    const fetch = vi.fn<typeof globalThis.fetch>(
+      async () =>
+        new Response(new ReadableStream({ cancel }), {
+          headers: { "content-type": "application/zip", "content-length": "100" },
+        }),
+    );
+    const file = { url: text, name: "source.zip" };
+    const files = await downloadLinearFiles([file, { ...file, url: pdf }], {
+      fetch,
+      token: async () => "secret",
+      maxStagedBytes: 150,
+    });
+    expect(files[0]).toMatchObject({ ...file, staged: { size: 100, type: "application/zip" } });
+    expect(files[1]?.skipped).toContain("budget");
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(applyLinearFiles({ text: `[source.zip](${text})`, messageId: "prompt" }, files)).toMatchObject({
+      staged: [{ ...file, size: 100, type: "application/zip", messageId: "prompt" }],
+    });
+  });
+
   it("encodes binary attachments in an edge runtime without Node Buffer", async () => {
     const response = new Response(new Uint8Array([0, 1, 2, 255]), { headers: { "content-type": "image/png" } });
     vi.stubGlobal("Buffer", undefined);

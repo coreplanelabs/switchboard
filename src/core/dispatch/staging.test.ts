@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InMemoryArtifactStore } from "../../artifacts/store.js";
 import type { Executor } from "../../execution/executor.js";
 import type { RunEvent } from "../runEvents.js";
@@ -106,6 +106,25 @@ describe("staging — the commands", () => {
 });
 
 describe("staging — copy then pull", () => {
+  it("uses a channel's private copy while keeping shared workspace pulls and artifact receipts", async () => {
+    const store = storeWithSlack();
+    const copyAttachment = vi.fn(async () => {});
+    const events: RunEvent[] = [];
+    const rec = recorder();
+    const { outcomes } = await stageIntoWorkspace([clip], {
+      store,
+      copyAttachment,
+      threadKey: "linear:org:session",
+      nextIndex: stagingIndex(),
+      publish: (e) => void events.push(e),
+      executor: rec.executor,
+      resident: false,
+    });
+    expect(copyAttachment).toHaveBeenCalledWith(clip, outcomes[0]!.key);
+    expect(store.copies).toEqual([]);
+    expect(outcomes[0]?.error).toBeUndefined();
+    expect(events).toMatchObject([{ type: "artifact", direction: "in", key: outcomes[0]!.key }]);
+  });
   it("copies every file under the thread's inbound key, publishes an `artifact` event per copy after it answered, then pulls each in order; a resident gets the exclude first", async () => {
     const store = storeWithSlack();
     const events: RunEvent[] = [];

@@ -95,6 +95,7 @@ export function noWorkspaceLine(files: readonly StagedFile[]): string {
 
 export interface CopyDeps {
   store: ArtifactStore;
+  copyAttachment?: (file: StagedFile, key: string) => Promise<void>;
   /** The thread the files belong to: the key's first segment. */
   threadKey: string;
   /** The run's staging counter (`stagingIndex()`): ONE sequence across every
@@ -137,7 +138,8 @@ export async function copyStaged(files: readonly StagedFile[], deps: CopyDeps): 
       const basename = stagedBasename(index, file.name);
       const key = inboundKey(deps.threadKey, file.messageId, index, file.name);
       try {
-        await deps.store.copyFromUrl({ url: file.url, size: file.size, key });
+        if (deps.copyAttachment) await deps.copyAttachment(file, key);
+        else await deps.store.copyFromUrl({ url: file.url, size: file.size, key });
         deps.publish?.({
           type: "artifact",
           direction: "in",

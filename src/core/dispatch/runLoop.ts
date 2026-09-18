@@ -768,6 +768,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         if (files.length === 0) return "";
         const staged = await stageIntoWorkspace(files, {
           store: deps.artifacts!,
+          copyAttachment: io.copyAttachment?.bind(io),
           threadKey: msg.threadKey,
           publish: (e) => registry.publish(run.id, e),
           nextIndex: nextStagedIndex,

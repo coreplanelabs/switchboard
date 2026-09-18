@@ -26,6 +26,29 @@ function fixture() {
 }
 
 describe("Linear channel output", () => {
+  it("binds attachment copies to the checked requester and verifies the completed copy", async () => {
+    const { api, io } = fixture();
+    const file = {
+      url: "https://uploads.linear.app/org/data",
+      name: "data.zip",
+      size: 100,
+      type: "application/zip",
+      messageId: "prompt",
+    };
+    const key = "threads/linear-org-s/in/prompt/1-data.zip";
+    const copy = vi.fn(async () => ({ key, size: 100 }));
+    api.copyAttachment = copy;
+    await expect(io.copyAttachment(file, key)).rejects.toThrow("linear_staging_unavailable");
+    await io.checkAccess("linear:org:alice");
+    await io.copyAttachment(file, key);
+    expect(copy).toHaveBeenCalledWith("s", "linear:org:alice", file, key);
+    copy.mockResolvedValueOnce({ key, size: 99 });
+    await expect(io.copyAttachment(file, key)).rejects.toThrow("linear_file_copy_incomplete");
+    vi.mocked(api.canRead).mockResolvedValue(false);
+    await io.checkAccess("linear:org:bob");
+    await expect(io.copyAttachment(file, key)).rejects.toThrow("linear_staging_unavailable");
+    expect(copy).toHaveBeenCalledTimes(2);
+  });
   it("opens an isolated native child with the checked requester and a stable coordinator key", async () => {
     const { api, io } = fixture();
     vi.mocked(api.openThread).mockResolvedValue({

@@ -305,6 +305,9 @@ export interface ChannelIO {
    * out and the tool posts the run-page link through `reply` instead.
    */
   uploadTicket?(file: { name: string; size: number }): Promise<UploadTicket>;
+  /** Copy a private incoming file into the configured artifact store at the
+   * credential-holding edge. The core still owns keys, workspace pulls and receipts. */
+  copyAttachment?(file: StagedFile, key: string): Promise<void>;
   /**
    * Show the confirmation a routed write is offered as
    * (docs/reference/specs/routing-and-config.md item 25, record 0044): the full

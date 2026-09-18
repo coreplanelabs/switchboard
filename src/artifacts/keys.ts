@@ -34,5 +34,5 @@ export function outboundKey(runId: string, seq: number, name: string): string {
 
 /** A received file: `threads/<thread>/in/<messageTs>/<index>-<basename>`, `index` the file's position in the message. */
 export function inboundKey(threadKey: string, messageTs: string, index: number, name: string): string {
-  return `threads/${threadKeySafe(threadKey)}/in/${messageTs}/${index}-${safeBasename(name)}`;
+  return `threads/${threadKeySafe(threadKey)}/in/${threadKeySafe(messageTs)}/${index}-${safeBasename(name)}`;
 }

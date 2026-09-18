@@ -29,6 +29,11 @@ describe("safeBasename (item 20)", () => {
 });
 
 describe("key builders (item 20)", () => {
+  it("normalizes namespaced message ids into one storage segment", () => {
+    expect(inboundKey("linear:org:session", "org:AgentSessionEvent:digest", 1, "data.zip")).toBe(
+      "threads/linear-org-session/in/org-AgentSessionEvent-digest/1-data.zip",
+    );
+  });
   it("outbound keys live under the run with a per-file sequence; inbound under the thread and message with the file's index", () => {
     expect(outboundKey("run-1", 1, "screenshot.png")).toBe("runs/run-1/out/1-screenshot.png");
     expect(outboundKey("run-1", 2, "screenshot.png")).toBe("runs/run-1/out/2-screenshot.png");

@@ -3,7 +3,7 @@
 The Linear integration is being built in stages. OAuth, durable webhook intake,
 native conversations, edge acknowledgements, dispatcher consumption, outbound
 files, inline incoming files, issue tools and lifecycle cancellation are wired.
-Large-file staging and live deployment verification remain in progress. Do not install the app for end users until the completed channel
+Workspace file staging is wired; live deployment verification remains in progress. Do not install the app for end users until the completed channel
 is deployed. See the [delivery plan](../plans/2026-09-17-001-linear-channel.md).
 
 Child work can open a separate native session on a new comment on the same issue.
@@ -131,8 +131,15 @@ newest first. Images are capped at 5 MiB each, documents at 10 MiB, with a 12 Mi
 combined budget per prompt or history load. Repeated history links carry bytes
 only on the newest user turn. Credential-shaped filenames, unsupported formats,
 missing files and files over those limits are named as unread in the prompt.
-Large files and binary formats are not yet staged into the workspace. Temporary
-failures downloading a new prompt's files retry before dispatch starts.
+With an artifact store configured on the bot and its bucket bound at the edge,
+large files and binary formats are staged into the agent's `attachments/`
+directory: up to 10 files per prompt, 1 GiB per file, within
+`artifacts.inbound.maxBytesPerMessage` (2 GiB by default). Files without a known
+size, credential-shaped names and files over budget are reported as unread.
+The edge rechecks access and session context at copy time and streams directly
+into storage; the executor receives only a temporary artifact download URL.
+Agents without a workspace report that they cannot stage the file. Temporary
+failures downloading a new prompt's inline files retry before dispatch starts.
 
 Coding runs can return files through `attach_file`. With an artifact store,
 the executor streams the file to a private Linear upload using a short-lived

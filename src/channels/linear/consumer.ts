@@ -23,6 +23,7 @@ export interface LinearConsumerDeps {
   api(organizationId: string): LinearApi;
   clock: Clock;
   warn(message: string): void;
+  maxStagedBytes?: number;
   dispatch(msg: IncomingMessage, io: ChannelIO): Promise<{ deferred?: true } | void>;
   stop(input: Extract<LinearInput, { kind: "stop" }>, io: ChannelIO): Promise<void>;
   /** Proves admission from the ledger/history, not merely the runStarted hook. */
@@ -206,7 +207,10 @@ export class LinearConsumer {
           const urls = fileReferences(input.msg.text).map((ref) => ref.url);
           if (urls.length) {
             try {
-              input.msg = applyLinearFiles(input.msg, await api.files(session.id, input.msg.userId, urls));
+              input.msg = applyLinearFiles(
+                input.msg,
+                await api.files(session.id, input.msg.userId, urls, false, this.deps.maxStagedBytes),
+              );
             } catch (error) {
               if (!(error instanceof Error) || error.message !== "linear_file_denied") throw error;
               // Dispatch still checks current access and issues the refusal. If

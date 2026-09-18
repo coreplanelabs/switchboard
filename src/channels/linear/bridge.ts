@@ -1,4 +1,6 @@
 import type { LinearFile } from "./files.js";
+import type { StagedFile } from "../../core/types.js";
+import { ARTIFACT_DEFAULTS } from "../../artifacts/config.js";
 import type { Clock } from "../../core/trace/types.js";
 import { LINEAR_TIMING } from "../../core/budgets.js";
 import {
@@ -51,11 +53,13 @@ async function call<T>(transport: LinearTransport, body: Record<string, unknown>
       method: "POST",
       redirect: "error",
       signal: AbortSignal.timeout(
-        body.op === "files"
-          ? LINEAR_TIMING.fileBridgeTimeoutMs
-          : body.op === "openThread"
-            ? LINEAR_TIMING.childBridgeTimeoutMs
-            : LINEAR_TIMING.apiTimeoutMs,
+        body.op === "copyAttachment"
+          ? ARTIFACT_DEFAULTS.copyTimeoutMs
+          : body.op === "files"
+            ? LINEAR_TIMING.fileBridgeTimeoutMs
+            : body.op === "openThread"
+              ? LINEAR_TIMING.childBridgeTimeoutMs
+              : LINEAR_TIMING.apiTimeoutMs,
       ),
       headers: { "content-type": "application/json", authorization: `Bearer ${transport.token}` },
       body: JSON.stringify(body),
@@ -80,8 +84,31 @@ export class RemoteLinearApi implements LinearApi {
   openThread(sessionId: string, userId: string, input: { id: string; lead: string }): Promise<LinearOpenedThread> {
     return call(this.transport, { op: "openThread", organizationId: this.organizationId, sessionId, userId, input });
   }
-  files(sessionId: string, userId: string, urls: string[], history = false): Promise<LinearFile[]> {
-    return call(this.transport, { op: "files", organizationId: this.organizationId, sessionId, userId, urls, history });
+  files(sessionId: string, userId: string, urls: string[], history = false, maxStagedBytes = 0): Promise<LinearFile[]> {
+    return call(this.transport, {
+      op: "files",
+      organizationId: this.organizationId,
+      sessionId,
+      userId,
+      urls,
+      history,
+      maxStagedBytes,
+    });
+  }
+  copyAttachment(
+    sessionId: string,
+    userId: string,
+    file: StagedFile,
+    key: string,
+  ): Promise<{ key: string; size: number }> {
+    return call(this.transport, {
+      op: "copyAttachment",
+      organizationId: this.organizationId,
+      sessionId,
+      userId,
+      file,
+      key,
+    });
   }
   canRead(sessionId: string, userId: string): Promise<boolean> {
     return call(this.transport, { op: "canRead", organizationId: this.organizationId, sessionId, userId });
@@ -204,6 +231,7 @@ export async function handleLinearBridge(
       "session",
       "canRead",
       "files",
+      "copyAttachment",
       "activities",
       "activity",
       "link",
@@ -242,8 +270,22 @@ export async function handleLinearBridge(
           id: required(input.id),
           lead: required(input.lead),
         });
+      } else if (op === "copyAttachment") {
+        if (!api.copyAttachment) throw new Error("linear_staging_unavailable");
+        result = await api.copyAttachment(
+          id,
+          required(body.userId),
+          object(body.file) as unknown as StagedFile,
+          required(body.key),
+        );
       } else if (op === "files")
-        result = await api.files(id, required(body.userId), body.urls as string[], body.history === true);
+        result = await api.files(
+          id,
+          required(body.userId),
+          body.urls as string[],
+          body.history === true,
+          body.maxStagedBytes as number | undefined,
+        );
       else if (op === "activities") result = await api.activities(id);
       else if (op === "activity") {
         const options = object(body.options);
@@ -277,7 +319,7 @@ export async function handleLinearBridge(
     return answer(200, { result: result ?? null });
   } catch (error) {
     if (
-      (op === "workItems" || op === "files" || op === "openThread") &&
+      (op === "workItems" || op === "files" || op === "openThread" || op === "copyAttachment") &&
       error instanceof Error &&
       Object.hasOwn(WORK_ITEM_ERRORS, error.message)
     )

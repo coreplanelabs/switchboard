@@ -211,6 +211,7 @@ function watchedChild(
   if (io.attach) watched.attach = (file) => io.attach!(file);
   if (io.attachFile) watched.attachFile = (file) => io.attachFile!(file);
   if (io.uploadTicket) watched.uploadTicket = (file) => io.uploadTicket!(file);
+  if (io.copyAttachment) watched.copyAttachment = (file, key) => io.copyAttachment!(file, key);
   if (io.workItems) watched.workItems = (actor) => io.workItems!(actor);
   if (io.question) watched.question = (text) => io.question!(text);
   if (io.checkAccess) watched.checkAccess = (userId) => io.checkAccess!(userId);

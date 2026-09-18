@@ -601,6 +601,12 @@ export async function runBot(): Promise<void> {
     linearTransport = { baseUrl, token: linearBearer.reveal(), fetch };
     const transport = linearTransport;
     linearConsumer = new LinearConsumer({
+      ...(artifacts
+        ? {
+            maxStagedBytes:
+              config.config.artifacts?.inbound?.maxBytesPerMessage ?? ARTIFACT_DEFAULTS.maxBytesPerMessage,
+          }
+        : {}),
       inbox: new RemoteLinearInbox(transport),
       api: (organizationId) => new RemoteLinearApi(transport, organizationId),
       clock: systemClock,

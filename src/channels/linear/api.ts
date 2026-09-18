@@ -4,7 +4,11 @@ import {
   LINEAR_FILE_LIMITS,
   type LinearFile,
   type LinearFileReference,
+  copyLinearFile,
+  type LinearFileCopy,
 } from "./files.js";
+import type { StagedFile } from "../../core/types.js";
+import { inboundKey } from "../../artifacts/keys.js";
 import { LINEAR_TIMING } from "../../core/budgets.js";
 import { contentTypeFor } from "../../artifacts/contentType.js";
 import type { WorkItemRequest, WorkItemResult } from "../../core/workItems.js";
@@ -58,7 +62,19 @@ export interface LinearActivity {
 /** Bound to one installation. Implementations keep its token at the edge. */
 export interface LinearApi {
   openThread(sessionId: string, userId: string, input: { id: string; lead: string }): Promise<LinearOpenedThread>;
-  files(sessionId: string, userId: string, urls: string[], history?: boolean): Promise<LinearFile[]>;
+  files(
+    sessionId: string,
+    userId: string,
+    urls: string[],
+    history?: boolean,
+    maxStagedBytes?: number,
+  ): Promise<LinearFile[]>;
+  copyAttachment?(
+    sessionId: string,
+    userId: string,
+    file: StagedFile,
+    key: string,
+  ): Promise<{ key: string; size: number }>;
   canRead(sessionId: string, userId: string): Promise<boolean>;
   session(id: string): Promise<LinearSession>;
   activities(sessionId: string): Promise<LinearActivity[]>;
@@ -102,6 +118,7 @@ export class DirectLinearApi implements LinearApi {
       organizationId: string;
       appUserId: string;
       children?: LinearChildStore;
+      copy?: LinearFileCopy;
       token(): Promise<string>;
       fetch: typeof fetch;
     },
@@ -305,18 +322,54 @@ export class DirectLinearApi implements LinearApi {
     return allowed;
   }
 
-  async files(sessionId: string, userId: string, urls: string[], history = false): Promise<LinearFile[]> {
+  async files(
+    sessionId: string,
+    userId: string,
+    urls: string[],
+    history = false,
+    maxStagedBytes = 0,
+  ): Promise<LinearFile[]> {
+    if (!Number.isSafeInteger(maxStagedBytes) || maxStagedBytes < 0) throw new Error("linear_invalid_files");
     const allowed = await this.fileContext(sessionId, userId, urls);
     const requested = [...new Set(urls)];
     const downloaded = await downloadLinearFiles(
       requested.flatMap((url) => (allowed.has(url) ? [allowed.get(url)!] : [])),
-      this.deps,
+      { ...this.deps, maxStagedBytes: this.deps.copy && !history ? maxStagedBytes : 0 },
       history ? LINEAR_FILE_LIMITS.historyCount : LINEAR_FILE_LIMITS.count,
     );
     const byUrl = new Map(downloaded.map((file) => [file.url, file]));
     return requested.map(
       (url) => byUrl.get(url) ?? { url, name: "attachment", skipped: "not found in current session context" },
     );
+  }
+
+  async copyAttachment(
+    sessionId: string,
+    userId: string,
+    file: StagedFile,
+    key: string,
+  ): Promise<{ key: string; size: number }> {
+    if (!this.deps.copy) throw new Error("linear_staging_unavailable");
+    const index = typeof key === "string" ? Number(/\/(\d+)-[^/]+$/.exec(key)?.[1]) : NaN;
+    if (
+      !file ||
+      typeof file.url !== "string" ||
+      typeof file.name !== "string" ||
+      !file.name ||
+      file.name.length > 255 ||
+      typeof file.messageId !== "string" ||
+      !/^[A-Za-z0-9:_-]{1,512}$/.test(file.messageId) ||
+      !Number.isSafeInteger(file.size) ||
+      file.size <= 0 ||
+      file.size > LINEAR_FILE_LIMITS.stagedFileBytes ||
+      !Number.isSafeInteger(index) ||
+      index < 1 ||
+      key !== inboundKey(`linear:${this.deps.organizationId}:${sessionId}`, file.messageId, index, file.name)
+    )
+      throw new Error("linear_invalid_files");
+    const ref = (await this.fileContext(sessionId, userId, [file.url])).get(file.url);
+    if (!ref) throw new Error("linear_file_denied");
+    return copyLinearFile(ref, file, key, { ...this.deps, copy: this.deps.copy });
   }
 
   workItems(_sessionId: string, actor: LinearWorkItemActor, input: WorkItemRequest): Promise<WorkItemResult> {

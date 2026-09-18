@@ -27,6 +27,7 @@ export type LinearEnv = Pick<
   | "LINEAR_ORGANIZATION_ID"
   | "LINEAR_BRIDGE_TOKEN"
   | "PUBLIC_BASE_URL"
+  | "ARTIFACTS"
 >;
 
 /** Public OAuth and signed webhook routes never wake the bot's container.
@@ -98,6 +99,15 @@ export class LinearState extends DurableObject<LinearEnv> {
       organizationId,
       appUserId: installation.appUserId,
       children: new StoredLinearChildStore(this.ctx.storage),
+      ...(this.env.ARTIFACTS
+        ? {
+            copy: {
+              put: (key: string, stream: ReadableStream<Uint8Array>, type: string) =>
+                this.env.ARTIFACTS!.put(key, stream, { httpMetadata: { contentType: type } }),
+              lengthPipe: (size: number) => new FixedLengthStream(size),
+            },
+          }
+        : {}),
       token: () => this.tokens.accessToken(organizationId),
       fetch: (input, init) => fetch(input, init),
     });

@@ -1,4 +1,5 @@
-import type { DocumentAttachment, ImageAttachment } from "../../core/types.js";
+import type { DocumentAttachment, ImageAttachment, StagedFile } from "../../core/types.js";
+import { ARTIFACT_DEFAULTS } from "../../artifacts/config.js";
 import { LINEAR_TIMING } from "../../core/budgets.js";
 import { INLINE_IMAGE_TYPES } from "../../artifacts/contentType.js";
 import { classifyDocument, isSecretFile } from "../attachmentTypes.js";
@@ -9,6 +10,7 @@ export const LINEAR_FILE_LIMITS = {
   imageBytes: 5 * 1024 * 1024,
   documentBytes: 10 * 1024 * 1024,
   totalBytes: 12 * 1024 * 1024,
+  stagedFileBytes: 1024 * 1024 * 1024,
 } as const;
 export interface LinearFileReference {
   url: string;
@@ -17,6 +19,7 @@ export interface LinearFileReference {
 export interface LinearFile extends LinearFileReference {
   image?: ImageAttachment;
   document?: DocumentAttachment;
+  staged?: { size: number; type: string };
   skipped?: string;
 }
 
@@ -135,11 +138,13 @@ function base64(bytes: Uint8Array): string {
  * requester's current session context. The OAuth token never leaves this call. */
 export async function downloadLinearFiles(
   refs: readonly LinearFileReference[],
-  deps: { fetch: typeof fetch; token(): Promise<string> },
+  deps: { fetch: typeof fetch; token(): Promise<string>; maxStagedBytes?: number },
   count: number = LINEAR_FILE_LIMITS.count,
 ): Promise<LinearFile[]> {
   const files: LinearFile[] = [];
   let total = 0;
+  let stagedBytes = 0;
+  const stagingBudget = Math.min(deps.maxStagedBytes ?? 0, LINEAR_FILE_LIMITS.stagedFileBytes * count);
   for (const [index, ref] of refs.entries()) {
     const file: LinearFile = { ...ref };
     files.push(file);
@@ -151,7 +156,7 @@ export async function downloadLinearFiles(
       file.skipped = "looks like a credential or key file";
       continue;
     }
-    if (index >= count || total >= LINEAR_FILE_LIMITS.totalBytes) {
+    if (index >= count || (total >= LINEAR_FILE_LIMITS.totalBytes && !stagingBudget)) {
       file.skipped = "attachment budget limit";
       continue;
     }
@@ -182,15 +187,27 @@ export async function downloadLinearFiles(
         .toLowerCase();
       const image = INLINE_IMAGE_TYPES.has(mediaType);
       const kind = classifyDocument(mediaType, file.name);
+      const declared = Number(response.headers.get("content-length"));
+      const max = Math.min(
+        image ? LINEAR_FILE_LIMITS.imageBytes : LINEAR_FILE_LIMITS.documentBytes,
+        LINEAR_FILE_LIMITS.totalBytes - total,
+      );
+      if (stagingBudget && ((!image && !kind) || declared > max)) {
+        await response.body?.cancel();
+        if (!Number.isSafeInteger(declared) || declared <= 0) file.skipped = "no size for workspace staging";
+        else if (declared > LINEAR_FILE_LIMITS.stagedFileBytes || stagedBytes + declared > stagingBudget)
+          file.skipped = "workspace staging byte budget";
+        else {
+          stagedBytes += declared;
+          file.staged = { size: declared, type: mediaType };
+        }
+        continue;
+      }
       if (!image && !kind) {
         await response.body?.cancel();
         file.skipped = "unsupported inline file type";
         continue;
       }
-      const max = Math.min(
-        image ? LINEAR_FILE_LIMITS.imageBytes : LINEAR_FILE_LIMITS.documentBytes,
-        LINEAR_FILE_LIMITS.totalBytes - total,
-      );
       const bytes = await readLimited(response, max);
       if (!bytes) {
         file.skipped = "attachment byte limit";
@@ -208,17 +225,84 @@ export async function downloadLinearFiles(
 }
 
 export function applyLinearFiles<
-  T extends { text: string; images?: ImageAttachment[]; documents?: DocumentAttachment[] },
->(turn: T, files: readonly LinearFile[]): T & { images?: ImageAttachment[]; documents?: DocumentAttachment[] } {
+  T extends {
+    text: string;
+    messageId?: string;
+    images?: ImageAttachment[];
+    documents?: DocumentAttachment[];
+    staged?: StagedFile[];
+  },
+>(
+  turn: T,
+  files: readonly LinearFile[],
+): T & { images?: ImageAttachment[]; documents?: DocumentAttachment[]; staged?: StagedFile[] } {
   const urls = new Set(fileReferences(turn.text).map((ref) => ref.url));
   const selected = files.filter((file) => urls.has(file.url));
   const images = selected.flatMap((file) => (file.image ? [file.image] : []));
   const documents = selected.flatMap((file) => (file.document ? [file.document] : []));
+  const staged = selected.flatMap((file) =>
+    file.staged && turn.messageId
+      ? [{ name: file.name, url: file.url, ...file.staged, messageId: turn.messageId }]
+      : [],
+  );
   const skipped = selected.filter((file) => file.skipped).map((file) => `${file.name}: ${file.skipped}`);
   return {
     ...turn,
     ...(images.length ? { images: [...(turn.images ?? []), ...images] } : {}),
     ...(documents.length ? { documents: [...(turn.documents ?? []), ...documents] } : {}),
+    ...(staged.length ? { staged: [...(turn.staged ?? []), ...staged] } : {}),
     ...(skipped.length ? { text: `${turn.text}\n\n[Attachments not read: ${skipped.join("; ")}]` } : {}),
   };
+}
+
+export interface LinearFileCopy {
+  put(key: string, stream: ReadableStream<Uint8Array>, type: string): Promise<unknown>;
+  lengthPipe(size: number): { readable: ReadableStream<Uint8Array>; writable: WritableStream<Uint8Array> };
+}
+
+/** The edge streams a freshly authorized reference into the artifact store.
+ * The caller binds the key to the session; no credential or bytes leave here. */
+export async function copyLinearFile(
+  ref: LinearFileReference,
+  file: StagedFile,
+  key: string,
+  deps: { fetch: typeof fetch; token(): Promise<string>; copy: LinearFileCopy },
+): Promise<{ key: string; size: number }> {
+  if (
+    privateUrl(file.url) !== file.url ||
+    file.url !== ref.url ||
+    isSecretFile(ref.name) ||
+    isSecretFile(urlName(file.url)) ||
+    isSecretFile(file.name)
+  )
+    throw new Error("linear_file_denied");
+  const controller = new AbortController();
+  const response = await deps.fetch(file.url, {
+    redirect: "error",
+    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(ARTIFACT_DEFAULTS.copyTimeoutMs)]),
+    headers: { authorization: `Bearer ${await deps.token()}` },
+  });
+  const name = responseName(response.headers.get("content-disposition")) ?? ref.name;
+  const size = Number(response.headers.get("content-length"));
+  if (response.status !== 200 || !response.body || size !== file.size || name !== file.name || isSecretFile(name)) {
+    await response.body?.cancel();
+    throw new Error("linear_file_changed_or_unavailable");
+  }
+  const pipe = deps.copy.lengthPipe(file.size);
+  const pumping = response.body.pipeTo(pipe.writable, { signal: controller.signal });
+  try {
+    await Promise.all([
+      pumping,
+      deps.copy.put(key, pipe.readable, response.headers.get("content-type") ?? "application/octet-stream"),
+    ]);
+  } catch {
+    controller.abort();
+    // A put can fail before it starts reading. Release the pipe's backpressure
+    // too, so its pending write cannot keep the authenticated download alive.
+    await pipe.readable.cancel().catch(() => {});
+    await pumping.catch(() => {});
+    await response.body.cancel().catch(() => {});
+    throw new Error("linear_file_copy_failed");
+  }
+  return { key, size: file.size };
 }
