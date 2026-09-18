@@ -68,12 +68,18 @@ export type Preset = LoopPreset | "ship";
 
 /** What each preset asks for when nothing above it is tighter, in minutes. The
  *  pipeline's (`ship`) is the wall clock one segment of its loop runs under;
- *  a deployment's `ship.maxMinutes` replaces it, held to `fit` below. */
+ *  a deployment's `ship.maxMinutes` replaces it, held to `fit` below. Coding's
+ *  is sized by the ledger's ship children, not its standalone runs: a child
+ *  that pushes at minute 29 and then runs the repo's whole gate (seven to ten
+ *  minutes on a resident) was cut at 45 one run in twelve, so the ask is
+ *  double the 90th percentile (31.5) with the gate inside it. Ship's holds
+ *  its own loop at the default rounds with a fix round at that ask, not at
+ *  its floor (`fit` proves the floor case; the ask leaves room above it). */
 export const ASKS: Readonly<Record<Preset, number>> = {
   general: 5,
-  coding: 45,
+  coding: 90,
   review: 25,
-  ship: 120,
+  ship: 240,
   research: 8,
   explore: 120,
   conductor: 120,
@@ -87,10 +93,13 @@ export type RoundKind = "coding" | "review" | "fix" | "merge";
  *  falls under the floor is refused rather than dispatched: a two-minute
  *  review or fix costs an attach and a model turn and finishes nothing.
  *  Review's is the ledger's 90th percentile of completed reviews (5.1 min over
- *  181); coding's and the merge wait's are guesses until the ledger says. */
+ *  181); coding's is the least a fix round can run the repo's gate in — the
+ *  gate alone takes seven to ten minutes on a resident, and a fix that cannot
+ *  run it finishes nothing its contract asks; the merge wait's is a guess
+ *  until the ledger says. */
 export const PRESET_FLOORS: Readonly<Record<LoopPreset, number>> = {
   general: 2,
-  coding: 10,
+  coding: 15,
   review: 5,
   research: 3,
   explore: 15,
@@ -387,6 +396,9 @@ export type GrantSource = "org" | "channel" | "user" | "run";
 export const DEFAULT_GRANT: Grant = { renewals: 0 };
 
 /** The most renewals one request may carry: thirteen segments of the ship
- *  preset's ask are a day, the longest problem a person hands over in one
- *  message before a plan should carry it. */
+ *  preset's ask are two days. The cap bounds a COUNT a person types
+ *  (`renewals:`) or a scope holds; it did not halve when the ask doubled,
+ *  since every grant already configured is a count of segments and a day's
+ *  hand-over is now `renewals: 5` — the longest problem a person hands over
+ *  in one message before a plan should carry it. */
 export const GRANT_RENEWALS_MAX = 12;

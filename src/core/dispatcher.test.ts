@@ -1,4 +1,4 @@
-import { bearerExpiresAt } from "./budgets.js";
+import { ASKS, bearerExpiresAt } from "./budgets.js";
 import { contractFromPlan, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./ship/contract.js";
 import { NO_VERDICT_LINE } from "./reviewVerdict.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
@@ -8656,7 +8656,7 @@ workspaceDir: __WORKDIR__
       repo: "acme/api",
       branch: SHIP_BRANCH,
       base: "main",
-      caps: { maxRounds: 3, maxMinutes: 120 },
+      caps: { maxRounds: 3, maxMinutes: 240 },
       runId: "run-ship1",
     });
     expect(unit).toMatchObject({ unit: "U1", slug: "u1", branch: SHIP_BRANCH, dependsOn: [], rounds: [] });
@@ -8698,9 +8698,9 @@ workspaceDir: __WORKDIR__
     for (const text of surfaces) expect(text).not.toContain("ship/");
   });
 
-  it("a channel boundary clips the pipeline's wall clock: the preset's 120 becomes the channel's 110 in the caps handed to the runner, the card names the clip and the record carries the ship profile; a boundary under the loop's fit (10 against 108) is refused before any instance opens, naming the sum", async () => {
+  it("a channel boundary clips the pipeline's wall clock: the preset's 240 becomes the channel's 200 in the caps handed to the runner, the card names the clip and the record carries the ship profile; a boundary under the loop's fit (10 against 163) is refused before any instance opens, naming the sum", async () => {
     const { deps, instances } = shipDeps(
-      SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 110\n',
+      SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 200\n',
     );
     const store = new InMemoryRunStore();
     const registry = new RunRegistry({ genId: () => "run-shipb", genToken: () => "tok" });
@@ -8715,38 +8715,38 @@ workspaceDir: __WORKDIR__
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     await deps.runHistoryWriter.settled();
     expect(replies[0]).toContain("Handed to the plan runner");
-    expect((await handed(instances, "run-shipb")).instance?.caps).toEqual({ maxRounds: 3, maxMinutes: 110 });
+    expect((await handed(instances, "run-shipb")).instance?.caps).toEqual({ maxRounds: 3, maxMinutes: 200 });
     expect(
       statuses
         .map((s) => JSON.stringify(s))
-        .some((s) => s.includes("budget 110 min (channel boundary; preset asks 120)")),
+        .some((s) => s.includes("budget 200 min (channel boundary; preset asks 240)")),
     ).toBe(true);
-    const profile = { preset: "ship", machine: "repo-resident", identity: "write", minutes: 110, boundedBy: "channel" };
+    const profile = { preset: "ship", machine: "repo-resident", identity: "write", minutes: 200, boundedBy: "channel" };
     expect((await store.get("run-shipb"))!.profile).toEqual(profile);
-    expect(AGENTS.ship.maxMinutes).toBe(120); // the shared def is never mutated
+    expect(AGENTS.ship.maxMinutes).toBe(240); // the shared def is never mutated
 
     // The fit at the fork (agent-ship item 8): a boundary of 10 cannot hold the
-    // loop's 108, so the request is refused with the sum and no instance opens.
+    // loop's 163, so the request is refused with the sum and no instance opens.
     const tight = shipDeps(SHIP_YAML + 'channels:\n  "slack:CX":\n    boundary:\n      maxMinutes: 10\n');
     tight.deps.runRegistry = new RunRegistry({ genId: () => "run-shipt", genToken: () => "tok" });
     const tightIo = fakeIO();
     await dispatch(tight.deps, msg(TASK_MSG, "slack:UADMIN"), tightIo.io);
     expect(tightIo.replies[0]).toContain("Ship cannot start under a 10-minute budget");
-    expect(tightIo.replies[0]).toContain("needs 108 minutes");
+    expect(tightIo.replies[0]).toContain("needs 163 minutes");
     expect(tight.created).toEqual([]);
   });
 
-  it("`agent:ship budget:90` clips the pipeline's wall clock as the caller's own boundary; `ship.maxMinutes` stays the preset's declared budget the card names; the block's rounds cap rides unclipped", async () => {
-    const { deps, instances } = shipDeps(SHIP_YAML + "ship:\n  maxMinutes: 120\n  maxRounds: 2\n");
+  it("`agent:ship budget:200` clips the pipeline's wall clock as the caller's own boundary; `ship.maxMinutes` stays the preset's declared budget the card names; the block's rounds cap rides unclipped", async () => {
+    const { deps, instances } = shipDeps(SHIP_YAML + "ship:\n  maxMinutes: 240\n  maxRounds: 2\n");
     const registry = new RunRegistry({ genId: () => "run-shipd", genToken: () => "tok" });
     deps.runRegistry = registry;
     const { io, statuses } = fakeIO();
-    await dispatch(deps, msg("agent:ship budget:90 in acme/api: fix the login redirect", "slack:UADMIN"), io);
-    expect((await handed(instances, "run-shipd")).instance?.caps).toEqual({ maxRounds: 2, maxMinutes: 90 });
+    await dispatch(deps, msg("agent:ship budget:200 in acme/api: fix the login redirect", "slack:UADMIN"), io);
+    expect((await handed(instances, "run-shipd")).instance?.caps).toEqual({ maxRounds: 2, maxMinutes: 200 });
     expect(
       statuses
         .map((s) => JSON.stringify(s))
-        .some((s) => s.includes("budget 90 min (budget directive; preset asks 120)")),
+        .some((s) => s.includes("budget 200 min (budget directive; preset asks 240)")),
     ).toBe(true);
   });
 
@@ -13065,7 +13065,7 @@ workspaceDir: __WORKDIR__
     const profile = { machine: "repo-resident", identity: "write", minutes: 10, boundedBy: "channel" };
     expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(profile);
     expect(vi.mocked(runPiHarnessOpen).mock.calls[0][1].agent.maxMinutes).toBe(10); // the runner's deadline is the clipped budget
-    expect(AGENTS.coding.maxMinutes).toBe(45); // the shared def is never mutated
+    expect(AGENTS.coding.maxMinutes).toBe(ASKS.coding); // the shared def is never mutated
     // The ledger row and its seed carry the clip, so a resume runs on it (run-history's resume rule).
     expect(seen.row?.meta).toMatchObject({ agent: "coding", readonly: false, profile });
     expect(seen.steps).toEqual([expect.objectContaining({ step: 0, remainingMs: 10 * 60_000 })]);
@@ -13074,7 +13074,7 @@ workspaceDir: __WORKDIR__
     expect(
       statuses
         .map((s) => JSON.stringify(s))
-        .some((s) => s.includes("budget 10 min (channel boundary; preset asks 45)")),
+        .some((s) => s.includes("budget 10 min (channel boundary; preset asks 90)")),
     ).toBe(true);
   });
 
@@ -13083,11 +13083,11 @@ workspaceDir: __WORKDIR__
     const { io, statuses } = fakeIO();
     await dispatch(deps, inChannel("CX", "agent:coding fix it"), io);
     await writer.settled();
-    const declared = { machine: "repo-resident", identity: "write", minutes: 45 };
+    const declared = { machine: "repo-resident", identity: "write", minutes: ASKS.coding };
     expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual(declared);
-    expect(vi.mocked(runPiHarnessOpen).mock.calls[0][1].agent.maxMinutes).toBe(45);
+    expect(vi.mocked(runPiHarnessOpen).mock.calls[0][1].agent.maxMinutes).toBe(ASKS.coding);
     expect(seen.row?.meta).toMatchObject({ agent: "coding", readonly: false, profile: declared });
-    expect(seen.steps).toEqual([expect.objectContaining({ step: 0, remainingMs: 45 * 60_000 })]);
+    expect(seen.steps).toEqual([expect.objectContaining({ step: 0, remainingMs: ASKS.coding * 60_000 })]);
     expect((await store.get("run-u"))!.profile).toEqual({ preset: "coding", ...declared });
     expect(statuses.map((s) => JSON.stringify(s)).some((s) => s.includes("budget"))).toBe(false);
   });

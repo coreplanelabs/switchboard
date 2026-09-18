@@ -34,9 +34,9 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.review.maxMinutes).toBe(25);
   });
 
-  it("coding: full toolset, 45 min, no built-in effort (config layers decide)", () => {
+  it("coding: full toolset, 90 min, no built-in effort (config layers decide)", () => {
     expect(AGENTS.coding.toolset).toBe("full");
-    expect(AGENTS.coding.maxMinutes).toBe(45);
+    expect(AGENTS.coding.maxMinutes).toBe(90);
     expect(AGENTS.coding.effort).toBeUndefined();
   });
 
@@ -139,7 +139,7 @@ describe("agent registry matches the feature specs", () => {
 describe("the turn cap is a runaway guard derived from the wall clock (docs/reference/specs/harness-pi.md item 15)", () => {
   it("the rule: six turns a minute over the wall clock", () => {
     expect(RUNAWAY_TURNS_PER_MINUTE).toBe(6);
-    expect(runawayTurnCap(45)).toBe(270);
+    expect(runawayTurnCap(90)).toBe(540);
     expect(runawayTurnCap(25)).toBe(150);
     expect(runawayTurnCap(5)).toBe(30);
   });
@@ -153,8 +153,8 @@ describe("the turn cap is a runaway guard derived from the wall clock (docs/refe
     expect(AGENTS.ship.maxTurns).toBe(1);
   });
 
-  it("the derived caps: coding 270 in 45, review 150 in 25, research 48 in 8, general 30 in 5, explore and conductor 720 in 120", () => {
-    expect(AGENTS.coding.maxTurns).toBe(270);
+  it("the derived caps: coding 540 in 90, review 150 in 25, research 48 in 8, general 30 in 5, explore and conductor 720 in 120", () => {
+    expect(AGENTS.coding.maxTurns).toBe(540);
     expect(AGENTS.review.maxTurns).toBe(150);
     expect(AGENTS.research.maxTurns).toBe(48);
     expect(AGENTS.general.maxTurns).toBe(30);
@@ -615,7 +615,7 @@ describe("ship agent (docs/reference/specs/agent-ship.md)", () => {
     expect(AGENTS.ship.toolset).toBe("full");
     expect(AGENTS.ship.maxTurns).toBe(1);
     expect(AGENTS.ship.maxTokens).toBe(16000);
-    expect(AGENTS.ship.maxMinutes).toBe(120);
+    expect(AGENTS.ship.maxMinutes).toBe(240);
   });
 
   it("ship's child presets run within ship's own profile — coding and review declare an identity at or under `write` and ship's own machine class — so the parent's profile gate covers every round", () => {

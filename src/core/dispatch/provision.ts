@@ -243,7 +243,7 @@ export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Pro
 /**
  * The card's budget line (docs/reference/specs/routing-and-config.md item 4):
  * what clipped the run's budget below the preset's own — `budget 45 min
- * (channel boundary; preset asks 120)`, `budget 30 min (budget directive;
+ * (channel boundary; preset asks 90)`, `budget 30 min (budget directive;
  * preset asks 120)` — and, when the request carried a `budget:` directive that
  * did not win, that it narrowed nothing: `budget:200 narrowed nothing (preset
  * asks 120)` alone, or appended to the clip of the boundary that was tighter.

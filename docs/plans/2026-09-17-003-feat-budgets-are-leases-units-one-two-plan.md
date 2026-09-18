@@ -117,6 +117,8 @@ Phase A (record unit one): U1 → U2 → U3, each a pull request; U3 may land af
 
 - The ratchet's starting allowlist is 146 literals in 83 files; U3 lists them, it does not clean them. A unit that tries to also relocate them balloons.
 - Test titles encode the asks (`coding 270 in 45 …`); no ask moves in this plan, so the titles stand. A later ask change is a spec change by the existing rule in harness-pi item 15.
+
+> **Amended 2026-09-17.** The asks moved after this plan's units landed, by the record's third amendment: coding 45 → 90, the coding and fix floors 10 → 15, ship 120 → 240, on the ledger's first eighteen hours of ship children under the 45-minute lease. The sums the unit scenarios below spell — 108 and 129 for the fit, 60 / 52 / 39 / 31 / 18 / 10 for the reserves, `carve(118, coding)` = 45, `preset asks 45` — were the table at the time; they read 163 and 189, 70 / 62 / 44 / 36 / 18 / 10, `carve(238, coding)` = 90 and `preset asks 90` now, and `budgets.check.test.ts` spells the current ones. The test titles that encode the asks moved with them, as the risk above said they would.
 - Whether pi's abort ends its tool's process group is unknown; U7 is shaped by U4's answer and does not start before it.
 - `shipPipeline.ts`'s exact export list is pinned by `src/core/ship/surface.test.ts`; moving `SHIP_LOOP_RESERVE_MS` and `SHIP_MIN_MAX_MINUTES` updates that scan in the same commit.
 - Adding a run event kind ripples to every exhaustive switch (`runEventLines.ts`'s validator drops an unvalidated kind silently); U8 lists the sites.

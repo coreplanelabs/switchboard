@@ -27,7 +27,7 @@ references:
   enabled: true
 ship:
   maxRounds: 5
-  maxMinutes: 150
+  maxMinutes: 300
 spawn:
   maxChildren: 2
 slack:

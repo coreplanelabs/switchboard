@@ -1027,8 +1027,8 @@ describe("spawn block (spawn.maxChildren)", () => {
 
 describe("ship caps block (agent:ship pipeline)", () => {
   it("parses maxRounds/maxMinutes; absent block leaves the field unset", async () => {
-    const s = store(YAML_FIXTURE + "ship:\n  maxRounds: 2\n  maxMinutes: 90\n");
-    expect(s.config.ship).toEqual({ maxRounds: 2, maxMinutes: 90 });
+    const s = store(YAML_FIXTURE + "ship:\n  maxRounds: 2\n  maxMinutes: 180\n");
+    expect(s.config.ship).toEqual({ maxRounds: 2, maxMinutes: 180 });
     expect(store().config.ship).toBeUndefined();
   });
 
@@ -1041,14 +1041,14 @@ describe("ship caps block (agent:ship pipeline)", () => {
   // agent-ship.md item 8, decision 0046: the fit at config load — the pipeline
   // holds its first child at its ask and every later round at its floor, or
   // the config is refused naming the sum, never left to cap out on every unit.
-  it("a ship pipeline that cannot hold its loop is refused with the sum: 40 minutes against the 108 three review rounds need, 120 against the 129 four need; 108 at three rounds loads, and the default 120 at three rounds loads", async () => {
+  it("a ship pipeline that cannot hold its loop is refused with the sum: 40 minutes against the 163 three review rounds need, 180 against the 189 four need; 163 at three rounds loads, and the default 240 at three rounds loads", async () => {
     expect(() => store(YAML_FIXTURE + "ship:\n  maxMinutes: 40\n")).toThrow(
-      /ship\.maxMinutes 40 cannot hold the loop ship\.maxRounds 3 allows — 108 minutes are needed \(3 to provision, the coding child's 45, and the reserve for 3 review rounds at their floors\)/,
+      /ship\.maxMinutes 40 cannot hold the loop ship\.maxRounds 3 allows — 163 minutes are needed \(3 to provision, the coding child's 90, and the reserve for 3 review rounds at their floors\)/,
     );
-    expect(() => store(YAML_FIXTURE + "ship:\n  maxRounds: 4\n")).toThrow(
-      /ship\.maxMinutes 120 cannot hold the loop ship\.maxRounds 4 allows — 129 minutes are needed/,
+    expect(() => store(YAML_FIXTURE + "ship:\n  maxRounds: 4\n  maxMinutes: 180\n")).toThrow(
+      /ship\.maxMinutes 180 cannot hold the loop ship\.maxRounds 4 allows — 189 minutes are needed/,
     );
-    expect(store(YAML_FIXTURE + "ship:\n  maxMinutes: 108\n").config.ship).toEqual({ maxMinutes: 108 });
+    expect(store(YAML_FIXTURE + "ship:\n  maxMinutes: 163\n").config.ship).toEqual({ maxMinutes: 163 });
     expect(store(YAML_FIXTURE + "ship:\n  maxRounds: 3\n").config.ship).toEqual({ maxRounds: 3 });
   });
 
@@ -1189,7 +1189,7 @@ describe("ship caps block (agent:ship pipeline)", () => {
     expect(shipPresetFor({ maxRounds: 1 })).toEqual(AGENTS.ship);
     expect(shipPresetFor({ maxMinutes: 45 })).toEqual({ ...AGENTS.ship, maxMinutes: 45 });
     expect(shipPresetFor({ maxMinutes: 45 }).maxMinutes).toBe(resolveShipCaps({ maxMinutes: 45 }).maxMinutes);
-    expect(AGENTS.ship.maxMinutes).toBe(120); // the shared def is never mutated
+    expect(AGENTS.ship.maxMinutes).toBe(240); // the shared def is never mutated
   });
 
   it("the example config (config/config.example.yaml) still loads through ConfigStore", async () => {

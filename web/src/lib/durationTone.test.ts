@@ -51,9 +51,9 @@ describe("durationTone", () => {
     expect(isTimedOutExit(undefined)).toBe(false);
   });
 
-  it("a whole run is scaled to the coding wall clock: 5 min is warm, 45 min is at the ceiling", () => {
+  it("a whole run is scaled to the coding wall clock: 5 min is warm, 90 min is at the ceiling", () => {
     expect(durationTone(5 * 60_000, "run").level).toBeGreaterThanOrEqual(1);
-    expect(durationTone(45 * 60_000, "run").t).toBe(1);
+    expect(durationTone(90 * 60_000, "run").t).toBe(1);
     expect(durationTone(30_000, "run").level).toBe(0);
   });
 });

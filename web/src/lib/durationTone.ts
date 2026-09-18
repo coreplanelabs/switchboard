@@ -20,7 +20,7 @@
 //
 // The scale's anchors are the runtime's own numbers: the bash tool's 20-minute
 // ceiling (`BASH_TIMEOUT_MAX_MS`), the friction analyzer's 30 s slow-tool and
-// 60 s slow-turn thresholds, and the coding agent's 45-minute wall clock.
+// 60 s slow-turn thresholds, and the coding agent's 90-minute wall clock.
 
 export type HeatKind = "tool" | "turn" | "run";
 
@@ -45,8 +45,8 @@ const SCALES: Record<HeatKind, Scale> = {
   tool: { floorMs: 2_000, ceilingMs: 20 * 60_000 },
   // A model turn under 15 s is routine; five minutes of thinking is the top.
   turn: { floorMs: 15_000, ceilingMs: 5 * 60_000 },
-  // A whole run under a minute is quick; the coding agent's wall clock is 45 min.
-  run: { floorMs: 60_000, ceilingMs: 45 * 60_000 },
+  // A whole run under a minute is quick; the coding agent's wall clock is 90 min.
+  run: { floorMs: 60_000, ceilingMs: 90 * 60_000 },
 };
 
 /** The one exit code the runtime reserves for its own deadline kill (coreutils

@@ -107,7 +107,7 @@ describe("effectiveProfile — preset ∩ directives ∩ boundary, clip or refus
       kind: "profile",
       profile: { machine: "repo-resident", identity: "write", minutes: 30, boundedBy: "channel" },
     });
-    const loose = effectiveProfile(AGENTS.coding, {}, intersectBoundaries([layer("channel", { maxMinutes: 45 })]));
+    const loose = effectiveProfile(AGENTS.coding, {}, intersectBoundaries([layer("channel", { maxMinutes: 90 })]));
     expect(loose).toEqual({ kind: "profile", profile: declaredProfile(AGENTS.coding) });
     const looser = effectiveProfile(AGENTS.coding, {}, intersectBoundaries([layer("user", { maxMinutes: 120 })]));
     expect(looser).toEqual({ kind: "profile", profile: declaredProfile(AGENTS.coding) });
@@ -251,12 +251,12 @@ describe("declaredProfile and budgetedAgent", () => {
     const budgeted = budgetedAgent(AGENTS.coding, { machine: "repo-resident", identity: "write", minutes: 12 });
     expect(budgeted).toEqual({ ...AGENTS.coding, maxMinutes: 12, maxTurns: 72 });
     expect(budgeted).not.toBe(AGENTS.coding);
-    expect(AGENTS.coding.maxMinutes).toBe(45);
+    expect(AGENTS.coding.maxMinutes).toBe(90);
   });
 
-  it("a 45-minute preset clipped to 10 minutes gets 60 turns — the runaway guard follows the clipped budget (docs/reference/specs/harness-pi.md item 15)", () => {
-    expect(AGENTS.coding.maxMinutes).toBe(45);
-    expect(AGENTS.coding.maxTurns).toBe(270);
+  it("a 90-minute preset clipped to 10 minutes gets 60 turns — the runaway guard follows the clipped budget (docs/reference/specs/harness-pi.md item 15)", () => {
+    expect(AGENTS.coding.maxMinutes).toBe(90);
+    expect(AGENTS.coding.maxTurns).toBe(540);
     const budgeted = budgetedAgent(AGENTS.coding, { machine: "repo-resident", identity: "write", minutes: 10 });
     expect(budgeted.maxMinutes).toBe(10);
     expect(budgeted.maxTurns).toBe(60);
