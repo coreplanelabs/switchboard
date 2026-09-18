@@ -17100,7 +17100,9 @@ describe("current channel access before dispatch", () => {
       expect(provider.requests).toHaveLength(0);
       expect(deps.invoked).toEqual([]);
       expect(deps.admission.size).toBe(0);
-      expect(replies).toEqual([expect.stringContaining("access to this conversation")]);
+      expect(replies).toEqual([
+        "I can’t start work here because your access to this conversation could not be verified.",
+      ]);
     }
   });
   it("defers a failed access lookup without answering or consuming the request", async () => {
@@ -17182,6 +17184,25 @@ describe("clarification through dispatch", () => {
 });
 
 describe("coordinator clarification replies", () => {
+  it("refuses another person's answer without closing the waiting session", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await threadWithFinishedRun(deps, "coding", {
+      awaitingInput: true,
+      parentInstanceId: "plan-answer",
+      idempotencyKey: "plan-answer:U10/0/coding",
+    });
+    const { io, replies } = fakeIO([{ role: "assistant", text: "Which behavior do you want?" }]);
+    io.question = vi.fn(async () => {});
+    const outcome = await dispatch(deps, msg("Keep the existing behavior"), io);
+    expect(outcome).toEqual({ status: "refused", refusal: "coordinator_clarification", cause: "policy" });
+    expect(io.question).toHaveBeenCalledExactlyOnceWith(
+      "Only the original requester can answer this coordinator question.",
+    );
+    expect(replies).toEqual([]);
+    expect(provider.requests).toEqual([]);
+  });
+
   it("defers an answer when its durable coordinator context cannot be read", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);

@@ -359,6 +359,10 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
     // Every code in the closed table is accounted for: rendered here, built by
     // another module's tested builder, or silent by design.
     const provenElsewhere: RefusalCode[] = [
+      // dispatcher.test.ts proves the access and clarification refusal text,
+      // including nonterminal delivery when another requester owns the question.
+      "channel_access",
+      "coordinator_clarification",
       "pr_head_unknown",
       "branch_moved",
       // (record 0054): each producer's own test proves its sentences
