@@ -71,10 +71,12 @@ import {
   checkFence,
   decideClaim,
   decideClaimWrite,
+  decideIntakeInsert,
   phaseTransition,
   reclaimPhase,
   selectReclaim,
 } from "../../src/core/runLedger/decisions.ts";
+import { intakeReceiptRetentionMs } from "../../src/core/budgets.ts";
 import {
   IDEMPOTENCY_KEY_PATTERN,
   capThreadEvent,
@@ -91,9 +93,13 @@ import {
 } from "../../src/core/coordinator/contract.ts";
 import {
   GEN_PATTERN,
+  isIntakeReceipt,
   type ClaimRequest,
   type ClaimResult,
   type FenceResult,
+  type IntakeQuery,
+  type IntakeReceipt,
+  type IntakeWriteResult,
   type LivePhase,
   type LiveRunRow,
   type ReclaimedRun,
@@ -1519,6 +1525,22 @@ export class RunHistoryDO extends DurableObject<Env> {
         PRIMARY KEY (run_id, kind)
       );
     `);
+    // The intake receipts (run-history item 59): one verdict per message key,
+    // first writer wins, beside the live rows because the reconnect catch-up
+    // reads them through the same store key. `prune_after` is stamped at the
+    // insert (the bound is the writer's window through
+    // `intakeReceiptRetentionMs`) and the alarm sweeps by it.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS intake_receipts (
+        key TEXT PRIMARY KEY,
+        thread_key TEXT NOT NULL,
+        decided_at INTEGER NOT NULL,
+        prune_after INTEGER NOT NULL,
+        json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS intake_thread ON intake_receipts(thread_key, decided_at);
+      CREATE INDEX IF NOT EXISTS intake_prune ON intake_receipts(prune_after);
+    `);
     // The coordinator's parent records (run-history item 49): one row per
     // instance, written by the bot at the instance's creation and read by the
     // spawn route for the requester, channel and thread every child acts as.
@@ -2073,6 +2095,59 @@ export class RunHistoryDO extends DurableObject<Env> {
     return parseEventRows(this.eventRows(runId, 0, Number.MAX_SAFE_INTEGER));
   }
 
+  // ---- the intake receipts (run-history item 59) -------------------------------
+
+  private intakeRow(key: string): IntakeReceipt | undefined {
+    const r = this.sql.exec<{ json: string }>(`SELECT json FROM intake_receipts WHERE key = ?`, key).toArray()[0];
+    return r ? (JSON.parse(r.json) as IntakeReceipt) : undefined;
+  }
+
+  /** Insert-if-absent inside one transaction: the first writer's row stands
+   *  and every caller acts on `stored` (`decideIntakeInsert`). `windowMs` is
+   *  the writer's reconnect catch-up window; the retention bound is stamped on
+   *  the row so the alarm's sweep is one indexed delete. */
+  async recordIntake(key: string, receipt: IntakeReceipt, windowMs: number): Promise<IntakeWriteResult> {
+    let out: IntakeWriteResult = { inserted: false, stored: receipt };
+    this.ctx.storage.transactionSync(() => {
+      out = decideIntakeInsert(this.intakeRow(key), receipt);
+      if (!out.inserted) return;
+      this.sql.exec(
+        `INSERT INTO intake_receipts (key, thread_key, decided_at, prune_after, json) VALUES (?, ?, ?, ?, ?)`,
+        key,
+        receipt.threadKey,
+        receipt.decidedAt,
+        receipt.decidedAt + intakeReceiptRetentionMs(windowMs),
+        JSON.stringify(receipt),
+      );
+    });
+    if ((await this.ctx.storage.getAlarm()) === null)
+      await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
+    return out;
+  }
+
+  async readIntake(key: string): Promise<IntakeReceipt | null> {
+    return this.intakeRow(key) ?? null;
+  }
+
+  /** A thread's receipts, or the receipts since an instant, oldest first. */
+  async listIntake(query: IntakeQuery): Promise<IntakeReceipt[]> {
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+    if (query.threadKey !== undefined) {
+      clauses.push("thread_key = ?");
+      params.push(query.threadKey);
+    }
+    if (query.since !== undefined) {
+      clauses.push("decided_at >= ?");
+      params.push(query.since);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return this.sql
+      .exec<{ json: string }>(`SELECT json FROM intake_receipts${where} ORDER BY decided_at ASC`, ...params)
+      .toArray()
+      .map((r) => JSON.parse(r.json) as IntakeReceipt);
+  }
+
   // ---- policy ---------------------------------------------------------------
 
   /** The persisted policy (defaults until the first proposal lands). */
@@ -2354,12 +2429,19 @@ export class RunHistoryDO extends DurableObject<Env> {
       const now = systemClock();
       const { policy } = this.policyState();
       let deleted = 0;
+      let receipts = 0;
       let candidates: { key: string; threadKey: string }[] = [];
       this.ctx.storage.transactionSync(() => {
         deleted = this.trim(policy, now, undefined).deleted;
         // Orphan sweep: events whose run is gone (defensive — `deleteRuns` pairs
         // the two deletes, so this is a periodic check, not a per-put cost).
         this.sql.exec(`DELETE FROM run_events WHERE run_id NOT IN (SELECT run_id FROM runs)`);
+        // Intake receipts past their bound (item 59): each row carries its own
+        // `prune_after`, stamped at the insert from the writer's window.
+        receipts = this.sql
+          .exec<{ n: number }>(`SELECT COUNT(*) AS n FROM intake_receipts WHERE prune_after <= ?`, now)
+          .one().n;
+        this.sql.exec(`DELETE FROM intake_receipts WHERE prune_after <= ?`, now);
         // The sessions no kept run names any more (session-log item 7): decided
         // here, on the rows this transaction leaves; dropped after it.
         candidates = this.sql
@@ -2371,7 +2453,9 @@ export class RunHistoryDO extends DurableObject<Env> {
           .map((r) => ({ key: r.key, threadKey: r.thread_key }));
       });
       const dropped = await this.sweepSessions(candidates);
-      console.log(`[runs/alarm] swept ${deleted} rows outside policy, dropped ${dropped} session log(s)`);
+      console.log(
+        `[runs/alarm] swept ${deleted} rows outside policy, pruned ${receipts} intake receipt(s), dropped ${dropped} session log(s)`,
+      );
       await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
       root.end("ok", { swept: deleted });
     } catch (err) {
@@ -3636,6 +3720,9 @@ const LEDGER_ROUTES = new Set([
   "/runs/reclaim",
   "/runs/live",
   "/runs/live-events",
+  "/runs/intake",
+  "/runs/intake/read",
+  "/runs/intake/list",
   "/runs/transcript/owner",
   "/runs/transcript/write",
   "/runs/transcript/read",
@@ -4040,6 +4127,32 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
       );
       return json(r);
     }
+  }
+
+  // The intake receipts (run-history item 59): keyed by the message, not a run.
+  if (pathname === "/runs/intake" || pathname === "/runs/intake/read") {
+    const receiptKey = b.key;
+    if (typeof receiptKey !== "string" || receiptKey.length === 0 || receiptKey.length > 256)
+      return json({ error: "key must be a non-empty string of at most 256 characters" }, 400);
+    if (pathname === "/runs/intake/read") return json({ receipt: await stub.readIntake(receiptKey) });
+    if (!isIntakeReceipt(b.receipt)) return json({ error: "receipt must be an intake receipt" }, 400);
+    if (b.windowMs !== undefined && (typeof b.windowMs !== "number" || !Number.isFinite(b.windowMs) || b.windowMs < 0))
+      return json({ error: "windowMs must be a non-negative number" }, 400);
+    const r = await stub.recordIntake(receiptKey, b.receipt, typeof b.windowMs === "number" ? b.windowMs : 0);
+    console.log(`[runs/intake] ${key.value} ${receiptKey} → ${r.inserted ? "inserted" : "existing"}`);
+    return json(r);
+  }
+  if (pathname === "/runs/intake/list") {
+    if (b.threadKey !== undefined && (typeof b.threadKey !== "string" || b.threadKey.length === 0))
+      return json({ error: "threadKey must be a non-empty string" }, 400);
+    if (b.since !== undefined && (typeof b.since !== "number" || !Number.isFinite(b.since)))
+      return json({ error: "since must be a number" }, 400);
+    return json({
+      receipts: await stub.listIntake({
+        ...(b.threadKey !== undefined ? { threadKey: b.threadKey } : {}),
+        ...(b.since !== undefined ? { since: b.since } : {}),
+      }),
+    });
   }
 
   const runId = parseRunId(b.runId);

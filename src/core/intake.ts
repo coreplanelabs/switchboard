@@ -23,6 +23,7 @@
 import type { ToolDef } from "./provider.js";
 import { oneLine, redactAndCap } from "./redact.js";
 import { wrapUntrusted } from "./untrusted.js";
+import type { IntakeReceipt } from "./runLedger/types.js";
 import {
   ROUTE_MIN_OUTPUT_TOKENS,
   ROUTE_REASON_CAP,
@@ -74,17 +75,10 @@ export interface IntakeFacts {
   threadStartedByBot: boolean;
 }
 
-/** The receipt row as the ledger stores it, keyed by `<channel>:<ts>`. */
-export interface IntakeReceipt {
-  verdict: IntakeVerdict;
-  reason: string;
-  source: IntakeSource;
-  mode: "mention" | "classify";
-  model: string;
-  gen: number;
-  threadKey: string;
-  decidedAt: number;
-}
+/** The receipt row as the ledger stores it, keyed by `<channel>:<ts>` — one
+ *  type, owned by the ledger's node-free contract (run-history item 59) so
+ *  this seam and every ledger implementation provably store the same row. */
+export type { IntakeReceipt } from "./runLedger/types.js";
 
 /** What intake asks of the ledger: the receipt-first read and the
  *  insert-if-absent write. The run ledger implements both; tests hand a

@@ -14,6 +14,9 @@ import type {
   ClaimRequest,
   ClaimResult,
   FenceResult,
+  IntakeQuery,
+  IntakeReceipt,
+  IntakeWriteResult,
   LivePhase,
   LiveRunRow,
   ReclaimedRun,
@@ -105,6 +108,16 @@ export interface RunLedger {
   /** Take over expired and handed-off runs; the transcript owner is updated before this resolves. */
   reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]>;
   listLive(): Promise<LiveRunRow[]>;
+  /** The intake receipt for a message key (item 59), insert-if-absent: the
+   *  first writer's row stands and every caller acts on `stored`. Satisfies
+   *  the intake seam (`IntakeLedger` in `src/core/intake.ts`) structurally. */
+  recordIntake(key: string, receipt: IntakeReceipt): Promise<IntakeWriteResult>;
+  /** The stored receipt, or none — the read the gate and the catch-up make
+   *  before deciding (item 59). */
+  readIntake(key: string): Promise<IntakeReceipt | undefined>;
+  /** The receipts of a thread, or since an instant, oldest first (item 59) —
+   *  what the live false-silence ratio reads. */
+  listIntake(query: IntakeQuery): Promise<IntakeReceipt[]>;
   readTranscript(runId: string): Promise<AssembledTranscript>;
   /** The events appended so far for a LIVE run, in `seq` order — what a
    *  reclaim closes an unresumable run's record with (the finished-runs routes

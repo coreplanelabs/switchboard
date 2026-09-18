@@ -85,6 +85,19 @@ export const DRAIN = {
   defaultMinutes: 60,
 } as const;
 
+/** How long an intake receipt row is kept on the run history object
+ *  (docs/reference/specs/run-history.md item 59; docs/decisions/0058): the larger of one day
+ *  and the reconnect catch-up window the write named plus the drain deadline
+ *  (`DRAIN.maxMinutes`, the longest a fleet drain may last), so a catch-up
+ *  that runs after the longest allowed drain still reads the verdict instead
+ *  of deciding the reply again. The window is clamped to a month so a
+ *  misconfigured writer cannot make retention unbounded. */
+export const INTAKE_WINDOW_MAX_MS = 30 * DAY_MS;
+export function intakeReceiptRetentionMs(catchUpWindowMs: number): number {
+  const window = Math.min(Math.max(0, catchUpWindowMs), INTAKE_WINDOW_MAX_MS);
+  return Math.max(DAY_MS, window + minutesToMs(DRAIN.maxMinutes));
+}
+
 /** The presets that run the tool loop, and the one pipeline preset. */
 export const LOOP_PRESETS = ["general", "coding", "review", "research", "explore", "conductor"] as const;
 export type LoopPreset = (typeof LOOP_PRESETS)[number];

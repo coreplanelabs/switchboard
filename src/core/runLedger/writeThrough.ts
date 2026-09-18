@@ -33,6 +33,8 @@ import {
   LEASE_MS,
   type AppendableEvent,
   type CardHandle,
+  type IntakeReceipt,
+  type IntakeWriteResult,
   type LiveRunMeta,
   type RunState,
   type StepRecord,
@@ -266,6 +268,14 @@ export interface LedgerWriteThrough {
    *  running here until the process exits; their writes are fenced the moment
    *  the next generation reclaims them. Returns the run ids marked. */
   handoff(): Promise<{ marked: string[]; failed?: string }>;
+  /** An intake receipt write with the claim's retry (run-history item 59): a
+   *  lost response is retried after `RETRY_MS[0]` by READING the same row —
+   *  the insert may have landed — and a row carrying this write's `gen` and
+   *  `decidedAt` answers `inserted: true`, another writer's answers what it
+   *  stored; a read that finds none inserts once more. `undefined` (with one
+   *  warning) when the ledger cannot say — the route missing, a permanent
+   *  refusal, or the retry failing too — the caller's degrade (record 0058). */
+  recordIntake(key: string, receipt: IntakeReceipt): Promise<IntakeWriteResult | undefined>;
 }
 
 /** The write-through of a process without a run ledger (a Null Object,
@@ -314,6 +324,9 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   }
   async handoff(): Promise<{ marked: string[]; failed?: string }> {
     return { marked: [] };
+  }
+  async recordIntake(_key: string, _receipt: IntakeReceipt): Promise<IntakeWriteResult | undefined> {
+    return undefined;
   }
 }
 
@@ -1090,6 +1103,36 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         return { marked };
       } catch (err) {
         return { marked: [], failed: describe(err) };
+      }
+    },
+
+    async recordIntake(key, receipt) {
+      const degraded = (why: string): undefined => {
+        warn(`[ledger] intake receipt ${key} not recorded: ${why} — acting on the verdict without one`);
+        return undefined;
+      };
+      try {
+        return await ledger.recordIntake(key, receipt);
+      } catch (err) {
+        if (err instanceof RouteMissingError) return degraded("the state Worker has no intake routes");
+        if (err instanceof PermanentStoreError) return degraded(describe(err));
+        // A lost response: the insert may have landed. Retry by reading the
+        // same row after the claim's backoff — this write's own row (its gen
+        // and decidedAt) answers inserted, another writer's answers what it
+        // stored; none at all means the insert never landed, so insert once.
+        try {
+          await sleep(RETRY_MS[0]);
+          const stored = await ledger.readIntake(key);
+          if (stored !== undefined) {
+            return {
+              inserted: stored.gen === receipt.gen && stored.decidedAt === receipt.decidedAt,
+              stored,
+            };
+          }
+          return await ledger.recordIntake(key, receipt);
+        } catch (retryErr) {
+          return degraded(`${describe(err)}; the retry failed too: ${describe(retryErr)}`);
+        }
       }
     },
   };
