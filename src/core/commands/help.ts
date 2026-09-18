@@ -107,7 +107,8 @@ export const helpShow = defineCommand({
   id: "help.show",
   action: "help:read",
   effect: "read",
-  describe: "How to ask in plain words: describe what you want, force an agent, change a route in the thread.",
+  describe:
+    "How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.",
   render: plainHelp,
   handler: async ({ deps }) => ({
     agents: deps.help.agents() as unknown as JsonValue,

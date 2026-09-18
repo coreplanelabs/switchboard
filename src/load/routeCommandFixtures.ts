@@ -1,12 +1,13 @@
 // The command fixtures of the route replay (record 0036, units 2 and 3): for
 // every command the router is offered — the full-capability catalogue's chat
-// surface — three fixtures. A happy path binds every required argument as a
-// person would say it; a paraphrase asks for the same thing in other words; a
-// decoy names the command's subject without asking for what the command does,
-// so any command call is a miss (unless `allow` names it). The conformance
-// fence (src/core/commandConformance.test.ts) holds the set to three per
-// offered command, so a command added to the catalogue fails `verify` by name
-// until its fixtures land. Neutral names only (acme/…, r-N, m-N): the public
+// surface — a fixture of each kind. A happy path binds every required argument
+// as a person would say it; a paraphrase asks for the same thing in other
+// words; a decoy names the command's subject without asking for what the
+// command does, so any command call is a miss (unless `allow` names it). A
+// command may carry further decoys, each a production miss pinned verbatim.
+// The conformance fence (src/core/commandConformance.test.ts) holds every
+// offered command to at least one of each kind, so a command added to the
+// catalogue fails `verify` by name until its fixtures land. Neutral names only (acme/…, r-N, m-N): the public
 // tree carries no private references.
 
 /** One example: the text as typed, the repository the thread names (when the
@@ -194,6 +195,10 @@ const d = (id: string, text: string, command: string, allow?: readonly string[])
 
 export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c01d", "help me fix this bug", "help.show"),
+  // Two production replies that bound `help.show` in one pipeline thread: a
+  // person asking for the delivered work's screenshots.
+  d("c01e", "show me screenshots", "help.show"),
+  d("c01f", "attach UI screenshots of what you delivered to this slack thread", "help.show"),
   d("c02d", "which command should I have used for that?", "help.commands", ["help.commands", "help.show"]),
   d("c03d", "should we upgrade to the newest build?", "status.show"),
   d("c04d", "is the config for this channel sensible?", "config.show"),

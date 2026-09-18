@@ -36,7 +36,7 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `help show` | How to ask in plain words: describe what you want, force an agent, change a route in the thread. | anyone |
+| `help show` | How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show. | anyone |
 | `help commands` | Every chat command by group, the grammar, and the per-request directives. | anyone |
 
 ### `status`
