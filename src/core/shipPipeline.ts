@@ -10,7 +10,7 @@
 // for the bot-side callers — the reclaim at boot, the coordinator routes.
 
 import { AGENTS, type AgentDef } from "../agents/registry.js";
-import { DEFAULT_GRANT, type Grant, type GrantSource } from "./budgets.js";
+import { DEFAULT_GRANT, IDLE_DAYS_DEFAULT, type Grant, type GrantSource } from "./budgets.js";
 
 // ---- config (`ship` block, docs/reference/specs/agent-ship.md item 8) -------------------
 
@@ -32,6 +32,12 @@ export interface ShipConfig {
    *  channel and per user (`ship.grant` on the scope) and, for the count alone,
    *  per run by a `renewals:<count>` directive. Absent: zero renewals, no cap. */
   grant?: Grant;
+  /** The idle flag (record 0051; agent-ship item 8): an integer count of days,
+   *  0 to `IDLE_DAYS_MAX` — above zero, a unit whose pipeline ends in an
+   *  idling kind idles for that many days instead of ending; 0 (the default)
+   *  is today's behavior. Overridable per channel and per user
+   *  (`ship.idleDays` on the scope), user over channel over org. */
+  idleDays?: number;
 }
 
 import { shipInterruptedNote, type ShipCaps } from "./ship/coordinator.js";
@@ -78,6 +84,14 @@ export function resolveGrant(layers: { org?: Grant; channel?: Grant; user?: Gran
   if (layers.run === undefined) return scoped;
   const cap = scoped.grant.costCapUsd;
   return { grant: { renewals: layers.run, ...(cap !== undefined ? { costCapUsd: cap } : {}) }, source: "run" };
+}
+
+/** The idle flag in force (record 0051): the user's scope wins over the
+ *  channel's over the org's `ship.idleDays`, the default zero — nothing idles
+ *  until someone says so. Resolved once by the ship fork and written on the
+ *  instance beside the grant, so the machine reads one value. */
+export function resolveIdleDays(layers: { org?: number; channel?: number; user?: number }): number {
+  return layers.user ?? layers.channel ?? layers.org ?? IDLE_DAYS_DEFAULT;
 }
 
 export const SHIP_DEFAULT_MAX_ROUNDS = 3;

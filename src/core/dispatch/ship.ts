@@ -36,7 +36,7 @@ import {
 } from "../coordinator/instancesClient.js";
 import { NullCoordinatorInstanceStore, type CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "../coordinator/instancesRoute.js";
-import { resolveAddressSeverity, resolveGrant, resolveShipCaps } from "../shipPipeline.js";
+import { resolveAddressSeverity, resolveGrant, resolveIdleDays, resolveShipCaps } from "../shipPipeline.js";
 import { shipPreflight } from "../ship/preflight.js";
 import { redactSecrets, type AgentSource } from "../runEvents.js";
 import type { LiveThread } from "../threadAdmission.js";
@@ -474,6 +474,14 @@ export async function runShipBranch(
       user: scopes.user.ship?.grant,
       run: directives.renewals,
     });
+    // The idle flag (record 0051), resolved once here the same way — user over
+    // channel over the org's `ship.idleDays` — and written on the instance
+    // beside the grant. Zero by default: nothing idles until someone says so.
+    const idleDays = resolveIdleDays({
+      org: deps.config.config.ship?.idleDays,
+      channel: scopes.channel.ship?.idleDays,
+      user: scopes.user.ship?.idleDays,
+    });
     const shim = processShimOptions;
     // The hand-off (agent-ship.md item 16): the request — a plan, a task, or a
     // resume at review — becomes a plan runner instance; the bot writes the
@@ -509,6 +517,7 @@ export async function runShipBranch(
               addressSeverity,
               grant,
               verbosity: ctx.verbosity,
+              idleDays,
               ...(card.handle !== undefined ? { card: card.handle } : {}),
               now: clock(),
             },

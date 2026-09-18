@@ -15,9 +15,11 @@ const ENDING_CLS: Record<string, string> = {
   done: "border-ok/30 text-ok",
 };
 
-/** How a unit stands: its ending's kind, else whether it has started. */
+/** How a unit stands: its ending's kind, else `idle · <why>` while it idles
+ *  (record 0051), else whether it has started. */
 function standing(u: UnitFacts): string {
   if (u.ending) return u.ending.kind;
+  if (u.idle) return `idle · ${u.idle.why}`;
   return u.threads.coding !== undefined
     ? `round ${u.rounds.at(-1)?.index ?? 0} · ${u.rounds.at(-1)?.agent ?? "in flight"}`
     : "not started";

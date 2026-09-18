@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CoordinatorUnit } from "./coordinator/contract.js";
 import type { RunView } from "./runsService.js";
-import { roundBoundaries, unitRunsOf } from "./unitRuns.js";
+import { roundBoundaries, unitFactsOf, unitRunsOf } from "./unitRuns.js";
 
 // Feature: docs/reference/specs/agent-ship.md item 17 — the unit is the
 // reading unit. The pure half: how a unit's two threads' runs are cut at the
@@ -145,5 +145,30 @@ describe("unitRunsOf — a unit's runs cut at its round boundaries, in time orde
       "y",
       "z",
     ]);
+  });
+});
+
+// record 0051; run-history item 50: the row's idle is projected onto the
+// unit's readable facts — the page's `idle · <why>` — without the machine
+// fields a continuation reads (`from`, `runId`, the handoff).
+describe("unitFactsOf — the idle on the facts", () => {
+  it("a row with an idle carries {why, at, renewalsLeft, wakes} on the facts; a row without one carries none", () => {
+    const idle = {
+      why: "wall_clock_cap",
+      at: T0 + 50_000,
+      renewalsLeft: 2,
+      from: "a".repeat(40),
+      runId: "run-c0",
+      spendUsd: 12.5,
+      handoff: { deviations: [], followUps: [], unproven: [] },
+      wakes: 0,
+    };
+    const facts = unitFactsOf({ ...unit, idle });
+    expect(facts.idle).toEqual({ why: "wall_clock_cap", at: T0 + 50_000, renewalsLeft: 2, wakes: 0 });
+    expect(facts.idle).not.toHaveProperty("from");
+    expect(facts.idle).not.toHaveProperty("runId");
+    expect(facts.idle).not.toHaveProperty("handoff");
+    expect(unitFactsOf(unit).idle).toBeUndefined();
+    expect(unitFactsOf(unit)).not.toHaveProperty("idle");
   });
 });

@@ -461,3 +461,17 @@ export const DEFAULT_GRANT: Grant = { renewals: 0 };
  *  hand-over is now `renewals: 5` — the longest problem a person hands over
  *  in one message before a plan should carry it. */
 export const GRANT_RENEWALS_MAX = 12;
+
+// ---- the idle unit (record 0051: a pipeline idles instead of ending) ----
+
+/** `ship.idleDays`' default: zero — today's endings byte for byte. It moves to
+ *  seven only in the unit that lands after the baseline and the billing answer
+ *  are recorded (record 0051's plan), never before. */
+export const IDLE_DAYS_DEFAULT = 0;
+/** The most days one idle may wait: the platform's own `waitForEvent` ceiling
+ *  (a year), which the wait must pass explicitly — its default is 24 hours. */
+export const IDLE_DAYS_MAX = 365;
+/** The most wakes one idle answers before it expires: a bound on how long a
+ *  busy thread can keep an instance parked (read by the wait, this plan's
+ *  fifth unit). */
+export const IDLE_WAKES_MAX = 100;

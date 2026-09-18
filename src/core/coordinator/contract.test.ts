@@ -182,6 +182,12 @@ describe("isCoordinatorInstance — the parent ship record", () => {
     expect(isCoordinatorInstance({ ...full, attempt: 2 })).toBe(true);
     expect(isCoordinatorInstance({ ...full, attempt: 1 })).toBe(false);
     expect(isCoordinatorInstance({ ...full, attempt: 2.5 })).toBe(false);
+    // The idle flag (record 0051): an integer count of days within the module's bounds.
+    expect(isCoordinatorInstance({ ...full, idleDays: 0 })).toBe(true);
+    expect(isCoordinatorInstance({ ...full, idleDays: 365 })).toBe(true);
+    expect(isCoordinatorInstance({ ...full, idleDays: 366 })).toBe(false);
+    expect(isCoordinatorInstance({ ...full, idleDays: -1 })).toBe(false);
+    expect(isCoordinatorInstance({ ...full, idleDays: "7" })).toBe(false);
   });
 });
 
@@ -230,6 +236,29 @@ describe("isCoordinatorUnit — one unit's row", () => {
     expect(isCoordinatorUnit({ ...unit, segments: [{ index: 2 }] })).toBe(false);
     expect(isCoordinatorUnit({ ...unit, segments: [{ index: 2, from: 7, at: 3_000 }] })).toBe(false);
     expect(isCoordinatorUnit({ ...unit, segments: { index: 2, at: 3_000 } })).toBe(false);
+  });
+
+  it("the idle on a row (record 0051, run-history item 50): why, at, renewalsLeft, wakes and the optional continuation facts accepted; a missing why, a negative count, a malformed spendUsd or handoff refused", () => {
+    const idle = { why: "wall_clock_cap", at: 3_000, renewalsLeft: 2, spendUsd: 12.5, wakes: 0 };
+    expect(isCoordinatorUnit({ ...unit, idle })).toBe(true);
+    expect(
+      isCoordinatorUnit({
+        ...unit,
+        idle: {
+          ...idle,
+          from: "a".repeat(40),
+          runId: "run-c0",
+          spendUsd: null,
+          handoff: { deviations: [], followUps: [], unproven: [] },
+        },
+      }),
+    ).toBe(true);
+    expect(isCoordinatorUnit({ ...unit, idle: { ...idle, why: undefined } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, idle: { ...idle, renewalsLeft: -1 } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, idle: { ...idle, wakes: 0.5 } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, idle: { ...idle, spendUsd: "12" } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, idle: { ...idle, handoff: { deviations: "none" } } })).toBe(false);
+    expect(isCoordinatorUnit({ ...unit, idle: "wall_clock_cap" })).toBe(false);
   });
 
   it("a resume at review is the pull request number with an optional head and url; a resume without the number, or with a malformed head or url, is refused", () => {

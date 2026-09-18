@@ -16,7 +16,7 @@
 // its seams: the file read, the instance store, the create and the status read.
 
 import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
-import { DEFAULT_GRANT, type Grant, type GrantSource } from "../budgets.js";
+import { DEFAULT_GRANT, IDLE_DAYS_DEFAULT, type Grant, type GrantSource } from "../budgets.js";
 import { DEFAULT_VERBOSITY, type Verbosity } from "../verbosity.js";
 import { PLAN_MAX_CHARS, unitTitleOf } from "../ship/contract.js";
 import type { ShipEntry } from "../ship/preflight.js";
@@ -74,6 +74,10 @@ export interface HandOffInput {
    *  instance so the runner's own thread messages speak at it; absent reads
    *  as `quiet`. */
   verbosity?: Verbosity;
+  /** The idle flag, resolved by the ship branch (user > channel > org) —
+   *  written on the instance beside the grant (record 0051); absent is zero:
+   *  nothing idles. */
+  idleDays?: number;
   /** The status card in the requesting thread, when the channel has one. */
   card?: { channel: string; ts: string };
   now: number;
@@ -185,6 +189,8 @@ async function plan(
     grantSource: input.grant?.source ?? "org",
     // Absent, the runner speaks at the default: quiet (routing-and-config item 28).
     verbosity: input.verbosity ?? DEFAULT_VERBOSITY,
+    // Absent, nothing idles: zero days, today's endings (record 0051).
+    idleDays: input.idleDays ?? IDLE_DAYS_DEFAULT,
     ...(input.card !== undefined ? { card: input.card } : {}),
     runId: input.runId,
     label: input.label,

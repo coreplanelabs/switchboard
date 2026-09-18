@@ -1329,6 +1329,8 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         grantSource: "org",
         // Absent on the record: the runner speaks at the default, quiet (routing-and-config item 28).
         verbosity: "quiet",
+        // Absent on the record: zero days — nothing idles (record 0051).
+        idleDays: 0,
         generated: false,
         repo: "acme/api",
         base: "main",
@@ -2460,6 +2462,117 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     }
     expect(h.registry.snapshotById(run.id)!.events).toHaveLength(before);
     expect(h.written).toEqual([]);
+  });
+
+  // record 0051; run-history item 50: an idle ending is not the unit's end —
+  // the row gets the idle and no ending, the leftovers wait, the card names it.
+  it("unit-end with an idle ending writes idle {why, at, renewalsLeft, from, runId, spendUsd, handoff, wakes: 0} and no ending; the report still reaches the thread; unitLines shows `idle · wall_clock_cap`; unconsumed events stay; a malformed idle is 400; a why past 64 chars is 400; the body's headSha lands as lastPush; a later real ending drops the idle; the plan route answers idleDays", async () => {
+    const replies: Array<{ threadKey: string; text: string }> = [];
+    const frames: unknown[] = [];
+    const h = await planHarness({
+      ioFor: (thread) => ({
+        reply: async (text) => void replies.push({ threadKey: thread.threadKey, text }),
+        status: async (frame) => {
+          frames.push(frame);
+          return { update: (f: unknown) => void frames.push(f), done: async (f: unknown) => void frames.push(f) };
+        },
+        history: async () => [],
+      }),
+    });
+    await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    const key = { instanceId: PLAN_INSTANCE.id, unit: "U10" };
+    await h.instances.appendEvent(key, {
+      sender: "slack:UBOB",
+      text: "also update the readme",
+      mode: "steer",
+      at: NOW - 1000,
+    });
+    const handoff = { deviations: [], followUps: [{ what: "tests", where: "src" }], unproven: [] };
+    const sha = "a".repeat(40);
+    expect(
+      await call(h, "unit-end", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        ending: {
+          kind: "idle",
+          report: "🧢 Ship stopped at a cap: the remaining pipeline time cannot hold another round.",
+          why: "wall_clock_cap",
+          renewalsLeft: 2,
+          from: sha,
+          spendUsd: 12.5,
+          handoff,
+        },
+        codingRunId: "run-c0",
+        // An idled review_pending names the pending head, as the plain ending does.
+        headSha: sha,
+      }),
+    ).toEqual({ status: 200, body: { ok: true, told: true, at: NOW } });
+    const rows = await h.instances.listUnits(PLAN_INSTANCE.id);
+    expect(rows[0].idle).toEqual({
+      why: "wall_clock_cap",
+      at: NOW,
+      renewalsLeft: 2,
+      from: sha,
+      runId: "run-c0",
+      spendUsd: 12.5,
+      handoff,
+      wakes: 0,
+    });
+    // No ending: the unit stays unfinished and keeps owning its thread.
+    expect(rows[0].ending).toBeUndefined();
+    // The pending head is on the row for the re-issue's pre-check, as for a plain review_pending.
+    expect(rows[0].lastPush).toBe(sha);
+    // The report — the old kind's sentence — still reaches the unit's thread.
+    expect(replies).toEqual([
+      {
+        threadKey: "slack:C1:2.0",
+        text: "🧢 Ship stopped at a cap: the remaining pipeline time cannot hold another round.",
+      },
+    ]);
+    // The parent card's line names the idle and its why (record 0051).
+    expect(JSON.stringify(frames)).toContain("idle · wall_clock_cap");
+    // The leftovers wait for the fold or the wake (this plan's fifth unit): no fresh turn ran.
+    expect(await h.instances.listEvents(key, true)).toHaveLength(1);
+    expect(h.dispatched).toHaveLength(0);
+    // An idle ending without its facts is refused by name.
+    expect(
+      (
+        await call(h, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "idle", report: "x" },
+        })
+      ).status,
+    ).toBe(400);
+    // A why past the contract's 64-character bound is refused at the door, not by the store.
+    expect(
+      (
+        await call(h, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "idle", report: "x", why: "w".repeat(65), renewalsLeft: 0 },
+        })
+      ).status,
+    ).toBe(400);
+    // A later real ending drops the idle: the row says one thing about how the unit stands.
+    expect(
+      (
+        await call(h, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "merge_ready", report: "✅ ready" },
+        })
+      ).status,
+    ).toBe(200);
+    const ended = (await h.instances.listUnits(PLAN_INSTANCE.id))[0];
+    expect(ended.idle).toBeUndefined();
+    expect(ended.ending).toMatchObject({ kind: "merge_ready", report: "✅ ready" });
+    // The plan route answers the instance's flag (the machine reads one value).
+    const flagged = harness();
+    await flagged.instances.put({ ...PLAN_INSTANCE, idleDays: 7 });
+    await flagged.instances.putUnits([unitRow("U10"), unitRow("U11")]);
+    const body = (await call(flagged, "plan", { parentInstanceId: PLAN_INSTANCE.id })).body as Record<string, unknown>;
+    expect(body.idleDays).toBe(7);
   });
 
   it("unit-end writes the ending and the pull request on the row, posts the report in the unit's thread and redraws the card; finish writes the parent's record from the rows, closes the card and tells the requesting thread the plan's summary", async () => {

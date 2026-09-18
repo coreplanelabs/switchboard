@@ -127,9 +127,12 @@ export interface Scope {
    * `grant`: the renewals and cost cap a ship request in this scope carries
    * (decision 0046, the renewable lease): user over channel over the org's
    * `ship.grant`; a `renewals:<count>` directive sets the count for one
-   * request. Validated at load (`validateScopeBlocks`).
+   * request. `idleDays` (record 0051): how many days a ship unit of this
+   * scope's requests idles instead of ending — an integer from 0 to 365, user
+   * over channel over the org's `ship.idleDays`, 0 meaning today's endings.
+   * Validated at load (`validateScopeBlocks`).
    */
-  ship?: { grant?: Grant };
+  ship?: { grant?: Grant; idleDays?: number };
   /**
    * The thread-reply intake gate's mode in this scope (routing-and-config
    * item 27, record 0058): thread over user over channel over the top-level

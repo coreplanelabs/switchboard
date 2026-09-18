@@ -8,9 +8,10 @@
 // parent record the spawn route reads the requester from, and the names the
 // routes decide on.
 //
-import type { Grant, GrantSource } from "../budgets.js";
+import { IDLE_DAYS_MAX, type Grant, type GrantSource } from "../budgets.js";
 import { isVerbosity, type Verbosity } from "../verbosity.js";
 import { isAddressSeverity, type AddressSeverity, type AddressSeveritySource } from "../ship/coordinator.js";
+import { isHandoffShape, type Handoff } from "../ship/handoff.js";
 
 // A coordinator is a Workflow instance in the shim Worker whose children are
 // ordinary `dispatch()` runs as the requesting user. It holds no credential of
@@ -329,6 +330,11 @@ export interface CoordinatorInstance {
    *  the unit threads it owns — the unit-ending report's asides and the
    *  segment lines are `verbose` material. Absent reads as `quiet`. */
   verbosity?: Verbosity;
+  /** The idle flag (record 0051; agent-ship item 8): `ship.idleDays` as the
+   *  ship fork resolved it (user > channel > org), written here beside the
+   *  grant and answered by the plan route — above zero, an idling ending
+   *  becomes `idle`; absent reads as zero, today's endings. */
+  idleDays?: number;
   /** The pipeline's caps as the profile gate clipped them: the rounds cap and the wall clock per unit. */
   caps?: { maxRounds: number; maxMinutes: number };
   /** The status card in the requesting thread, when the channel has one — what
@@ -348,6 +354,24 @@ export interface UnitSegment {
   from?: string;
   runId?: string;
   at: number;
+}
+
+/** The longest `why` an idle carries: an ending kind's name, never prose —
+ *  the route refuses a longer one at the door, the row validator at the store. */
+export const IDLE_WHY_MAX = 64;
+
+/** The idle on a unit's row (record 0051): what a continuation needs, and the
+ *  wakes spent against `IDLE_WAKES_MAX`. */
+export interface UnitIdle {
+  /** The old ending kind the idle stands in for (`wall_clock_cap`, `stopped`, `continued`, …). */
+  why: string;
+  at: number;
+  renewalsLeft: number;
+  from?: string;
+  runId?: string;
+  spendUsd: number | null;
+  handoff?: Handoff;
+  wakes: number;
 }
 
 /** One unit of the plan an instance runs (a task string is a generated plan of
@@ -398,6 +422,15 @@ export interface CoordinatorUnit {
    *  renews the same segment twice. `from` is the sha the segment continues
    *  from, `runId` the coding run whose write-up briefs it. */
   segments?: UnitSegment[];
+  /** The unit idles (record 0051; run-history item 50): written by `unit-end`
+   *  on an `idle` ending in place of `ending`, so the unit stays unfinished
+   *  and keeps owning its thread. `why` is the old kind, `renewalsLeft` what
+   *  the grant still holds (the wake spends one — this plan's fifth unit),
+   *  `from` the head a continuation opens from, `runId` the last coding
+   *  child's run (absent when none ran), `spendUsd` the session's dollars
+   *  (null once any run's cost is unknown), `handoff` that child's lists, and
+   *  `wakes` how many wakes this idle has answered — zero at the write. */
+  idle?: UnitIdle;
   /** The round boundaries the coordinator reported, oldest first (the `ship_round`
    *  vocabulary). `gate` rides an approve the machine's severity check caught
    *  carrying a finding at or above the level in force ([agent-ship](../../../docs/reference/specs/agent-ship.md)
@@ -450,6 +483,11 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
   if (r.caps !== undefined && !(isObject(r.caps) && isFinite(r.caps.maxRounds) && isFinite(r.caps.maxMinutes)))
     return false;
   if (r.card !== undefined && !(isObject(r.card) && isText(r.card.channel) && isText(r.card.ts))) return false;
+  if (
+    r.idleDays !== undefined &&
+    !(Number.isInteger(r.idleDays) && (r.idleDays as number) >= 0 && (r.idleDays as number) <= IDLE_DAYS_MAX)
+  )
+    return false;
   if (!isOptionalText(r.runId) || !isOptionalText(r.label)) return false;
   if (r.verbosity !== undefined && !isVerbosity(r.verbosity)) return false;
   if (r.attempt !== undefined && !(Number.isInteger(r.attempt) && (r.attempt as number) >= 2)) return false;
@@ -463,6 +501,17 @@ const isRoundGate = (v: unknown): boolean =>
   isAddressSeverity(v.level) &&
   Array.isArray(v.findings) &&
   v.findings.every((f) => typeof f === "string");
+
+const isUnitIdle = (v: unknown): boolean =>
+  isObject(v) &&
+  isText(v.why, IDLE_WHY_MAX) &&
+  isFinite(v.at) &&
+  isCount(v.renewalsLeft) &&
+  (v.from === undefined || isText(v.from)) &&
+  (v.runId === undefined || isText(v.runId)) &&
+  (v.spendUsd === null || isFinite(v.spendUsd)) &&
+  (v.handoff === undefined || isHandoffShape(v.handoff)) &&
+  isCount(v.wakes);
 
 const isSegment = (v: unknown): boolean =>
   isObject(v) &&
@@ -486,6 +535,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (r.resume !== undefined && !isResume(r.resume)) return false;
   if (r.lastPush !== undefined && !isText(r.lastPush)) return false;
   if (r.segments !== undefined && (!Array.isArray(r.segments) || !r.segments.every(isSegment))) return false;
+  if (r.idle !== undefined && !isUnitIdle(r.idle)) return false;
   if (
     !Array.isArray(r.rounds) ||
     r.rounds.length > MAX_ROUNDS ||

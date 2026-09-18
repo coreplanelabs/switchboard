@@ -33,6 +33,7 @@ import { NO_GRANTS } from "./core/authz/types.js";
 import {
   resolveAddressSeverity,
   resolveGrant,
+  resolveIdleDays,
   resolveShipCaps,
   SHIP_DEFAULT_MAX_MINUTES,
   shipPresetFor,
@@ -1402,6 +1403,38 @@ describe("ship caps block (agent:ship pipeline)", () => {
       source: "run",
     });
     expect(resolveGrant({ run: 0 })).toEqual({ grant: { renewals: 0 }, source: "run" });
+  });
+
+  it("ship.idleDays (record 0051): accepts 0 and 365 on the org block and a scope, refuses 366, -1 and a string by name; resolveIdleDays layers user > channel > org with 0 as the default", () => {
+    expect(store(YAML_FIXTURE + "ship:\n  idleDays: 0\n").config.ship).toEqual({ idleDays: 0 });
+    expect(store(YAML_FIXTURE + "ship:\n  idleDays: 365\n").config.ship).toEqual({ idleDays: 365 });
+    expect(() => store(YAML_FIXTURE + "ship:\n  idleDays: 366\n")).toThrow(
+      /ship\.idleDays must be an integer from 0 to 365/,
+    );
+    expect(() => store(YAML_FIXTURE + "ship:\n  idleDays: -1\n")).toThrow(
+      /ship\.idleDays must be an integer from 0 to 365/,
+    );
+    expect(() => store(YAML_FIXTURE + 'ship:\n  idleDays: "seven"\n')).toThrow(
+      /ship\.idleDays must be an integer from 0 to 365/,
+    );
+    // The scope field (routing-and-config item 2): a channel's or a user's
+    // `ship.idleDays`, held to the same bounds and refused naming the path.
+    expect(
+      store(YAML_FIXTURE.replace("channels:\n", 'channels:\n  "slack:CIDLE":\n    ship:\n      idleDays: 7\n')).config
+        .channels?.["slack:CIDLE"]?.ship,
+    ).toEqual({ idleDays: 7 });
+    expect(() =>
+      store(YAML_FIXTURE.replace("users:\n", 'users:\n  "slack:UIDLE":\n    ship:\n      idleDays: 366\n')),
+    ).toThrow(/users\.slack:UIDLE\.ship\.idleDays must be an integer from 0 to 365/);
+    expect(() =>
+      store(YAML_FIXTURE.replace("users:\n", 'users:\n  "slack:UIDLE":\n    ship:\n      idleDays: half\n')),
+    ).toThrow(/users\.slack:UIDLE\.ship\.idleDays must be an integer from 0 to 365/);
+    // Resolution: user over channel over org, the default 0 — nothing idles until someone says so.
+    expect(resolveIdleDays({})).toBe(0);
+    expect(resolveIdleDays({ org: 7 })).toBe(7);
+    expect(resolveIdleDays({ org: 7, channel: 14 })).toBe(14);
+    expect(resolveIdleDays({ org: 7, channel: 14, user: 3 })).toBe(3);
+    expect(resolveIdleDays({ channel: 14, user: 0 })).toBe(0);
   });
 
   it("a stored overrides document's `ship.grant` is held to the same rule at load, naming the backing — the one way around the chat command's validation is refused too", () => {
