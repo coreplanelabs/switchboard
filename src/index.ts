@@ -3,10 +3,13 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
-import { openConfigStore } from "./config.js";
+import { intakeModelRef, openConfigStore } from "./config.js";
+import { parseModelRef } from "./core/provider.js";
+import { providerRouteModel } from "./core/dispatch/route.js";
+import type { IntakeReceipt } from "./core/runLedger/types.js";
 import { capabilitiesFrom } from "./core/capabilities.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
-import { createSlackApp } from "./channels/slack.js";
+import { createSlackApp, wireIntakeGate, type SlackIntakeGate } from "./channels/slack.js";
 import { SlackChannelDirectory } from "./channels/slackChannelDirectory.js";
 import { SlackConversationReader } from "./channels/slack/references.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
@@ -577,7 +580,53 @@ export async function runBot(): Promise<void> {
   // registration, every surface.
   deps.commands = commands;
   // --- end command registry ---
-  const { app, receiver, statusClient } = createSlackApp(deps);
+  // The thread-reply intake gate (record 0058; docs/reference/specs/slack-channel.md
+  // item 15): the fast model behind the router's seam, the receipt on the run
+  // ledger — or degraded without one, which `wireIntakeGate` says once at
+  // startup — and the runs page and the pending confirmation as the facts'
+  // sources. Without a resolvable model ref the gate is not wired and thread
+  // replies run as `always`: degrade open, never a silence nothing decided.
+  let slackIntake: SlackIntakeGate | undefined;
+  try {
+    const intakeRef = intakeModelRef(config.config);
+    if (intakeRef) {
+      const ref = parseModelRef(intakeRef);
+      const intakeLedger = ledgerClient
+        ? {
+            readIntake: (key: string) => ledgerClient.readIntake(key),
+            // The write-through's retrying insert (run-history item 59); its
+            // degraded `undefined` becomes the throw `decideIntake` maps to
+            // `receipt: failed`, so the adapter still acts on the verdict.
+            recordIntake: async (key: string, receipt: IntakeReceipt) => {
+              const out = await runLedger.recordIntake(key, receipt);
+              if (out === undefined) throw new Error("the receipt write degraded (the ledger warning names why)");
+              return out;
+            },
+          }
+        : null;
+      slackIntake = wireIntakeGate({
+        intakeModeFor: (threadKey, userId, channelId) => config.intakeModeFor(threadKey, userId, channelId),
+        deps: {
+          model: providerRouteModel(completions.get(ref.provider), ref.model),
+          ledger: intakeLedger,
+          now: systemClock,
+        },
+        modelRef: intakeRef,
+        gen: PROCESS_STARTED_AT,
+        runs: runsService,
+        confirmations,
+      });
+    } else {
+      console.warn(
+        "[intake] no model ref resolves (intake.model, routing.model, defaults.models.general) — thread replies run as always",
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[intake] gate not wired (${err instanceof Error ? err.message : String(err)}) — thread replies run as always`,
+    );
+  }
+  const { app, receiver, statusClient } = createSlackApp(deps, slackIntake);
   // A thread's channel handle rebuilt from a stored row's parts, with no
   // triggering event (run-history item 38): what a resumed run replies through
   // and what a coordinator's child is dispatched into. Slack from the key's

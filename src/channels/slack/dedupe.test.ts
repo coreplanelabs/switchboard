@@ -103,6 +103,27 @@ describe("dedupeDelivery (redelivery guard)", () => {
     expect(client.calls).toHaveLength(0);
   });
 
+  it("the claim precedes the guard's fetch: the mark lands before conversations.replies, so a concurrent second delivery hits the handled-set however the awaits interleave (record 0058's one decider per process)", async () => {
+    const order: string[] = [];
+    const state = {
+      was: () => false,
+      mark: () => {
+        order.push("mark");
+      },
+    };
+    const client = {
+      conversations: {
+        history: async () => ({}),
+        replies: async () => {
+          order.push("fetch");
+          return { messages: [] };
+        },
+      },
+    };
+    await dedupeDelivery(client, ev, REDELIVERY_MS, state); // stale: the guard pays its one fetch
+    expect(order).toEqual(["mark", "fetch"]);
+  });
+
   it("a catch-up replay skips both checks — the scan already judged it against Slack state — but still claims the pair", async () => {
     const state = memState([`C1234567890:${TS}`]);
     const client = repliesClient(new Error("must not be called"));

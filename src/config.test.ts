@@ -982,6 +982,8 @@ describe("the thread scope and intakeModeFor (routing-and-config item 27)", () =
     expect(s.intakeModeFor(THREAD, "slack:UX", "slack:CX")).toBe("mention");
     // Another thread in the same channel is untouched by the thread layer.
     expect(s.intakeModeFor("slack:CX:2.0", "slack:UX", "slack:CX")).toBe("classify");
+    // A userless event skips the user layer — never resolved for a made-up id.
+    expect(s.intakeModeFor("slack:CX:2.0", undefined, "slack:CX")).toBe("always");
     // The write persisted `threads` beside channels and users in the ONE document.
     expect(backing.document?.threads).toEqual({ [THREAD]: { intake: { threadReplies: "mention" } } });
   });

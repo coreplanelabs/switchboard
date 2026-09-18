@@ -7,11 +7,18 @@ import {
   clickSlackIO,
   createStatusClient,
   handleConfirmClick,
+  receiveSlackMessage,
   resumeSlackIO,
   SlackIO,
   stripMention,
   threadIncludesBot,
+  wireIntakeGate,
+  type SlackIntakeGate,
 } from "./slack.js";
+import { decideIntake, degradedIntakeLine, type IntakeDecision, type IntakeInput } from "../core/intake.js";
+import type { IntakeReceipt } from "../core/runLedger/types.js";
+import type { Span } from "../core/trace/types.js";
+import type { RunView } from "../core/runsService.js";
 import { fetchImages } from "./slack/attachments.js";
 import { createStatusBudget, type StatusBudget } from "../core/statusBudget.js";
 import { dispatchClick, type CoreDeps } from "../core/dispatcher.js";
@@ -1080,5 +1087,489 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
       thread_ts: "1.0",
       text: `${"x".repeat(100)}\ntail`,
     });
+  });
+});
+
+// Feature: docs/reference/specs/slack-channel.md item 15 (record 0058) — the
+// intake gate before the 👀: an unmentioned reply in a bot thread gets its
+// verdict after the redelivery guard and before anything visible (the ack, the
+// downloads); `silent` produces nothing; `addressed` proceeds exactly as today
+// with the thread's runs page handed on; `always` never reaches intake.
+describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-channel.md item 15)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const NOW = 160_000;
+  const POLICY = { staging: false, maxBytesPerMessage: 1_000_000 };
+  let seq = 0;
+  /** A fresh ts per event: unique (the module-level handled-set claims each) and
+   *  recent (an old ts would make the redelivery guard pay its thread fetch). */
+  const nextTs = () => (Date.now() / 1000 + ++seq).toFixed(6);
+  const png = { id: "f1", name: "a.png", mimetype: "image/png", size: 4, url_private_download: "https://f.test/a" };
+
+  /** A scripted Web API recording the order of the calls the golden pins.
+   *  `replyPages` scripts successive `conversations.replies` answers; a page
+   *  with `next` hands a cursor onward, the last page repeats. */
+  function gateClient(replyPages: Array<{ messages: Array<Record<string, unknown>>; next?: string }> = []) {
+    const calls: string[] = [];
+    const add = vi.fn(async () => {
+      calls.push("reactions.add");
+      return { ok: true };
+    });
+    const postMessage = vi.fn(async () => {
+      calls.push("chat.postMessage");
+      return { ok: true, ts: "n.1" };
+    });
+    let nthReply = 0;
+    const replies = vi.fn(async (_o: Record<string, unknown>) => {
+      calls.push("conversations.replies");
+      const page = replyPages[Math.min(nthReply++, replyPages.length - 1)] ?? { messages: [] };
+      return {
+        ok: true,
+        messages: page.messages,
+        ...(page.next !== undefined ? { response_metadata: { next_cursor: page.next } } : {}),
+      };
+    });
+    const info = vi.fn(async () => ({ ok: true, channel: { name: "general" } }));
+    const usersInfo = vi.fn(async () => ({ ok: true, user: { real_name: "Ada" } }));
+    const test = vi.fn(async () => ({ ok: true }));
+    const client = {
+      reactions: { add },
+      chat: { postMessage },
+      conversations: { replies, info },
+      users: { info: usersInfo },
+      auth: { test },
+    } as unknown as Parameters<typeof receiveSlackMessage>[0];
+    return { calls, add, postMessage, replies, client };
+  }
+
+  /** Downloads recorded in the same order array as the Web API calls. */
+  function stubDownloads(calls: string[]) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls.push("download");
+        return new Response(new Uint8Array(4).fill(7), { status: 200, headers: { "content-type": "image/png" } });
+      }),
+    );
+  }
+
+  function spanStub() {
+    const attrs: Record<string, unknown> = {};
+    return { attrs, span: { setAttrs: (a: Record<string, unknown>) => Object.assign(attrs, a) } as unknown as Span };
+  }
+
+  const parentTs = "100.000000";
+  /** The page threadIfBotInIt fetched: the bot's own post as the parent, the asker's reply. */
+  const shortThread = [
+    { user: BOT, text: "report ready", ts: parentTs },
+    { user: "UASKER", text: "thanks", ts: "110.000000" },
+  ];
+
+  function followUp(over: Record<string, unknown> = {}) {
+    return {
+      channel: "CGATE",
+      user: "UASKER",
+      text: "and the tests?",
+      ts: nextTs(),
+      threadTs: parentTs,
+      botUserId: BOT,
+      trigger: "thread-follow-up" as const,
+      thread: shortThread,
+      files: [png],
+      ...over,
+    };
+  }
+
+  const decided = (verdict: "addressed" | "silent", receipt: IntakeDecision["receipt"] = "inserted") =>
+    vi.fn(async (): Promise<IntakeDecision> => ({ verdict, reason: "r", source: "model", receipt }));
+
+  /** A gate over fakes: the mode, a scripted verdict seam, no ledger. */
+  function gateOf(over: Partial<SlackIntakeGate> & { mode?: "mention" | "classify" | "always" } = {}) {
+    const decide = over.decideIntake ?? decided("addressed");
+    const gate: SlackIntakeGate = {
+      intakeModeFor: () => over.mode ?? "classify",
+      decideIntake: decide as unknown as typeof decideIntake,
+      deps: { model: async () => "unused", ledger: null, now: () => NOW },
+      modelRef: "anthropic/fast-model",
+      gen: 7,
+      ...(over.runs !== undefined ? { runs: over.runs } : {}),
+      ...(over.confirmations !== undefined ? { confirmations: over.confirmations } : {}),
+    };
+    return { decide: decide as ReturnType<typeof decided>, gate };
+  }
+
+  /** An in-memory receipt ledger with the store's insert-if-absent contract. */
+  function fakeLedger(seedKey?: string, seed?: Partial<IntakeReceipt>) {
+    const rows = new Map<string, IntakeReceipt>();
+    if (seedKey)
+      rows.set(seedKey, {
+        verdict: "addressed",
+        reason: "another caller's row",
+        source: "model",
+        mode: "classify",
+        model: "anthropic/fast-model",
+        gen: 99,
+        threadKey: "slack:CGATE:100.000000",
+        decidedAt: 1,
+        ...seed,
+      });
+    return {
+      rows,
+      readIntake: async (key: string) => rows.get(key),
+      recordIntake: async (key: string, receipt: IntakeReceipt) => {
+        const existing = rows.get(key);
+        if (existing) return { inserted: false, stored: existing };
+        rows.set(key, receipt);
+        return { inserted: true, stored: receipt };
+      },
+    };
+  }
+
+  it("the always golden: a thread follow-up under always is byte-identical to the gate-less path — dedupe, 👀, downloads, the message — and intake is never asked", async () => {
+    const bare = gateClient();
+    stubDownloads(bare.calls);
+    const a = await receiveSlackMessage(bare.client, followUp(), spanStub().span, POLICY, []);
+    expect(a?.message.text).toBe("and the tests?");
+    const gated = gateClient();
+    stubDownloads(gated.calls);
+    const { gate, decide } = gateOf({ mode: "always" });
+    const b = await receiveSlackMessage(gated.client, followUp(), spanStub().span, POLICY, [], gate);
+    expect(b?.message.text).toBe("and the tests?");
+    expect(decide).not.toHaveBeenCalled();
+    expect(gated.calls).toEqual(bare.calls);
+    expect(gated.calls[0]).toBe("reactions.add");
+    expect(gated.calls).toContain("download");
+  });
+
+  it("a caught-up message under always keeps its golden too: 👀, the ⏱ delay note, then the downloads", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const { gate, decide } = gateOf({ mode: "always" });
+    const out = await receiveSlackMessage(
+      s.client,
+      followUp({ ts: (Date.now() / 1000 - 120).toFixed(6), caughtUp: true }),
+      spanStub().span,
+      POLICY,
+      [],
+      gate,
+    );
+    expect(out).toBeDefined();
+    expect(decide).not.toHaveBeenCalled();
+    expect(s.calls.slice(0, 2)).toEqual(["reactions.add", "chat.postMessage"]);
+    expect(s.calls).toContain("download");
+  });
+
+  it("a mention and a DM never reach the gate in any mode (a top-level post never reaches handle at all): the sequence is the golden", async () => {
+    for (const trigger of ["mention", "dm"] as const) {
+      const s = gateClient();
+      stubDownloads(s.calls);
+      const { gate, decide } = gateOf({ mode: "classify" });
+      const out = await receiveSlackMessage(s.client, followUp({ trigger }), spanStub().span, POLICY, [], gate);
+      expect(out).toBeDefined();
+      expect(decide).not.toHaveBeenCalled();
+      expect(s.calls[0]).toBe("reactions.add");
+    }
+    // A top-level channel post is skipped by trigger gating before handle().
+    expect(classifyMessage({ channel_type: "channel", text: "hello" }, BOT)).toBe("skip");
+  });
+
+  it("a message a stored receipt already decided (intakeDecided) is never decided twice", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const { gate, decide } = gateOf({ mode: "classify" });
+    const out = await receiveSlackMessage(
+      s.client,
+      followUp({ intakeDecided: true }),
+      spanStub().span,
+      POLICY,
+      [],
+      gate,
+    );
+    expect(out).toBeDefined();
+    expect(decide).not.toHaveBeenCalled();
+    expect(s.calls[0]).toBe("reactions.add");
+  });
+
+  it("a caught-up thread reply bypasses the gate for now — the catch-up reads no receipts yet, so a replayed addressed reply whose run died must still run", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const { gate, decide } = gateOf({ mode: "classify" });
+    const out = await receiveSlackMessage(
+      s.client,
+      followUp({ ts: (Date.now() / 1000 - 120).toFixed(6), caughtUp: true }),
+      spanStub().span,
+      POLICY,
+      [],
+      gate,
+    );
+    expect(out).toBeDefined();
+    expect(decide).not.toHaveBeenCalled();
+    expect(s.calls[0]).toBe("reactions.add");
+  });
+
+  it("a userless event resolves the intake mode with no user scope: intakeModeFor is handed undefined, never a made-up id", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const { gate } = gateOf({ mode: "always" });
+    const modeFor = vi.fn(() => "always" as const);
+    gate.intakeModeFor = modeFor;
+    await receiveSlackMessage(s.client, followUp({ user: undefined }), spanStub().span, POLICY, [], gate);
+    expect(modeFor).toHaveBeenCalledWith("slack:CGATE:100.000000", undefined, "slack:CGATE");
+  });
+
+  it("silent: no 👀, no download, no note, no message to dispatch — and the span carries the verdict, its source and the receipt", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const { attrs, span } = spanStub();
+    const { gate } = gateOf({ decideIntake: decided("silent") as unknown as typeof decideIntake });
+    const out = await receiveSlackMessage(s.client, followUp(), span, POLICY, [], gate);
+    expect(out).toBeUndefined();
+    expect(s.calls).toEqual([]);
+    expect(attrs).toMatchObject({ intake: "silent", intakeSource: "model", intakeReceipt: "inserted" });
+  });
+
+  it("addressed: the verdict and its receipt come first, the 👀 and the downloads after, and the runs page rides out as thread for dispatch", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const page: RunView[] = [
+      { id: "run-1", agent: "coding", userId: "slack:UASKER", startedAt: 100_000, finished: true } as RunView,
+    ];
+    const decide = vi.fn(async (): Promise<IntakeDecision> => {
+      s.calls.push("decideIntake");
+      return { verdict: "addressed", reason: "r", source: "model", receipt: "inserted" };
+    });
+    const { gate } = gateOf({
+      decideIntake: decide as unknown as typeof decideIntake,
+      runs: { listRuns: async () => ({ runs: page, total: 1 }) } as unknown as SlackIntakeGate["runs"],
+    });
+    const { attrs, span } = spanStub();
+    const out = await receiveSlackMessage(s.client, followUp(), span, POLICY, [], gate);
+    expect(out?.thread).toEqual(page);
+    expect(s.calls.indexOf("decideIntake")).toBe(0);
+    expect(s.calls.indexOf("decideIntake")).toBeLessThan(s.calls.indexOf("reactions.add"));
+    expect(s.calls.indexOf("reactions.add")).toBeLessThan(s.calls.indexOf("download"));
+    expect(attrs).toMatchObject({ intake: "addressed", intakeSource: "model", intakeReceipt: "inserted" });
+  });
+
+  it("mode mention: the model is never called, the verdict is silent by mode, and the receipt row is written", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const ledger = fakeLedger();
+    const model = vi.fn(async () => ({ tool: "intake", input: { answer: "addressed", reason: "no" } }));
+    const { gate } = gateOf({ mode: "mention", decideIntake: decideIntake });
+    gate.deps = { model, ledger, now: () => NOW };
+    const ev = followUp();
+    const { attrs, span } = spanStub();
+    const out = await receiveSlackMessage(s.client, ev, span, POLICY, [], gate);
+    expect(out).toBeUndefined();
+    expect(model).not.toHaveBeenCalled();
+    expect(s.calls).toEqual([]);
+    expect(attrs).toMatchObject({ intake: "silent", intakeSource: "mode", intakeReceipt: "inserted" });
+    expect(ledger.rows.get(`CGATE:${ev.ts}`)).toMatchObject({ verdict: "silent", mode: "mention", gen: 7 });
+  });
+
+  it("not the inserter: a receipt another caller stored — addressed or not — yields no action here (only the inserter acts)", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const ev = followUp();
+    const ledger = fakeLedger(`CGATE:${ev.ts}`);
+    const { gate } = gateOf({ decideIntake: decideIntake });
+    gate.deps = {
+      model: async () => {
+        throw new Error("must not be called: the receipt answers");
+      },
+      ledger,
+      now: () => NOW,
+    };
+    const { attrs, span } = spanStub();
+    const out = await receiveSlackMessage(s.client, ev, span, POLICY, [], gate);
+    expect(out).toBeUndefined();
+    expect(s.calls).toEqual([]);
+    expect(attrs).toMatchObject({ intake: "addressed", intakeReceipt: "existing" });
+  });
+
+  it("degraded, never silent by accident: a throwing write still dispatches an addressed reply (receipt failed), a throwing read decides as if none (inserted), and the null ledger acts with receipt absent", async () => {
+    const model = async () => ({ tool: "intake", input: { answer: "addressed", reason: "asked the bot" } });
+    // write throws
+    let s = gateClient();
+    stubDownloads(s.calls);
+    let { gate } = gateOf({ decideIntake: decideIntake });
+    gate.deps = {
+      model,
+      ledger: {
+        readIntake: async () => undefined,
+        recordIntake: async () => {
+          throw new Error("DO down");
+        },
+      },
+      now: () => NOW,
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let stub = spanStub();
+    let out = await receiveSlackMessage(s.client, followUp(), stub.span, POLICY, [], gate);
+    expect(out).toBeDefined();
+    expect(s.calls[0]).toBe("reactions.add");
+    expect(stub.attrs).toMatchObject({ intake: "addressed", intakeReceipt: "failed" });
+    // read throws, write lands
+    s = gateClient();
+    stubDownloads(s.calls);
+    const ledger = fakeLedger();
+    ({ gate } = gateOf({ decideIntake: decideIntake }));
+    gate.deps = {
+      model,
+      ledger: {
+        readIntake: async () => {
+          throw new Error("DO down");
+        },
+        recordIntake: ledger.recordIntake,
+      },
+      now: () => NOW,
+    };
+    stub = spanStub();
+    out = await receiveSlackMessage(s.client, followUp(), stub.span, POLICY, [], gate);
+    expect(out).toBeDefined();
+    expect(stub.attrs).toMatchObject({ intake: "addressed", intakeReceipt: "inserted" });
+    // null ledger
+    s = gateClient();
+    stubDownloads(s.calls);
+    ({ gate } = gateOf({ decideIntake: decideIntake }));
+    gate.deps = { model, ledger: null, now: () => NOW };
+    stub = spanStub();
+    out = await receiveSlackMessage(s.client, followUp(), stub.span, POLICY, [], gate);
+    expect(out).toBeDefined();
+    expect(stub.attrs).toMatchObject({ intake: "addressed", intakeReceipt: "absent" });
+    warn.mockRestore();
+  });
+
+  it("a second live delivery of the same event is dropped by the redelivery guard with no second verdict", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const decide = decided("addressed");
+    const { gate } = gateOf({ decideIntake: decide as unknown as typeof decideIntake });
+    const ev = followUp();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const first = await receiveSlackMessage(s.client, ev, spanStub().span, POLICY, [], gate);
+    expect(first).toBeDefined();
+    expect(decide).toHaveBeenCalledTimes(1);
+    const { attrs, span } = spanStub();
+    const second = await receiveSlackMessage(s.client, ev, span, POLICY, [], gate);
+    log.mockRestore();
+    expect(second).toBeUndefined();
+    expect(decide).toHaveBeenCalledTimes(1);
+    expect(attrs).toMatchObject({ dedupe: "duplicate" });
+  });
+
+  it("a thread past the prefetched page (50 messages) pages forward to the tail (replies come oldest-first): cursor followed, duplicates dropped, the newest turns kept; a short thread never fetches", async () => {
+    const long = Array.from({ length: 50 }, (_, i) => ({
+      user: i % 2 ? "UASKER" : BOT,
+      text: `turn ${i}`,
+      ts: `${100 + i}.000000`,
+    }));
+    const tail = Array.from({ length: 12 }, (_, i) => ({
+      user: i % 2 ? BOT : "UASKER",
+      text: `tail ${i}`,
+      ts: `${200 + i}.000000`,
+    }));
+    const s = gateClient([
+      // Slack re-sends the parent; the dedupe must drop it, and the cursor hands on.
+      { messages: [{ user: BOT, text: "turn 0", ts: "100.000000" }, ...tail], next: "c2" },
+      { messages: [{ user: "UASKER", text: "the newest turn", ts: "500.000000" }] },
+    ]);
+    stubDownloads(s.calls);
+    let input: IntakeInput | undefined;
+    const decide = vi.fn(async (i: IntakeInput): Promise<IntakeDecision> => {
+      input = i;
+      return { verdict: "silent", reason: "r", source: "model", receipt: "inserted" };
+    });
+    const { gate } = gateOf({ decideIntake: decide as unknown as typeof decideIntake });
+    const ev = followUp({ thread: long });
+    await receiveSlackMessage(s.client, ev, spanStub().span, POLICY, [], gate);
+    expect(s.replies).toHaveBeenCalledTimes(2);
+    expect(s.replies.mock.calls[0]![0]).toEqual({
+      channel: "CGATE",
+      ts: parentTs,
+      oldest: "149.000000",
+      inclusive: false,
+      limit: 50,
+    });
+    expect(s.replies.mock.calls[1]![0]).toEqual({ channel: "CGATE", ts: parentTs, cursor: "c2", limit: 50 });
+    // The verdict sees the thread's END — the last 12 turns — never its head.
+    expect(input!.turns.map((t) => t.text)).toEqual([...tail.slice(1).map((t) => t.text), "the newest turn"]);
+    const short = gateClient();
+    stubDownloads(short.calls);
+    const { gate: g2 } = gateOf({ decideIntake: decide as unknown as typeof decideIntake });
+    await receiveSlackMessage(short.client, followUp(), spanStub().span, POLICY, [], g2);
+    expect(short.replies).not.toHaveBeenCalled();
+  });
+
+  it("the labels and the adapter's facts: bot/requester/person by user id against the runs page, the live run, the pending confirmation, the other mention, the bot's last turn and the bot-started thread", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const page: RunView[] = [
+      { id: "live", agent: "coding", userId: "slack:UASKER", startedAt: 100_000, finished: false },
+      { id: "prev", agent: "general", userId: "slack:UOTHER", startedAt: 50_000, finished: true },
+    ] as RunView[];
+    let input: IntakeInput | undefined;
+    const decide = vi.fn(async (i: IntakeInput): Promise<IntakeDecision> => {
+      input = i;
+      return { verdict: "silent", reason: "r", source: "model", receipt: "inserted" };
+    });
+    const { gate } = gateOf({
+      decideIntake: decide as unknown as typeof decideIntake,
+      runs: { listRuns: async () => ({ runs: page, total: 2 }) } as unknown as SlackIntakeGate["runs"],
+      confirmations: {
+        pendingByThread: async () => ({ message: { userId: "slack:UWAITER" } }),
+      } as unknown as SlackIntakeGate["confirmations"],
+    });
+    const thread = [
+      { user: BOT, text: "report ready", ts: parentTs }, // the bot's own post starts the thread
+      { user: "UASKER", text: "thanks", ts: "110.000000" },
+      { user: "UOTHER", text: "looks fine", ts: "120.000000" },
+      { user: BOT, text: "anything else?", ts: "130.000000" },
+    ];
+    const ev = followUp({ thread, rawText: "and <@UOTHER> should check too" });
+    await receiveSlackMessage(s.client, ev, spanStub().span, POLICY, [], gate);
+    expect(input!.turns).toEqual([
+      { role: "bot", text: "report ready" },
+      { role: "requester", text: "thanks" },
+      { role: "person", text: "looks fine" },
+      { role: "bot", text: "anything else?" },
+    ]);
+    expect(input!.facts).toEqual({
+      liveRun: { agent: "coding", secondsInFlight: 60 },
+      replierIsRequester: true,
+      botLastSpokeSeconds: 30,
+      mentionsOther: true,
+      pendingConfirmation: "slack:UWAITER",
+      threadStartedByBot: true,
+    });
+    expect(input!.mode).toBe("classify");
+    expect(input!.model).toBe("anthropic/fast-model");
+    expect(input!.gen).toBe(7);
+    expect(input!.threadKey).toBe("slack:CGATE:100.000000");
+    expect(input!.key).toBe(`CGATE:${ev.ts}`);
+  });
+
+  it("wireIntakeGate prints the degraded startup line exactly once when the ledger is null, and never with one", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      wireIntakeGate({
+        intakeModeFor: () => "classify",
+        deps: { model: async () => "x", ledger: null, now: () => 0 },
+        modelRef: "anthropic/fast-model",
+        gen: 1,
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(degradedIntakeLine());
+      wireIntakeGate({
+        intakeModeFor: () => "classify",
+        deps: { model: async () => "x", ledger: fakeLedger(), now: () => 0 },
+        modelRef: "anthropic/fast-model",
+        gen: 1,
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
