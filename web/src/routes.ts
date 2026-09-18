@@ -1,10 +1,12 @@
 import type { RouteRecordRaw } from "vue-router";
 
 /*
- * Navigation between top-level pages is full page loads (plain anchors): the
- * server renders a fresh shell + seed per request, exactly like the previous
- * string-rendered frontend. The router's only job is to mount the page
- * component matching the URL the shell was served for.
+ * Navigation between pages is in place: a link is a RouterLink, the router
+ * asks the next address for its seed before the route resolves
+ * (lib/seedRouting.ts), and App.vue mounts the page component for the address
+ * from that seed — the same mount the shell's island gives on a full load.
+ * The server still decides every page's content: a route here only says which
+ * component paints the seed the server answered for its URL.
  */
 export const routes: RouteRecordRaw[] = [
   // The home page: the chat (docs/reference/specs/web-chat.md, record 0043) — under

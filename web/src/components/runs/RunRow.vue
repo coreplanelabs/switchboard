@@ -146,11 +146,11 @@ function onRowClick(ev: MouseEvent): void {
     :data-expires-at="expires !== undefined ? String(expires) : undefined"
     @click="onRowClick"
   >
-    <a
+    <RouterLink
       class="row absolute inset-0 rounded-md focus-visible:outline-2 focus-visible:outline-primary"
-      :href="href"
+      :to="href"
       :aria-label="`open run ${run.label || shortId(run.id)}`"
-    ></a>
+    ></RouterLink>
     <!-- ONE responsive body (no per-breakpoint DOM): from sm it is the
          one-line grid — dot · started · chip · scope · snippet · badges ·
          source · facts · actions. Below sm the SAME cells wrap into a card via

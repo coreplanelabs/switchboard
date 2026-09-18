@@ -10,6 +10,7 @@ import { ALL_ON, mountApp } from "../../testing/mount";
 
 const island = (over: Partial<Capabilities> = {}): WebSeed => ({
   page: "runNotFound",
+  title: "Run not found",
   retentionDays: null,
   capabilities: { ...ALL_ON, ...over },
 });

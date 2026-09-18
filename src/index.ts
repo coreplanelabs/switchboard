@@ -14,7 +14,7 @@ import { createMcpHandler } from "./channels/mcp.js";
 import { FAVICON_ICO_SVG, createLiveViewHandler } from "./channels/liveView.js";
 import { loadWebAssets, webDistDir } from "./channels/webAssets.js";
 import { PACKAGE_ROOT, packageVersion } from "./packageRoot.js";
-import { makeShellRenderer } from "./channels/webShell.js";
+import { makePageSender } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createWebChatHandler } from "./channels/web.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
@@ -774,7 +774,7 @@ export async function runBot(): Promise<void> {
     // build it; local dev runs `npm run build` in web/ once, or points
     // SWITCHBOARD_WEB_DIST elsewhere).
     const webAssets = loadWebAssets(webDistDir(publicEnv(), PACKAGE_ROOT));
-    const shell = makeShellRenderer(webAssets.entry, capabilities);
+    const page = makePageSender(webAssets.entry, capabilities);
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin
     // /residents route live on every request with the same bearer the chat
@@ -786,7 +786,7 @@ export async function runBot(): Promise<void> {
     // live rows seed it and its `?stream=1` feed keeps it current.
     const residentsView = createResidentsViewHandler({
       client: residentAdminClient,
-      shell,
+      page,
       runs: defaultRunRegistry,
       trace: { config, spanLog },
     });
@@ -797,7 +797,7 @@ export async function runBot(): Promise<void> {
     // Costs dash: GET /costs (first group) + /costs/<group> (+ .json twins),
     // served from the snapshot built above. Access-gated below alongside /runs
     // and /residents.
-    const costsView = createCostsViewHandler(costsService, shell, { names });
+    const costsView = createCostsViewHandler(costsService, page, { names });
     const costsState = costs
       ? `GET /costs (${costsService.groups().join(",")}; LLM ${costs.llmOn ? "on" : "off"}; snapshot every ${costsCfg?.snapshot.everyHours ?? "?"} h)`
       : costsCfg
@@ -806,7 +806,7 @@ export async function runBot(): Promise<void> {
     // Delivery page: GET /delivery (first repository) + /delivery/<owner>/<name>
     // (+ .json twin). Reads GitHub and the viewer's own runs live per request;
     // gated below alongside /runs, /residents and /costs.
-    const deliveryView = createDeliveryViewHandler({ service: deliveryService, runs: runsService }, shell);
+    const deliveryView = createDeliveryViewHandler({ service: deliveryService, runs: runsService }, page);
     // Settings page: GET /settings and its tabs (record 0041). Every tab's seed
     // is the registry's answer to the same commands the CLI would run, invoked
     // as the viewer; the Installation tab projects the running config by allow-list.
@@ -825,7 +825,7 @@ export async function runBot(): Promise<void> {
         },
         capabilities,
       },
-      shell,
+      page,
     );
     // The web chat (record 0043, docs/reference/specs/web-chat.md): channel
     // adapter #5 at `/threads`. `POST /threads/<id>/send` dispatches the body as
@@ -838,7 +838,7 @@ export async function runBot(): Promise<void> {
       service: runsService,
       registry: defaultRunRegistry,
       commands,
-      shell,
+      page,
       capabilities,
       names,
       retention:
@@ -896,7 +896,7 @@ export async function runBot(): Promise<void> {
     });
     void viewAsPeople.refresh();
     const liveView = createLiveViewHandler({
-      shell,
+      page,
       service: runsService,
       index: defaultRunRegistry,
       // The view-as picker's people (record 0053): the cache `viewAsPeople` keeps.

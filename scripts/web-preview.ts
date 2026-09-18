@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { loadWebAssets } from "../src/channels/webAssets.js";
-import { makeShellRenderer, WEB_HTML_HEADERS } from "../src/channels/webShell.js";
+import { makePageSender } from "../src/channels/webShell.js";
 import type { Actor } from "../src/core/authz/types.js";
 import type {
   HomeCommandSeed,
@@ -70,7 +70,7 @@ const assets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cw
 // paints the smallest installation instead — Runs alone, no Scheduled tab, no
 // docs link — so both shapes of the header can be seen and screenshotted.
 const CAPABILITIES = process.env.SWITCHBOARD_PREVIEW_CAPABILITIES === "minimal" ? NO_CAPABILITIES : ALL_CAPABILITIES;
-const shell = makeShellRenderer(assets.entry, CAPABILITIES);
+const sendPage = makePageSender(assets.entry, CAPABILITIES);
 
 const row = (over: Partial<RunIndexRowSeed>): RunIndexRowSeed => ({
   id: "run-x",
@@ -2620,13 +2620,17 @@ createServer((req, res) => {
   }
   // Preview-only: framing allowed so a fixed-width <iframe> can emulate a
   // phone viewport for screenshots. Production keeps frame-ancestors 'none'.
-  const { "x-frame-options": _xfo, ...headers } = WEB_HTML_HEADERS;
-  res.writeHead(p.status ?? 200, {
-    ...headers,
-    "content-security-policy": headers["content-security-policy"].replace(
-      "frame-ancestors 'none'",
-      "frame-ancestors 'self'",
-    ),
-  });
-  res.end(shell(p.viewer, p.title, p.seed));
+  // The sender writes the head itself, so the relaxation rides on the
+  // response: the HTML head loses its framing defenses, a seed head is kept.
+  const writeHead = res.writeHead.bind(res) as (status: number, headers: Record<string, string>) => void;
+  res.writeHead = ((status: number, headers: Record<string, string> = {}) => {
+    const { "x-frame-options": _xfo, ...rest } = headers;
+    const csp = rest["content-security-policy"];
+    writeHead(status, {
+      ...rest,
+      ...(csp ? { "content-security-policy": csp.replace("frame-ancestors 'none'", "frame-ancestors 'self'") } : {}),
+    });
+    return res;
+  }) as typeof res.writeHead;
+  sendPage(req, res, p.status ?? 200, p.viewer, p.title, p.seed);
 }).listen(PORT, "127.0.0.1", () => console.log(`web preview on http://localhost:${PORT}/runs (fixtures only, no bot)`));

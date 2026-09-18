@@ -1,8 +1,38 @@
 // Browser side effects behind one object so tests can spy on them (ESM
 // exports are not spyable; methods on an object are).
 
+/** Where `navigate` sends an address of this app once the router is up
+ *  (main.ts hands its `push` in); until then every navigation is a full one. */
+let inApp: ((href: string) => void) | null = null;
+
+/** Route this app's own addresses through the router instead of the browser. */
+export function routeNavigationInApp(handler: ((href: string) => void) | null): void {
+  inApp = handler;
+}
+
+/** An address of this app: root-relative, and not protocol-relative (`//host`). */
+export function isAppPath(href: string): boolean {
+  return href.startsWith("/") && !href.startsWith("//");
+}
+
 export const browser = {
+  /** Go to an address: in place when it is one of this app's pages and the
+   *  router is up (lib/seedRouting.ts loads its seed), else a full navigation.
+   *  The address the page is already at is re-read — a reload, as the browser
+   *  gives a link to the page it shows — so a control that sends the page to
+   *  itself (view-as entering on the index) sees the page seeded anew. */
   navigate(href: string): void {
+    if (!inApp || !isAppPath(href)) {
+      window.location.assign(href);
+      return;
+    }
+    const hash = href.indexOf("#");
+    const address = hash === -1 ? href : href.slice(0, hash);
+    if (hash === -1 && address === window.location.pathname + window.location.search) window.location.reload();
+    else inApp(href);
+  },
+  /** A full navigation, whatever the address: the browser shows what it really is. */
+  leave(href: string): void {
     window.location.assign(href);
   },
   reload(): void {

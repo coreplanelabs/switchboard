@@ -5,7 +5,7 @@ import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import { NoCostsSnapshotError, NullCostsService, type CostsService } from "../core/costsService.js";
 import { ACTORS } from "../core/authz/testing.js";
 import { createCostsViewHandler, parseCostsRoute, type CostsViewContext } from "./costsView.js";
-import { makeShellRenderer } from "./webShell.js";
+import { makePageSender } from "./webShell.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { SEED_ELEMENT_ID, type CostsSeed } from "./webSeed.js";
 
@@ -69,7 +69,7 @@ function report(over: Partial<CostReport> = {}): CostReport {
   };
 }
 
-const shell = makeShellRenderer({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
+const sendPage = makePageSender({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
 
 function seedOf(html: string): CostsSeed {
   const m = new RegExp(`<script type="application/json" id="${SEED_ELEMENT_ID}">([\\s\\S]*?)</script>`).exec(html);
@@ -266,7 +266,7 @@ describe("createCostsViewHandler", () => {
   it("ignores paths it does not own", () => {
     const h = createCostsViewHandler(
       fakeService(() => Promise.resolve(report())),
-      shell,
+      sendPage,
     );
     const io = fakeReqRes("GET", "/runs");
     expect(h(io.req, io.res)).toBe(false);
@@ -274,7 +274,7 @@ describe("createCostsViewHandler", () => {
   });
 
   it("503s with a pointer to the config when the process has no cost reporting (the null service has no groups)", () => {
-    const h = createCostsViewHandler(new NullCostsService(), shell);
+    const h = createCostsViewHandler(new NullCostsService(), sendPage);
     const io = fakeReqRes("GET", "/costs");
     expect(h(io.req, io.res)).toBe(true);
     expect(io.status).toBe(503);
@@ -285,7 +285,7 @@ describe("createCostsViewHandler", () => {
   it("405s non-GET", () => {
     const h = createCostsViewHandler(
       fakeService(() => Promise.resolve(report())),
-      shell,
+      sendPage,
     );
     const io = fakeReqRes("POST", "/costs");
     expect(h(io.req, io.res)).toBe(true);
@@ -305,7 +305,7 @@ describe("createCostsViewHandler", () => {
         },
         ["switchboard", "other"],
       ),
-      shell,
+      sendPage,
     );
     for (let i = 0; i < 2; i++) {
       const io = fakeReqRes("GET", "/costs");
@@ -342,7 +342,7 @@ describe("createCostsViewHandler", () => {
           return Promise.resolve(byReport(dimension));
         },
       ),
-      shell,
+      sendPage,
     );
     const identity = { sub: "access-sub-1", email: "alice@example.com" };
     const page = fakeReqRes("GET", "/costs/switchboard?view=users&days=7");
@@ -391,7 +391,7 @@ describe("createCostsViewHandler", () => {
         ["switchboard"],
         () => Promise.reject(new Error("run history unreachable " + "x".repeat(600))),
       ),
-      shell,
+      sendPage,
     );
     const io = fakeReqRes("GET", "/costs/switchboard/users.json");
     h(io.req, io.res, {});
@@ -428,7 +428,7 @@ describe("createCostsViewHandler", () => {
         ["switchboard"],
         (_g, _d, dimension) => Promise.resolve(reports[dimension]),
       ),
-      shell,
+      sendPage,
       {
         names: {
           person: async (id) => (asked.push(id), id === "slack:UBOB" ? "Bob" : undefined),
@@ -476,7 +476,7 @@ describe("createCostsViewHandler", () => {
         snapshot: () => Promise.reject(new Error("no take in this test")),
         subscribe: () => () => undefined,
       },
-      shell,
+      sendPage,
     );
     const page = fakeReqRes("GET", "/costs/switchboard?view=users&days=7");
     h(page.req, page.res, { identity: { sub: "s" } });
@@ -521,7 +521,7 @@ describe("createCostsViewHandler", () => {
   it("seeds canSnapshot from the viewer's actor: true for a `costs:write` holder, false for a member and for no actor", async () => {
     const h = createCostsViewHandler(
       fakeService(() => Promise.resolve(report())),
-      shell,
+      sendPage,
     );
     const seedFor = async (actor: CostsViewContext["actor"]) => {
       const io = fakeReqRes("GET", "/costs");
@@ -544,7 +544,7 @@ describe("createCostsViewHandler", () => {
         return () => void listeners.delete(l);
       },
     };
-    const h = createCostsViewHandler(service, shell);
+    const h = createCostsViewHandler(service, sendPage);
     const io = fakeReqRes("GET", "/costs/switchboard?stream=1");
     expect(h(io.req, io.res)).toBe(true);
     expect(io.status).toBe(200);
@@ -571,7 +571,7 @@ describe("createCostsViewHandler", () => {
       fakeService((_g, days) =>
         Promise.resolve(report({ range: { from: "x", to: "y", days: Number(days), partialLastDay: false } })),
       ),
-      shell,
+      sendPage,
     );
     const ok = fakeReqRes("GET", "/costs/switchboard?days=7");
     h(ok.req, ok.res);
@@ -587,7 +587,7 @@ describe("createCostsViewHandler", () => {
   it("serves the JSON twin for agents with no-store", async () => {
     const h = createCostsViewHandler(
       fakeService(() => Promise.resolve(report())),
-      shell,
+      sendPage,
     );
     const io = fakeReqRes("GET", "/costs/switchboard.json");
     h(io.req, io.res);
@@ -603,7 +603,7 @@ describe("createCostsViewHandler", () => {
   it("502s (never 500s, never leaks) when an upstream source fails", async () => {
     const h = createCostsViewHandler(
       fakeService(() => Promise.reject(new Error("cloudflare graphql 403: denied " + "x".repeat(2000)))),
-      shell,
+      sendPage,
     );
     const io = fakeReqRes("GET", "/costs");
     h(io.req, io.res);

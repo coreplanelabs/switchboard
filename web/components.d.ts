@@ -44,6 +44,7 @@ declare module 'vue' {
     RunsTabs: typeof import('./src/components/runs/RunsTabs.vue')['default']
     RunTimeline: typeof import('./src/components/run/RunTimeline.vue')['default']
     RunUnitsBlock: typeof import('./src/components/run/RunUnitsBlock.vue')['default']
+    SeedScope: typeof import('./src/components/SeedScope.vue')['default']
     SessionSearch: typeof import('./src/components/unit/SessionSearch.vue')['default']
     SettingSelect: typeof import('./src/components/SettingSelect.vue')['default']
     SettingsLink: typeof import('./src/components/SettingsLink.vue')['default']

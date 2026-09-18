@@ -1,6 +1,7 @@
 <script lang="ts">
-// The tabs of the /runs page: Runs (live list) · Scheduled. Full page loads;
-// the current tab is ink at the house weight over a 1px ink rail, aria-current
+// The tabs of the /runs page: Runs (live list) · Scheduled. RouterLinks (the
+// router loads each tab's seed); the current tab is ink at the house weight
+// over a 1px ink rail, aria-current
 // is both the styling hook and the accessible signal. Scheduled exists only
 // when firing history is configured (`capabilities.schedules`, from the seed)
 // or the viewer is on it; a bar with one tab is no choice at all, so the bar
@@ -43,14 +44,14 @@ const tabs = computed(() => runsTabs(caps, props.current));
     class="tabs mb-3.5 flex gap-5 border-b border-muted px-2 text-[0.8rem]"
     aria-label="Runs views"
   >
-    <a
+    <RouterLink
       v-for="t in tabs"
       :key="t.id"
-      :href="t.href"
+      :to="t.href"
       :aria-current="t.id === current ? 'page' : undefined"
       class="-mb-px border-b border-transparent pb-2 pt-1.5 text-muted no-underline hover:text-highlighted aria-[current=page]:border-(--ui-text-highlighted) aria-[current=page]:font-medium aria-[current=page]:text-highlighted"
     >
       {{ t.label }}
-    </a>
+    </RouterLink>
   </nav>
 </template>

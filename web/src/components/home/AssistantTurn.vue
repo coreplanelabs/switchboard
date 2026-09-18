@@ -245,7 +245,7 @@ const workSummary = computed(() => {
       data-testid="disconnected"
     >
       <span>stream disconnected · the run may still be working</span>
-      <a class="ml-auto text-primary no-underline hover:underline" :href="runHref">open the run</a>
+      <RouterLink class="ml-auto text-primary no-underline hover:underline" :to="runHref">open the run</RouterLink>
     </p>
 
     <!-- The work: the run page's own step blocks, open while live, folded once over. -->
@@ -269,7 +269,7 @@ const workSummary = computed(() => {
         <p v-if="replay === 'loading'" class="py-2 font-mono text-xs text-dimmed">reading the run's record…</p>
         <p v-else-if="replay === 'failed'" class="py-2 font-mono text-xs text-warn">
           the run's record could not be read —
-          <a class="text-primary no-underline hover:underline" :href="runHref">open the run</a>
+          <RouterLink class="text-primary no-underline hover:underline" :to="runHref">open the run</RouterLink>
         </p>
         <ol v-else class="m-0 list-none p-0">
           <TransitionGroup name="sb-rise">
@@ -296,7 +296,9 @@ const workSummary = computed(() => {
     <!-- One line of facts once over: duration on the heat scale, the run's page. -->
     <div v-if="!live" class="facts flex flex-wrap items-baseline gap-x-3 font-mono text-[0.7rem] text-dimmed">
       <span class="dur tabular-nums" :class="heatPaint ? 'heat' : ''" :style="heatPaint">{{ elapsedText }}</span>
-      <a class="open text-dimmed no-underline hover:text-primary hover:underline" :href="runHref">open run</a>
+      <RouterLink class="open text-dimmed no-underline hover:text-primary hover:underline" :to="runHref"
+        >open run</RouterLink
+      >
     </div>
   </div>
 </template>

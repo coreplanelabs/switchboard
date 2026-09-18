@@ -43,7 +43,7 @@ export interface MountAppOptions {
 
 export function mountApp(component: Component, options: MountAppOptions = {}) {
   const { seed = null, props, slots, eventSource, provides = [] } = options;
-  const island: WebSeed | null = seed === null ? null : { capabilities: ALL_ON, ...seed };
+  const island: WebSeed | null = seed === null ? null : { title: "test page", capabilities: ALL_ON, ...seed };
   const host = defineComponent({
     setup() {
       provide(SeedKey, island);

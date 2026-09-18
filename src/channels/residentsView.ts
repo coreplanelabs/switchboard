@@ -8,8 +8,7 @@ import { nodeSseSink, startSseHeartbeat } from "./liveView/sse.js";
 import { readableRuns, visibleIndexFeed } from "./liveView/viewer.js";
 import { serveResidentsFeed } from "./residentsFeed.js";
 import { RESIDENT_SLUG_RE, residentSlug, type ResidentListing, type ResidentRecordView } from "./residentsModel.js";
-import type { ShellRenderer } from "./webShell.js";
-import { WEB_HTML_HEADERS } from "./webShell.js";
+import type { PageSender } from "./webShell.js";
 import type { ResidentsIndexSeed } from "./webSeed.js";
 
 // Residents dash: an Access-gated, read-only browser view of the resident
@@ -76,8 +75,8 @@ export interface ResidentsViewDeps {
   /** The resident admin client the config names, or the null client carrying
    *  the reason residents are off (→ 503). */
   client: ResidentAdminClient;
-  /** The bound web-app shell (webShell.ts): title + seed → the HTML document. */
-  shell: ShellRenderer;
+  /** The bound page sender (webShell.ts): the shell or the seed, by what the request accepts. */
+  page: PageSender;
   /** The run registry's faces the index needs: the live rows (with tokens, for
    *  their hrefs), the index feed, and the per-run subscribe the feed watches
    *  each repo run's attach and seal through. */
@@ -143,7 +142,7 @@ async function readListing(client: ResidentAdminClient): Promise<ListingResult> 
 export function createResidentsViewHandler(
   deps: ResidentsViewDeps,
 ): (req: HttpRequest, res: ServerResponse, ctx: ResidentsViewContext) => boolean {
-  const { client, shell, runs } = deps;
+  const { client, page, runs } = deps;
   const now = deps.now ?? Date.now;
   return (req, res, ctx) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -219,8 +218,7 @@ export function createResidentsViewHandler(
           now: now(),
           runs: live,
         };
-        res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(shell(ctx.actor, "Resident repos", seed));
+        page(req, res, 200, ctx.actor, "Resident repos", seed);
         finish(200);
         return;
       }
@@ -229,8 +227,7 @@ export function createResidentsViewHandler(
         plainEnd(404, `${route.slug} is not onboarded as a resident`);
         return;
       }
-      res.writeHead(200, WEB_HTML_HEADERS);
-      res.end(shell(ctx.actor, route.slug, { page: "resident", slug: route.slug, record }));
+      page(req, res, 200, ctx.actor, route.slug, { page: "resident", slug: route.slug, record });
       finish(200);
     });
     return true;

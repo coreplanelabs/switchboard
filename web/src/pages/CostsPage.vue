@@ -258,11 +258,11 @@ function monthDay(date: string): string {
             aria-current="page"
             >{{ rangeLabel(n) }}</span
           >
-          <a
+          <RouterLink
             v-else
             class="rounded-md px-2.5 py-1 font-mono text-xs tabular-nums text-muted no-underline hover:bg-elevated hover:text-highlighted"
-            :href="hrefOf(report.group, n, view)"
-            >{{ rangeLabel(n) }}</a
+            :to="hrefOf(report.group, n, view)"
+            >{{ rangeLabel(n) }}</RouterLink
           >
         </template>
       </nav>
@@ -274,11 +274,11 @@ function monthDay(date: string): string {
             aria-current="page"
             >{{ g }}</span
           >
-          <a
+          <RouterLink
             v-else
             class="rounded-md px-2.5 py-1 text-xs text-muted no-underline hover:bg-elevated hover:text-highlighted"
-            :href="hrefOf(g, report.range.days, view)"
-            >{{ g }}</a
+            :to="hrefOf(g, report.range.days, view)"
+            >{{ g }}</RouterLink
           >
         </template>
       </nav>
@@ -430,11 +430,11 @@ function monthDay(date: string): string {
           aria-current="page"
           >{{ v.tab }}</span
         >
-        <a
+        <RouterLink
           v-else
           class="-mb-px border-b-2 border-transparent px-3 py-1.5 text-sm text-muted no-underline hover:border-muted hover:text-highlighted"
-          :href="hrefOf(report.group, report.range.days, v.view)"
-          >{{ v.tab }}</a
+          :to="hrefOf(report.group, report.range.days, v.view)"
+          >{{ v.tab }}</RouterLink
         >
       </template>
     </nav>
@@ -629,11 +629,11 @@ function monthDay(date: string): string {
             aria-current="page"
             >{{ g }}</span
           >
-          <a
+          <RouterLink
             v-else
             class="rounded-md px-2.5 py-1 text-xs text-muted no-underline hover:bg-elevated hover:text-highlighted"
-            :href="`/costs/${g}`"
-            >{{ g }}</a
+            :to="`/costs/${g}`"
+            >{{ g }}</RouterLink
           >
         </template>
       </nav>
