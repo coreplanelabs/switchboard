@@ -1148,7 +1148,48 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(readBotAnswer(500, "x".repeat(400))).toEqual({ ok: false, reason: `HTTP 500 — ${"x".repeat(200)}…` });
   });
 
-  it("transientRefusal: the answers the bot itself calls a passing condition — GitHub unavailable, no channel to rebuild the thread on, a unit not yet started — are a reason to retry the step; every other answer, refusals included, is the machine's to judge", () => {
+  it("a 409 not_host on unit-start, round, unit-end and finish — a bot generation that no longer hosts the parent — is a transient refusal the step re-asks under its policy, and the plan completes once the host answers; a 409 busy stays the machine's answer, not a retry", async () => {
+    const notHost = (at = T0): BotReply => ok({ ok: false, error: "not_host" }, at, 409);
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [notHost(), started("U10")],
+      "pr-check": [prNone(), prMerged(T0 + 10 * MIN)],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [
+        record(
+          {
+            id: "run-c0",
+            finished: true,
+            status: "completed",
+            finalReply: "Unit U10 is already done — nothing to ship this run.",
+            handoff: true,
+          },
+          T0 + 10 * MIN,
+        ),
+      ],
+      round: [notHost(), acked(), notHost(T0 + 10 * MIN), acked(T0 + 10 * MIN)],
+      "unit-end": [notHost(T0 + 10 * MIN), acked(T0 + 10 * MIN)],
+      finish: [notHost(T0 + 10 * MIN), acked(T0 + 10 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merged" });
+    expect(summary.outcome).toBe("completed");
+    // Each refused step was asked again under its own policy, not failed.
+    expect(s.attempts["U10/start"]).toBe(2);
+    expect(s.attempts["U10/note/1"]).toBe(2);
+    expect(s.attempts["U10/note/2"]).toBe(2);
+    expect(s.attempts["U10/end"]).toBe(2);
+    expect(s.attempts.finish).toBe(2);
+    // The same body without the bot's clock is not the bot's answer, as today.
+    expect(readBotAnswer(409, JSON.stringify({ ok: false, error: "not_host" }))).toEqual({
+      ok: false,
+      reason: "HTTP 409 — not_host",
+    });
+  });
+
+  it("transientRefusal: the answers the bot itself calls a passing condition — GitHub unavailable, no channel to rebuild the thread on, a unit not yet started, a bot that is not the host — are a reason to retry the step; every other answer, refusals included, is the machine's to judge", () => {
     expect(transientRefusal(answer({ ok: false, error: "github_unavailable", message: "HTTP 502" }, T0, 502))).toBe(
       "the bot answered github_unavailable: HTTP 502",
     );
@@ -1157,6 +1198,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "thread_failed",
     );
     expect(transientRefusal(answer({ ok: false, error: "unit_not_started" }, T0, 409))).toContain("unit_not_started");
+    expect(transientRefusal(answer({ ok: false, error: "not_host" }, T0, 409))).toBe("the bot answered not_host");
     expect(transientRefusal(answer({ ok: false, error: "busy" }, T0, 409))).toBeUndefined();
     expect(transientRefusal(answer({ ok: false, error: "agent_allowlist" }, T0, 403))).toBeUndefined();
     expect(transientRefusal(answer({ ok: false, error: "spawn_failed", message: "x" }, T0, 502))).toBeUndefined();

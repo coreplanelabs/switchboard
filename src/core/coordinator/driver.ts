@@ -145,7 +145,7 @@ export function readBotAnswer(
 
 /** The answers the bot itself calls a passing condition — the step is asked
  *  again, under the policy. Everything else, refusals included, is the machine's. */
-const TRANSIENT = new Set(["github_unavailable", "no_channel", "thread_failed", "unit_not_started"]);
+const TRANSIENT = new Set(["github_unavailable", "no_channel", "thread_failed", "unit_not_started", "not_host"]);
 export function transientRefusal(answer: BotAnswer): string | undefined {
   const { ok, error, message } = answer.body;
   if (ok !== false || typeof error !== "string" || !TRANSIENT.has(error)) return undefined;
