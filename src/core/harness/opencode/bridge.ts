@@ -82,6 +82,7 @@ import {
   CONTINUE_PROMPT,
   finaleAbortReason,
   finaleTimedOutNote,
+  finaleWaitNote,
   HARD_STOP_MESSAGE,
   hardStopNote,
   MODEL_CALL_IN_FLIGHT,
@@ -2334,17 +2335,27 @@ export async function driveOpenCode(
       }
       // The write-up is bounded by its allowance, as pi's is (harness.md item
       // 5): past the bound the run closes by the wind-down's own answer with no
-      // write-up — the call in flight interrupted, its failure the wind-down's
-      // note — and the loop leaves now rather than wait for a settle a hung
-      // turn never sends: a turn that answered nothing for the bound answers
-      // nothing to the interrupt either, and the caller ends the process.
+      // write-up — what was in flight interrupted, the wind-down's note saying
+      // what that was — and the loop leaves now rather than wait for a settle a
+      // hung turn never sends: a turn that answered nothing for the bound
+      // answers nothing to the interrupt either, and the caller ends the
+      // process. The note is worded for what the bound fell on: a model call
+      // (pi's shape, the write-up's own call hanging) is a model call that
+      // failed under the wind-down; a tool call — the loop-end cut's tool with
+      // its interrupt still unanswered, or a tool the write-up's own execution
+      // made — is a wait the bound ended, no model call having failed.
       if (writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) {
         writeUpAt = undefined;
         ended = "finale";
         const reason = finaleAbortReason(lease.finaleMs);
         writeUpFailed ??= reason;
         run.onProgress?.(finaleTimedOutNote());
-        note("harness_error", windDownFailureNote(reason));
+        const doing = bridge.doingNow();
+        const onTool = doing !== undefined && doing !== "model";
+        note(
+          "harness_error",
+          cutInFlight || onTool ? finaleWaitNote(reason, doingWords(doing), cutInFlight) : windDownFailureNote(reason),
+        );
         void interrupt({ ending: "the write-up's finale" });
       }
       return;
