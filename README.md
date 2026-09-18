@@ -80,3 +80,4 @@ Off means the bot never offers it and the dashboard and the plan never show it (
 Docs: <https://openswitchboard.dev> ([`docs/`](docs/README.md)) · [CONTRIBUTING.md](CONTRIBUTING.md) · [AGENTS.md](AGENTS.md) · [SECURITY.md](SECURITY.md) · [Apache-2.0](LICENSE).
 
 Going deeper: commands and directives exist for whoever wants to type them ([Slack commands](docs/reference/slack-commands.md)); a plain sentence needs none.
+Probe of the title gate (delete me).
