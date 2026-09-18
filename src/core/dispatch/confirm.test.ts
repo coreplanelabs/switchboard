@@ -12,6 +12,7 @@ import {
   type ConfirmationStore,
   type PendingConfirmation,
   type RedispatchConfirmation,
+  type RunConfirmation,
 } from "../confirmations.js";
 import type { DispatchOutcome } from "./outcome.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
@@ -180,6 +181,29 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     if (res.kind !== "ran") throw new Error("unreachable");
     expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: res.result.text });
     expect(d.runRegistry.snapshotById("run-2")).toBeNull();
+  });
+
+  it("a routed config set thread row (record 0044's button under the built-in write default) runs at the click through the typed path and sets the thread's intake mode", async () => {
+    const d = deps();
+    const base = pending("c-thread") as Omit<RunConfirmation, "expiresAt">;
+    const row: PendingConfirmation = {
+      ...base,
+      input: { args: ["thread"], options: { intake: { threadReplies: "mention" } } },
+      receipt: "config set thread --intake.threadReplies mention",
+    };
+    await d.store.put(row, CONFIRMATION_TTL_MS);
+    const { io, ending, trace } = request(d);
+    const res = await consumeAndRun(d, { id: "c-thread", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch);
+    await ending.sealAfterReply(async () => {});
+    expect(res.kind).toBe("ran");
+    if (res.kind !== "ran") throw new Error("unreachable");
+    expect(res.text.split("\n")[0]).toBe("routed: config set thread --intake.threadReplies mention");
+    // The stored message's thread is the target: the mode now resolves for it and no other.
+    expect(d.config.intakeModeFor("slack:CX:1.0", "slack:UADMIN", "slack:CX")).toBe("mention");
+    expect(d.config.intakeModeFor("slack:CX:2.0", "slack:UADMIN", "slack:CX")).toBe("classify");
+    expect(d.audits).toEqual([
+      expect.objectContaining({ commandId: "config.set", callerId: "slack:UADMIN", outcome: "ok", source: "confirm" }),
+    ]);
   });
 
   it("a second click on the same id reads `already used` and nothing runs", async () => {

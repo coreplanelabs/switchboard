@@ -5,7 +5,7 @@ import {
   type ConfigDescription,
   type Scope,
 } from "../../config.js";
-import { boundaryProblem, MAX_INSTRUCTIONS_LENGTH, MIN_BOUNDARY_MINUTES } from "../../config/validate.js";
+import { boundaryProblem, INTAKE_MODES, MAX_INSTRUCTIONS_LENGTH, MIN_BOUNDARY_MINUTES } from "../../config/validate.js";
 import { CONFIRM_CLASSES, type Boundary } from "../../config/profile.js";
 import { IDENTITIES, MACHINE_CLASSES, type MachineClass } from "../../agents/registry.js";
 import { EFFORT_LEVELS, type Effort } from "../../effort.js";
@@ -29,13 +29,17 @@ import {
 // The `config.*` registrations (phase 4b): runtime config on the typed model.
 //   config show [--channel <id>]
 //   config overrides                       — the channels that carry a scope, setting names only
-//   config set <channel|me> [--agent x] [--model p/m] [--models.<agent> p/m] [--effort e] [--efforts.<agent> e]
-//                           [--harness.<agent> pi|opencode]
-//                           [--boundary.maxMinutes n] [--boundary.maxIdentity none|read|write] [--boundary.machines a,b] [--channel <id>]
-//   config clear <channel|me> [--channel <id>]
+//   config set <channel|me|thread> [--agent x] [--model p/m] [--models.<agent> p/m] [--effort e] [--efforts.<agent> e]
+//                           [--harness.<agent> pi|opencode] [--intake.threadReplies mention|classify|always]
+//                           [--boundary.maxMinutes n] [--boundary.maxIdentity none|read|write] [--boundary.machines a,b]
+//                           [--channel <id>] [--thread <key>]
+//   config clear <channel|me|thread> [--channel <id>] [--thread <key>]
 //   config instructions <channel|me> [text…] [--channel <id>]
 // The caller's own channel (`caller.origin`) is the default target; `--channel`
 // names another (or is required where there is no origin — a machine surface).
+// The `thread` scope is the caller's own thread (`--thread <key>` on a machine
+// surface), carries only the intake gate's mode, and rides a `config-scope
+// { thread }` policy row that grants whoever holds the channel's `config:write`.
 // `me` is the caller's own user scope: a person always has it (pointing
 // yourself at a restricted agent is harmless: the run-time agent gate still
 // applies), a credential needs `config:write` — the `config:write` rows on
@@ -59,8 +63,10 @@ export interface ConfigCommandDeps {
     scopes(channelId: string, userId: string): Promise<{ channel: Scope; user: Scope }>;
     setChannelOverride(channelId: string, patch: Scope): Promise<Scope>;
     setUserOverride(userId: string, patch: Scope): Promise<Scope>;
+    setThreadOverride(threadKey: string, patch: Scope): Promise<Scope>;
     clearChannelOverride(channelId: string): Promise<void>;
     clearUserOverride(userId: string): Promise<void>;
+    clearThreadOverride(threadKey: string): Promise<void>;
     /** Every channel with a scope, names only (`ConfigStore.channelsWithScope`), before the per-channel read gate. */
     channelsWithScope(): Promise<ChannelScopeIndexRow[]>;
     /** The agent names a scope may pin (`AGENTS` keys). */
@@ -84,10 +90,17 @@ const defineCommand = commandDefiner<ConfigCommandDeps>();
 
 const scopeArg = {
   name: "scope",
+  schema: z.enum(["channel", "me", "thread"]),
+  describe: "`channel` (everyone here), `me` (your own runs) or `thread` (this thread's intake gate)",
+} as const;
+/** `config instructions` keeps the two scopes: a thread carries no instructions text. */
+const instructionsScopeArg = {
+  name: "scope",
   schema: z.enum(["channel", "me"]),
   describe: "`channel` (everyone here) or `me` (your own runs)",
 } as const;
 const channelOption = z.string().optional().describe("target channel (default: the channel you are speaking in)");
+const threadOption = z.string().optional().describe("target thread key (default: the thread you are speaking in)");
 
 const effort = z.enum(EFFORT_LEVELS);
 /** The ladder as the option descriptions print it (`<low|medium|high|xhigh|max>`):
@@ -141,6 +154,14 @@ function targetChannel(caller: Caller, channel: string | undefined): string {
   return target;
 }
 
+/** The thread a thread-scoped write targets: `--thread`, else the caller's own
+ *  thread; a machine caller with neither must name one. */
+function targetThread(caller: Caller, thread: string | undefined): string {
+  const target = thread ?? caller.origin?.threadKey;
+  if (!target) throw new CommandError("invalid_input", "thread: required on this surface — pass --thread <key>");
+  return target;
+}
+
 /** The channel scope affects everyone in the channel: the policy table's
  *  `config:write` row on `config-scope { channel }` (the channel-config right). */
 function mayEditChannel(caller: Caller, channel: string): boolean {
@@ -150,6 +171,14 @@ function mayEditChannel(caller: Caller, channel: string): boolean {
 function assertMayEditChannel(caller: Caller, channel: string): void {
   if (!mayEditChannel(caller, channel))
     throw new CommandError("unauthorized", "Channel config changes are restricted.");
+}
+
+/** A thread's scope carries the channel-config right (routing-and-config item 27):
+ *  the policy table's `config:write` row on `config-scope { thread }`, so
+ *  whoever may set the channel may set a thread in it. */
+function assertMayEditThread(caller: Caller, threadKey: string): void {
+  if (!authorize(caller.actor, "config:write", { type: "config-scope", kind: "thread", id: threadKey }).allow)
+    throw new CommandError("unauthorized", "Thread config changes are restricted.");
 }
 
 /** Why a `me` write is refused for a service token (records 0041, 0043): no run is
@@ -233,7 +262,7 @@ function summarizeScope(s: Scope): JsonObject {
   ) as JsonObject;
 }
 
-const who = (scope: "channel" | "me") => (scope === "channel" ? "channel" : "your");
+const who = (scope: "channel" | "me" | "thread") => (scope === "me" ? "your" : scope);
 
 // ---- config show ---------------------------------------------------------------------
 
@@ -377,17 +406,28 @@ export const configSet = defineCommand({
           ),
       })
       .optional(),
+    intake: z
+      .object({
+        threadReplies: z
+          .enum(INTAKE_MODES)
+          .optional()
+          .describe(
+            `the thread-reply intake gate's mode in this scope <${INTAKE_MODES.join("|")}> — thread over user over channel over the defaults (--intake.threadReplies <mode>)`,
+          ),
+      })
+      .optional(),
     channel: channelOption,
+    thread: threadOption,
   }),
   action: "config:write",
   effect: "write",
   // Reversible: one `config set` or `config clear` undoes it; the receipt names the scope.
   annotations: { destructive: false, risk: () => "changes the scope's settings for everyone in it until reset" },
   describe:
-    "Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself; per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
+    "Set the agent, model, effort, harness or boundary for a channel (gated) or for yourself, or the intake gate's mode for a thread (gated like the channel); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
   render: (output) => {
     const o = output as JsonObject;
-    return `Updated ${who(o.scope as "channel" | "me")} scope. Now: ${JSON.stringify(o.effective)}`;
+    return `Updated ${who(o.scope as "channel" | "me" | "thread")} scope. Now: ${JSON.stringify(o.effective)}`;
   },
   handler: async ({ args, options, caller, deps }) => {
     const agents = deps.config.agentNames();
@@ -419,6 +459,7 @@ export const configSet = defineCommand({
     if (options.harness) patch.harness = options.harness as Record<string, HarnessName>;
     if (options.review?.addressSeverity !== undefined)
       patch.review = { addressSeverity: options.review.addressSeverity };
+    if (options.intake?.threadReplies !== undefined) patch.intake = { threadReplies: options.intake.threadReplies };
     if (options.boundary) {
       // The list arrives as one comma-separated token and the confirm class as
       // a bare word; the whole boundary is then held to the load-time rule, so
@@ -444,13 +485,22 @@ export const configSet = defineCommand({
     if (Object.keys(patch).length === 0)
       throw new CommandError(
         "invalid_input",
-        "nothing to set: pass --agent, --model, --models.<agent>, --effort, --efforts.<agent>, --harness.<agent>, or --boundary.<maxMinutes|maxIdentity|machines|confirm>",
+        "nothing to set: pass --agent, --model, --models.<agent>, --effort, --efforts.<agent>, --harness.<agent>, --intake.threadReplies, or --boundary.<maxMinutes|maxIdentity|machines|confirm>",
       );
     let effective: Scope;
     if (args.scope === "channel") {
       const channel = targetChannel(caller, options.channel);
       assertMayEditChannel(caller, channel);
       effective = await deps.config.setChannelOverride(channel, patch);
+    } else if (args.scope === "thread") {
+      // The thread layer is read for the intake gate alone (routing-and-config
+      // item 27): any other setting stored there would be read by nothing, so
+      // it is refused by name rather than silently kept.
+      if (Object.keys(patch).some((k) => k !== "intake"))
+        throw new CommandError("invalid_input", "thread: only --intake.threadReplies applies to a thread scope");
+      const thread = targetThread(caller, options.thread);
+      assertMayEditThread(caller, thread);
+      effective = await deps.config.setThreadOverride(thread, patch);
     } else {
       effective = await deps.config.setUserOverride(meIdOrRefuse(caller), patch);
     }
@@ -463,18 +513,22 @@ export const configSet = defineCommand({
 export const configClear = defineCommand({
   id: "config.clear",
   args: [scopeArg],
-  options: z.object({ channel: channelOption }),
+  options: z.object({ channel: channelOption, thread: threadOption }),
   action: "config:write",
   effect: "write",
   annotations: { destructive: false, risk: () => "changes the scope's settings for everyone in it until reset" },
   describe:
-    "Drop every runtime override of a channel (gated) or of yourself; static config.yaml values show through again.",
-  render: (output) => `Cleared ${who((output as JsonObject).scope as "channel" | "me")} overrides.`,
+    "Drop every runtime override of a channel (gated), of yourself, or of a thread (gated like the channel); static config.yaml values show through again.",
+  render: (output) => `Cleared ${who((output as JsonObject).scope as "channel" | "me" | "thread")} overrides.`,
   handler: async ({ args, options, caller, deps }) => {
     if (args.scope === "channel") {
       const channel = targetChannel(caller, options.channel);
       assertMayEditChannel(caller, channel);
       await deps.config.clearChannelOverride(channel);
+    } else if (args.scope === "thread") {
+      const thread = targetThread(caller, options.thread);
+      assertMayEditThread(caller, thread);
+      await deps.config.clearThreadOverride(thread);
     } else {
       await deps.config.clearUserOverride(meIdOrRefuse(caller));
     }
@@ -489,7 +543,7 @@ const quote = (text: string) => `> ${text.replace(/\n/g, "\n> ")}`;
 export const configInstructions = defineCommand({
   id: "config.instructions",
   args: [
-    scopeArg,
+    instructionsScopeArg,
     {
       name: "text",
       schema: z.string().optional(),

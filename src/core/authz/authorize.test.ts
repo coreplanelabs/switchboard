@@ -230,6 +230,8 @@ describe("authorize: fail-closed", () => {
         return { type: "config-scope", kind: "channel", id: CHANNELS.priv.id };
       case "config-scope/user":
         return { type: "config-scope", kind: "user", id: "slack:UALICE" };
+      case "config-scope/thread":
+        return { type: "config-scope", kind: "thread", id: `${CHANNELS.priv.id}:1.0` };
       case "config-scope/org":
         return { type: "config-scope", kind: "org" };
       case "agent":

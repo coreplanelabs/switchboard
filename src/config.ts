@@ -32,6 +32,7 @@ import { isRunSchedule, SCHEDULES } from "./core/schedules.js";
 import { AGENTS } from "./agents/registry.js";
 import type { McpServerEntry } from "./mcp/registry.js";
 import {
+  defaultIntakeMode,
   validateBoundaries,
   validateScopeBlocks,
   validateConfig,
@@ -119,10 +120,9 @@ export interface Scope {
   ship?: { grant?: Grant };
   /**
    * The thread-reply intake gate's mode in this scope (routing-and-config
-   * item 27, record 0058): user over channel over the top-level `intake`
-   * block, whose default is `classify`; a thread scope lands in a later unit
-   * above them all. Validated at load (`validateScopeBlocks`). Nothing reads
-   * it yet.
+   * item 27, record 0058): thread over user over channel over the top-level
+   * `intake` block, whose default is `classify` — resolved by `intakeModeFor`.
+   * Validated at load (`validateScopeBlocks`).
    */
   intake?: { threadReplies?: IntakeMode };
   /**
@@ -482,6 +482,11 @@ export interface SlackConfig {
 export interface Overrides {
   channels: Record<string, Scope>;
   users: Record<string, Scope>;
+  /** Runtime thread scopes (`config set thread`, routing-and-config item 27),
+   *  keyed by thread key (`slack:C…:<ts>`). Read by `intakeModeFor` for
+   *  `intake.threadReplies` only — no other setting resolves a thread layer.
+   *  Optional so documents written before it existed load (no migration). */
+  threads?: Record<string, Scope>;
   /** Org-wide runtime settings (today: `mcpServers` added with `mcp add --scope org`);
    *  layered over `defaults`. Optional so documents written before it existed load. */
   org?: Scope;
@@ -945,6 +950,26 @@ export class ConfigStore {
     return layerScope(this.config.users?.[userId], this.overrides.users[userId]);
   }
 
+  private threadScope(threadKey: string): Scope {
+    return this.overrides.threads?.[threadKey] ?? {};
+  }
+
+  /**
+   * The thread-reply intake gate's mode for one reply (routing-and-config
+   * item 27, record 0058): thread scope > user scope > channel scope > the
+   * top-level `intake` block's default (`defaultIntakeMode`, `classify` when
+   * unset). The user scope is the replier's. The one reader of the thread
+   * layer — no other setting resolves through it.
+   */
+  intakeModeFor(threadKey: string, userId: string, channelId: string): IntakeMode {
+    return (
+      this.threadScope(threadKey).intake?.threadReplies ??
+      this.userScope(userId).intake?.threadReplies ??
+      this.channelScope(channelId).intake?.threadReplies ??
+      defaultIntakeMode(this.config)
+    );
+  }
+
   /**
    * The effective channel and user scopes (static config merged with runtime
    * overrides) — what `resolve()` layers on top of the defaults. Read-only
@@ -1200,6 +1225,16 @@ export class ConfigStore {
     return this.userScope(userId);
   }
 
+  /** The thread scope is runtime-only (`config set thread`): no static
+   *  `threads:` block exists in config.yaml, so the override IS the scope. */
+  async setThreadOverride(threadKey: string, patch: Scope): Promise<Scope> {
+    await this.write((o) => {
+      o.threads ??= {};
+      o.threads[threadKey] = mergeScope(o.threads[threadKey], patch);
+    });
+    return this.threadScope(threadKey);
+  }
+
   async clearChannelOverride(channelId: string): Promise<void> {
     await this.write((o) => {
       delete o.channels[channelId];
@@ -1209,6 +1244,12 @@ export class ConfigStore {
   async clearUserOverride(userId: string): Promise<void> {
     await this.write((o) => {
       delete o.users[userId];
+    });
+  }
+
+  async clearThreadOverride(threadKey: string): Promise<void> {
+    await this.write((o) => {
+      delete o.threads?.[threadKey];
     });
   }
 

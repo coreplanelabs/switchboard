@@ -816,12 +816,16 @@ export function validateReview(review: ReviewConfig): void {
  *  item 2); the org's ride `validateReview` and `validateShip`. A grant without
  *  `renewals` reads as zero at resolution. */
 export function validateScopeBlocks(
-  layer: { channels?: Record<string, Scope>; users?: Record<string, Scope> },
+  layer: { channels?: Record<string, Scope>; users?: Record<string, Scope>; threads?: Record<string, Scope> },
   source: string,
 ): void {
   for (const [kind, scopes] of [
     ["channels", layer.channels],
     ["users", layer.users],
+    // The thread layer is runtime-only (`config set thread`, routing-and-config
+    // item 27): config.yaml has no `threads:` key, so only a stored overrides
+    // document reaches this arm — held to the same rule by name.
+    ["threads", layer.threads],
   ] as const) {
     for (const [id, scope] of Object.entries(scopes ?? {})) {
       const level = addressSeverityProblem(`${kind}.${id}.review.addressSeverity`, scope.review?.addressSeverity);

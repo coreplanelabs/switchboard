@@ -870,6 +870,68 @@ describe("intake block and Scope.intake (routing-and-config item 27)", () => {
   });
 });
 
+// Feature: docs/reference/specs/routing-and-config.md item 27 (record 0058) —
+// the thread scope: `Overrides.threads[threadKey]` is a third map in the one
+// overrides document, read by `intakeModeFor` for `intake.threadReplies` only,
+// above the user and channel layers.
+describe("the thread scope and intakeModeFor (routing-and-config item 27)", () => {
+  const THREAD = "slack:CX:1.0";
+  const storeOver = async (backing: InMemoryOverridesBacking) => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, YAML_FIXTURE);
+    return new ConfigStore(cfg, { backing, initial: await backing.load() });
+  };
+
+  it("resolves thread over user over channel over the default: each layer set in turn wins over the ones below", async () => {
+    const backing = new InMemoryOverridesBacking();
+    const s = await storeOver(backing);
+    expect(s.intakeModeFor(THREAD, "slack:UX", "slack:CX")).toBe("classify"); // the code's default
+    await s.setChannelOverride("slack:CX", { intake: { threadReplies: "always" } });
+    expect(s.intakeModeFor(THREAD, "slack:UX", "slack:CX")).toBe("always");
+    await s.setUserOverride("slack:UX", { intake: { threadReplies: "classify" } });
+    expect(s.intakeModeFor(THREAD, "slack:UX", "slack:CX")).toBe("classify");
+    await s.setThreadOverride(THREAD, { intake: { threadReplies: "mention" } });
+    expect(s.intakeModeFor(THREAD, "slack:UX", "slack:CX")).toBe("mention");
+    // Another thread in the same channel is untouched by the thread layer.
+    expect(s.intakeModeFor("slack:CX:2.0", "slack:UX", "slack:CX")).toBe("classify");
+    // The write persisted `threads` beside channels and users in the ONE document.
+    expect(backing.document?.threads).toEqual({ [THREAD]: { intake: { threadReplies: "mention" } } });
+  });
+
+  it("the top-level intake block is the defaults layer under the three scopes", () => {
+    const s = store(YAML_FIXTURE + "intake:\n  threadReplies: mention\n");
+    expect(s.intakeModeFor(THREAD, "slack:UX", "slack:CX")).toBe("mention");
+  });
+
+  it("clearThreadOverride drops the thread's scope so the user layer shows through again", async () => {
+    const backing = new InMemoryOverridesBacking();
+    const s = await storeOver(backing);
+    await s.setUserOverride("slack:UX", { intake: { threadReplies: "always" } });
+    await s.setThreadOverride(THREAD, { intake: { threadReplies: "mention" } });
+    await s.clearThreadOverride(THREAD);
+    expect(s.intakeModeFor(THREAD, "slack:UX", "slack:CX")).toBe("always");
+    expect(backing.document?.threads).toEqual({});
+  });
+
+  it("a stored thread scope with an unknown mode or key is refused at construction naming the path — never read as a default", async () => {
+    const bad = new InMemoryOverridesBacking({
+      channels: {},
+      users: {},
+      threads: { [THREAD]: { intake: { threadReplies: "sometimes" as "classify" } } },
+    });
+    await expect(storeOver(bad)).rejects.toThrow(
+      /threads\.slack:CX:1\.0\.intake\.threadReplies must be mention, classify or always/,
+    );
+    const badKey = new InMemoryOverridesBacking({
+      channels: {},
+      users: {},
+      threads: { [THREAD]: { intake: { mode: "classify" } as { threadReplies?: "classify" } } },
+    });
+    await expect(storeOver(badKey)).rejects.toThrow(/threads\.slack:CX:1\.0\.intake\.mode is not a known key/);
+  });
+});
+
 // Feature: docs/reference/specs/harness.md item 8; harness-pi.md item 1 — the
 // `harness` block puts a preset on a harness by the name the harness object
 // declares: `pi` or `opencode`, the roster's two words, read off the roster

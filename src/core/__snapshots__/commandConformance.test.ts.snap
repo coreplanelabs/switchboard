@@ -61,6 +61,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "required": false,
         "type": "string",
       },
+      {
+        "name": "thread",
+        "required": false,
+        "type": "string",
+      },
     ],
     "resource": "command",
     "surfaces": [
@@ -176,7 +181,17 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "object",
       },
       {
+        "name": "intake",
+        "required": false,
+        "type": "object",
+      },
+      {
         "name": "channel",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "thread",
         "required": false,
         "type": "string",
       },

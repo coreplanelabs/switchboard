@@ -71,8 +71,11 @@ function configDeps(config: ConfigStore) {
     setChannelOverride: (c: string, p: Parameters<ConfigStore["setChannelOverride"]>[1]) =>
       config.setChannelOverride(c, p),
     setUserOverride: (u: string, p: Parameters<ConfigStore["setUserOverride"]>[1]) => config.setUserOverride(u, p),
+    setThreadOverride: (t: string, p: Parameters<ConfigStore["setThreadOverride"]>[1]) =>
+      config.setThreadOverride(t, p),
     clearChannelOverride: (c: string) => config.clearChannelOverride(c),
     clearUserOverride: (u: string) => config.clearUserOverride(u),
+    clearThreadOverride: (t: string) => config.clearThreadOverride(t),
     channelsWithScope: async () => config.channelsWithScope(),
   };
 }
@@ -479,7 +482,7 @@ describe("config set", () => {
       message: expect.stringMatching(/^nothing to set/),
     });
     expect(await commands.invoke("config.set", { args: ["everyone"], options: { agent: "review" } }, me)).toMatchObject(
-      { ok: false, error: "invalid_input", message: 'scope: expected one of "channel", "me"' },
+      { ok: false, error: "invalid_input", message: 'scope: expected one of "channel", "me", "thread"' },
     );
     expect(
       JSON.stringify(await commands.invoke("config.set", { args: ["me"], options: { agent: "wizard" } }, me)),
@@ -598,6 +601,102 @@ describe("config clear", () => {
       error: "unauthorized",
       decidedBy: "handler",
     });
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 27 (record 0058) — the
+// thread scope: `config set thread --intake.threadReplies <mode>` and `config
+// clear thread`, the target the caller's own thread (`--thread <key>` on a
+// machine surface), gated by the `config-scope { thread }` row — the same
+// channel-config right, so whoever may set the channel may set a thread in it.
+describe("config set thread / config clear thread — the thread scope", () => {
+  it("a typed `config set thread --intake.threadReplies <mode>` targets the caller's thread and runs at once; the store resolves it above a user and a channel mode; `config clear thread` drops it", async () => {
+    const config = store(OPEN_YAML);
+    const commands = bind(config);
+    const me = chat(config, "slack:UX");
+    await commands.invoke("config.set", { args: ["channel"], options: { intake: { threadReplies: "always" } } }, me);
+    await commands.invoke("config.set", { args: ["me"], options: { intake: { threadReplies: "classify" } } }, me);
+    const { res, text } = await say(commands, "config set thread --intake.threadReplies mention", me);
+    expect(res.ok).toBe(true);
+    expect(text).toBe('Updated thread scope. Now: {"intake":{"threadReplies":"mention"}}');
+    expect(config.intakeModeFor("slack:CX:1.0", "slack:UX", "slack:CX")).toBe("mention");
+    // Another thread resolves the user's mode: the thread layer is that thread's alone.
+    expect(config.intakeModeFor("slack:CX:2.0", "slack:UX", "slack:CX")).toBe("classify");
+    expect((await say(commands, "config clear thread", me)).text).toBe("Cleared thread overrides.");
+    expect(config.intakeModeFor("slack:CX:1.0", "slack:UX", "slack:CX")).toBe("classify");
+  });
+
+  it("the thread scope rides the config-scope thread row: a caller without config:write is refused, on set and on clear alike", async () => {
+    const config = store();
+    const commands = bind(config);
+    const refusal = { ok: false, error: "unauthorized", decidedBy: "handler" };
+    expect(
+      await commands.invoke(
+        "config.set",
+        { args: ["thread"], options: { intake: { threadReplies: "mention" } } },
+        chat(config, "slack:UX"),
+      ),
+    ).toMatchObject(refusal);
+    expect(await commands.invoke("config.clear", { args: ["thread"] }, chat(config, "slack:UX"))).toMatchObject(
+      refusal,
+    );
+    // The admin holds it through `all`.
+    expect(
+      await commands.invoke(
+        "config.set",
+        { args: ["thread"], options: { intake: { threadReplies: "mention" } } },
+        chat(config, "slack:UADMIN"),
+      ),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("a machine surface has no origin thread: --thread <key> names one, and without it the write is `invalid_input` naming the option", async () => {
+    const config = store();
+    const commands = bind(config);
+    const machine = mcp("config:write");
+    expect(
+      await commands.invoke(
+        "config.set",
+        { args: ["thread"], options: { intake: { threadReplies: "mention" } } },
+        machine,
+      ),
+    ).toMatchObject({ ok: false, error: "invalid_input", message: expect.stringContaining("--thread <key>") });
+    expect(
+      await commands.invoke(
+        "config.set",
+        { args: ["thread"], options: { intake: { threadReplies: "mention" }, thread: "slack:CY:9.9" } },
+        machine,
+      ),
+    ).toMatchObject({ ok: true });
+    expect(config.intakeModeFor("slack:CY:9.9", "slack:UX", "slack:CY")).toBe("mention");
+    expect(await commands.invoke("config.clear", { args: ["thread"] }, machine)).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+    });
+  });
+
+  it("an unknown mode is refused by name, never echoing the value; a thread scope takes only --intake.threadReplies", async () => {
+    const config = store(OPEN_YAML);
+    const commands = bind(config);
+    const me = chat(config, "slack:UX");
+    const bad = await say(commands, "config set thread --intake.threadReplies sometimes", me);
+    expect(bad.res.ok).toBe(false);
+    expect(bad.text).toMatch(/intake\.threadReplies: expected one of/);
+    expect(bad.text).not.toContain("sometimes");
+    const agent = await say(commands, "config set thread --agent review", me);
+    expect(agent.res).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(agent.text).toContain("--intake.threadReplies");
+    expect(config.scopes("slack:CX", "slack:UX").channel).toEqual({});
+  });
+
+  it("--intake.threadReplies is a scope setting: it lands on `me` and `channel` too, under the intake gate's layers", async () => {
+    const config = store(OPEN_YAML);
+    const commands = bind(config);
+    const me = chat(config, "slack:UX");
+    const set = await say(commands, "config set me --intake.threadReplies always", me);
+    expect(set.res.ok).toBe(true);
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({ intake: { threadReplies: "always" } });
+    expect(config.intakeModeFor("slack:CX:1.0", "slack:UX", "slack:CX")).toBe("always");
   });
 });
 
