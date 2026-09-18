@@ -77,6 +77,12 @@ export interface RunStore {
   /** `trace.span`: the caller's span, under which a Worker store's request is an
    *  `http.client` span (docs/reference/specs/tracing.md item 24); the local stores ignore it. */
   put(record: RunRecord, trace?: TraceOptions): Promise<PutResult>;
+  /** The history writer's sink contract (`RecordSink`, docs/reference/specs/run-history.md
+   *  item 54): the caller's final word that a record will not be put again. A
+   *  store keeps nothing in flight per record, so every store answers no-op —
+   *  the word is required on the type so a sink that does keep something in
+   *  flight cannot forget it. */
+  abandoned(record: RunRecord, why: string): void;
   /** The record, or null when unknown, expired, or the id is malformed — one not-found shape. */
   get(id: string): Promise<RunRecord | null>;
   /** The record WITHOUT its events (the listing row, `bytes` included) — the
@@ -136,6 +142,9 @@ export function usageReportOfRecords(
  *  read is the not-found shape, `list` is empty, `put` accepts and keeps
  *  nothing (`stored: false`, the same word a record outside retention gets). */
 export class NullRunStore implements RunStore {
+  abandoned(): void {
+    // a store keeps nothing in flight per record (run-history item 54): nothing to settle
+  }
   async put(_record: RunRecord, _trace?: TraceOptions): Promise<PutResult> {
     return { ok: true, retained: 0, stored: false, rewritten: false };
   }
@@ -241,6 +250,9 @@ export class InMemoryRunStore implements RunStore {
     return applyRetention(this.items(), this.policy, this.now());
   }
 
+  abandoned(): void {
+    // a store keeps nothing in flight per record (run-history item 54): nothing to settle
+  }
   async put(record: RunRecord): Promise<PutResult> {
     if (!isValidRunId(record.id)) return { ok: true, retained: this.records.size, stored: false, rewritten: false };
     const bytes = utf8ByteLength(JSON.stringify(record));
@@ -392,6 +404,9 @@ export class FileRunStore implements RunStore {
     return kept;
   }
 
+  abandoned(): void {
+    // a store keeps nothing in flight per record (run-history item 54): nothing to settle
+  }
   async put(record: RunRecord): Promise<PutResult> {
     if (!isValidRunId(record.id))
       return { ok: true, retained: this.readIndex().length, stored: false, rewritten: false };

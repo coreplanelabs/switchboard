@@ -13,15 +13,19 @@ import {
   NullLedgerWriteThrough,
   type AdoptRunRequest,
   type LedgerRun,
+  type ReserveOutcome,
   type ReserveRunRequest,
 } from "../runLedger/writeThrough.js";
 import { NullRunStore } from "../runStore.js";
+import { TransientStoreError } from "../runStoreWorker.js";
 import type { RunRecord } from "../runRecord.js";
 import type { InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import {
   admit,
   adoptCarriedRun,
+  closeRestartRow,
+  closeResumedRow,
   DURABLE_INBOX_MAX_BYTES,
   durableInboxMessage,
   foldCarriedInbox,
@@ -107,15 +111,15 @@ class RecordingLedger extends NullLedgerWriteThrough {
     super("gen-T", new NullRunStore());
   }
   private handle(runId: string): LedgerRun {
-    return new NullLedgerRun(runId, { put: async (r: RunRecord) => void this.puts.push(r) });
+    return new NullLedgerRun(runId, { put: async (r: RunRecord) => void this.puts.push(r), abandoned: () => {} });
   }
   override adopt(req: AdoptRunRequest): LedgerRun {
     this.adopted.push(req);
     return this.handle(req.runId);
   }
-  override async reserve(req: ReserveRunRequest): Promise<LedgerRun | undefined> {
+  override async reserve(req: ReserveRunRequest): Promise<ReserveOutcome> {
     this.reserved.push(req);
-    return this.handle(req.runId);
+    return { kind: "tracked", run: this.handle(req.runId) };
   }
   override async pushInbox(runId: string, message: Record<string, unknown>): Promise<number | undefined> {
     this.pushes.push({ runId, message });
@@ -721,6 +725,49 @@ describe("followUpFromInbox — a durable inbox item back as a follow-up", () =>
 // allowed to run the live agent), the same durable copy first, the same
 // in-memory inbox the runner drains — with the sending run named on the item
 // and no channel handle, since a program's message is never run fresh.
+// The reclaim's closers put a record once and never retry: on a failure the
+// sink must hear the final word (run-history item 54), or a reservation later
+// meeting the row would wait on a finish nobody is landing; and a record that
+// cannot even be assembled must not escape a best-effort closer into the
+// dispatcher's finally.
+describe("closeResumedRow / closeRestartRow — one attempt, the final word said (item 54)", () => {
+  it("a closer whose put fails says `abandoned` for the record it could not put, once, with the error, and does not throw", async () => {
+    const row = await rowOf("run-x");
+    const spoken: Array<{ id: string; why: string }> = [];
+    const adopted = new NullLedgerRun("run-x", {
+      put: async () => {
+        throw new TransientStoreError("run ledger /runs/finish: HTTP 503");
+      },
+      abandoned: (r, why) => void spoken.push({ id: r.id, why }),
+    });
+    await expect(
+      closeResumedRow(adopted, { row, events: [] } as unknown as ResumeContext, "the test says so"),
+    ).resolves.toBeUndefined();
+    await expect(closeRestartRow(adopted, { row, inbox: [] }, "the test says so")).resolves.toBeUndefined();
+    expect(spoken).toEqual([
+      { id: "run-x", why: "run ledger /runs/finish: HTTP 503" },
+      { id: "run-x", why: "run ledger /runs/finish: HTTP 503" },
+    ]);
+  });
+
+  it("a record that cannot be assembled — the row without its meta — is caught too: nothing is put, nothing is said to the sink, the closer stays best-effort", async () => {
+    const row = await rowOf("run-y");
+    const spoken: string[] = [];
+    let puts = 0;
+    const adopted = new NullLedgerRun("run-y", {
+      put: async () => void puts++,
+      abandoned: (_r, why) => void spoken.push(why),
+    });
+    const broken = { ...row, meta: undefined } as unknown as LiveRunRow;
+    await expect(
+      closeResumedRow(adopted, { row: broken, events: [] } as unknown as ResumeContext, "the test says so"),
+    ).resolves.toBeUndefined();
+    await expect(closeRestartRow(adopted, { row: broken, inbox: [] }, "the test says so")).resolves.toBeUndefined();
+    expect(puts).toBe(0);
+    expect(spoken).toEqual([]);
+  });
+});
+
 describe("steerRun — a run steers a live run through the inbox a thread reply takes", () => {
   const CHILD_THREAD = "slack:CX:9.0";
   const sender = {

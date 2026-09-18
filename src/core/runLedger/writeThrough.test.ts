@@ -9,10 +9,15 @@ import type { RunLedger } from "./ledger.js";
 import { GEN_PATTERN, TRANSCRIPT_PART_BYTES } from "./types.js";
 import {
   createLedgerWriteThrough,
+  LANDED_MAX,
   mintGeneration,
   NullLedgerRun,
   NullLedgerWriteThrough,
+  type LedgerRun,
+  type LedgerWriteThrough,
   type OpenRunRequest,
+  type ReserveOutcome,
+  type ReserveRunRequest,
 } from "./writeThrough.js";
 
 // The write-through (docs/reference/specs/run-history.md item 35): what a dispatched run
@@ -89,12 +94,21 @@ function harness(over: { ledger?: RunLedger; now?: () => number } = {}) {
   const wt = createLedgerWriteThrough({
     ledger,
     gen: "gen-A",
-    fallback: { put: async (r) => void fallbackPuts.push(r) },
+    fallback: { put: async (r) => void fallbackPuts.push(r), abandoned: () => {} },
     warn: (m) => warnings.push(m),
     sleep: async (ms) => void sleeps.push(ms),
     ...t,
   });
   return { ledger: ledger as InMemoryRunLedger, wt, warnings, fallbackPuts, sleeps, t };
+}
+
+/** The reservation's run, or undefined for any other outcome — the shape most tests read. */
+const runOf = (o: ReserveOutcome): LedgerRun | undefined => (o.kind === "tracked" ? o.run : undefined);
+/** Reserve, recording an untracked outcome's why in `said`. */
+async function reserveSaying(wt: LedgerWriteThrough, req: ReserveRunRequest, said: string[]) {
+  const o = await wt.reserve(req);
+  if (o.kind === "untracked") said.push(o.why);
+  return runOf(o);
 }
 
 const openReq = (over: Partial<OpenRunRequest> = {}): OpenRunRequest => ({
@@ -273,7 +287,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
 
   it("reserves the thread at admission: an attaching row with the request, the card and no prompt; the heartbeat runs from here so a long attach keeps the lease; the run is tracked, live, not resumable, and never handed off", async () => {
     const { ledger, wt, t, warnings } = harness();
-    const run = await wt.reserve(reserveReq());
+    const run = runOf(await wt.reserve(reserveReq()));
     expect(run?.tracked()).toBe(true);
     expect(run?.resumable).toBe(false);
     expect(t.heartbeats()).toBe(1);
@@ -298,7 +312,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
 
   it("open with the reservation promotes it in place: the same tracked run, the prompt, tools, card and state on the row, phase live, the seed written, one heartbeat still — and the run is resumable from here", async () => {
     const { ledger, wt, t, warnings } = harness();
-    const reserved = (await wt.reserve(reserveReq()))!;
+    const reserved = runOf(await wt.reserve(reserveReq()))!;
     const run = await wt.open(openReq({ reservation: reserved, state: { checklist: [] } }));
     expect(run).toBe(reserved);
     expect(run?.resumable).toBe(true);
@@ -320,7 +334,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
     {
       const { ledger, wt, t, warnings } = harness();
       let fenced = 0;
-      const reserved = (await wt.reserve({ ...reserveReq(), onFenced: () => fenced++ }))!;
+      const reserved = runOf(await wt.reserve({ ...reserveReq(), onFenced: () => fenced++ }))!;
       ledger.live.get("r1")!.leaseUntil = 0;
       await ledger.reclaim("gen-B", 10_000, 30_000);
       await t.beat();
@@ -335,7 +349,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
     {
       const { ledger, wt, warnings } = harness();
       let fenced = 0;
-      const reserved = (await wt.reserve({ ...reserveReq(), onFenced: () => fenced++ }))!;
+      const reserved = runOf(await wt.reserve({ ...reserveReq(), onFenced: () => fenced++ }))!;
       ledger.live.get("r1")!.leaseUntil = 0;
       await ledger.reclaim("gen-B", 10_000, 30_000);
       expect(await wt.open(openReq({ reservation: reserved }))).toBeUndefined();
@@ -349,7 +363,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
 
   it("abandon: a reserved run whose dispatch ended before its prompt existed drops its row with NO record — heartbeat stopped, no longer live, the fallback store untouched; a fenced reservation's abandon is a no-op (the row is another generation's); a null run's abandon is nothing", async () => {
     const { ledger, wt, t, fallbackPuts, warnings } = harness();
-    const reserved = (await wt.reserve(reserveReq()))!;
+    const reserved = runOf(await wt.reserve(reserveReq()))!;
     await ledger.pushInbox("r1", { text: "late" });
     await reserved.abandon();
     expect(ledger.live.get("r1")).toBeUndefined();
@@ -362,21 +376,21 @@ describe("reserve — the row before the prompt (item 42)", () => {
     expect(warnings).toEqual([]);
     // Fenced: the row was reclaimed by another generation — leave it to them.
     const other = harness();
-    const taken = (await other.wt.reserve(reserveReq()))!;
+    const taken = runOf(await other.wt.reserve(reserveReq()))!;
     other.ledger.live.get("r1")!.leaseUntil = 0;
     await other.ledger.reclaim("gen-B", 10_000, 30_000);
     await other.t.beat();
     expect(taken.tracked()).toBe(false);
     await taken.abandon();
     expect(other.ledger.live.get("r1")?.ownerGen).toBe("gen-B");
-    const nul = new NullLedgerWriteThrough("gen-N", { put: async () => {} });
+    const nul = new NullLedgerWriteThrough("gen-N", { put: async () => {}, abandoned: () => {} });
     await nul.adopt({ runId: "x", threadKey: "t", state: {}, lastStep: 0, lastSeq: 0 }).abandon();
   });
 
   it("a reservation the ledger refuses (another run's row on the thread, missing routes) is undefined with one warning — the run goes on untracked, as an open would; the null write-through reserves nothing", async () => {
     const { ledger, wt, warnings } = harness();
     await ledger.claim({ ...openReq(), runId: "other", gen: "gen-Z", leaseMs: 30_000 });
-    expect(await wt.reserve(reserveReq())).toBeUndefined();
+    expect(runOf(await wt.reserve(reserveReq()))).toBeUndefined();
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("other");
     const missing = harness({
@@ -386,16 +400,18 @@ describe("reserve — the row before the prompt (item 42)", () => {
         },
       }),
     });
-    expect(await missing.wt.reserve(reserveReq())).toBeUndefined();
+    expect(runOf(await missing.wt.reserve(reserveReq()))).toBeUndefined();
     expect(missing.warnings).toHaveLength(1);
-    const nul = new NullLedgerWriteThrough("gen-N", { put: async () => {} });
-    expect(await nul.reserve(reserveReq())).toBeUndefined();
+    const nul = new NullLedgerWriteThrough("gen-N", { put: async () => {}, abandoned: () => {} });
+    expect(await nul.reserve(reserveReq())).toEqual({ kind: "off" });
   });
 
-  // A restart from a request (item 54) is dispatched from the closed run's
-  // finally, right after that run's finish was handed to the history writer:
-  // the reservation can reach the ledger while the thread's live row is still
-  // the closed run's. Naming the run it restarts turns that answer into a wait.
+  // A restart from a request (item 54) — and the fresh turn for a closed
+  // run's unconsumed follow-ups — is dispatched from the closed run's finally,
+  // right after that run's finish was handed to the history writer: the
+  // reservation can reach the ledger while the thread's live row is still the
+  // closed run's. A finish this process is landing turns that answer into a
+  // wait; a finish that landed here turns it into one more claim at once.
   it("a reservation that meets the row of a run whose finish is in flight through this write-through awaits the finish's own promise, no timer scheduled, and claims again: tracked, the closed run's row gone, no warning, no untracked word", async () => {
     const inner = new InMemoryRunLedger(() => 10_000);
     let releaseFinish!: () => void;
@@ -418,7 +434,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
     const old = (await wt.open(openReq({ runId: "old" })))!;
     expect(await old.finishing()).toBe("ok");
     const finish = old.sink.put(record("old")); // the writer's put: in flight, awaited by nobody in the dispatch
-    const reserving = wt.reserve({ ...reserveReq(), onUntracked: (w) => untracked.push(w) });
+    const reserving = reserveSaying(wt, reserveReq(), untracked);
     await new Promise((r) => setImmediate(r));
     expect(claims).toEqual(["old ok", "r1 thread-live"]); // met the predecessor's row, and is waiting on its finish
     expect(ledger.live.has("r1")).toBe(false);
@@ -437,8 +453,11 @@ describe("reserve — the row before the prompt (item 42)", () => {
     expect(warnings).toEqual([]);
   });
 
-  it("a reservation whose awaited finish fails (the store client's timeout, on a put nobody retries) claims once more the moment it settles, goes on untracked by name and says why through onUntracked; a claim meeting a row whose finish is not in flight here never waits and says nothing", async () => {
+  it("a reservation whose awaited finish fails for good — the history writer's last attempt — claims once more the moment the writer gives up, goes on untracked by name and says why through onUntracked", async () => {
     const inner = new InMemoryRunLedger(() => 10_000);
+    let releaseFirst!: () => void;
+    const gate = new Promise<void>((r) => (releaseFirst = r));
+    let finishAttempts = 0;
     const claims: string[] = [];
     const untracked: string[] = [];
     const { ledger, wt, warnings, sleeps } = harness({
@@ -448,35 +467,36 @@ describe("reserve — the row before the prompt (item 42)", () => {
           claims.push(`${req.runId} ${result.ok ? "ok" : result.reason}`);
           return result;
         },
-        // What the client throws when the state Worker answers nothing for RUN_STORE_TIMEOUT_MS.
+        // What the client throws when the state Worker answers 503 — every attempt.
         finish: async () => {
-          throw new TransientStoreError("run ledger /runs/finish: The operation was aborted due to timeout");
+          if (++finishAttempts === 1) await gate;
+          throw new TransientStoreError("run ledger /runs/finish: HTTP 503");
         },
       }),
     });
+    const writer = createRunHistoryWriter({
+      store: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+      sleep: async () => {},
+    });
     const old = (await wt.open(openReq({ runId: "old" })))!;
-    const failing = old.sink.put(record("old")).then(
-      () => "landed",
-      () => "threw",
-    );
-    expect(await wt.reserve({ ...reserveReq(), onUntracked: (w) => untracked.push(w) })).toBeUndefined();
-    expect(await failing).toBe("threw"); // the writer's to retry; this reservation awaited only this attempt
+    expect(await old.finishing()).toBe("ok");
+    writer.write(record("old"), { via: old.sink });
+    const reserving = reserveSaying(wt, reserveReq(), untracked);
+    await new Promise((r) => setImmediate(r));
+    expect(claims).toEqual(["old ok", "r1 thread-live"]); // waiting on the finish's attempt sequence
+    releaseFirst();
+    await writer.settled();
+    expect(await reserving).toBeUndefined();
+    expect(finishAttempts).toBe(3); // the writer's whole ladder, then its final word
     expect(claims).toEqual(["old ok", "r1 thread-live", "r1 thread-live"]);
-    expect(sleeps).toEqual([]); // no timer: the attempt's own settlement woke the re-claim
+    expect(sleeps).toEqual([]); // no timer of the write-through's own
     expect(untracked).toEqual([
-      "run old, whose finish was in flight in this process, still holds the thread's row: its finish did not land (run ledger /runs/finish: The operation was aborted due to timeout)",
+      "run old, whose finish was in flight in this process, still holds the thread's row: its finish did not land (not persisted after 3 attempts: run ledger /runs/finish: HTTP 503)",
     ]);
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("belongs to run old");
+    expect(warnings[0]).toContain("still holds the thread's row");
     expect(ledger.live.has("r1")).toBe(false);
-    // The failed put cleared the name: a claim meeting the same row finds no finish in flight — one more claim at once, no wait, no word.
-    claims.length = 0;
-    warnings.length = 0;
-    expect(await wt.reserve({ ...reserveReq(), runId: "r2", onUntracked: (w) => untracked.push(w) })).toBeUndefined();
-    expect(claims).toEqual(["r2 thread-live", "r2 thread-live"]); // the one more claim, at once; then untracked
-    expect(sleeps).toEqual([]);
-    expect(untracked).toHaveLength(1);
-    expect(warnings).toHaveLength(1);
   });
 
   it("a reservation whose awaited finish lands in the moment between the thread-live answer and the wait claims once more all the same, and is tracked", async () => {
@@ -492,7 +512,8 @@ describe("reserve — the row before the prompt (item 42)", () => {
           const result = await inner.claim(req);
           claims.push(`${req.runId} ${result.ok ? "ok" : result.reason}`);
           // The gap: the answer names the predecessor, and its finish lands
-          // before the write-through reads what is in flight.
+          // before the write-through reads what is in flight — the run is
+          // in `landed` by then, not in `landing`.
           if (req.runId === "r1" && !result.ok) {
             releaseFinish();
             await finish;
@@ -507,7 +528,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
     });
     const old = (await wt.open(openReq({ runId: "old" })))!;
     finish = old.sink.put(record("old"));
-    const run = await wt.reserve({ ...reserveReq(), onUntracked: (w) => untracked.push(w) });
+    const run = await reserveSaying(wt, reserveReq(), untracked);
     expect(run?.tracked()).toBe(true);
     expect(claims).toEqual(["old ok", "r1 thread-live", "r1 ok"]);
     expect(ledger.live.has("old")).toBe(false);
@@ -517,7 +538,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
     expect(warnings).toEqual([]);
   });
 
-  it("the name stays through the history writer's retry backoff (retryFollows): a claim arriving in the backoff waits for the retry that lands, and is tracked; a single put that fails without that word clears the name at once", async () => {
+  it("the name stays through the history writer's retry backoff: a claim arriving in the backoff waits for the retry that lands, and is tracked; a one-shot closer's failed put keeps the name until its `abandoned`, after which a row whose finish is neither in flight nor landed here is untracked in one claim, with why", async () => {
     const inner = new InMemoryRunLedger(() => 10_000);
     let finishAttempts = 0;
     const claims: string[] = [];
@@ -541,7 +562,7 @@ describe("reserve — the row before the prompt (item 42)", () => {
     const backoff = new Promise<void>((r) => (wake = r));
     const writerWarnings: string[] = [];
     const writer = createRunHistoryWriter({
-      store: { put: async () => {} },
+      store: { put: async () => {}, abandoned: () => {} },
       warn: (m) => writerWarnings.push(m),
       sleep: () => backoff,
     });
@@ -549,8 +570,8 @@ describe("reserve — the row before the prompt (item 42)", () => {
     expect(await old.finishing()).toBe("ok");
     writer.write(record("old"), { via: old.sink });
     await new Promise((r) => setImmediate(r));
-    expect(finishAttempts).toBe(1); // the first attempt failed; the writer is in its backoff
-    const reserving = wt.reserve({ ...reserveReq(), onUntracked: (w) => untracked.push(w) });
+    expect(finishAttempts).toBe(1); // the first attempt failed; the writer is in its backoff, the name stands
+    const reserving = reserveSaying(wt, reserveReq(), untracked);
     await new Promise((r) => setImmediate(r));
     expect(claims).toEqual(["old ok", "r1 thread-live"]); // met the row, and is waiting: the name stayed through the backoff
     expect(ledger.live.has("r1")).toBe(false);
@@ -566,9 +587,10 @@ describe("reserve — the row before the prompt (item 42)", () => {
     expect(warnings).toEqual([]);
     expect(writerWarnings).toEqual([]);
 
-    // A single put that fails without the writer's word (a direct caller who
-    // will not try again) clears the name at once: the next claim meeting that
-    // row finds no finish in flight and is untracked as it always was.
+    // A one-shot closer (`closeResumedRow`) puts once and, failing, says
+    // `abandoned` itself: until it does the name stands; after it the row is
+    // another run's for real, and a claim meeting it is untracked in ONE
+    // claim — no wait, no re-claim — with why on the record.
     const lone = harness({
       ledger: overriding(new InMemoryRunLedger(() => 10_000), {
         finish: async () => {
@@ -577,14 +599,223 @@ describe("reserve — the row before the prompt (item 42)", () => {
       }),
     });
     const closing = (await lone.wt.open(openReq({ runId: "lone" })))!;
-    await expect(closing.sink.put(record("lone"))).rejects.toThrow("HTTP 503");
+    const closingRecord = record("lone");
+    await expect(closing.sink.put(closingRecord)).rejects.toThrow("HTTP 503");
+    closing.sink.abandoned?.(closingRecord, "run ledger /runs/finish: HTTP 503");
     const spoken: string[] = [];
-    expect(await lone.wt.reserve({ ...reserveReq(), onUntracked: (w) => spoken.push(w) })).toBeUndefined();
+    const loneClaims: string[] = [];
+    const before = lone.ledger.claim.bind(lone.ledger);
+    lone.ledger.claim = async (req) => {
+      const result = await before(req);
+      loneClaims.push(`${req.runId} ${result.ok ? "ok" : result.reason}`);
+      return result;
+    };
+    expect(await reserveSaying(lone.wt, reserveReq(), spoken)).toBeUndefined();
+    expect(loneClaims).toEqual(["r1 thread-live"]);
     expect(lone.ledger.live.has("lone")).toBe(true);
-    expect(spoken).toEqual([]);
+    expect(spoken).toEqual([
+      "the thread's live row belongs to run lone (started 1970-01-01T00:00:09.000Z), whose finish is not in flight in this process — reclaim is the resume phase's",
+    ]);
     expect(lone.sleeps).toEqual([]);
     expect(lone.warnings).toHaveLength(1);
     expect(lone.warnings[0]).toContain("belongs to run lone");
+  });
+
+  // The failure the writer will NOT retry: the ledger's finish route and the
+  // store's put route both missing (a wrong host, a rolled-back Worker). The
+  // sink must not keep the name pending on its own reading of the error — the
+  // writer's `abandoned` at its give-up is what settles it, so a claim awaiting
+  // that finish is never parked.
+  it("a finish the writer abandons settles the name — RouteMissingError on both the ledger and the store: the claim awaiting it is not parked, and the run goes on untracked with why", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let releaseFinish!: () => void;
+    const gate = new Promise<void>((r) => (releaseFinish = r));
+    const claims: string[] = [];
+    const untracked: string[] = [];
+    const warnings: string[] = [];
+    const sleeps: number[] = [];
+    const t = timers();
+    const wt = createLedgerWriteThrough({
+      ledger: overriding(inner, {
+        claim: async (req) => {
+          const result = await inner.claim(req);
+          claims.push(`${req.runId} ${result.ok ? "ok" : result.reason}`);
+          return result;
+        },
+        finish: async () => {
+          await gate;
+          throw new RouteMissingError("run ledger /runs/finish: route missing (older state Worker)");
+        },
+      }),
+      gen: "gen-A",
+      fallback: {
+        put: async () => {
+          throw new RouteMissingError("run store /runs/put: route missing (older state Worker)");
+        },
+        abandoned: () => {},
+      },
+      warn: (m) => warnings.push(m),
+      sleep: async (ms) => void sleeps.push(ms),
+      ...t,
+    });
+    const writerWarnings: string[] = [];
+    const writer = createRunHistoryWriter({
+      store: { put: async () => {}, abandoned: () => {} },
+      warn: (m) => writerWarnings.push(m),
+      sleep: async () => {},
+    });
+    const old = (await wt.open(openReq({ runId: "old" })))!;
+    expect(await old.finishing()).toBe("ok");
+    writer.write(record("old"), { via: old.sink });
+    const reserving = reserveSaying(wt, reserveReq(), untracked);
+    await new Promise((r) => setImmediate(r));
+    expect(claims).toEqual(["old ok", "r1 thread-live"]); // waiting on the finish in flight
+    releaseFinish();
+    await writer.settled();
+    // Not parked: the writer gave up on the missing routes and said so to the sink.
+    const outcome = await Promise.race([
+      reserving.then((run) => (run === undefined ? "untracked" : "tracked")),
+      new Promise<string>((r) => setTimeout(() => r("parked"), 500)),
+    ]);
+    expect(outcome).toBe("untracked");
+    expect(claims).toEqual(["old ok", "r1 thread-live", "r1 thread-live"]);
+    expect(untracked).toEqual([
+      "run old, whose finish was in flight in this process, still holds the thread's row: its finish did not land (run store /runs/put: route missing (older state Worker))",
+    ]);
+    expect(sleeps).toEqual([]);
+    expect(writerWarnings.some((w) => w.includes("route"))).toBe(true);
+    expect(inner.live.has("old")).toBe(true); // the row stands: nobody could close it
+  });
+
+  it("every untracked exit says why through onUntracked: no run-ledger routes; a claim that kept failing; another run's row whose finish is not in flight here", async () => {
+    // (a) The state Worker has no run-ledger routes.
+    const missing = harness({
+      ledger: overriding(new InMemoryRunLedger(() => 10_000), {
+        claim: async () => {
+          throw new RouteMissingError("run ledger /runs/claim: route missing (older state Worker)");
+        },
+      }),
+    });
+    const said: string[] = [];
+    expect(await reserveSaying(missing.wt, reserveReq(), said)).toBeUndefined();
+    expect(said).toEqual(["the state Worker has no run-ledger routes"]);
+    // (b) The claim kept failing.
+    const failing = harness({
+      ledger: overriding(new InMemoryRunLedger(() => 10_000), {
+        claim: async () => {
+          throw new TransientStoreError("socket hang up");
+        },
+      }),
+    });
+    const said2: string[] = [];
+    expect(await reserveSaying(failing.wt, reserveReq(), said2)).toBeUndefined();
+    expect(said2).toEqual(["the claim failed after 3 attempt(s): socket hang up"]);
+    // (c) Another run's row, its finish neither in flight nor landed here — one claim, no wait.
+    const foreign = harness();
+    await foreign.ledger.claim({
+      runId: "older",
+      threadKey: "slack:C1:1.0",
+      gen: "gen-Z",
+      leaseMs: 30_000,
+      startedAt: 1_000,
+      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0" },
+      system: "",
+      tools: [],
+    });
+    const said3: string[] = [];
+    expect(await reserveSaying(foreign.wt, reserveReq(), said3)).toBeUndefined();
+    expect(said3).toEqual([
+      "the thread's live row belongs to run older (started 1970-01-01T00:00:01.000Z), whose finish is not in flight in this process — reclaim is the resume phase's",
+    ]);
+    expect(foreign.sleeps).toEqual([]);
+    expect(foreign.warnings).toHaveLength(1);
+  });
+
+  // The `landed` memory is the newest LANDED_MAX finishes, oldest out: a
+  // `thread-live` naming a finish older than that is a stale row, untracked in
+  // one claim; one naming the newest is still the gap, claimed once more.
+  it("`landed` remembers the newest LANDED_MAX finishes: a thread-live naming an older one is untracked in one claim, one naming the newest is claimed once more", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const claims: string[] = [];
+    // The ledger answers `thread-live` for whatever run the test names, once per claim.
+    let liveRun: string | undefined;
+    const { wt, warnings } = harness({
+      ledger: overriding(inner, {
+        claim: async (req) => {
+          claims.push(req.runId);
+          if (liveRun !== undefined)
+            return { ok: false, reason: "thread-live", live: { runId: liveRun, startedAt: 1 } };
+          return inner.claim(req);
+        },
+      }),
+    });
+    // LANDED_MAX + 1 finishes land here, each on its own thread: the first is evicted.
+    for (let i = 0; i <= LANDED_MAX; i++) {
+      const run = (await wt.open(openReq({ runId: `fin-${i}`, threadKey: `slack:C1:${i}.0`, seed: undefined })))!;
+      await run.sink.put(record(`fin-${i}`));
+    }
+    liveRun = "fin-0"; // evicted: a stale row
+    claims.length = 0;
+    expect(runOf(await wt.reserve(reserveReq()))).toBeUndefined();
+    expect(claims).toEqual(["r1"]); // one claim, no re-claim
+    liveRun = `fin-${LANDED_MAX}`; // the newest: the gap
+    claims.length = 0;
+    expect(runOf(await wt.reserve({ ...reserveReq(), runId: "r2" }))).toBeUndefined();
+    expect(claims).toEqual(["r2", "r2"]); // claimed once more, then untracked (the fake keeps answering thread-live)
+    expect(warnings.filter((w) => w.includes("not tracked"))).toHaveLength(2);
+    // The note tells what happened: the finish landed here, and the row still stands.
+    expect(warnings[1]).toContain(
+      `run fin-${LANDED_MAX}, whose finish landed in this process, still holds the thread's row: the row stands past its finish`,
+    );
+  });
+
+  // A reservation that never started is abandoned in the dispatcher's finally
+  // with one unretried call. When that call fails, the row stands as this
+  // generation's own dead reservation; the next claim on the thread knows it
+  // (reserved here, promoted never, driven by nobody), abandons it again and
+  // claims once more — so no ordering in the finally has to be right.
+  it("a claim that meets this generation's own dead reservation — its abandon failed transiently — abandons it again and claims once more, tracked; when the abandon keeps failing, untracked with that why", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let abandonFailures = 1;
+    const claims: string[] = [];
+    const { ledger, wt, warnings } = harness({
+      ledger: overriding(inner, {
+        abandon: async (runId, gen) => {
+          if (abandonFailures-- > 0) throw new TransientStoreError("run ledger /runs/abandon: HTTP 503");
+          return inner.abandon(runId, gen);
+        },
+        claim: async (req) => {
+          const result = await inner.claim(req);
+          claims.push(`${req.runId} ${result.ok ? "ok" : result.reason}`);
+          return result;
+        },
+      }),
+    });
+    const dead = runOf(await wt.reserve({ ...reserveReq(), runId: "dead" }))!;
+    await dead.abandon(); // the finally's one attempt: it throws, the row stands
+    expect(ledger.live.has("dead")).toBe(true);
+    expect(warnings.some((w) => w.includes("abandon failed") && w.includes("abandons the row again"))).toBe(true);
+    const said: string[] = [];
+    const next = await reserveSaying(wt, { ...reserveReq(), runId: "next" }, said);
+    expect(next?.tracked()).toBe(true);
+    expect(claims).toEqual(["dead ok", "next thread-live", "next ok"]);
+    expect(ledger.live.has("dead")).toBe(false);
+    expect(ledger.live.get("next")).toMatchObject({ phase: "attaching", ownerGen: "gen-A" });
+    expect(said).toEqual([]);
+
+    // The abandon keeps failing: one more claim, then untracked with that why.
+    abandonFailures = 99;
+    const stuck = runOf(await wt.reserve({ ...reserveReq(), runId: "stuck", threadKey: "slack:C1:2.0" }))!;
+    await stuck.abandon();
+    const said2: string[] = [];
+    claims.length = 0;
+    expect(
+      await reserveSaying(wt, { ...reserveReq(), runId: "after", threadKey: "slack:C1:2.0" }, said2),
+    ).toBeUndefined();
+    expect(claims).toEqual(["after thread-live", "after thread-live"]);
+    expect(said2).toEqual([
+      "run stuck is this generation's own reservation that never started and still holds the thread's row: its abandon did not reach the ledger (run ledger /runs/abandon: HTTP 503)",
+    ]);
   });
 });
 
@@ -1199,7 +1430,7 @@ describe("the session log — a run is a range of it", () => {
     const ship = (await wt.open(openReq({ runId: "r3", threadKey: "slack:C1:2.0", seed: undefined })))!;
     expect(ship.session).toBeUndefined();
     expect(ship.logIndexOf(0)).toBeUndefined();
-    expect(new NullLedgerRun("r9", { put: async () => {} }).logIndexOf(0)).toBeUndefined();
+    expect(new NullLedgerRun("r9", { put: async () => {}, abandoned: () => {} }).logIndexOf(0)).toBeUndefined();
   });
 
   it("two agents in one thread keep two logs; a run without a conversation of its own (a ship pipeline) has no session", async () => {
@@ -1297,6 +1528,7 @@ describe("NullLedgerWriteThrough — the write-through of a process without a le
     const puts: RunRecord[] = [];
     const ledger = new NullLedgerWriteThrough("20260101T000000Z-abcd", {
       put: async (r: RunRecord) => void puts.push(r),
+      abandoned: () => {},
     });
     expect(ledger.gen).toBe("20260101T000000Z-abcd");
     expect(await ledger.open({} as OpenRunRequest)).toBeUndefined();
@@ -1309,7 +1541,10 @@ describe("NullLedgerWriteThrough — the write-through of a process without a le
 
   it("adopt answers a detached run: untracked, not resumable, every mirror a no-op, finishing `unavailable`, its finish sink the plain store so a record cannot vanish", async () => {
     const puts: RunRecord[] = [];
-    const ledger = new NullLedgerWriteThrough("gen", { put: async (r: RunRecord) => void puts.push(r) });
+    const ledger = new NullLedgerWriteThrough("gen", {
+      put: async (r: RunRecord) => void puts.push(r),
+      abandoned: () => {},
+    });
     const run = ledger.adopt({ runId: "r9", threadKey: "slack:C1:1", state: {}, lastStep: 3, lastSeq: 7 });
     expect(run.runId).toBe("r9");
     expect(run.tracked()).toBe(false);

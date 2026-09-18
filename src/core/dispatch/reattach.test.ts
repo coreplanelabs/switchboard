@@ -134,7 +134,7 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
     const registry = new RunRegistry({ genId: () => "run-old", genToken: () => "tok" });
     const run = registry.create("label", { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0" });
     const puts: RunRecord[] = [];
-    const ledgerRun = new NullLedgerRun("run-old", { put: async (r) => void puts.push(r) });
+    const ledgerRun = new NullLedgerRun("run-old", { put: async (r) => void puts.push(r), abandoned: () => {} });
     const closes: StatusUpdate[] = [];
     const refusals: string[] = [];
     const shell = createCardShell({ label: "*coding*", startedAt: 5_000, now: () => NOW });
