@@ -334,7 +334,11 @@ export interface FakeServeOptions {
   /** The write-up's own execution (the play after the cut) opens a step that
    *  fails `aborted` — a step begun after the interrupt landed, the write-up's
    *  own — and the execution then fails on the provider: the step's failure is
-   *  the harness's to say, no cut's abort. */
+   *  the harness's to say, no cut's abort. A contrivance, not a measured shape:
+   *  the `failed` end after an aborted step is measured (`interruptSettlesLate:
+   *  "failed"`), an `aborted` step with no interrupt behind it is not — it
+   *  places the one failure type the cut's steps swallow where the cut cannot
+   *  own it, so the swallow's scope is what the test proves. */
   writeUpStepAborts?: boolean;
   /** The cut tool's own outcome (`hangToolCall`) rides the interrupted
    *  execution's tail itself — before the next execution starts, in the

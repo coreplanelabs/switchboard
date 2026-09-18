@@ -72,18 +72,25 @@ export const finaleTimedOutNote = (closes: "run" | "turn" = "run"): string =>
  *  never saw it, so the answer wears no wind-down label. */
 export const wrapUpUndeliveredNote = (kind: "time" | "turns" | "soft", closes: "run" | "turn" = "run"): string =>
   `the ${wrapUpName(kind)} wrap-up instruction never reached pi — held behind a prompt in doubt when pi settled — so the ${closes} closes on pi's own answer, unlabelled`;
-/** The card's line when OpenCode's loop-end cut found the session idle (the
- *  tool completed and the execution ended on its own during the interrupt's
- *  round-trip — finished, or failed on the provider, `ended` says which;
- *  harness.md item 13): the wrap-up instruction was never posted, so the
- *  answer is the model's own and wears no wind-down label — the same rule as
- *  pi's undelivered wrap-up. */
+/** How a never-posted wrap-up's wait ended (harness.md item 13): the loop-end
+ *  interrupt found the session idle, the execution having `finished` on its
+ *  own or `failed` on the provider during the round-trip; or the interrupt was
+ *  never answered and the `finale` bound ended the wait. */
+export type NeverPostedEnd = "finished" | "failed" | "finale";
+/** The card's line when OpenCode's loop-end cut posted no wrap-up instruction
+ *  (`NeverPostedEnd` says how the wait ended): the model never saw it, so the
+ *  answer is its own and wears no wind-down label — the same rule as pi's
+ *  undelivered wrap-up. */
 export const wrapUpNeverPostedNote = (
   kind: "time" | "turns" | "soft",
   closes: "run" | "turn" = "run",
-  ended: "finished" | "failed" = "finished",
+  ended: NeverPostedEnd = "finished",
 ): string =>
-  `the ${wrapUpName(kind)} wrap-up instruction was never posted — the loop-end interrupt found the session idle, the execution having ${ended === "failed" ? "failed on the provider" : "finished on its own"} — so the ${closes} closes on OpenCode's own answer, unlabelled`;
+  `the ${wrapUpName(kind)} wrap-up instruction was never posted — ${
+    ended === "finale"
+      ? "the loop-end interrupt was never answered, the finale bound ending the wait"
+      : `the loop-end interrupt found the session idle, the execution having ${ended === "failed" ? "failed on the provider" : "finished on its own"}`
+  } — so the ${closes} closes on OpenCode's own answer, unlabelled`;
 /** The card's line when the wrap-up instruction's write failed with the
  *  control plane's reset (harness-pi item 16): a steer is never resolved by a
  *  re-send, so the finale's clock is not started on an instruction pi may
@@ -183,16 +190,26 @@ export const turnGuardAnswer = (text: string, pace: string, writeUpFailed?: stri
     : `Stopped after ${pace} — that pace looks like a loop — without finishing${noWriteUp(writeUpFailed)}. Partial work may exist in the workspace — look for a retry loop in the run's events before trying again.`;
 
 /** The thread's answer when no wind-down label applies — the wrap-up never
- *  reached the model (OpenCode's never-posted prompt) — with the model call
- *  that failed under the wind-down said when one did (`writeUpFailed`), so
- *  the failure the record holds reaches the thread too: after the model's own
- *  last text when there is one, alone when there is none. */
-export const unlabelledAnswer = (text: string, writeUpFailed?: string): string =>
-  writeUpFailed
-    ? text
-      ? `${text}\n\n⚠️ _The model call that followed failed (${writeUpFailed}); this is the last answer before it._`
-      : `⚠️ The model call failed (${writeUpFailed}) and no answer came. Partial work may exist in the workspace.`
-    : text || "_(no response)_";
+ *  reached the model (OpenCode's never-posted prompt) — with what ended the
+ *  wait said when it was a failure (`writeUpFailed`, the reason): a model call
+ *  that failed under the wind-down, or the finale bound ending a wait on an
+ *  interrupt never answered (`ended`) — so what the record holds reaches the
+ *  thread too: after the model's own last text when there is one, alone when
+ *  there is none. */
+export const unlabelledAnswer = (
+  text: string,
+  writeUpFailed?: string,
+  ended: "failed" | "finale" = "failed",
+): string => {
+  if (!writeUpFailed) return text || "_(no response)_";
+  if (ended === "finale")
+    return text
+      ? `${text}\n\n⚠️ _The write-up never started: the loop-end interrupt went unanswered and the finale bound ended the wait (${writeUpFailed}); this is the last answer before it._`
+      : `⚠️ The write-up never started: the loop-end interrupt went unanswered and the finale bound ended the wait (${writeUpFailed}). Partial work may exist in the workspace.`;
+  return text
+    ? `${text}\n\n⚠️ _The model call that followed failed (${writeUpFailed}); this is the last answer before it._`
+    : `⚠️ The model call failed (${writeUpFailed}) and no answer came. Partial work may exist in the workspace.`;
+};
 /** The thread's answer after a soft stop. */
 export const softStopAnswer = (text: string, writeUpFailed?: string): string =>
   text
