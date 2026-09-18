@@ -194,6 +194,33 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     expect(adopted.events).toEqual([]);
   });
 
+  it("a promotion gone untracked publishes the ledger_untracked note with the why and marks the card through markUntracked — the same label the reserve-time path sets", async () => {
+    const { deps, registry, run, base } = setup();
+    const ledger = deps.runLedger as RecordingLedger;
+    // A promotion whose claim went untracked: the write-through abandoned the
+    // row, said why through onUntracked, and answered undefined.
+    ledger.open = async (req) => {
+      req.onUntracked?.("the claim failed after 3 attempts");
+      return undefined;
+    };
+    let marked = 0;
+    const reserved = new NullLedgerRun("run-c", { put: async () => {}, abandoned: () => {} });
+    const out = await claimRun(deps, {
+      ...base,
+      reserved,
+      resume: undefined,
+      ledgerRun: undefined,
+      markUntracked: () => marked++,
+    });
+    expect(out).toBeUndefined();
+    expect(marked).toBe(1);
+    const events: RunEvent[] = [];
+    registry.subscribe(run.id, run.token, { onEvent: (event) => void events.push(event) });
+    const note = events.find((e) => e.type === "run_note");
+    expect(note).toMatchObject({ type: "run_note", kind: "ledger_untracked" });
+    expect((note as { summary: string }).summary).toContain("the claim failed after 3 attempts");
+  });
+
   it("a run the ledger refused to reserve is untracked: no claim is asked, the handle stays undefined", async () => {
     const { deps, ledger, base } = setup();
     expect(

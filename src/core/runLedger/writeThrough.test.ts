@@ -361,6 +361,82 @@ describe("reserve — the row before the prompt (item 42)", () => {
     }
   });
 
+  it("a reserved run whose promotion claim fails three times is abandoned (row gone, not just heartbeat-stopped) and onUntracked fires with why — the attaching row does not stand for the reclaim sweep to restart the run", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let reservationDone = false;
+    // Let the reservation's own claim through; fail every subsequent one (the promotion).
+    const failing = harness({
+      ledger: overriding(inner, {
+        claim: async (req) => {
+          if (!reservationDone) {
+            reservationDone = true;
+            return inner.claim(req);
+          }
+          throw new TransientStoreError("socket hang up");
+        },
+      }),
+    });
+    const reserved = runOf(await failing.wt.reserve(reserveReq()))!;
+    // The reserved row is attaching while the promotion claim will fail repeatedly.
+    expect(failing.ledger.live.get("r1")).toMatchObject({ phase: "attaching", ownerGen: "gen-A" });
+    const untrackedWhys: string[] = [];
+    const opened = await failing.wt.open(
+      openReq({ reservation: reserved, onUntracked: (why) => untrackedWhys.push(why) }),
+    );
+    expect(opened).toBeUndefined();
+    // The attaching row must be gone — not still standing with a dead heartbeat.
+    expect(failing.ledger.live.get("r1")).toBeUndefined();
+    expect(failing.ledger.finished.get("r1")).toBeUndefined();
+    // The run is no longer live.
+    expect(failing.wt.liveRuns()).toEqual([]);
+    // onUntracked was called with the reason (the note the record carries).
+    expect(untrackedWhys).toHaveLength(1);
+    expect(untrackedWhys[0]).toMatch(/claim failed after 3 attempt/);
+    // No record went to the fallback store (no run_meta, no finish).
+    expect(failing.fallbackPuts).toEqual([]);
+  });
+
+  it("a promotion gone untracked whose abandon itself fails leaves the run known as this generation's dead reservation: the thread's next claim abandons the row again and is tracked — the safety net of item 54 holds on the promotion path too", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    let reservationDone = false;
+    let abandonFailures = 1;
+    const claims: string[] = [];
+    const { ledger, wt, warnings } = harness({
+      ledger: overriding(inner, {
+        claim: async (req) => {
+          // Let each run's first claim (its reservation) through; fail the
+          // promotion's — the same transient shape as the abandon's below.
+          if (req.runId === "r1" && reservationDone) throw new TransientStoreError("socket hang up");
+          if (req.runId === "r1") reservationDone = true;
+          const result = await inner.claim(req);
+          claims.push(`${req.runId} ${result.ok ? "ok" : result.reason}`);
+          return result;
+        },
+        abandon: async (runId, gen) => {
+          if (abandonFailures-- > 0) throw new TransientStoreError("run ledger /runs/abandon: HTTP 503");
+          return inner.abandon(runId, gen);
+        },
+      }),
+    });
+    const reserved = runOf(await wt.reserve(reserveReq()))!;
+    const untrackedWhys: string[] = [];
+    expect(
+      await wt.open(openReq({ reservation: reserved, onUntracked: (why) => untrackedWhys.push(why) })),
+    ).toBeUndefined();
+    expect(untrackedWhys).toHaveLength(1);
+    // The abandon threw: the attaching row still stands, its heartbeat stopped —
+    // exactly the shape the next claim's re-abandon exists for.
+    expect(ledger.live.get("r1")).toMatchObject({ phase: "attaching", ownerGen: "gen-A" });
+    expect(warnings.some((w) => w.includes("abandon failed") && w.includes("abandons the row again"))).toBe(true);
+    const said: string[] = [];
+    const next = await reserveSaying(wt, { ...reserveReq(), runId: "next" }, said);
+    expect(next?.tracked()).toBe(true);
+    expect(claims).toEqual(["r1 ok", "next thread-live", "next ok"]);
+    expect(ledger.live.has("r1")).toBe(false);
+    expect(ledger.live.get("next")).toMatchObject({ phase: "attaching", ownerGen: "gen-A" });
+    expect(said).toEqual([]);
+  });
+
   it("abandon: a reserved run whose dispatch ended before its prompt existed drops its row with NO record — heartbeat stopped, no longer live, the fallback store untouched; a fenced reservation's abandon is a no-op (the row is another generation's); a null run's abandon is nothing", async () => {
     const { ledger, wt, t, fallbackPuts, warnings } = harness();
     const reserved = runOf(await wt.reserve(reserveReq()))!;

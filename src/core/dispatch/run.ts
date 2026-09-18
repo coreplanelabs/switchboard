@@ -37,6 +37,7 @@ import type { AuthorizeDeps } from "./authorize.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { RecordDeps } from "./record.js";
 import { processSecrets } from "../../secrets.js";
+import { oneLine, redactAndCap } from "../redact.js";
 import type { HarnessRoster } from "../harness/roster.js";
 import type { HarnessContainer } from "../harness/container.js";
 import type { HarnessRegistry } from "../harness/pi/relay.js";
@@ -230,6 +231,10 @@ export interface ClaimContext {
   seed?: RunSeed;
   /** The router's decision when it chose the preset, on the row (run-history item 35). */
   route?: RouteDecided;
+  /** Marks the run's card `untracked by the ledger` when the promotion's claim
+   *  goes untracked — the same label the reserve-time untracked path sets in
+   *  the dispatcher, wired from there because the card's shell lives there. */
+  markUntracked?: () => void;
   /** For a seed read from the session's log (session-log item 9): the rows of
    *  the log the first messages of `messages` are, so the write-through
    *  appends only what follows them. */
@@ -270,6 +275,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     seed,
     route,
     seedLog,
+    markUntracked,
   } = ctx;
   const { resident, binding } = selection;
   let ledgerRun = ctx.ledgerRun;
@@ -340,6 +346,25 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         // run or reply here (D9).
         onStop: (mode) => void run.control.requestStop(mode),
         onFenced: () => void run.control.requestStop("hard"),
+        // The promotion's claim went untracked (failing retries or
+        // RouteMissingError) while the reserved row stood: the row is now
+        // abandoned and the run is untracked. Publish the note so the record
+        // says why, and mark the card as the reserve-time path does — the same
+        // one place as the reservation's own note (D9).
+        onUntracked: (why) => {
+          registry.publish(run.id, {
+            type: "run_note",
+            kind: "ledger_untracked",
+            summary: redactAndCap(
+              oneLine(
+                `not tracked by the run ledger: ${why} — no handoff, resume or reclaim reaches this run; its record still reaches the store`,
+              ),
+              500,
+            ),
+            at: clock(),
+          });
+          markUntracked?.();
+        },
       }),
     );
     if (opened) {
