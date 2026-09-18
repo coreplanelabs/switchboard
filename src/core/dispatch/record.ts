@@ -140,30 +140,37 @@ export async function channelVisibilityOf(
  * The diagnosis is computed as unfinished: the run never reached `finish`.
  */
 export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, finishedAt: number): RunRecord {
-  return assembleRunRecord({
-    run: { id: summary.id, ...(summary.label !== undefined ? { label: summary.label } : {}) },
-    snap,
-    agent: summary.agent,
-    model: summary.model,
-    msg: {
-      channelId: summary.channelId ?? "",
-      userId: summary.userId ?? "",
-      threadKey: summary.threadKey ?? "",
-      sourceUrl: summary.sourceUrl,
-      userName: summary.userName,
-      authenticatedAs: summary.authenticatedAs,
-    },
-    channelVisibility: summary.channelVisibility ?? "unknown",
-    repo: summary.repo,
-    ...(summary.parentRunId !== undefined ? { parentRunId: summary.parentRunId } : {}),
-    ...(summary.seed !== undefined ? { seed: summary.seed } : {}),
-    ...(summary.parentInstanceId !== undefined && summary.idempotencyKey !== undefined
-      ? { coordinator: { parentInstanceId: summary.parentInstanceId, idempotencyKey: summary.idempotencyKey } }
-      : {}),
-    finishedAt,
-    status: "interrupted",
-    diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated }),
-  });
+  // Mark this record provisional: it is always written with `{ provisional: true }`
+  // by the drain deadline pass, so the in-memory writer knows to stand it down;
+  // the persisted flag rides the record itself so a store-only reader can tell it
+  // apart from a real interrupt that owns no live row (run-history item 27).
+  return {
+    ...assembleRunRecord({
+      run: { id: summary.id, ...(summary.label !== undefined ? { label: summary.label } : {}) },
+      snap,
+      agent: summary.agent,
+      model: summary.model,
+      msg: {
+        channelId: summary.channelId ?? "",
+        userId: summary.userId ?? "",
+        threadKey: summary.threadKey ?? "",
+        sourceUrl: summary.sourceUrl,
+        userName: summary.userName,
+        authenticatedAs: summary.authenticatedAs,
+      },
+      channelVisibility: summary.channelVisibility ?? "unknown",
+      repo: summary.repo,
+      ...(summary.parentRunId !== undefined ? { parentRunId: summary.parentRunId } : {}),
+      ...(summary.seed !== undefined ? { seed: summary.seed } : {}),
+      ...(summary.parentInstanceId !== undefined && summary.idempotencyKey !== undefined
+        ? { coordinator: { parentInstanceId: summary.parentInstanceId, idempotencyKey: summary.idempotencyKey } }
+        : {}),
+      finishedAt,
+      status: "interrupted",
+      diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated }),
+    }),
+    provisional: true,
+  };
 }
 
 /**
@@ -439,7 +446,7 @@ export interface TombstoneContext {
 }
 
 /**
- * Tombstone-first (run-history item 42): a provisional TERMINAL record —
+ * Tombstone-first (run-history item 27): a provisional TERMINAL record —
  * status `interrupted`, `finishedAt` = `startedAt` — written the moment the run
  * loop owns the run, from the events published so far, so a crash or a drain
  * abandonment needs no store-side fixup: the tombstone is already the truth.
@@ -484,26 +491,32 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
     const startSnap = registry.snapshot(run.id, run.token);
     if (startSnap) {
       deps.runHistoryWriter.write(
-        assembleRunRecord({
-          run,
-          snap: startSnap,
-          agent: agent.name,
-          model: resolved.modelRef,
-          msg,
-          channelVisibility,
-          repo: repoCtx.repo,
-          profile: profileRecordOf(agent, profile),
-          ...(route !== undefined ? { route } : {}),
-          ...(parentRunId !== undefined ? { parentRunId } : {}),
-          ...(coordinator !== undefined ? { coordinator } : {}),
-          ...(seed !== undefined ? { seed } : {}),
-          finishedAt: startSnap.startedAt,
-          status: "interrupted",
-          diagnosis: analyzeRunFriction(startSnap.events, {
-            finished: false,
-            truncated: startSnap.truncated,
+        // Mark this tombstone provisional so a store-only reader (the CLI, a
+        // direct state-Worker read) can distinguish "no finish recorded yet"
+        // from a real interrupt that owns no live row (run-history item 27).
+        {
+          ...assembleRunRecord({
+            run,
+            snap: startSnap,
+            agent: agent.name,
+            model: resolved.modelRef,
+            msg,
+            channelVisibility,
+            repo: repoCtx.repo,
+            profile: profileRecordOf(agent, profile),
+            ...(route !== undefined ? { route } : {}),
+            ...(parentRunId !== undefined ? { parentRunId } : {}),
+            ...(coordinator !== undefined ? { coordinator } : {}),
+            ...(seed !== undefined ? { seed } : {}),
+            finishedAt: startSnap.startedAt,
+            status: "interrupted",
+            diagnosis: analyzeRunFriction(startSnap.events, {
+              finished: false,
+              truncated: startSnap.truncated,
+            }),
           }),
-        }),
+          provisional: true,
+        },
         { provisional: true },
       );
     }

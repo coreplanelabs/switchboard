@@ -128,6 +128,11 @@ export interface RunHistorySeed {
   threadKey?: string;
   events: LiveFrame[];
   status?: RunStatus;
+  /** The record is a provisional tombstone — the start-of-run `interrupted`
+   *  still in its provisional window. The page shows "unfinished — no finish
+   *  recorded" rather than `interrupted` (run-history item 27). Absent on
+   *  every final record. */
+  provisional?: true;
   eventCount: number;
   /** The record's stamps (docs/reference/specs/tracing.md). */
   startedAt: number;

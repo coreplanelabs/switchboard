@@ -59,6 +59,10 @@ describe("the drain deadline's records", () => {
       eventCount: 4,
       storedEventCount: 4,
       truncated: false,
+      // The drain-deadline record is provisional on the record itself too
+      // (run-history item 27): a store-only reader must not read it as a real
+      // interrupt while the run may still be live elsewhere.
+      provisional: true,
     });
     expect(rec.events).toEqual(snap.events); // ALL events published so far — the full-transcript upgrade
     expect(rec.label).toBe("coding · acme/x");
@@ -147,6 +151,10 @@ describe("writeTombstone — the provisional interrupted record at the loop's st
       agent: "general",
       model: "anthropic/general-model",
       profile: { preset: "general", machine: "none", identity: "none", minutes: 5 },
+      // The provisional flag rides the persisted record (run-history item 27):
+      // a store-only reader can distinguish "no finish recorded yet" from a real
+      // interrupt that owns no live row.
+      provisional: true,
     });
     expect(writes[0].record.finishedAt).toBe(writes[0].record.startedAt);
     expect(writes[0].record.events.map((e) => e.type)).toEqual(["input"]);

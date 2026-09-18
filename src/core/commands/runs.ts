@@ -20,7 +20,7 @@ import { parsePullRequestRef, PULL_REQUEST_REF_PATTERN, type FindingRow } from "
 import { formatUsd } from "../modelPricing.js";
 import type { RunEvent } from "../runEvents.js";
 import { SEARCH_MAX_HITS } from "../runLedger/sessionLog.js";
-import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, SESSION_KEY_PATTERN } from "../runRecord.js";
+import { PROVISIONAL_LABEL, RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, SESSION_KEY_PATTERN } from "../runRecord.js";
 import {
   MAX_EVENTS_PAGE,
   runResource,
@@ -215,7 +215,12 @@ export const runsList = defineCommand({
 /** `runs get` on the text surfaces: the record's `key: value` lines, its cost
  *  read as dollars (costs.md item 4c) — the total, then each model — or
  *  `unpriced` where the price table knows no model, never `$0`. */
-function renderRunRecord(output: JsonValue): string {
+function renderRunRecord(rawOutput: JsonValue): string {
+  // A provisional tombstone (run-history item 27) renders the third state in
+  // its status line: the run may still be live in a registry this store-only
+  // read cannot see, so `interrupted` would be a misread.
+  const output =
+    isObject(rawOutput) && rawOutput.provisional === true ? { ...rawOutput, status: PROVISIONAL_LABEL } : rawOutput;
   if (!isObject(output) || !isObject(output.cost)) return renderCompact("runs.get", output);
   const { cost, ...rest } = output;
   const dollars = (usd: unknown): string => (typeof usd === "number" ? formatUsd(usd) : "unpriced");

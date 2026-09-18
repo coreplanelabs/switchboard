@@ -581,6 +581,21 @@ describe("runs.get / runs.events / runs.friction", () => {
     expect(renderText(get, old.ok ? old.value : null)).not.toContain("cost:");
   });
 
+  // run-history item 27: the provisional tombstone's third state on the CLI.
+  it("runs.get renders a provisional tombstone's status line as 'unfinished — no finish recorded' — never `interrupted` — while the JSON view keeps the record's own status and flag", async () => {
+    const { registry, store, deps } = await setup();
+    const machine = { channelId: "mcp:X", channelVisibility: "machine" as const };
+    await store.put(record("fin-tomb", NOW - 300, { ...machine, status: "interrupted", provisional: true }));
+    const get = runsCommands.find((c) => c.id === "runs.get")!;
+    const out = await registry.invoke("runs.get", { args: ["fin-tomb"], options: {} }, reader, deps);
+    const view = value<{ status: string; provisional?: true }>(out);
+    expect(view.status).toBe("interrupted");
+    expect(view.provisional).toBe(true);
+    const text = renderText(get, out.ok ? out.value : null);
+    expect(text).toContain("status: unfinished — no finish recorded");
+    expect(text).not.toContain("status: interrupted");
+  });
+
   it("wrapEvent wraps a tool result's output and a span end's error too; a span with no error is returned as is", () => {
     const wrapped = wrapEvent({ type: "tool_result", tool: "bash", ok: true, summary: "ok", output: "raw out" });
     expect((wrapped as { output: string }).output).toContain(UNTRUSTED_OPEN);

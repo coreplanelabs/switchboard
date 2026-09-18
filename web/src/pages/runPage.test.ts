@@ -544,6 +544,15 @@ describe("RunPage — history mode", () => {
     expect(hard.find(".conn .chip").text()).toBe("killed");
     const unknown = mountApp(RunPage, { seed: historySeed([]) });
     expect(unknown.find(".conn .chip").text()).toBe("ended");
+    // run-history item 27: a provisional tombstone is the third state — amber,
+    // never the red `interrupted` chip — while an unflagged interrupted record
+    // keeps its red chip.
+    const provisional = mountApp(RunPage, { seed: historySeed([], { status: "interrupted", provisional: true }) });
+    expect(provisional.find(".conn .chip").text()).toBe("unfinished — no finish recorded");
+    expect(provisional.find(".conn .chip").classes().join(" ")).toContain("warn");
+    const interrupted = mountApp(RunPage, { seed: historySeed([], { status: "interrupted" }) });
+    expect(interrupted.find(".conn .chip").text()).toBe("interrupted");
+    expect(interrupted.find(".conn .chip").classes().join(" ")).toContain("bad");
   });
 
   // session-log.md item 10: the notepad is a document the agent keeps for the

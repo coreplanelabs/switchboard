@@ -703,6 +703,36 @@ describe("untrusted wrapping and rendering", () => {
     expect(text).not.toMatch(/slack:|acme|threadKey|UALICE/);
   });
 
+  it("renderCompact renders a provisional tombstone row as the third state — 'unfinished — no finish recorded', never `interrupted` — on text and chat; a real interrupted row (no flag) still says `interrupted` (run-history item 27)", () => {
+    const now = 1_000_000;
+    const runs = [
+      {
+        id: "abcdefgh1234",
+        agent: "coding",
+        status: "interrupted",
+        startedAt: now - 90_000,
+        finishedAt: now - 90_000,
+        finished: true,
+        provisional: true,
+      },
+      {
+        id: "zyxwvutsrqponmlk",
+        agent: "review",
+        status: "interrupted",
+        startedAt: now - 30_000,
+        finishedAt: now - 10_000,
+        finished: true,
+      },
+    ];
+    const text = renderCompact("runs.list", { runs }, { now });
+    const lines = text.split("\n");
+    expect(lines[0]).toContain("unfinished — no finish recorded");
+    expect(lines[0]).not.toContain("interrupted");
+    expect(lines[1]).toContain("interrupted");
+    const chat = renderCompact("runs.list", { runs }, { now, surface: "chat" });
+    expect(chat.split("\n")[0]).toContain("• `abcdefgh` — coding · unfinished — no finish recorded ·");
+  });
+
   it("renderCompact appends the store-unavailable banner to runs.list when the service degraded to live rows", () => {
     const banner = "⚠ history store unavailable — showing live runs only";
     expect(renderCompact("runs.list", { runs: [], storeUnavailable: true })).toBe(`(no runs)\n${banner}`);

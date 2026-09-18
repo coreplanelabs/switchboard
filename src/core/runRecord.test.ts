@@ -342,6 +342,17 @@ describe("isRunRecord", () => {
     }
   });
 
+  it("provisional: true on an interrupted tombstone is valid; any other value is rejected; absent on a final record is valid", () => {
+    // A provisional tombstone: the start-of-run interrupted record (run-history item 27)
+    expect(isRunRecord(record({ status: "interrupted", provisional: true }))).toBe(true);
+    // Absent on a final record: every completed/failed/stopped run
+    expect(isRunRecord(record({ status: "completed" }))).toBe(true);
+    // Any value other than `true` is malformed
+    expect(isRunRecord({ ...record({ status: "interrupted" }), provisional: false })).toBe(false);
+    expect(isRunRecord({ ...record({ status: "interrupted" }), provisional: "yes" })).toBe(false);
+    expect(isRunRecord({ ...record({ status: "interrupted" }), provisional: 1 })).toBe(false);
+  });
+
   it("round-trips the run-page fields on tool, input and model.turn span events verbatim (callId, exitCode, output, source, startedAt/durationMs/attrs) — the validator only checks each event's `type`", () => {
     const events: RunEvent[] = [
       {

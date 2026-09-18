@@ -913,6 +913,10 @@ export function createLiveViewHandler(
           events: withOmittedMarkers(timed ? normalizeSpans(events) : events, view.eventCount),
           ...(timed ? {} : { untimed: true as const }),
           ...(view.status ? { status: view.status } : {}),
+          // Propagate the provisional flag so the run page renders the third
+          // "unfinished — no finish recorded" state instead of `interrupted`
+          // (run-history item 27).
+          ...(view.provisional === true ? { provisional: true as const } : {}),
           eventCount: view.eventCount,
           startedAt: view.startedAt,
           ...(view.receivedAt !== undefined ? { receivedAt: view.receivedAt } : {}),

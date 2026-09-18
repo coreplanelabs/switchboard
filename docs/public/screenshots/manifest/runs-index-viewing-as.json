@@ -30,7 +30,7 @@
     "web/src/lib/durationTone.ts": "486c6fec68068a0a02d7b6ced1e1c568ddf66f82e3c37f6bba3fc561fc8f6aa2",
     "web/src/lib/eventSource.ts": "56cee4056941a052433f8b19d2ce2f8eaf43ba483080d0e836afa19794900f9c",
     "web/src/lib/format.ts": "c606fee13ee47cd493bc70bc5c8d70fe697bc1903afa8434261b48c29e682759",
-    "web/src/lib/indexRow.ts": "14bfe15c9a4a18e2fb64e7310c633084bcfee21fd975e77b66a04804135f7c47",
+    "web/src/lib/indexRow.ts": "aed574f60a8aa306a2af4d5204685a438a3965bcc3a387055eb1ea29dd253430",
     "web/src/lib/markPulse.ts": "df29e8abee12f0827e8e1295f8fcb1184530240139790da7bffb5929fad8f647",
     "web/src/lib/navSections.ts": "dd842db8c9b0fc1d7cc592f145803622047d03131d876e7681710c28f4f348db",
     "web/src/lib/seed.ts": "b7ac1e0780a5f69b2ef2d5d0c40e41119a015fd29fb63c4026d4425b02d53661",
