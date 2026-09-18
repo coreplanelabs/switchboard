@@ -69,6 +69,23 @@ export interface ProviderPiOptions {
   /** A pi bump: an event kind no disposition table names, emitted once at the
    *  first turn's start (the conformance suite's unknown-kind row). */
   emitUnknownKind?: string;
+  /** The session of a pi that was already running before this double was
+   *  scripted: the harness re-attached to it rather than starting a fresh one,
+   *  so no `container.start` was issued and `current()` cannot read the session
+   *  from the last start's arguments. The double uses this in its place —
+   *  the live pi's run id, model, tools and session history — so a `prompt`
+   *  (or steer) is the first command it receives, as a real re-attached pi
+   *  would. The files at `paths.dir` are the pi's own (where the log and the
+   *  FIFO are), so the double can answer a `get_state` with the right path. */
+  alreadyRunning?: {
+    runId: string;
+    model: string;
+    effort?: import("../../../../effort.js").Effort;
+    system?: string;
+    builtins: string[];
+    sessionFile: string;
+    messages: ChatMessage[];
+  };
 }
 
 export interface ProviderPi {
@@ -202,9 +219,26 @@ export function scriptPiFromProvider(container: FakeHarnessContainer, opts: Prov
     void run(text, images);
   };
 
-  /** The session pi started on: read once from the last start's arguments and files. */
+  /** The session pi started on: read once from the last start's arguments and
+   *  files, or from `alreadyRunning` when the harness re-attached to a pi that
+   *  was already alive (no start was issued). */
   function current(): Session {
     if (session) return session;
+    const ar = opts.alreadyRunning;
+    if (!container.starts.at(-1) && ar) {
+      // The harness re-attached: no start was issued, so the session is the one
+      // the live pi carries, handed in directly rather than read from a start.
+      session = {
+        runId: ar.runId,
+        model: ar.model,
+        effort: ar.effort,
+        system: ar.system,
+        builtins: ar.builtins,
+        sessionFile: ar.sessionFile,
+        messages: ar.messages.map((m) => ({ role: m.role, content: [...m.content] })),
+      };
+      return session;
+    }
     const start = container.starts.at(-1);
     if (!start) throw new Error("providerPi: a command arrived before pi was started");
     const arg = (flag: string) => {

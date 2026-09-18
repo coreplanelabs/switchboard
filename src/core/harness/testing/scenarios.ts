@@ -18,6 +18,7 @@ import type { ChatMessage, ContentPart } from "../../chatMessage.js";
 import type { CompletionRequest, CompletionResult } from "../../provider.js";
 import type { RunEvent, StopMode } from "../../runEvents.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
+import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { identityChangedCondition, type HarnessRequest, type HarnessStart } from "../container.js";
 import { WORD_ALIVE_REATTACH_NOTE } from "../reattach.js";
 import {
@@ -1193,35 +1194,30 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     id: "survival-alive-here",
     clause: "survival",
     title:
-      "a resume whose facts name this same container reconciles with the process still alive here before a fresh one is placed: the run answers, and the one resumed note says which honest path was taken — re-attached to the live process (no second process, the live one ended only at the session's end, its session continued) or ended it for a fresh start (one fresh process, the live one ended first)",
+      "a resume whose facts name this same container and carry the bearer hash re-attaches to the live process: no second process started, the live one ended only at the session's end, and the one resumed note says pi still runs in the container continuing its session",
     script: (driver) => ({
       turns: [text("resumed here")],
       processAliveOnResume: true,
-      resume: resumeOf(driver.facts({ pid: 999, container: driver.containerWord })),
+      resume: resumeOf(
+        driver.facts({ pid: 999, container: driver.containerWord, bearerHash: bearerHashOf(driver.bearer) }),
+      ),
     }),
     check: (run) => {
       assert.equal(answered(run), "resumed here");
       const resumed = notes(run).filter((n) => n.kind === "resumed");
       assert.equal(resumed.length, 1, "not exactly one resumed note");
-      // Two honest reconciliations. The row here carries no bearer hash, so a
-      // harness whose re-attach needs one ends the process instead; a row that
-      // carries it is the harness's own re-attach test. Demanding the re-attach
-      // of every driver needs a double that plays an already-running pi — the
-      // follow-up.
-      const reAttached = run.starts.length === 0;
-      if (reAttached) {
-        assert.deepEqual(
-          run.killed.filter((pid) => pid === 999),
-          [999],
-          "the live process is ended once, at the session's end, never for a fresh start",
-        );
-        assert.match(resumed[0].summary, /still runs in the container \(pid 999/);
-        assert.match(resumed[0].summary, /continuing its session/);
-      } else {
-        assert.equal(run.starts.length, 1, "one fresh process was started on the record");
-        assert.equal(run.killed[0], 999, "the live process was not ended before the fresh start");
-        assert.match(resumed[0].summary, /ended/);
-      }
+      // Both drivers now take the re-attach branch: the bearer hash in the
+      // facts lets pi honour it, and OpenCode's fake serve answers the row's
+      // port with the right password. No second process is started; the live
+      // one is ended once, at the session's end.
+      assert.equal(run.starts.length, 0, "a second process was started: the row must re-attach to the live one");
+      assert.deepEqual(
+        run.killed.filter((pid) => pid === 999),
+        [999],
+        "the live process is ended once, at the session's end, never for a fresh start",
+      );
+      assert.match(resumed[0].summary, /still runs in the container \(pid 999/);
+      assert.match(resumed[0].summary, /continuing its session/);
       assert.ok(!notes(run).some((n) => n.kind === "harness_error"), "a harness_error on a clean resume");
     },
   },
