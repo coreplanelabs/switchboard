@@ -81,6 +81,22 @@ export function runFinishedEventType(runId: string): string {
   return `${RUN_FINISHED_EVENT_PREFIX}${runId}`;
 }
 
+/** The deploy-roll signals a child's reattach path sends its parent
+ *  (run-history item 47a): `child-interrupted-<runId>` — the child closed
+ *  `interrupted` for a restart from its request, so the wait settles at once
+ *  beside `run-finished-<runId>` and the round ends with the child's own
+ *  reason; `child-resumed-<runId>` — the same run carries on after a roll, so
+ *  the wait keeps waiting. Same alphabet as the finish event; the parent
+ *  confirms either by `read-record` before it acts. */
+export const CHILD_INTERRUPTED_EVENT_PREFIX = "child-interrupted-";
+export function childInterruptedEventType(runId: string): string {
+  return `${CHILD_INTERRUPTED_EVENT_PREFIX}${runId}`;
+}
+export const CHILD_RESUMED_EVENT_PREFIX = "child-resumed-";
+export function childResumedEventType(runId: string): string {
+  return `${CHILD_RESUMED_EVENT_PREFIX}${runId}`;
+}
+
 /** A message into a thread an unfinished unit owns (record 0051's reply-as-event rule): one row
  *  of the unit's event list, appended by the dispatcher, folded into the
  *  unit's next coding spawn — or run as one fresh turn at the unit's end.
@@ -521,6 +537,25 @@ export async function sendChecksSettled(
   try {
     const handle = await workflow.get(instance);
     await handle.sendEvent({ type, payload });
+    return { kind: "sent", instance, type };
+  } catch (err) {
+    return { kind: "failed", instance, type, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** One deploy-roll signal to the child's parent (run-history item 47a): best
+ *  effort like `sendRunFinished` — a refusal is answered, never thrown; a lost
+ *  send costs the wait a chunk, never the round. */
+export async function sendChildSignal(
+  workflow: WorkflowSender | undefined,
+  signal: { runId: string; parentInstanceId: string; kind: "interrupted" | "resumed"; reason: string; at: number },
+): Promise<RunFinishedSend> {
+  const { runId, parentInstanceId: instance, kind, reason, at } = signal;
+  if (!workflow) return { kind: "no-binding", instance };
+  const type = kind === "interrupted" ? childInterruptedEventType(runId) : childResumedEventType(runId);
+  try {
+    const handle = await workflow.get(instance);
+    await handle.sendEvent({ type, payload: { runId, kind, reason, at, parentInstanceId: instance } });
     return { kind: "sent", instance, type };
   } catch (err) {
     return { kind: "failed", instance, type, reason: err instanceof Error ? err.message : String(err) };

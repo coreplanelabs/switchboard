@@ -423,6 +423,8 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       ev.type === "pr_opened" ||
       ev.type === "coordinator_tag" ||
       ev.type === "ship_handoff" ||
+      ev.type === "child_interrupted" ||
+      ev.type === "child_resumed" ||
       ev.type === "review_posted" ||
       ev.type === "ship_round" ||
       ev.type === "route" ||

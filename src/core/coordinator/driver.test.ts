@@ -140,7 +140,12 @@ function steps(waits: Record<string, "event" | "timeout"> = {}) {
       throw new Error(`timeout waiting for ${options.type}`);
     },
   };
-  const names = () => taken.map((t) => t.name);
+  // The step sequence most tests read: every run-finished wait rides with its
+  // two deploy-roll companions (`…/interrupted`, `…/resumed[/n]`, item 47a) —
+  // asserted by their own tests below and elided here so the machine's own
+  // step order stays legible.
+  const names = () =>
+    taken.filter((t) => !/\/(wait|busy)\/\d+\/(interrupted|resumed)(\/\d+)?$/.test(t.name)).map((t) => t.name);
   return { runner, taken, attempts, names };
 }
 
@@ -224,7 +229,21 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     // walks the child's budget plus the margin in chunks, a read-record between them.
     expect(s.taken.filter((t) => t.kind === "wait")).toEqual([
       { kind: "wait", name: "U10/0/coding/wait/1", type: "run-finished-run-c0", timeout: WAIT_CHUNK_MS },
+      {
+        kind: "wait",
+        name: "U10/0/coding/wait/1/interrupted",
+        type: "child-interrupted-run-c0",
+        timeout: WAIT_CHUNK_MS,
+      },
+      { kind: "wait", name: "U10/0/coding/wait/1/resumed", type: "child-resumed-run-c0", timeout: WAIT_CHUNK_MS },
       { kind: "wait", name: "U10/1/review/wait/1", type: "run-finished-run-r1", timeout: WAIT_CHUNK_MS },
+      {
+        kind: "wait",
+        name: "U10/1/review/wait/1/interrupted",
+        type: "child-interrupted-run-r1",
+        timeout: WAIT_CHUNK_MS,
+      },
+      { kind: "wait", name: "U10/1/review/wait/1/resumed", type: "child-resumed-run-r1", timeout: WAIT_CHUNK_MS },
     ]);
     // What the bot was asked, in the machine's words.
     expect(b.of("plan")).toEqual([{ parentInstanceId: INSTANCE }]);
@@ -449,7 +468,11 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(summary.units).toEqual({ U10: "merged" });
     expect(s.taken.filter((t) => t.kind === "wait").map((t) => t.name)).toEqual([
       "U10/0/coding/wait/1",
+      "U10/0/coding/wait/1/interrupted",
+      "U10/0/coding/wait/1/resumed",
       "U10/1/review/wait/1",
+      "U10/1/review/wait/1/interrupted",
+      "U10/1/review/wait/1/resumed",
     ]);
     expect(b.of("pr-check")).toEqual([
       { parentInstanceId: INSTANCE, unit: "U10" },
@@ -475,6 +498,63 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
     expect(end.ending.kind).toBe("interrupted");
     expect(end.ending.report).toContain("the pipeline stopped");
+  });
+
+  it("a deploy roll's child-interrupted event settles the wait beside run-finished (item 47a): the read-record confirms the interrupted child and the round ends at once with the child's own reason, never the budget clip", async () => {
+    const s = steps({ "U10/0/coding/wait/1/interrupted": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [record({ id: "run-c0", finished: true, status: "interrupted" }, T0 + 5 * MIN)],
+      "pr-check": [prNone(), prNone(T0 + 6 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 6 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 6 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "interrupted" });
+    // One wait chunk: the interrupted companion settled it — no second chunk
+    // was walked out, and the confirming read-record carried the reason.
+    const waits = s.taken.filter((t) => t.kind === "wait").map((t) => t.name);
+    expect(waits).toEqual(["U10/0/coding/wait/1", "U10/0/coding/wait/1/interrupted", "U10/0/coding/wait/1/resumed"]);
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
+    expect(end.ending.kind).toBe("interrupted");
+    expect(end.ending.report).toContain("the pipeline stopped");
+  });
+
+  it("a deploy roll's child-resumed event keeps the wait (item 47a): the signal is consumed, the next resumed wait is armed under the next durable name, and the chunk still ends as a timeout confirmed by read-record — a live child is waited on again, never a lost round", async () => {
+    const s = steps({ "U10/0/coding/wait/1/resumed": "event", "U10/0/coding/wait/2": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [
+        record({ finished: false }, T0 + 5 * MIN),
+        record({ id: "run-c0", finished: true, status: "interrupted" }, T0 + 10 * MIN),
+      ],
+      "pr-check": [prNone(), prNone(T0 + 11 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 11 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 11 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "interrupted" });
+    const waits = s.taken.filter((t) => t.kind === "wait").map((t) => t.name);
+    // The resumed signal re-armed under `/resumed/2` and settled nothing: the
+    // chunk timed out, the read-record found the child live, and the machine
+    // waited the next chunk under the next step name.
+    expect(waits).toEqual([
+      "U10/0/coding/wait/1",
+      "U10/0/coding/wait/1/interrupted",
+      "U10/0/coding/wait/1/resumed",
+      "U10/0/coding/wait/1/resumed/2",
+      "U10/0/coding/wait/2",
+      "U10/0/coding/wait/2/interrupted",
+      "U10/0/coding/wait/2/resumed",
+    ]);
   });
 
   it("a failed coding child whose recover pr-check answers none with a reason carries that reason into the abort — the parse keeps `unrecovered`", async () => {
@@ -799,7 +879,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       type: "run-finished-run-other",
     });
     // The wait the engine never answered was one chunk — the read-record after it is what found the child finished.
-    expect(s.taken.filter((t) => t.kind === "wait" && t.name.startsWith("U10/0/coding/wait/"))).toEqual([
+    expect(s.taken.filter((t) => t.kind === "wait" && /^U10\/0\/coding\/wait\/\d+$/.test(t.name))).toEqual([
       { kind: "wait", name: "U10/0/coding/wait/1", type: "run-finished-run-c0", timeout: WAIT_CHUNK_MS },
       { kind: "wait", name: "U10/0/coding/wait/2", type: "run-finished-run-c0", timeout: WAIT_CHUNK_MS },
     ]);

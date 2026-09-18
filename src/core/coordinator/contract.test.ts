@@ -9,6 +9,9 @@ import {
   INSTANCE_ID_PATTERN,
   isCoordinatorInstance,
   runFinishedEventType,
+  childInterruptedEventType,
+  childResumedEventType,
+  sendChildSignal,
   sendRunFinished,
   STEP_NAME_PATTERN,
   isCoordinatorUnit,
@@ -74,6 +77,15 @@ describe("the coordinator's names", () => {
     expect(runFinishedEventType(runId)).toBe(`run-finished-${runId}`);
     expect(runFinishedEventType(runId)).toMatch(platform);
     expect(`run finished:${runId}`).not.toMatch(platform);
+  });
+
+  it("the deploy-roll signals ride the same alphabet: child-interrupted-<runId> and child-resumed-<runId> (run-history item 47a)", () => {
+    const runId = "8b5a233a-e63d-4da4-b18d-8314f1b08a88";
+    const platform = /^[a-zA-Z0-9_][a-zA-Z0-9-_]*$/;
+    expect(childInterruptedEventType(runId)).toBe(`child-interrupted-${runId}`);
+    expect(childResumedEventType(runId)).toBe(`child-resumed-${runId}`);
+    expect(childInterruptedEventType(runId)).toMatch(platform);
+    expect(childResumedEventType(runId)).toMatch(platform);
   });
 
   it("coordinatorFields spreads a tag into the two record fields and nothing without one", () => {
@@ -299,6 +311,73 @@ describe("sendRunFinished — the event a terminal record sends", () => {
       kind: "failed",
       instance: "inst_1",
       type: "run-finished-run-1",
+      reason: "instance is not running",
+    });
+  });
+});
+
+// Feature: docs/reference/specs/run-history.md item 47a — the deploy-roll
+// signal a child's reattach path sends its parent, beside the finish event.
+describe("sendChildSignal — the deploy-roll signal a child sends its parent", () => {
+  function workflow(behaviour: "ok" | "not-running" = "ok") {
+    const sent: Array<{ instance: string; type: string; payload: unknown }> = [];
+    const sender: WorkflowSender = {
+      get: async (id) => ({
+        sendEvent: async (event) => {
+          if (behaviour === "not-running") throw new Error("instance is not running");
+          sent.push({ instance: id, type: event.type, payload: event.payload });
+        },
+      }),
+    };
+    return { sender, sent };
+  }
+  const signal = {
+    runId: "run-1",
+    parentInstanceId: "inst_1",
+    kind: "interrupted" as const,
+    reason: "workspace lost across the restart",
+    at: 5_000,
+  };
+
+  it("sends child-interrupted-<runId> for an interruption and child-resumed-<runId> for a resume, the payload naming the run, the kind, the reason and the instance", async () => {
+    const w = workflow();
+    expect(await sendChildSignal(w.sender, signal)).toEqual({
+      kind: "sent",
+      instance: "inst_1",
+      type: "child-interrupted-run-1",
+    });
+    expect(await sendChildSignal(w.sender, { ...signal, kind: "resumed", reason: "re-attached" })).toEqual({
+      kind: "sent",
+      instance: "inst_1",
+      type: "child-resumed-run-1",
+    });
+    expect(w.sent).toEqual([
+      {
+        instance: "inst_1",
+        type: "child-interrupted-run-1",
+        payload: {
+          runId: "run-1",
+          kind: "interrupted",
+          reason: "workspace lost across the restart",
+          at: 5_000,
+          parentInstanceId: "inst_1",
+        },
+      },
+      {
+        instance: "inst_1",
+        type: "child-resumed-run-1",
+        payload: { runId: "run-1", kind: "resumed", reason: "re-attached", at: 5_000, parentInstanceId: "inst_1" },
+      },
+    ]);
+  });
+
+  it("no binding → nothing sent, said by name; a refusing engine is swallowed and reported, never thrown", async () => {
+    expect(await sendChildSignal(undefined, signal)).toEqual({ kind: "no-binding", instance: "inst_1" });
+    const w = workflow("not-running");
+    expect(await sendChildSignal(w.sender, signal)).toEqual({
+      kind: "failed",
+      instance: "inst_1",
+      type: "child-interrupted-run-1",
       reason: "instance is not running",
     });
   });

@@ -59,7 +59,14 @@ import {
   stepPrefixOf,
   type UnitSession,
 } from "../ship/coordinator.js";
-import { checksSettledEventType, isCoordinatorUnit, runFinishedEventType, type CoordinatorUnit } from "./contract.js";
+import {
+  checksSettledEventType,
+  childInterruptedEventType,
+  childResumedEventType,
+  isCoordinatorUnit,
+  runFinishedEventType,
+  type CoordinatorUnit,
+} from "./contract.js";
 
 const MIN = 60_000;
 
@@ -403,17 +410,58 @@ function answerOf(route: CoordinatorStepRoute, reply: BotReply): BotAnswer {
   return read.answer;
 }
 
-/** A wait's outcome: the event, or anything else — the machine confirms either by `read-record`. */
+/** A wait's outcome: the event, or anything else — the machine confirms either by `read-record`.
+ *
+ *  Three waits under one chunk (run-history item 47a): the child's finish
+ *  (`run-finished-<runId>`), its deploy-roll interruption
+ *  (`child-interrupted-<runId>`, the reattach path's word that the child
+ *  closed `interrupted` — settled as the finish is, so the round ends at once
+ *  with the child's own reason once `read-record` confirms it) and its resume
+ *  (`child-resumed-<runId>`, the same run carrying on after a roll — consumed
+ *  and re-armed, never a settlement: a resumed child keeps the wait). The
+ *  chunk times out only once the finish AND the interruption waits both have;
+ *  a resumed wait's own timeout decides nothing. */
 async function waitForRun(
   step: StepRunner,
   action: Extract<CoordinatorAction, { type: "wait" }>,
 ): Promise<"event" | "timeout"> {
-  try {
-    await step.waitForEvent(action.step, { type: runFinishedEventType(action.runId), timeout: action.timeoutMs });
-    return "event";
-  } catch {
-    return "timeout";
-  }
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timeouts = 0;
+    const settle = (outcome: "event" | "timeout") => {
+      settled = true;
+      resolve(outcome);
+    };
+    const settling = (name: string, type: string) =>
+      step.waitForEvent(name, { type, timeout: action.timeoutMs }).then(
+        () => settle("event"),
+        () => {
+          timeouts += 1;
+          // Deferred a microtask so a resume that lands with the chunk's own
+          // end is still consumed (re-armed) before the timeout settles.
+          if (timeouts === 2) queueMicrotask(() => settle("timeout"));
+        },
+      );
+    void settling(action.step, runFinishedEventType(action.runId));
+    void settling(`${action.step}/interrupted`, childInterruptedEventType(action.runId));
+    // Each resumed event re-arms under the next durable name, so a second roll
+    // in the same chunk is still heard; a timeout here ends nothing, and a
+    // settled wait arms no further step.
+    const armResumed = (n: number): void => {
+      void step
+        .waitForEvent(n === 1 ? `${action.step}/resumed` : `${action.step}/resumed/${n}`, {
+          type: childResumedEventType(action.runId),
+          timeout: action.timeoutMs,
+        })
+        .then(
+          () => {
+            if (!settled) armResumed(n + 1);
+          },
+          () => {},
+        );
+    };
+    armResumed(1);
+  });
 }
 
 async function perform(

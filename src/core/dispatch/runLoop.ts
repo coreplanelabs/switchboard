@@ -1613,6 +1613,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     });
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
     if (!interrupted) throw err;
+    // A coordinator's child says the interruption on its own record
+    // (run-history item 47a): the typed event beside the harness's notes, so
+    // the parent's read-record and the run page read the roll as a fact. The
+    // Workflow wake rides the terminal record's put (item 47).
+    if (coordinator !== undefined)
+      registry.publish(run.id, {
+        type: "child_interrupted",
+        parentInstanceId: coordinator.parentInstanceId,
+        reason: redactAndCap(interrupted.message, ENDING_NOTE_MAX),
+        at: clock(),
+      });
     // The interruption is the loop's own outcome: answered from here, the
     // finally below finishing the run `interrupted` and closing its card first.
     return {

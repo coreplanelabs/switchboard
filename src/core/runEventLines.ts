@@ -134,6 +134,12 @@ function isRunEvent(v: unknown): v is RunEvent {
     case "coordinator_tag":
       // The instance a coordinator's child belongs to (run-history item 48a).
       return typeof o.parentInstanceId === "string";
+    case "child_interrupted":
+      // A deploy roll interrupted a coordinator's child (run-history item 47a).
+      return typeof o.parentInstanceId === "string" && typeof o.reason === "string";
+    case "child_resumed":
+      // A coordinator's child resumed across a deploy roll (run-history item 47a).
+      return typeof o.parentInstanceId === "string" && typeof o.summary === "string";
     case "route":
       return typeof o.preset === "string" && typeof o.reason === "string" && typeof o.model === "string";
     case "refusal":
