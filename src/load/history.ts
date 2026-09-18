@@ -84,16 +84,22 @@ export interface ListCursor {
 }
 
 /** Page a newest-first listing with the store's compound cursor until a short
- *  page or `maxPages`. `fetchPage` receives the cursor to continue from. */
+ *  page or `maxPages`. `fetchPage` receives the cursor to continue from.
+ *  When `maxItems` is a positive number, paging stops as soon as that many
+ *  rows have been accumulated and the result is trimmed to exactly `maxItems`;
+ *  when unset or zero, all pages are read (the original behaviour). */
 export async function pageAll<T extends { id: string; finishedAt: number }>(
   fetchPage: (cursor?: ListCursor) => Promise<T[]>,
-  opts: { pageSize: number; maxPages: number },
+  opts: { pageSize: number; maxPages: number; maxItems?: number },
 ): Promise<T[]> {
   const all: T[] = [];
   let cursor: ListCursor | undefined;
   for (let page = 0; page < opts.maxPages; page++) {
     const items = await fetchPage(cursor);
     all.push(...items);
+    if (opts.maxItems && opts.maxItems > 0 && all.length >= opts.maxItems) {
+      return all.slice(0, opts.maxItems);
+    }
     if (items.length < opts.pageSize) break;
     const last = items[items.length - 1];
     cursor = { before: last.finishedAt, beforeId: last.id };

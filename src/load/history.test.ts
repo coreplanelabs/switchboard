@@ -74,4 +74,35 @@ describe("pageAll — cursor paging over the run store's list route", () => {
     expect(n).toBe(3);
     expect(items).toHaveLength(6);
   });
+
+  it("stops paging once maxItems rows have been accumulated and trims to exactly that count", async () => {
+    let fetchCount = 0;
+    // Each page returns 3 items; with maxItems=4, the second fetch completes
+    // the limit (3+3=6 ≥ 4) and paging stops — no third fetch.
+    const items = await pageAll(
+      async () => {
+        fetchCount++;
+        const base = (fetchCount - 1) * 3;
+        return [run(`r${base}`, 0, 100 - base), run(`r${base + 1}`, 0, 99 - base), run(`r${base + 2}`, 0, 98 - base)];
+      },
+      { pageSize: 3, maxPages: 10, maxItems: 4 },
+    );
+    expect(items).toHaveLength(4);
+    expect(fetchCount).toBe(2);
+  });
+
+  it("with maxItems=0 (default unlimited), reads all pages as before", async () => {
+    let n = 0;
+    const items = await pageAll(
+      async () => {
+        n++;
+        if (n <= 3) return [run(`r${n}`, 0, 100 - n)];
+        return []; // short page — stops naturally
+      },
+      { pageSize: 1, maxPages: 10, maxItems: 0 },
+    );
+    // pageAll stops on an empty page; 3 pages of 1 item each = 3 items
+    expect(items).toHaveLength(3);
+    expect(n).toBe(4); // 4th call returned [] (short page), triggered break
+  });
 });
