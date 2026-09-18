@@ -9489,13 +9489,15 @@ workspaceDir: __WORKDIR__
     };
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     await writer.settled();
+    // The row is claimed under the host key (record 0060: the parent occupies
+    // no thread) while its metadata names the thread the run lists under.
     expect(rowSeen).toMatchObject({
-      threadKey: "slack:CX:1.0",
+      threadKey: "slack:CX:1.0#host",
       ownerGen: "gen-ship",
       card: { channel: "CX", ts: "9.9" },
       system: "",
       tools: [],
-      meta: { agent: "ship", channelId: "slack:CX", userId: "slack:UADMIN" },
+      meta: { agent: "ship", channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:1.0", hosted: true },
     });
     expect(phaseAtReply).toBe("finishing"); // the CAS was taken before the final reply
     expect(ledger.live.has("rship-l")).toBe(false);
