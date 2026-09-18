@@ -4905,7 +4905,14 @@ describe("runPiHarness — a read-identity preset", () => {
     const system = w.container.files.get(`${paths.agentDir}/SYSTEM.md`)!;
     expect(system).toContain("no `edit` and no `write`");
     expect(system).not.toContain("`write_file` use `write`");
-    expect(rules).toEqual({ identity: "read", checkout: "/workspace/threads/t/main", protectedBranches: ["main"] });
+    expect(rules).toEqual({
+      identity: "read",
+      checkout: "/workspace/threads/t/main",
+      protectedBranches: ["main"],
+      loopEndsIn: expect.any(Function),
+    });
+    // The loop's clock rides on the rules: what is left to the LOOP's end (the write-up and the review post-step held back), never the lease's.
+    expect(rules!.loopEndsIn!()).toBe(loopClock(NOW, 25 * MINUTE_MS, "review").loopEnd - NOW);
     expect(judgeToolCall("edit", { path: "src/x.ts" }, rules!)).toEqual({
       verdict: "outside-profile",
       reason: "edit is the `write-files` bundle, outside the read identity's reach",
@@ -4923,7 +4930,13 @@ describe("runPiHarness — a read-identity preset", () => {
       finalTurn(c, "Done.");
     });
     await w.start();
-    expect(rules).toEqual({ identity: "write", checkout: "/workspace/threads/t/main", protectedBranches: ["main"] });
+    expect(rules).toEqual({
+      identity: "write",
+      checkout: "/workspace/threads/t/main",
+      protectedBranches: ["main"],
+      loopEndsIn: expect.any(Function),
+    });
+    expect(rules!.loopEndsIn!()).toBe(loopClock(NOW, 45 * MINUTE_MS, "coding").loopEnd - NOW);
     const args = w.container.starts[0].args;
     expect(args[args.indexOf("--tools") + 1]).toBe("read,bash,edit,write,grep,find,ls,update_status");
   });

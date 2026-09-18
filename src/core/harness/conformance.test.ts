@@ -176,9 +176,10 @@ describe("the table", () => {
 // U11 (record 0038's fourth and fifth amendments): the OpenCode harness enters
 // the same table as a driver over a fake `serve`. This unit greens the gate and
 // the record rows; U12 adds the driver to `harnessDrivers()` and greens every
-// row against the real binary. The gate's honest cannot — a forged approval
-// caught by detection, never prevented by construction — is the one declared
-// cell (`gate-approval-unforgeable`).
+// row against the real binary. The gate's honest cannots are the declared
+// cells: a forged approval caught by detection, never prevented by
+// construction (`gate-approval-unforgeable`), and a bash timeout the ask never
+// carries (`budget-refuses-a-command-past-the-loop-end`).
 describe("conformance — opencode (fake serve, gate and record)", () => {
   const driver = openCodeDriver();
   const rows = SCENARIOS.filter((r) => r.clause === "gate" || r.clause === "record");
@@ -196,17 +197,18 @@ describe("conformance — opencode (fake serve, gate and record)", () => {
     }
   }
 
-  it("the matrix shows OpenCode green on every gate and record row against the fake serve, with the one declared cannot cell", async () => {
+  it("the matrix shows OpenCode green on every gate and record row against the fake serve, with the declared cannot cells", async () => {
     const verdicts: Record<string, RowOutcome> = {};
     for (const row of rows) verdicts[row.id] = (await rowVerdict(driver, row)).outcome;
-    for (const row of rows) expect(verdicts[row.id]).toBe(row.id === "gate-approval-unforgeable" ? "cannot" : "pass");
+    const declared = new Set(Object.keys(driver.cannot ?? {}));
+    for (const row of rows) expect(verdicts[row.id]).toBe(declared.has(row.id) ? "cannot" : "pass");
     const rendered = renderHarnessConformanceMatrix(
       [{ harness: "opencode", rows: verdicts, ...(driver.cannot ? { cannot: driver.cannot } : {}) }],
       ["opencode"],
       rows,
     );
     expect(rendered).toContain("| ✖ |");
-    expect(rendered).toContain("✖ opencode cannot `gate-approval-unforgeable`:");
+    for (const id of declared) expect(rendered).toContain(`✖ opencode cannot \`${id}\`:`);
   });
 });
 

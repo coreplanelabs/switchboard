@@ -32,6 +32,7 @@ import {
 } from "../contract.js";
 import { ALLOWANCES, MINUTE_MS } from "../../budgets.js";
 import {
+  commandPastLoopEndRefusal,
   finaleTimedOutNote,
   HARD_STOP_MESSAGE,
   MODEL_CALL_IN_FLIGHT,
@@ -50,6 +51,12 @@ import { TRANSPORT_LOST_TEXT } from "./fakeContainer.js";
 export const CONFORMANCE_MAX_MINUTES = 10;
 /** The provider's words when a scripted model call fails (`RunScript.failModelCall`), on every driver. */
 export const FAILED_MODEL_CALL_ERROR = "the provider closed the stream before the answer";
+/** Where a script's clock sits before the loop's end (`RunScript.nearLoopEndBeforeModelCall`):
+ *  inside the loop, ahead of the wrap-up warning, with room for a short command. */
+export const NEAR_LOOP_END_SECONDS = 150;
+/** A bash timeout that reaches past the loop's end from there, and one that does not. */
+export const TIMEOUT_PAST_LOOP_END_SECONDS = 600;
+export const TIMEOUT_INSIDE_LOOP_END_SECONDS = 60;
 
 /** One answer of the scripted model: the content parts and how it stopped. */
 export interface ModelTurn {
@@ -114,6 +121,12 @@ export interface RunScript {
    *  harness winds the run down — the budget note, the write-up steered — and
    *  that call is the one the wind-down waits on. */
   budgetBeforeModelCall?: number;
+  /** The run's clock sits `NEAR_LOOP_END_SECONDS` before the loop's end from
+   *  the model call of this 1-based number on: inside the loop, so nothing
+   *  winds down, and close enough that a bash timeout of
+   *  `TIMEOUT_PAST_LOOP_END_SECONDS` reaches past the end while one of
+   *  `TIMEOUT_INSIDE_LOOP_END_SECONDS` does not. */
+  nearLoopEndBeforeModelCall?: number;
   /** The model call of this 1-based number fails with a provider error
    *  (`FAILED_MODEL_CALL_ERROR`) instead of answering its turn. */
   failModelCall?: number;
@@ -635,6 +648,50 @@ export const SCENARIOS: readonly ScenarioRow[] = [
       const refused = notes(run).filter((n) => n.kind === "tool_refused");
       assert.equal(refused.length, 1, "one tool_refused note for the push");
       assert.match(refused[0].summary, /main/);
+    },
+  },
+  {
+    id: "budget-refuses-a-command-past-the-loop-end",
+    clause: "gate",
+    title:
+      "a bash call whose explicit timeout reaches past the loop's end is refused at the gate before it runs — the refusal names the seconds asked and the seconds left, is the call's result and a tool_refused note — and the next call, its timeout inside the end, runs",
+    script: {
+      turns: [
+        call("c1", "bash", { command: "npm run verify", timeout: TIMEOUT_PAST_LOOP_END_SECONDS }),
+        call("c2", "bash", { command: "npm test -- one.test.ts", timeout: TIMEOUT_INSIDE_LOOP_END_SECONDS }),
+        text("pushed what there was and wrote up"),
+      ],
+      nearLoopEndBeforeModelCall: 1,
+    },
+    check: (run) => {
+      assert.equal(answered(run), "pushed what there was and wrote up");
+      const results = toolResults(run);
+      assert.deepEqual(
+        results.map((r) => [r.callId, r.ok]),
+        [
+          ["c1", false],
+          ["c2", true],
+        ],
+        "the call past the end was not the one refused, or the one inside it did not run",
+      );
+      const refused = notes(run).filter((n) => n.kind === "tool_refused");
+      assert.equal(refused.length, 1, "one tool_refused note for the timeout past the end");
+      // The seconds left are the clock's at the ask: at most the script's distance from the end, above zero.
+      const left = Number(/the loop ends in (\d+) s/.exec(refused[0].summary)?.[1]);
+      assert.ok(left > 0 && left <= NEAR_LOOP_END_SECONDS, `the note names ${left} s left: ${refused[0].summary}`);
+      assert.equal(
+        refused[0].summary,
+        `bash refused: ${commandPastLoopEndRefusal(TIMEOUT_PAST_LOOP_END_SECONDS, left)}`,
+        "the note is not the wind-down's sentence",
+      );
+      // The refusal is the call's result, whole, and the model's next turn read it as that result.
+      const sentence = commandPastLoopEndRefusal(TIMEOUT_PAST_LOOP_END_SECONDS, left);
+      assert.equal(results[0].output, sentence, "the refused call's result is not the sentence");
+      const read = JSON.stringify(run.modelCalls[1]?.messages.at(-1) ?? null);
+      assert.ok(read.includes(sentence), `the model's next call did not carry the refusal: ${read}`);
+      // No budget wind-down ran: the loop never reached its end, the run answered on its own.
+      assert.equal(notes(run).filter((n) => n.kind === "time_budget_exhausted").length, 0);
+      assert.equal(notes(run).filter((n) => n.kind === "tool_cut").length, 0);
     },
   },
   {

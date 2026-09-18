@@ -1537,6 +1537,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       checkout: "/srv/wt/the-pr",
       branch: "fix/the-pr-head",
       protectedBranches: ["main"],
+      loopEndsIn: expect.any(Function),
     });
     expect(push(fixRound, "fix/the-pr-head")).toBe("allowed");
     expect(push(fixRound, "main")).toBe("refused");
@@ -1550,6 +1551,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       checkout: "/workspace",
       branch: "unit/u26",
       protectedBranches: ["feat/trunk"],
+      loopEndsIn: expect.any(Function),
     });
     expect(push(child, "unit/u26")).toBe("allowed");
     expect(push(child, "feat/trunk")).toBe("refused");
@@ -1580,12 +1582,18 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       checkout: "/workspace",
       branch: "unit/u27",
       protectedBranches: ["feat/trunk"],
+      loopEndsIn: expect.any(Function),
     });
     expect(push(recovered, "unit/u27")).toBe("allowed");
     expect(push(recovered, "feat/trunk")).toBe("refused");
     // A plain thread bound at the repository's base: the run pushes a branch of its own making.
     const plain = await rulesOf({ repoCtx: { repo: "o/r", ref: "main" }, binding: { ref: "main", sha: "def" } });
-    expect(plain).toEqual({ identity: "write", checkout: "/workspace", protectedBranches: ["main"] });
+    expect(plain).toEqual({
+      identity: "write",
+      checkout: "/workspace",
+      protectedBranches: ["main"],
+      loopEndsIn: expect.any(Function),
+    });
     expect(push(plain, "feat/anything")).toBe("allowed");
     expect(push(plain, "main")).toBe("refused");
   });
