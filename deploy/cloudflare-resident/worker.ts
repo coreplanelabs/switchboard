@@ -158,6 +158,7 @@ import {
 } from "../../src/core/schedules.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 import { RestoreWaiters } from "../../src/execution/restoreWaiters.js";
+import { isRuntimeBusySignal, SandboxRuntimeBusyError } from "../../src/execution/sandboxErrors.js";
 import {
   decisivePull,
   effectiveLimits,
@@ -328,6 +329,7 @@ import {
   RuntimeReplacedError,
   controlResetErr,
   execFailureDocument,
+  runtimeBusyErr,
   runtimeReplacedErr,
   selfAndCauses,
   threadErrBuilders,
@@ -841,6 +843,17 @@ class RuntimeUnreachableError extends Error {
  *  command's own output is a `StepError` with an exit code and never gets here. */
 function isRuntimeUnreachable(err: unknown): boolean {
   for (const link of selfAndCauses(err)) if (isRuntimeUnreachableSignal(link)) return true;
+  return false;
+}
+
+/** Did the platform refuse the connect because the container is loaded
+ *  (docs/reference/specs/resident-repos.md item 68; execution.md item 28)? The
+ *  platform's own wording — a plain `Error`, the SDK hands it on unwrapped —
+ *  anywhere in the cause chain. Asked only of a spawn-phase error, after
+ *  `isRuntimeReplacement`: a loaded container is neither replaced nor silent
+ *  for good, and a command's own output never gets here. */
+function isRuntimeBusy(err: unknown): boolean {
+  for (const link of selfAndCauses(err)) if (isRuntimeBusySignal(link)) return true;
   return false;
 }
 /** Trailing slice of one string for an error reason. Command RESULTS are not
@@ -2027,6 +2040,14 @@ export class ResidentDO extends Sandbox<Env> {
       // read as a replaced container.
       if (isControlReset(err)) throw new ControlResetError("spawn", err);
       if (!isRuntimeReplacement(err)) {
+        // The container is running but did not accept the SDK's connect inside
+        // the platform's own allowance (item 68): a command already running in
+        // it has its cores. Nothing started, the worktree is as it was, and the
+        // container accepts again in moments — the typed word, for the thread
+        // routes to answer with the wait token; never counted as unreachable.
+        if (isRuntimeBusy(err)) {
+          throw new SandboxRuntimeBusyError({ containerId: this.ctx.id.toString(), cause: errMsg(err) });
+        }
         // The control port never answered the SDK's connect (its 30 s abort,
         // raised inside the wake path): no process started and nothing about
         // the repository is known. Count it in storage — the ladder of item 64
@@ -6416,6 +6437,9 @@ export class ResidentDO extends Sandbox<Env> {
       // container is unchanged, so no `replacedExecAnswer` gate applies.
       if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return this.replacedExecAnswer(err);
+      // A loaded container at the command's spawn (item 68): the wait token,
+      // the command never started.
+      if (err instanceof SandboxRuntimeBusyError) return runtimeBusyErr(err);
       throw err;
     }
   }
@@ -6496,6 +6520,7 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
+      if (err instanceof SandboxRuntimeBusyError) return runtimeBusyErr(err);
       throw err;
     }
     if (r.exitCode !== 0 || r.timedOut) return { error: `read-failed: ${describeStepFailure(r)}`, status: 404 };
@@ -6545,6 +6570,7 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
+      if (err instanceof SandboxRuntimeBusyError) return runtimeBusyErr(err);
       throw err;
     }
   }
@@ -6592,6 +6618,7 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       if (err instanceof ControlResetError) return controlResetErr(err);
       if (err instanceof RuntimeReplacedError) return runtimeReplacedErr(err);
+      if (err instanceof SandboxRuntimeBusyError) return runtimeBusyErr(err);
       const step = err instanceof StepError ? ` at ${err.step}` : "";
       return { error: `write-failed${step}: ${errMsg(err)}`, status: 400 };
     }

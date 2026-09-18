@@ -27,8 +27,15 @@ import { repoResourceId } from "../core/residentAdmin.js";
 import { EXEC_CALL_MARGIN_MS, attachBoundWithinRun, clampBashTimeout } from "./bashTimeout.js";
 import { DISK_PRESSURE_REASON } from "./residentDiskBudget.js";
 import {
+  RUNTIME_BUSY_BACKOFF_MS,
+  RUNTIME_BUSY_REASON,
+  RUNTIME_BUSY_WAIT_MAX_MS,
+  runtimeBusyExhaustedMessage,
+} from "./sandboxErrors.js";
+import {
   BASH_TIMEOUT_MS,
   BASH_TIMEOUT_MAX_MS,
+  ExecCapacityError,
   ExecControlResetError,
   ExecInfraError,
   ExecSandboxRestartedError,
@@ -207,7 +214,12 @@ function refusalWords(answer: { status: number; data: Record<string, unknown> })
  *  (`image-stale`). The answer's other own words never reach this reading:
  *  `unregistered` is refused before it (`residentAnswerReason`), and
  *  `runtime-replaced` and `control-reset` are 409s carrying no state. */
-const ANSWER_OWN_WORDS: ReadonlySet<string> = new Set(["mirror-busy", DISK_PRESSURE_REASON, "image-stale"]);
+const ANSWER_OWN_WORDS: ReadonlySet<string> = new Set([
+  "mirror-busy",
+  DISK_PRESSURE_REASON,
+  "image-stale",
+  RUNTIME_BUSY_REASON,
+]);
 
 /** The lifecycle reason on a resident answer: `stateReason` where the Worker
  *  names it (every 503 that carries `state`); on a Worker that predates the
@@ -337,6 +349,31 @@ export const wakeStopped = (route: string): ExecInfraError =>
     new ExecInfraError(`resident ${route}: stopped waiting for the resident to wake: the run was stopped`, "aborted"),
     { kind: "transport" },
   );
+
+/** The busy wait's end by the run's own stop during a pause: the same one
+ *  typed shape as the wake wait's (`wakeStopped`), naming this wait. */
+export const busyStopped = (route: string): ExecInfraError =>
+  classifyError(
+    new ExecInfraError(`resident ${route}: stopped waiting for a loaded container: the run was stopped`, "aborted"),
+    { kind: "transport" },
+  );
+
+/** Resolve after `ms`, or reject with the stop's typed error the moment
+ *  `signal` fires — a hard stop must not sit out a busy wait. */
+function pauseUnlessStopped(route: string, ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(busyStopped(route));
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(busyStopped(route));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 /** Resolve after `ms`; reject the moment `signal` fires. A hard stop never
  *  sits out a wake, and the rejection is `wakeStopped`. */
@@ -1237,13 +1274,17 @@ export class ResidentExecutor implements Executor {
       waitStarted ??= systemClock();
       return Math.max(0, waitBudget - (systemClock() - waitStarted));
     };
+    // A loaded container's refusal (resident-repos.md item 68) is waited out
+    // around every send this operation makes, inside the command's own budget.
+    const busyBudgetMs = Math.min(opts.waitBudgetMs ?? BASH_TIMEOUT_MS, RUNTIME_BUSY_WAIT_MAX_MS);
+    const send = () => this.callWaitingOutBusy(route, body, callTimeoutMs, busyBudgetMs, signal, span);
     // Every attach an operation opens from here — the rolling wake's re-attach,
     // which recreates the worktree from the mirror, and the three recovery
     // attaches — runs under the attach's own default clipped to the run's
     // remaining clock where this executor carries it (`attachBoundMs`): the
     // op's call bound is the command's, and the wake budget bounds the
     // probing alone.
-    let r = await this.call(route, body, callTimeoutMs, signal, span);
+    let r = await send();
     if (isContainerRolling(r.data.error)) {
       const woke = await this.awaitWake(route, String(r.data.error), {
         origin: "container-exited",
@@ -1256,7 +1297,7 @@ export class ResidentExecutor implements Executor {
           sandboxRestartedMessage({ waitedMs: woke.waitedMs, ref: woke.binding.ref, sha: woke.binding.sha }),
           woke.waitedMs,
         );
-      r = await this.call(route, body, callTimeoutMs, signal, span);
+      r = await send();
       if (isContainerRolling(r.data.error)) {
         throw classifyError(
           new ExecInfraError(
@@ -1271,7 +1312,7 @@ export class ResidentExecutor implements Executor {
     controlResetUnderThread(r.data);
     if (r.data.needs === "attach") {
       await this.attach(span, { signal, budgetMs: waitLeft() }); // the recovery rides the same trace as the op it rescues
-      r = await this.call(route, body, callTimeoutMs, signal, span);
+      r = await send();
       goneUnderThread(r.data);
       controlResetUnderThread(r.data);
       if (r.data.needs === "attach") throw stillGone(r.data);
@@ -1282,7 +1323,7 @@ export class ResidentExecutor implements Executor {
       // second landing is harmless here (`/read`, idempotent by shape; `/write`,
       // a full-content put). Still reset after the re-issue → the unknown outcome.
       await this.attach(span, { signal, budgetMs: waitLeft() }); // the recovery rides the same trace as the op it rescues
-      r = await this.call(route, body, callTimeoutMs, signal, span);
+      r = await send();
       if (saysControlReset(r.data)) throw new ExecControlResetError(String(r.data.error).trim());
       // Compound fault: the reset also left the worktree evicted. The re-attach
       // above was this op's one re-attach, so name it precisely, as the
@@ -1294,7 +1335,7 @@ export class ResidentExecutor implements Executor {
       // An idempotent route (/exec threw above): re-attach once and re-issue.
       this.noteRuntimeReplaced(route, r.data);
       await this.attach(span, { signal, budgetMs: waitLeft() }); // the recovery rides the same trace as the op it rescues
-      r = await this.call(route, body, callTimeoutMs, signal, span);
+      r = await send();
       if (r.data.reason === "runtime-replaced") this.noteRuntimeReplaced(route, r.data);
       // Compound fault: the deploy also left the worktree evicted. The
       // re-attach above was this op's one re-attach, so name it precisely
@@ -1303,6 +1344,38 @@ export class ResidentExecutor implements Executor {
     }
     if (typeof r.data.error !== "string" || !r.data.error) this.runtimeReplacedStreak = 0;
     return r;
+  }
+
+  /** One send, re-sent while the resident answers `runtime-busy`
+   *  (docs/reference/specs/resident-repos.md item 68; the thread sandbox's
+   *  execution.md item 28): the container is running but did not accept the
+   *  SDK's connect because a command already running in it has its cores, so
+   *  nothing ran and the IDENTICAL request is safe to re-send — after 3 s,
+   *  5 s, then 10 s, until the total wait reaches `budgetMs` (the command's
+   *  own, under the five-minute cap). Then `ExecCapacityError`, never
+   *  `ExecInfraError`: a loaded container is not a dead one. A hard stop ends
+   *  the pause at once with the stop's typed error. Every other answer is
+   *  returned as it came for the caller's own rules. */
+  private async callWaitingOutBusy(
+    route: string,
+    body: Record<string, unknown>,
+    callTimeoutMs: number,
+    budgetMs: number,
+    signal?: AbortSignal,
+    span?: Span,
+  ): Promise<{ status: number; data: Record<string, unknown> }> {
+    let waited = 0;
+    let attempt = 0;
+    for (;;) {
+      const r = await this.call(route, body, callTimeoutMs, signal, span);
+      if (r.data.reason !== RUNTIME_BUSY_REASON) return r;
+      if (waited >= budgetMs) throw new ExecCapacityError(runtimeBusyExhaustedMessage(waited));
+      const step = RUNTIME_BUSY_BACKOFF_MS[Math.min(attempt, RUNTIME_BUSY_BACKOFF_MS.length - 1)];
+      const delay = Math.min(step, budgetMs - waited);
+      attempt++;
+      await pauseUnlessStopped(route, delay, signal);
+      waited += delay;
+    }
   }
 
   private noteRuntimeReplaced(route: string, data: Record<string, unknown>): void {

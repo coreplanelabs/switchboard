@@ -11,6 +11,7 @@ import {
   isRuntimeUnreachableSignal,
   selfAndCauses,
 } from "../../src/execution/residentRefresh.js";
+import { isRuntimeBusyError, RUNTIME_BUSY_REASON } from "../../src/execution/sandboxErrors.js";
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 import type { ResidentStep } from "../../src/execution/residentStepTrace.js";
 import type { RefusalCause } from "../../src/core/refusal.js";
@@ -287,6 +288,9 @@ export function threadErrBuilders(p: ThrowPredicates): ThreadErrBuilders {
     // `isRuntimeUnreachableReason`) — and the remainder sentences.
     for (const link of selfAndCauses(err)) {
       if (isRuntimeUnreachableSignal(link)) return true;
+      // The DO's own word for a loaded container (`runtime-busy:`, item 68):
+      // the container accepts again in moments, so a re-probe clears it.
+      if (isRuntimeBusyError(link)) return true;
       const message = messageOf(link);
       if (isRuntimeUnreachableReason(message) || TRANSIENT_PLATFORM_WORDING.test(message)) return true;
     }
@@ -311,11 +315,26 @@ export function threadErrBuilders(p: ThrowPredicates): ThreadErrBuilders {
       if (route === "/exec" && !vouched) return { error: messageOf(err), status: 409, cause: "system" };
       return runtimeReplacedErr(new RuntimeReplacedError("call", err, vouched));
     }
+    // The DO's own word for a loaded container, thrown out of a method before
+    // the stub answered (item 68): the same 503 the method answers inside, so
+    // the client re-sends on the token wherever the throw was met.
+    if (isRuntimeBusyError(err)) return runtimeBusyErr(err instanceof Error ? err : new Error(messageOf(err)));
     // The two verdicts just settled ride into the typed 500, so its walk of the
     // cause chain is for the transient alone.
     return catchAllErr(err, undefined, { controlReset, runtimeReplacement });
   };
   return { isTransientPlatformThrow, catchAllErr, threadRejectionErr };
+}
+
+/** A loaded container that did not accept the connection
+ *  (docs/reference/specs/resident-repos.md item 68; execution.md item 28): the
+ *  platform's accept refusal met at the exec choke point's SPAWN — nothing
+ *  ran, the worktree is as it was — named with the wait token the client
+ *  re-sends on, as a 503 like the mirror held. `err` is the DO's typed error
+ *  (`SandboxRuntimeBusyError`, its message starting with the token), or the
+ *  same error after the stub boundary. */
+export function runtimeBusyErr(err: Error): ThreadErr {
+  return { error: err.message, status: 503, reason: RUNTIME_BUSY_REASON, cause: "system" };
 }
 
 /** /exec's failure document, in the item-3 dual shape (`error` beside

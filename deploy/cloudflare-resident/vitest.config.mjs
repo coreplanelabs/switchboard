@@ -6,7 +6,9 @@ import { defineConfig } from "vitest/config";
 // (refresh.test.ts), for the order of the instance step's gates and its
 // in-flight count (instanceStep.test.ts), for the absence of any
 // lifecycle timer (lifecycle.test.ts), and for the runtime-unreachable
-// counter and its escalation ladder (runtimeUnreachable.test.ts), and for the
+// counter and its escalation ladder (runtimeUnreachable.test.ts), for the
+// loaded container's word being given at the spawn alone and answered as the
+// 503 with the wait token (runtimeBusy.test.ts), and for the
 // reuse-only attach path and the container identity (reuseAttach.test.ts), and
 // for the in-place rebind onto the thread's own pull request branch
 // (rebindAttach.test.ts), for the release at a run's end
@@ -39,6 +41,7 @@ export default defineConfig({
       "instanceStep.test.ts",
       "lifecycle.test.ts",
       "runtimeUnreachable.test.ts",
+      "runtimeBusy.test.ts",
       "controlReset.test.ts",
       "notServiceable.test.ts",
       "reuseAttach.test.ts",
