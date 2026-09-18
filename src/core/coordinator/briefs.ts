@@ -20,6 +20,7 @@ import {
   contractFromPlan,
   generatedUnit,
   parsePlanUnit,
+  PLAN_MAX_CHARS,
   specItemRefs,
   type AgentRules,
   type ChildContract,
@@ -40,8 +41,14 @@ export interface ChildRunFacts {
 }
 
 export interface BriefReaders {
-  /** A file of the target repository at the base ref (the plan, a spec, the rules file), or undefined when there is none. */
-  readRepoFile(path: string): Promise<string | undefined>;
+  /** A file of the target repository at the base ref (the plan, a spec, the
+   *  rules file), or undefined when there is none: its text up to `opts.maxChars`
+   *  (the tool clip when unset) and whether it was cut there. The plan is asked
+   *  for up to `PLAN_MAX_CHARS` and a cut plan is refused, never parsed short. */
+  readRepoFile(
+    path: string,
+    opts?: { maxChars?: number },
+  ): Promise<{ content: string; truncated: boolean } | undefined>;
   /** A child run's typed facts by run id, or undefined for a run the history does not hold. */
   readRunFacts(runId: string): Promise<ChildRunFacts | undefined>;
   /** A generated plan's request text: the ship run's own record (`instance.runId`,
@@ -102,18 +109,22 @@ export async function contractFor(
   if (isGenerated(instance)) {
     source = { unit: await generatedUnitOf(instance, unit, readers) };
   } else {
-    const planMarkdown = await readers.readRepoFile(instance.plan!.path!);
-    if (planMarkdown === undefined)
+    const plan = await readers.readRepoFile(instance.plan!.path!, { maxChars: PLAN_MAX_CHARS });
+    if (plan === undefined)
       throw new Error(`the plan ${instance.plan!.path} is not readable at ${rebase.onto} in ${instance.repo}`);
-    source = { planMarkdown, unitId: unit.unit };
+    if (plan.truncated)
+      throw new Error(
+        `the plan ${instance.plan!.path} is longer than ${PLAN_MAX_CHARS.toLocaleString("en-US")} characters at ${rebase.onto} in ${instance.repo}; a unit read from a cut plan could be briefed short, so none is`,
+      );
+    source = { planMarkdown: plan.content, unitId: unit.unit };
   }
   const section = ("unit" in source ? source.unit : parsePlanUnit(source.planMarkdown, unit.unit))?.section ?? "";
   const specs = new Map<string, string | undefined>();
   for (const spec of new Set(specItemRefs(section).map((r) => r.spec)))
-    specs.set(spec, await readers.readRepoFile(`${SPECS_DIR}/${spec}`));
+    specs.set(spec, (await readers.readRepoFile(`${SPECS_DIR}/${spec}`))?.content);
   let agentRules: AgentRules | undefined;
   for (const file of RULES_FILES) {
-    const text = await readers.readRepoFile(file);
+    const text = (await readers.readRepoFile(file))?.content;
     if (text !== undefined) {
       agentRules = { file, text };
       break;

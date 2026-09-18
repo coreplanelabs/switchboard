@@ -129,6 +129,13 @@ export const CONTRACT_SECTION_HEADINGS = {
  *  repository's rules file (~15k characters) and a long unit both inside it. */
 export const DEFAULT_CONTRACT_MAX_CHARS = 48_000;
 
+/** The most of a plan a reader hands the parsers: ten times the tool clip
+ *  (`MAX_FILE_CHARS`, `src/execution/githubApi.ts`), which a plan that grows by
+ *  amendment passes — the program plan crossed 400k characters and the seed
+ *  then saw its first 25 units alone. A plan past this bound is refused by
+ *  name, never parsed short. */
+export const PLAN_MAX_CHARS = 2_000_000;
+
 const UNIT_HEADING = /^### (U\d+)\. (.+?)\s*$/;
 const ANY_HEADING = /^#{2,3} /;
 const BULLET = /^- \*\*([^*]+)\*\*:(?:\s?(.*))?$/;

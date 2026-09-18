@@ -28,6 +28,13 @@ const MAX_BODY_CHARS = 65_000;
  *  with a note (the tool says how to read a range). */
 export const MAX_FILE_CHARS = 200_000;
 
+/** How much of a file `readFile` hands back: `maxChars` characters, the tool
+ *  clip when unset. The bound is the caller's business — the model's tool
+ *  keeps the clip, a plan reader needs the whole document. */
+export interface ReadFileOptions {
+  maxChars?: number;
+}
+
 export interface RepoFile {
   path: string;
   /** Decoded UTF-8 text (binary files come back as a note, not bytes). */
@@ -102,7 +109,11 @@ export interface GithubApi {
    *  client without it (a test double) is used as is. */
   withSpan?(span: Span): GithubApi;
   listRepos(): Promise<InstallationRepo[]>;
-  readFile(repo: string, path: string, ref?: string): Promise<RepoFile>;
+  /** A file's text at a ref, clipped at `opts.maxChars` (the tool clip
+   *  `MAX_FILE_CHARS` when absent) with `truncated` saying so; a reader that
+   *  needs the whole document, a plan the runner parses units out of, passes
+   *  its own bound and refuses a `truncated` answer by name. */
+  readFile(repo: string, path: string, ref?: string, opts?: ReadFileOptions): Promise<RepoFile>;
   listTree(repo: string, path?: string, ref?: string): Promise<TreeEntry[]>;
   searchCode(query: string, repo?: string, limit?: number): Promise<CodeSearchHit[]>;
   listIssues(
@@ -287,7 +298,8 @@ export class RestGithubApi implements GithubApi {
     return out;
   }
 
-  async readFile(repo: string, path: string, ref?: string): Promise<RepoFile> {
+  async readFile(repo: string, path: string, ref?: string, opts?: ReadFileOptions): Promise<RepoFile> {
+    const maxChars = opts?.maxChars ?? MAX_FILE_CHARS;
     const q = ref ? `?ref=${encodeURIComponent(ref)}` : "";
     const res = await this.request("read", "GET", "contents", `/repos/${repo}/contents/${encodePath(path)}${q}`);
     const body = (await res.json()) as Record<string, unknown>;
@@ -309,13 +321,13 @@ export class RestGithubApi implements GithubApi {
         undefined,
         "application/vnd.github.raw+json",
       );
-      content = await readTextCapped(raw, MAX_FILE_CHARS + 1);
+      content = await readTextCapped(raw, maxChars + 1);
     } else content = String(body.content ?? "");
     if (content.includes("\u0000")) content = `(binary file, ${size} bytes — not shown)`;
-    const truncated = content.length > MAX_FILE_CHARS;
+    const truncated = content.length > maxChars;
     return {
       path,
-      content: truncated ? content.slice(0, MAX_FILE_CHARS) : content,
+      content: truncated ? content.slice(0, maxChars) : content,
       size,
       truncated,
       sha: String(body.sha ?? ""),
@@ -803,7 +815,8 @@ export class InMemoryGithubApi implements GithubApi {
     }));
   }
 
-  async readFile(repo: string, path: string, ref?: string): Promise<RepoFile> {
+  async readFile(repo: string, path: string, ref?: string, opts?: ReadFileOptions): Promise<RepoFile> {
+    const maxChars = opts?.maxChars ?? MAX_FILE_CHARS;
     const r = this.repo(repo);
     const clean = path.replace(/^\/+/, "");
     const content = r.files[clean];
@@ -812,10 +825,10 @@ export class InMemoryGithubApi implements GithubApi {
         throw new GithubApiError(400, `${path} is a directory — list it with github_tree`);
       throw new GithubApiError(404, `GitHub GET /repos/${repo}/contents/${clean} failed: HTTP 404 Not Found`);
     }
-    const truncated = content.length > MAX_FILE_CHARS;
+    const truncated = content.length > maxChars;
     return {
       path: clean,
-      content: truncated ? content.slice(0, MAX_FILE_CHARS) : content,
+      content: truncated ? content.slice(0, maxChars) : content,
       size: content.length,
       truncated,
       sha: "0".repeat(40),

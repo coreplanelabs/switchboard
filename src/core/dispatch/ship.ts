@@ -375,8 +375,8 @@ export async function runShipBranch(
     outcome = await root.span("dispatch.ship_hand_off", () =>
       handOffToCoordinator(
         {
-          readFile: (repo, path, ref) =>
-            githubCapabilityFor(deps, chatActorOf(deps.config, msg)).api.readFile(repo, path, ref),
+          readFile: (repo, path, ref, opts) =>
+            githubCapabilityFor(deps, chatActorOf(deps.config, msg)).api.readFile(repo, path, ref, opts),
           instances: deps.coordinatorInstances ?? new NullCoordinatorInstanceStore(),
           create: deps.createCoordinatorInstance ?? ((id) => createInstanceViaShim(shim(), id)),
           status: deps.fetchCoordinatorInstanceStatus ?? ((id) => fetchInstanceStatusViaShim(shim(), id)),
