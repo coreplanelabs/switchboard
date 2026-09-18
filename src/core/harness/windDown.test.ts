@@ -92,6 +92,43 @@ describe("windDownAnswer — the finale answer reads what the ending established
     );
   });
 
+  it("writeUpFailedOnTool: when the finale fell on a tool call the clause says a wait on a tool, not a failed model call", () => {
+    const reason = "aborted at the finale bound (3 minutes)";
+    // time budget — model call (no writeUpFailedOnTool)
+    expect(windDownAnswer({ kind: "time", text: "", writeUpFailed: reason }, 45)).toBe(
+      `Stopped at the 45-minute budget without finishing; the model call failed during the wind-down (${reason}), so no write-up came. Partial work may exist in the workspace — narrow the task and try again.`,
+    );
+    // time budget — tool wait (writeUpFailedOnTool: true)
+    expect(windDownAnswer({ kind: "time", text: "", writeUpFailed: reason, writeUpFailedOnTool: true }, 45)).toBe(
+      `Stopped at the 45-minute budget without finishing; the finale bound ended the wait on a tool call (${reason}), so no write-up came. Partial work may exist in the workspace — narrow the task and try again.`,
+    );
+    // turn guard — tool wait
+    expect(
+      windDownAnswer(
+        { kind: "turns", pace: "5 turns in 1 minute", text: "", writeUpFailed: reason, writeUpFailedOnTool: true },
+        45,
+      ),
+    ).toBe(
+      `Stopped after 5 turns in 1 minute — that pace looks like a loop — without finishing; the finale bound ended the wait on a tool call (${reason}), so no write-up came. Partial work may exist in the workspace — look for a retry loop in the run's events before trying again.`,
+    );
+    // soft stop — tool wait
+    expect(windDownAnswer({ kind: "soft", text: "", writeUpFailed: reason, writeUpFailedOnTool: true }, 45)).toBe(
+      `⏹ Stopped early by an operator (soft stop) before any findings were written; the finale bound ended the wait on a tool call (${reason}), so no write-up came. Partial work may exist in the workspace.`,
+    );
+    // windDownEndingOf carries writeUpFailedOnTool through
+    expect(windDownEndingOf({ kind: "time" }, "", reason, "finale", true)).toEqual({
+      kind: "time",
+      text: "",
+      writeUpFailed: reason,
+      writeUpFailedOnTool: true,
+    });
+    expect(windDownEndingOf({ kind: "time" }, "", reason, "finale")).toEqual({
+      kind: "time",
+      text: "",
+      writeUpFailed: reason,
+    });
+  });
+
   it("the turn guard, the soft stop and the unlabelled endings read the same facts with their own reason and advice", () => {
     const clean: EndingFacts = { workspace: { kind: "clean", branch: BRANCH, head: HEAD } };
     const clause = `The tree was clean and \`${BRANCH}\` held no unpushed commits — its head \`a1b2c3d\` is on the remote.`;

@@ -896,7 +896,12 @@ export class OpenCodeBridge {
   }
 
   doingNow(): DoingNow | undefined {
-    const open = [...this.openTools.values()].map((o) => o.tool);
+    // Once the loop-end cut has landed (`cutLanded`), the cut calls in `openTools`
+    // belong to the interrupted execution, not the write-up's — skip them so the
+    // write-up's hanging model call is not masked as a tool call.
+    const open = [...this.openTools.entries()]
+      .filter(([callId]) => !(this.cutLanded && this.cutCalls.has(callId)))
+      .map(([, o]) => o.tool);
     if (open.length > 0) return { tools: open };
     return this.stepOpen ? "model" : undefined;
   }
@@ -2288,9 +2293,12 @@ export async function driveOpenCode(
    *  execution the request did not start or a cut it did not make. */
   let windDownFailed: Error | undefined;
   let providerError: string | undefined;
-  /** The model call the wind-down waited on failed: a note, never the ending —
-   *  the write-up's answer names it where the findings would have been. */
+  /** The model call (or tool call) the wind-down waited on failed: a note,
+   *  never the ending — the write-up's answer names it where the findings would
+   *  have been. `writeUpFailedOnTool` true when the finale fell on a tool call,
+   *  not a model call, so the answer clause is worded as a wait on a tool. */
   let writeUpFailed: string | undefined;
+  let writeUpFailedOnTool: true | undefined;
   let settled = false;
   /** The interrupts the loop posted at a live execution, two facts recorded
    *  where each is decided: `cut`, the loop-end cut once its interrupt answered
@@ -2477,6 +2485,14 @@ export async function driveOpenCode(
       // the loop does next — recorded for the exit's words (`interrupts.cut`),
       // the calls it met marked — even when the loop has ended, or is about to
       // on a stop, and no write-up follows: the same cut, the same teardown.
+      // Capture what the interrupt met before marking the cut as landed: the
+      // calls open NOW, the ones the interrupt met (the tool open at the
+      // decision may have completed in the round-trip and another step's tool
+      // begun). `doingNow` filters landed-cut calls once `cutInterruptLanded`
+      // is called, so the snapshot must be taken before that; `cut` (never
+      // undefined here — the steer path returned above it) backstops a
+      // round-trip that closed every call.
+      const atInterruptLanding = bridge.doingNow() ?? cut;
       if (answer === "interrupted") {
         interrupts.cut = true;
         bridge.cutInterruptLanded();
@@ -2508,13 +2524,13 @@ export async function driveOpenCode(
         return;
       }
       // The interrupt has landed on a live execution: the cut is a fact — noted
-      // for the calls open NOW, the ones the interrupt met (the tool open at
-      // the decision may have completed in the round-trip and another step's
-      // tool begun) — and what is still open is its cut; the interrupted
+      // for the calls open at the landing, snapshotted before `cutInterruptLanded`
+      // (`atInterruptLanding`), so the landed-cut filter `doingNow` applies
+      // after this does not lose the call the interrupt met; the interrupted
       // execution's records — its tail — are an earlier execution's from here;
       // the write-up's own start makes the loop's records its own again
       // (`executionStartedFor`).
-      note("tool_cut", toolCutNote(doingWords(bridge.doingNow() ?? cut)));
+      note("tool_cut", toolCutNote(doingWords(atInterruptLanding)));
       executionOwned = false;
       const promptSeq = conn.writes ? ++conn.writes.seq : 0;
       writeUpPosted = true;
@@ -2656,6 +2672,7 @@ export async function driveOpenCode(
         run.onProgress?.(finaleTimedOutNote());
         const doing = bridge.doingNow();
         const onTool = doing !== undefined && doing !== "model";
+        if (cutInFlight || onTool) writeUpFailedOnTool = true;
         note(
           "harness_error",
           cutInFlight || onTool ? finaleWaitNote(reason, doingWords(doing), cutInFlight) : windDownFailureNote(reason),
@@ -3327,8 +3344,15 @@ export async function driveOpenCode(
   // post-steps have run (harness-pi item 6); the answer here is the same words
   // with no facts. No label when the wind-down's instruction never reached the
   // model, but what ended the wait is still said: a model call that failed
-  // under it, or the finale bound ending a wait on an interrupt never answered.
-  const ending = windDownEndingOf(writeUp, text, writeUpFailed, neverPostedEnd === "finale" ? "finale" : "failed");
+  // under it, or the finale bound ending a wait — on an interrupt never
+  // answered, or on a tool call the write-up's own execution made.
+  const ending = windDownEndingOf(
+    writeUp,
+    text,
+    writeUpFailed,
+    neverPostedEnd === "finale" ? "finale" : "failed",
+    writeUpFailedOnTool,
+  );
   const answer = ending ? windDownAnswer(ending, run.agent.maxMinutes) : unlabelledAnswer(text, undefined);
   return { answer, ...(ending ? { ending } : {}), remainingMs: remaining, hardStopped: false, ...handOver() };
 }
