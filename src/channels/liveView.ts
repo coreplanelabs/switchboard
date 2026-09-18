@@ -26,10 +26,9 @@ import type { ScheduleDef } from "../core/schedules.js";
 import type { ScheduleStore } from "../core/scheduleStore.js";
 import { STORE_UNAVAILABLE_BANNER } from "../core/commandRegistry.js";
 import { buildScheduledRows, type FiringsState } from "./scheduledPanel.js";
-import type { ShellRenderer } from "./webShell.js";
+import type { PageSender } from "./webShell.js";
 import { holdsAll } from "../core/authz/viewAs.js";
 import { peopleOf, refuseWhileViewing } from "./viewAs.js";
-import { WEB_HTML_HEADERS } from "./webShell.js";
 import type {
   RunIndexRowSeed,
   RunsIndexSeed,
@@ -223,8 +222,8 @@ export type HistoryReadAudit =
   | { route: HistoryReadRoute; identity: string; denied: string };
 
 export interface LiveViewDeps {
-  /** The bound web-app shell (webShell.ts): title + seed → the HTML document. */
-  shell: ShellRenderer;
+  /** The bound page sender (webShell.ts): the shell or the seed, by what the request accepts. */
+  page: PageSender;
   /** Every run read and the tokenless stop go through the service. */
   service: RunsService;
   /** The registry's index face: the live rows (with tokens, for their hrefs) and
@@ -483,14 +482,11 @@ export function createLiveViewHandler(
   /** The run 404 as a page (item 19): one non-revealing message for an unknown
    *  id, an expired one, a wrong token, a deny — and a unit the viewer may not
    *  see (item 28) — with the way back. */
-  const notFoundPage = (res: ServerResponse, viewer: Actor): void => {
-    res.writeHead(404, WEB_HTML_HEADERS);
-    res.end(
-      deps.shell(viewer, "Run not found", {
-        page: "runNotFound",
-        retentionDays: deps.retention ? deps.retention.retentionDays : null,
-      }),
-    );
+  const notFoundPage = (req: HttpRequest, res: ServerResponse, viewer: Actor): void => {
+    deps.page(req, res, 404, viewer, "Run not found", {
+      page: "runNotFound",
+      retentionDays: deps.retention ? deps.retention.retentionDays : null,
+    });
   };
   /** `?all=1`: one full page of the service's live ∪ finished ∪ persisted rows
    *  the viewer may see (the service's cap, never its 50-row default), with the
@@ -589,8 +585,7 @@ export function createLiveViewHandler(
           ...(page.olderHref ? { olderHref: page.olderHref } : {}),
           ...(page.olderThan !== undefined ? { olderThan: page.olderThan } : {}),
         };
-        res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(deps.shell(ctx.actor, title, seed));
+        deps.page(req, res, 200, ctx.actor, title, seed);
       };
       if (!all) {
         // The default view is the registry plus the ledger's rows live under
@@ -616,8 +611,7 @@ export function createLiveViewHandler(
     if (route.kind === "scheduled") {
       const scheduled = deps.scheduled;
       if (!scheduled) {
-        res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(deps.shell(ctx.actor, "Scheduled runs", { page: "scheduled", now: now(), rows: null }));
+        deps.page(req, res, 200, ctx.actor, "Scheduled runs", { page: "scheduled", now: now(), rows: null });
         return true;
       }
       const visibleTo = readableRuns(ctx.actor);
@@ -630,8 +624,7 @@ export function createLiveViewHandler(
           rows: buildScheduledRows(scheduled.schedules, firings, live, t),
           ...(firings.ok ? {} : { firingsUnavailable: firings.reason }),
         };
-        res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(deps.shell(ctx.actor, "Scheduled runs", seed));
+        deps.page(req, res, 200, ctx.actor, "Scheduled runs", seed);
       };
       if (!scheduled.store) {
         render({ ok: false, reason: NO_STORE_REASON });
@@ -655,7 +648,7 @@ export function createLiveViewHandler(
       run(res, async () => {
         const found = await service.listUnitRuns(route.key, visibleTo);
         if (!found.ok) {
-          notFoundPage(res, ctx.actor);
+          notFoundPage(req, res, ctx.actor);
           return;
         }
         // The pull request's findings ledger (agent-ship item 18), under the
@@ -675,8 +668,7 @@ export function createLiveViewHandler(
           now: now(),
           retentionDays: deps.retention ? deps.retention.retentionDays : null,
         };
-        res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(deps.shell(ctx.actor, `Unit ${found.value.id}`, seed));
+        deps.page(req, res, 200, ctx.actor, `Unit ${found.value.id}`, seed);
       });
       return true;
     }
@@ -701,29 +693,26 @@ export function createLiveViewHandler(
             const { token: own, ...row } = s;
             return s.finished ? row : { ...row, token: own };
           });
-        res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(
-          deps.shell(ctx.actor, "Live run", {
-            page: "run",
-            mode: "live",
-            id: route.id,
-            ...(() => {
-              const key = index.listActive().find((s) => s.id === route.id)?.threadKey;
-              return key !== undefined ? { threadKey: key } : {};
-            })(),
-            ...(children.length > 0 ? { children } : {}),
-            // Stop control: same token, POST-only; `&mode=` is appended client-side.
-            eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
-            stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}`,
-            // The files' URL base with the same token (item 26): the page appends each key.
-            ...artifactsSeed(route.id, token),
-            // The stamps the header's one duration reads (docs/reference/specs/tracing.md).
-            serverNow: now(),
-            startedAt: snap?.startedAt ?? now(),
-            ...(snap?.receivedAt !== undefined ? { receivedAt: snap.receivedAt } : {}),
-            ...(snap?.finishedAt !== undefined ? { finishedAt: snap.finishedAt } : {}),
-          }),
-        );
+        deps.page(req, res, 200, ctx.actor, "Live run", {
+          page: "run",
+          mode: "live",
+          id: route.id,
+          ...(() => {
+            const key = index.listActive().find((s) => s.id === route.id)?.threadKey;
+            return key !== undefined ? { threadKey: key } : {};
+          })(),
+          ...(children.length > 0 ? { children } : {}),
+          // Stop control: same token, POST-only; `&mode=` is appended client-side.
+          eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
+          stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}`,
+          // The files' URL base with the same token (item 26): the page appends each key.
+          ...artifactsSeed(route.id, token),
+          // The stamps the header's one duration reads (docs/reference/specs/tracing.md).
+          serverNow: now(),
+          startedAt: snap?.startedAt ?? now(),
+          ...(snap?.receivedAt !== undefined ? { receivedAt: snap.receivedAt } : {}),
+          ...(snap?.finishedAt !== undefined ? { finishedAt: snap.finishedAt } : {}),
+        });
         return true;
       }
       // One of the run's files (item 26): the token that opens the page opens
@@ -865,7 +854,7 @@ export function createLiveViewHandler(
         } else if (route.kind === "page") {
           // A person landed here: the same 404 (existence never revealed), as a
           // page with the way back (item 19). Machine routes keep the text body.
-          notFoundPage(res, ctx.actor);
+          notFoundPage(req, res, ctx.actor);
         } else text(res, 404, NOT_FOUND);
         return;
       }
@@ -909,37 +898,34 @@ export function createLiveViewHandler(
             ? { unit: ledger.value.unit, rows: ledger.value.findings.length }
             : undefined;
         const tokens = liveTokens();
-        res.writeHead(200, WEB_HTML_HEADERS);
-        res.end(
-          deps.shell(ctx.actor, "Run", {
-            page: "run",
-            mode: "history",
-            id: route.id,
-            ...(view.threadKey !== undefined ? { threadKey: view.threadKey } : {}),
-            ...(children.length > 0 ? { children: children.map((c) => withLiveToken(c, tokens)) } : {}),
-            ...(units.length > 0 ? { units } : {}),
-            ...(findingsLedger !== undefined ? { findingsLedger } : {}),
-            // The stored stream with the truncation made visible (AE11): the
-            // seed IS the stream on a history page — normalized first on a
-            // span-schema record, so a pair whose twin the budget dropped gets
-            // it back.
-            events: withOmittedMarkers(timed ? normalizeSpans(events) : events, view.eventCount),
-            ...(timed ? {} : { untimed: true as const }),
-            ...(view.status ? { status: view.status } : {}),
-            eventCount: view.eventCount,
-            startedAt: view.startedAt,
-            ...(view.receivedAt !== undefined ? { receivedAt: view.receivedAt } : {}),
-            ...(view.finishedAt !== undefined ? { finishedAt: view.finishedAt } : {}),
-            ...(view.sealedAt !== undefined ? { sealedAt: view.sealedAt } : {}),
-            ...(view.replyOk !== undefined ? { replyOk: view.replyOk } : {}),
-            ...(runDurationMs(view) !== undefined ? { durationMs: runDurationMs(view) } : {}),
-            // The run's dollars beside its duration (costs.md item 4c); a record without usage has none.
-            ...(view.cost !== undefined ? { cost: view.cost } : {}),
-            ...(view.truncated !== undefined ? { truncated: view.truncated } : {}),
-            // Tokenless: the files are read under the same decision as this page (item 26).
-            ...artifactsSeed(route.id),
-          }),
-        );
+        deps.page(req, res, 200, ctx.actor, "Run", {
+          page: "run",
+          mode: "history",
+          id: route.id,
+          ...(view.threadKey !== undefined ? { threadKey: view.threadKey } : {}),
+          ...(children.length > 0 ? { children: children.map((c) => withLiveToken(c, tokens)) } : {}),
+          ...(units.length > 0 ? { units } : {}),
+          ...(findingsLedger !== undefined ? { findingsLedger } : {}),
+          // The stored stream with the truncation made visible (AE11): the
+          // seed IS the stream on a history page — normalized first on a
+          // span-schema record, so a pair whose twin the budget dropped gets
+          // it back.
+          events: withOmittedMarkers(timed ? normalizeSpans(events) : events, view.eventCount),
+          ...(timed ? {} : { untimed: true as const }),
+          ...(view.status ? { status: view.status } : {}),
+          eventCount: view.eventCount,
+          startedAt: view.startedAt,
+          ...(view.receivedAt !== undefined ? { receivedAt: view.receivedAt } : {}),
+          ...(view.finishedAt !== undefined ? { finishedAt: view.finishedAt } : {}),
+          ...(view.sealedAt !== undefined ? { sealedAt: view.sealedAt } : {}),
+          ...(view.replyOk !== undefined ? { replyOk: view.replyOk } : {}),
+          ...(runDurationMs(view) !== undefined ? { durationMs: runDurationMs(view) } : {}),
+          // The run's dollars beside its duration (costs.md item 4c); a record without usage has none.
+          ...(view.cost !== undefined ? { cost: view.cost } : {}),
+          ...(view.truncated !== undefined ? { truncated: view.truncated } : {}),
+          // Tokenless: the files are read under the same decision as this page (item 26).
+          ...artifactsSeed(route.id),
+        });
         return;
       }
       serveHistoryEvents(view.events ?? [], view.eventCount, nodeSseSink(req, res));

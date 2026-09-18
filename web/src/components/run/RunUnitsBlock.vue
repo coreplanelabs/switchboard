@@ -39,15 +39,15 @@ function standing(u: UnitFacts): string {
         class="unit flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 border-t border-default py-1.5 first:border-t-0"
         :data-unit="u.unit"
       >
-        <a
+        <RouterLink
           class="key shrink-0 rounded border border-accented px-1.5 font-mono text-[0.72rem] font-medium text-toned no-underline hover:border-primary hover:text-primary"
-          :href="`/runs/unit/${encodeURIComponent(u.unit)}`"
-          >{{ u.id }}</a
+          :to="`/runs/unit/${encodeURIComponent(u.unit)}`"
+          >{{ u.id }}</RouterLink
         >
-        <a
+        <RouterLink
           class="title min-w-0 flex-1 truncate text-sm text-highlighted no-underline hover:underline"
-          :href="`/runs/unit/${encodeURIComponent(u.unit)}`"
-          >{{ u.title ?? u.branch }}</a
+          :to="`/runs/unit/${encodeURIComponent(u.unit)}`"
+          >{{ u.title ?? u.branch }}</RouterLink
         >
         <span
           class="standing shrink-0 rounded border px-1.5 font-mono text-[0.7rem]"

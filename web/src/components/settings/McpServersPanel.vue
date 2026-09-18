@@ -146,7 +146,7 @@ const STATE_LABEL: Record<McpServerView["state"], string> = {
   static: "pinned in config.yaml",
 };
 
-/** `?channel=` is part of the page's URL: another channel is another page load. */
+/** `?channel=` is part of the page's URL: another channel is another address, navigated to. */
 function openPicked(id: string): void {
   if (id === (props.mcps.channel ?? "")) return;
   browser.navigate(id ? `/settings/mcps?channel=${encodeURIComponent(id)}` : "/settings/mcps");

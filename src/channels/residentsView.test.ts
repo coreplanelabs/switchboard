@@ -13,7 +13,7 @@ import {
   type ResidentsViewContext,
   type ResidentsViewDeps,
 } from "./residentsView.js";
-import { makeShellRenderer } from "./webShell.js";
+import { makePageSender } from "./webShell.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { recordingSink } from "../core/testing/recordingSink.js";
 import {
@@ -62,7 +62,7 @@ const DOWN = {
 
 const LISTING: ResidentListing = { cap: 5, count: 2, residents: [WARM, DOWN] };
 
-const shell = makeShellRenderer({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
+const page = makePageSender({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
 
 /** The viewer every call below reads as unless a test says otherwise: a fleet
  *  admin resolved through the real Access resolver (the path index.ts takes). */
@@ -77,7 +77,7 @@ function handler(
   runs: ResidentsViewDeps["runs"] = new RunRegistry(),
   now?: () => number,
 ) {
-  return createResidentsViewHandler({ client, shell, runs, ...(trace ? { trace } : {}), ...(now ? { now } : {}) });
+  return createResidentsViewHandler({ client, page, runs, ...(trace ? { trace } : {}), ...(now ? { now } : {}) });
 }
 
 function seedOf(html: string): ResidentsIndexSeed | ResidentDetailSeed {

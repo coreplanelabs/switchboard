@@ -12,8 +12,9 @@ import { compactAge, filterRows } from "../../lib/homeModel";
 // full read in the row's tooltip (ThreadTip) after a short hover. Bounded by
 // the seed (the bot caps it), so there is nothing to page: the way to
 // everything is the `All runs` link at the foot. A filter (⌘K) narrows the
-// rows by a fuzzy match; the new-thread CTA carries its shortcut (⇧⌘O). A full
-// page load per conversation, like every section.
+// rows by a fuzzy match; the new-thread CTA carries its shortcut (⇧⌘O). Every
+// row is a RouterLink: a conversation is an address whose seed the router
+// loads, like every section.
 
 /** The hover before the tooltip: long enough that a pointer crossing the
  *  rail opens nothing, short enough that a rest on a row is answered. */
@@ -47,9 +48,9 @@ defineExpose({ focusFilter });
 <template>
   <nav class="rail flex flex-col gap-1 text-[0.8rem]" aria-label="Recent threads">
     <!-- The CTA: the one solid control on the rail, with its shortcut in view. -->
-    <a
+    <RouterLink
       class="new group mb-3 flex items-center gap-2 rounded-xl bg-inverted px-3 py-2 font-medium text-inverted no-underline transition-[transform,opacity] duration-150 ease-out hover:-translate-y-px hover:opacity-90 active:translate-y-0 active:opacity-100"
-      href="/threads"
+      to="/threads"
       :aria-current="current === '' ? 'page' : undefined"
       data-testid="new-thread"
     >
@@ -64,7 +65,7 @@ defineExpose({ focusFilter });
         ><kbd class="rounded border border-current/30 px-1">⌘</kbd
         ><kbd class="rounded border border-current/30 px-1">O</kbd>
       </span>
-    </a>
+    </RouterLink>
 
     <!-- The filter: a hairline field that brightens on focus, ⌘K away. -->
     <label
@@ -98,9 +99,9 @@ defineExpose({ focusFilter });
           <template #content>
             <ThreadTip :row="row" :now="now" />
           </template>
-          <a
+          <RouterLink
             class="row group relative flex items-baseline gap-2 rounded-lg px-3 py-1.5 no-underline transition-colors duration-150 ease-out hover:bg-(--ui-bg-muted) aria-[current=page]:bg-(--ui-bg-accented)"
-            :href="`/threads/${encodeURIComponent(row.id)}`"
+            :to="`/threads/${encodeURIComponent(row.id)}`"
             :aria-current="row.id === current ? 'page' : undefined"
             :data-surface="row.surface"
           >
@@ -121,14 +122,14 @@ defineExpose({ focusFilter });
             <span class="when shrink-0 font-mono text-[0.7rem] tabular-nums text-dimmed">{{
               compactAge(row.lastAt, now)
             }}</span>
-          </a>
+          </RouterLink>
         </UTooltip>
       </div>
     </TransitionGroup>
 
-    <a
+    <RouterLink
       class="all mt-3 flex items-center gap-1.5 px-3 py-1 text-xs font-medium text-muted no-underline transition-colors duration-150 ease-out hover:text-highlighted"
-      href="/runs"
+      to="/runs"
       data-testid="all-runs"
     >
       All runs
@@ -137,13 +138,14 @@ defineExpose({ focusFilter });
         class="size-3 transition-transform duration-150 ease-out group-hover:translate-x-0.5"
         aria-hidden="true"
       />
-    </a>
+    </RouterLink>
     <p class="retention px-3 pt-1 text-[0.7rem] leading-relaxed text-dimmed">{{ retention }}</p>
     <!-- The one sentence on how the two pages relate (web-chat.md item 7): a thread is the
          conversation, a run is one message's work, and Runs is every run on every thread. -->
     <p class="model px-3 pt-2 text-[0.7rem] leading-relaxed text-dimmed" data-testid="what-is-a-thread">
       A thread is a conversation; each message you send is a run.
-      <a class="text-muted hover:text-highlighted" href="/runs">Runs</a> lists every run across everyone's threads.
+      <RouterLink class="text-muted hover:text-highlighted" to="/runs">Runs</RouterLink> lists every run across
+      everyone's threads.
     </p>
   </nav>
 </template>

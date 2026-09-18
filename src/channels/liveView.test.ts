@@ -14,7 +14,7 @@ import {
   type LiveViewDeps,
   type SseSink,
 } from "./liveView.js";
-import { makeShellRenderer, type ShellRenderer } from "./webShell.js";
+import { makePageSender, type PageSender } from "./webShell.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import {
   SEED_ELEMENT_ID,
@@ -62,7 +62,7 @@ const result = (ok: boolean, summary: string): RunEvent => ({ type: "tool_result
 const PRELUDE = "retry: 3000\n\n";
 
 /** Fixed assets so shell output is deterministic. */
-const shell: ShellRenderer = makeShellRenderer(
+const page: PageSender = makePageSender(
   { js: "/assets/main-test.js", css: ["/assets/main-test.css"] },
   ALL_CAPABILITIES,
 );
@@ -125,7 +125,7 @@ function adminByDefault(
 function liveOnlyHandler(registry: RunRegistry, over: Partial<Parameters<typeof createLiveViewHandler>[0]> = {}) {
   return adminByDefault(
     createLiveViewHandler({
-      shell,
+      page,
       service: createRunsService({ registry, store: null }),
       index: registry,
       retention: null,
@@ -509,7 +509,7 @@ describe("scheduled tab — GET /runs/scheduled (item 18)", () => {
   function panelHandler(registry: RunRegistry, options: Pick<LiveViewDeps, "scheduled">) {
     return adminByDefault(
       createLiveViewHandler({
-        shell,
+        page,
         service: createRunsService({ registry, store: null }),
         index: registry,
         retention: null,
@@ -688,6 +688,7 @@ describe("createLiveViewHandler (node:http)", () => {
     const seed = runSeedOf(t.body());
     expect(seed).toEqual({
       page: "run",
+      title: "Live run",
       mode: "live",
       id,
       eventsUrl: `/runs/${id}/events?t=${token}`,
@@ -784,6 +785,32 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(seed.rows).toHaveLength(1);
     expect(seed.rows[0]).toMatchObject({ id, token, label: "coding · owner/repo", finished: false });
     expect(t.body()).toContain("<title>(1) Live runs</title>"); // item 21: the tab carries the live count
+  });
+
+  // Feature: live-view.md item 31 — the same URL answers the seed alone to the web app's own request.
+  it("answers the index seed as JSON, tokens and title included, to a request that accepts application/json — and the run 404 as a 404 seed", async () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create("coding · owner/repo");
+    const handler = liveOnlyHandler(reg);
+    const t = fakeReqRes("GET", "/runs", { accept: "application/json" });
+    expect(handler(t.req, t.res)).toBe(true);
+    await t.finished;
+    expect(t.status).toBe(200);
+    expect(t.headers["content-type"]).toBe("application/json; charset=utf-8");
+    expect(t.headers["cache-control"]).toBe("no-store");
+    expect(t.headers.vary).toBe("accept");
+    expect(t.body()).not.toContain("<");
+    const seed = JSON.parse(t.body()) as WebSeed & RunsIndexSeed;
+    expect(seed.page).toBe("runs");
+    expect(seed.title).toBe("(1) Live runs");
+    expect(seed.capabilities).toEqual(ALL_CAPABILITIES);
+    expect(seed.rows[0]).toMatchObject({ id, token });
+    const missing = fakeReqRes("GET", "/runs/nope?t=bad", { accept: "application/json" });
+    expect(handler(missing.req, missing.res)).toBe(true);
+    await missing.finished;
+    expect(missing.status).toBe(404);
+    expect(missing.headers["content-type"]).toBe("application/json; charset=utf-8");
+    expect(JSON.parse(missing.body())).toMatchObject({ page: "runNotFound", title: "Run not found" });
   });
 
   // Feature: docs/decisions/0053 — the picker is offered to a session holding `all`, to nobody else.
@@ -1290,7 +1317,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
     const service = createRunsService({ registry, store, ...(opts.ledger ? { ledger: opts.ledger } : {}) });
     const handler = adminByDefault(
       createLiveViewHandler({
-        shell,
+        page,
         service,
         index: registry,
         now, // the seeds carry `serverNow`: two renders compared byte-for-byte need one clock
@@ -1664,7 +1691,12 @@ describe("live view on RunsService: history pages + index toggle", () => {
         if (/\/(events|friction)$/.test(url)) expect(t.body()).toBe("run not found");
         else {
           const seed = seedOf(t.body()) as RunNotFoundSeed;
-          expect(seed).toEqual({ page: "runNotFound", retentionDays: 30, capabilities: ALL_CAPABILITIES }); // nothing echoed from the request — a static seed
+          expect(seed).toEqual({
+            page: "runNotFound",
+            title: "Run not found",
+            retentionDays: 30,
+            capabilities: ALL_CAPABILITIES,
+          }); // nothing echoed from the request — a static seed
           expect(t.body()).not.toContain("nope");
           expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
           pageBodies.add(t.body());
@@ -1684,7 +1716,12 @@ describe("live view on RunsService: history pages + index toggle", () => {
       await done(t);
       expect(t.status).toBe(404);
       const seed = seedOf(t.body()) as RunNotFoundSeed;
-      expect(seed).toEqual({ page: "runNotFound", retentionDays: 30, capabilities: ALL_CAPABILITIES });
+      expect(seed).toEqual({
+        page: "runNotFound",
+        title: "Run not found",
+        retentionDays: 30,
+        capabilities: ALL_CAPABILITIES,
+      });
     });
   });
 
@@ -2057,7 +2094,12 @@ describe("live view on RunsService: history pages + index toggle", () => {
       const unknown = await request(h, "/runs/nope", alice);
       expect(denied.status).toBe(404);
       expect(denied.body()).toBe(unknown.body()); // byte-identical: existence never revealed
-      expect(seedOf(denied.body())).toEqual({ page: "runNotFound", retentionDays: 30, capabilities: ALL_CAPABILITIES });
+      expect(seedOf(denied.body())).toEqual({
+        page: "runNotFound",
+        title: "Run not found",
+        retentionDays: 30,
+        capabilities: ALL_CAPABILITIES,
+      });
       for (const url of ["/runs/priv/events", "/runs/priv/friction"]) {
         const t = await request(h, url, alice);
         expect([url, t.status, t.body()]).toEqual([url, 404, "run not found"]);
@@ -2251,7 +2293,7 @@ describe("artifact route (item 26)", () => {
     const artifacts = new InMemoryArtifactStore({ bucket: "test" });
     const handler = adminByDefault(
       createLiveViewHandler({
-        shell,
+        page,
         service,
         index: registry,
         retention: { retentionDays: 30 },
@@ -2688,7 +2730,7 @@ describe("the unit page and what a run is the parent of (item 28)", () => {
     await store.put(record("r1", { threadKey: "slack:C1:u1r", agent: "review", startedAt: T0 + 12_000 }));
     const service = createRunsService({ registry, store, ...(opts.units === false ? {} : { units: instances }) });
     const handler = adminByDefault(
-      createLiveViewHandler({ shell, service, index: registry, now: () => NOW, retention: { retentionDays: 30 } }),
+      createLiveViewHandler({ page, service, index: registry, now: () => NOW, retention: { retentionDays: 30 } }),
     );
     const get = async (url: string, ctx?: LiveViewContext) => {
       const t = fakeReqRes("GET", url);

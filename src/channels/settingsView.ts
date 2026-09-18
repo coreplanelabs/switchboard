@@ -10,8 +10,7 @@ import { NO_NAMES, namesOf, type NameDirectory } from "../core/names.js";
 import type { McpServerView } from "../mcp/registry.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import type { ChannelScopeView, ViewerSettingsView, SettingsSeed, SettingsTab, SettingsVocabulary } from "./webSeed.js";
-import type { ShellRenderer } from "./webShell.js";
-import { WEB_HTML_HEADERS } from "./webShell.js";
+import type { PageSender } from "./webShell.js";
 
 // The settings page (docs/decisions/0041, docs/reference/specs/settings-page.md):
 // `GET /settings` and its three tabs, behind the dashboard gate like every
@@ -130,7 +129,7 @@ export function homeTab(caps: Capabilities): SettingsTab {
 
 export function createSettingsViewHandler(
   deps: SettingsViewDeps,
-  shell: ShellRenderer,
+  page: PageSender,
 ): (req: HttpRequest, res: ServerResponse, ctx: SettingsViewContext) => boolean {
   const canWrite = (caller: Caller, action: "mcp:write" | "config:write", kind: "org" | "channel", id?: string) =>
     authorize(
@@ -245,9 +244,11 @@ export function createSettingsViewHandler(
     const tab: SettingsTab = route.tab === "home" ? homeTab(deps.capabilities) : route.tab;
     const failed = (err: unknown) => {
       const reason = (err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX);
-      // A failure after the 200 was written (the shell threw mid-render) can
-      // no longer change the status: close the response rather than throw a
-      // second writeHead inside the catch and leave the rejection unhandled.
+      // A failure after the 200 was written (the response itself failing
+      // mid-write) can no longer change the status: close the response rather
+      // than throw a second writeHead inside the catch and leave the rejection
+      // unhandled. The page sender builds its body before the head, so a
+      // throwing sender lands below as one 502.
       if (res.headersSent) {
         console.error(`[settings] render failed after the head was sent: ${reason}`);
         res.end();
@@ -255,10 +256,7 @@ export function createSettingsViewHandler(
       }
       plain(res, 502, `settings unavailable: ${reason}`);
     };
-    const render = (viewer: Actor, seed: SettingsSeed) => {
-      res.writeHead(200, WEB_HTML_HEADERS);
-      res.end(shell(viewer, "Settings", seed));
-    };
+    const render = (viewer: Actor, seed: SettingsSeed) => page(req, res, 200, viewer, "Settings", seed);
     const channel = "channel" in route ? route.channel : undefined;
     // The caller is resolved once per request, linked to its person when the
     // session's email names one (record 0042) — the same resolution `/api` makes.

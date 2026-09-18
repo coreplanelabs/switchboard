@@ -35,7 +35,7 @@ import {
   WebIO,
 } from "./web.js";
 import { SEED_ELEMENT_ID, type HomeSeed, type RunNotFoundSeed } from "./webSeed.js";
-import { makeShellRenderer } from "./webShell.js";
+import { makePageSender } from "./webShell.js";
 
 // Feature: docs/reference/specs/web-chat.md item 11 (record 0043) — the web
 // channel adapter: `POST /threads/<id>/send` dispatches the body as the
@@ -120,7 +120,7 @@ function setup(opts: { dispatch?: DispatchFn; now?: number; channelNames?: Recor
     service,
     registry,
     commands: { list: () => COMMANDS },
-    shell: makeShellRenderer({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES),
+    page: makePageSender({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES),
     capabilities: ALL_CAPABILITIES,
     retention: { retentionDays: 30 },
     publicBaseUrl: "https://bot.example.test",

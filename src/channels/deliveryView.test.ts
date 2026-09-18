@@ -16,7 +16,7 @@ import { createRunsService } from "../core/runsService.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunRecord } from "../core/runRecord.js";
 import { createDeliveryViewHandler, DELIVERY_NO_REPOS_MESSAGE, parseDeliveryRoute } from "./deliveryView.js";
-import { makeShellRenderer } from "./webShell.js";
+import { makePageSender } from "./webShell.js";
 import { SEED_ELEMENT_ID, type DeliverySeed } from "./webSeed.js";
 
 // The delivery page handler: routing, live-per-request reads, the viewer's
@@ -55,7 +55,7 @@ const report = (repo = "acme/api", runs: RunFact[] = []): DeliveryReport =>
     ],
   });
 
-const shell = makeShellRenderer({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
+const page = makePageSender({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES);
 
 function seedOf(html: string): DeliverySeed {
   const m = new RegExp(`<script type="application/json" id="${SEED_ELEMENT_ID}">([\\s\\S]*?)</script>`).exec(html);
@@ -136,19 +136,19 @@ describe("parseDeliveryRoute", () => {
 
 describe("createDeliveryViewHandler", () => {
   it("ignores paths it does not own", () => {
-    const h = createDeliveryViewHandler({ service: fakeService(() => Promise.resolve(report())) }, shell);
+    const h = createDeliveryViewHandler({ service: fakeService(() => Promise.resolve(report())) }, page);
     const io = fakeReqRes("GET", "/runs");
     expect(h(io.req, io.res, ctx(viewer))).toBe(false);
     expect(io.status).toBe(0);
   });
 
   it("503s with the reason when the process has no GitHub (the Null Object), and with the config to set when no repository is named", () => {
-    const off = createDeliveryViewHandler({ service: new NullDeliveryService() }, shell);
+    const off = createDeliveryViewHandler({ service: new NullDeliveryService() }, page);
     const a = fakeReqRes("GET", "/delivery");
     expect(off(a.req, a.res, ctx(viewer))).toBe(true);
     expect(a.status).toBe(503);
     expect(a.body()).toBe(DELIVERY_OFF_MESSAGE);
-    const none = createDeliveryViewHandler({ service: fakeService(() => Promise.resolve(report()), []) }, shell);
+    const none = createDeliveryViewHandler({ service: fakeService(() => Promise.resolve(report()), []) }, page);
     const b = fakeReqRes("GET", "/delivery/acme/api");
     expect(none(b.req, b.res, ctx(viewer))).toBe(true);
     expect(b.status).toBe(503);
@@ -157,7 +157,7 @@ describe("createDeliveryViewHandler", () => {
   });
 
   it("405s non-GET", () => {
-    const h = createDeliveryViewHandler({ service: fakeService(() => Promise.resolve(report())) }, shell);
+    const h = createDeliveryViewHandler({ service: fakeService(() => Promise.resolve(report())) }, page);
     const io = fakeReqRes("POST", "/delivery");
     expect(h(io.req, io.res, ctx(viewer))).toBe(true);
     expect(io.status).toBe(405);
@@ -179,7 +179,7 @@ describe("createDeliveryViewHandler", () => {
           ["acme/api", "acme/web"],
         ),
       },
-      shell,
+      page,
     );
     for (let i = 0; i < 2; i++) {
       const io = fakeReqRes("GET", "/delivery");
@@ -213,7 +213,7 @@ describe("createDeliveryViewHandler", () => {
           ["acme/api", "acme/web"],
         ),
       },
-      shell,
+      page,
     );
     const w = fakeReqRes("GET", "/delivery/acme/web?weeks=2");
     h(w.req, w.res, ctx(viewer));
@@ -273,7 +273,7 @@ describe("createDeliveryViewHandler", () => {
         }),
         runs,
       },
-      shell,
+      page,
     );
     const asViewer = fakeReqRes("GET", "/delivery");
     h(asViewer.req, asViewer.res, ctx(viewer));
@@ -299,7 +299,7 @@ describe("createDeliveryViewHandler", () => {
           }),
         ),
       },
-      shell,
+      page,
     );
     const io = fakeReqRes("GET", "/delivery/acme/api.json");
     h(io.req, io.res, ctx(viewer));
@@ -316,7 +316,7 @@ describe("createDeliveryViewHandler", () => {
   });
 
   it("a renderer that throws once the report is in hand is one 502 with the reason — the headers are written once, never a 200 and then a 502", async () => {
-    const exploding: typeof shell = () => {
+    const exploding: typeof page = () => {
       throw new Error("template exploded");
     };
     const h = createDeliveryViewHandler({ service: fakeService(() => Promise.resolve(report())) }, exploding);
@@ -335,7 +335,7 @@ describe("createDeliveryViewHandler", () => {
           Promise.reject(new Error("GitHub GET pulls failed: HTTP 403 denied " + "x".repeat(2000))),
         ),
       },
-      shell,
+      page,
     );
     const io = fakeReqRes("GET", "/delivery");
     h(io.req, io.res, ctx(viewer));

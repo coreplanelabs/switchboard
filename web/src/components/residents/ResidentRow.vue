@@ -206,12 +206,12 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
           :title="factsTip || undefined"
           >{{ facts }}</span
         >
-        <a
+        <RouterLink
           v-if="href"
           class="detail ml-auto shrink-0 text-xs text-muted no-underline hover:text-highlighted hover:underline"
-          :href="href"
+          :to="href"
           @click.stop
-          >detail ↗</a
+          >detail ↗</RouterLink
         >
         <span v-if="live.reason" class="basis-full pl-[1.9rem] text-xs text-warn">{{ live.reason }}</span>
       </summary>
@@ -309,12 +309,12 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
                 :title="`running for · started ${formatRelative(row.run.startedAt, now)}`"
                 >{{ row.elapsed }}</span
               >
-              <a
+              <RouterLink
                 v-if="row.run"
                 class="open text-xs text-muted no-underline hover:text-highlighted hover:underline"
-                :href="row.href"
+                :to="row.href"
                 :aria-label="`open run ${row.run.label || shortId(row.run.id)}`"
-                >open ↗</a
+                >open ↗</RouterLink
               >
             </span>
           </li>

@@ -4,6 +4,8 @@ Every route below sits behind the dashboard's one identity gate unless noted. Wh
 
 The header lists only the surfaces this installation has: **Residents** appears when resident environments are configured (`execution.resident`), **Costs** when `costs` is configured with its analytics token, **Delivery** when a GitHub credential is set, the **Scheduled** tab when `schedules.worker` records firings. The **settings cog** beside the docs link is always there (every installation has channel scopes); the page's MCPs tab only with an `mcp` block. The docs link is always there: it opens the project's published site. The routes themselves still answer without their subsystem — with a `503` naming the config that turns them on.
 
+Every page route below also answers its data alone as JSON to a request whose `Accept` header is `application/json` — the same status and the same content the page paints from. The dashboard navigates between its pages that way, without a document load; an agent may read a page the same way.
+
 | Route | Shows | Notes |
 |---|---|---|
 | `GET /runs` | Active runs, newest first | Default view excludes finished runs; each row's link carries that run's capability token — the index itself is gated specifically because of this |

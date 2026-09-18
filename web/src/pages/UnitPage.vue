@@ -126,7 +126,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
 <template>
   <AppShell :title="title" nav="runs">
     <template #leading>
-      <a class="back text-sm text-primary no-underline hover:underline" href="/runs">← All runs</a>
+      <RouterLink class="back text-sm text-primary no-underline hover:underline" to="/runs">← All runs</RouterLink>
     </template>
     <template #status>
       <span v-if="view" id="standing" class="flex items-center gap-2 font-mono">
@@ -231,12 +231,12 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             </template>
             <template v-else>of a ship request</template>
           </span>
-          <a
+          <RouterLink
             v-if="parentHref"
             class="parent ml-auto font-normal normal-case tracking-normal text-primary no-underline hover:underline"
-            :href="parentHref"
+            :to="parentHref"
             title="the pipeline's own record — its card, its summary, every unit"
-            >the plan's record →</a
+            >the plan's record →</RouterLink
           >
         </h2>
         <p v-if="view.title" class="title text-sm text-highlighted">{{ view.title }}</p>

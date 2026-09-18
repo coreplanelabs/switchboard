@@ -202,7 +202,7 @@ describe("DeliveryPage", () => {
       const w = mountApp(DeliveryPage, { seed: seed({ ...report(), snapshotAt: "2026-09-11T13:51:00Z" }) });
       const footer = w.find("footer").text();
       expect(footer).toContain("As of Sep 11, 13:51 UTC, 12 minutes ago");
-      expect(w.find('footer a[href="?fresh=1"]').text()).toContain("read GitHub now");
+      expect(w.find('footer a[href="/delivery/acme/api?fresh=1"]').text()).toContain("read GitHub now");
       expect(footer).toContain("snapshot");
       expect(footer).not.toContain("nothing stored");
       // A report with no read time (a bare source) says nothing about one.

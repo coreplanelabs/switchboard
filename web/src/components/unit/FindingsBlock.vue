@@ -85,9 +85,8 @@ function trail(r: FindingRow): TrailStop[] {
   return stops;
 }
 
-function follow(stop: TrailStop, event: Event): void {
-  if (!stop.onPage) return; // a plain link to the run's own page
-  event.preventDefault();
+/** A stop on this page opens its fold here; one elsewhere is a RouterLink to the run's own page. */
+function follow(stop: TrailStop): void {
   emit("open", stop.runId);
 }
 </script>
@@ -141,13 +140,21 @@ function follow(stop: TrailStop, event: Event): void {
             <span v-if="i > 0" aria-hidden="true">·</span>
             <span>{{ stop.what }} in</span>
             <a
-              class="run text-muted no-underline hover:text-primary hover:underline"
-              :class="{ onpage: stop.onPage }"
-              :href="stop.onPage ? `#run-${stop.runId}` : `/runs/${encodeURIComponent(stop.runId)}`"
+              v-if="stop.onPage"
+              class="run onpage text-muted no-underline hover:text-primary hover:underline"
+              :href="`#run-${stop.runId}`"
               :data-run-id="stop.runId"
-              :title="stop.onPage ? 'open this run\'s fold on this page' : 'open this run\'s page'"
-              @click="follow(stop, $event)"
+              title="open this run's fold on this page"
+              @click.prevent="follow(stop)"
               >{{ stop.label }}</a
+            >
+            <RouterLink
+              v-else
+              class="run text-muted no-underline hover:text-primary hover:underline"
+              :to="`/runs/${encodeURIComponent(stop.runId)}`"
+              :data-run-id="stop.runId"
+              title="open this run's page"
+              >{{ stop.label }}</RouterLink
             >
           </template>
         </span>

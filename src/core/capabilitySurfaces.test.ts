@@ -5,7 +5,7 @@ import { AGENTS } from "../agents/registry.js";
 import { CLI_CALLER, runCli } from "../cli.js";
 import { parseAppConfigText } from "../config.js";
 import { createLiveViewHandler, type LiveViewContext } from "../channels/liveView.js";
-import { makeShellRenderer } from "../channels/webShell.js";
+import { makePageSender } from "../channels/webShell.js";
 import { retentionSentence, SEED_ELEMENT_ID, type RunsIndexSeed, type ScheduledSeed } from "../channels/webSeed.js";
 import { DEPLOY_ORDER, formatPlan, planDeploy, type DeployOptions, type WorkerName } from "../deploy/plan.js";
 import { parseProfile, PROFILE_EXAMPLE_PATH, type LoadedProfile } from "../deploy/profile.js";
@@ -170,7 +170,7 @@ async function webSeeds(caps: Capabilities) {
   const registry = new RunRegistry({ now: () => NOW });
   const store = new InMemoryRunStore({ now: () => NOW });
   const handler = createLiveViewHandler({
-    shell: makeShellRenderer({ js: "/assets/main-test.js", css: [] }, caps),
+    page: makePageSender({ js: "/assets/main-test.js", css: [] }, caps),
     service: createRunsService({ registry, store: caps.runHistory ? store : null, clock: () => NOW }),
     index: registry,
     retention: caps.runHistory ? { retentionDays: 30 } : null,

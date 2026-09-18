@@ -216,16 +216,16 @@ const SOURCE_LABEL = { config: "config.yaml", runtime: "runtime", both: "config.
               class="border-b border-muted last:border-0"
               :data-channel="row.channelId"
             >
-              <a
+              <RouterLink
                 class="grid gap-0.5 px-4 py-2 no-underline hover:bg-(--ui-bg-muted)"
-                :href="`/settings/channels/${encodeURIComponent(row.channelId)}`"
+                :to="`/settings/channels/${encodeURIComponent(row.channelId)}`"
                 :aria-current="selected?.channelId === row.channelId ? 'page' : undefined"
               >
                 <span class="font-mono text-xs font-medium text-highlighted" :title="row.channelId">{{
                   channelLabel(row)
                 }}</span>
                 <span class="text-xs text-muted">{{ row.settings.join(", ") }} · {{ SOURCE_LABEL[row.source] }}</span>
-              </a>
+              </RouterLink>
             </li>
           </ul>
         </div>
