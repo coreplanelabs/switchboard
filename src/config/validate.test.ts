@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AppConfig, Scope } from "../config.js";
-import { boundaryProblem, validateBoundaries, validateProviders } from "./validate.js";
+import { boundaryProblem, validateBoundaries, validateProviders, validateSlack } from "./validate.js";
 import { wireOf, type ProviderConfig } from "../core/provider.js";
 
 const providers = (blocks: Record<string, unknown>): AppConfig => ({ providers: blocks }) as unknown as AppConfig;
@@ -157,5 +157,32 @@ describe("validateBoundaries — a stored confirm is held to the same rule at lo
         "config.yaml",
       ),
     ).not.toThrow();
+  });
+});
+
+// Feature: docs/reference/specs/slack-channel.md item 13 — `slack.relayApps`
+// names the apps whose relay footer is read for the person. Held to Slack's
+// bot-id shape at load, so a typo cannot silently leave every relayed request
+// billed to the app.
+describe("validateSlack — the relay apps", () => {
+  it("accepts an absent block, an absent list and a list of Slack bot ids", () => {
+    expect(() => validateSlack(undefined)).not.toThrow();
+    expect(() => validateSlack({ catchUp: { enabled: true } })).not.toThrow();
+    expect(() => validateSlack({ relayApps: [] })).not.toThrow();
+    expect(() => validateSlack({ relayApps: ["B0CLAUDE", "B0RELAY2"] })).not.toThrow();
+  });
+
+  it("refuses a block that is not a mapping, a list that is not a list, and an entry that is not a bot id, each by name", () => {
+    expect(() => validateSlack("yes")).toThrow("config.yaml: slack must be a mapping");
+    expect(() => validateSlack({ relayApps: "B0CLAUDE" })).toThrow(
+      "config.yaml: slack.relayApps must be a list of Slack bot ids (B…)",
+    );
+    expect(() => validateSlack({ relayApps: ["slack:bot:B0CLAUDE"] })).toThrow(
+      'config.yaml: slack.relayApps[0] is "slack:bot:B0CLAUDE" — a Slack bot id looks like B0ABC123',
+    );
+    expect(() => validateSlack({ relayApps: ["B0CLAUDE", 7] })).toThrow(
+      'config.yaml: slack.relayApps[1] is "7" — a Slack bot id looks like B0ABC123',
+    );
+    expect(() => validateSlack({ relayApps: [""] })).toThrow('config.yaml: slack.relayApps[0] is ""');
   });
 });

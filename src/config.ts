@@ -433,6 +433,15 @@ export interface SlackConfig {
      */
     windowMinutes?: number;
   };
+  /**
+   * The apps whose relay footer (`Sent by Claude in <#C…> on behalf of <@U…> ·
+   * <permalink>`) names the requester (docs/reference/specs/slack-channel.md
+   * item 13), by Slack `bot_id` (`B…` — the id a run record's `postedBy:
+   * slack:bot:B…` carries). A footer is message text any app can write, so it
+   * is read only from an app named here; from any other app the app itself is
+   * the requester. Absent or empty = no footer is honoured. Validated at load.
+   */
+  relayApps?: string[];
 }
 
 export interface Overrides {

@@ -535,6 +535,16 @@ workspaceDir: ./workspaces
 #   catchUp:
 #     enabled: true
 #     windowMinutes: 30
+#   # The apps whose relay footer — `Sent by Claude in <#C…> on behalf of <@U…> ·
+#   # <permalink>`, appended by the Claude Slack app to a post it makes from a
+#   # Claude Code session — names the person the run is for and billed to
+#   # (docs/reference/specs/slack-channel.md item 13). By Slack bot id: the
+#   # `bot_id` on the app's messages, the `B…` a run record's `postedBy:
+#   # slack:bot:B…` carries. The footer is message text any app can write, so
+#   # it is read only from an app listed here; from any other app the app itself
+#   # is the requester, footer or not. Absent or empty: no footer is honoured.
+#   relayApps:
+#     - B0123ABCDE
 
 # Where chat-set runtime overrides (`config set`, `config instructions`, `config clear`)
 # persist (docs/reference/specs/routing-and-config.md item 12). Without this block they go to

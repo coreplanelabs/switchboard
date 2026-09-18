@@ -10,9 +10,10 @@ import {
 import { RELAY_FOOTER_RE, type SlackThreadMessage } from "./threadTurns.js";
 
 // Feature: docs/reference/specs/slack-channel.md item 13 — who asked. An app's
-// post has no `user`; the requester is the person it relayed for, found through
-// the relay footer's thread or the thread the bot replied in, else the app
-// itself by name — never `unknown`.
+// post has no `user`; when the app is the configured relay (`slack.relayApps`)
+// the requester is the person its footer names, outright or through the
+// footer's thread; any other app — footer or not, in a person's thread or not —
+// is the requester itself by name, never `unknown`.
 
 // The footer exactly as Slack delivered it on a real relayed review request
 // (channel and thread ids made up; `&amp;` is how Slack escapes `&` in text).
@@ -174,14 +175,22 @@ describe("textOfBlocks / rawTextOf", () => {
   });
 });
 
+// The relay app the operator configured (`slack.relayApps`): the one app whose
+// footer is read for the person. Every other app is the requester itself.
+const RELAY_APPS = ["B0CLAUDE"];
+
 describe("resolveSlackRequester", () => {
-  it("a footer that names the person resolves to them with no API call — the live shape", async () => {
+  it("a footer that names the person resolves to them with no API call — the live shape, from the configured relay app", async () => {
     const c = client(() => new Error("never"));
-    const r = await resolveSlackRequester(c, {
-      ...base,
-      text: rawTextOf(LIVE_TEXT, LIVE_BLOCKS),
-      poster: { botId: "B0CLAUDE", name: "Claude [coming-soon interest grid]" },
-    });
+    const r = await resolveSlackRequester(
+      c,
+      {
+        ...base,
+        text: rawTextOf(LIVE_TEXT, LIVE_BLOCKS),
+        poster: { botId: "B0CLAUDE", name: "Claude [coming-soon interest grid]" },
+      },
+      RELAY_APPS,
+    );
     expect(r).toEqual({
       userId: "slack:U0B0RIS",
       slackUserId: "U0B0RIS",
@@ -192,22 +201,30 @@ describe("resolveSlackRequester", () => {
     expect(c.calls).toEqual([]);
   });
 
-  it("a person's own message is the requester, with no API call and no relay", async () => {
+  it("a person's own message is the requester, with no API call and no relay — a reply in another person's thread included", async () => {
     const c = client(() => new Error("never"));
-    const r = await resolveSlackRequester(c, { ...base, user: "U0ALICE", text: "hi", poster: { botId: "B1" } });
+    const r = await resolveSlackRequester(c, { ...base, user: "U0ALICE", text: "hi", poster: { botId: "B1" } }, []);
     expect(r).toEqual({ userId: "slack:U0ALICE", slackUserId: "U0ALICE", resolvedBy: "message" });
+    // A person replying inside a thread someone else started is still themselves:
+    // the thread's parent is never read for a person's own words.
+    const reply = await resolveSlackRequester(
+      c,
+      { ...base, ts: "1789507999.000001", threadTs: "1789500000.000001", user: "U0ALICE", text: "me too" },
+      RELAY_APPS,
+    );
+    expect(reply).toEqual({ userId: "slack:U0ALICE", slackUserId: "U0ALICE", resolvedBy: "message" });
     expect(c.calls).toEqual([]);
   });
 
-  it("an app's post with a relay footer resolves to the person who started the footer's thread, relayed by the app's name", async () => {
+  it("the configured relay app's post with an older footer resolves to the person who started the footer's thread, relayed by the app's name", async () => {
     const c = client(({ channel, ts }) =>
       channel === "C0PROMPT" && ts === "1789504919.942589" ? [{ ts, user: "U0ALICE", text: "review my PR" }] : [],
     );
-    const r = await resolveSlackRequester(c, {
-      ...base,
-      text: RELAY,
-      poster: { botId: "B0CLAUDE", name: "Claude [fixing the build]" },
-    });
+    const r = await resolveSlackRequester(
+      c,
+      { ...base, text: RELAY, poster: { botId: "B0CLAUDE", name: "Claude [fixing the build]" } },
+      RELAY_APPS,
+    );
     expect(r).toEqual({
       userId: "slack:U0ALICE",
       slackUserId: "U0ALICE",
@@ -217,7 +234,11 @@ describe("resolveSlackRequester", () => {
     });
     expect(c.calls).toEqual([{ channel: "C0PROMPT", ts: "1789504919.942589" }]);
     // The same session's next request reads nothing: the thread's parent is remembered.
-    await resolveSlackRequester(c, { ...base, ts: "1789507999.000001", threadTs: "1789507999.000001", text: RELAY });
+    await resolveSlackRequester(
+      c,
+      { ...base, ts: "1789507999.000001", threadTs: "1789507999.000001", text: RELAY, poster: { botId: "B0CLAUDE" } },
+      RELAY_APPS,
+    );
     expect(c.calls).toHaveLength(1);
   });
 
@@ -225,66 +246,78 @@ describe("resolveSlackRequester", () => {
     let fail = true;
     const c = client(() => (fail ? new Error("channel_not_found") : [{ ts: "1789504919.942589", user: "U0ALICE" }]));
     const ev = { ...base, text: RELAY, poster: { botId: "B0CLAUDE", name: "Claude [x]" } };
-    expect(await resolveSlackRequester(c, ev)).toEqual({
+    expect(await resolveSlackRequester(c, ev, RELAY_APPS)).toEqual({
       userId: "slack:bot:B0CLAUDE",
       userName: "Claude [x]",
       resolvedBy: "bot",
     });
     fail = false;
-    expect((await resolveSlackRequester(c, ev)).userId).toBe("slack:U0ALICE");
+    expect((await resolveSlackRequester(c, ev, RELAY_APPS)).userId).toBe("slack:U0ALICE");
     resetRelayParentCache();
     const botParent = client(() => [{ ts: "1789504919.942589", bot_id: "B9", user: "U0BOTUSER" }]);
-    expect((await resolveSlackRequester(botParent, ev)).resolvedBy).toBe("bot");
+    expect((await resolveSlackRequester(botParent, ev, RELAY_APPS)).resolvedBy).toBe("bot");
   });
 
-  it("an app's reply inside a thread a person started is that person's request, from the prefetched page when there is one", async () => {
+  it("an app that is not the configured relay is the requester itself, footer or not — the footer's name is not read and no thread is read", async () => {
     const c = client(() => new Error("never"));
-    const thread: SlackThreadMessage[] = [
-      { ts: "1789500000.000001", user: "U0SAM", text: "please fix the build" },
-      { ts: "1789500001.000002", bot_id: "B0CLAUDE", text: "re-review" },
-    ];
-    const r = await resolveSlackRequester(c, {
-      ...base,
-      ts: "1789500001.000002",
-      threadTs: "1789500000.000001",
-      text: "<@U0BOT> re-review",
-      poster: { botId: "B0CLAUDE", name: "Claude [ci]" },
-      thread,
+    const other = { botId: "B0OTHER", name: "Some other app" };
+    // The live footer, naming a person outright.
+    expect(
+      await resolveSlackRequester(c, { ...base, text: rawTextOf(LIVE_TEXT, LIVE_BLOCKS), poster: other }, RELAY_APPS),
+    ).toEqual({ userId: "slack:bot:B0OTHER", userName: "Some other app", resolvedBy: "bot" });
+    // The older footer, naming a person's thread.
+    expect(await resolveSlackRequester(c, { ...base, text: RELAY, poster: other }, RELAY_APPS)).toEqual({
+      userId: "slack:bot:B0OTHER",
+      userName: "Some other app",
+      resolvedBy: "bot",
     });
-    expect(r).toEqual({
-      userId: "slack:U0SAM",
-      slackUserId: "U0SAM",
-      relayedBy: "Claude [ci]",
-      postedBy: "slack:bot:B0CLAUDE",
-      resolvedBy: "thread-parent",
+    // A post with no poster facts at all is never the configured relay.
+    expect(await resolveSlackRequester(c, { ...base, text: rawTextOf(LIVE_TEXT, LIVE_BLOCKS) }, RELAY_APPS)).toEqual({
+      userId: "slack:bot:unknown",
+      resolvedBy: "bot",
     });
     expect(c.calls).toEqual([]);
-    // Without a prefetched page the parent is read once.
-    resetRelayParentCache();
-    const fetched = client(({ ts }) => [{ ts, user: "U0SAM" }]);
-    const r2 = await resolveSlackRequester(fetched, {
+  });
+
+  it("with no relay app configured, no footer is honoured — the posting app is the requester", async () => {
+    const c = client(() => new Error("never"));
+    const ev = { ...base, text: rawTextOf(LIVE_TEXT, LIVE_BLOCKS), poster: { botId: "B0CLAUDE", name: "Claude [x]" } };
+    expect(await resolveSlackRequester(c, ev, [])).toEqual({
+      userId: "slack:bot:B0CLAUDE",
+      userName: "Claude [x]",
+      resolvedBy: "bot",
+    });
+    expect(c.calls).toEqual([]);
+  });
+
+  it("an app's reply inside a thread a person started, with no footer, is the app's own request — configured relay or not, the parent is never read", async () => {
+    const c = client(() => new Error("never"));
+    const reply = {
       ...base,
       ts: "1789500001.000002",
       threadTs: "1789500000.000001",
       text: "<@U0BOT> re-review",
-      poster: { botId: "B0CLAUDE" },
-    });
-    expect(r2).toMatchObject({
-      userId: "slack:U0SAM",
-      relayedBy: "an app",
-      postedBy: "slack:bot:B0CLAUDE",
-      resolvedBy: "thread-parent",
-    });
-    expect(fetched.calls).toEqual([{ channel: "C0REVIEW", ts: "1789500000.000001" }]);
+    };
+    expect(
+      await resolveSlackRequester(c, { ...reply, poster: { botId: "B0CLAUDE", name: "Claude [ci]" } }, RELAY_APPS),
+    ).toEqual({ userId: "slack:bot:B0CLAUDE", userName: "Claude [ci]", resolvedBy: "bot" });
+    expect(
+      await resolveSlackRequester(c, { ...reply, poster: { botId: "B0OTHER", name: "Deploy bot" } }, RELAY_APPS),
+    ).toEqual({ userId: "slack:bot:B0OTHER", userName: "Deploy bot", resolvedBy: "bot" });
+    expect(c.calls).toEqual([]);
   });
 
   it("a top-level app post with no footer is the app itself by id and name — never `unknown`", async () => {
     const c = client(() => new Error("never"));
     expect(
-      await resolveSlackRequester(c, { ...base, text: "<@U0BOT> hello", poster: { botId: "B0X", name: "Deploy bot" } }),
+      await resolveSlackRequester(
+        c,
+        { ...base, text: "<@U0BOT> hello", poster: { botId: "B0X", name: "Deploy bot" } },
+        [],
+      ),
     ).toEqual({ userId: "slack:bot:B0X", userName: "Deploy bot", resolvedBy: "bot" });
     // No poster facts at all: still a named shape, not a person.
-    expect(await resolveSlackRequester(c, { ...base, text: "<@U0BOT> hello" })).toEqual({
+    expect(await resolveSlackRequester(c, { ...base, text: "<@U0BOT> hello" }, [])).toEqual({
       userId: "slack:bot:unknown",
       resolvedBy: "bot",
     });
