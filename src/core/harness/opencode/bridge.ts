@@ -120,7 +120,7 @@ import {
   type OpenCodePermissionRequest,
 } from "./client.js";
 import { openCodeDispositionOf } from "./dispositions.js";
-import { openCodeReplacedCallNote, openCodeSettlementNote } from "./session.js";
+import { openCodeReplacedCallNote, openCodeSettlementNote, openCodeStoreRowCount } from "./session.js";
 import { openCodeBuiltinToolsFor, OPENCODE_READY_MS, type OpenCodeRunPaths } from "./process.js";
 
 /** A tool call the model ran to its end with no ask the bot answered, or an
@@ -442,6 +442,12 @@ export interface OpenCodeBridgeDeps {
   onStep?: (report: StepReport) => Promise<void>;
   /** The ledger rows the transcript holds before the first step (the seed). */
   seedLength: number;
+  /** The store rows the seed occupies — what the store projection skips.
+   *  Absent, the ledger rows: one store row per turn, a fresh run's shape. A
+   *  rebuild's import writes fewer rows than the record has turns (a turn of
+   *  tool results alone is folded into the assistant row before it), so a
+   *  rebuild passes the count its import wrote (`openCodeStoreRowCount`). */
+  storeSeed?: number;
   remainingMs: () => number;
   /** Relayed tools that declare `failsInText`: an `error:`-opening result is `ok:false`. */
   textFailing?: ReadonlySet<string>;
@@ -640,7 +646,7 @@ export class OpenCodeBridge {
   private mirrorChain: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: OpenCodeBridgeDeps) {
-    this.storeSeed = deps.seedLength;
+    this.storeSeed = deps.storeSeed ?? deps.seedLength;
     this.mirror = new PiMirror({
       ...(deps.onStep ? { onStep: deps.onStep } : {}),
       seedLength: deps.seedLength,
@@ -1970,6 +1976,13 @@ export async function driveOpenCode(
     // transcript and every compaction row), which the store holds and the
     // request-prompt appends past.
     seedLength: run.resume ? run.resume.messages.length + (run.resume.compactions?.length ?? 0) : run.messages.length,
+    // A rebuild's store holds fewer rows than the record has turns: a turn of
+    // tool results alone is folded into the assistant row before it, so the
+    // store skip is the rows the import wrote, or the mirror would skip the
+    // first answer past the seed too.
+    ...(run.resume
+      ? { storeSeed: openCodeStoreRowCount(run.resume.messages, run.resume.compactions?.length ?? 0) }
+      : {}),
     remainingMs: () => deadline - now(),
     textFailing: new Set(run.tools.filter((t) => t.failsInText).map((t) => t.name)),
   });

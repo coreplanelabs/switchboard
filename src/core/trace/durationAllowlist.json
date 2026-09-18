@@ -37,7 +37,7 @@
   "src/core/harness/opencode/testing/driver.ts": 1,
   "src/core/harness/pi/harness.ts": 1,
   "src/core/harness/pi/testing/driver.ts": 1,
-  "src/core/harness/testing/scenarios.ts": 4,
+  "src/core/harness/testing/scenarios.ts": 5,
   "src/core/harness/windDown.ts": 1,
   "src/core/installationSettings.ts": 1,
   "src/core/readingDiff.ts": 1,

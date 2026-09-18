@@ -1095,6 +1095,14 @@ class ScriptedServe {
     if (req.method === "POST" && req.path === "/api/session/import") {
       if (this.primePostFails) return j(500, { error: "the store hiccuped" });
       const body = parseBody(req.body);
+      // The binary decodes the body against its session-message schema before
+      // it stores a row, and a tool content in `state: error` must carry
+      // `error: { type, message }` (`Session.StructuredError`); the first key
+      // missing is refused as the binary words it, path and all — so a body
+      // the fake takes is one the binary takes.
+      const missing = importMissingKey(body.messages);
+      if (missing !== undefined)
+        return j(400, { _tag: "InvalidRequestError", message: `Missing key\n  at ${missing}`, kind: "Payload" });
       this.sessionModel = (body.info as { model?: unknown } | undefined)?.model;
       // The conversation clause switched off: the seed is never imported, so the
       // model's first call does not see the thread's earlier turns.
@@ -2363,6 +2371,28 @@ function parseBody(body: string | undefined): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/** The path of the first key an import body's tool contents lack that the
+ *  binary's session-message schema requires — `Session.Message.ToolState.Error`
+ *  is `{ status, input, error: { type, message }, content? }` — in the words
+ *  the binary's decoder refuses it with (`["messages"][i]["content"][k]…`);
+ *  `undefined` when every tool content decodes. */
+function importMissingKey(messages: unknown): string | undefined {
+  if (!Array.isArray(messages)) return undefined;
+  const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+  for (const [i, message] of messages.entries()) {
+    if (!isRecord(message) || !Array.isArray(message.content)) continue;
+    for (const [k, part] of message.content.entries()) {
+      if (!isRecord(part) || part.type !== "tool" || !isRecord(part.state) || part.state.status !== "error") continue;
+      const at = `["messages"][${i}]["content"][${k}]["state"]["error"]`;
+      const error = part.state.error;
+      if (!isRecord(error)) return at;
+      if (typeof error.type !== "string") return `${at}["type"]`;
+      if (typeof error.message !== "string") return `${at}["message"]`;
+    }
+  }
+  return undefined;
 }
 
 /** The container's loopback as the harness sees it: this generation's launch

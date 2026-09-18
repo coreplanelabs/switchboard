@@ -1108,6 +1108,70 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     },
   },
   {
+    id: "survival-rebuild-after-failed-call",
+    clause: "survival",
+    title:
+      "a re-attach after a failed tool call imports: a process rebuilt from a record whose history holds a tool call that ran and failed (its result marked an error) and a call in flight rebuilds a session holding both — the failed result as the record wrote it, the call in flight settled — and continues: the next step's rows are the settlement turn at the seed index then the answer, and the model's view is the record's rows",
+    script: (driver) => ({
+      turns: [text("carried on")],
+      resume: {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "carry on" }] },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "c-failed", name: "bash", input: { command: "make" } }],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", toolUseId: "c-failed", content: "make: *** [all] Error 2", isError: true },
+            ],
+          },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "c-flight", name: "bash", input: { command: "make clean all" } }],
+          },
+        ],
+        settlements: [
+          {
+            toolUse: { type: "tool_use", id: "c-flight", name: "bash", input: { command: "make clean all" } },
+            action: "synthetic",
+            text: "The container was replaced while this bash call was in flight; its result was lost.",
+          },
+        ],
+        remainingMs: 5 * 60_000,
+        turn: 2,
+        inboxConsumedSeq: 0,
+        facts: driver.facts({ pid: 999, container: "vm-old" }),
+      },
+    }),
+    check: (run) => {
+      assert.equal(answered(run), "carried on");
+      assert.ok(run.steps.length > 0, "no step was written after the rebuild");
+      const step = run.steps[0];
+      assert.equal(step.firstIdx, 4, "the settlement turn does not land at the seed index");
+      const [settled, answer] = step.turns;
+      assert.equal(settled.role, "user");
+      assert.deepEqual(settled.content[0], {
+        type: "tool_result",
+        toolUseId: "c-flight",
+        content: "The container was replaced while this bash call was in flight; its result was lost.",
+        isError: true,
+      });
+      assert.equal(answer.role, "assistant");
+      // The model saw the record's rows: the failed call and its error result
+      // as the record held them, then the settlement turn.
+      assert.ok(run.modelCalls.length > 0, "the model was never asked");
+      const view = run.modelCalls[0].messages;
+      assert.deepEqual(view[2], {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "c-failed", content: "make: *** [all] Error 2", isError: true }],
+      });
+      assert.deepEqual(view[4], settled, "the model's view of the settlement turn is not the ledger's row");
+      assert.equal(view.length, 5);
+    },
+  },
+  {
     id: "survival-alive-here",
     clause: "survival",
     title:
