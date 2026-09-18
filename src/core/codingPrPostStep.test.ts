@@ -97,6 +97,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: (e: RunEvent) => events.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     };
     // pushed, no description: the head is recorded even though no pull request opens
     await runCodingPrPostStep({ ...common, observed: observation(), description: undefined });
@@ -127,6 +128,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: (e) => events.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(1);
     expect(spy.calls[0]).toMatchObject({
@@ -162,6 +164,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: (e) => events.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(events.map((e) => e.type)).toEqual(["pushed_head", "pr_opened", "review_artifact"]);
     const artifact = events[2];
@@ -196,6 +199,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: (e) => events.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     await runCodingPrPostStep({
       observed: observation({ remoteHead: undefined }),
@@ -207,6 +211,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: (e) => events.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(events.filter((e) => e.type === "review_artifact")).toEqual([]);
   });
@@ -223,6 +228,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls[0]?.base).toBe("main");
   });
@@ -249,6 +255,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(fetchRepoInfo).toHaveBeenCalledTimes(1);
     expect(spy.calls).toHaveLength(1);
@@ -274,6 +281,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(fetchRepoInfo).toHaveBeenCalledTimes(1);
     expect(spy.calls).toHaveLength(0);
@@ -301,6 +309,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(published).toEqual([
@@ -343,6 +352,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(fetchRepoInfo).not.toHaveBeenCalled();
@@ -378,6 +388,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(note).toBeUndefined();
     expect(spy.calls).toHaveLength(0);
@@ -410,11 +421,33 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: async (repo, number, patch) => void updates.push({ repo, number, ...patch }),
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(updates).toHaveLength(1);
     expect(updates[0]).toMatchObject({ repo: "acme/api", number: 41, title: DESCRIPTION.title });
     expect(updates[0].body).toContain(`https://github.com/acme/api/blob/${PR_HEAD}/src/login.ts#L10-L20`);
+    // At quiet (routing-and-config item 28) the note is the link alone: the
+    // head the body was rendered at is verbose material.
+    const quiet = await runCodingPrPostStep({
+      observed: observation({ branch: "main", checkedOut: "main" }),
+      description: DESCRIPTION,
+      target: {
+        repo: "acme/api",
+        baseRef: "main",
+        bindingRef: "main",
+        resolvedRef: "docs/seed-header",
+        ownPr: { number: 41, headSha: PR_HEAD, state: "open" },
+      },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr: noOpenPr,
+      updatePullRequest: async () => {},
+      publish: () => {},
+      logKey: "t",
+      verbosity: "quiet",
+    });
+    expect(quiet).toBe("🔀 PR updated: https://github.com/acme/api/pull/41");
     expect(updates[0].body).not.toContain(HEAD);
     expect(published.map((e) => e.type)).toEqual(["pr_opened", "review_artifact"]);
     expect(published[0]).toEqual({
@@ -450,6 +483,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       },
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(published).toEqual([]);
     expect(note).toContain("https://github.com/acme/api/pull/41");
@@ -477,6 +511,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: update,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(update).not.toHaveBeenCalled();
     expect(spy.calls).toHaveLength(1);
@@ -509,6 +544,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: update,
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(update).toHaveBeenCalledTimes(1);
@@ -545,6 +581,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
         updatePullRequest: async (_repo, number, patch) => void updates.push({ number, body: patch.body }),
         publish: (e) => void published.push(e),
         logKey: "t",
+        verbosity: "verbose" as const,
       });
     const merged = await run("merged");
     expect(spy.calls).toHaveLength(0);
@@ -589,6 +626,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: update,
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(update).not.toHaveBeenCalled();
     expect(spy.calls).toHaveLength(0);
@@ -637,6 +675,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: async (_repo, number, patch) => void updates.push({ number, body: patch.body }),
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(updates).toHaveLength(1);
@@ -677,6 +716,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: update,
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(update).not.toHaveBeenCalled();
     expect(spy.calls).toHaveLength(1);
@@ -709,6 +749,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: update,
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(update).not.toHaveBeenCalled();
     expect(spy.calls).toHaveLength(0);
@@ -731,6 +772,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: update,
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(update).not.toHaveBeenCalled();
     expect(published).toEqual([expect.objectContaining({ type: "run_note", kind: "pr_not_opened" })]);
@@ -749,6 +791,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(note).toBeUndefined();
     expect(published).toEqual([]);
@@ -766,6 +809,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toContain("no base branch");
@@ -786,6 +830,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toContain("no base branch");
@@ -803,6 +848,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toContain("has unpushed commits (the remote branch is at bbbbbbb, the workspace at a1b2c3d)");
@@ -821,6 +867,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toBe(
@@ -854,6 +901,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: async (repo, number, patch) => void updates.push({ repo, number, ...patch }),
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(findOpenPr).toHaveBeenCalledWith("acme/api", "feat/x");
     expect(spy.calls).toHaveLength(0);
@@ -874,6 +922,24 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
     expect(note).toContain("🔀 PR updated: https://github.com/acme/api/pull/700");
     expect(note).toContain(`re-rendered at its head \`${PR_HEAD.slice(0, 7)}\``);
     expect(note).toContain(`has unpushed commits the pull request does not carry`);
+    // The caveat is set off by a dash, never a bare `;` on the URL — at quiet
+    // (no rendered-at tail) an autolinker would fold it into the link.
+    expect(note).not.toMatch(/pull\/700[;,.]/);
+    const quiet = await runCodingPrPostStep({
+      observed: observation({ remoteHead: PR_HEAD }),
+      description: DESCRIPTION,
+      target: { repo: "acme/api", baseRef: "main", bindingRef: undefined, resolvedRef: "main" },
+      openPullRequest: spy.fn,
+      fetchRepoInfo: unreachable,
+      findOpenPr,
+      updatePullRequest: async () => {},
+      publish: () => {},
+      logKey: "t",
+      verbosity: "quiet",
+    });
+    expect(quiet).toContain("🔀 PR updated: https://github.com/acme/api/pull/700 — ");
+    expect(quiet).not.toContain("re-rendered");
+    expect(quiet).not.toMatch(/pull\/700[;,.]/);
     expect(note).toContain(`the remote is at ${PR_HEAD.slice(0, 7)}, the workspace at ${HEAD.slice(0, 7)}`);
     expect(note).not.toContain("no PR was opened");
   });
@@ -897,6 +963,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: async (repo, number, patch) => void updates.push({ repo, number, ...patch }),
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(findOpenPr).toHaveBeenCalledWith("acme/api", "feat/x");
     expect(updates).toHaveLength(1);
@@ -921,6 +988,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: async (...args) => void updates.push(args),
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(updates).toEqual([]);
     expect(published).toEqual([]);
@@ -949,6 +1017,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       },
       publish: (e) => void published.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(published).toEqual([]);
     expect(note).toContain("https://github.com/acme/api/pull/700");
@@ -969,6 +1038,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
         updatePullRequest: noUpdate,
         publish: () => {},
         logKey: "t",
+        verbosity: "verbose" as const,
       });
     const fresh = await run(noOpenPr);
     expect(fresh).toContain("has unpushed commits");
@@ -992,6 +1062,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toBeUndefined();
@@ -1018,6 +1089,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       fetchRepoInfo: unreachable,
       publish: (e) => events.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(findOpenPr).toHaveBeenCalledWith("acme/api", "dependabot/github_actions/actions-4c45254bbe");
     expect(spy.calls).toHaveLength(0); // no description → nothing to render, the PR body is left alone
@@ -1063,6 +1135,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       fetchRepoInfo: unreachable,
       publish: (e) => events.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(findOpenPr).toHaveBeenCalledWith("acme/api", "feat/x");
     expect(spy.calls).toHaveLength(0);
@@ -1087,6 +1160,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
         ...(commitsOverBase !== undefined ? { commitsOverBase } : {}),
         publish: (e) => events.push(e),
         logKey: "t",
+        verbosity: "verbose" as const,
       });
       expect(spy.calls).toHaveLength(0);
       expect(events.map((e) => e.type)).toEqual(["pushed_head"]);
@@ -1128,6 +1202,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       fetchRepoInfo: unreachable,
       publish: (e) => events.push(e),
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toContain("No PR was opened");
@@ -1146,6 +1221,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       fetchRepoInfo: unreachable,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     };
     // a description: open-or-edit does its own lookup
     await runCodingPrPostStep({ ...common, observed: observation(), description: DESCRIPTION });
@@ -1179,6 +1255,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(fetchRepoInfo).not.toHaveBeenCalled();
   });
@@ -1201,6 +1278,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(1);
     expect(spy.calls[0]).toMatchObject({ repo: "acme/api", headBranch: "feat/x", base: "main" });
@@ -1221,6 +1299,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toBe(
@@ -1240,6 +1319,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toContain("could not be observed");
@@ -1260,6 +1340,7 @@ describe("runCodingPrPostStep (callable with explicit inputs)", () => {
       updatePullRequest: noUpdate,
       publish: () => {},
       logKey: "t",
+      verbosity: "verbose" as const,
     });
     expect(spy.calls).toHaveLength(0);
     expect(note).toContain("no repository is known");

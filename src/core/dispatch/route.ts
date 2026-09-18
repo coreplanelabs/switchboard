@@ -79,7 +79,6 @@ import { chatInvocation, jsonSchemaFor, mcpToolName, namedToInput } from "../com
 import { unwrapChatLinks, type ChatCommands } from "../commandChat.js";
 import { CONFIRMATION_TTL_MS } from "../budgets.js";
 import {
-  confirmationFooter,
   confirmationMessageOf,
   newConfirmationId,
   renderOffer,
@@ -1459,7 +1458,6 @@ async function answerHandBack(
   const line = chatInvocation(def, input);
   if (redactSecrets(line) !== line) return answer(UNSHOWABLE_LINE, "hand_back", () => io.reply(UNSHOWABLE_LINE));
   const risk = def.annotations?.risk?.(input) ?? "";
-  const footer = confirmationFooter(confirm.scope);
   let row: Confirmation;
   try {
     row = await store.put(
@@ -1471,7 +1469,6 @@ async function answerHandBack(
         input,
         receipt,
         risk,
-        footer,
         model: route.model,
       },
       CONFIRMATION_TTL_MS,
@@ -1483,8 +1480,10 @@ async function answerHandBack(
     const text = `${handBack}\n${STORE_UNREACHABLE_NOTE}`;
     return answer(text, "hand_back", () => io.reply(text));
   }
-  const shown: ConfirmationOffer = { id: row.id, line, risk, footer, expiresAt: row.expiresAt };
-  console.log(`[route] ${msg.threadKey} offered ${def.id} as confirmation ${row.id} (${footer})`);
+  const shown: ConfirmationOffer = { id: row.id, line, risk, expiresAt: row.expiresAt };
+  console.log(
+    `[route] ${msg.threadKey} offered ${def.id} as confirmation ${row.id} (confirm asked by ${confirm.scope})`,
+  );
   // The Block Kit goes out through the reply stage's one offer renderer
   // (record 0054): the same shape as before, one seam for the unit that gives
   // a `request` refusal its question and Yes.

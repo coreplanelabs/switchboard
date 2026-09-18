@@ -30,12 +30,23 @@ import {
 import { REFERENCE_REFUSAL } from "./references.js";
 import { FOLLOW_UP_DROPPED_BY_STOP } from "./settle.js";
 import type { ChannelIO } from "../types.js";
-import { replyAck } from "./reply.js";
+import { quietActivity, replyAck } from "./reply.js";
 
 // Feature: docs/reference/specs/routing-and-config.md item 28 — an acknowledgement
 // is `verbose` material: the seam every ack goes through sends it at verbose
 // and debug and swallows it at quiet, so the person on the default hears the
 // result and nothing before it.
+describe("quietActivity — the card's activity at quiet (routing-and-config item 28)", () => {
+  it("a command becomes the caption naming the tool; a line and nothing stay as they are", () => {
+    expect(quietActivity({ kind: "command", tool: "bash", command: "npm test\nnpm run lint" })).toEqual({
+      kind: "line",
+      text: "→ bash",
+    });
+    expect(quietActivity({ kind: "line", text: "✓ read_file: ok" })).toEqual({ kind: "line", text: "✓ read_file: ok" });
+    expect(quietActivity(undefined)).toBeUndefined();
+  });
+});
+
 describe("replyAck — acknowledgements speak at verbose and above", () => {
   const capture = () => {
     const replies: string[] = [];
@@ -461,7 +472,6 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       id: "c1",
       line: "config set channel --models.coding anthropic/claude-opus-5",
       risk: "changes the scope's settings for everyone in it until reset",
-      footer: "confirmation required by the built-in default",
       expiresAt: 1_000,
     };
     const { io, offer, replies } = capture();

@@ -1248,9 +1248,9 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     ]);
     expect(notes.some((n) => n.kind === "description_turn")).toBe(true);
     expect(commands.some((c) => c.startsWith("git push") || c.startsWith("git commit"))).toBe(false);
-    expect(out.prNote).toContain(
-      `PR updated: https://github.com/o/r/pull/700 — body re-rendered at \`${HEAD.slice(0, 7)}\``,
-    );
+    // The quiet default (routing-and-config item 28): the link, not the head it was rendered at.
+    expect(out.prNote).toContain("PR updated: https://github.com/o/r/pull/700");
+    expect(out.prNote).not.toContain("re-rendered");
     // The card reads what the ending established, in that order.
     expect(out.answer).toBe(
       `Stopped at the ${ASKS.coding}-minute budget without finishing. The tree was clean and \`${BRANCH}\` held no unpushed commits — its head \`${HEAD.slice(0, 7)}\` is on the remote. The PR description was submitted.`,
@@ -1458,7 +1458,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     expect(opened[0]).toMatchObject({ repo: "acme/api", headBranch: BRANCH, base: "main", title: DESCRIPTION.title });
     expect(String(opened[0].body)).toContain(`blob/${HEAD}/`);
     expect(out.prNote).toContain("PR updated:");
-    expect(out.prNote).toContain("body re-rendered");
+    expect(out.prNote).not.toContain("body re-rendered"); // the quiet default keeps the link, not the head (item 28)
     expect(out.prNote).not.toContain("not resubmitted");
     // pi ended once, after the turn
     expect(container.killed).toEqual([4242]);

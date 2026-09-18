@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage } from "./types.js";
 import {
-  confirmationFooter,
   confirmationMessageOf,
   FileConfirmationStore,
   InMemoryConfirmationStore,
@@ -39,7 +38,6 @@ const pending = (id: string, over: Partial<Omit<RunConfirmation, "expiresAt">> =
   input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
   receipt: "config set channel --models.coding anthropic/claude-opus-5",
   risk: "changes the scope's settings for everyone in it until reset",
-  footer: "confirmation required by the built-in default",
   model: "anthropic/general-model",
   ...over,
 });
@@ -338,26 +336,16 @@ describe("WorkerConfirmationStore (the ConfigDO confirmations client)", () => {
 });
 
 describe("the offer's words and the stored message", () => {
-  it("confirmationFooter names the scope that asked, the built-in default included", () => {
-    expect(confirmationFooter("channel")).toBe("confirmation required by this channel's boundary");
-    expect(confirmationFooter("user")).toBe("confirmation required by your boundary");
-    expect(confirmationFooter("defaults")).toBe("confirmation required by the defaults' boundary");
-    expect(confirmationFooter("built-in")).toBe("confirmation required by the built-in default");
-  });
-
-  it("renderOffer is the offer as a channel without components would read it: the line, the risk when there is one, the footer", () => {
+  it("renderOffer is the offer as a channel without components would read it: the line, then the risk when there is one — no footer (routing-and-config item 28)", () => {
     expect(
       renderOffer({
         id: "c1",
         line: "config set channel --x y",
         risk: "changes it",
-        footer: "confirmation required by the built-in default",
         expiresAt: 1,
       }),
-    ).toBe("config set channel --x y\nchanges it\nconfirmation required by the built-in default");
-    expect(renderOffer({ id: "c1", line: "mcp remove linear", risk: "", footer: "f", expiresAt: 1 })).toBe(
-      "mcp remove linear\nf",
-    );
+    ).toBe("config set channel --x y\nchanges it");
+    expect(renderOffer({ id: "c1", line: "mcp remove linear", risk: "", expiresAt: 1 })).toBe("mcp remove linear");
   });
 
   it("renderOffer on a question's offer reads as the question the renderer would have typed: the sentence, the marker, the line as code, the evidence", () => {
@@ -366,7 +354,6 @@ describe("the offer's words and the stored message", () => {
         id: "q1",
         line: "agent:ship repo:acme/api fix it",
         risk: "",
-        footer: "",
         expiresAt: 1,
         question: {
           text: "acme/api is not onboarded here.",

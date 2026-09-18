@@ -104,7 +104,8 @@ import type { ChannelIO, IncomingMessage, StagedFile, StatusActivity, StatusHand
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
-import { artifactLink, cardActivity, replyAck } from "./reply.js";
+import { artifactLink, cardActivity, quietActivity, replyAck } from "./reply.js";
+import { shows } from "../verbosity.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 
@@ -343,12 +344,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let inFlightTool: string | undefined;
   // The shutdown notice rides on the LIVE frame only: the closed card is
   // built from `shell.close` and never mentions the restart.
+  // The quiet-wait suffix and the running command's code block are for
+  // someone watching the machinery (routing-and-config item 28): at quiet the
+  // card keeps the checklist and a caption naming the tool, nothing more.
+  const chatty = shows(resolved.verbosity, "verbose");
   const currentFrame = () =>
     shell.live({
-      suffix: quietSuffix(clock() - lastActivityAt, inFlightTool),
+      suffix: chatty ? quietSuffix(clock() - lastActivityAt, inFlightTool) : "",
       notice: shutdownNotice(),
       detail: [checklist],
-      activity: lastActivity,
+      activity: chatty ? lastActivity : quietActivity(lastActivity),
     });
   // The closed card keeps the run link (the run page outlives the run and
   // shows the final answer) and the agent's checklist; only the transient
@@ -1485,6 +1490,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (isCodingPrRun && !tailSkipped()) {
       prNote = await root.span("run.pr_post_step", () =>
         runCodingPrPostStep({
+          verbosity: resolved.verbosity,
           observed: {
             head: observedHead,
             branch: observedBranch,
@@ -1573,6 +1579,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           post: deps.postReviewComment ?? postReviewComment,
           fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
           reply: (text) => io.reply(text),
+          ack: (text) => replyAck(io, resolved.verbosity, text),
           publish: (e) => registry.publish(run.id, e),
           logKey: msg.threadKey,
         }),
