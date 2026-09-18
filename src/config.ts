@@ -24,6 +24,7 @@ import {
   type GrantsTable,
   type RestrictConfig,
 } from "./core/authz/grants.js";
+import { isViewablePerson } from "./core/authz/viewAs.js";
 import { ConfigDocumentClient, parseConfigLocation, stateWorkerFrom } from "./configDocument.js";
 import type { EnvRecord, Secrets } from "./secrets.js";
 import type { Actor, Grants } from "./core/authz/types.js";
@@ -1111,6 +1112,12 @@ export class ConfigStore {
    *  `Caller.actor`: the ONLY thing `authorize` reads about a caller. */
   grantsFor(actorId: string): Grants {
     return grantsIn(this.grants, actorId);
+  }
+
+  /** The Slack people the grants table names, in its order — whoever holds anything by name (the
+   *  people an admin may want to view the dashboard as, record 0053). Never a credential or a surface. */
+  grantedPeople(): string[] {
+    return [...this.grants.grants.keys()].filter(isViewablePerson);
   }
 
   /** Who to ask when denied — for actionable error messages: the Slack users

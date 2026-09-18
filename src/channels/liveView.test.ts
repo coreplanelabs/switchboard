@@ -122,13 +122,14 @@ function adminByDefault(
 
 /** The handler over a registry alone — run history off (store: null), the
  *  live-only shape every token-path test below exercises. */
-function liveOnlyHandler(registry: RunRegistry) {
+function liveOnlyHandler(registry: RunRegistry, over: Partial<Parameters<typeof createLiveViewHandler>[0]> = {}) {
   return adminByDefault(
     createLiveViewHandler({
       shell,
       service: createRunsService({ registry, store: null }),
       index: registry,
       retention: null,
+      ...over,
     }),
   );
 }
@@ -816,6 +817,36 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(seed.asUser).toEqual({ id: "slack:UIVY", name: "ivy" });
     // The people it names are the requesters of the rows IVY sees — bob's private run is not one; a typed id or Exit is the way to him.
     expect(seed.viewAs).toEqual({ people: [] });
+  });
+
+  it("the picker's people are the installation's known people merged with the page's requesters, sorted by name; an empty source leaves the page's requesters; a narrower viewer still gets none", async () => {
+    const reg = fixedRegistry();
+    reg.create("coding · owner/repo", {
+      channelId: "slack:C1",
+      threadKey: "t1",
+      userId: "slack:UBOB",
+      userName: "bob",
+    });
+    const known = liveOnlyHandler(reg, {
+      people: () => [{ id: "slack:UIVY", name: "ivy" }, { id: "slack:UBOB" }, { id: "slack:UANON" }],
+    });
+    const t = fakeReqRes("GET", "/runs");
+    known(t.req, t.res);
+    await t.finished;
+    expect(indexSeedOf(t.body()).viewAs).toEqual({
+      people: [{ id: "slack:UBOB", name: "bob" }, { id: "slack:UIVY", name: "ivy" }, { id: "slack:UANON" }],
+    });
+    const reader = fakeReqRes("GET", "/runs");
+    known(reader.req, reader.res, {
+      actor: accessActor({ sub: "alice" }, (id) => grantsFor(id, { commandGroups: ["runs"] })),
+    });
+    await reader.finished;
+    expect(indexSeedOf(reader.body())).not.toHaveProperty("viewAs");
+    const empty = liveOnlyHandler(reg, { people: () => [] });
+    const f = fakeReqRes("GET", "/runs");
+    empty(f.req, f.res);
+    await f.finished;
+    expect(indexSeedOf(f.body()).viewAs).toEqual({ people: [{ id: "slack:UBOB", name: "bob" }] });
   });
 
   it("also serves the index at /runs/ (trailing slash)", async () => {

@@ -50,8 +50,8 @@ export interface RunsIndexSeed {
    *  its `access:<sub>` (record 0043), and the toggle says so. */
   asUser?: { id: string; name?: string };
   /** Present when the viewer may view the dashboard as another person (record 0053: a session
-   *  holding `all`): the people the page can name — the requesters of its rows — for the picker;
-   *  a typed id is offered too. Absent, the picker is not drawn. */
+   *  holding `all`): the installation's known people and the page's requesters, by name, for the
+   *  picker; a typed id is offered too. Absent, the picker is not drawn. */
   viewAs?: { people: ViewablePerson[] };
   /** Configured run-history retention; null when history is off. */
   retentionDays: number | null;

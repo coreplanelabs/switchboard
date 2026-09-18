@@ -24,7 +24,7 @@
     "web/src/components/runs/RunRow.vue": "2c9e4436bf6bb23f9e51470bdd8e30a5c65392dad7beb8c885166b5ceddfd998",
     "web/src/components/runs/RunsTabs.vue": "b20205f3e70f5c043f26d937cf90905e9411584b4289dd546621d58ece044d41",
     "web/src/components/runs/SourceMark.vue": "437844bb6d5ea4a3461afe465d2540deec87414a68efcaedd0eec5a7fbf3c757",
-    "web/src/components/runs/ViewAsPicker.vue": "abafd9a327d3da3ffa324fb0d58f676844e2327f9ce5a72adbb56af8ac8a8428",
+    "web/src/components/runs/ViewAsPicker.vue": "1ad45366da1ee6ecd7206b7cb3576c5b7862fa46f46a42fbbf7d0e0858381557",
     "web/src/lib/browser.ts": "d1fd4f9f5935c3ca65a7d7e38f362601576ae575406bb2b5ac87ad118ff05dc7",
     "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",
     "web/src/lib/durationTone.ts": "9e5bbcf765a307f3c05cf1fd807697bf1957e03acbf95f38883b5db4d4b8f3c1",

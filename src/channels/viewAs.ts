@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Actor } from "../core/authz/types.js";
+import { MINUTE_MS } from "../core/budgets.js";
 import { holdsAll, isViewablePerson, viewingRefusal } from "../core/authz/viewAs.js";
 import type { RunView } from "../core/runsService.js";
 import { originAllowed } from "./commandHttp.js";
@@ -49,12 +50,98 @@ export function isViewAsPath(pathname: string): boolean {
 
 /** The people a runs page can name for the picker: its rows' Slack requesters, once each, by name. */
 export function requestersOf(rows: readonly RunView[]): ViewablePerson[] {
+  return peopleOf(rows, []);
+}
+
+/** The picker's people: the page's Slack requesters and the installation's known people
+ *  (`LiveViewDeps.people` — everyone the grants table names and every requester in run history),
+ *  once each, a name kept from whichever source has one, sorted by name. A row's requester is
+ *  always offered, so a page never names someone the picker cannot pick. */
+export function peopleOf(rows: readonly RunView[], known: readonly ViewablePerson[]): ViewablePerson[] {
   const seen = new Map<string, ViewablePerson>();
-  for (const r of rows) {
-    if (!r.userId || !isViewablePerson(r.userId) || seen.has(r.userId)) continue;
-    seen.set(r.userId, { id: r.userId, ...(r.userName ? { name: r.userName } : {}) });
-  }
+  const add = (id: string, name?: string) => {
+    if (!isViewablePerson(id)) return;
+    const had = seen.get(id);
+    if (!had) seen.set(id, { id, ...(name ? { name } : {}) });
+    else if (!had.name && name) seen.set(id, { id, name });
+  };
+  for (const r of rows) if (r.userId) add(r.userId, r.userName);
+  for (const p of known) add(p.id, p.name);
   return [...seen.values()].sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id));
+}
+
+export interface KnownPeopleDeps {
+  /** The grants table's Slack people (`ConfigStore.grantedPeople`). */
+  granted: () => readonly string[];
+  /** Every requester the run history holds: the service's list under the admin's own `all`. */
+  requesters: () => Promise<readonly RunView[]>;
+  /** A person's display name from the directory; undefined when it has none. */
+  name: (personId: string) => Promise<string | undefined>;
+}
+
+/**
+ * The installation's known people for the picker: the grants table's Slack people, named
+ * through the directory, and every requester in the run history the service lists. A failing
+ * directory leaves an id unnamed; a failing history read leaves only the granted people.
+ */
+export async function knownPeople(deps: KnownPeopleDeps): Promise<ViewablePerson[]> {
+  const rows = await deps.requesters().catch((): RunView[] => []);
+  const fromRuns = peopleOf(rows, []);
+  const namedIds = new Set(fromRuns.filter((p) => p.name).map((p) => p.id));
+  const granted = await Promise.all(
+    deps.granted().map(async (id): Promise<ViewablePerson> => {
+      if (namedIds.has(id)) return { id };
+      const name = await deps.name(id).catch((): undefined => undefined);
+      return { id, ...(name ? { name } : {}) };
+    }),
+  );
+  return peopleOf(rows, granted);
+}
+
+/** How long the picker's people stand before a paint asks for a refresh: a minute, the same
+ *  order as the directory's own caches — a new person appears within it, never mid-paint. */
+export const KNOWN_PEOPLE_TTL_MS = MINUTE_MS;
+
+export interface PeopleSource {
+  /** The people as last computed — empty before the first refresh lands. Never waits: when the
+   *  list is stale it starts one refresh in the background and answers with what it has. */
+  current(): readonly ViewablePerson[];
+  /** Compute the list now (single-flight: a refresh in flight is shared). Never rejects. */
+  refresh(): Promise<void>;
+}
+
+/**
+ * The people source the index reads from (index.ts wires it and primes it at startup): the
+ * known people behind a cache, refreshed in the background once they are older than the TTL.
+ * A page paint therefore never waits on the run store or Slack — the reads `knownPeople` makes
+ * happen off the request, and a paint that finds the cache stale is served the last list while
+ * the refresh runs. A refresh that fails (a throwing `granted`) keeps the last list.
+ */
+export function peopleSource(deps: KnownPeopleDeps, opts: { ttlMs?: number; now?: () => number } = {}): PeopleSource {
+  const ttlMs = opts.ttlMs ?? KNOWN_PEOPLE_TTL_MS;
+  const now = opts.now ?? Date.now;
+  let people: readonly ViewablePerson[] = [];
+  let refreshedAt = Number.NEGATIVE_INFINITY;
+  let inFlight: Promise<void> | undefined;
+  const refresh = (): Promise<void> => {
+    inFlight ??= knownPeople(deps)
+      .then((next) => {
+        people = next;
+        refreshedAt = now();
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        inFlight = undefined;
+      });
+    return inFlight;
+  };
+  return {
+    current() {
+      if (now() - refreshedAt >= ttlMs) void refresh();
+      return people;
+    },
+    refresh,
+  };
 }
 
 const JSON_NO_STORE = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };

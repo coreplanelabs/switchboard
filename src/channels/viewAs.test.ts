@@ -9,6 +9,9 @@ import {
   VIEW_AS_COOKIE,
   createViewAsHandler,
   isViewAsPath,
+  knownPeople,
+  peopleOf,
+  peopleSource,
   refuseWhileViewing,
   requestersOf,
   viewAsFromCookie,
@@ -92,6 +95,116 @@ describe("requestersOf", () => {
       { id: "slack:UANON" },
     ]);
     expect(requestersOf([])).toEqual([]);
+  });
+});
+
+describe("peopleOf and knownPeople", () => {
+  const row = (id: string, over: Partial<RunView>): RunView => ({
+    id,
+    startedAt: 0,
+    finished: true,
+    eventCount: 0,
+    ...over,
+  });
+  it("peopleOf merges the page's requesters with the installation's people once each, keeps a name from whichever source has one, always offers a row's requester, drops non-people, sorts by name", () => {
+    const rows = [
+      row("1", { userId: "slack:UBOB", userName: "bob" }),
+      row("2", { userId: "slack:UANON" }),
+      row("3", { userId: "access:a1" }),
+    ];
+    const known = [
+      { id: "slack:UANON", name: "anon" }, // names the page's unnamed requester
+      { id: "slack:UBOB" }, // already named by the page: the name stays
+      { id: "slack:UIVY", name: "ivy" }, // not on the page: offered anyway
+      { id: "http:ops", name: "ops" }, // never a person
+    ];
+    expect(peopleOf(rows, known)).toEqual([
+      { id: "slack:UANON", name: "anon" },
+      { id: "slack:UBOB", name: "bob" },
+      { id: "slack:UIVY", name: "ivy" },
+    ]);
+    expect(peopleOf([], [])).toEqual([]);
+  });
+
+  it("knownPeople: the granted Slack people named through the directory plus every requester in history; a requester's name spares the lookup; a failing lookup leaves the id; a failing history read leaves the granted people alone", async () => {
+    const asked: string[] = [];
+    const name = async (id: string) => {
+      asked.push(id);
+      if (id === "slack:UDOWN") throw new Error("slack down");
+      return id === "slack:UADMIN" ? "admin" : undefined;
+    };
+    const people = await knownPeople({
+      granted: () => ["slack:UADMIN", "slack:UBOB", "slack:UDOWN", "slack:UNONAME"],
+      requesters: async () => [
+        row("1", { userId: "slack:UBOB", userName: "bob" }),
+        row("2", { userId: "slack:UCAROL", userName: "carol" }),
+      ],
+      name,
+    });
+    expect(people).toEqual([
+      { id: "slack:UADMIN", name: "admin" },
+      { id: "slack:UBOB", name: "bob" },
+      { id: "slack:UCAROL", name: "carol" },
+      { id: "slack:UDOWN" },
+      { id: "slack:UNONAME" },
+    ]);
+    expect(asked).toEqual(["slack:UADMIN", "slack:UDOWN", "slack:UNONAME"]); // bob's name came from his run
+    const noHistory = await knownPeople({
+      granted: () => ["slack:UADMIN"],
+      requesters: async () => {
+        throw new Error("store down");
+      },
+      name,
+    });
+    expect(noHistory).toEqual([{ id: "slack:UADMIN", name: "admin" }]);
+  });
+});
+
+describe("peopleSource", () => {
+  const row = (id: string, over: Partial<RunView>): RunView => ({
+    id,
+    startedAt: 0,
+    finished: true,
+    eventCount: 0,
+    ...over,
+  });
+  it("answers from its cache and never waits: empty before the first refresh lands, the list after; a stale read serves the last list and starts one refresh in the background; a failing refresh keeps the last list", async () => {
+    let clock = 1_000_000;
+    let reads = 0;
+    let fail = false;
+    const source = peopleSource(
+      {
+        granted: () => {
+          if (fail) throw new Error("config gone");
+          return ["slack:UADMIN"];
+        },
+        requesters: async () => (reads++, [row("1", { userId: "slack:UBOB", userName: `bob${reads}` })]),
+        name: async () => "admin",
+      },
+      { ttlMs: 60_000, now: () => clock },
+    );
+    // Cold: nothing yet, one refresh started; a second read joins it.
+    expect(source.current()).toEqual([]);
+    expect(source.current()).toEqual([]);
+    await source.refresh(); // shares the refresh in flight
+    expect(reads).toBe(1);
+    expect(source.current()).toEqual([
+      { id: "slack:UADMIN", name: "admin" },
+      { id: "slack:UBOB", name: "bob1" },
+    ]);
+    expect(reads).toBe(1); // fresh: no refresh
+    // Stale: the last list is served at once, one refresh runs behind it.
+    clock += 60_000;
+    expect(source.current()[1]).toEqual({ id: "slack:UBOB", name: "bob1" });
+    expect(source.current()[1]).toEqual({ id: "slack:UBOB", name: "bob1" });
+    await source.refresh();
+    expect(reads).toBe(2);
+    expect(source.current()[1]).toEqual({ id: "slack:UBOB", name: "bob2" });
+    // A failing refresh keeps the last list.
+    clock += 60_000;
+    fail = true;
+    await source.refresh();
+    expect(source.current()[1]).toEqual({ id: "slack:UBOB", name: "bob2" });
   });
 });
 
