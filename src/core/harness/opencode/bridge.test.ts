@@ -279,6 +279,26 @@ describe("the gate's honest cannot, the compaction row, the budget stop, the unk
     expect(bridge.observe(replied("per_1", "once")).bypass).toBeUndefined();
   });
 
+  it("the refusals held for a step — what a withdrawn sibling's note is explained by — are dropped when the step ends or fails, so the map never grows over a long run", () => {
+    const ended = harness();
+    ended.bridge.observe(asked("per_1", "c1", "shell", "git push origin main"));
+    expect(ended.bridge.stepsWithHeldRefusals()).toEqual(["msg_a0"]);
+    ended.bridge.observe(ev("session.step.ended", { sessionID: "ses_c", assistantMessageID: "msg_a0" }));
+    expect(ended.bridge.stepsWithHeldRefusals()).toEqual([]);
+
+    const failed = harness();
+    failed.bridge.observe(asked("per_2", "c2", "shell", "git push origin main"));
+    expect(failed.bridge.stepsWithHeldRefusals()).toEqual(["msg_a0"]);
+    failed.bridge.observe(
+      ev("session.step.failed", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_a0",
+        error: { type: "aborted", message: "Step interrupted" },
+      }),
+    );
+    expect(failed.bridge.stepsWithHeldRefusals()).toEqual([]);
+  });
+
   it("a forged `once` for an ask the bot rejected — the effect differs from the bot's recorded decision — is a bypass", () => {
     const { bridge, events } = harness();
     const ask = bridge.observe(asked("per_2", "c2", "shell", "git push origin main"));
@@ -674,6 +694,28 @@ describe("the loop — a reply that cannot be posted, and the narration's timing
     expect(sibling?.summary).toMatch(/declined this tool call/);
     // The step ended interrupted by the binary, not by a loop-posted interrupt.
     expect(r.requests.filter((q) => q.method === "POST" && /\/interrupt$/.test(q.path))).toHaveLength(0);
+  });
+
+  it("a permission-reply POST the server answers 404 for an ask its pending list no longer carries, with no refusal of the bot's in the step to explain it, is still withdrawn and not a fatal reply — the note says no refusal is on the record — but the server's own reject echo is judged as any reply is: a reject where the bot decided once is a bypass, fail closed", async () => {
+    const r = await openCodeDriver({ replyRefusedAskDropped: true }).run(oneCall);
+    expect(r.outcome.kind).toBe("failed");
+    if (r.outcome.kind === "failed") {
+      expect(r.outcome.error.name).toBe("OpenCodeGateBypassedError");
+      expect(r.outcome.error.message).toMatch(/answering `reject` where the bot decided `once` \(request per_c1\)/);
+    }
+    const withdrawn = notes(r.events).filter((n) => n.kind === "ask_withdrawn");
+    expect(withdrawn).toHaveLength(1);
+    expect(withdrawn[0].summary).toMatch(
+      /withdrew the ask for bash \(call c1\) before the gate's reply \(once\) landed/,
+    );
+    expect(withdrawn[0].summary).toMatch(/no refusal of the same step is on the record/);
+    expect(notes(r.events).filter((n) => n.kind === "harness_error" && /could not be posted/.test(n.summary))).toEqual(
+      [],
+    );
+    expect(notes(r.events).some((n) => n.kind === "harness_error" && /bypassed/.test(n.summary))).toBe(true);
+    expect(replyPosts(r)).toHaveLength(1);
+    expect(pendingLists(r)).toHaveLength(1);
+    expect(r.killed.length).toBeGreaterThan(0);
   });
 
   it("a permission-reply POST the server answers 404 while its pending list still carries the ask stops the run by name, as any reply that did not land — fail closed, no ask_withdrawn note", async () => {

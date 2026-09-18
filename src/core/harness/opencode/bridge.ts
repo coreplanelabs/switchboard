@@ -478,7 +478,9 @@ export class OpenCodeBridge {
    *  rejected ran against the reject. Both are bypasses. */
   private readonly answered = new Map<string, "once" | "reject">();
   /** stepID → the calls of that step the gate refused, in the order refused:
-   *  what explains a sibling ask the server withdrew (`askWithdrawn`). */
+   *  what explains a sibling ask the server withdrew (`askWithdrawn`). A
+   *  step's entry is dropped when the step ends or fails, so the map never
+   *  outgrows the open step on a long run. */
   private readonly refusedByStep = new Map<string, Array<{ callId: string; tool: string }>>();
   /** requestID → the reply the bot decided, and whether the server has echoed
    *  it once. A `permission.replied` is the bot's own echo only when its
@@ -493,9 +495,11 @@ export class OpenCodeBridge {
    *  before it died, or by the model's shell with the server's password — and
    *  the run cannot tell by whom (`unattributable`): its echo fails the run
    *  closed, at most one model call lost. An ask the server withdrew before
-   *  the bot's reply reached it (`askWithdrawn`) is `withdrawn`: the server's
-   *  own `reject` for it is the withdrawal's echo, not a reply the bot did not
-   *  send. */
+   *  the bot's reply reached it, with the bot's own refusal of another call of
+   *  the same step on the record as the cause (`askWithdrawn`), is
+   *  `withdrawn`: the server's own `reject` for it is the cascade's echo, not
+   *  a reply the bot did not send. A withdrawal with no such refusal leaves
+   *  the mark off, and its echo is judged as any reply is. */
   private readonly decidedReplies = new Map<
     string,
     {
@@ -797,21 +801,33 @@ export class OpenCodeBridge {
    *  `ask_withdrawn` note naming the call, the reply the gate had decided and
    *  the refusal of the same step that explains it when the step has one
    *  (harness.md item 2). Information, not a failure: nothing ran that the
-   *  gate did not decide, and the call settles by the server's own tool event. */
+   *  gate did not decide, the loop is not stopped, and the step ends by the
+   *  server's word. Only a withdrawal the bot's own refusal of another call of
+   *  the step explains marks the ask `withdrawn` for its echo: the cascade
+   *  needs our reject as its cause, and with none on the record the server's
+   *  `reject` echo is judged as any reply is (`onPermissionReplied`). */
+  /** The steps whose refusals are still held for a withdrawn sibling's note
+   *  (`refusedByStep`): each step's entry goes when the step ends. */
+  stepsWithHeldRefusals(): string[] {
+    return [...this.refusedByStep.keys()];
+  }
+
   askWithdrawn(reply: OpenCodeReply): void {
-    const decided = this.decidedReplies.get(reply.requestID);
-    if (decided !== undefined) decided.withdrawn = true;
     const tool = openCodeToolNameWord(this.toolNames.get(reply.callId ?? "") ?? "tool");
     const call = reply.callId ? `${tool} (call ${reply.callId})` : `request ${reply.requestID}`;
     const refused = (reply.stepID !== undefined ? this.refusedByStep.get(reply.stepID) : undefined) ?? [];
     const siblings = refused.filter((r) => r.callId !== reply.callId);
+    if (siblings.length > 0) {
+      const decided = this.decidedReplies.get(reply.requestID);
+      if (decided !== undefined) decided.withdrawn = true;
+    }
     const why =
       siblings.length > 0
         ? `the gate refused ${siblings.map((s) => `${s.tool} (call ${s.callId})`).join(", ")} in the same step, and at a reject OpenCode declines every other pending ask and ends their step`
         : "no refusal of the same step is on the record, so the server dropped it for a reason of its own";
     this.note(
       "ask_withdrawn",
-      `OpenCode withdrew the ask for ${call} before the gate's reply (${reply.reply}) landed — ${why}; the call settles by the server's own word, and the run goes on`,
+      `OpenCode withdrew the ask for ${call} before the gate's reply (${reply.reply}) landed — ${why}; the loop is not stopped; the step ends by the server's word`,
     );
   }
 
@@ -950,6 +966,8 @@ export class OpenCodeBridge {
         break;
       case "session.step.ended":
         out.boundary = true;
+        // The step's end is heard here alone: its held refusals (`refusedByStep`) go with it.
+        if (typeof data.assistantMessageID === "string") this.refusedByStep.delete(data.assistantMessageID);
         if (earlier) break;
         this.pendingNarration = undefined;
         this.stepOpen = false;
@@ -986,6 +1004,8 @@ export class OpenCodeBridge {
         break;
       case "session.step.failed":
         out.boundary = true;
+        // The step's end, failing: its held refusals (`refusedByStep`) go with it.
+        if (typeof data.assistantMessageID === "string") this.refusedByStep.delete(data.assistantMessageID);
         // An earlier execution's step failing is the interrupt's doing — the
         // wind-down the loop before wrote is on the record; said again it would
         // be a second `harness_error` for one ending.
@@ -1460,11 +1480,13 @@ export class OpenCodeBridge {
       return;
     }
     if (reply === "reject" && decided.withdrawn === true && !decided.echoed) {
-      // The server's own rejection of an ask it withdrew — the step ended on a
-      // sibling's refusal and the binary rejects the step's other pending asks
-      // itself (measured, `testing/realDriver.test.ts`) — is the withdrawal's
-      // echo, whatever the bot had decided for it: no tool ran on it. A second
-      // echo, or one answering `once`, is judged below as any reply is.
+      // The server's own rejection of an ask it withdrew under the bot's own
+      // refusal of a sibling — the binary rejects the step's other pending asks
+      // itself at a reject (measured, `testing/realDriver.test.ts`) — is the
+      // cascade's echo, whatever the bot had decided for it: no tool ran on it.
+      // A second echo, one answering `once`, or a withdrawal no refusal of ours
+      // explains (`askWithdrawn` leaves the mark off) is judged below as any
+      // reply is.
       decided.echoed = true;
       return;
     }

@@ -234,6 +234,12 @@ export interface FakeServeOptions {
    *  server that lists an ask and refuses its reply, the contradiction the
    *  harness fails closed on. */
   replyRefusedWhilePending?: boolean;
+  /** Every permission-reply POST answers 404 with the ask already gone — the
+   *  server dropped and declined it by itself, with no refusal of the bot's in
+   *  the step to explain it — and the server's own `reject` echo and the
+   *  tool's failure follow: the withdrawal is not a fatal reply, and the echo
+   *  is judged as any reply is. */
+  replyRefusedAskDropped?: boolean;
   /** A `reject` reply declines every other ask the session has pending, as the
    *  pinned binary's `Permission.reply` does (`packages/core/src/permission.ts:203-220`
    *  at v2.0.3, each declined ask published as a `permission.replied` `reject`):
@@ -433,7 +439,13 @@ export interface FakeServeOptions {
    *  POST: `landed`, the server took the reply (the ask gone, the tool run);
    *  `lost`, the ask still pending; `unlistable`, lost, and the pending-asks
    *  GET the resolution reads meets the reset too. */
-  controlResetOnReply?: "landed" | "lost" | "unlistable";
+  controlResetOnReply?: "landed" | "lost" | "unlistable" | "lost-then-dropped" | "lost-then-refused";
+  /** `lost-then-dropped` and `lost-then-refused` lose the first reply to the
+   *  reset as `lost` does, and answer the re-issue 404: `dropped`, the server
+   *  dropped the ask meanwhile — gone from the listing, the tool failing
+   *  `aborted` with no `permission.replied`, the interrupt's measured shape —
+   *  and the run goes on; `refused`, the ask stays listed and the reply is
+   *  refused all the same, the contradiction the harness fails closed on. */
   /** The interrupt POST answers 500: the server refused it — its word, whenever it comes. */
   interruptPostFails?: boolean;
   /** The interrupt POST answers only when the container kills the server —
@@ -562,6 +574,7 @@ class ScriptedServe {
   private replyFailuresLeft: number;
   private readonly replyPostThrows: boolean;
   private readonly replyRefusedWhilePending: boolean;
+  private readonly replyRefusedAskDropped: boolean;
   private readonly declineCascade: boolean;
   /** A `reject` landed in the turn under play (`declineCascade`): the turn's next asks are declined as raised. */
   private cascadeArmed = false;
@@ -577,7 +590,10 @@ class ScriptedServe {
   private readonly interruptSettlesLate: "interrupted" | "failed" | "budget" | undefined;
   private readonly lateTailNoise: boolean;
   private readonly controlResetOnPrompt: "landed" | "lost" | "again" | undefined;
-  private readonly controlResetOnReply: "landed" | "lost" | "unlistable" | undefined;
+  private readonly controlResetOnReply:
+    "landed" | "lost" | "unlistable" | "lost-then-dropped" | "lost-then-refused" | undefined;
+  /** How the re-issue after a lost reply answers (`controlResetOnReply: "lost-then-*"`). */
+  private reissueAnswers: "lost-then-dropped" | "lost-then-refused" | undefined;
   /** How many prompt POSTs the control plane has reset under (`controlResetOnPrompt`). */
   private promptResets = 0;
   /** The first reply POST met the reset (`controlResetOnReply`). */
@@ -699,6 +715,7 @@ class ScriptedServe {
     this.replyFailuresLeft = options.failReplyPosts ?? 0;
     this.replyPostThrows = options.replyPostThrows === true;
     this.replyRefusedWhilePending = options.replyRefusedWhilePending === true;
+    this.replyRefusedAskDropped = options.replyRefusedAskDropped === true;
     this.declineCascade = options.declineCascade === true;
     this.steerPostFails = options.steerPostFails === true;
     this.primePostFails = options.primePostFails === true;
@@ -1241,6 +1258,18 @@ class ScriptedServe {
       // The ask stays pending — listed, its waiter kept — and the reply is
       // refused all the same (`replyRefusedWhilePending`).
       if (this.replyRefusedWhilePending) return j(404, { error: "permission not found" });
+      // The server dropped the ask by itself and declines it (`replyRefusedAskDropped`):
+      // gone from the listing before the 404 answers, the waiter resolved with the
+      // server's own reject, so the echo and the tool's failure follow on the feed.
+      if (this.replyRefusedAskDropped) {
+        const dropped = this.replies.get(reply[1]);
+        if (dropped !== undefined) {
+          this.liveAsks.delete(reply[1]);
+          this.replies.delete(reply[1]);
+          dropped({ reply: "reject" });
+        }
+        return j(404, { error: "permission not found" });
+      }
       const body = parseBody(req.body);
       const decision: Decision = {
         reply: body.reply === "reject" ? "reject" : "once",
@@ -1253,9 +1282,29 @@ class ScriptedServe {
       const replyReset =
         this.controlResetOnReply !== undefined && !this.replyReset ? this.controlResetOnReply : undefined;
       if (replyReset !== undefined) this.replyReset = true;
+      if (replyReset === "lost-then-dropped" || replyReset === "lost-then-refused") {
+        this.reissueAnswers = replyReset;
+        throw controlReset("request");
+      }
       if (replyReset === "lost" || replyReset === "unlistable") {
         this.permissionListResets = replyReset === "unlistable";
         throw controlReset("request");
+      }
+      // The re-issue after a lost reply (`lost-then-*`) answers 404: the ask
+      // dropped meanwhile — gone from the listing, its waiter failed as the
+      // interrupt fails one (`interruptedAsks`: the tool `aborted`, no echo) —
+      // or still listed and refused all the same.
+      if (this.reissueAnswers !== undefined) {
+        if (this.reissueAnswers === "lost-then-dropped") {
+          const waiter = this.replies.get(reply[1]);
+          if (waiter !== undefined) {
+            this.liveAsks.delete(reply[1]);
+            this.replies.delete(reply[1]);
+            this.interruptedAsks.add(reply[1]);
+            waiter({ reply: "reject" });
+          }
+        }
+        return j(404, { error: "permission not found" });
       }
       const taken = (): HarnessResponse => {
         if (replyReset === "landed") throw controlReset("request");
