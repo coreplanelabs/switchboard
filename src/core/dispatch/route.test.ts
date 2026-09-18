@@ -1690,6 +1690,16 @@ describe("the command menu — every chat command as a tool beside route (record
     expect(buildRoutePrompt(base).system).not.toContain(sentence);
   });
 
+  it("the rule tells the model a thing to be made, shown or attached is never a command call: one sentence, once, only with a menu", () => {
+    const withMenu = buildRoutePrompt({ ...base, commands: menu });
+    const sentence = "A request for something to be made, shown or attached";
+    expect(withMenu.system.split(sentence)).toHaveLength(2);
+    expect(withMenu.system).toContain("is work for a preset, never a command call");
+    // The example names no command: the tools carry their own names.
+    expect(withMenu.system).not.toMatch(/help_show|help\.show/);
+    expect(buildRoutePrompt(base).system).not.toContain(sentence);
+  });
+
   it("route(): a call to an offered command is a command decision — the input bound to the registry's { args, options } shape, no side effect — under an output cap that covers the offered tools", async () => {
     let seen: number | undefined;
     const model: RouteModel = async (_prompt, opts) => {

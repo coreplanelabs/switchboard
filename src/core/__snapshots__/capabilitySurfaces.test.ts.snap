@@ -86,7 +86,7 @@ exports[`capability surfaces — cloud-full > CLI catalogue 1`] = `
        switchboard help
 
 commands:
-  help show            — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+  help show            — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
   help commands        — Every chat command by group, the grammar, and the per-request directives.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
@@ -240,7 +240,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
-• \`help show\` — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+• \`help show\` — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
 • \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
@@ -339,7 +339,7 @@ exports[`capability surfaces — local-full > CLI catalogue 1`] = `
        switchboard help
 
 commands:
-  help show            — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+  help show            — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
   help commands        — Every chat command by group, the grammar, and the per-request directives.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
@@ -466,7 +466,7 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
-• \`help show\` — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+• \`help show\` — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
 • \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
@@ -553,7 +553,7 @@ exports[`capability surfaces — minimal > CLI catalogue 1`] = `
        switchboard help
 
 commands:
-  help show            — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+  help show            — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
   help commands        — Every chat command by group, the grammar, and the per-request directives.
   status show          — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.
   config show          — The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel.
@@ -644,7 +644,7 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 
 *Commands* (\`<group> <verb> [args…] [--option value…]\`; \`<group> help\` lists a group, \`<group> <verb> --help\` explains one):
 *help*
-• \`help show\` — How to ask in plain words: describe what you want, force an agent, change a route in the thread.
+• \`help show\` — How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show.
 • \`help commands\` — Every chat command by group, the grammar, and the per-request directives.
 *status*
 • \`status show\` — Which build this process runs: version, commit, when it was built and started, runs in flight, draining.

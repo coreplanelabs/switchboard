@@ -46,7 +46,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 
 | Route | Methods | Action | What it does |
 |---|---|---|---|
-| `/api/help.show` | `GET`, `POST` | `help:read` | How to ask in plain words: describe what you want, force an agent, change a route in the thread. |
+| `/api/help.show` | `GET`, `POST` | `help:read` | How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show. |
 | `/api/help.commands` | `GET`, `POST` | `help:read` | Every chat command by group, the grammar, and the per-request directives. |
 | `/api/status.show` | `GET`, `POST` | `status:read` | Which build this process runs: version, commit, when it was built and started, runs in flight, draining. |
 | `/api/config.show` | `GET`, `POST` | `config:read` | The effective agent/model/effort for you in this channel, the defaults, both scopes, and what is restricted; without a channel (a browser, a token, the CLI), your settings outside any channel. |

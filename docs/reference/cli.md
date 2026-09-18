@@ -36,7 +36,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 | Command | What it does | Surfaces |
 |---|---|---|
-| `help show` | How to ask in plain words: describe what you want, force an agent, change a route in the thread. | every surface |
+| `help show` | How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show. | every surface |
 | `help commands` | Every chat command by group, the grammar, and the per-request directives. | every surface |
 
 ### `status`
