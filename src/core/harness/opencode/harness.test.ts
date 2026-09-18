@@ -26,9 +26,11 @@ import {
   finaleAbortReason,
   finaleTimedOutNote,
   HARD_STOP_MESSAGE,
+  MODEL_CALL_IN_FLIGHT,
   timeBudgetAnswer,
   toolCutNote,
   windDownFailureNote,
+  wrapUpNeverPostedNote,
 } from "../windDown.js";
 import { bearerHashOf, RunBearerStore, type RunBearerGrant } from "../../modelProxy/runBearers.js";
 import { createTracer } from "../../trace/tracer.js";
@@ -1023,7 +1025,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     await session.end();
   });
 
-  it("a tool that completes on its own while the loop-end interrupt is in flight: the interrupt answers `interrupted: false`, so nothing was cut — no tool_cut note, no write-up prompt posted; the tool's own success is read as the loop's own and lands unmarked — nothing in flight — and the run closes under the budget's no-write-up label", async () => {
+  it("a tool that completes on its own while the loop-end interrupt is in flight: the interrupt answers `interrupted: false`, so nothing was cut — no tool_cut note, no write-up prompt posted; the tool's own success is read as the loop's own and lands unmarked — nothing in flight — and the run closes on the model's own answer, unlabelled, a wrap_up note saying the instruction was never posted", async () => {
     const hungTool: RunScript = {
       turns: [
         {
@@ -1038,9 +1040,14 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       hungTool,
     );
     const session = await o.opened;
-    // Nothing was interrupted: the execution ran on to its own end, and its last text is the answer under the
-    // budget's label.
-    expect(session.answer).toBe(timeBudgetAnswer("never", 10));
+    // Nothing was interrupted: the execution ran on to its own end, and its last text is the answer — the
+    // budget's write-up instruction was never posted, so the answer wears no label and the record says why.
+    expect(session.answer).toBe("never");
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "wrap_up")
+        .map((n) => n.summary),
+    ).toContain(wrapUpNeverPostedNote("time"));
     // The budget note names the tool in flight; the cut note is written only once an interrupt has landed on a live
     // execution, and this one landed on an idle session.
     expect(notes(o.events).filter((n) => n.kind === "time_budget_exhausted")).toHaveLength(1);
@@ -1355,6 +1362,35 @@ describe("the post-turn on the run's session — refused, answered by silence, o
     expect(o.container.requests.filter((q) => q.method === "POST" && /\/interrupt$/.test(q.path))).toHaveLength(1);
     expect(notes(o.events).filter((n) => n.kind === "tool_cut")).toEqual([]);
     expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:false"]);
+    await session.end();
+  });
+
+  it("the hung tool completes during the interrupt's round-trip and the execution moves on to its next step, which the interrupt cuts, its tail before the answer: that step began after the interrupt was posted and is the cut's — its aborted failure no harness_error — the tool's own success lands unmarked, the tool_cut note names the model call, and the write-up answers", async () => {
+    const o = openRun(
+      { hangToolCall: 1, cutLandsOnNextStep: true, interruptAnswersAfterTail: true },
+      {
+        turns: [
+          {
+            content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "sleep 30" } }],
+            stopReason: "tool_use",
+          },
+          { content: [{ type: "text", text: "never" }], stopReason: "end_turn" },
+          { content: [{ type: "text", text: "findings so far" }], stopReason: "end_turn" },
+        ],
+      },
+    );
+    const session = await o.opened;
+    expect(session.answer).toBe(timeBudgetAnswer("findings so far", 10));
+    expect(o.progress).not.toContain(finaleTimedOutNote());
+    expect(notes(o.events).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(
+      notes(o.events)
+        .filter((n) => n.kind === "tool_cut")
+        .map((n) => n.summary),
+    ).toEqual([toolCutNote(MODEL_CALL_IN_FLIGHT)]);
+    // The tool completed before the interrupt landed: its own success, unmarked; the model call was what the cut met.
+    expect(toolEventsOf(o.events)).toEqual(["tool_call:c1", "tool_result:c1:true:false"]);
+    expect(callsInFlight(o.events, "completed")).toEqual([]);
     await session.end();
   });
 

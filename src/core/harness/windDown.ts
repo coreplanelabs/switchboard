@@ -72,6 +72,13 @@ export const finaleTimedOutNote = (closes: "run" | "turn" = "run"): string =>
  *  never saw it, so the answer wears no wind-down label. */
 export const wrapUpUndeliveredNote = (kind: "time" | "turns" | "soft", closes: "run" | "turn" = "run"): string =>
   `the ${wrapUpName(kind)} wrap-up instruction never reached pi — held behind a prompt in doubt when pi settled — so the ${closes} closes on pi's own answer, unlabelled`;
+/** The card's line when OpenCode's loop-end cut found the session idle (the
+ *  tool completed and the execution finished on its own during the interrupt's
+ *  round-trip; harness.md item 13): the wrap-up instruction was never posted,
+ *  so the answer is the model's own and wears no wind-down label — the same
+ *  rule as pi's undelivered wrap-up. */
+export const wrapUpNeverPostedNote = (kind: "time" | "turns" | "soft", closes: "run" | "turn" = "run"): string =>
+  `the ${wrapUpName(kind)} wrap-up instruction was never posted — the loop-end interrupt found the session idle, the execution having finished on its own — so the ${closes} closes on OpenCode's own answer, unlabelled`;
 /** The card's line when the wrap-up instruction's write failed with the
  *  control plane's reset (harness-pi item 16): a steer is never resolved by a
  *  re-send, so the finale's clock is not started on an instruction pi may
