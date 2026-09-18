@@ -820,6 +820,7 @@ async function coordinatorRoundRuns(
       limit: RUN_LIST_MAX_LIMIT,
       ...(cursor ?? {}),
     });
+    if (result.storeUnavailable) throw new Error("The coordinator continuation history is temporarily unavailable");
     for (const row of result.runs) {
       if (
         row.parentInstanceId === original.parentInstanceId &&

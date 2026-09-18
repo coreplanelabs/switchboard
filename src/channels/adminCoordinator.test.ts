@@ -2633,6 +2633,21 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
 });
 
 describe("coordinator question records", () => {
+  it("retries unavailable continuation history rather than settling an incomplete round", async () => {
+    const h = harness();
+    await h.store.put(record("run-question", { ...TAG, awaitingInput: true }));
+    vi.spyOn(h.deps.runs, "listRuns").mockResolvedValueOnce({ runs: [], storeUnavailable: true });
+    await expect(
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+          parentInstanceId: INSTANCE.id,
+          runId: "run-question",
+        }),
+        h.deps,
+      ),
+    ).rejects.toThrow(/temporarily unavailable/);
+  });
+
   it.each([false, true])(
     "includes every earlier question's cost in the settled round (missing price: %s)",
     async (missing) => {

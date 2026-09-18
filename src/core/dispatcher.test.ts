@@ -16557,6 +16557,25 @@ describe("clarification through dispatch", () => {
 });
 
 describe("coordinator clarification replies", () => {
+  it("defers an answer when its durable coordinator context cannot be read", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await threadWithFinishedRun(deps, "coding", {
+      userId: "slack:UX",
+      awaitingInput: true,
+      parentInstanceId: "plan-answer",
+      idempotencyKey: "plan-answer:U10/0/coding",
+    });
+    const instances = new InMemoryCoordinatorInstanceStore();
+    vi.spyOn(instances, "get").mockRejectedValueOnce(new Error("offline"));
+    deps.coordinatorInstances = instances;
+    const { io, replies } = fakeIO([{ role: "assistant", text: "Which behavior do you want?" }]);
+    const outcome = await dispatch(deps, msg("Keep the existing behavior"), io);
+    expect(outcome.deferred).toBe(true);
+    expect(replies).toEqual([]);
+    expect(provider.requests).toEqual([]);
+  });
+
   it.each([false, true])(
     "continues the same branch and coordinator tag, with fresh repository access (denied=%s)",
     async (denied) => {

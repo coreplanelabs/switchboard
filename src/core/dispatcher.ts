@@ -406,7 +406,12 @@ export async function dispatch(
         now: clock(),
       });
     } catch (error) {
-      if (!(error instanceof CoordinatorClarificationRefusal)) throw error;
+      if (!(error instanceof CoordinatorClarificationRefusal)) {
+        // No admission or model work has begun. Let durable intake retry a
+        // missing store response instead of closing the waiting conversation.
+        ended.deferred = true;
+        return ended;
+      }
       // A refused reply must not close another person's waiting Linear session.
       await refuse("coordinator_clarification", () =>
         io.question ? io.question(error.message) : io.reply(error.message),

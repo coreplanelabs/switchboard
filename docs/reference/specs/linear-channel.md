@@ -137,7 +137,9 @@ the human assignee.
     Fresh agent and repository permission checks precede contract reconstruction.
     The coordinator follows the continuation run and uses its result in later
     briefs. Settled round cost includes earlier question turns; an unpriced turn
-    or incomplete listing makes that total unknown.
+    or incomplete listing makes that total unknown. An unavailable coordinator
+    context defers the answer before admission; an unavailable continuation
+    history retries the coordinator read rather than settling from partial facts.
 
 20. A Stop with no authorized active run does not post a completion or progress
     activity that could change another person's session. It can close the newest
