@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.249.0](https://github.com/coreplanelabs/switchboard/compare/v1.248.0...v1.249.0) (2026-09-18)
+
+
+### Features
+
+* **deploy:** the resident step drains the fleet before it deploys ([#1746](https://github.com/coreplanelabs/switchboard/issues/1746)) ([9d86e6f](https://github.com/coreplanelabs/switchboard/commit/9d86e6feaddf8e3f1632ac2783f713cb84ab760c))
+* **dispatcher:** a question's Yes redispatches the stored guess ([#1745](https://github.com/coreplanelabs/switchboard/issues/1745)) ([326ccf6](https://github.com/coreplanelabs/switchboard/commit/326ccf6e3a129f050049fe984497f52748ad3558))
+* **dispatcher:** a repo refusal proposes the near resident by name ([#1715](https://github.com/coreplanelabs/switchboard/issues/1715)) ([0254daf](https://github.com/coreplanelabs/switchboard/commit/0254daf9e59f516fbf0510d9bbc6dfa67cecf458))
+* **harness:** pi's models.json and OpenCode's config carry the card ([#1748](https://github.com/coreplanelabs/switchboard/issues/1748)) ([57d2dbe](https://github.com/coreplanelabs/switchboard/commit/57d2dbece0008e5cfa5a7c8afbbcbff69ae069a2))
+* **providers:** one model card per run, decided before the first call ([#1714](https://github.com/coreplanelabs/switchboard/issues/1714)) ([5661ecc](https://github.com/coreplanelabs/switchboard/commit/5661ecce564a1cc7f01e03841efab643d2a9a43e))
+* **ship:** a unit has one thread; the review child runs in it ([#1723](https://github.com/coreplanelabs/switchboard/issues/1723)) ([83967e2](https://github.com/coreplanelabs/switchboard/commit/83967e2a0fd248c2e055e8f36a88643207fe9465))
+
+
+### Bug fixes
+
+* **deploy:** a deploy holds for runs in flight, then fails by name ([#1733](https://github.com/coreplanelabs/switchboard/issues/1733)) ([3a82575](https://github.com/coreplanelabs/switchboard/commit/3a8257575925a8229fcc159e8b3f47e8232936a0))
+* **dispatcher:** a spec-shaped ask and a linked thread route to ship ([#1713](https://github.com/coreplanelabs/switchboard/issues/1713)) ([27eebfb](https://github.com/coreplanelabs/switchboard/commit/27eebfba151eb308cc41b3979ad1bc6ddbb0d3ec))
+* **dispatcher:** the help command never claims a task or a thing to show ([#1737](https://github.com/coreplanelabs/switchboard/issues/1737)) ([93233af](https://github.com/coreplanelabs/switchboard/commit/93233afd15906ce28a8c8952e128bf9dc8fee452))
+* **harness:** a 404 on a gate reply is read against the pending asks ([#1709](https://github.com/coreplanelabs/switchboard/issues/1709)) ([f8cbe0b](https://github.com/coreplanelabs/switchboard/commit/f8cbe0bab4d411513fa81fd0427468819dbb0fa8))
+* **harness:** a re-attach after a failed tool call imports on OpenCode ([#1734](https://github.com/coreplanelabs/switchboard/issues/1734)) ([63b4e39](https://github.com/coreplanelabs/switchboard/commit/63b4e39e0407c5fcfb1f290f23049a68d4d8fe23))
+* **harness:** a refused compaction summary becomes the bot's pointer ([#1732](https://github.com/coreplanelabs/switchboard/issues/1732)) ([8930f1e](https://github.com/coreplanelabs/switchboard/commit/8930f1ef73243f9024c74d294b743868cfb29b1c))
+* **harness:** a withdrawn ask's echo needs the gate's own refusal ([#1720](https://github.com/coreplanelabs/switchboard/issues/1720)) ([3924315](https://github.com/coreplanelabs/switchboard/commit/3924315369090f746ff0507f872afaccfc2f5053))
+* **harness:** OpenCode settles on the refill that carries the answer ([#1744](https://github.com/coreplanelabs/switchboard/issues/1744)) ([0ee5d3a](https://github.com/coreplanelabs/switchboard/commit/0ee5d3a088118add4d879e69f77e7c170b2016f9))
+* **resident:** a loaded container's refused connect is a wait, not fatal ([#1739](https://github.com/coreplanelabs/switchboard/issues/1739)) ([dc064a1](https://github.com/coreplanelabs/switchboard/commit/dc064a1804f51369a990b8e4b2cfa397737b6bdf))
+* **router:** the help command never claims a task or a thing to show ([93233af](https://github.com/coreplanelabs/switchboard/commit/93233afd15906ce28a8c8952e128bf9dc8fee452)), closes [#1728](https://github.com/coreplanelabs/switchboard/issues/1728)
+* **sandbox:** a loaded container's refused connect is a wait, not fatal ([#1730](https://github.com/coreplanelabs/switchboard/issues/1730)) ([83d2bd3](https://github.com/coreplanelabs/switchboard/commit/83d2bd35cf962dcf2912c307bf4974c024946a89))
+* **sandbox:** runtime-busy names the refused connect, never its cause ([#1743](https://github.com/coreplanelabs/switchboard/issues/1743)) ([945bbd2](https://github.com/coreplanelabs/switchboard/commit/945bbd2675fd58359f95ed79b21a781a513b1bea))
+* **ship:** a unit whose scope already landed ends done, not aborted ([#1710](https://github.com/coreplanelabs/switchboard/issues/1710)) ([a7eb847](https://github.com/coreplanelabs/switchboard/commit/a7eb847b82a9d759f864106266b45fbbc3865963))
+* **ship:** the merge-ready report reads the checks at the approved head ([#1726](https://github.com/coreplanelabs/switchboard/issues/1726)) ([dc4c987](https://github.com/coreplanelabs/switchboard/commit/dc4c987598d5db2d15e362eee93373561bf66e6f))
+
+
+### Documentation
+
+* **docs:** record 0057 keys a working session by unit and lane ([#1736](https://github.com/coreplanelabs/switchboard/issues/1736)) ([45c12e7](https://github.com/coreplanelabs/switchboard/commit/45c12e760ce0cda9d28fc48769a0cb74eca93ce1))
+* **docs:** record 0057, the operator is the one door for chat input ([#1731](https://github.com/coreplanelabs/switchboard/issues/1731)) ([30a2838](https://github.com/coreplanelabs/switchboard/commit/30a2838137928c53abc8ffcf7247400e1e4cf923))
+* **docs:** record 0058 amended after the three-arm adversarial review ([49631d5](https://github.com/coreplanelabs/switchboard/commit/49631d57a1cea51f408d0f2325ce6a2ad38bd3e9))
+* **docs:** record 0058 amended after the three-arm adversarial review ([#1749](https://github.com/coreplanelabs/switchboard/issues/1749)) ([49631d5](https://github.com/coreplanelabs/switchboard/commit/49631d57a1cea51f408d0f2325ce6a2ad38bd3e9))
+* **docs:** record 0058, silence is an outcome of the door ([0c9d9db](https://github.com/coreplanelabs/switchboard/commit/0c9d9dbb9f3beeeee937aa1554d1b42782fb628d))
+* **docs:** record 0058, silence is an outcome of the door ([#1738](https://github.com/coreplanelabs/switchboard/issues/1738)) ([0c9d9db](https://github.com/coreplanelabs/switchboard/commit/0c9d9dbb9f3beeeee937aa1554d1b42782fb628d))
+* record 0051 amended, a finished unit stays warm for its thread ([a666613](https://github.com/coreplanelabs/switchboard/commit/a6666130580ec8401d0672ecfbe55e3b5158d19e))
+* record 0051 amended, a finished unit stays warm for its thread ([#1740](https://github.com/coreplanelabs/switchboard/issues/1740)) ([a666613](https://github.com/coreplanelabs/switchboard/commit/a6666130580ec8401d0672ecfbe55e3b5158d19e))
+
 ## [1.248.0](https://github.com/coreplanelabs/switchboard/compare/v1.247.0...v1.248.0) (2026-09-18)
 
 
