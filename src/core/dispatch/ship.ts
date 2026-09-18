@@ -9,6 +9,7 @@
 // the runner's steps call back into the bot from there), so no round runs in
 // this branch and a bot death under a pipeline interrupts a child, never the
 // pipeline. The branch reads the run slice plus the seams only ship needs.
+import { awaitChannelAdmission, RunAdmissionStopped } from "./runStart.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { RunProfile } from "../../config/profile.js";
@@ -251,7 +252,6 @@ export async function runShipBranch(
       ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
     },
   );
-  io.runStarted?.({ id: run.id });
   const publishText = (
     type: "input" | "context" | "answer",
     text: string,
@@ -390,7 +390,15 @@ export async function runShipBranch(
     run: directives.renewals,
   });
   const shim = processShimOptions;
+  let stoppedBeforeExecution = false;
   try {
+    await awaitChannelAdmission(io, registry, run.id);
+    stoppedBeforeExecution = run.control.hardSignal.aborted;
+    if (stoppedBeforeExecution) {
+      const stopped = new RunAdmissionStopped(run.control);
+      publishText("answer", stopped.message);
+      throw stopped;
+    }
     // The hand-off (agent-ship.md item 16): the request — a plan, a task, or a
     // resume at review — becomes a plan runner instance; the bot writes the
     // records, asks its shim for the Workflow, and this run ends with where the
@@ -436,7 +444,7 @@ export async function runShipBranch(
     // RunStatus is the run-store contract (shared with the memory worker): a
     // refused hand-off still answered the request, so record and registry say
     // `completed` — the refusal lives in the reply and the card close below.
-    const status: RunStatus = outcome === undefined ? "failed" : "completed";
+    const status: RunStatus = stoppedBeforeExecution ? "stopped_hard" : outcome === undefined ? "failed" : "completed";
     registry.finish(run.id, status);
     const snap = registry.snapshot(run.id, run.token);
     const finishedAt = snap?.finishedAt ?? clock();
@@ -480,7 +488,9 @@ export async function runShipBranch(
     // card's total is the run's.
     if (outcome === undefined)
       await root
-        .span("post.card_close", () => card.done(shell.close({ kind: "done", icon: "❌", ...doneLines(diagnosis) })))
+        .span("post.card_close", () =>
+          card.done(shell.close({ kind: "done", icon: stoppedBeforeExecution ? "⛔" : "❌", ...doneLines(diagnosis) })),
+        )
         .catch(() => {});
   }
   if (!outcome) return; // unreachable: the finally above rethrew

@@ -13,6 +13,7 @@
 // follows it is recorded by `runChatCommand` because its route carries an
 // outcome — whatever the command, announced to no surface unless the command
 // was a run anyway.
+import { awaitChannelAdmission, RunAdmissionStopped } from "./runStart.js";
 import { systemClock } from "../trace/index.js";
 import { COMMAND_RUN_AGENT, DOOR_RUN_AGENT } from "../runOwner.js";
 import type { Span } from "../trace/types.js";
@@ -320,7 +321,6 @@ export async function runInlineCommandRun<
   // spans so far backfill, then `run.command` and the reply follow live. A
   // natural-language fall-through rebinds the same root to the agent run next.
   trace.bindRun(run.id, (e) => registry.publish(run.id, e));
-  if (announce) io.runStarted?.({ id: run.id });
   registry.publish(run.id, {
     type: "input",
     text: redactSecrets(msg.text),
@@ -335,7 +335,11 @@ export async function runInlineCommandRun<
   // where a routed agent run carries the same event.
   if (opts.route) registry.publish(run.id, { type: "route", ...opts.route, at: clock() });
   let result: T | undefined;
+  let stoppedBeforeExecution = false;
   try {
+    if (announce) await awaitChannelAdmission(io, registry, run.id);
+    stoppedBeforeExecution = run.control.hardSignal.aborted;
+    if (stoppedBeforeExecution) throw new RunAdmissionStopped(run.control);
     // The command's deterministic body is the run's one counted step (`tools`
     // for a command run); a resident op's own steps graft under it.
     result = await root.span(
@@ -361,10 +365,14 @@ export async function runInlineCommandRun<
     // A thrown command still gets an `answer`: the same `⚠️ <error>` line the
     // dispatcher's outer handler replies with, so the record explains its
     // `failed` status and the channel reply stays a projection of it.
-    registry.publish(run.id, { type: "answer", text: redactSecrets(errorReply(err)), at: clock() });
+    registry.publish(run.id, {
+      type: "answer",
+      text: redactSecrets(err instanceof RunAdmissionStopped ? err.message : errorReply(err)),
+      at: clock(),
+    });
     throw err;
   } finally {
-    const status: RunStatus = result?.ok ? "completed" : "failed";
+    const status: RunStatus = stoppedBeforeExecution ? "stopped_hard" : result?.ok ? "completed" : "failed";
     registry.finish(run.id, status);
     if (announce) io.runFinished?.({ id: run.id, status });
     // Sealed by the caller's drain after its reply (or at once, with no reply,

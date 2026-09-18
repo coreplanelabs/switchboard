@@ -1,3 +1,4 @@
+import { awaitChannelAdmission, RunAdmissionStopped } from "./dispatch/runStart.js";
 import {
   coordinatorClarificationFor,
   coordinatorClarificationContract,
@@ -344,6 +345,7 @@ export async function dispatch(
   // object and the outer finally stamps its status before the promise settles,
   // so the function resolves exactly when it did before it answered anything.
   const ended: DispatchOutcome = { status: "completed" };
+  let admissionStopped: RunAdmissionStopped | undefined;
   const resume = opts.resume;
   const restart = opts.restart;
   const clock = deps.clock ?? systemClock;
@@ -1089,6 +1091,25 @@ export async function dispatch(
     });
     const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;
     registered = run;
+    await awaitChannelAdmission(io, registry, run.id);
+    if (run.control.hardSignal.aborted) {
+      stoppedWhileAttaching = "hard";
+      await ending.sealAfterReply(
+        () =>
+          root.span("dispatch.stop", () =>
+            card.done(
+              shell.close({
+                kind: "not_started",
+                icon: "⛔",
+                reason: "stopped before the run started",
+                ...closeLines(clock(), false),
+              }),
+            ),
+          ),
+        () => root.span("post.reply", () => io.reply("Run stopped before execution.")),
+      );
+      return ended;
+    }
     // What the session seed could not do (session-log item 9), on the record
     // before the first turn — the run is not changed by it.
     for (const summary of seedNotes)
@@ -1692,6 +1713,16 @@ export async function dispatch(
     });
     return ended;
   } catch (err) {
+    if (err instanceof RunAdmissionStopped) {
+      admissionStopped = err;
+      await ending
+        .sealAfterReply(
+          async () => {},
+          () => root.span("post.reply", () => io.reply(err.message)),
+        )
+        .catch(() => {});
+      return ended;
+    }
     caught = true;
     // The catch-all is the last line (record 0054): an uncaught throw is a
     // `system`/`uncaught` refusal on the trace, counted like any other —
@@ -1818,8 +1849,8 @@ export async function dispatch(
       admitted,
       // A stop that ended the attach counts as the loop's stop would: the
       // request ends `stopped`, and a follow-up queued during the wait is told.
-      stopCounts: runLoopStarted || stoppedWhileAttaching !== undefined,
-      control: registered?.control,
+      stopCounts: runLoopStarted || stoppedWhileAttaching !== undefined || admissionStopped !== undefined,
+      control: registered?.control ?? admissionStopped?.control,
     });
     if (settled.kind === "dropped") await tellDropped(root, settled.pending);
     const stopMode = (settled.kind === "handed-on" ? undefined : settled.stopMode) ?? stoppedWhileAttaching;
@@ -1910,6 +1941,7 @@ export interface ClickRequest {
  */
 export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promise<DispatchOutcome> {
   const ended: DispatchOutcome = { status: "completed" };
+  let admissionStopped: RunAdmissionStopped | undefined;
   const clock = deps.clock ?? systemClock;
   const trace = startRequestRoot(deps, {
     channel: click.actor.origin ? channelOf(click.actor.origin.channelId) : undefined,
@@ -2020,6 +2052,16 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     if (res.result.ok && res.result.followUp) postSettledOutcome(res.result.followUp, io, root);
     return ended;
   } catch (err) {
+    if (err instanceof RunAdmissionStopped) {
+      admissionStopped = err;
+      await ending
+        .sealAfterReply(
+          async () => {},
+          () => root.span("post.reply", () => io.reply(err.message)),
+        )
+        .catch(() => {});
+      return ended;
+    }
     caught = true;
     await ending
       .sealAfterReply(
@@ -2031,7 +2073,13 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
   } finally {
     // The backstop, as in dispatch(): a finished run no reply reached is sealed and written.
     ending.drain(undefined);
-    ended.status = caught ? "failed" : refused ? "refused" : (redispatched?.status ?? "completed");
+    ended.status = caught
+      ? "failed"
+      : refused
+        ? "refused"
+        : admissionStopped
+          ? "stopped"
+          : (redispatched?.status ?? "completed");
     root.end(caught ? "error" : "ok", { status: ended.status });
     activeRuns--;
   }

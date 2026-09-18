@@ -156,6 +156,35 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
   beforeEach(() => vi.stubEnv("PUBLIC_BASE_URL", ""));
   afterEach(() => vi.unstubAllEnvs());
 
+  it.each(["stop", "unavailable"])(
+    "awaits channel admission and stops before creating a coordinator (%s)",
+    async (mode) => {
+      const s = setup("slack:UADMIN");
+      let release!: () => void;
+      s.io.runStarted = ({ id }) =>
+        new Promise<void>((resolve, reject) => {
+          release = () => {
+            if (mode === "unavailable") {
+              reject(new Error("binding unavailable"));
+              return;
+            }
+            s.registry.requestStopById(id, "hard", { kind: "chat", id: "test" });
+            resolve();
+          };
+        });
+      const running = runShipBranch(s.deps, s.msg, s.io, s.ctx);
+      const rejected = expect(running).rejects.toThrow("stopped");
+      await vi.waitFor(() => expect(release).toBeDefined());
+      expect(s.created).toEqual([]);
+      release();
+      await rejected;
+      expect(s.created).toEqual([]);
+      expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "stopped_hard" });
+      s.ending.drain(false);
+      await s.writer.settled();
+      expect(await s.store.get("run-s")).toMatchObject({ status: "stopped_hard" });
+    },
+  );
   it("refused at the preflight (ship allowed, coding not): one `dispatch.refuse` outcome, the card closes 🚫 naming the missing grant, the reply names it, no run exists and the runner is never asked", async () => {
     const s = setup("slack:UREV");
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);

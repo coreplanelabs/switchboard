@@ -7334,6 +7334,23 @@ describe("inline command runs + run receipts", () => {
     return new RunRegistry({ genId: () => `${prefix}-${++i}`, genToken: () => "tok" });
   }
 
+  it("reports a command stopped during channel admission without invoking it or recording a refusal", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.frictionLedger = new InMemoryFrictionLedger();
+    deps.runRegistry = sequentialRegistry("cancelled");
+    const { invoked } = wireCommands(deps);
+    const { io, replies, receipts } = receiptIO();
+    io.runStarted = async () => {
+      throw new Error("delivery admission unavailable");
+    };
+    expect(await dispatch(deps, msg("friction report"), io)).toEqual({ status: "stopped" });
+    expect(invoked).toEqual([]);
+    expect(receipts).toEqual([{ id: "cancelled-1", status: "stopped_hard" }]);
+    expect(replies).toEqual(["Run stopped before execution."]);
+    expect(deps.runRegistry.listActive()).toHaveLength(1);
+    expect(deps.runRegistry.getById("cancelled-1")).toMatchObject({ finished: true, status: "stopped_hard" });
+  });
+
   it("`friction report` is a run: input + answer events, finished, labeled, receipt `completed`", async () => {
     const deps = makeDeps(YAML_FIXTURE, capturingProvider());
     deps.frictionLedger = new InMemoryFrictionLedger();
@@ -8984,6 +9001,17 @@ workspaceDir: __WORKDIR__
     deps.fetchCoordinatorInstanceStatus = vi.fn(async () => ({ kind: "absent" as const }));
     return { deps, provider, instances, created };
   }
+
+  it("reports a ship request stopped during channel admission without handing off or recording a refusal", async () => {
+    const { deps, created } = shipDeps();
+    const { io, replies } = fakeIO();
+    io.runStarted = async () => {
+      throw new Error("delivery admission unavailable");
+    };
+    expect(await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io)).toEqual({ status: "stopped" });
+    expect(created).toEqual([]);
+    expect(replies).toEqual(["Run stopped before execution."]);
+  });
 
   /** The one generated plan instance a request became, with its U1 row — what
    *  the runner is handed. The instance's id is content-derived (`plan-<id>`),
@@ -15363,6 +15391,43 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
 // nothing and is told where the file can be worked with; a refused steer
 // copies nothing; without a store nothing is staged.
 describe("inbound staging (record 0033)", () => {
+  it.each(["stop", "unavailable"])(
+    "awaits channel admission before file copies, workspace attach or model execution (%s)",
+    async (mode) => {
+      const registry = new RunRegistry({ genId: () => "admission-stop", genToken: () => "t" });
+      const provider = capturingProvider();
+      const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+      deps.runRegistry = registry;
+      deps.artifacts = storeWithSlack();
+      const { io } = fakeIO();
+      const copy = vi.fn();
+      io.copyAttachment = copy;
+      let release!: () => void;
+      io.runStarted = ({ id }) =>
+        new Promise<void>((resolve, reject) => {
+          release = () => {
+            if (mode === "unavailable") {
+              reject(new Error("binding unavailable"));
+              return;
+            }
+            registry.requestStopById(id, "hard", { kind: "chat", id: "test" });
+            resolve();
+          };
+        });
+      vi.mocked(makeExecutor).mockClear();
+      const running = dispatch(deps, { ...msg("agent:coding read this", "slack:UADMIN"), staged: [clip] }, io);
+      await vi.waitFor(() => expect(release).toBeDefined());
+      expect(copy).not.toHaveBeenCalled();
+      expect(makeExecutor).not.toHaveBeenCalled();
+      expect(provider.requests).toEqual([]);
+      release();
+      expect((await running).status).toBe("stopped");
+      expect(copy).not.toHaveBeenCalled();
+      expect(makeExecutor).not.toHaveBeenCalled();
+      expect(provider.requests).toEqual([]);
+      expect(registry.getById("admission-stop")).toBeNull();
+    },
+  );
   it("a hard stop cancels an admitted file copy before any model turn or workspace pull", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("GITHUB_APP_ID", "");

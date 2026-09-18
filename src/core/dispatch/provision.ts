@@ -355,7 +355,6 @@ export interface RegisterRunContext {
 export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext): Promise<RegisteredRun> {
   const {
     msg,
-    io,
     agent,
     resolved,
     directives,
@@ -449,7 +448,6 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   const liveUrl = liveViewLink(run.id, run.token);
   shell.setLink(liveUrl ? { url: liveUrl, label: "Live run" } : undefined);
   if (liveUrl) admitted.runLink = liveUrl;
-  io.runStarted?.({ id: run.id });
   // The run's stream is live from here (docs/reference/specs/tracing.md item 6): the
   // spans so far — the root, the ack card, the repo resolution — are
   // backfilled, and the attach and the resident's grafted steps stream as

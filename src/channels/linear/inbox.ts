@@ -190,7 +190,7 @@ export class SqlLinearInbox implements LinearInbox {
     return (
       this.sql
         .exec(
-          "UPDATE linear_deliveries SET run_id = ? WHERE event_key = ? AND lease = ? AND phase = 'processing' AND (run_id IS NULL OR run_id = ?) RETURNING event_key",
+          "UPDATE linear_deliveries SET run_id = ? WHERE event_key = ? AND lease = ? AND phase = 'processing' AND defer_stop_at IS NULL AND (run_id IS NULL OR run_id = ?) RETURNING event_key",
           runId,
           key,
           lease,
@@ -387,7 +387,7 @@ export class InMemoryLinearInbox implements LinearInbox {
   }
   async bind(key: string, lease: string, runId: string): Promise<boolean> {
     const row = this.owned(key, lease);
-    if (!row || (row.runId && row.runId !== runId)) return false;
+    if (!row || row.deferStopAt !== undefined || (row.runId && row.runId !== runId)) return false;
     row.runId = runId;
     return true;
   }

@@ -339,9 +339,11 @@ export interface ChannelIO {
    * Called once by the core the moment a run has been CREATED in the registry
    * (before it executes), with the run id. The async HTTP ingress path uses it
    * to answer `202 Accepted` with the run id while the run continues in the
-   * background; Slack/CLI need nothing from it. Optional, like runFinished.
+   * background; Slack/CLI need nothing from it. A channel may return a promise
+   * to confirm durable admission; execution waits for it and fails closed if
+   * it rejects. Optional, like runFinished.
    */
-  runStarted?(started: { id: string }): void;
+  runStarted?(started: { id: string }): void | Promise<void>;
   /**
    * Open a thread of this channel's own for a child run
    * (docs/reference/specs/thread-admission.md item 6): post `lead` where a new

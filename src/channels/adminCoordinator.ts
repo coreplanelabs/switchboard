@@ -517,8 +517,9 @@ function watched(io: ChannelIO, on: { started: (id: string) => void; replied: (t
     status: (initial) => io.status(initial),
     history: () => io.history(),
     runStarted: (started) => {
-      io.runStarted?.(started);
+      const pending = io.runStarted?.(started);
       on.started(started.id);
+      return pending;
     },
   };
   if (io.attach) out.attach = (file) => io.attach!(file);

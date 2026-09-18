@@ -71,7 +71,10 @@ The bot starts its consumer when `LINEAR_BRIDGE_TOKEN` is configured. Slack
 credentials are optional for a Linear-only process; if either Slack token is
 present, both are required and the Slack channel starts too. It requires
 the durable run-history Worker and run ledger, so a container replacement can
-rebuild the conversation and reconcile admitted work. It stops intake during
+rebuild the conversation and reconcile admitted work. Run registration waits for the durable delivery binding before execution. A Stop
+received during admission prevents that delivery from starting, and an unavailable
+binding stops the local run instead of allowing uncertain ownership.
+It stops intake during
 drain; pending deliveries survive in the edge inbox. The edge acknowledges new sessions
 with a native thought before releasing them to the consumer. An alarm retries
 failed acknowledgements under the same activity id, so container startup does

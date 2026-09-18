@@ -71,6 +71,77 @@ function fixture(maxStagedBytes?: number) {
 afterEach(() => vi.useRealTimers());
 
 describe("Linear event consumer", () => {
+  it("stops a run registered after its delivery was cancelled during dispatch setup", async () => {
+    const f = fixture();
+    const registry = new RunRegistry({ genId: () => "late-run", genToken: () => "t" });
+    f.deps.leaseLost.mockImplementation((id) => {
+      registry.requestStopById(id, "hard", { kind: "chat", id: "linear:lease-lost" });
+    });
+    let announce!: () => void;
+    const effects = vi.fn();
+    f.deps.dispatch.mockImplementation(async (_msg, io) => {
+      await new Promise<void>((resolve) => {
+        announce = resolve;
+      });
+      const run = registry.create("late-run");
+      await io.runStarted?.({ id: run.id });
+      if (!run.control.hardSignal.aborted) effects();
+    });
+    await f.store.accept(event());
+    await f.consumer.poll();
+    await vi.waitFor(() => expect(announce).toBeDefined());
+    await f.store.cancelPending({ organizationId: "org", sessionId: "s", userId: "alice", receivedAt: 150 });
+    announce();
+    await f.consumer.settled();
+    expect(effects).not.toHaveBeenCalled();
+    expect(f.deps.leaseLost).toHaveBeenCalledWith("late-run");
+    expect(f.inbox.complete).toHaveBeenCalledOnce();
+    f.advance(200_000);
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.dispatch).toHaveBeenCalledOnce();
+    expect(f.deps.recover).not.toHaveBeenCalled();
+  });
+  it("waits for durable run binding and stops work if that binding cannot be confirmed", async () => {
+    const f = fixture();
+    let rejectBind!: (error: Error) => void;
+    f.inbox.bind.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectBind = reject;
+        }),
+    );
+    let admitted = false;
+    f.deps.dispatch.mockImplementation(async (_msg, io) => {
+      await io.runStarted?.({ id: "run" });
+      admitted = true;
+    });
+    await f.store.accept(event());
+    await f.consumer.poll();
+    await vi.waitFor(() => expect(f.inbox.bind).toHaveBeenCalledOnce());
+    expect(admitted).toBe(false);
+    rejectBind(new Error("transport unavailable"));
+    await f.consumer.settled();
+    expect(f.deps.leaseLost).toHaveBeenCalledWith("run");
+    expect(f.inbox.complete).toHaveBeenCalledOnce();
+  });
+  it("cannot complete a replacement consumer's lease after run admission is fenced", async () => {
+    const f = fixture();
+    f.inbox.bind.mockImplementationOnce(async () => {
+      f.advance(200_000);
+      expect((await f.store.claim(200_100, 100, "replacement"))?.begun).toBe(true);
+      return false;
+    });
+    f.deps.dispatch.mockImplementation(async (_msg, io) => {
+      await io.runStarted?.({ id: "old-run" });
+    });
+    await f.store.accept(event());
+    await f.consumer.poll();
+    await f.consumer.settled();
+    expect(f.deps.leaseLost).toHaveBeenCalledWith("old-run");
+    expect(f.inbox.complete).toHaveBeenCalledWith(event().key, "1");
+    expect(await f.store.complete(event().key, "replacement", 200_110)).toBe(true);
+  });
   it("does not replay a no-effects deferral that finishes after an authorized Stop", async () => {
     const f = fixture();
     let defer!: () => void;

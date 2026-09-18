@@ -15,6 +15,7 @@ import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { FastPathDeps } from "./fastPath.js";
 import {
   isInlineRunCommand,
+  runInlineCommandRun,
   recordRefusal,
   recordRoutedDecision,
   runChatCommand,
@@ -91,6 +92,35 @@ const ROUTE: RouteEventFields = {
 };
 
 describe("runChatCommand — the machinery moved from the fast path", () => {
+  it.each(["stop", "unavailable"])(
+    "awaits channel admission and records a stop before executing a command (%s)",
+    async (mode) => {
+      const d = deps();
+      const { message, io, ending, trace } = request("repo test", d);
+      let release!: () => void;
+      io.runStarted = ({ id }) =>
+        new Promise<void>((resolve, reject) => {
+          release = () => {
+            if (mode === "unavailable") {
+              reject(new Error("binding unavailable"));
+              return;
+            }
+            d.runRegistry.requestStopById(id, "hard", { kind: "chat", id: "test" });
+            resolve();
+          };
+        });
+      const execute = vi.fn(async () => ({ ok: true, text: "executed" }));
+      const running = runInlineCommandRun(d, message, "repo.test", io, execute, ending, trace);
+      const rejected = expect(running).rejects.toThrow("stopped");
+      await vi.waitFor(() => expect(release).toBeDefined());
+      expect(execute).not.toHaveBeenCalled();
+      release();
+      await rejected;
+      expect(execute).not.toHaveBeenCalled();
+      expect(d.runRegistry.getById("run-cmd")).toMatchObject({ finished: true, status: "stopped_hard" });
+      ending.drain(false);
+    },
+  );
   it("records an inline run for a command that does work (`repo.test`) and none for one that answers from local state (`config.show`) — exactly as the fast path did", async () => {
     expect(isInlineRunCommand("repo.test")).toBe(true);
     expect(isInlineRunCommand("mcp.promote")).toBe(true); // a promote does work: an org entry and a ticket

@@ -28,6 +28,21 @@ function sqlStore() {
 for (const kind of ["memory", "sqlite"] as const) {
   describe(`Linear event inbox — ${kind}`, () => {
     const make = () => (kind === "memory" ? new InMemoryLinearInbox() : sqlStore().inbox);
+    it("refuses run admission after Stop while retaining the uncertain delivery for recovery", async () => {
+      const inbox = make();
+      await inbox.accept({
+        ...event,
+        payload: { ...event.payload, agentSession: { id: "session", creatorId: "alice" } },
+      });
+      await inbox.claim(200, 100, "first");
+      await inbox.begin(event.key, "first");
+      await inbox.cancelPending({ organizationId: "org", sessionId: "session", userId: "alice", receivedAt: 210 });
+      expect(await inbox.bind(event.key, "first", "late-run")).toBe(false);
+      const replay = await inbox.claim(400, 100, "replacement");
+      expect(replay).toMatchObject({ begun: true, event: { key: event.key } });
+      expect(replay?.runId).toBeUndefined();
+      expect(await inbox.bind(event.key, "replacement", "another-run")).toBe(false);
+    });
     it("retains Stop across an in-flight no-effects deferral without cancelling another requester", async () => {
       const inbox = make();
       const preparing = {
@@ -89,7 +104,7 @@ for (const kind of ["memory", "sqlite"] as const) {
       expect((await inbox.claim(200, 100, "bob"))?.event.key).toBe("other-person");
       expect(await inbox.begin("other-person", "bob")).toBe(true);
       expect(await inbox.cancelPending({ organizationId: "org", sessionId: "s", receivedAt: 200 })).toBe(1);
-      expect(await inbox.bind("other-person", "bob", "run")).toBe(true);
+      expect(await inbox.bind("other-person", "bob", "run")).toBe(false);
       expect((await inbox.claim(200, 100, "next"))?.event.key).toBe("other-session");
       expect((await inbox.claim(200, 100, "next-org"))?.event.key).toBe("other-org");
       expect((await inbox.claim(200, 100, "control"))?.event.key).toBe("stop");

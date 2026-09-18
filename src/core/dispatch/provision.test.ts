@@ -396,7 +396,8 @@ describe("registerRun — the run's row on every surface before the attach", () 
     expect(out.channelVisibility).toBe("unknown");
     expect(out.liveUrl).toBe("https://sb.example/runs/run-p?t=tok");
     expect(r.admitted.runLink).toBe(out.liveUrl);
-    expect(started).toEqual(["run-p"]);
+    // The caller first records the registered run, then awaits channel admission.
+    expect(started).toEqual([]);
     const summary = registry.getById("run-p")!;
     expect(summary.label).toBe('coding · acme/api · "fix the login bug"');
     expect(summary).toMatchObject({

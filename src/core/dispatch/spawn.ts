@@ -204,8 +204,9 @@ function watchedChild(
     status: (initial) => io.status(initial),
     history: () => io.history(),
     runStarted: (started) => {
-      io.runStarted?.(started);
+      const pending = io.runStarted?.(started);
       on.started(started.id);
+      return pending;
     },
   };
   if (io.attach) watched.attach = (file) => io.attach!(file);

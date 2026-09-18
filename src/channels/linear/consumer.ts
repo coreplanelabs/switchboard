@@ -108,6 +108,7 @@ export class LinearConsumer {
     const preceding = sessionKey && !isStop ? this.sessionTurns.get(sessionKey) : undefined;
     let release!: (ready: boolean) => void;
     let ready = false;
+    let dispatchSettled = false;
     const admitted = new Promise<boolean>((resolve) => {
       release = resolve;
     });
@@ -171,29 +172,30 @@ export class LinearConsumer {
           clock: this.deps.clock,
           warn: this.deps.warn,
         });
-        io.runStarted = ({ id }) => {
+        io.runStarted = async ({ id }) => {
           const first = runId === undefined;
           runId = id;
-          ready = true;
-          release(true);
-          // The dispatcher can replace an interrupted run on the same IO.
-          // Keep the first durable hint; recovery also searches the request id.
-          // Lease loss must stop the latest local run, not its predecessor.
-          if (!first) {
-            if (!owned) this.deps.leaseLost(id);
+          // Keep the first durable hint when the core replaces an interrupted
+          // run; recovery also searches the request id. Every replacement must
+          // still wait for that binding and stop if ownership was lost.
+          if (first) {
+            binding = inbox
+              .bind(event.key, lease, id)
+              .then((ok) => {
+                if (!ok) lose();
+              })
+              .catch(() => {
+                this.deps.warn("[linear] run binding unavailable");
+                lose();
+              });
+          }
+          await binding;
+          if (!owned) {
+            this.deps.leaseLost(id);
             return;
           }
-          // Observe errors immediately; the durable begun marker still fences a
-          // replay if a bind's response is lost. Completion waits for this write.
-          binding = binding
-            .then(() => inbox.bind(event.key, lease, id))
-            .then((ok) => {
-              if (!ok) lose();
-            })
-            .catch(() => {
-              this.deps.warn("[linear] run binding unavailable");
-            });
-          if (!owned) this.deps.leaseLost(id);
+          ready = true;
+          release(true);
         };
         if (!owned) return;
         if (input.kind === "stop") {
@@ -222,6 +224,7 @@ export class LinearConsumer {
           if (!owned) return;
           const outcome = await this.deps.dispatch(input.msg, io);
           await binding;
+          dispatchSettled = true;
           if (outcome?.deferred) {
             if (runId) throw new Error("linear_deferred_after_run_started");
             if (owned) await inbox.defer(event.key, lease);
@@ -229,7 +232,10 @@ export class LinearConsumer {
           }
         }
       }
-      if (owned) ready = await inbox.complete(event.key, lease);
+      // A dispatch that stopped after a failed binding still settled its work.
+      // Complete with the original lease: the inbox CAS refuses a newer owner,
+      // while a Stop-marked delivery we still own needs no uncertain replay.
+      if (owned || dispatchSettled) ready = await inbox.complete(event.key, lease);
     } catch {
       this.deps.warn("[linear] delivery unfinished; retained for recovery");
       if (owned) await inbox.retry(event.key, lease).catch(() => {});
