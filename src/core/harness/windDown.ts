@@ -64,6 +64,19 @@ export const hardStopNote = (): string => "hard stop — run aborted, no summary
  *  ending: the write-up's answer stands, and this says what failed under it. */
 export const windDownFailureNote = (error: string, closes: "run" | "turn" = "run"): string =>
   `the model call failed during the wind-down (${error}); the ${closes} closes with its findings so far`;
+/** The finale bound ending a wait that was not on a model call (harness.md
+ *  items 5 and 13, OpenCode): a tool call open when the bound fell — the
+ *  loop-end cut's tool with its interrupt still unanswered
+ *  (`interruptUnanswered`), or a tool the write-up's own execution made —
+ *  said as the wait it was, never as a model call that failed. `doing` is
+ *  what the run was at (`doingWords`), `reason` the bound's own words. */
+export const finaleWaitNote = (
+  reason: string,
+  doing: string | undefined,
+  interruptUnanswered: boolean,
+  closes: "run" | "turn" = "run",
+): string =>
+  `the finale bound ended the wait${doing ? ` while ${doing}` : ""}${interruptUnanswered ? ", the loop-end interrupt unanswered" : ""} (${reason}); the ${closes} closes with its findings so far`;
 /** The card's line when the finale bound ends a write-up that never came. */
 export const finaleTimedOutNote = (closes: "run" | "turn" = "run"): string =>
   `finale timed out — closing the ${closes} without a write-up`;

@@ -25,6 +25,7 @@ import { recordingSink } from "../../testing/recordingSink.js";
 import {
   finaleAbortReason,
   finaleTimedOutNote,
+  finaleWaitNote,
   HARD_STOP_MESSAGE,
   MODEL_CALL_IN_FLIGHT,
   timeBudgetAnswer,
@@ -923,15 +924,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       pollMs: 1,
       tickMs: 5,
     };
-    return {
-      opened: openThroughSeam(new OpenCodeHarness(), deps, run),
-      events,
-      progress,
-      container,
-      sink,
-      lease,
-      clock,
-    };
+    return { opened: openThroughSeam(new OpenCodeHarness(), deps, run), events, progress, container, sink, lease };
   }
   const postTurn = { text: "describe the change", maxTurns: 5, maxMinutes: 5, toolContext: { executor } };
 
@@ -1450,13 +1443,12 @@ describe("the post-turn on the run's session — refused, answered by silence, o
 
   it("a tool call cut at the loop's end whose interrupt is never answered: the finale bound ends the wait, the write-up was never posted, and the record says that — the wrap_up note names the finale, not an idle session or a provider failure, and the unlabelled answer names the finale bound; the cut call is closed marked cut for the release", async () => {
     // The interrupt answers only once the server is killed (`interruptAnswersAfterKill`), so the loop-end cut's
-    // interrupt is in flight for the rest of the loop; the clock is moved past the finale bound once the wind-down
-    // has decided (the budget note), on the next real ticks — never inside the note's own emit, where the write-up's
-    // clock is stamped right after.
-    const o = openRun({ hangToolCall: 1, interruptAnswersAfterKill: "refused" }, sleepThenNever, (e) => {
-      if (e.type === "run_note" && e.kind === "time_budget_exhausted")
-        setTimeout(() => void (o.clock.now += o.lease.finaleMs + 1), 40);
-    });
+    // interrupt is in flight for the rest of the loop, and the fake moves the clock past the finale bound on that
+    // interrupt's request (`finaleDuringCutInterrupt`) — after the write-up's clock was stamped, before any answer.
+    const o = openRun(
+      { hangToolCall: 1, interruptAnswersAfterKill: "refused", finaleDuringCutInterrupt: true },
+      sleepThenNever,
+    );
     const session = await o.opened;
     const reason = finaleAbortReason(o.lease.finaleMs);
     expect(o.progress).toContain(finaleTimedOutNote());
@@ -1466,11 +1458,13 @@ describe("the post-turn on the run's session — refused, answered by silence, o
         .filter((n) => n.kind === "wrap_up")
         .map((n) => n.summary),
     ).toContain(wrapUpNeverPostedNote("time", "run", "finale"));
-    expect(
-      notes(o.events)
-        .filter((n) => n.kind === "harness_error")
-        .map((n) => n.summary),
-    ).toContain(windDownFailureNote(reason));
+    // The record's own note says what the finale ended: a wait on the cut tool with its interrupt unanswered — no
+    // model call was in flight, so none is said to have failed.
+    const errors = notes(o.events)
+      .filter((n) => n.kind === "harness_error")
+      .map((n) => n.summary);
+    expect(errors).toContain(finaleWaitNote(reason, "running bash", true));
+    expect(errors).not.toContain(windDownFailureNote(reason));
     // One prompt (the request's): the write-up was never posted; the cut's interrupt, then the finale's own.
     expect(o.container.requests.filter((q) => q.method === "POST" && /\/prompt$/.test(q.path))).toHaveLength(1);
     expect(o.container.requests.filter((q) => q.method === "POST" && /\/interrupt$/.test(q.path))).toHaveLength(2);

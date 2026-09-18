@@ -324,6 +324,13 @@ export interface FakeServeOptions {
    *  and the interrupt answers `interrupted: true` at once — so the stop is on
    *  the control, unread by the loop's next check, when the answer lands. */
   hardStopBeforeCutAnswer?: boolean;
+  /** The wall clock passes the finale bound while the loop-end cut's interrupt
+   *  is in flight: moved on the interrupt's request itself — the write-up's
+   *  clock is stamped before the post — as the hung model call's hang moves
+   *  it, so the loop's next tick finds the finale with the interrupt still
+   *  unanswered (pair it with `interruptAnswersAfterKill`). Deterministic: no
+   *  real-time delay decides when the clock moves. */
+  finaleDuringCutInterrupt?: boolean;
   /** The hung tool (`hangToolCall`) completes on its own while the loop-end
    *  interrupt is in flight, the execution moves on to its NEXT step — a model
    *  call, begun after the interrupt was posted — and the interrupt lands on
@@ -570,6 +577,7 @@ class ScriptedServe {
   private readonly owedEndNeverSerialized: boolean;
   private readonly hangAtAsk: number | undefined;
   private readonly hardStopBeforeCutAnswer: boolean;
+  private readonly finaleDuringCutInterrupt: boolean;
   /** The step the run's first play hung in (`hangModelCall`, `hangToolCall`, `hangAtAsk`): the late tail's aborted step is that step's, as the binary's is. */
   private hungStep: string | undefined;
   private readonly hungToolSettlesInTail: boolean;
@@ -689,6 +697,7 @@ class ScriptedServe {
     this.owedEndNeverSerialized = options.owedEndNeverSerialized === true;
     this.hangAtAsk = options.hangAtAsk;
     this.hardStopBeforeCutAnswer = options.hardStopBeforeCutAnswer === true;
+    this.finaleDuringCutInterrupt = options.finaleDuringCutInterrupt === true;
     this.hungToolSettlesInTail = options.hungToolSettlesInTail === true;
     this.bypassGateAtTurn = options.bypassGateAtTurn;
     this.dropStreamAtSettle = options.dropStreamAtSettle;
@@ -1286,6 +1295,15 @@ class ScriptedServe {
       // (`hardStopBeforeCutAnswer`): the loop's next check has not read it when
       // the answer lands.
       if (this.hanging && this.hardStopBeforeCutAnswer) this.run.control?.requestStop("hard");
+      // The finale bound passes with this interrupt in flight
+      // (`finaleDuringCutInterrupt`): the clock moves here, on the request.
+      if (this.hanging && this.finaleDuringCutInterrupt) {
+        if (this.deps.advanceClock === undefined || this.deps.finaleMs === undefined)
+          throw new Error(
+            "finaleDuringCutInterrupt needs the driver's clock: hand the serve `advanceClock` and `finaleMs`",
+          );
+        this.deps.advanceClock(this.deps.finaleMs + 1);
+      }
       const stopFirst = this.hanging && this.hardStopOnCutInterrupt && this.run.control !== undefined;
       if (stopFirst) {
         this.run.control?.requestStop("hard");
