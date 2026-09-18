@@ -189,6 +189,37 @@ describe("sandbox Worker wiring (static)", () => {
     expect(worker).toContain("instanceof OperationInterruptedError");
   });
 
+  // item 28: the platform's accept refusal is the wait token only where no
+  // process was started — the spawn and the gate's warm-up — never on the
+  // output of a running command, whose re-send would run it twice; the file
+  // routes throw the typed error and the fetch handler answers 503 with the
+  // token; a busy error that escaped the Durable Object is still named.
+  it("a loaded container's refusal is the runtime-busy token at the spawn and the warm-up alone, the file routes' 503, and named after the RPC boundary", () => {
+    // The spawn's catch and the warm-up's catch go through `spawnFailure`; the output's catch does not.
+    expect(worker).toMatch(
+      /proc = await createExtensionProcessSandbox\(this\)\.exec\(argv, \{ env: envVars, timeout: backstopMs \}\);\s*\} catch \(err\) \{[^}]*return this\.spawnFailure\(err, startedAt\);/,
+    );
+    expect(worker).toMatch(
+      /\(cause\) => sandboxStartingExecAnswer\(cause\),\s*\);\s*\} catch \(err\) \{[^}]*return this\.spawnFailure\(err, startedAt\);/,
+    );
+    expect(worker).toMatch(
+      /await proc\.kill\(9\)\.catch\(\(\) => \{\}\);[\s\S]*?\}\s*return this\.execFailure\(err, startedAt\);/,
+    );
+    expect(worker.match(/this\.spawnFailure\(/g)).toHaveLength(2);
+    // spawnFailure names the token through the platform's wording; execFailure never does.
+    expect(worker).toMatch(/private spawnFailure\([\s\S]*?isRuntimeBusy\(err\)[\s\S]*?runtimeBusyExecAnswer\(/);
+    const execFailureBody = worker.slice(
+      worker.indexOf("private execFailure("),
+      worker.indexOf("private runtimeUnreachable("),
+    );
+    expect(execFailureBody).not.toContain("isRuntimeBusy(");
+    expect(worker).toContain("isRuntimeBusySignal(link)");
+    // The file routes and the fetch handler.
+    expect(worker).toMatch(/isRuntimeBusy\(err\)\) throw this\.runtimeBusy\(thrownText\(shape\)\);/);
+    expect(worker).toMatch(/if \(isRuntimeBusyError\(err\)\) return json\(runtimeBusyAnswer\(msg\), 503\);/);
+    expect(worker).toMatch(/if \(isRuntimeBusyError\(err\)\) return runtimeBusyExecAnswer\(raw\);/);
+  });
+
   // The credential rides in the SDK's per-process `env` option, so it never
   // appears in the command text the SDK logs. The 0.3.x base64 export prefix
   // put the live GH_TOKEN into every "Command executed" log line.

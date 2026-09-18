@@ -11,8 +11,19 @@ import {
   fleetBusyExhaustedMessage,
   isFleetBusy,
   isRuntimeUnreachableError,
+  RUNTIME_BUSY_BACKOFF_MS,
+  RUNTIME_BUSY_ERROR_NAME,
+  RUNTIME_BUSY_REASON,
+  RUNTIME_BUSY_WAIT_MAX_MS,
   RUNTIME_UNREACHABLE_ERROR_NAME,
   RUNTIME_UNREACHABLE_REASON,
+  isRuntimeBusyError,
+  isRuntimeBusySignal,
+  runtimeBusyAnswer,
+  runtimeBusyExecAnswer,
+  runtimeBusyExhaustedMessage,
+  runtimeBusyMessage,
+  SandboxRuntimeBusyError,
   runtimeUnreachableAnswer,
   runtimeUnreachableExecAnswer,
   runtimeUnreachableMessage,
@@ -119,9 +130,10 @@ describe("the sandbox-starting answer shapes the Worker sends", () => {
     expect(e).toEqual({ error: e.error, reason: "sandbox-starting", stdout: "", stderr: e.error, exitCode: 127 });
   });
 
-  it("the two wait tokens are the only reasons the executor re-sends on; anything else is an ordinary failure", () => {
+  it("the three wait tokens are the only reasons the executor re-sends on; anything else is an ordinary failure", () => {
     expect(isWaitReason("fleet-busy")).toBe(true);
     expect(isWaitReason("sandbox-starting")).toBe(true);
+    expect(isWaitReason("runtime-busy")).toBe(true);
     expect(isWaitReason("runtime-unreachable")).toBe(false);
     expect(isWaitReason(undefined)).toBe(false);
     expect(isWaitReason("")).toBe(false);
@@ -296,6 +308,89 @@ describe("the runtime-unreachable answer shapes the Worker sends", () => {
     expect(runtimeUnreachableExecAnswer(message)).toEqual({
       error: message,
       reason: "runtime-unreachable",
+      stdout: "",
+      stderr: message,
+      exitCode: 127,
+    });
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 28 — a loaded container that did
+// not accept the connection is a wait, not a dead sandbox: the platform's
+// accept refusal met before a process was started is named with a token the
+// executor re-sends on.
+describe("the runtime-busy signal, message and error", () => {
+  const PLATFORM =
+    "Container is taking too long to accept the connection; the application could be overwhelmed with load";
+
+  it("recognizes the platform's accept refusal by its wording, as a plain Error or a bare shape, and nothing else", () => {
+    expect(isRuntimeBusySignal(new Error(PLATFORM))).toBe(true);
+    expect(isRuntimeBusySignal({ message: PLATFORM })).toBe(true);
+    expect(isRuntimeBusySignal(new Error("The operation was aborted"))).toBe(false);
+    expect(isRuntimeBusySignal(new Error("no container instance available"))).toBe(false);
+    expect(isRuntimeBusySignal(new Error("Session 'x' shell exited (exit code: 1)"))).toBe(false);
+    expect(isRuntimeBusySignal("Container is taking too long to accept the connection")).toBe(false);
+    expect(isRuntimeBusySignal(null)).toBe(false);
+  });
+
+  it("the message starts with the token, says nothing ran and the request is re-sent, and names the container and the platform's words", () => {
+    const m = runtimeBusyMessage({ containerId: "3708bca6db4a", cause: PLATFORM });
+    expect(m.startsWith("runtime-busy: ")).toBe(true);
+    expect(m).toContain("nothing ran");
+    expect(m).toContain("re-sent");
+    expect(m).toContain("container 3708bca6db4a");
+    expect(m).toContain(PLATFORM);
+    expect(runtimeBusyMessage({ containerId: "c", cause: "  " })).toContain("no detail from the platform");
+  });
+
+  it("the typed error carries the name and the token, and is recognized by either after the RPC boundary", () => {
+    const err = new SandboxRuntimeBusyError({ containerId: "c1", cause: PLATFORM });
+    expect(err.name).toBe(RUNTIME_BUSY_ERROR_NAME);
+    expect(err.reason).toBe("runtime-busy");
+    expect(isRuntimeBusyError(err)).toBe(true);
+    expect(isRuntimeBusyError({ name: RUNTIME_BUSY_ERROR_NAME, message: "" })).toBe(true);
+    expect(isRuntimeBusyError(new Error(err.message))).toBe(true);
+    expect(isRuntimeBusyError("runtime-busy: the thread's sandbox container is running but did not accept")).toBe(true);
+  });
+
+  it("is NOT a fleet-busy, a runtime-unreachable, a recycle or the platform's bare words — the Worker names it, the executor reads the token", () => {
+    expect(isRuntimeBusyError(new Error(PLATFORM))).toBe(false);
+    expect(isRuntimeBusyError(new Error("runtime-unreachable: the sandbox container's runtime did not answer"))).toBe(
+      false,
+    );
+    expect(isRuntimeBusyError({ name: "ContainerUnavailableError", message: "no container instance available" })).toBe(
+      false,
+    );
+    expect(
+      isRuntimeBusyError({ name: "SessionTerminatedError", message: "Session 'x' shell exited (exit code: 1)" }),
+    ).toBe(false);
+    const err = new SandboxRuntimeBusyError({ containerId: "c1", cause: PLATFORM });
+    expect(isFleetBusyError(err)).toBe(false);
+    expect(isRuntimeUnreachableError(err)).toBe(false);
+  });
+
+  it("the wait is bounded like the fleet's and polls denser than the start's; the exhausted message names the wait and what loads the container", () => {
+    expect(RUNTIME_BUSY_WAIT_MAX_MS).toBe(5 * 60_000);
+    expect(RUNTIME_BUSY_BACKOFF_MS).toEqual([3_000, 5_000, 10_000]);
+    expect(RUNTIME_BUSY_BACKOFF_MS[0]).toBeLessThan(SANDBOX_START_BACKOFF_MS[0]);
+    expect(runtimeBusyExhaustedMessage(60_000)).toBe(
+      "sandbox busy — the thread's container did not accept a connection within 60s (a command already running in it has every core); wait for it to finish, then retry",
+    );
+  });
+});
+
+describe("the runtime-busy answer shapes the Worker sends", () => {
+  const message = runtimeBusyMessage({ containerId: "c1", cause: "x" });
+
+  it("the /read and /write shape carries the reason and the text as the error", () => {
+    expect(runtimeBusyAnswer(message)).toEqual({ error: message, reason: RUNTIME_BUSY_REASON });
+    expect(RUNTIME_BUSY_REASON).toBe("runtime-busy");
+  });
+
+  it("the /exec shape is the dual in-body failure form (error + exit 127 + stderr) plus the reason", () => {
+    expect(runtimeBusyExecAnswer(message)).toEqual({
+      error: message,
+      reason: "runtime-busy",
       stdout: "",
       stderr: message,
       exitCode: 127,
