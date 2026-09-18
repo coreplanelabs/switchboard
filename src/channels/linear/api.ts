@@ -252,10 +252,14 @@ export class DirectLinearApi implements LinearApi {
     }
   }
 
-  async files(sessionId: string, userId: string, urls: string[], history = false): Promise<LinearFile[]> {
+  private async fileContext(
+    sessionId: string,
+    userId: string,
+    urls: string[],
+  ): Promise<Map<string, LinearFileReference>> {
     if (!Array.isArray(urls) || urls.length > 1000 || urls.some((url) => typeof url !== "string" || url.length > 4096))
       throw new Error("linear_invalid_files");
-    if (!urls.length) return [];
+    if (!urls.length) return new Map();
     if (!(await this.canRead(sessionId, userId))) throw new Error("linear_file_denied");
     const requested = [...new Set(urls)];
     const wanted = new Set(requested);
@@ -298,6 +302,12 @@ export class DirectLinearApi implements LinearApi {
       cursors.add(after);
     }
     for (const activity of await this.activities(sessionId)) collect(activity.body);
+    return allowed;
+  }
+
+  async files(sessionId: string, userId: string, urls: string[], history = false): Promise<LinearFile[]> {
+    const allowed = await this.fileContext(sessionId, userId, urls);
+    const requested = [...new Set(urls)];
     const downloaded = await downloadLinearFiles(
       requested.flatMap((url) => (allowed.has(url) ? [allowed.get(url)!] : [])),
       this.deps,
