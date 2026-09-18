@@ -55,6 +55,11 @@ export const POLICY: readonly Rule[] = [
   // Stopping a run needs the write grant AND visibility of the run.
   { action: "runs:write", resource: "run", when: [grant("runs:write"), MEMBER_OF] },
   { action: "runs:write", resource: "run", when: [grant("runs:write"), ALL_CHANNELS] },
+  // Native session cancellation: a person may stop their own run without
+  // acquiring operator rights to other runs or run-management commands.
+  { action: "runs:stop", resource: "run", when: [grant("runs:stop:self"), IS_SELF] },
+  { action: "runs:stop", resource: "run", when: [grant("runs:write"), MEMBER_OF] },
+  { action: "runs:stop", resource: "run", when: [grant("runs:write"), ALL_CHANNELS] },
   // List-shaped `runs.*`: the grant admits the command; the store predicate narrows the rows.
   { action: "runs:read", resource: "command", when: [grant("runs:read")] },
   { action: "runs:write", resource: "command", when: [grant("runs:write")] },
@@ -66,6 +71,11 @@ export const POLICY: readonly Rule[] = [
   // channel only from inside it, an admin's `all` not consulted. The row has
   // no caller until the references dispatch step lands behind its flag.
   { action: "conversation:read", resource: "channel", when: [MEMBER_OF] },
+
+  // Work tracking requires both the action grant and current platform access.
+  // Its adapter supplies fresh memberOf facts and caps public access for guests.
+  { action: "work-items:read", resource: "channel", when: [grant("work-items:read"), MEMBER_OF] },
+  { action: "work-items:write", resource: "channel", when: [grant("work-items:write"), MEMBER_OF] },
 
   // ── review ───────────────────────────────────────────────────────────────
   // `review abridge` spends one Opus-class call and rewrites a stored record:

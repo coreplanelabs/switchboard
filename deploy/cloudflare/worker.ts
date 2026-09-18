@@ -53,6 +53,8 @@ import { COPY_PATH, handleArtifactsCopy } from "./artifactsCopy.ts";
 import { withKnownLength } from "./knownLength.ts";
 import type { ShipCoordinatorParams } from "./coordinator";
 import { INSTANCE, INTERNAL } from "./shared";
+import { handleLinearEdge, linearRoute, type LinearState } from "./linear";
+export { LinearState } from "./linear";
 
 /** The ship coordinator's Workflow entrypoint is declared in coordinator.ts;
  *  the Workflows binding resolves its `class_name` against this module
@@ -67,6 +69,14 @@ const tracer = createTracer({ clock: systemClock });
 const traceSinks = [workerLogSink((line) => console.log(line))];
 
 export interface Env {
+  LINEAR_STATE: DurableObjectNamespace<LinearState>;
+  // Linear credentials stay on the edge: none are forwarded to the container.
+  LINEAR_CLIENT_ID?: string;
+  LINEAR_CLIENT_SECRET?: string;
+  LINEAR_APPLICATION_ID?: string;
+  LINEAR_WEBHOOK_SECRET?: string;
+  LINEAR_ORGANIZATION_ID?: string;
+  LINEAR_BRIDGE_TOKEN?: string;
   SWITCHBOARD: DurableObjectNamespace<SwitchboardServer>;
   /** The ship coordinator (coordinator.ts): `POST /admin/coordinator/instances`
    *  creates its instances; the state Worker's finish sends them `run-finished-<runId>`. */
@@ -113,6 +123,7 @@ export interface Env {
 /** Every secret/var the Worker forwards into the container. Optional entries
  *  are forwarded only when set, so the bot sees "not configured" as absence. */
 const FORWARDED_OPTIONAL = [
+  "LINEAR_BRIDGE_TOKEN",
   "OPENAI_API_KEY",
   "OPENROUTER_API_KEY",
   "E2B_API_KEY",
@@ -483,6 +494,7 @@ const withLength = (res: Response): Response => withKnownLength(res, (size) => n
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const pathname = new URL(request.url).pathname;
+    if (linearRoute(pathname)) return handleLinearEdge(request, env);
     // The public edge (docs/reference/specs/tracing.md item 22): whatever trace context the
     // caller sent is stripped, and what the container sees carries this
     // Worker's own root. A static asset or the live view's SSE stream gets no

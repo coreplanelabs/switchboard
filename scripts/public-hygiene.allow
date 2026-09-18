@@ -89,6 +89,11 @@ deploy/cloudflare-memory/wrangler.template.jsonc	"compatibility_date": "2026-08-
 deploy/cloudflare-resident/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
 deploy/cloudflare-sandbox/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
 deploy/cloudflare/wrangler.template.jsonc	"compatibility_date": "2026-08-01",
+deploy/cloudflare/linear.local.jsonc	"compatibility_date": "2026-08-01",
+
+# These links use the required dated plan filename, not an incident retelling.
+docs/how-to/connect-linear.md	is deployed. See the [delivery plan](../plans/2026-09-17-001-linear-channel.md).
+docs/reference/specs/linear-channel.md	- **Docs**: [Delivery plan](../../plans/2026-09-17-001-linear-channel.md).
 
 # The example profile's placeholder account id: src/deploy/profile.ts requires exactly 32 hex characters, so the placeholder keeps the shape.
 deploy/profile.example.json	"account": "00000000000000000000000000000000",

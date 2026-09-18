@@ -947,3 +947,74 @@ describe("a child is its thread — the reads follow the thread's newest run", (
     expect("finalReply" in followed).toBe(false);
   });
 });
+
+describe("child clarification stays unfinished", () => {
+  it.each(["slack", "linear"])(
+    "reports a persisted %s question as awaiting_input and follows the human continuation",
+    async (channel) => {
+      const w = world();
+      const requester: Actor = { ...alice, id: `${channel}:alice` };
+      const first = persisted("r-question", {
+        parentRunId: "run-p",
+        userId: requester.id,
+        channelId: `${channel}:team`,
+        threadKey: `${channel}:team:question`,
+        sourceUrl: "https://example.com/child-session",
+        awaitingInput: true,
+        events: [{ type: "answer", text: "Which repository should I inspect?", seq: 1 }],
+        eventCount: 1,
+        storedEventCount: 1,
+      });
+      await w.store.put(first);
+      const { wait, slept } = waitFor(w);
+      const ctx = ctxFor(w, requester, { runId: "run-p", wait });
+      const status = JSON.parse(String(await getRunStatusTool.run({ id: first.id }, ctx)));
+      expect(status.status).toBe("awaiting_input");
+      expect(String(status.finalReply)).toContain("Which repository");
+      expect(String(status.finalReply)).toMatch(/untrusted/i);
+      const listed = JSON.parse(String(await listRunsTool.run({}, ctx)));
+      expect(listed[0].status).toBe("awaiting_input");
+      const question = report(await awaitRunsTool.run({ ids: [first.id] }, ctx));
+      expect(question.ended).toBe("awaiting_input");
+      expect(question.runs[0]).toMatchObject({ id: first.id, status: "awaiting_input" });
+      expect(String(question.runs[0].finalReply)).toContain("Which repository");
+      expect(String(question.runs[0].finalReply)).toMatch(/untrusted/i);
+      expect(question.note).toContain("request_input");
+      expect(question.runs[0].url).toBe(first.sourceUrl);
+      expect(slept).toEqual([]);
+      const other = w.registry.create("research · other", {
+        agent: "research",
+        userId: requester.id,
+        channelId: first.channelId,
+        threadKey: `${channel}:other`,
+        channelVisibility: "public",
+        parentRunId: "run-p",
+      });
+      const mixed = report(await awaitRunsTool.run({ ids: [first.id, other.id] }, ctx));
+      expect(mixed.ended).toBe("awaiting_input");
+      expect(mixed.runs.map((row) => row.status)).toEqual(["awaiting_input", "running"]);
+      expect(mixed.note).toContain(`Still running (they keep running): ${other.id}.`);
+      expect(mixed.note).not.toContain(`Still running (they keep running): ${first.id}`);
+      expect(slept).toEqual([]);
+
+      const later = w.registry.create("research · child", {
+        agent: "research",
+        userId: first.userId,
+        channelId: first.channelId,
+        channelVisibility: "public",
+        threadKey: first.threadKey,
+        parentRunId: "run-p",
+      });
+      const live = JSON.parse(String(await getRunStatusTool.run({ id: first.id }, ctx)));
+      expect(live).toMatchObject({ status: "running", continuedBy: later.id });
+      expect(live.finalReply).toBeUndefined();
+      w.registry.publish(later.id, { type: "answer", text: "The repository uses a durable queue." });
+      w.registry.finish(later.id, "completed");
+      const done = report(await awaitRunsTool.run({ ids: [first.id] }, ctx));
+      expect(done.ended).toBe("all_ended");
+      expect(done.runs[0]).toMatchObject({ status: "completed", continuedBy: later.id });
+      expect(String(done.runs[0].finalReply)).toContain("durable queue");
+      expect(String(done.runs[0].finalReply)).not.toContain("Which repository");
+    },
+  );
+});

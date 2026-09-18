@@ -60,6 +60,49 @@ const commandRow = (action: string, commandId: string, allow: readonly Actor[], 
 });
 
 const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> = {
+  "runs:stop run [has-grant(runs:stop:self) & is-self]": {
+    allow: [
+      [
+        { ...A.noGrants, grants: { ...A.noGrants.grants, actions: new Set(["runs:stop:self"]) } },
+        run({ channel: "priv", userId: A.noGrants.id }),
+      ],
+    ],
+    deny: [
+      [A.noGrants, run({ channel: "priv", userId: A.noGrants.id })],
+      [
+        { ...A.noGrants, grants: { ...A.noGrants.grants, actions: new Set(["runs:stop:self"]) } },
+        run({ channel: "priv", userId: "slack:UBOB" }),
+      ],
+    ],
+  },
+  "runs:stop run [has-grant(runs:write) & member-of]": {
+    allow: [[A.member, run({ channel: "priv", userId: "slack:UERIN" })]],
+    deny: [[A.nonMember, foreignPrivRun]],
+  },
+  "runs:stop run [has-grant(runs:write) & all-channels]": {
+    allow: [[A.admin, foreignPrivRun]],
+    deny: [[A.nonMember, foreignPrivRun]],
+  },
+  ...Object.fromEntries(
+    ["read", "write"].map((verb) => {
+      const action = `work-items:${verb}`;
+      const reader = {
+        ...A.noGrants,
+        grants: { ...A.noGrants.grants, actions: new Set([action]) },
+        memberOf: new Set([CHANNELS.priv.id]),
+      };
+      return [
+        `${action} channel [has-grant(${action}) & member-of]`,
+        {
+          allow: [[reader, channel(CHANNELS.priv)]],
+          deny: [
+            [A.noGrants, channel(CHANNELS.pub1)],
+            [{ ...reader, memberOf: new Set() }, channel(CHANNELS.priv)],
+          ],
+        },
+      ];
+    }),
+  ),
   // Record 0037: who may point the bot at a channel's thread. Asked for a
   // pointing actor (one membership, the origin, no grants): public from
   // anywhere, private only from inside, denied elsewhere for an admin too;

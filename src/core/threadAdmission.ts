@@ -122,6 +122,7 @@ export class FollowUpInbox<T extends FollowUpInput = FollowUpInput> {
 /** The run a thread is currently occupied by, as admission sees it. */
 export interface LiveThread<T extends FollowUpInput = FollowUpInput> {
   agent: string;
+  userId?: string;
   inbox: FollowUpInbox<T>;
   startedAt: number;
   /** Set by the owning dispatch once its run is registered (the run page link
@@ -141,11 +142,12 @@ export type ClaimOutcome<T extends FollowUpInput = FollowUpInput> =
 export class ThreadAdmission<T extends FollowUpInput = FollowUpInput> {
   private readonly live = new Map<string, LiveThread<T>>();
 
-  claim(threadKey: string, run: { agent: string; now?: number }): ClaimOutcome<T> {
+  claim(threadKey: string, run: { agent: string; now?: number; userId?: string }): ClaimOutcome<T> {
     const existing = this.live.get(threadKey);
     if (existing) return { kind: "live", live: existing };
     const live: LiveThread<T> = {
       agent: run.agent,
+      ...(run.userId !== undefined ? { userId: run.userId } : {}),
       inbox: new FollowUpInbox<T>(),
       startedAt: run.now ?? systemClock(),
     };

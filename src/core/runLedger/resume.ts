@@ -98,6 +98,7 @@ export type ResumePlan =
  *  restart note the rebuilt session ends on (harness-pi.md item 8). */
 export const RERUN_SAFE_TOOLS: ReadonlySet<string> = new Set([
   "update_status",
+  "request_input",
   "submit_verdict",
   "submit_pr_description",
   "submit_handoff",

@@ -23,6 +23,11 @@ None open. The panel renderer is [reading-diff.md](reading-diff.md) item 12: the
 
 ## Validation criteria
 
+The final description turn can ask the requester for missing information through
+`request_input`. A pending question becomes the channel reply and skips automatic
+PR creation or editing, even if that turn also submits a description
+([Linear channel](linear-channel.md), criterion 19).
+
 | Criterion | Proof |
 |---|---|
 | Schema: complete object accepted, lines trimmed; no pointers, missing fields and blank strings rejected naming the field; decisions may be empty, criteria may not | `[unit]` `src/core/prDescription.test.ts::parsePrDescription (the schema)` (7) |

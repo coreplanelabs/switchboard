@@ -463,10 +463,13 @@ export type CoordinatorAction =
 /** A child's facts as `read-record` answers them: live, or finished with the
  *  typed artifacts its run recorded. */
 export type ChildFacts =
-  | { finished: false }
+  | { finished: false; runId?: string }
   | {
       finished: true;
+      runId?: string;
       status: RunStatus;
+      /** The turn asked a question; no earlier artifact completes the unit. */
+      awaitingInput?: true;
       finalReply?: string;
       /** A coding child's `pr_opened`. */
       pr?: { number: number; url: string; created: boolean };
@@ -714,7 +717,9 @@ type Phase =
   | { at: "busy-wait"; round: RoundRef; runId?: string; n: number }
   /** `until`: when the child's budget plus the margin runs out, counted from the spawn's answer — the wait's last slice ends there. */
   | { at: "wait"; round: RoundRef; runId: string; n: number; until: number }
-  | { at: "read"; round: RoundRef; runId: string; n: number; until: number }
+  | { at: "read"; round: RoundRef; runId: string; n: number; until: number; awaitingInput?: true }
+  /** A durable sleep, not another wait on the already-consumed finish event. */
+  | { at: "input-wait"; round: RoundRef; runId: string; n: number; until: number }
   | {
       at: "pr-check";
       round: RoundRef;
@@ -927,6 +932,12 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         step: `${roundStep(s, p.round)}/wait/${p.n}`,
         runId: p.runId,
         timeoutMs: waitSliceMs(s.clock, p.until),
+      };
+    case "input-wait":
+      return {
+        type: "sleep",
+        step: `${roundStep(s, p.round)}/input/${p.n}`,
+        ms: Math.min(30_000, Math.max(1, remainingMs(s))),
       };
     case "read":
       return { type: "read-record", step: `${roundStep(s, p.round)}/read/${p.n}`, runId: p.runId };
@@ -1428,7 +1439,8 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
 function withClock(s: UnitPipelineState, at: number): UnitPipelineState {
   const delta = Math.max(0, at - s.clock);
   const round = "round" in s.phase ? s.phase.round : undefined;
-  const bucket = round === undefined ? "waiting" : round.kind === "review" ? "review" : "coding";
+  const awaitingInput = s.phase.at === "input-wait" || (s.phase.at === "read" && s.phase.awaitingInput);
+  const bucket = awaitingInput || round === undefined ? "waiting" : round.kind === "review" ? "review" : "coding";
   return { ...s, clock: at, spentMs: { ...s.spentMs, [bucket]: s.spentMs[bucket] + delta } };
 }
 
@@ -1552,13 +1564,46 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         state: { ...s, phase: { at: "read", round: p.round, runId: p.runId, n: p.n, until: p.until } },
         notes: [],
       };
+    case "input-wait":
+      return {
+        state: {
+          ...s,
+          phase: { at: "read", round: p.round, runId: p.runId, n: p.n, until: p.until, awaitingInput: true },
+        },
+        notes: [],
+      };
     case "read": {
       const r = ret as Extract<StepReturn, { type: "read-record" }>;
+      const runId = r.run.runId ?? p.runId;
+      const current =
+        runId === p.runId
+          ? clocked
+          : {
+              ...clocked,
+              ...(p.round.kind === "review"
+                ? { reviewRunByRound: { ...clocked.reviewRunByRound, [p.round.index]: runId } }
+                : p.round.kind === "findings"
+                  ? {
+                      lastCodingRunId: runId,
+                      findingsRunByRound: { ...clocked.findingsRunByRound, [p.round.index]: runId },
+                    }
+                  : { lastCodingRunId: runId }),
+            };
+      if (r.run.finished && r.run.status === "completed" && r.run.awaitingInput) {
+        if (remainingMs(current) <= 0) return end(current, capEnding(current, p.round));
+        return {
+          state: {
+            ...current,
+            phase: { at: "input-wait", round: p.round, runId, n: p.n + 1, until: p.until },
+          },
+          notes: [],
+        };
+      }
       if (!r.run.finished)
         return {
           state: {
-            ...clocked,
-            phase: { at: "wait", round: p.round, runId: p.runId, n: p.n + 1, until: p.until },
+            ...current,
+            phase: { at: "wait", round: p.round, runId, n: p.n + 1, until: p.until },
           },
           notes: [],
         };
@@ -1568,16 +1613,16 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
         // branch to recover, so its interruption still ends the unit at once.
         if (p.round.kind !== "review")
           return {
-            state: { ...clocked, phase: { at: "pr-check", round: p.round, runId: p.runId, dead: "interrupted" } },
+            state: { ...current, phase: { at: "pr-check", round: p.round, runId, dead: "interrupted" } },
             notes: [],
           };
-        return end(clocked, { kind: "interrupted", round: p.round, runId: p.runId, reviewRounds: s.reviewRounds }, [
+        return end(current, { kind: "interrupted", round: p.round, runId, reviewRounds: s.reviewRounds }, [
           roundNote(p.round, "aborted"),
         ]);
       }
       return p.round.kind === "review"
-        ? settleReview(clocked, p.round, r.run)
-        : settleCoding(clocked, p.round, p.runId, r.run);
+        ? settleReview(current, p.round, r.run)
+        : settleCoding(current, p.round, runId, r.run);
     }
     case "pr-check":
       return settlePrCheck(clocked, p, (ret as Extract<StepReturn, { type: "pr-check" }>).pr);

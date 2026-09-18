@@ -12,6 +12,9 @@ import {
 import type { TraceOptions } from "./trace/types.js";
 import type { Secrets } from "../secrets.js";
 import {
+  preserveInputStop,
+  stopWaitingRecord,
+  type InputStop,
   applyRetention,
   clampListLimit,
   clampRetentionPolicy,
@@ -73,7 +76,11 @@ export interface RunEventsPage {
   nextAfterSeq?: number;
 }
 
+export type StopWaitingResult = "stopped" | "conflict" | "not_found";
+
 export interface RunStore {
+  /** Atomically close a completed turn's question; repeated identical stops succeed. */
+  stopWaiting(id: string, stop: InputStop): Promise<StopWaitingResult>;
   /** `trace.span`: the caller's span, under which a Worker store's request is an
    *  `http.client` span (docs/reference/specs/tracing.md item 24); the local stores ignore it. */
   put(record: RunRecord, trace?: TraceOptions): Promise<PutResult>;
@@ -142,6 +149,9 @@ export function usageReportOfRecords(
  *  read is the not-found shape, `list` is empty, `put` accepts and keeps
  *  nothing (`stored: false`, the same word a record outside retention gets). */
 export class NullRunStore implements RunStore {
+  async stopWaiting(_id: string, _stop: InputStop): Promise<StopWaitingResult> {
+    return "not_found";
+  }
   abandoned(): void {
     // a store keeps nothing in flight per record (run-history item 54): nothing to settle
   }
@@ -253,10 +263,21 @@ export class InMemoryRunStore implements RunStore {
   abandoned(): void {
     // a store keeps nothing in flight per record (run-history item 54): nothing to settle
   }
+  async stopWaiting(id: string, stop: InputStop): Promise<StopWaitingResult> {
+    if (!isValidRunId(id)) return "not_found";
+    const entry = this.records.get(id);
+    if (!entry || !this.retained().some((row) => row.id === id)) return "not_found";
+    const changed = stopWaitingRecord(entry.record, stop);
+    if (!changed) return "conflict";
+    await this.put(changed);
+    return "stopped";
+  }
+
   async put(record: RunRecord): Promise<PutResult> {
     if (!isValidRunId(record.id)) return { ok: true, retained: this.records.size, stored: false, rewritten: false };
-    const bytes = utf8ByteLength(JSON.stringify(record));
     const prev = this.records.get(record.id);
+    record = preserveInputStop(record, prev?.record.inputStop);
+    const bytes = utf8ByteLength(JSON.stringify(record));
     const rewritten =
       prev !== undefined && !sameStoredVersion({ ...prev.record, bytes: prev.bytes }, { ...record, bytes });
     this.records.set(record.id, { record: clone(record), bytes });
@@ -407,14 +428,40 @@ export class FileRunStore implements RunStore {
   abandoned(): void {
     // a store keeps nothing in flight per record (run-history item 54): nothing to settle
   }
+  async stopWaiting(id: string, stop: InputStop): Promise<StopWaitingResult> {
+    if (!isValidRunId(id) || !applyRetention(this.readIndex(), this.policy, this.now()).some((r) => r.id === id))
+      return "not_found";
+    let record: unknown;
+    try {
+      record = JSON.parse(readFileSync(this.recordPath(id), "utf8"));
+    } catch {
+      return "not_found";
+    }
+    if (!isRunRecord(record) || record.id !== id) return "not_found";
+    const changed = stopWaitingRecord(record, stop);
+    if (!changed) return "conflict";
+    await this.put(changed);
+    return "stopped";
+  }
+
   async put(record: RunRecord): Promise<PutResult> {
     if (!isValidRunId(record.id))
       return { ok: true, retained: this.readIndex().length, stored: false, rewritten: false };
     this.ensureDir();
-    const content = JSON.stringify(record);
-    const bytes = utf8ByteLength(content);
     const index = this.readIndex();
     const prev = index.find((r) => r.id === record.id);
+    // The record lands before the index. A crash between those writes must
+    // not let a retried finish erase a stop already present in the record.
+    let inputStop = prev?.inputStop;
+    try {
+      const previous: unknown = JSON.parse(readFileSync(this.recordPath(record.id), "utf8"));
+      if (isRunRecord(previous) && previous.id === record.id) inputStop = previous.inputStop ?? inputStop;
+    } catch {
+      /* A new or torn record has no additional stop marker. */
+    }
+    record = preserveInputStop(record, inputStop);
+    const content = JSON.stringify(record);
+    const bytes = utf8ByteLength(content);
     const rewritten = prev !== undefined && !sameStoredVersion(prev, { ...record, bytes });
     this.writeAtomic(this.recordPath(record.id), content);
     const item = toListItem(record, bytes);

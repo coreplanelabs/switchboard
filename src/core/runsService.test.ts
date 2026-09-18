@@ -82,6 +82,36 @@ function expectNoToken(value: unknown): void {
 }
 
 describe("RunsService.getRun", () => {
+  it.each(["missing", "tombstone", "unavailable"])(
+    "a required finished record retries %s history and recovers its waiting marker",
+    async (state) => {
+      const { reg, tick, store, svc } = setup();
+      const run = reg.create("coding · question");
+      if (state === "tombstone") await store!.put(record(run.id, NOW, { startedAt: NOW, status: "interrupted" }));
+      tick(1_000);
+      reg.finish(run.id, "completed");
+      if (state === "unavailable")
+        vi.spyOn(store!, "getSummary").mockRejectedValueOnce(new Error("history temporarily unavailable"));
+      await expect(svc.getRun(run.id, { requireRecord: true })).rejects.toThrow(/temporarily unavailable/);
+      await store!.put(record(run.id, NOW + 1_000, { awaitingInput: true }));
+      const retry = await svc.getRun(run.id, { requireRecord: true });
+      expect(retry).toMatchObject({ ok: true, value: { finished: true, status: "completed", awaitingInput: true } });
+      await store!.stopWaiting(run.id, { at: NOW + 2_000, by: actor, mode: "hard" });
+      expect(await svc.getRun(run.id, { requireRecord: true })).toMatchObject({
+        ok: true,
+        value: { status: "stopped_hard", inputStop: { mode: "hard" } },
+      });
+    },
+  );
+
+  it("requires a history store only once the run has finished", async () => {
+    const { reg, svc } = setup(null);
+    const run = reg.create("coding · live");
+    expect(await svc.getRun(run.id, { requireRecord: true })).toMatchObject({ ok: true, value: { finished: false } });
+    reg.finish(run.id, "completed");
+    await expect(svc.getRun(run.id, { requireRecord: true })).rejects.toThrow(/temporarily unavailable/);
+  });
+
   it("returns a live run as finished:false with no token and no events unless asked", async () => {
     const { reg, svc } = setup();
     const { id } = reg.create("coding · acme/x");
@@ -263,6 +293,7 @@ describe("RunsService.getRun", () => {
   it("a finished run still in the registry carries verdict, reviewHead, reviewPost, dispositions and handoff from the store the moment the store holds its record — identity, status and events stay the registry's, and only the summary row is read", async () => {
     const inner = new InMemoryRunStore({ now: () => NOW });
     const store: RunStore = {
+      stopWaiting: (id, stop) => inner.stopWaiting(id, stop),
       put: (r) => inner.put(r),
       abandoned: () => {},
       get: vi.fn((id: string) => inner.get(id)),
@@ -333,6 +364,7 @@ describe("RunsService.getRun", () => {
   it("a finished registry row whose record has not landed carries no artifacts and is not persisted — the start tombstone lends nothing, not even its status; a live row never asks the store; a store that throws is one warning and the registry row", async () => {
     const inner = new InMemoryRunStore({ now: () => NOW });
     const store: RunStore = {
+      stopWaiting: (id, stop) => inner.stopWaiting(id, stop),
       put: (r) => inner.put(r),
       abandoned: () => {},
       get: vi.fn((id: string) => inner.get(id)),
@@ -708,6 +740,7 @@ describe("RunsService.listRuns — read merge", () => {
       return rest;
     });
     const store: RunStore = {
+      stopWaiting: async () => "not_found",
       put: vi.fn(),
       abandoned: () => {},
       get: vi.fn(async () => null),
@@ -728,6 +761,7 @@ describe("RunsService.listRuns — read merge", () => {
 
   it("degrades to live rows + storeUnavailable when the store throws, warning once per failure (the message, never a token); active is unaffected", async () => {
     const broken: RunStore = {
+      stopWaiting: async () => "not_found",
       put: vi.fn(),
       abandoned: () => {},
       get: vi.fn(async () => {
@@ -1104,6 +1138,7 @@ describe("RunsService — summary-only persisted reads", () => {
       }),
     );
     const store: RunStore = {
+      stopWaiting: (id, stop) => inner.stopWaiting(id, stop),
       put: (r) => inner.put(r),
       abandoned: () => {},
       get: vi.fn((id: string) => inner.get(id)),
@@ -1242,6 +1277,28 @@ describe("RunsService.getRunFriction", () => {
 });
 
 describe("RunsService.stopRun", () => {
+  it("reads and stops a waiting question while its finished turn is still in the registry", async () => {
+    const { reg, tick } = testRegistry();
+    const store = new InMemoryRunStore({ now: () => NOW + 100 });
+    const run = reg.create();
+    tick(10);
+    reg.finish(run.id);
+    const question = record(run.id, NOW + 10, { awaitingInput: true });
+    await store.put(question);
+    const svc = createRunsService({ registry: reg, store, clock: () => NOW + 20 });
+    expect(await svc.getRun(run.id)).toMatchObject({ ok: true, value: { awaitingInput: true } });
+    expect(await svc.stopRun(run.id, "hard", actor)).toMatchObject({ ok: true, value: { state: "stopped" } });
+    await store.put(question);
+    const stopped = await svc.getRun(run.id);
+    expect(stopped).toMatchObject({
+      ok: true,
+      value: { status: "stopped_hard", inputStop: { at: NOW + 20, by: actor } },
+    });
+    expect(stopped.ok && stopped.value.awaitingInput).toBeUndefined();
+    const restarted = createRunsService({ registry: new RunRegistry(), store });
+    expect(await restarted.getRun(run.id)).toMatchObject({ ok: true, value: { status: "stopped_hard" } });
+  });
+
   it("live: drives the control and publishes stop_requested with the structured actor", async () => {
     const { reg, svc } = setup();
     const { id, token, control } = reg.create();

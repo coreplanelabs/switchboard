@@ -41,6 +41,7 @@ const TOOLS: KnownTool[] = [
   { name: "github_issue_comment" },
   { name: "update_status" },
   { name: "submit_verdict" },
+  { name: "request_input" },
   { name: "submit_handoff" },
   { name: "mcp_jira_create_ticket" }, // a bridged tool that mutates: known, not side-effect-free, not on the safe list
 ];
@@ -76,7 +77,15 @@ describe("settlementFor — D4", () => {
       action: "synthetic",
       text: expect.stringMatching(/restarted while this mcp_jira_create_ticket call was in flight/),
     });
-    for (const name of ["read", "web_fetch", "github_file", "update_status", "submit_verdict", "submit_handoff"]) {
+    for (const name of [
+      "read",
+      "web_fetch",
+      "github_file",
+      "update_status",
+      "submit_verdict",
+      "submit_handoff",
+      "request_input",
+    ]) {
       expect(settlementFor(call("c", name), toolMap)).toEqual({ toolUse: call("c", name), action: "rerun" });
     }
     // pi's whole-file write is a mutation like any other: its effects are the container's, unknowable after a restart.

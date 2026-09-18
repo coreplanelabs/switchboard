@@ -279,7 +279,7 @@ export interface AdmissionContext {
   };
 }
 
-/** How the admission claim ended. Every kind but `proceed` and `redispatch`
+/** How the admission claim ended. Every kind but `proceed`, `redispatch` and `deferred`
  *  means the thread has been answered and the dispatch is over — no card, no
  *  run, no workspace. */
 export type AdmissionOutcome =
@@ -287,6 +287,8 @@ export type AdmissionOutcome =
   | { kind: "proceed"; admitted: LiveThread<DispatchFollowUp> }
   /** The run this message was steered into ended during the round trip: the message runs fresh, as its own dispatch. */
   | { kind: "redispatch" }
+  /** No model or inbox effect: the adapter must keep this request for a later turn. */
+  | { kind: "deferred" }
   /** Folded into the run in flight — here, or on another generation through its durable inbox — and acked. */
   | { kind: "steered"; where: "here" | "elsewhere" }
   /** Not run, and told why: the sender may not run the live agent, or asked for
@@ -338,6 +340,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
   // the steer ack's "N in" is the run's elapsed time, not the resume's.
   let claim = admission.claim(msg.threadKey, {
     agent: agentName,
+    userId: msg.userId,
     ...(carriedRow ? { now: carriedRow.startedAt } : {}),
   });
   if (claim.kind === "live" && restart) {
@@ -400,6 +403,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     return { kind: "refused", reason: "coordinator_thread_live" };
   }
   if (claim.kind === "live") {
+    if (io.isolateFollowUps && claim.live.userId !== msg.userId) return { kind: "deferred" };
     // The gate above ran against THIS message's resolved agent; a steered
     // follow-up is read by the LIVE agent, so its sender must be allowed to
     // run that one too (invariant 3 — no path runs an agent for a user the
@@ -482,6 +486,10 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     await refuseSilently("coordinator_thread_live", async () => {});
     return { kind: "refused", reason: "coordinator_thread_live" };
   }
+  if (elsewhere && io.isolateFollowUps && elsewhere.userId !== msg.userId) {
+    admission.release(msg.threadKey, claim.live);
+    return { kind: "deferred" };
+  }
   if (elsewhere && farAgent === undefined) {
     // No agent on the row: the no-agent-switch gate cannot be judged, so the
     // message is not steered into it (a claim always records the agent; this
@@ -536,7 +544,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
     deps.threadsElsewhere.forget(msg.threadKey);
     console.log(`[dispatch] ${msg.threadKey} run ${elsewhere.runId} is no longer on the ledger — running fresh`);
     // Take the slot back for the fresh run below.
-    const again = admission.claim(msg.threadKey, { agent: agentName });
+    const again = admission.claim(msg.threadKey, { agent: agentName, userId: msg.userId });
     if (again.kind === "live") {
       // Someone claimed it during the round trip: this message steers into them as any follow-up would.
       return { kind: "redispatch" };

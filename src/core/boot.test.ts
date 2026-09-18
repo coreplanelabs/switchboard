@@ -335,7 +335,7 @@ describe("reclaimRuns", () => {
         card: { channel: "C1", ts: "alive.1" },
         threadKey: "slack:C1:1.0",
         startedAt: expect.any(Number),
-        meta: { agent: "review" },
+        meta: { agent: "review", userId: "slack:UALICE" },
       }),
     ]);
     expect(ledger.live.get("alive")!.ownerGen).toBe("g1");

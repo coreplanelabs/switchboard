@@ -2,6 +2,7 @@ import { errorSuffix } from "./workerError.js";
 import { tracedFetch } from "./trace/tracedFetch.js";
 import type { Span, TraceOptions } from "./trace/types.js";
 import {
+  type InputStop,
   isRunListItem,
   isRunRecord,
   normalizeStored,
@@ -12,7 +13,7 @@ import {
   type RunRecord,
   type StoredRunEvent,
 } from "./runRecord.js";
-import type { PutResult, RunEventsOptions, RunEventsPage, RunStore } from "./runStore.js";
+import type { StopWaitingResult, PutResult, RunEventsOptions, RunEventsPage, RunStore } from "./runStore.js";
 import { isRunUsageRows, reportOfUsageRows, type RunUsageQuery, type RunUsageReport } from "./runUsage.js";
 
 // The DURABLE RunStore (docs/decisions/0006-runs-have-two-lives.md): an HTTPS client to the RunHistoryDO on the
@@ -88,7 +89,14 @@ export interface WorkerRunStoreOptions {
 
 /** The Worker's routes, as a span names them. */
 type RunStoreRoute =
-  "/runs/put" | "/runs/get" | "/runs/summary" | "/runs/list" | "/runs/events" | "/runs/delete" | "/runs/usage";
+  | "/runs/stop-waiting"
+  | "/runs/put"
+  | "/runs/get"
+  | "/runs/summary"
+  | "/runs/list"
+  | "/runs/events"
+  | "/runs/delete"
+  | "/runs/usage";
 
 export class WorkerRunStore implements RunStore {
   private readonly baseUrl: string;
@@ -102,6 +110,14 @@ export class WorkerRunStore implements RunStore {
   abandoned(): void {
     // a store keeps nothing in flight per record (run-history item 54): nothing to settle
   }
+  async stopWaiting(id: string, stop: InputStop): Promise<StopWaitingResult> {
+    if (!RUN_ID_PATTERN.test(id)) return "not_found";
+    const data = await this.post("/runs/stop-waiting", { storeKey: this.opts.storeKey, id, stop });
+    if (data.result !== "stopped" && data.result !== "conflict" && data.result !== "not_found")
+      throw new PermanentStoreError("run store /runs/stop-waiting returned a malformed result");
+    return data.result;
+  }
+
   async put(record: RunRecord, trace?: TraceOptions): Promise<PutResult> {
     if (!RUN_ID_PATTERN.test(record.id))
       throw new PermanentStoreError(`run store: refusing to put malformed id ${JSON.stringify(record.id)}`);

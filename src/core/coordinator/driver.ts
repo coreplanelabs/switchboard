@@ -260,7 +260,8 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
   const run = a.body.run;
   if (a.body.ok !== true || !isRecord(run) || typeof run.finished !== "boolean")
     throw new UnreadableAnswer("read-record", a, "run");
-  if (!run.finished) return { type: "read-record", step, run: { finished: false }, at: a.body.at };
+  const identity = typeof run.id === "string" ? { runId: run.id } : {};
+  if (!run.finished) return { type: "read-record", step, run: { finished: false, ...identity }, at: a.body.at };
   if (typeof run.status !== "string") throw new UnreadableAnswer("read-record", a, "status");
   // The typed artifacts as the bot's record carries them — shape-checked where
   // they were written (the run record's validator), read here as they are.
@@ -286,7 +287,9 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
     step,
     run: {
       finished: true,
+      ...identity,
       status: run.status as Extract<ChildFacts, { finished: true }>["status"],
+      ...(run.awaitingInput === true ? { awaitingInput: true as const } : {}),
       ...(finalReply !== undefined ? { finalReply } : {}),
       ...(pr !== undefined ? { pr } : {}),
       ...(headSha !== undefined ? { headSha } : {}),

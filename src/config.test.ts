@@ -612,7 +612,7 @@ describe("grants config — the one shape", () => {
 
   it("an unknown actor id prefix fails the load naming the id", () => {
     expect(() => load(withGrants(`  "discord:123":\n    actions: all\n`))).toThrow(
-      /config\.yaml: grants\["discord:123"\].*slack:, http:, mcp:, access:, schedule:/,
+      /config\.yaml: grants\["discord:123"\].*slack:, linear:, http:, mcp:, access:, schedule:/,
     );
   });
 
@@ -630,7 +630,7 @@ describe("grants config — the one shape", () => {
     for (const id of ["slack:U*", "schedule:*", "access:svc:*", "agent:*"]) {
       expect(() => load(withGrants(`  "${id}":\n    actions: all\n`)), id).toThrow(
         new RegExp(
-          `config\\.yaml: grants\\["${id.replace(/\*/g, "\\*")}"\\].*slack:\\*, http:\\*, mcp:\\*, access:\\*`,
+          `config\\.yaml: grants\\["${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\].*slack:\\*, linear:\\*, http:\\*, mcp:\\*, access:\\*`,
         ),
       );
     }

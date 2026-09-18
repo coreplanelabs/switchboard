@@ -43,6 +43,27 @@ const source: GrantsSource = {
 };
 const lookup = (id: string) => grantsFor(id, source);
 
+describe("Linear actor authorization", () => {
+  it("namespaces the workspace and human, shares the chat baseline and keeps grants independent of Slack", () => {
+    const parsed = parseGrantsConfig({
+      "linear:org:alice": { actions: ["repo:write"] },
+      "linear:*": { actions: ["runs:read"] },
+      "slack:alice": { actions: "all", repos: "all" },
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error(parsed.errors.join("; "));
+    const a = resolveChatActor(
+      { userId: "linear:org:alice", channelId: "linear:org:team", threadKey: "linear:org:session" },
+      (id) => grantsFor(id, { grants: parsed.grants, agentNames: ["general"] }),
+    );
+    expect(a.kind).toBe("user");
+    expect(a.id).toBe("linear:org:alice");
+    expect(a.grants.actions).toEqual(set(...CHAT_OPEN_ACTIONS, "agent:run:general", "runs:read", "repo:write"));
+    expect(a.grants.repos).toEqual(set());
+    expect(grantsFor("linear:other:alice", { grants: parsed.grants }).actions).not.toContain("repo:write");
+  });
+});
+
 describe("actorIdFor — platform-namespaced ids (invariant 4)", () => {
   it("one prefix per surface; Access service tokens under access:svc:", () => {
     expect(actorIdFor("slack", "UALICE")).toBe("slack:UALICE");

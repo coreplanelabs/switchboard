@@ -17,6 +17,7 @@ import {
   githubActionsJobLogTool,
 } from "./github.js";
 import { TOOLSETS } from "./toolsets.js";
+import { WORK_ITEM_READ_TOOLS, WORK_ITEM_WRITE_TOOLS } from "./workItems.js";
 import type { ToolContext } from "./runnableTool.js";
 import type { Executor } from "../execution/executor.js";
 
@@ -206,6 +207,8 @@ describe("toolset wiring", () => {
   const names = (key: string) => (TOOLSETS[key] ?? []).map((t) => t.name);
   const reads = GITHUB_READ_TOOLS.map((t) => t.name);
   const writes = GITHUB_ISSUE_WRITE_TOOLS.map((t) => t.name);
+  const workReads = WORK_ITEM_READ_TOOLS.map((t) => t.name);
+  const workWrites = WORK_ITEM_WRITE_TOOLS.map((t) => t.name);
 
   it("reads are in every toolset with a tool loop; issue writes only in assistant (general) and full (coding); none stays empty", () => {
     for (const key of ["full", "readonly", "web", "assistant", "explore", "conductor"])
@@ -220,15 +223,19 @@ describe("toolset wiring", () => {
   // docs/reference/specs/agent-conductor.md item 2: the five run tools, the
   // GitHub reads, URL reading and the status card — no shell, no files, no
   // writes; and the run tools are in no other toolset (dark by default).
-  it("conductor holds spawn_run, send_to_run, await_runs, list_runs, get_run_status, web_fetch, update_status and the GitHub reads — no shell, no files, no submit_*, no issue writes; no other toolset holds a run tool", () => {
+  it("conductor holds spawn_run, send_to_run, await_runs, list_runs, get_run_status, web_fetch, update_status, request_input and the GitHub reads — no shell, no files, no submit_*, no issue writes; no other toolset holds a run tool", () => {
     const runTools = ["spawn_run", "send_to_run", "await_runs", "list_runs", "get_run_status"];
-    expect(names("conductor").sort()).toEqual([...runTools, "web_fetch", "update_status", ...reads].sort());
+    expect(names("conductor").sort()).toEqual(
+      [...runTools, "web_fetch", "update_status", "request_input", ...reads, ...workReads].sort(),
+    );
     for (const key of Object.keys(TOOLSETS).filter((k) => k !== "conductor"))
       for (const t of runTools) expect(names(key), `${key} ${t}`).not.toContain(t);
   });
 
-  it("assistant has no shell, no file writes, no verdict/PR submission — GitHub + web_fetch + status only", () => {
-    expect(names("assistant").sort()).toEqual(["web_fetch", "update_status", ...reads, ...writes].sort());
+  it("assistant has no shell, no file writes, no verdict/PR submission — GitHub, work tracking, web_fetch, status and questions only", () => {
+    expect(names("assistant").sort()).toEqual(
+      ["web_fetch", "update_status", "request_input", ...reads, ...writes, ...workReads, ...workWrites].sort(),
+    );
   });
 
   // docs/reference/specs/agent-explore.md item 2: the investigation preset's
@@ -236,9 +243,20 @@ describe("toolset wiring", () => {
   // tools and the GitHub reads; nothing that submits a verdict, a description,
   // dispositions or a handoff, or writes an issue. Its shell and file reads
   // are pi's own tools in its cold sandbox, never rows of this table.
-  it("explore relays update_status, web_fetch, web_search, the skill tools, the session tools and the GitHub reads — no submit_*, no issue writes, and none of pi's own workspace tools", () => {
+  it("explore relays update_status, request_input, web_fetch, web_search, the skill tools, the session tools and the GitHub reads — no submit_*, no issue writes, and none of pi's own workspace tools", () => {
     expect(names("explore").sort()).toEqual(
-      ["update_status", "web_fetch", "web_search", "list_skills", "use_skill", "recall", "notes", ...reads].sort(),
+      [
+        "update_status",
+        "request_input",
+        "web_fetch",
+        "web_search",
+        "list_skills",
+        "use_skill",
+        "recall",
+        "notes",
+        ...reads,
+        ...workReads,
+      ].sort(),
     );
     expect(names("explore").filter((n) => n.startsWith("submit_"))).toEqual([]);
   });

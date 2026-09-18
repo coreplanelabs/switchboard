@@ -9,6 +9,7 @@ import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import type { Provider } from "../provider.js";
+import { requestInputTool } from "../../tools/question.js";
 import { ExecSandboxRestartedError, type Executor } from "../../execution/executor.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
@@ -355,6 +356,192 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it.each(["verdict", "description", "re-review"] as const)(
+    "delivers a question from the %s turn without another model turn or automatic publication",
+    async (stage) => {
+      const head = "a".repeat(40);
+      const moved = "b".repeat(40);
+      const commits = (sha: string): PrCommitList => ({
+        commits: [
+          { sha: head, message: "feat: the change" },
+          ...(sha === moved ? [{ sha: moved, message: "fix: the change" }] : []),
+        ],
+        files: ["src/x.ts"],
+        filesTruncated: false,
+      });
+      const post = vi.fn(async () => {});
+      const openPr = vi.fn();
+      const updatePr = vi.fn();
+      const fake = watched(piHarness, { answer: "Initial write-up" });
+      const end = vi.fn(async () => {});
+      const followUp = vi.fn<HarnessSession["followUp"]>(async (input) => {
+        await requestInputTool.run({ question: "Which behavior should this preserve?" }, input.toolContext);
+        if (stage === "description")
+          input.toolContext.onPrDescription?.({
+            title: "fix(core): preserve the requested behavior",
+            tldr: "Preserves the behavior.",
+            why: "The caller needs it.",
+            pointers: [{ label: "Behavior", text: "The change.", anchor: { path: "src/x.ts", from: 1, to: 1 } }],
+            feedbackWanted: "Confirm the behavior.",
+            verified: "Unit tests.",
+            decisions: [],
+            risk: "none",
+            validation: { criteria: [{ criterion: "Behavior", proof: "Unit tests" }] },
+          });
+        return "Closing prose must not replace the question.";
+      });
+      const open = fake.harness.open;
+      fake.harness.open = async (deps, run) => ({ ...(await open(deps, run)), followUp, end });
+      const h = setup("", {
+        agent: stage === "description" ? "coding" : "review",
+        coding: stage === "description",
+        executor: {
+          exec: async (cmd) => {
+            if (cmd.includes("--abbrev-ref HEAD")) return "feature/change";
+            if (cmd.includes("ls-remote")) return `${head}\trefs/heads/feature/change\n`;
+            return head;
+          },
+        },
+        repoCtx: {
+          repo: "o/r",
+          ref: "main",
+          baseRef: "main",
+          ...(stage === "description" ? {} : { pr: 42 }),
+        } as RepoContext,
+        review: { head, currentHead: stage === "re-review" ? moved : head, commits, post },
+      });
+      h.deps.harness = { ...h.deps.harness!, harnesses: roster(fake.harness) };
+      h.deps.findOpenPrByHead = async () => ({ number: 42, htmlUrl: "https://github.com/o/r/pull/42" });
+      h.deps.openPullRequest = openPr;
+      h.deps.updatePullRequest = updatePr;
+      const out = answered(await runLoop(h.deps, h.ctx));
+      expect(out).toMatchObject({ answer: "Which behavior should this preserve?", awaitingInput: true });
+      expect(followUp).toHaveBeenCalledTimes(1);
+      if (stage !== "re-review") expect(followUp.mock.calls[0]![0].tools).toContain("request_input");
+      expect(post).not.toHaveBeenCalled();
+      expect(openPr).not.toHaveBeenCalled();
+      expect(updatePr).not.toHaveBeenCalled();
+      expect(end).toHaveBeenCalledExactlyOnceWith();
+      h.ending.drain(undefined);
+      await h.writer.settled();
+      expect(await h.store.get("run-l")).toMatchObject({ awaitingInput: true });
+    },
+  );
+
+  it("a hard stop during a final question turn clears waiting state without posting a review", async () => {
+    const head = "a".repeat(40);
+    const post = vi.fn(async () => {});
+    const fake = watched(piHarness, { answer: "Initial write-up" });
+    const open = fake.harness.open;
+    fake.harness.open = async (deps, run) => ({
+      ...(await open(deps, run)),
+      followUp: async (input) => {
+        await requestInputTool.run({ question: "Which behavior?" }, input.toolContext);
+        run.control?.requestStop("hard");
+        return "Stopped.";
+      },
+    });
+    const h = setup("", {
+      agent: "review",
+      executor: { exec: async () => head },
+      repoCtx: { repo: "o/r", pr: 42 } as RepoContext,
+      review: { head, post },
+    });
+    h.deps.harness = { ...h.deps.harness!, harnesses: roster(fake.harness) };
+    const state = vi.fn();
+    const ledgerRun = new NullLedgerRun("run-l", h.store);
+    ledgerRun.setState = state;
+    const out = answered(await runLoop(h.deps, { ...h.ctx, ledgerRun }));
+    expect(out.awaitingInput).toBeUndefined();
+    expect(state).toHaveBeenLastCalledWith({ question: null });
+    expect(post).not.toHaveBeenCalled();
+    h.ending.drain(undefined);
+    await h.writer.settled();
+    const record = await h.store.get("run-l");
+    expect(record?.status).toBe("stopped_hard");
+    expect(record?.awaitingInput).toBeUndefined();
+  });
+
+  it("keeps a typed question in the turn outcome, receipt and durable run record", async () => {
+    let turn = 0;
+    const provider: Provider = {
+      name: "fake",
+      complete: async () =>
+        ++turn === 1
+          ? {
+              content: [{ type: "tool_use", id: "q", name: "request_input", input: { question: "Which repository?" } }],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "Closing text" }], stopReason: "end_turn" },
+    };
+    const runFinished = vi.fn();
+    const h = setup("", { provider, io: { runFinished } });
+    const state = vi.fn();
+    const ledgerRun = new NullLedgerRun("run-l", h.store);
+    ledgerRun.setState = state;
+    const out = answered(await runLoop(h.deps, { ...h.ctx, ledgerRun }));
+    expect(out).toMatchObject({ answer: "Which repository?", awaitingInput: true });
+    expect(state).toHaveBeenCalledWith({ question: "Which repository?" });
+    expect(runFinished).toHaveBeenCalledWith({ id: "run-l", status: "completed", awaitingInput: true });
+    h.ending.drain(undefined);
+    await h.writer.settled();
+    expect(await h.store.get("run-l")).toMatchObject({ awaitingInput: true });
+  });
+
+  it("ends the model process when a question skips the publishing steps", async () => {
+    const fake = watched(piHarness);
+    const end = vi.fn(async () => {});
+    const open = fake.harness.open;
+    fake.harness.open = async (deps, run) => {
+      run.toolContext.onQuestion?.("Which repository?");
+      return { ...(await open(deps, run)), end };
+    };
+    const h = setup("");
+    h.deps.harness = { ...h.deps.harness!, harnesses: roster(fake.harness) };
+    const out = answered(await runLoop(h.deps, h.ctx));
+    expect(out.awaitingInput).toBe(true);
+    expect(end).toHaveBeenCalledExactlyOnceWith();
+    h.ending.drain(undefined);
+    await h.writer.settled();
+  });
+
+  it("clears a pending question when a follow-up arrives before the turn finishes", async () => {
+    const fake = watched(piHarness, { answer: "I used your answer." });
+    const open = fake.harness.open;
+    fake.harness.open = async (deps, run) => {
+      run.toolContext.onQuestion?.("Which repository?");
+      run.onEvent?.({ type: "input", messageId: "follow-up", text: "Use acme/api" });
+      return open(deps, run);
+    };
+    const h = setup("");
+    h.deps.harness = { ...h.deps.harness!, harnesses: roster(fake.harness) };
+    const out = answered(await runLoop(h.deps, h.ctx));
+    expect(out.answer).toBe("I used your answer.");
+    expect(out.awaitingInput).toBeUndefined();
+    h.ending.drain(undefined);
+    await h.writer.settled();
+  });
+
+  it("binds work tracking to the resolved requester before a model can call an issue tool", async () => {
+    const request = vi.fn(async () => ({ items: [] }));
+    const workItems = vi.fn(() => ({ request }));
+    let turn = 0;
+    const provider: Provider = {
+      name: "fake",
+      async complete() {
+        return turn++ === 0
+          ? {
+              content: [{ type: "tool_use", id: "t1", name: "work_items_delegated", input: {} }],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "No delegated issues." }], stopReason: "end_turn" };
+      },
+    };
+    const h = setup("", { agent: "coding", provider, io: { workItems } });
+    await runLoop(h.deps, h.ctx);
+    expect(workItems).toHaveBeenCalledWith(expect.objectContaining({ id: h.ctx.msg.userId }));
+    expect(request).toHaveBeenCalledWith({ op: "delegated", after: undefined, limit: undefined });
+  });
   // docs/reference/specs/agent-coding.md item 10: the thread's file upload
   // rides the tool context only when the channel has one — a coding run's
   // `attach_file` posts through the requesting thread's `attachFile`.
@@ -2676,6 +2863,9 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     expect(tools).toEqual([
       "web_fetch",
       "update_status",
+      "request_input",
+      "work_item_get",
+      "work_items_delegated",
       "github_repos",
       "github_file",
       "github_tree",
@@ -2684,6 +2874,10 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       "github_issue_get",
       "github_actions_run",
       "github_actions_job_log",
+      "work_item_update",
+      "work_item_create_child",
+      "work_item_comment",
+
       "github_issue_create",
       "github_issue_update",
       "github_issue_comment",
@@ -2860,7 +3054,15 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     expect(start.env.SWITCHBOARD_HARNESS_URL).toBe("http://127.0.0.1:8080");
     expect(start.env.SWITCHBOARD_RUN_BEARER).toBe("sbr_run-l.s3cret");
     const tools = start.args[start.args.indexOf("--tools") + 1].split(",");
-    expect(tools).toEqual(["web_fetch", "web_search", "update_status", ...GITHUB_READS]);
+    expect(tools).toEqual([
+      "web_fetch",
+      "web_search",
+      "update_status",
+      "request_input",
+      "work_item_get",
+      "work_items_delegated",
+      ...GITHUB_READS,
+    ]);
     for (const own of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(tools).not.toContain(own);
     expect(refusals).toEqual([
       {
@@ -3001,6 +3203,9 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       "get_run_status",
       "web_fetch",
       "update_status",
+      "request_input",
+      "work_item_get",
+      "work_items_delegated",
       ...GITHUB_READS,
     ]);
     for (const own of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(tools).not.toContain(own);
@@ -3168,6 +3373,42 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     ...(mode ? { mode } : {}),
     at: seq,
     seq,
+  });
+
+  it("an operator stop takes precedence over a restored question", async () => {
+    const s = setup("must not run");
+    const resume = finishing("Stopped summary", {
+      state: { question: "Which repository?" },
+      events: [
+        { type: "run_note", kind: "stop_requested", mode: "soft", summary: "stop", at: 1, seq: 1 },
+        { type: "run_note", kind: "stopped", mode: "soft", summary: "stopped", at: 2, seq: 2 },
+      ],
+    });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect(out.awaitingInput).toBeUndefined();
+    expect(out.answer).not.toContain("Which repository?");
+    s.ending.drain(undefined);
+    await s.writer.settled();
+  });
+
+  it("restores a pending question without more model calls or automatic PR or review publication", async () => {
+    for (const agent of ["coding", "review"]) {
+      const post = vi.fn(async () => {});
+      const s = setup("must not run", {
+        agent,
+        ...(agent === "coding" ? { coding: true } : { review: { head: "abc", post } }),
+        repoCtx: { repo: "acme/api", pr: 1 },
+      });
+      const openPullRequest = vi.fn();
+      s.deps.openPullRequest = openPullRequest;
+      const resume = finishing("Closing text", { agent, state: { question: "Which repository?" } });
+      const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+      expect(out).toMatchObject({ answer: "Which repository?", awaitingInput: true });
+      expect(post).not.toHaveBeenCalled();
+      expect(openPullRequest).not.toHaveBeenCalled();
+      s.ending.drain(undefined);
+      await s.writer.settled();
+    }
   });
 
   it("the model is never called: the transcript's final turn is the answer, published and finished `completed`, and a `resumed` note on the stream says the loop had ended before the restart", async () => {

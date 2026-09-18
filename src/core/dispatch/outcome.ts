@@ -10,6 +10,8 @@
 export interface DispatchOutcome {
   status: "completed" | "refused" | "failed" | "stopped";
   refusal?: string;
+  /** Admission made no run/inbox effects; a durable channel should retry later. */
+  deferred?: true;
   /** The refusal's cause, from the one code→cause table (src/core/refusal.ts). */
   cause?: "request" | "policy" | "system";
 }

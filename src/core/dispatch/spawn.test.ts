@@ -221,6 +221,38 @@ describe("spawnChild — the one path a child run is born through", () => {
     expect(seen).toEqual([true, false]);
   });
 
+  it("keeps work tracking and ongoing-work acknowledgements on the opened child's channel", async () => {
+    const ch = channel();
+    const acknowledged: string[] = [];
+    const actorIds: string[] = [];
+    ch.childIo.acknowledge = async (text) => {
+      acknowledged.push(text);
+    };
+    ch.childIo.isolateFollowUps = true;
+    ch.childIo.checkAccess = async (id) => id === PARENT_MSG.userId;
+    ch.childIo.workItems = (actor) => {
+      actorIds.push(actor.id);
+      return { request: async () => ({ items: [] }) };
+    };
+    const { dispatch } = fakeDispatch(async (_msg, io) => {
+      expect(io.isolateFollowUps).toBe(true);
+      expect(await io.checkAccess?.(PARENT_MSG.userId)).toBe(true);
+      expect(await io.checkAccess?.("another-person")).toBe(false);
+      await io.acknowledge?.("Still working");
+      const actor = {
+        kind: "user" as const,
+        id: PARENT_MSG.userId,
+        grants: { actions: new Set<string>(), channels: new Set<string>(), repos: new Set<string>() },
+      };
+      expect(await io.workItems?.(actor).request({ op: "delegated" })).toEqual({ items: [] });
+      return { status: "completed" };
+    });
+    await spawnChild(deps(dispatch), parent(ch.io), { preset: "research", prompt: "q" });
+    expect(acknowledged).toEqual(["Still working"]);
+    expect(actorIds).toEqual([PARENT_MSG.userId]);
+    expect(ch.childReplies).toEqual([]);
+  });
+
   it("a spawn from a run at depth 1 is refused `spawn_depth` before anything else: no thread opened, no dispatch", async () => {
     const { dispatch } = fakeDispatch(registers("run-child"));
     const ch = channel();

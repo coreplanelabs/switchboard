@@ -6,7 +6,15 @@ import { installationPath } from "./deploy/operatorRoot.js";
 import { openConfigStore } from "./config.js";
 import { capabilitiesFrom } from "./core/capabilities.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
+import { channelsToStart, linearBridgeBaseUrl } from "./channels/startup.js";
 import { createSlackApp } from "./channels/slack.js";
+import { RemoteLinearApi, RemoteLinearInbox, type LinearTransport } from "./channels/linear/bridge.js";
+import { LinearConsumer } from "./channels/linear/consumer.js";
+import { LinearChannelIO } from "./channels/linear/io.js";
+import { linearThread } from "./channels/linear/session.js";
+import { recoverLinearDelivery } from "./channels/linear/recovery.js";
+import { stopLinearSession } from "./channels/linear/control.js";
+import { handleLinearLifecycle, type LinearLiveWork } from "./channels/linear/lifecycle.js";
 import { SlackChannelDirectory } from "./channels/slackChannelDirectory.js";
 import { SlackConversationReader } from "./channels/slack/references.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
@@ -157,11 +165,14 @@ const INTERRUPTED_WRITE_BUDGET_MS = 10_000;
  * CLI's `start` (src/cli.ts) — the same process from the same directory.
  */
 export async function runBot(): Promise<void> {
-  for (const v of ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"]) {
-    if (!processSecrets.get(v)) {
-      console.error(`Missing required env var ${v}`);
-      process.exit(1);
-    }
+  let channels: ReturnType<typeof channelsToStart>;
+  try {
+    channels = channelsToStart(
+      new Set(["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "LINEAR_BRIDGE_TOKEN"].filter((key) => processSecrets.get(key))),
+    );
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : "Invalid channel configuration");
+    process.exit(1);
   }
 
   // Build identity for /healthz (docs/reference/specs/slack-channel.md item 8): written by
@@ -577,15 +588,73 @@ export async function runBot(): Promise<void> {
   // registration, every surface.
   deps.commands = commands;
   // --- end command registry ---
-  const { app, receiver, statusClient } = createSlackApp(deps);
+  const slack = channels.slack ? createSlackApp(deps) : undefined;
+  const linearBearer = processSecrets.get("LINEAR_BRIDGE_TOKEN");
+  let linearTransport: LinearTransport | undefined;
+  let linearConsumer: LinearConsumer | undefined;
+  if (linearBearer) {
+    const baseUrl = linearBridgeBaseUrl({
+      LINEAR_BRIDGE_URL: process.env.LINEAR_BRIDGE_URL,
+      PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
+    });
+    if (!ledgerClient) throw new Error("LINEAR_BRIDGE_TOKEN requires durable run history and its run ledger");
+    linearTransport = { baseUrl, token: linearBearer.reveal(), fetch };
+    const transport = linearTransport;
+    linearConsumer = new LinearConsumer({
+      inbox: new RemoteLinearInbox(transport),
+      api: (organizationId) => new RemoteLinearApi(transport, organizationId),
+      clock: systemClock,
+      warn: (message) => console.warn(message),
+      dispatch: (msg, io) => dispatch(deps, msg, io),
+      stop: (input, io) => stopLinearSession({ config, runs: runsService }, input, io),
+      recover: (delivery, msg) => recoverLinearDelivery({ ledger: ledgerClient, store: runStore }, delivery, msg),
+      other: (event) =>
+        handleLinearLifecycle(
+          {
+            api: (org) => new RemoteLinearApi(transport, org),
+            live: async () => {
+              const live = new Map<string, LinearLiveWork>(
+                defaultRunRegistry
+                  .listActive()
+                  .filter((run) => !run.finished)
+                  .map((run) => [run.id, run]),
+              );
+              for (const row of await ledgerClient.listLive())
+                if (!live.has(row.runId)) live.set(row.runId, { ...row.meta, id: row.runId, startedAt: row.startedAt });
+              return [...live.values()];
+            },
+            halt: async (id) => {
+              defaultRunRegistry.requestStopById(id, "hard", {
+                kind: "chat",
+                id: `linear:${event.payload.organizationId}:access-removed`,
+              });
+              await ledgerClient.requestStop(id, "hard");
+            },
+          },
+          event,
+        ),
+      leaseLost: (id) => {
+        defaultRunRegistry.requestStopById(id, "hard", { kind: "chat", id: "linear:lease-lost" });
+      },
+    });
+  }
   // A thread's channel handle rebuilt from a stored row's parts, with no
   // triggering event (run-history item 38): what a resumed run replies through
   // and what a coordinator's child is dispatched into. Slack from the key's
   // channel and ts (and the row's card, when it has one); HTTP and MCP have
   // no thread to speak into, so their handle logs; any other platform, none.
   const threadIoFor = (thread: { threadKey: string; userId: string; cardTs?: string }): ChannelIO | undefined => {
+    const linear = linearThread(thread.threadKey);
+    if (linear && linearTransport)
+      return new LinearChannelIO({
+        api: new RemoteLinearApi(linearTransport, linear.organizationId),
+        sessionId: linear.sessionId,
+        clock: systemClock,
+        warn: (message) => console.warn(message),
+      });
     const [platform, channel, threadTs] = thread.threadKey.split(":");
-    if (platform === "slack" && channel && threadTs) {
+    if (platform === "slack" && channel && threadTs && slack) {
+      const { app, statusClient } = slack;
       return resumeSlackIO(
         app.client,
         {
@@ -605,65 +674,68 @@ export async function runBot(): Promise<void> {
   // channel is public or private — cached per channel per TTL, `unknown` on any
   // failure — so a public channel's runs are readable by everyone and a private
   // channel's or DM's stay grants-only. Non-Slack ids keep the static answer.
-  const channelDirectory = new SlackChannelDirectory(app.client);
-  deps.channelDirectory = channelDirectory;
-  // Membership: a dashboard session linked to its person carries the
-  // channels that person is in, from `users.conversations` cached per person. The
-  // events keep the cache fresh — a join or leave forgets that person, a move of
-  // the bot's own reach forgets everyone (the bot joining a channel makes that
-  // channel visible on every member's set at once), and so does a reconnect
-  // (Socket Mode replays nothing missed) — so the TTL is only the bound on a
-  // missed event.
-  slackChannelsOf = (actorId) => channelDirectory.channelsOf(actorId);
-  let directoryBotUserId: string | undefined;
-  const membershipMoved = async (user: string) => {
-    try {
-      directoryBotUserId ??= (await app.client.auth.test()).user_id ?? undefined;
-    } catch {
-      channelDirectory.forgetAll(); // who moved is unknown: forgetting more is always safe
-      return;
-    }
-    if (user === directoryBotUserId) channelDirectory.forgetAll();
-    else channelDirectory.forgetMember(`slack:${user}`);
-  };
-  app.event("member_joined_channel", async ({ event }) => membershipMoved(event.user));
-  app.event("member_left_channel", async ({ event }) => membershipMoved(event.user));
-  for (const moved of [
-    "channel_left",
-    "group_left",
-    "channel_archive",
-    "group_archive",
-    "channel_deleted",
-    "group_deleted",
-  ] as const)
-    app.event(moved, async () => channelDirectory.forgetAll());
-  receiver.client.on("connected", () => channelDirectory.forgetAll());
-  // The conversation reader (record 0037): a permalink to another thread the
-  // bot is in becomes a quoted, untrusted block on the request turn — this
-  // workspace's URL grammar, one fresh `conversations.info` per classification,
-  // a text-only fetch. Inert until `references.enabled` is set; the host it
-  // recognises is read from `auth.test` once the socket is up.
-  const conversationReader = new SlackConversationReader(app.client);
-  deps.conversationReaders = [conversationReader];
-  // Connect tickets bind to the requester's email when Slack can tell us
-  // (`users:read.email`); without the scope the lookup yields undefined and the
-  // ticket binds to the first Access identity that opens it instead.
-  slackEmailLookup = (userId) =>
-    userId.startsWith("slack:")
-      ? resolveUserEmail(app.client, userId.slice("slack:".length))
-      : Promise.resolve(undefined);
-  slackNameLookup = (userId) =>
-    userId.startsWith("slack:")
-      ? resolveUserName(app.client, userId.slice("slack:".length))
-      : Promise.resolve(undefined);
-  slackNameDirectory = slackNames(app.client);
-  slackPost = async (channel, text) => {
-    await app.client.chat.postMessage({ channel, text: mdToMrkdwn(text) });
-  };
-  // The dashboard link (record 0042): a browser session's Access email names
-  // its Slack person, resolved once per gate pass through a cached reverse
-  // lookup — identity, never authority.
-  slackPersonByEmail = (email) => resolvePersonByEmail(app.client, email);
+  if (slack) {
+    const { app, receiver } = slack;
+    const channelDirectory = new SlackChannelDirectory(app.client);
+    deps.channelDirectory = channelDirectory;
+    // Membership: a dashboard session linked to its person carries the
+    // channels that person is in, from `users.conversations` cached per person. The
+    // events keep the cache fresh — a join or leave forgets that person, a move of
+    // the bot's own reach forgets everyone (the bot joining a channel makes that
+    // channel visible on every member's set at once), and so does a reconnect
+    // (Socket Mode replays nothing missed) — so the TTL is only the bound on a
+    // missed event.
+    slackChannelsOf = (actorId) => channelDirectory.channelsOf(actorId);
+    let directoryBotUserId: string | undefined;
+    const membershipMoved = async (user: string) => {
+      try {
+        directoryBotUserId ??= (await app.client.auth.test()).user_id ?? undefined;
+      } catch {
+        channelDirectory.forgetAll(); // who moved is unknown: forgetting more is always safe
+        return;
+      }
+      if (user === directoryBotUserId) channelDirectory.forgetAll();
+      else channelDirectory.forgetMember(`slack:${user}`);
+    };
+    app.event("member_joined_channel", async ({ event }) => membershipMoved(event.user));
+    app.event("member_left_channel", async ({ event }) => membershipMoved(event.user));
+    for (const moved of [
+      "channel_left",
+      "group_left",
+      "channel_archive",
+      "group_archive",
+      "channel_deleted",
+      "group_deleted",
+    ] as const)
+      app.event(moved, async () => channelDirectory.forgetAll());
+    receiver.client.on("connected", () => channelDirectory.forgetAll());
+    // The conversation reader (record 0037): a permalink to another thread the
+    // bot is in becomes a quoted, untrusted block on the request turn — this
+    // workspace's URL grammar, one fresh `conversations.info` per classification,
+    // a text-only fetch. Inert until `references.enabled` is set; the host it
+    // recognises is read from `auth.test` once the socket is up.
+    const conversationReader = new SlackConversationReader(app.client);
+    deps.conversationReaders = [conversationReader];
+    // Connect tickets bind to the requester's email when Slack can tell us
+    // (`users:read.email`); without the scope the lookup yields undefined and the
+    // ticket binds to the first Access identity that opens it instead.
+    slackEmailLookup = (userId) =>
+      userId.startsWith("slack:")
+        ? resolveUserEmail(app.client, userId.slice("slack:".length))
+        : Promise.resolve(undefined);
+    slackNameLookup = (userId) =>
+      userId.startsWith("slack:")
+        ? resolveUserName(app.client, userId.slice("slack:".length))
+        : Promise.resolve(undefined);
+    slackNameDirectory = slackNames(app.client);
+    slackPost = async (channel, text) => {
+      await app.client.chat.postMessage({ channel, text: mdToMrkdwn(text) });
+    };
+    // The dashboard link (record 0042): a browser session's Access email names
+    // its Slack person, resolved once per gate pass through a cached reverse
+    // lookup — identity, never authority.
+    slackPersonByEmail = (email) => resolvePersonByEmail(app.client, email);
+  }
 
   // Work in flight = agent runs + the background memory reflections they spawn
   // + run-history writes still retrying (a record lost at SIGTERM is
@@ -1227,17 +1299,19 @@ export async function runBot(): Promise<void> {
     // launched (the launcher runs after this, and in-process admission takes
     // over the moment a resume is dispatched).
     threadsElsewhere.replace([...outcome.liveElsewhere, ...outcome.resumable.map((r) => r.row)]);
-    const closedCards = await closeReclaimedCards(
-      app.client,
-      outcome.closed.map((c) => ({
-        status: c.status,
-        agent: c.agent,
-        card: c.card,
-        ...(c.note ? { note: c.note } : {}),
-        ...(c.routed ? { routed: true } : {}),
-      })),
-      (w) => console.warn(w),
-    );
+    const closedCards = slack
+      ? await closeReclaimedCards(
+          slack.app.client,
+          outcome.closed.map((c) => ({
+            status: c.status,
+            agent: c.agent,
+            card: c.card,
+            ...(c.note ? { note: c.note } : {}),
+            ...(c.routed ? { routed: true } : {}),
+          })),
+          (w) => console.warn(w),
+        )
+      : 0;
     if (closedCards > 0) console.log(`[reclaim] closed ${closedCards} card(s) of runs the previous generation left`);
     // An interrupted ship pipeline's work stands on GitHub with nobody driving
     // it (run-history item 36): its thread is told, with the re-issue that
@@ -1245,9 +1319,9 @@ export async function runBot(): Promise<void> {
     for (const c of outcome.closed) {
       if (c.status !== "interrupted" || c.agent !== "ship" || !c.note) continue;
       const [platform, channel, threadTs] = c.threadKey.split(":");
-      if (platform !== "slack" || !channel || !threadTs) continue;
+      if (platform !== "slack" || !channel || !threadTs || !slack) continue;
       try {
-        await app.client.chat.postMessage({ channel, thread_ts: threadTs, text: mdToMrkdwn(c.note) });
+        await slack.app.client.chat.postMessage({ channel, thread_ts: threadTs, text: mdToMrkdwn(c.note) });
       } catch (err) {
         console.warn(
           `[reclaim] ${c.runId}: the ship pipeline's thread could not be told: ${err instanceof Error ? err.message : String(err)}`,
@@ -1315,7 +1389,7 @@ export async function runBot(): Promise<void> {
     // No ledger: nothing is ever on its way back, so the door's verdict is final from the start.
     takeover.settle();
   }
-  await app.start();
+  await slack?.app.start();
   // The runs the boot reclaim found resumable continue now that the socket is
   // up (run-history item 38), and the reclaim repeats every lease interval so a
   // row whose lease was still current at boot is taken once it expires.
@@ -1334,6 +1408,7 @@ export async function runBot(): Promise<void> {
     });
   }
 
+  linearConsumer?.start();
   console.log(
     `switchboard running (providers: ${completions.names().join(", ")}; default agent: ${config.config.defaults.agent})`,
   );
@@ -1359,6 +1434,7 @@ export async function runBot(): Promise<void> {
   const drain = async (signal: string) => {
     if (draining) return;
     draining = true;
+    linearConsumer?.stop();
     drainStartedAt = systemClock();
     // The drain is one `drain` root on the span log (docs/reference/specs/tracing.md item
     // 20): what signalled it, what it held, what it handed off and abandoned.
@@ -1370,7 +1446,7 @@ export async function runBot(): Promise<void> {
       `[drain] ${signal}: closing Slack socket, ${activeRunCount()} run(s) + ${pendingReflectionCount()} reflection(s) + ${pendingHistoryWrites()} history write(s) in flight`,
     );
     setShutdownNotice(DEPLOY_RESTART_NOTICE);
-    await app.stop().catch(() => {});
+    await slack?.app.stop().catch(() => {});
     // The handoff (plan D8, run-history item 39): every run a resume can
     // continue is marked `handoff` on the ledger, so the next generation takes
     // it at once — whatever its lease — and carries on from its last step. Those

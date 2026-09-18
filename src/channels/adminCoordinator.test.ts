@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { Secret } from "../secrets.js";
 import { AGENTS } from "../agents/registry.js";
@@ -1137,6 +1137,22 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       },
     };
   }
+
+  it("checks the requester before opening coordinator threads and gives each retry a stable channel key", async () => {
+    const io = openingIo([]);
+    const checkAccess = vi.fn(async () => false);
+    const openThread = vi.fn(io.openThread!);
+    const h = await planHarness({ ioFor: () => ({ ...io, checkAccess, openThread }) });
+    const denied = await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
+    expect(denied).toMatchObject({ status: 403, body: { error: "channel_access_denied" } });
+    expect(checkAccess).toHaveBeenCalledWith(PLAN_INSTANCE.userId);
+    expect(openThread).not.toHaveBeenCalled();
+    checkAccess.mockResolvedValue(true);
+    expect((await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" })).status).toBe(200);
+    expect(openThread).toHaveBeenCalledTimes(1);
+    for (const [lead, options] of openThread.mock.calls)
+      expect(options).toEqual({ idempotencyKey: `${PLAN_INSTANCE.id}:${lead}` });
+  });
 
   it("unit-start opens a plan unit's thread through the requesting thread's channel and no review thread, finds the board issue titled by the unit id, and writes the thread on the row; a generated plan's unit runs in the requesting thread and opens nothing", async () => {
     const opened: string[] = [];
@@ -2652,6 +2668,221 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       ).body,
     ).toMatchObject({ ok: true });
     expect(gone.logs.some((l) => l.includes("the board comment could not be posted"))).toBe(true);
+  });
+});
+
+describe("coordinator question records", () => {
+  it.each([1, 2])(
+    "retries a failed durable point read %s while the finished child is still cached",
+    async (failedRead) => {
+      const h = harness();
+      const child = h.registry.create("coding · question", {
+        ...TAG,
+        agent: "coding",
+        channelId: INSTANCE.channelId,
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+      });
+      h.registry.publish(child.id, {
+        type: "pr_opened",
+        number: 7,
+        url: "https://github.com/acme/api/pull/7",
+        created: true,
+      });
+      h.registry.finish(child.id, "completed");
+      await h.store.put(record(child.id, { ...TAG, awaitingInput: true }));
+      const read = h.store.getSummary.bind(h.store);
+      let reads = 0;
+      vi.spyOn(h.store, "getSummary").mockImplementation((id) => {
+        if (++reads === failedRead) throw new Error("history temporarily unavailable");
+        return read(id);
+      });
+      const request = post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+        parentInstanceId: INSTANCE.id,
+        runId: child.id,
+      });
+      await expect(handleCoordinatorRequest(request, h.deps)).rejects.toThrow(/temporarily unavailable/);
+      const retry = await handleCoordinatorRequest(request, h.deps);
+      expect(retry).toMatchObject({ status: 200, body: { run: { awaitingInput: true } } });
+      expect((retry!.body as { run: Record<string, unknown> }).run.pr).toBeUndefined();
+      expect(h.merges).toHaveLength(0);
+    },
+  );
+
+  it("reports a cancelled question as stopped and withholds its earlier review and PR artifacts", async () => {
+    const h = harness();
+    await h.store.put(
+      record("run-question", {
+        ...TAG,
+        awaitingInput: true,
+        verdict: { verdict: "approve", summary: "Earlier approval", findings: [] },
+        reviewHead: "a".repeat(40),
+        events: [{ type: "pr_opened", number: 7, url: "https://github.com/acme/api/pull/7", created: true, seq: 1 }],
+      }),
+    );
+    await h.store.stopWaiting("run-question", { at: NOW, mode: "hard", by: { kind: "chat", id: INSTANCE.userId } });
+    const reply = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+        parentInstanceId: INSTANCE.id,
+        runId: "run-question",
+      }),
+      h.deps,
+    );
+    expect(reply).toMatchObject({
+      status: 200,
+      body: { run: { status: "stopped_hard", finalReply: "Stopped waiting for input." } },
+    });
+    const run = (reply!.body as { run: Record<string, unknown> }).run;
+    expect(run.awaitingInput).toBeUndefined();
+    expect(run.verdict).toBeUndefined();
+    expect(run.pr).toBeUndefined();
+  });
+
+  it("retries unavailable continuation history rather than settling an incomplete round", async () => {
+    const h = harness();
+    await h.store.put(record("run-question", { ...TAG, awaitingInput: true }));
+    vi.spyOn(h.deps.runs, "listRuns").mockResolvedValueOnce({ runs: [], storeUnavailable: true });
+    await expect(
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+          parentInstanceId: INSTANCE.id,
+          runId: "run-question",
+        }),
+        h.deps,
+      ),
+    ).rejects.toThrow(/temporarily unavailable/);
+  });
+
+  it.each([false, true])(
+    "includes every earlier question's cost in the settled round (missing price: %s)",
+    async (missing) => {
+      const h = harness({
+        prices: parseModelPrices({ "anthropic/claude-fable-5": { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 } }),
+      });
+      const usage = {
+        turns: 1,
+        byModel: {
+          "anthropic/claude-fable-5": {
+            turns: 1,
+            inputTokens: 1_000_000,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
+        },
+      };
+      await h.store.put(record("run-question", { ...TAG, awaitingInput: true, usage: missing ? undefined : usage }));
+      await h.store.put(
+        record("run-another-question", {
+          ...TAG,
+          awaitingInput: true,
+          usage,
+          startedAt: NOW - 7_000,
+          finishedAt: NOW - 6_000,
+        }),
+      );
+      await h.store.put(record("run-answer", { ...TAG, usage, startedAt: NOW - 5_000, finishedAt: NOW - 4_000 }));
+      // Both the initial question and an already-followed continuation expose the same total.
+      for (const runId of ["run-question", "run-answer"]) {
+        const reply = await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+            parentInstanceId: INSTANCE.id,
+            runId,
+          }),
+          h.deps,
+        );
+        expect(reply).toMatchObject({ status: 200, body: { run: { id: "run-answer", costUsd: missing ? null : 9 } } });
+      }
+    },
+  );
+
+  it("follows only a continuation with the same instance, round, thread and requester", async () => {
+    const h = harness();
+    await h.store.put(record("run-question", { ...TAG, awaitingInput: true }));
+    await h.store.put(
+      record("run-answer", {
+        ...TAG,
+        startedAt: NOW - 5_000,
+        finishedAt: NOW - 4_000,
+        events: [{ type: "answer", text: "The requested behavior is implemented.", seq: 1 }],
+      }),
+    );
+    await h.store.put(
+      record("run-foreign", { ...TAG, userId: "slack:UBOB", startedAt: NOW - 3_000, finishedAt: NOW - 2_000 }),
+    );
+    await h.store.put(
+      record("run-other-credential", {
+        ...TAG,
+        authenticatedAs: "http:other",
+        startedAt: NOW - 2_000,
+        finishedAt: NOW - 1_000,
+      }),
+    );
+    await h.store.put(
+      record("run-other-round", {
+        ...TAG,
+        idempotencyKey: `${INSTANCE.id}:U20/0/coding`,
+        startedAt: NOW - 1_000,
+        finishedAt: NOW,
+      }),
+    );
+    const reply = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+        parentInstanceId: INSTANCE.id,
+        runId: "run-question",
+      }),
+      h.deps,
+    );
+    expect(reply).toMatchObject({
+      status: 200,
+      body: {
+        run: {
+          id: "run-answer",
+          finished: true,
+          status: "completed",
+          finalReply: "The requested behavior is implemented.",
+          costUsd: null,
+        },
+      },
+    });
+  });
+
+  it("returns the question marker without exposing earlier verdict or PR artifacts", async () => {
+    const h = harness();
+    await h.store.put(
+      record("run-question", {
+        ...TAG,
+        awaitingInput: true,
+        verdict: { verdict: "approve", summary: "Earlier approval", findings: [] },
+        reviewHead: "a".repeat(40),
+        events: [
+          { type: "pr_opened", number: 7, url: "https://github.com/acme/api/pull/7", created: true, seq: 1 },
+          { type: "answer", text: "Which behavior do you want?", seq: 2 },
+        ],
+      }),
+    );
+    const reply = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}read-record`, {
+        parentInstanceId: INSTANCE.id,
+        runId: "run-question",
+      }),
+      h.deps,
+    );
+    expect(reply).toMatchObject({
+      status: 200,
+      body: {
+        run: {
+          finished: true,
+          status: "completed",
+          awaitingInput: true,
+          finalReply: "Which behavior do you want?",
+        },
+      },
+    });
+    const run = (reply!.body as { run: Record<string, unknown> }).run;
+    expect(run.verdict).toBeUndefined();
+    expect(run.pr).toBeUndefined();
+    expect(run.reviewPosted).toBeUndefined();
   });
 });
 

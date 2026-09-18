@@ -10,7 +10,8 @@ import type { Actor, Grants } from "./types.js";
 // says what an actor MAY do.
 
 /** What an adapter can prove about a caller's surface. */
-export type ActorSurface = "slack" | "http" | "mcp" | "access-browser" | "access-service" | "cli" | "schedule";
+export type ActorSurface =
+  "slack" | "linear" | "http" | "mcp" | "access-browser" | "access-service" | "cli" | "schedule";
 
 export interface ActorInput {
   surface: ActorSurface;
@@ -33,6 +34,8 @@ export function actorIdFor(surface: ActorSurface, subjectId: string): string {
   switch (surface) {
     case "slack":
       return `slack:${subjectId}`;
+    case "linear":
+      return `linear:${subjectId}`;
     case "http":
       return `http:${subjectId}`;
     case "mcp":
@@ -51,6 +54,7 @@ export function actorIdFor(surface: ActorSurface, subjectId: string): string {
 function kindFor(surface: ActorSurface): Actor["kind"] {
   switch (surface) {
     case "slack":
+    case "linear":
     case "access-browser":
     case "cli":
       return "user";
@@ -99,6 +103,7 @@ export function chatActorOf(
 
 const CHAT_SURFACES: Readonly<Record<string, ActorSurface>> = {
   slack: "slack",
+  linear: "linear",
   http: "http",
   mcp: "mcp",
   cli: "cli",

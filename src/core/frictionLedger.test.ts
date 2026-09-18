@@ -182,6 +182,7 @@ describe("RunStoreFrictionLedger", () => {
 
   it("a run store that cannot be read rejects with its error — the friction command names the cause", async () => {
     const brokenStore: RunStore = {
+      stopWaiting: async () => "not_found",
       put: async () => ({ ok: true, retained: 0, stored: false, rewritten: false }),
       abandoned: () => {},
       get: async () => null,
@@ -219,6 +220,7 @@ describe("RunStoreFrictionLedger", () => {
     const inner = new InMemoryRunStore({ now: () => NOW });
     for (let i = 0; i < 3; i++) await inner.put(runRecord(`r${i}`, NOW - i));
     const spy: RunStore = {
+      stopWaiting: (id, stop) => inner.stopWaiting(id, stop),
       put: (r) => inner.put(r),
       abandoned: () => {},
       get: async (id) => {

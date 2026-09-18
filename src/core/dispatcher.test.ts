@@ -26,7 +26,7 @@ import { InMemoryArtifactStore } from "../artifacts/store.js";
 import { ExecInfraError, ExecSandboxRestartedError } from "../execution/executor.js";
 import { classifyError } from "./trace/classify.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
-import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
+import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusUpdate } from "./types.js";
 import { activeRunCount, dispatch, dispatchClick, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
 import { CONFIRMATION_TTL_MS } from "./budgets.js";
 import type { AuditEntry } from "./commandRegistry.js";
@@ -315,6 +315,7 @@ function ledgerBackedStore(ledger: InMemoryRunLedger, store: RunStore): RunStore
     for (const record of ledger.finished.values()) await store.put(record);
   };
   return {
+    stopWaiting: (id, stop) => store.stopWaiting(id, stop),
     put: (record, trace) => store.put(record, trace),
     abandoned: () => {},
     get: async (id) => {
@@ -2970,6 +2971,7 @@ describe("review post-step", () => {
       deps.runRegistry = new RunRegistry({ genId: () => "r-order", genToken: () => "t-order" });
       const inner = new InMemoryRunStore();
       const store: RunStore = {
+        stopWaiting: (id, stop) => inner.stopWaiting(id, stop),
         put: async (r) => {
           order.push(`record:${r.status}`);
           return inner.put(r);
@@ -9739,6 +9741,35 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
       ),
     );
 
+  it("an isolated channel defers another person and later binds a fresh run to that person", async () => {
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO(),
+      second = fakeIO();
+    first.io.isolateFollowUps = second.io.isolateFollowUps = true;
+    const actors: string[] = [];
+    second.io.workItems = (actor) => {
+      actors.push(actor.id);
+      return { request: async () => ({ items: [] }) };
+    };
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const other = threadMsg("a separate request", "slack:UY");
+    expect(await dispatch(deps, other, second.io)).toMatchObject({ deferred: true });
+    expect(second.replies).toEqual([]);
+    expect(second.statuses).toEqual([]);
+    expect(actors).toEqual([]);
+    expect(deps.admission.get(other.threadKey)?.inbox.size).toBe(0);
+    settle().answer("first answer");
+    await run;
+    expect(requests).toHaveLength(1);
+    expect(await dispatch(deps, other, second.io)).not.toHaveProperty("deferred");
+    expect(actors).toEqual(["slack:UY"]);
+    expect(requests).toHaveLength(2);
+    expect(second.replies).toEqual(["answer 2"]);
+  });
+
   it("a thread reply while a run is in flight is steered: no second run, the follow-up reaches the live run at its next step, the reply says where it went", async () => {
     vi.stubEnv("PUBLIC_BASE_URL", "https://sb.example");
     let ids = 0;
@@ -9934,6 +9965,26 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     expect(deps.admission!.size).toBe(0);
   });
 
+  it("reports an unconsumed follow-up that cannot restart while its access lookup is unavailable", async () => {
+    const registry = new RunRegistry({ genId: () => "r1", genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const second = fakeIO();
+    second.io.checkAccess = vi.fn().mockResolvedValueOnce(true).mockRejectedValue(new Error("offline"));
+    await dispatch(deps, threadMsg("and also the numbers"), second.io);
+    await foldedIn(registry, "r1", "and also the numbers");
+    settle().fail(new Error("provider exploded"));
+    await run;
+    expect(requests).toHaveLength(1);
+    expect(second.replies.at(-1)).toContain("has not started");
+    expect(second.replies.at(-1)).toContain("send it again");
+  });
+
   it("after an operator stop, an unconsumed follow-up is not run — its sender is told the run was stopped before reading it", async () => {
     let ids = 0;
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
@@ -10055,6 +10106,96 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     };
     return { io, replies };
   }
+
+  it("rechecks restored channel access: denials close rows and outages leave them reclaimable", async () => {
+    for (const kind of ["resume", "restart"] as const)
+      for (const temporary of [false, true]) {
+        const ledger = new InMemoryRunLedger(() => 10_000);
+        await ledger.claim({
+          runId: "old",
+          threadKey: "slack:CX:1.0",
+          gen: "gen-OLD",
+          leaseMs: 30_000,
+          startedAt: 5_000,
+          phase: kind === "restart" ? "attaching" : "live",
+          meta: {
+            channelId: "slack:CX",
+            userId: "slack:UX",
+            threadKey: "slack:CX:1.0",
+            agent: "general",
+            model: "anthropic/general-model",
+          },
+          system: "stored prompt",
+          tools: [],
+        });
+        const messages: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "hello" }] }];
+        if (kind === "resume") {
+          await ledger.seed("old", "gen-OLD", [{ idx: 0, message: messages[0]! }]);
+          await ledger.step(
+            "old",
+            "gen-OLD",
+            {
+              step: 0,
+              seq: 0,
+              turnIndex: 1,
+              inFlight: [],
+              inboxConsumedSeq: 0,
+              remainingMs: 300_000,
+              turn: 0,
+              iteration: 0,
+            },
+            [],
+          );
+        }
+        ledger.live.get("old")!.leaseUntil = 0;
+        const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+        const provider = capturingProvider("must not run");
+        const { deps, writer } = wired(provider, { ledger });
+        const { io, replies } = ioWithCard();
+        io.history = vi.fn(async () => []);
+        io.checkAccess = vi.fn(async () => {
+          if (temporary) throw new Error("offline");
+          return false;
+        });
+        let options: Parameters<typeof dispatch>[3];
+        if (kind === "restart") options = { restart: { row: reclaimed.row, inbox: [] } };
+        else {
+          const plan = planResume({
+            transcript: { complete: true, compactions: [], turns: 1, messages },
+            lastStep: reclaimed.lastStep!,
+            tools: knownToolsFor(getAgent("general")),
+          });
+          if (plan.kind !== "resume") throw new Error(plan.kind);
+          options = {
+            resume: {
+              row: reclaimed.row,
+              lastStep: reclaimed.lastStep!,
+              plan,
+              events: [],
+              lastSeq: 0,
+              repoCtx: {},
+              inbox: [],
+            },
+          };
+        }
+        const outcome = await dispatch(deps, msg("hello"), io, options);
+        await writer.settled();
+        expect(io.history).not.toHaveBeenCalled();
+        expect(provider.requests).toHaveLength(0);
+        expect(io.checkAccess).toHaveBeenCalledWith("slack:UX");
+        if (temporary) {
+          expect(outcome).toMatchObject({ deferred: true });
+          expect(replies).toEqual([]);
+          expect(ledger.finished.has("old")).toBe(false);
+          expect((await ledger.reclaim("gen-next", 40_001, 30_000)).map((r) => r.row.runId)).toEqual(["old"]);
+        } else {
+          expect(outcome).toEqual({ status: "refused", refusal: "channel_access", cause: "policy" });
+          expect(ledger.live.has("old")).toBe(false);
+          expect(ledger.finished.get("old")?.status).toBe("interrupted");
+          expect(replies).toHaveLength(1);
+        }
+      }
+  });
 
   it("claims the run once its prompt exists (system, tools, card, meta, seed), records each step before its tools, appends events, takes finishing before the reply and finishes through the ledger", async () => {
     const seen: {
@@ -16943,6 +17084,278 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     expect(res.outcome).toEqual({ status: "completed" });
     expect(activeRunCount()).toBe(0);
   });
+});
+
+describe("current channel access before dispatch", () => {
+  it("refuses revoked access before commands, history, admission or model work", async () => {
+    for (const text of ["help", "write a report"]) {
+      const provider = capturingProvider("never");
+      const deps = makeDeps(YAML_FIXTURE, provider);
+      deps.admission = new ThreadAdmission();
+      const { io, replies } = fakeIO();
+      io.checkAccess = vi.fn(async () => false);
+      io.history = vi.fn(async () => []);
+      const outcome = await dispatch(deps, msg(text), io);
+      expect(outcome).toEqual({ status: "refused", refusal: "channel_access", cause: "policy" });
+      expect(io.checkAccess).toHaveBeenCalledWith("slack:UX");
+      expect(io.history).not.toHaveBeenCalled();
+      expect(provider.requests).toHaveLength(0);
+      expect(deps.invoked).toEqual([]);
+      expect(deps.admission.size).toBe(0);
+      expect(replies).toEqual([
+        "I can’t start work here because your access to this conversation could not be verified.",
+      ]);
+    }
+  });
+  it("defers a failed access lookup without answering or consuming the request", async () => {
+    const provider = capturingProvider("allowed");
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO();
+    io.checkAccess = vi.fn().mockRejectedValueOnce(new Error("unavailable")).mockResolvedValue(true);
+    io.history = vi.fn(async () => []);
+    expect(await dispatch(deps, msg("write a report"), io)).toMatchObject({ deferred: true });
+    expect(io.history).not.toHaveBeenCalled();
+    expect(provider.requests).toHaveLength(0);
+    expect(replies).toEqual([]);
+    expect(await dispatch(deps, msg("write a report"), io)).not.toHaveProperty("deferred");
+    expect(replies).toEqual(["allowed"]);
+  });
+});
+
+describe("clarification through dispatch", () => {
+  it("reports a model failure instead of sending a pending question", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      name: "fake",
+      complete: async () => {
+        if (++calls === 1)
+          return {
+            content: [{ type: "tool_use", id: "q1", name: "request_input", input: { question: "Which repository?" } }],
+            stopReason: "tool_use",
+          };
+        throw new Error("model unavailable");
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO();
+    io.question = vi.fn();
+    io.runFinished = vi.fn();
+    expect(await dispatch(deps, msg("look into the issue"), io)).toMatchObject({ status: "failed" });
+    expect(io.question).not.toHaveBeenCalled();
+    expect(io.runFinished).toHaveBeenCalledWith(expect.objectContaining({ status: "failed" }));
+    expect(replies.join("\n")).toContain("model unavailable");
+  });
+  it("asks the recorded question and continues from the next reply without announcing completion", async () => {
+    let calls = 0;
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      complete: async (request) => {
+        requests.push(structuredClone(request));
+        if (++calls === 1)
+          return {
+            content: [{ type: "tool_use", id: "q1", name: "request_input", input: { question: "Which repository?" } }],
+            stopReason: "tool_use",
+          };
+        return {
+          content: [{ type: "text", text: calls === 2 ? "The model's closing text" : "Using that repository." }],
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const first = fakeIO();
+    const questions: string[] = [];
+    first.io.question = async (text) => {
+      questions.push(text);
+    };
+    first.io.runFinished = vi.fn();
+    await dispatch(deps, msg("look into the issue"), first.io);
+    expect(questions).toEqual(["Which repository?"]);
+    expect(first.replies).toEqual([]);
+    expect(first.io.runFinished).toHaveBeenCalledWith(expect.objectContaining({ awaitingInput: true }));
+    const second = fakeIO([
+      { role: "user", text: "look into the issue" },
+      { role: "assistant", text: questions[0]! },
+    ]);
+    await dispatch(deps, msg("Use acme/api"), second.io);
+    expect(second.replies).toEqual(["Using that repository."]);
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain("Which repository?");
+    expect(JSON.stringify(requests.at(-1)?.messages)).toContain("Use acme/api");
+  });
+});
+
+describe("coordinator clarification replies", () => {
+  it("refuses another person's answer without closing the waiting session", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await threadWithFinishedRun(deps, "coding", {
+      awaitingInput: true,
+      parentInstanceId: "plan-answer",
+      idempotencyKey: "plan-answer:U10/0/coding",
+    });
+    const { io, replies } = fakeIO([{ role: "assistant", text: "Which behavior do you want?" }]);
+    io.question = vi.fn(async () => {});
+    const outcome = await dispatch(deps, msg("Keep the existing behavior"), io);
+    expect(outcome).toEqual({ status: "refused", refusal: "coordinator_clarification", cause: "policy" });
+    expect(io.question).toHaveBeenCalledExactlyOnceWith(
+      "Only the original requester can answer this coordinator question.",
+    );
+    expect(replies).toEqual([]);
+    expect(provider.requests).toEqual([]);
+  });
+
+  it("defers an answer when its durable coordinator context cannot be read", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await threadWithFinishedRun(deps, "coding", {
+      userId: "slack:UX",
+      awaitingInput: true,
+      parentInstanceId: "plan-answer",
+      idempotencyKey: "plan-answer:U10/0/coding",
+    });
+    const instances = new InMemoryCoordinatorInstanceStore();
+    vi.spyOn(instances, "get").mockRejectedValueOnce(new Error("offline"));
+    deps.coordinatorInstances = instances;
+    const { io, replies } = fakeIO([{ role: "assistant", text: "Which behavior do you want?" }]);
+    const outcome = await dispatch(deps, msg("Keep the existing behavior"), io);
+    expect(outcome.deferred).toBe(true);
+    expect(replies).toEqual([]);
+    expect(provider.requests).toEqual([]);
+  });
+
+  it.each([false, true])(
+    "continues the same branch and coordinator tag, with fresh repository access (denied=%s)",
+    async (denied) => {
+      vi.stubEnv("SANDBOX_TOKEN", "tok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const provider = capturingProvider("The answer is incorporated.");
+      const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+      const registry = new RunRegistry({ genId: () => "run-answer", genToken: () => "token" });
+      deps.runRegistry = registry;
+      await threadWithFinishedRun(deps, "coding", {
+        awaitingInput: true,
+        parentInstanceId: "plan-answer",
+        idempotencyKey: "plan-answer:U10/0/coding",
+      });
+      const writer = createRunHistoryWriter({ store: deps.runStore, warn: () => {}, sleep: async () => {} });
+      deps.runHistoryWriter = writer;
+      const instances = new InMemoryCoordinatorInstanceStore();
+      await instances.put({
+        id: "plan-answer",
+        kind: "ship",
+        userId: "slack:UADMIN",
+        channelId: "slack:CX",
+        threadKey: "slack:CX:1.0",
+        repo: "acme/api",
+        branch: "plan/answer/u1",
+        base: "main",
+        createdAt: Date.now(),
+        plan: { id: "answer", path: "plan.md" },
+        caps: { maxRounds: 2, maxMinutes: 120 },
+      });
+      await instances.putUnits([
+        {
+          instanceId: "plan-answer",
+          unit: "U10",
+          slug: "u1",
+          branch: "plan/answer/u1",
+          dependsOn: [],
+          rounds: [],
+          threadKey: "slack:CX:1.0",
+          startedAt: Date.now(),
+        },
+      ]);
+      deps.coordinatorInstances = instances;
+      const api = new InMemoryGithubApi({
+        "acme/api": {
+          files: {
+            "plan.md":
+              "# Plan\n\n### U10. Preserve behavior\n\n- **Goal**: Retain the existing API behavior.\n- **Dependencies**: none\n",
+          },
+        },
+      });
+      const readFile = vi.spyOn(api, "readFile");
+      deps.githubApi = api;
+      const resolve = vi.fn(async (_request: IncomingMessage) => ({ repo: "acme/api", ref: "plan/answer/u1" }));
+      deps.resolveRepoContext = resolve;
+      if (denied) vi.spyOn(deps.config, "canUseRepo").mockReturnValue(false);
+      else
+        vi.mocked(makeExecutor).mockResolvedValueOnce({
+          executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" },
+        });
+      const { io, replies } = fakeIO([{ role: "assistant", text: "Which behavior do you want?" }]);
+      const outcome = await dispatch(deps, msg("Keep the existing behavior", "slack:UADMIN"), io);
+      await writer.settled();
+      if (denied) {
+        expect(outcome.status).toBe("refused");
+        expect(provider.requests).toEqual([]);
+        expect(readFile).not.toHaveBeenCalled();
+      } else {
+        expect(outcome.status, replies.join("\n")).toBe("completed");
+        const record = await deps.runStore.get("run-answer");
+        expect(record).toMatchObject({
+          agent: "coding",
+          repo: "acme/api",
+          parentInstanceId: "plan-answer",
+          idempotencyKey: "plan-answer:U10/0/coding",
+        });
+        expect(record?.events).toContainEqual(expect.objectContaining({ type: "coordinator_tag", base: "main" }));
+        expect(JSON.stringify(provider.requests)).toContain("Retain the existing API behavior");
+        expect(resolve.mock.calls[0]?.[0]).toMatchObject({
+          userId: "slack:UADMIN",
+          text: expect.stringContaining("plan/answer/u1"),
+        });
+        expect(JSON.stringify(provider.requests)).toContain("Keep the existing behavior");
+      }
+    },
+  );
+
+  it.each(["coding", "review"] as const)(
+    "resolves the original %s preset before fresh authorization instead of treating an answer as general chat",
+    async (preset) => {
+      const provider = capturingProvider();
+      const deps = makeDeps(YAML_FIXTURE.replace("agents: [coding]", "agents: [coding, review]"), provider);
+      await threadWithFinishedRun(deps, preset, {
+        userId: "slack:UX",
+        awaitingInput: true,
+        parentInstanceId: "plan-answer",
+        idempotencyKey: `plan-answer:U10/0/${preset}`,
+      });
+      const instances = new InMemoryCoordinatorInstanceStore();
+      await instances.put({
+        id: "plan-answer",
+        kind: "ship",
+        userId: "slack:UX",
+        channelId: "slack:CX",
+        threadKey: "slack:CX:1.0",
+        repo: "acme/api",
+        branch: "plan/answer/u1",
+        createdAt: Date.now(),
+        plan: { id: "answer", path: "plan.md" },
+        caps: { maxRounds: 2, maxMinutes: 120 },
+      });
+      await instances.putUnits([
+        {
+          instanceId: "plan-answer",
+          unit: "U10",
+          slug: "u1",
+          branch: "plan/answer/u1",
+          dependsOn: [],
+          rounds: [],
+          threadKey: "slack:CX:1.0",
+          startedAt: Date.now(),
+          reviewThread: { threadKey: "slack:CX:1.0" },
+          pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        },
+      ]);
+      deps.coordinatorInstances = instances;
+      const { io } = fakeIO([{ role: "assistant", text: "Which behavior do you want?" }]);
+      const outcome = await dispatch(deps, msg("Keep the existing behavior"), io);
+      expect(outcome).toMatchObject({ status: "refused", refusal: "agent_allowlist" });
+      expect(provider.requests).toEqual([]);
+    },
+  );
 });
 
 // Feature: record 0051's reply-as-event and gone-instance rules (thread-admission; routing-and-config item 21)

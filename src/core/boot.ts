@@ -82,7 +82,7 @@ export interface LiveElsewhere {
    *  thread is steered into the run's durable inbox, not run afresh. */
   threadKey: string;
   startedAt: number;
-  meta: { agent?: string };
+  meta: { agent?: string; userId?: string };
 }
 
 /** A reclaimed run the resume launcher continues (item 38): its row (ours
@@ -261,7 +261,7 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
           card: row.card,
           threadKey: row.threadKey,
           startedAt: row.startedAt,
-          meta: { ...(row.meta.agent !== undefined ? { agent: row.meta.agent } : {}) },
+          meta: { userId: row.meta.userId, ...(row.meta.agent !== undefined ? { agent: row.meta.agent } : {}) },
         });
     }
   } catch (err) {

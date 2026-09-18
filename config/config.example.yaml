@@ -202,6 +202,8 @@ defaults:
 #   slack:U0456DEV:
 #     actions: [agent:run:coding, repo:write, friction:write]
 #     repos: [acme/api]                 # the repos this user may use
+#   linear:*:
+#     actions: [work-items:write]       # issue edits still check each person's live Linear access
 #   access:svc:ops-bot:                 # an Access service token (its common_name)
 #     actions: [runs:read, runs:write, friction:read]
 #     channels: all                     # sees runs from every channel

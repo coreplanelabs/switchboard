@@ -218,6 +218,31 @@ describe("run usage", () => {
 });
 
 describe("run history routes", () => {
+  it("persists a waiting Stop and fences late history writes and stale stops", async () => {
+    const key = storeKey();
+    const now = Date.now();
+    const question = record("question", now, { awaitingInput: true });
+    const stop = { at: now + 1, mode: "hard", by: { kind: "chat", id: "linear:org:alice" } };
+    await post("/runs/put", { storeKey: key, record: question });
+    expect(
+      (await post("/runs/stop-waiting", { storeKey: key, id: "question", stop: { ...stop, at: now - 1 } })).data,
+    ).toEqual({ result: "conflict" });
+    expect((await post("/runs/stop-waiting", { storeKey: key, id: "question", stop })).data).toEqual({
+      result: "stopped",
+    });
+    await post("/runs/put", { storeKey: key, record: question });
+    const read = await post("/runs/get", { storeKey: key, id: "question" });
+    expect(read.data.record).toMatchObject({ status: "stopped_hard", inputStop: stop });
+    expect((read.data.record as RunRecord).awaitingInput).toBeUndefined();
+    expect((await post("/runs/stop-waiting", { storeKey: key, id: "question", stop })).data).toEqual({
+      result: "stopped",
+    });
+    expect(
+      (await post("/runs/stop-waiting", { storeKey: key, id: "question", stop: { ...stop, by: {} } })).status,
+    ).toBe(400);
+    expect((await post("/runs/stop-waiting", { storeKey: key, id: "question", stop }, {})).status).toBe(401);
+  });
+
   it("put → get round-trips the record with events in seq order; unknown id → {record: null} 200", async () => {
     const key = storeKey();
     const now = Date.now();

@@ -19,6 +19,10 @@ import {
   type DeliverySnapshotPatch,
 } from "../../src/core/deliverySnapshotStore.ts";
 import {
+  type InputStop,
+  isInputStop,
+  preserveInputStop,
+  stopWaitingRecord,
   applyRetention,
   clampRetentionPolicy,
   isRunRecord,
@@ -2308,6 +2312,14 @@ export class RunHistoryDO extends DurableObject<Env> {
     {
       const now = systemClock();
       const policy = proposal ? this.applyProposal(proposal, now).policy : this.policyState().policy;
+      const existing = this.sql
+        .exec<RunRow>(
+          `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE run_id = ?`,
+          record.id,
+        )
+        .toArray()[0];
+      const previous = existing ? parseSummary(existing) : undefined;
+      record = preserveInputStop(record, previous?.inputStop);
       const finishedAt = Math.min(record.finishedAt, now + RUN_MAX_FUTURE_MS);
       // The tracing stamps get the same skew clamp (docs/reference/specs/tracing.md).
       const stored: RunRecord = {
@@ -2320,12 +2332,6 @@ export class RunHistoryDO extends DurableObject<Env> {
       };
       const { events, ...summary } = stored;
       const bytes = utf8ByteLength(JSON.stringify(stored));
-      const existing = this.sql
-        .exec<{ event_count: number; finished_at: number; bytes: number }>(
-          `SELECT event_count, finished_at, bytes FROM runs WHERE run_id = ?`,
-          record.id,
-        )
-        .toArray()[0];
       const unchanged =
         existing !== undefined &&
         sameStoredVersion(
@@ -2407,6 +2413,33 @@ export class RunHistoryDO extends DurableObject<Env> {
         rewritten: existing !== undefined && !unchanged,
       };
     }
+  }
+
+  /** Persist cancellation before a channel closes the waiting conversation. */
+  async stopWaiting(id: string, stop: InputStop): Promise<"stopped" | "conflict" | "not_found"> {
+    let result: "stopped" | "conflict" | "not_found" = "not_found";
+    let changed: RunRecord | undefined;
+    this.ctx.storage.transactionSync(() => {
+      const row = this.sql
+        .exec<RunRow>(
+          `SELECT run_id, agent, channel_id, finished_at, bytes, event_count, summary_json FROM runs WHERE run_id = ?`,
+          id,
+        )
+        .toArray()[0];
+      if (!row || !this.isKept(row, this.policyState().policy, systemClock())) return;
+      const summary = parseSummary(row);
+      if (!summary) return;
+      const record = { ...summary, events: parseEventRows(this.eventRows(id, 0, Number.MAX_SAFE_INTEGER)) };
+      changed = stopWaitingRecord(record, stop);
+      if (!changed) {
+        result = "conflict";
+        return;
+      }
+      this.upsertInTransaction(changed);
+      result = "stopped";
+    });
+    if (changed) await sendRunFinished(this.env.SHIP_COORDINATOR, changed);
+    return result;
   }
 
   /** Remove a run and its events. Returns whether a run row existed. */
@@ -4241,6 +4274,13 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
     );
     return json(result);
   }
+  if (pathname === "/runs/stop-waiting") {
+    const parsed = parseRunTarget(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const stop = (body as Record<string, unknown>).stop;
+    if (!isInputStop(stop)) return json({ error: "invalid input stop" }, 400);
+    return json({ result: await stub(parsed.value.storeKey).stopWaiting(parsed.value.id, stop) });
+  }
   if (pathname === "/runs/get") {
     const parsed = parseRunTarget(body);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
@@ -4301,6 +4341,7 @@ const ROUTES = new Set([
   "/schedules/record",
   "/schedules/latest",
   "/runs/put",
+  "/runs/stop-waiting",
   "/runs/get",
   "/runs/summary",
   "/runs/list",

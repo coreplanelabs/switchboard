@@ -64,6 +64,24 @@ interface Harness {
 
 function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION_POLICY>) => Harness) {
   describe(`${name} — RunStore contract`, () => {
+    it("stops a waiting question durably and preserves the stop across late record writes", async () => {
+      const { store } = make();
+      const question = record("question", NOW, { awaitingInput: true });
+      const stop = { at: NOW + 1, mode: "hard" as const, by: { kind: "chat" as const, id: "slack:UALICE" } };
+      await store.put(question);
+      expect(await store.stopWaiting("question", { ...stop, at: NOW - 1 })).toBe("conflict");
+      expect(await store.stopWaiting("question", stop)).toBe("stopped");
+      expect(await store.stopWaiting("question", stop)).toBe("stopped");
+      await store.put(question);
+      expect(await store.get("question")).toMatchObject({ status: "stopped_hard", inputStop: stop });
+      expect((await store.get("question"))?.awaitingInput).toBeUndefined();
+      expect(await store.getSummary("question")).toMatchObject({ status: "stopped_hard", inputStop: stop });
+      expect(await store.stopWaiting("question", { ...stop, at: NOW + 2 })).toBe("conflict");
+      await store.put(record("done", NOW));
+      expect(await store.stopWaiting("done", stop)).toBe("conflict");
+      expect(await store.stopWaiting("missing", stop)).toBe("not_found");
+    });
+
     it("round-trips a 2 MB record and lists without events", async () => {
       const { store } = make();
       const big = record("big", NOW, { events: events(40, 50_000) });
@@ -420,6 +438,19 @@ contract("FileRunStore", (policy) => {
 describe("FileRunStore", () => {
   const make = (dir: string, policy: Partial<typeof DEFAULT_RETENTION_POLICY> = {}, clock = { now: NOW }) =>
     new FileRunStore(dir, { policy: { ...DEFAULT_RETENTION_POLICY, ...policy }, now: () => clock.now });
+
+  it("retains a question stop across reopen and an index interrupted before its replacement", async () => {
+    const dir = tmpDir();
+    const question = record("question", NOW, { awaitingInput: true });
+    const stop = { at: NOW + 1, mode: "hard" as const, by: { kind: "chat" as const, id: "slack:UALICE" } };
+    await make(dir).put(question);
+    const oldIndex = readFileSync(join(dir, "index.jsonl"), "utf8");
+    expect(await make(dir).stopWaiting("question", stop)).toBe("stopped");
+    expect(await make(dir).get("question")).toMatchObject({ inputStop: stop, status: "stopped_hard" });
+    writeFileSync(join(dir, "index.jsonl"), oldIndex);
+    await make(dir).put(question);
+    expect(await make(dir).get("question")).toMatchObject({ inputStop: stop, status: "stopped_hard" });
+  });
 
   it("writes <id>.json with mode 0600 inside a 0700 directory, temp-then-rename", async () => {
     const dir = tmpDir();

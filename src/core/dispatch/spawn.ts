@@ -211,8 +211,13 @@ function watchedChild(
   if (io.attach) watched.attach = (file) => io.attach!(file);
   if (io.attachFile) watched.attachFile = (file) => io.attachFile!(file);
   if (io.uploadTicket) watched.uploadTicket = (file) => io.uploadTicket!(file);
+  if (io.workItems) watched.workItems = (actor) => io.workItems!(actor);
+  if (io.question) watched.question = (text) => io.question!(text);
+  if (io.checkAccess) watched.checkAccess = (userId) => io.checkAccess!(userId);
+  if (io.isolateFollowUps) watched.isolateFollowUps = true;
+  if (io.acknowledge) watched.acknowledge = (text) => io.acknowledge!(text);
   if (io.runFinished) watched.runFinished = (receipt) => io.runFinished!(receipt);
-  if (io.openThread) watched.openThread = (lead) => io.openThread!(lead);
+  if (io.openThread) watched.openThread = (lead, options) => io.openThread!(lead, options);
   return watched;
 }
 

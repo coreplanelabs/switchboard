@@ -189,41 +189,47 @@ describe("diff_digest tool on a real multi-commit branch (LocalExecutor)", () =>
       },
     }).toString();
 
-  it("covers every commit's files and states exact totals even when the unified diff exceeds the output cap", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "digest-"));
-    sh(dir, "git init -q -b main upstream");
-    const up = join(dir, "upstream");
-    writeFileSync(join(up, "README.md"), "hello\n");
-    sh(up, "git add . && git commit -qm base");
-    sh(up, "git checkout -qb feature");
-    // commit 1: a file sorted FIRST alphabetically, bigger than the 120k cap on its own
-    writeFileSync(
-      join(up, "a-huge.txt"),
-      Array.from({ length: 6000 }, (_, i) => `line ${i} ${"x".repeat(20)}`).join("\n") + "\n",
-    );
-    sh(up, "git add . && git commit -qm huge");
-    // commit 2 + 3: files sorted AFTER it — the ones a cut diff loses
-    mkdirSync(join(up, "src"), { recursive: true });
-    writeFileSync(join(up, "src/late.ts"), "export const a = 1;\nexport const b = 2;\n");
-    sh(up, "git add . && git commit -qm late");
-    writeFileSync(join(up, "zz-last.md"), "tail\n");
-    writeFileSync(join(up, "README.md"), "hello\nworld\n");
-    sh(up, "git add . && git commit -qm last");
-    sh(up, "git checkout -q main"); // the upstream's HEAD is its default branch, as GitHub's is
-    // the clone the tool runs in, with origin/HEAD → main as a real clone has
-    sh(dir, "git clone -q --branch feature upstream wt");
-    const wt = join(dir, "wt");
+  // Repository creation, four commits and a clone share the test's budget;
+  // this proves exact totals and truncation handling, not filesystem latency.
+  it(
+    "covers every commit's files and states exact totals even when the unified diff exceeds the output cap",
+    { timeout: 15_000 },
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "digest-"));
+      sh(dir, "git init -q -b main upstream");
+      const up = join(dir, "upstream");
+      writeFileSync(join(up, "README.md"), "hello\n");
+      sh(up, "git add . && git commit -qm base");
+      sh(up, "git checkout -qb feature");
+      // commit 1: a file sorted FIRST alphabetically, bigger than the 120k cap on its own
+      writeFileSync(
+        join(up, "a-huge.txt"),
+        Array.from({ length: 6000 }, (_, i) => `line ${i} ${"x".repeat(20)}`).join("\n") + "\n",
+      );
+      sh(up, "git add . && git commit -qm huge");
+      // commit 2 + 3: files sorted AFTER it — the ones a cut diff loses
+      mkdirSync(join(up, "src"), { recursive: true });
+      writeFileSync(join(up, "src/late.ts"), "export const a = 1;\nexport const b = 2;\n");
+      sh(up, "git add . && git commit -qm late");
+      writeFileSync(join(up, "zz-last.md"), "tail\n");
+      writeFileSync(join(up, "README.md"), "hello\nworld\n");
+      sh(up, "git add . && git commit -qm last");
+      sh(up, "git checkout -q main"); // the upstream's HEAD is its default branch, as GitHub's is
+      // the clone the tool runs in, with origin/HEAD → main as a real clone has
+      sh(dir, "git clone -q --branch feature upstream wt");
+      const wt = join(dir, "wt");
 
-    const reports: DigestReport[] = [];
-    const ctx: ToolContext = { executor: new LocalExecutor(wt), onDigest: (r) => reports.push(r) };
-    const out = await diffDigestTool.run({}, ctx);
-    expect(out).toContain("4 files changed, +6004 -0");
-    for (const f of ["a-huge.txt", "src/late.ts", "zz-last.md", "README.md"]) expect(out).toContain(f);
-    expect(reports).toEqual([
-      { complete: true, base: "origin/HEAD", totals: { files: 4, additions: 6004, deletions: 0 } },
-    ]);
-    rmSync(dir, { recursive: true, force: true });
-  });
+      const reports: DigestReport[] = [];
+      const ctx: ToolContext = { executor: new LocalExecutor(wt), onDigest: (r) => reports.push(r) };
+      const out = await diffDigestTool.run({}, ctx);
+      expect(out).toContain("4 files changed, +6004 -0");
+      for (const f of ["a-huge.txt", "src/late.ts", "zz-last.md", "README.md"]) expect(out).toContain(f);
+      expect(reports).toEqual([
+        { complete: true, base: "origin/HEAD", totals: { files: 4, additions: 6004, deletions: 0 } },
+      ]);
+      rmSync(dir, { recursive: true, force: true });
+    },
+  );
 });
 
 describe("diff_digest toolset wiring", () => {

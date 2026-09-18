@@ -212,6 +212,28 @@ describe("attach_file through the artifact store", () => {
     return { store, commands, log, executor, tickets, replies, events, ctx };
   }
 
+  it("streams a PUT ticket with its signed header casing and completes only after upload succeeds", async () => {
+    for (const fail of [false, true]) {
+      const h = harness(fail ? { post: "exit 22: upload refused" } : {});
+      h.ctx.uploadTicket = async () => ({
+        url: "https://storage.example/file?signature=one-file",
+        method: "PUT",
+        headers: {
+          "Content-Disposition": "attachment; filename=report's.png",
+          "x-goog-content-length-range": "3145728,3145728",
+        },
+        complete: async (lead) => {
+          h.tickets.completed.push(lead);
+        },
+      });
+      await attachFileTool.run({ path: "shots/page.png", comment: "The plot" }, h.ctx);
+      expect(h.commands[2]!.command).toContain("-X PUT");
+      expect(h.commands[2]!.command).toContain("-H 'Content-Disposition: attachment; filename=report'\\''s.png'");
+      expect(h.commands[2]!.command).toContain("-H 'x-goog-content-length-range: 3145728,3145728'");
+      expect(h.tickets.completed).toEqual(fail ? [] : ["The plot"]);
+    }
+  });
+
   it("happy path: stat → presigned PUT → HEAD → artifact event → ticket → POST → complete, each command under the 20-minute cap, and the result names the size", async () => {
     const h = harness();
     const out = await attachFileTool.run({ path: "shots/page.png", comment: "the page" }, h.ctx);

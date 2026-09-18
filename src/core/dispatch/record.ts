@@ -1,3 +1,4 @@
+import { questionText } from "../question.js";
 // The record stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // what a run leaves behind. The channel-visibility stamp every run is created
 // with, and the ONE `RunRecord` assembly every run goes through before
@@ -193,6 +194,7 @@ export function reclaimedRunRecord(input: {
   };
   return assembleRunRecord({
     run: { id: row.runId },
+    ...(status === "completed" && questionText(row.state.question) ? { awaitingInput: true as const } : {}),
     snap,
     agent: row.meta.agent,
     model: row.meta.model,
@@ -298,6 +300,7 @@ export function assembleRunRecord(input: {
   /** The typed handoff the run submitted (docs/reference/specs/agent-ship.md item 14),
    *  as the tool accepted it; redacted HERE, the one assembly, so no caller
    *  can forget. Omitted (not set undefined) when the run submitted none. */
+  awaitingInput?: true;
   handoff?: Handoff;
   /** The verdict a review run submitted and the head it reviewed, the
    *  dispositions a fix round submitted (run-history item 2) — redacted HERE
@@ -385,6 +388,9 @@ export function assembleRunRecord(input: {
     ...(referencesOfEvents(events).length > 0 ? { references: referencesOfEvents(events) } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    ...(input.awaitingInput && input.status === "completed" && seal?.replyOk !== false
+      ? { awaitingInput: true as const }
+      : {}),
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
     ...(input.verdict !== undefined ? { verdict: redactVerdict(input.verdict) } : {}),
     ...(input.reviewHead !== undefined ? { reviewHead: input.reviewHead } : {}),
@@ -528,6 +534,7 @@ export interface FinishRecordContext {
   root: Span;
   ledgerRun: LedgerRun | undefined;
   /** The handoff the run loop captured from `submit_handoff`, when one was submitted. */
+  awaitingInput?: true;
   handoff?: Handoff;
   /** The verdict a review run submitted and the head it reviewed; the dispositions a fix round submitted. */
   verdict?: ReviewVerdict;
@@ -573,6 +580,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     root,
     ledgerRun,
     handoff,
+    awaitingInput,
     verdict,
     reviewHead,
     dispositions,
@@ -603,6 +611,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           status: failedAfterFinish && status === "completed" ? "failed" : status,
           diagnosis,
           seal,
+          ...(awaitingInput ? { awaitingInput } : {}),
           ...(handoff !== undefined ? { handoff } : {}),
           ...(verdict !== undefined ? { verdict } : {}),
           ...(reviewHead !== undefined ? { reviewHead } : {}),

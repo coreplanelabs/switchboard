@@ -191,18 +191,20 @@ describe("the installed CLI", () => {
     expect(extra.stderr).toContain("start takes no arguments");
   });
 
-  it("`start` from the installed package boots the bot process: in a directory with no .env it refuses at once naming the missing variable (the process's own rule), exit 1 — no stack, no Docker", () => {
+  it("`start` from the installed package boots the bot process: in a directory with no .env it refuses at once naming the missing channel configuration (the process's own rule), exit 1 — no stack, no Docker", () => {
     const work = join(tmp, "work-start");
     mkdirSync(work);
     const env = {
       ...Object.fromEntries(
-        Object.entries(process.env).filter(([k]) => k !== "SLACK_BOT_TOKEN" && k !== "SLACK_APP_TOKEN"),
+        Object.entries(process.env).filter(
+          ([k]) => k !== "SLACK_BOT_TOKEN" && k !== "SLACK_APP_TOKEN" && k !== "LINEAR_BRIDGE_TOKEN",
+        ),
       ),
       SWITCHBOARD_HOME: work,
     };
     const r = spawnSync(bin, ["start"], { cwd: work, encoding: "utf8", env, timeout: 30_000 });
     expect(r.status).toBe(1);
-    expect(r.stderr.trim()).toBe("Missing required env var SLACK_BOT_TOKEN");
+    expect(r.stderr.trim()).toBe("No channel configured: set Slack tokens or LINEAR_BRIDGE_TOKEN");
     expect(r.stdout).toBe("");
   });
 

@@ -1,3 +1,9 @@
+import {
+  coordinatorClarificationFor,
+  coordinatorClarificationContract,
+  CoordinatorClarificationRefusal,
+  type CoordinatorClarification,
+} from "./coordinator/clarification.js";
 import { getAgent } from "../agents/registry.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { systemClock } from "./trace/index.js";
@@ -25,10 +31,11 @@ import {
   type RestartContext,
   type ResumeContext,
 } from "./dispatch/admission.js";
+import { checkChannelAccess } from "./dispatch/channelAccess.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
 import { actorIdsOf, cancelPending, consumeAndRun, REFUSED_REASON } from "./dispatch/confirm.js";
 import { postSettledOutcome, recordRefusal, recordRoutedDecision } from "./dispatch/commandRun.js";
-import { COMMAND_RUN_AGENT } from "./runOwner.js";
+import { COMMAND_RUN_AGENT, DOOR_RUN_AGENT } from "./runOwner.js";
 import { redactedInput } from "./dispatch/route.js";
 import type { Actor } from "./authz/types.js";
 import {
@@ -38,7 +45,7 @@ import {
   referenceRefusalCode,
   type ReferenceDeps,
 } from "./dispatch/references.js";
-import { resolveChatActor } from "./authz/actor.js";
+import { chatActorOf, resolveChatActor } from "./authz/actor.js";
 import { referencesOn } from "../config.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
 import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps } from "./dispatch/route.js";
@@ -75,7 +82,7 @@ import {
   type ProvisionDeps,
 } from "./dispatch/provision.js";
 import type { FrictionDiagnosis } from "./runFriction.js";
-import { claimRun, type RunDeps } from "./dispatch/run.js";
+import { claimRun, githubCapabilityFor, type RunDeps } from "./dispatch/run.js";
 import { runLoop } from "./dispatch/runLoop.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { writeTombstone } from "./dispatch/record.js";
@@ -392,7 +399,7 @@ export async function dispatch(
   // the one table — stamped, the side work (a card close, a release) run
   // inside the span, the sentence rendered by the ONE renderer, and the
   // decision recorded as a `door` run.
-  const refuse = async (refusal: Refusal, side?: () => Promise<void>) => {
+  const refuse = async (refusal: Refusal, side?: () => Promise<void>, replyIo: ChannelIO = io) => {
     const cause = stampRefusal(refusal.code);
     await root.span(
       "dispatch.refuse",
@@ -401,7 +408,7 @@ export async function dispatch(
         // The store rides along so a question with a guess can mint its Yes
         // (record 0054): the renderer offers Yes and No where the channel can
         // show them, and the line to type everywhere else.
-        await renderRefusal(refusal, io, { confirmations: deps.confirmations });
+        await renderRefusal(refusal, replyIo, { confirmations: deps.confirmations });
         await recordRefusalOnce(refusal);
       },
       { attrs: { outcome: refusal.code, refusal: refusal.code, cause } },
@@ -533,6 +540,24 @@ export async function dispatch(
     },
   };
   try {
+    if (io.checkAccess) {
+      const access = await root.span("dispatch.channel_access", () =>
+        checkChannelAccess(deps.runLedger, { msg, io, resume, restart }),
+      );
+      if (access === "retry") {
+        ended.deferred = true;
+        return ended;
+      }
+      if (access === "deny") {
+        await refuse(
+          refusalOf(
+            "channel_access",
+            "I can’t start work here because your access to this conversation could not be verified.",
+          ),
+        );
+        return ended;
+      }
+    }
     // Stage A (dispatch/fastPath.ts): a message that names a registered chat
     // command is answered inline — never a model turn, and before the history
     // fetch, so a command costs none.
@@ -555,12 +580,47 @@ export async function dispatch(
       opts.parent || opts.coordinator || resume || restart || history.length === 0
         ? undefined
         : await readThread(runsService, msg.threadKey);
+    let clarification: CoordinatorClarification | undefined;
+    try {
+      clarification = await coordinatorClarificationFor({
+        newest: thread?.find((run) => run.agent !== DOOR_RUN_AGENT),
+        msg,
+        directives,
+        instances: deps.coordinatorInstances,
+        now: clock(),
+      });
+    } catch (error) {
+      if (!(error instanceof CoordinatorClarificationRefusal)) {
+        // No admission or model work has begun. Let durable intake retry a
+        // missing store response instead of closing the waiting conversation.
+        ended.deferred = true;
+        return ended;
+      }
+      // A refused reply must not close another person's waiting Linear session.
+      await refuse(
+        refusalOf("coordinator_clarification", error.message),
+        undefined,
+        io.question ? { ...io, reply: (text) => io.question!(text) } : io,
+      );
+      return ended;
+    }
+    if (clarification?.remainingMinutes !== undefined)
+      directives.budget = Math.min(directives.budget ?? Number.POSITIVE_INFINITY, clarification.remainingMinutes);
+    if (clarification?.instance.addressSeverity !== undefined)
+      directives.severity = clarification.instance.addressSeverity;
     const lineage = lineageOf(thread?.[0]);
     const parent: ParentRun | undefined = opts.parent ?? (lineage ? lineageParent(lineage) : undefined);
     const tellLineage = async (heard: LineageHeard) => {
       if (!lineage) return;
       await tellParent(
-        { runs: runsService, config: deps.config, runLedger: deps.runLedger, clock, admission },
+        {
+          runs: runsService,
+          config: deps.config,
+          runLedger: deps.runLedger,
+          clock,
+          admission,
+          isolateFollowUps: io.isolateFollowUps,
+        },
         lineage,
         msg,
         heard,
@@ -572,7 +632,7 @@ export async function dispatch(
     // the thread's newest finished run with a session log (routing-and-config
     // item 3) — else the config scopes; the model and the effort from the
     // thread's user turns, then the scopes.
-    const stickyAgent = thread ? stickyAgentOf(thread) : undefined;
+    const stickyAgent = clarification?.preset ?? (thread ? stickyAgentOf(thread) : undefined);
     // The same page names the pull request the thread's work lives on
     // (resident-repos item 29): the one its newest finished run opened, for
     // the target resolution below.
@@ -610,7 +670,13 @@ export async function dispatch(
     // <url>` in a pipeline thread still means what it says. A live thread is
     // the live run's (admission steers below); a session or no owner is the
     // sticky path and the router, exactly as before.
-    if (thread && !threadLive && directives.agent === undefined && deps.coordinatorInstances !== undefined) {
+    if (
+      thread &&
+      !clarification &&
+      !threadLive &&
+      directives.agent === undefined &&
+      deps.coordinatorInstances !== undefined
+    ) {
       const owner = await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey);
       if (owner.kind === "unit") {
         // The same gate a live steer passes (admission's allowlist check): the
@@ -747,6 +813,7 @@ export async function dispatch(
       });
     // A reply folded into the live child of a spawned thread: its parent hears it now.
     if (outcome.kind === "steered") await tellLineage({ kind: "steered" });
+    if (outcome.kind === "deferred") ended.deferred = true;
     if (outcome.kind !== "proceed") return ended;
     admitted = outcome.admitted;
     const taken = await adoptCarriedRun(deps, admissionCtx);
@@ -780,14 +847,14 @@ export async function dispatch(
       modelCard,
       decisions: cardDecisions,
     } = resolveTarget(deps, {
-      msg,
-      history,
+      msg: clarification ? { ...msg, text: clarification.targetText } : msg,
+      history: clarification ? [] : history,
       agent,
       profile,
       resolved,
       resume,
       root,
-      ...(threadPr ? { records: { pr: threadPr } } : {}),
+      ...(threadPr && !clarification ? { records: { pr: threadPr } } : {}),
     });
 
     // Cross-session memory — READ path, started here (dispatch/provision.ts) so
@@ -894,8 +961,16 @@ export async function dispatch(
     // compound's first turn is its brief (dispatch/route.ts): the message as
     // typed, then the parts for the conductor to spawn — the record's `input`
     // stays the message, its `route` event carries the parts.
-    const contractBlock = opts.contract
-      ? renderContract(opts.contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text
+    const contract =
+      opts.contract ??
+      (clarification
+        ? await coordinatorClarificationContract(clarification, {
+            github: githubCapabilityFor(deps, chatActorOf(deps.config, msg)).api,
+            runs: runsService,
+          })
+        : undefined);
+    const contractBlock = contract
+      ? renderContract(contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text
       : undefined;
     const requestText = route?.parts ? compoundBrief(directives.text, route.parts) : directives.text;
     // Where the conversation starts (run-history item 52), and every row and
@@ -982,7 +1057,8 @@ export async function dispatch(
     // the spawn's dispatch options are gone with the process that spawned it,
     // so the tag is rebuilt from the adopted row's meta and the
     // `coordinator_tag` event the spawning dispatch published.
-    const coordinator = opts.coordinator ?? (resume ? carriedCoordinatorTag(resume.row, resume.events) : undefined);
+    const coordinator =
+      opts.coordinator ?? clarification?.tag ?? (resume ? carriedCoordinatorTag(resume.row, resume.events) : undefined);
     const registration = await registerRun(deps, {
       msg,
       io,
@@ -1552,7 +1628,16 @@ export async function dispatch(
       console.log(`[dispatch] ${msg.threadKey} run ${run.id} restarts from its request: ${ran.note}`);
       return ended;
     }
-    const { answer, prNote, toolCalls, runDiagnosis, checklistAsLeft, checklistCheckedOff, releaseWorkspace } = ran;
+    const {
+      answer,
+      awaitingInput,
+      prNote,
+      toolCalls,
+      runDiagnosis,
+      checklistAsLeft,
+      checklistCheckedOff,
+      releaseWorkspace,
+    } = ran;
 
     // The card's final icon tells the stop apart from a normal finish: ⏹ soft
     // (a summary was written), ⛔ hard (aborted, no summary).
@@ -1563,6 +1648,7 @@ export async function dispatch(
     // ledger, the card close, the reply, the seal — the workspace released
     // after. A fenced run is another generation's now: nothing more from here.
     const delivery = await deliverAnswer({
+      ...(awaitingInput ? { awaitingInput } : {}),
       msg,
       io,
       agent,
@@ -1584,7 +1670,7 @@ export async function dispatch(
       releaseWorkspace,
       root,
     });
-    if (delivery.kind === "fenced") return ended;
+    if (delivery.kind === "fenced" || awaitingInput) return ended;
 
     // After the reply (dispatch/reply.ts): the memory reflection pass. The
     // review post-step ran inside the run loop, before the stream finished.
@@ -1755,18 +1841,32 @@ export async function dispatch(
         ...(restartRequest.restartOf !== undefined ? { restartOf: restartRequest.restartOf } : {}),
         ...(restartRequest.coordinator !== undefined ? { coordinator: restartRequest.coordinator } : {}),
       });
-      await dispatch(deps, restart.msg, io, restart.opts).catch((err: unknown) =>
-        console.error(
-          `[dispatch] ${msg.threadKey} restart from the request failed: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
+      await dispatch(deps, restart.msg, io, restart.opts)
+        .then(async (outcome) => {
+          if (outcome.deferred)
+            await io.reply(
+              "The request has not started because access could not be checked. Please send it again to retry.",
+            );
+        })
+        .catch((err: unknown) =>
+          console.error(
+            `[dispatch] ${msg.threadKey} restart from the request failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
     } else if (settled.kind === "handed-on") {
       const fresh = prepareFreshTurn(deps, { agent: settled.agent, pending: settled.pending, clock });
-      await dispatch(deps, fresh.msg, fresh.io, fresh.opts).catch((err: unknown) =>
-        console.error(
-          `[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
+      await dispatch(deps, fresh.msg, fresh.io, fresh.opts)
+        .then(async (outcome) => {
+          if (outcome.deferred)
+            await fresh.io.reply(
+              "The follow-up has not started because access could not be checked. Please send it again to retry.",
+            );
+        })
+        .catch((err: unknown) =>
+          console.error(
+            `[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
     }
     // The ledger heartbeat stops with the run (the finish write, in flight
     // through the writer, closes the row itself).

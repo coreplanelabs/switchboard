@@ -359,6 +359,10 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
     // Every code in the closed table is accounted for: rendered here, built by
     // another module's tested builder, or silent by design.
     const provenElsewhere: RefusalCode[] = [
+      // dispatcher.test.ts proves the access and clarification refusal text,
+      // including nonterminal delivery when another requester owns the question.
+      "channel_access",
+      "coordinator_clarification",
       "pr_head_unknown",
       "branch_moved",
       // (record 0054): each producer's own test proves its sentences
@@ -710,6 +714,22 @@ describe("deliverAnswer — the answer reaches the thread", () => {
     };
     return { ctx, replies, closes, releases, sealed, states };
   }
+
+  it("delivers a review question without formatting an earlier verdict as the answer", async () => {
+    const s = finishedRun();
+    const question = vi.fn(async () => {});
+    await deliverAnswer({
+      ...s.ctx,
+      answer: "Which revision should I review?",
+      awaitingInput: true,
+      verdict: { verdict: "approve", summary: "Earlier revision was fine" },
+      io: { ...s.ctx.io, question },
+    });
+    expect(question).toHaveBeenCalledExactlyOnceWith("Which revision should I review?");
+    expect(s.replies).toEqual([]);
+    expect(JSON.stringify(s.closes)).toContain("❓");
+    expect(JSON.stringify(s.closes)).toContain("○ step");
+  });
 
   it("delivered: the card closes ✅ with the checked-off checklist, the reply carries the answer (a review's with its run link), the run is sealed replyOk, the workspace is released after", async () => {
     const s = finishedRun();

@@ -4,6 +4,9 @@ data/
 workspaces/
 .env
 .agent-env/
+.wrangler/
+.dev.vars
+.dev.vars.*
 config/config.yaml
 node_modules
 build.json

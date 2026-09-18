@@ -4,6 +4,9 @@
 // talk back through. Everything else — config resolution, permissions, agent
 // selection, execution — is channel-agnostic and lives in the dispatcher.
 
+import type { Actor } from "./authz/types.js";
+import type { WorkItems } from "./workItems.js";
+
 /** An image the user attached, already downloaded and base64-encoded. */
 export interface ImageAttachment {
   /** e.g. "image/png" — adapters only pass types every provider accepts */
@@ -200,6 +203,8 @@ export type RunFinalStatus = "completed" | "failed" | "stopped_soft" | "stopped_
  *  run id (the `/runs/:id` record) and its terminal status. Never the view
  *  token — a receipt names the run, it does not grant access to it. */
 export interface RunReceipt {
+  /** The turn finished by asking for input; its task is still waiting. */
+  awaitingInput?: true;
   id: string;
   status: RunFinalStatus;
 }
@@ -218,11 +223,15 @@ export interface OpenedThread {
 }
 
 /** A minted one-shot upload (`ChannelIO.uploadTicket`): where the container
- *  POSTs the bytes, and the call that shares the uploaded file into the
- *  conversation once the POST succeeded. */
+ *  streams the bytes, and the call that shares the uploaded file into the
+ *  conversation once the upload succeeded. */
 export interface UploadTicket {
-  /** Accepts one POST of exactly the ticketed size; single use, short-lived. */
+  /** Accepts exactly the ticketed size; single use, short-lived. */
   url: string;
+  /** Defaults to POST for existing channels. */
+  method?: "POST" | "PUT";
+  /** Storage-signed headers; never an installation credential. */
+  headers?: Record<string, string>;
   /** Share the uploaded file into the conversation with `lead` as its message. */
   complete(lead: string): Promise<void>;
 }
@@ -246,8 +255,21 @@ export interface ConfirmationOffer {
 }
 
 export interface ChannelIO {
+  /** Ask for input without marking the channel’s session complete. */
+  question?(text: string): Promise<void>;
+  /** Refresh platform access before reading context or running a command.
+   * False refuses the request; a failed lookup defers it for durable retry. */
+  checkAccess?(userId: string): Promise<boolean>;
+  /** Queue another requester's follow-up until it can run with their own grants.
+   * The adapter must durably retry a dispatch that returns `deferred`. */
+  isolateFollowUps?: boolean;
+  /** Bind work-tracking tools to the resolved actor, outside model arguments. */
+  workItems?(actor: Actor): WorkItems;
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
   reply(text: string): Promise<void>;
+  /** Confirm a follow-up reached ongoing work, without completing its session.
+   * Channels without a separate activity type use an ordinary reply. */
+  acknowledge?(text: string): Promise<void>;
   /**
    * Present when this channel has nowhere to deliver a reply (the resumed-run
    * null channel, docs/reference/specs/run-history.md item 38): the reason, e.g.
@@ -325,6 +347,8 @@ export interface ChannelIO {
    * channel (HTTP, MCP) has no thread to open, and a spawn from such a channel
    * is refused by name (`spawn_unsupported`); it never falls back to the
    * parent's own thread.
+   * A durable caller may supply an idempotency key for adapters that can
+   * reconcile thread creation across retries; the lead must stay the same.
    */
-  openThread?(lead: string): Promise<OpenedThread>;
+  openThread?(lead: string, options?: { idempotencyKey: string }): Promise<OpenedThread>;
 }

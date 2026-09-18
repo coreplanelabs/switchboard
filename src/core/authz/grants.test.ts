@@ -104,7 +104,7 @@ describe("parseGrantsConfig — the native `grants` block", () => {
       expect(p.ok, id).toBe(false);
       if (p.ok) continue;
       expect(p.errors).toEqual([expect.stringContaining(`grants["${id}"]`)]);
-      expect(p.errors[0], id).toMatch(/slack:\*, http:\*, mcp:\*, access:\*/);
+      expect(p.errors[0], id).toMatch(/slack:\*, linear:\*, http:\*, mcp:\*, access:\*/);
     }
   });
 });

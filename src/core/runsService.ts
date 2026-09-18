@@ -1,6 +1,6 @@
 import { matchesPredicate } from "./authz/predicate.js";
 import type { ChannelVisibility, Predicate, Resource } from "./authz/types.js";
-import type { RunActor, RunEvent, StopMode } from "./runEvents.js";
+import { sanitizeActor, type RunActor, type RunEvent, type StopMode } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { analyzeRunFriction, type FrictionOptions, type FrictionDiagnosis } from "./runFriction.js";
@@ -11,6 +11,7 @@ import {
   RUN_LIST_MAX_LIMIT,
   toVisibilityFilter,
   utf8ByteLength,
+  type InputStop,
   type RunListItem,
   type RunRecord,
   type RunSession,
@@ -69,6 +70,9 @@ export type Result<T> = { ok: true; value: T } | { ok: false; error: "not_found"
  * expresses the outcome as `status`).
  */
 export interface RunView {
+  /** The most recent turn asked for input; this is a turn outcome, not live session state. */
+  awaitingInput?: true;
+  inputStop?: InputStop;
   id: string;
   label?: string;
   agent?: string;
@@ -269,7 +273,7 @@ export interface RunFrictionView {
 export interface StopRunView {
   id: string;
   mode: StopMode;
-  state: "stopping";
+  state: "stopping" | "stopped";
 }
 
 /** One hit of a session search (session-log item 11): the log turn, whose it
@@ -338,10 +342,12 @@ export interface RunsService {
    *  registry's rows. Empty without a ledger; a ledger that cannot be read is a
    *  warning and empty. */
   liveElsewhere(visibleTo: Predicate): Promise<RunView[]>;
-  getRun(id: string, opts?: { include?: "messages" }): Promise<Result<RunRecordView>>;
+  /** Coordinators require the finished record: a missing or unavailable store
+   *  must not make a cached question look like completed work. */
+  getRun(id: string, opts?: { include?: "messages"; requireRecord?: true }): Promise<Result<RunRecordView>>;
   getRunEvents(id: string, opts: { afterSeq?: number; limit?: number }): Promise<Result<RunEventsPageView>>;
   getRunFriction(id: string): Promise<Result<RunFrictionView>>;
-  stopRun(id: string, mode: StopMode, actor: RunActor): Promise<Result<StopRunView>>;
+  stopRun(id: string, mode: StopMode, actor: RunActor, options?: { receivedAt: number }): Promise<Result<StopRunView>>;
   /** A ship unit's runs in round order (agent-ship item 17): the coding
    *  thread's and the review thread's runs, live and finished, cut at the round
    *  boundaries the unit's row records, under `visibleTo`. `not_found` for a
@@ -632,23 +638,47 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
    *  wakes a reader is sent, so the reader that follows sees the verdict the
    *  record landed with, never the row's silence. A store without the record
    *  yet — or holding only the start tombstone, which carries none — lends
-   *  nothing; a store that throws is one warning and nothing. */
+   *  nothing; a store that throws is one warning and nothing. A coordinator's
+   *  required read instead retries until the terminal record is available. */
   const storedArtifacts = async (
     id: string,
+    requireRecord = false,
+    expectedStatus?: RunRecord["status"],
   ): Promise<
-    Pick<RunView, "verdict" | "reviewHead" | "reviewPost" | "dispositions" | "handoff" | "pr" | "usage" | "cost">
+    Pick<
+      RunView,
+      | "verdict"
+      | "reviewHead"
+      | "reviewPost"
+      | "dispositions"
+      | "handoff"
+      | "pr"
+      | "usage"
+      | "cost"
+      | "awaitingInput"
+      | "inputStop"
+      | "status"
+    >
   > => {
     let row: RunListItem | null;
     try {
       row = await storeSummary(id);
     } catch (err) {
+      if (requireRecord) throw err;
       warn(
         `[runs] history store read failed for ${id} — serving the registry row without its record: ${describe(err)}`,
       );
       return {};
     }
+    if (requireRecord && (!row || (!row.inputStop && row.status !== expectedStatus)))
+      throw new Error("The finished run record is temporarily unavailable");
     if (!row) return {};
     return {
+      ...(row.inputStop
+        ? { inputStop: row.inputStop, status: row.status }
+        : row.awaitingInput
+          ? { awaitingInput: true as const }
+          : {}),
       ...(row.verdict !== undefined ? { verdict: row.verdict } : {}),
       ...(row.reviewHead !== undefined ? { reviewHead: row.reviewHead } : {}),
       ...(row.reviewPost !== undefined ? { reviewPost: row.reviewPost } : {}),
@@ -791,7 +821,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         // A finished row inside the registry's window: its identity, stop state,
         // finish fields and events are the registry's; the record's typed
         // artifacts are the store's to supply (item 21). A live row never asks.
-        if (summary.finished) Object.assign(view, await storedArtifacts(id));
+        if (summary.finished) Object.assign(view, await storedArtifacts(id, opts.requireRecord, summary.status));
         return { ok: true, value: view };
       }
       // Live on the ledger, not here (item 41): the row and the events it holds.
@@ -878,13 +908,12 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       return { ok: true, value: { id, finished: true, diagnosis: summary.diagnosis } };
     },
 
-    async stopRun(id, mode, actor) {
+    async stopRun(id, mode, actor, options) {
       const res = registry.requestStopById(id, mode, actor);
       if (res.ok) return { ok: true, value: { id, mode: res.mode, state: "stopping" } };
-      if (res.reason === "finished") return conflict;
       // Live on the ledger under another generation (item 41): the stop rides the
       // row; the owner reads it on its next heartbeat.
-      if (ledger && RUN_ID_PATTERN.test(id)) {
+      if (res.reason !== "finished" && ledger && RUN_ID_PATTERN.test(id)) {
         try {
           const r = await ledger.requestStop(id, mode);
           if (r.ok) return { ok: true, value: { id, mode, state: "stopping" } };
@@ -892,8 +921,19 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
           warn(`[runs] run ledger stop failed for ${id}: ${describe(err)}`);
         }
       }
-      // Not in the registry: a persisted run is over (409), anything else is unknown.
-      return (await storeSummary(id)) ? conflict : notFound;
+      const summary = await storeSummary(id);
+      if (!summary) return res.reason === "finished" ? conflict : notFound;
+      if (!store || (!summary.awaitingInput && !summary.inputStop)) return conflict;
+      const result = await store.stopWaiting(id, {
+        at: options?.receivedAt ?? clock(),
+        mode,
+        by: sanitizeActor(actor),
+      });
+      return result === "stopped"
+        ? { ok: true, value: { id, mode, state: "stopped" } }
+        : result === "conflict"
+          ? conflict
+          : notFound;
     },
 
     authorizeLive(id, token) {

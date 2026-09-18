@@ -41,6 +41,8 @@ export interface CommandGuessHint {
 const CAUSE_OF = {
   // the dispatch gates (dispatcher.ts `refuse(code)`)
   agent_allowlist: "policy",
+  channel_access: "policy",
+  coordinator_clarification: "policy",
   profile_bounded: "policy",
   repo_not_visible: "policy",
   repo_unverified: "system",

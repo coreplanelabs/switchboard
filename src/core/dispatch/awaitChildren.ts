@@ -38,6 +38,8 @@ export type ChildEndStatus = RunStatus | "refused" | "stopped";
 export type ChildState =
   /** Live — in this process, or under another generation (`elsewhere`). */
   | { kind: "running"; activity?: string; elsewhere?: boolean; continuedBy?: string }
+  /** The turn ended with a question; the child task is not complete. */
+  | { kind: "awaiting_input"; activity?: string; finalReply?: string; continuedBy?: string }
   /** Ended: its terminal status, its last activity line, its final reply when
    *  it wrote one, and the gate's name when a gate refused it. */
   | {
@@ -52,7 +54,7 @@ export type ChildState =
   | { kind: "not_found" };
 
 /** A child the wait is done with: ended, or not there to wait for. */
-export const isTerminal = (state: ChildState): boolean => state.kind !== "running";
+export const isTerminal = (state: ChildState): boolean => state.kind === "ended" || state.kind === "not_found";
 
 /**
  * The children's states as the wait accumulates them, keyed by the ids the
@@ -81,7 +83,7 @@ export class ChildrenWatch {
     return this.states.get(id);
   }
 
-  /** The children still live — the ones the next tick re-reads. */
+  /** Children without a terminal result, including those awaiting input. */
   pending(): string[] {
     return [...this.states].filter(([, s]) => !isTerminal(s)).map(([id]) => id);
   }
@@ -96,7 +98,7 @@ export class ChildrenWatch {
 }
 
 /** Why the wait ended, in order of precedence. */
-export type WaitEnd = "all_ended" | "stop" | "follow_up" | "budget" | "timeout";
+export type WaitEnd = "all_ended" | "awaiting_input" | "stop" | "follow_up" | "budget" | "timeout";
 
 export interface WaitInputs {
   children: ReadonlyMap<string, ChildState>;
@@ -118,7 +120,9 @@ export type WaitDecision = { kind: "end"; why: WaitEnd } | { kind: "wait"; until
  * The one rule. A wait whose every child is terminal is complete and says so,
  * whatever else is true — the result is whole. Then a stop ends it at once
  * (soft or hard: no new step is owed, the parent wraps up); then a follow-up
- * in the parent's inbox (the parent's next step reads it); then the budget's
+ * in the parent's inbox (the parent's next step reads it); then a child's
+ * clarification returns immediately so the parent can ask for the missing
+ * information without reporting the child complete; then the budget's
  * edge (the parent writes up what returned and names what still runs); then
  * the caller's timeout — the budget is named when both have passed, being the
  * stronger fact. Otherwise the wait goes on until the earlier bound.
@@ -128,6 +132,8 @@ export function decideWait(inputs: WaitInputs): WaitDecision {
   if ([...children.values()].every(isTerminal)) return { kind: "end", why: "all_ended" };
   if (stop !== undefined) return { kind: "end", why: "stop" };
   if (followUpPending) return { kind: "end", why: "follow_up" };
+  if ([...children.values()].some((state) => state.kind === "awaiting_input"))
+    return { kind: "end", why: "awaiting_input" };
   if (now >= budgetEndsAt) return { kind: "end", why: "budget" };
   if (timeoutAt !== undefined && now >= timeoutAt) return { kind: "end", why: "timeout" };
   return { kind: "wait", until: Math.min(budgetEndsAt, timeoutAt ?? Number.POSITIVE_INFINITY) };

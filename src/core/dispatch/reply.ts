@@ -455,7 +455,7 @@ export function refusalQuestion(refusal: Refusal): string {
  * refusal in ack's clothing.
  */
 export async function replyAck(io: ChannelIO, text: string): Promise<void> {
-  return io.reply(text);
+  return (io.acknowledge ?? io.reply).call(io, text);
 }
 /**
  * The one caller of a channel's `offer` (record 0054): the Block Kit an
@@ -565,6 +565,7 @@ export type Delivery = { kind: "delivered" } | { kind: "fenced" };
 
 /** What `deliverAnswer` reads off the dispatch. */
 export interface DeliveryContext {
+  awaitingInput?: true;
   msg: IncomingMessage;
   io: ChannelIO;
   agent: AgentDef;
@@ -603,6 +604,7 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     agent,
     run,
     answer,
+    awaitingInput,
     liveUrl,
     prNote,
     stopped,
@@ -649,7 +651,7 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     // only — the `answer` event published above stays the model's own words
     // and link-free.
     const channelAnswer =
-      agent.name === "review"
+      agent.name === "review" && !awaitingInput
         ? buildReviewChannelReply({
             answer,
             verdict: ctx.verdict,
@@ -676,13 +678,18 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
           card.done(
             shell.close({
               kind: "done",
-              icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : "✅",
-              detail: stopped ? checklistAsLeft() : checklistCheckedOff(),
+              icon: stopped === "hard" ? "⛔" : stopped === "soft" ? "⏹" : awaitingInput ? "❓" : "✅",
+              detail: stopped || awaitingInput ? checklistAsLeft() : checklistCheckedOff(),
               ...doneLines(runDiagnosis),
             }),
           ),
         ),
-      () => root.span("post.reply", () => io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer)),
+      () =>
+        root.span("post.reply", () =>
+          awaitingInput && !stopped && io.question
+            ? io.question(channelAnswer)
+            : io.reply(prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer),
+        ),
       // A null channel's reply resolves but reaches nobody: the seal says
       // `replyOk: false` with the reason (run-history.md item 38).
       io.undeliverable !== undefined ? { undelivered: io.undeliverable } : undefined,

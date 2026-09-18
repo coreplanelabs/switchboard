@@ -1,3 +1,4 @@
+import { questionText } from "../question.js";
 // The run stage's loop (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the model turn and everything that rides on it. The card frame the loop
 // paints (checklist, activity line, the shutdown notice); the run on the pi
@@ -118,6 +119,7 @@ const ENDING_NOTE_MAX = 500;
  *  reply stage calls after the answer landed. The review post-step runs
  *  inside the loop (agent-review.md item 18), so its inputs stay here. */
 export interface RunOutcome {
+  awaitingInput?: true;
   kind: "answered";
   answer: string;
   reviewHead: string | undefined;
@@ -334,6 +336,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the checklist the card shows, the verdict/description already submitted,
   // the branch already pushed.
   const restored = resume?.row.state ?? {};
+  let question = questionText(restored.question);
+  const onQuestion = (text: string) => {
+    question = text;
+    ledgerRun?.setState({ question: text });
+  };
   let checklist: string | undefined = typeof restored.checklist === "string" ? restored.checklist : undefined;
   // Typed (`StatusActivity`): a bash call rides as its full command, which
   // the Slack card draws as a code block; everything else as its one line.
@@ -385,6 +392,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // via `registry.snapshot` — there is no second copy to drift from it.
   let recordedPushedBranch: string | undefined;
   const onEvent = (e: RunEvent) => {
+    if (e.type === "input" && question !== undefined) {
+      question = undefined;
+      ledgerRun?.setState({ question: null });
+    }
     registry.publish(run.id, e); // feed the external live-view stream
     if (isSpanRecord(e)) return; // timing, not activity (docs/reference/specs/tracing.md): the card and its clock ignore it
     if (e.type === "lease") {
@@ -694,8 +705,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  verdict turn and review post-step — is skipped: a hard stop observed
    *  nothing and posts nothing, and a relaunch that ended the run has no tree
    *  to look at and no verdict to post. Read at each step, since a stop can
-   *  land between them. */
-  const tailSkipped = (): boolean => run.control.requested === "hard" || relaunchEndedRun;
+   *  land between them. A question also suspends this tail until its answer. */
+  const tailSkipped = (): boolean => run.control.requested === "hard" || relaunchEndedRun || question !== undefined;
   // Give the workspace back now rather than at the inactivity sweep: a
   // resident's pool user is a scarce slot (docs/reference/specs/resident-repos.md item
   // 16a). The release mode is paired to the round's agent by the attach
@@ -781,6 +792,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     : undefined;
   const toolContext = {
     executor,
+    onQuestion,
+    workItems: io.workItems?.(chatActorOf(deps.config, msg)),
     reportProgress,
     ...(attachFile ? { attach: attachFile } : {}),
     ...(artifacts ? { artifacts } : {}),
@@ -1154,6 +1167,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       answer = harnessSession?.answer ?? leaseSpentDuringRelaunch ?? HARD_STOP_MESSAGE;
       if (harnessSession?.ending !== undefined) windDownEnding = harnessSession.ending;
     }
+    if (run.control.requested || relaunchEndedRun) {
+      question = undefined;
+      ledgerRun?.setState({ question: null });
+    } else if (question !== undefined) answer = question;
     // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
     // settleReviewedHead in reviewRound.ts): for a PR review, read the
     // workspace HEAD NOW — after the model is done, BEFORE the finally
@@ -1395,7 +1412,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           }),
         );
         // Re-read, not narrowed: a hard stop may have landed during the turn.
-        if (!run.control.hardSignal.aborted) await observeWorkspaceNow();
+        if (!run.control.hardSignal.aborted && question === undefined) await observeWorkspaceNow();
       }
     }
     // The last prompt on the run's pi has been sent: pi ends here, before the
@@ -1458,7 +1475,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // event BEFORE the finally below finish()es the stream, string fields
     // redacted like every payload, so the run page's review panel renders
     // the same object the GitHub body is rendered from.
-    if (prDescription) {
+    if (prDescription && question === undefined) {
       registry.publish(run.id, {
         type: "pr_description",
         description: redactPrDescription(prDescription),
@@ -1501,6 +1518,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         }),
       );
     }
+    // A final model turn can ask after the first question check. A stop wins.
+    if (run.control.requested || relaunchEndedRun) {
+      question = undefined;
+      ledgerRun?.setState({ question: null });
+    } else if (question !== undefined) answer = question;
     // The run record is the source of truth and Slack/GitHub are projections
     // of it: publish the final answer into the stream FIRST (redacted like
     // every event, uncapped — a soft stop's "findings so far" included; a
@@ -1523,7 +1545,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // windDown.ts, never by guessing at a tree the salvage just measured. Only
     // an answer that is still the harness's own composition is replaced: one a
     // post-turn put in its place (a review's re-review at a moved head) stands.
-    if (windDownEnding !== undefined && answer === windDownAnswer(windDownEnding, agent.maxMinutes))
+    if (
+      question === undefined &&
+      windDownEnding !== undefined &&
+      answer === windDownAnswer(windDownEnding, agent.maxMinutes)
+    )
       answer = windDownAnswer(windDownEnding, agent.maxMinutes, endingFacts());
     // Typed-output boundary (docs/reference/specs/llm-output.md item 5): the answer is
     // canonicalized ONCE here, so the event text, the channel reply, the
@@ -1650,7 +1676,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // The channel's receipt (id + terminal status, never the token): a
     // single-shot channel hands it to its caller — the Worker shim records a
     // scheduled firing's run from it.
-    io.runFinished?.({ id: run.id, status });
+    io.runFinished?.({
+      id: run.id,
+      status,
+      ...(question !== undefined && status === "completed" ? { awaitingInput: true as const } : {}),
+    });
     // The run finished: it is sealed by the next drain (after the reply), and
     // its record — everything captured now, assembled after the seal — is
     // written by that drain. The card's total stops at the finish stamp.
@@ -1671,6 +1701,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       diagnosis,
       root,
       ledgerRun,
+      ...(question !== undefined && status === "completed" ? { awaitingInput: true as const } : {}),
       ...(handoff !== undefined ? { handoff } : {}),
       ...(verdict !== undefined ? { verdict } : {}),
       ...(reviewHead !== undefined ? { reviewHead } : {}),
@@ -1706,6 +1737,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   }
   return {
     kind: "answered",
+    ...(question !== undefined && !run.control.requested ? { awaitingInput: true as const } : {}),
     answer,
     reviewHead,
     verdict,

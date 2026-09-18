@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "switchboard-linear-local",
+  "main": "linear.local.ts",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "vars": { "PUBLIC_BASE_URL": "http://localhost:8080" },
+  "durable_objects": {
+    "bindings": [{ "name": "LINEAR_STATE", "class_name": "LinearState" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LinearState"] }]
+}

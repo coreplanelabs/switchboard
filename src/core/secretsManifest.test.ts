@@ -54,7 +54,7 @@ describe("deploy/secrets.manifest.json", () => {
     }
   });
 
-  it("every bot secret reaches the container: the shim forwards each manifest `bot` entry (a secret on the Worker the container never sees is a silent misconfiguration — MCP_CREDENTIAL_KEY once was)", () => {
+  it("every bot secret reaches its declared boundary: container by default, edge only when explicitly marked", () => {
     const src = readFileSync(resolve(ROOT, "deploy/cloudflare/worker.ts"), "utf8");
     const fn = /function containerEnv\(env: Env\)[\s\S]*?\n\}/.exec(src);
     if (!fn) throw new Error("deploy/cloudflare/worker.ts: no containerEnv()");
@@ -63,7 +63,9 @@ describe("deploy/secrets.manifest.json", () => {
     const forwarded = new Set([...list[1].matchAll(/"([A-Z][A-Z0-9_]*)"/g)].map((m) => m[1]));
     for (const m of fn[0].matchAll(/^\s*([A-Z][A-Z0-9_]*): env\.\1,/gm)) forwarded.add(m[1]);
     for (const s of manifest.secrets) {
-      if (s.workers.includes("bot"))
+      if (s.workers.includes("bot") && s.forwardToContainer === false)
+        expect(forwarded, `${s.name} is edge-only and must not reach the container`).not.toContain(s.name);
+      else if (s.workers.includes("bot"))
         expect(forwarded, `${s.name} is put on the bot Worker but never forwarded into the container`).toContain(
           s.name,
         );
