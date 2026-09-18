@@ -641,8 +641,18 @@ interface ConfirmationRow extends ConfirmationInput {
 }
 /** Why a consume or a cancel refused: the row is gone (`used`), past its expiry (`expired`), or someone else's (`foreign`). */
 type ConfirmationRefusal = "used" | "expired" | "foreign";
-type ConfirmationOutcome = { row: ConfirmationRow } | { refused: ConfirmationRefusal };
+/** A refusal names the row where one still exists — `expired` (deleted here)
+ *  and `foreign` (kept) — so the bot can record the click's refusal against
+ *  the command that was bound (record 0054); `used` has no row to name. */
+type ConfirmationOutcome = { row: ConfirmationRow } | { refused: ConfirmationRefusal; row?: ConfirmationRow };
 type ConfirmationCancelOutcome = { ok: true } | { refused: Exclude<ConfirmationRefusal, "expired"> };
+/** The consume log's word: a refusal may carry the row it names (expired,
+ *  foreign), so the refusal is the discriminant, never the row's presence. The
+ *  parameter is the declared union, where the narrowing holds; the stub's
+ *  return type narrows to `never` across `in`. */
+function consumeWord(outcome: ConfirmationOutcome): string {
+  return "refused" in outcome ? outcome.refused : "consumed";
+}
 
 function isJsonObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -718,9 +728,9 @@ export class ConfigDO extends DurableObject<Env> {
       if (!stored) return { refused: "used" };
       if (stored.expiresAt <= now) {
         this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
-        return { refused: "expired" };
+        return { refused: "expired", row: stored };
       }
-      if (!actorIds.includes(stored.requester)) return { refused: "foreign" };
+      if (!actorIds.includes(stored.requester)) return { refused: "foreign", row: stored };
       this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
       return { row: stored };
     });
@@ -1233,7 +1243,7 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
       const click = confirmationClickOf(b);
       if (click instanceof Response) return click;
       const outcome = await dO.consumeConfirmation(click.id, click.actorIds, systemClock());
-      console.log(`[config/confirmations/consume] ${click.id} ${"row" in outcome ? "consumed" : outcome.refused}`);
+      console.log(`[config/confirmations/consume] ${click.id} ${consumeWord(outcome)}`);
       return json(outcome);
     }
     case "/config/confirmations/cancel": {

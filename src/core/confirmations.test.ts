@@ -56,22 +56,22 @@ function contract(name: string, make: () => { store: ConfirmationStore; tick: (m
       expect(typeof store.describe()).toBe("string");
     });
 
-    it("a row past its expiry is `expired` on touch and gone afterwards", async () => {
+    it("a row past its expiry is `expired` on touch — the refusal names the row it deleted — and gone afterwards", async () => {
       const { store, tick } = make();
       const row = await store.put(pending("c2"), TTL);
       tick(TTL - 1);
       expect((await store.consume("c2", ["slack:UOTHER"])).ok).toBe(false); // still pending: foreign, not expired
       tick(1);
-      expect(await store.consume("c2", ["slack:UREQ"])).toEqual({ ok: false, refused: "expired" });
+      expect(await store.consume("c2", ["slack:UREQ"])).toEqual({ ok: false, refused: "expired", row });
       expect(await store.consume("c2", ["slack:UREQ"])).toEqual({ ok: false, refused: "used" });
       expect(row.expiresAt).toBeGreaterThan(0);
     });
 
-    it("an actor whose ids miss the requester is `foreign` and the row stays; the requester's id anywhere in the list consumes", async () => {
+    it("an actor whose ids miss the requester is `foreign` — the refusal names the row — and the row stays; the requester's id anywhere in the list consumes", async () => {
       const { store } = make();
-      await store.put(pending("c3"), TTL);
-      expect(await store.consume("c3", ["slack:UOTHER"])).toEqual({ ok: false, refused: "foreign" });
-      expect(await store.consume("c3", ["access:sub-1"])).toEqual({ ok: false, refused: "foreign" });
+      const row = await store.put(pending("c3"), TTL);
+      expect(await store.consume("c3", ["slack:UOTHER"])).toEqual({ ok: false, refused: "foreign", row });
+      expect(await store.consume("c3", ["access:sub-1"])).toEqual({ ok: false, refused: "foreign", row });
       expect((await store.consume("c3", ["access:sub-1", "slack:UREQ"])).ok).toBe(true);
     });
 
@@ -142,9 +142,14 @@ contract("WorkerConfirmationStore over a scripted object", () => {
     if (!stored) return answer({ refused: "used" });
     if (path === "/config/confirmations/consume" && stored.expiresAt <= clock()) {
       rows.delete(id);
-      return answer({ refused: "expired" });
+      return answer({ refused: "expired", row: { id, ...stored } });
     }
-    if (!actorIds.includes(stored.requester)) return answer({ refused: "foreign" });
+    if (!actorIds.includes(stored.requester))
+      return answer(
+        path === "/config/confirmations/consume"
+          ? { refused: "foreign", row: { id, ...stored } }
+          : { refused: "foreign" },
+      );
     rows.delete(id);
     return answer(path === "/config/confirmations/cancel" ? { ok: true } : { row: { id, ...stored } });
   };
@@ -213,6 +218,33 @@ describe("WorkerConfirmationStore (the ConfigDO confirmations client)", () => {
     });
     expect(await refusing.store.consume("c1", ["slack:UOTHER"])).toEqual({ ok: false, refused: "foreign" });
     expect(await refusing.store.cancel("c1", ["slack:UOTHER"])).toEqual({ ok: false, refused: "used" });
+    // A refusal beside which the object still names the row (expired, foreign)
+    // answers the row too, so the click's refusal can be recorded; a malformed
+    // row beside a refusal is dropped, never a thrown consume.
+    const refusingWithRow = fake({
+      "/config/confirmations/consume": (b) => ({
+        refused: "expired",
+        row: {
+          id: b.id,
+          threadKey: "slack:CX:1.0",
+          requester: "slack:UREQ",
+          expiresAt: 4_200_000,
+          body: pending("c1"),
+        },
+      }),
+    });
+    expect(await refusingWithRow.store.consume("c1", ["slack:UREQ"])).toEqual({
+      ok: false,
+      refused: "expired",
+      row: { ...pending("c1"), expiresAt: 4_200_000 },
+    });
+    const refusingMalformedRow = fake({
+      "/config/confirmations/consume": () => ({ refused: "foreign", row: { body: { command: 7 } } }),
+    });
+    expect(await refusingMalformedRow.store.consume("c1", ["slack:UOTHER"])).toEqual({
+      ok: false,
+      refused: "foreign",
+    });
     const malformed = fake({
       "/config/confirmations/consume": () => ({ row: { id: "c1", body: { command: 7 } } }),
       "/config/confirmations/put": () => ({ ok: true }),

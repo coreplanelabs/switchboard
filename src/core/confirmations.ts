@@ -54,7 +54,13 @@ export type PendingConfirmation = Omit<Confirmation, "expiresAt">;
 export type ConfirmationRefusal = "used" | "expired" | "foreign";
 export const CONFIRMATION_REFUSALS: readonly ConfirmationRefusal[] = ["used", "expired", "foreign"];
 
-export type ConsumeOutcome = { ok: true; row: Confirmation } | { ok: false; refused: ConfirmationRefusal };
+/** A refusal carries the row when the store still holds one — `expired` (read,
+ *  then deleted) and `foreign` (kept for its requester) — so the click's
+ *  refusal can be recorded against the command that was bound (record 0054;
+ *  [run-history.md](../../docs/reference/specs/run-history.md) item 2). A
+ *  `used` row is gone, so that refusal names nothing. */
+export type ConsumeOutcome =
+  { ok: true; row: Confirmation } | { ok: false; refused: ConfirmationRefusal; row?: Confirmation };
 export type CancelOutcome = { ok: true } | { ok: false; refused: Exclude<ConfirmationRefusal, "expired"> };
 
 export interface ConfirmationStore {
@@ -179,9 +185,10 @@ function judge(
   if (!row) return { ok: false, refused: "used" };
   if (kind === "consume" && row.expiresAt <= now) {
     rows.delete(id);
-    return { ok: false, refused: "expired" };
+    return { ok: false, refused: "expired", row };
   }
-  if (!actorIds.includes(row.message.userId)) return { ok: false, refused: "foreign" };
+  if (!actorIds.includes(row.message.userId))
+    return kind === "consume" ? { ok: false, refused: "foreign", row } : { ok: false, refused: "foreign" };
   rows.delete(id);
   return kind === "consume" ? { ok: true, row } : { ok: true };
 }
@@ -204,7 +211,8 @@ export class InMemoryConfirmationStore implements ConfirmationStore {
   }
   async consume(id: string, actorIds: readonly string[]): Promise<ConsumeOutcome> {
     const out = judge(this.rows, id, actorIds, this.clock(), "consume") as ConsumeOutcome;
-    return out.ok ? { ok: true, row: structuredClone(out.row) } : out;
+    if (out.ok) return { ok: true, row: structuredClone(out.row) };
+    return out.row ? { ...out, row: structuredClone(out.row) } : out;
   }
   async cancel(id: string, actorIds: readonly string[]): Promise<CancelOutcome> {
     return judge(this.rows, id, actorIds, this.clock(), "cancel") as CancelOutcome;
@@ -288,9 +296,12 @@ export class WorkerConfirmationStore implements ConfirmationStore {
   }
   async consume(id: string, actorIds: readonly string[]): Promise<ConsumeOutcome> {
     const body = await this.post("/config/confirmations/consume", { id, actorIds });
-    if (isRefusal(body.refused)) return { ok: false, refused: body.refused };
     const stored = isRecord(body.row) ? body.row : undefined;
     const row = stored && isRecord(stored.body) ? { ...stored.body, expiresAt: stored.expiresAt } : undefined;
+    if (isRefusal(body.refused))
+      // The row beside a refusal is best-effort context (an older object
+      // answers without it): absent or malformed, the refusal stands alone.
+      return { ok: false, refused: body.refused, ...(isConfirmation(row) ? { row } : {}) };
     if (!isConfirmation(row)) throw new Error("confirmation store answered a consume outside its contract");
     return { ok: true, row };
   }

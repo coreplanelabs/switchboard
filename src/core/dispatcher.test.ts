@@ -16297,6 +16297,64 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     expect(codingModelIn(deps)).toBe("anthropic/coding-model");
   });
 
+  it("a refused click whose store refusal names the row is a run record: expired writes one with outcome refused, the code and the row's command; nothing runs (record 0054)", async () => {
+    const { deps, registry, tick } = wired();
+    const { offers } = await offered(deps);
+    tick(CONFIRMATION_TTL_MS);
+    const late = await click(deps, "confirm", offers[0]!.id, requester);
+    expect(late.outcome).toEqual({ status: "refused", refusal: "confirmation_expired", cause: "request" });
+    expect(late.replies).toEqual([OFFER_EXPIRED_LINE]);
+    expect(deps.invoked).toEqual([]);
+    const snap = registry.snapshotById("r2");
+    expect(registry.getById("r2")).toMatchObject({ status: "completed", agent: "command", threadKey: "slack:CX:1.0" });
+    expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
+    expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
+      preset: "command",
+      reason: "refused after offer",
+      model: "anthropic/general-model",
+      command: "config.set",
+      input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
+      receipt: LINE,
+      outcome: "refused",
+      refusalCode: "confirmation_expired",
+    });
+    expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: OFFER_EXPIRED_LINE });
+    expect(registry.snapshotById("r3")).toBeNull();
+  });
+
+  it("a foreign click's refusal is recorded with its code and the row stays; a used click and an unreadable store name no row and write no record", async () => {
+    const { deps, registry, store } = wired();
+    const { offers } = await offered(deps);
+    const foreign = await click(deps, "confirm", offers[0]!.id, stranger);
+    expect(foreign.replies).toEqual([OFFER_FOREIGN_LINE]);
+    expect(registry.snapshotById("r2")?.events.find((e) => e.type === "route")).toMatchObject({
+      outcome: "refused",
+      refusalCode: "confirmation_foreign",
+    });
+    const own = await click(deps, "confirm", offers[0]!.id, requester);
+    expect(own.outcome).toEqual({ status: "completed" });
+    // r3 is the confirmed run; the used click that follows writes no record.
+    const used = await click(deps, "confirm", offers[0]!.id, requester);
+    expect(used.outcome).toEqual({ status: "refused", refusal: "confirmation_used", cause: "request" });
+    expect(registry.snapshotById("r4")).toBeNull();
+    deps.confirmations = {
+      put: (row, ttl) => store.put(row, ttl),
+      cancel: (id, ids) => store.cancel(id, ids),
+      describe: () => "throwing",
+      consume: async () => {
+        throw new Error("object unreachable");
+      },
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const unreadable = await click(deps, "confirm", offers[0]!.id, requester);
+      expect(unreadable.outcome).toEqual({ status: "refused", refusal: "confirmation_unreadable", cause: "system" });
+      expect(registry.snapshotById("r4")).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("a clicker whose id and `self` miss the requester is refused and nothing runs; the requester still can", async () => {
     const { deps, audits } = wired();
     const { offers } = await offered(deps);
