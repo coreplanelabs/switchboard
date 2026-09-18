@@ -1993,6 +1993,25 @@ describe("wind-down parity, an undelivered follow-up, and the alive-here reconci
     expect(doingWords(bridge.doingNow())).toBeUndefined();
   });
 
+  it("doingNow: a cut call is skipped once the cut has landed, so a write-up's hanging model call is not masked as the cut's tool", () => {
+    // Before the cut: the cut's tool is open, doingNow says so.
+    const { bridge } = harness();
+    bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_a0" }));
+    bridge.observe(ev("session.tool.input.started", { sessionID: "ses_c", id: "c1", name: "shell" }));
+    bridge.observe(ev("session.tool.called", { sessionID: "ses_c", id: "c1", input: { command: "sleep 60" } }));
+    expect(doingWords(bridge.doingNow())).toBe("running bash");
+    // The loop-end interrupt is posted: the cut call stays visible (the interrupt is still in flight).
+    bridge.cutInterruptPosted();
+    expect(doingWords(bridge.doingNow())).toBe("running bash"); // still visible while interrupt is in flight
+    // The interrupt lands on the live execution (real code order: cutInterruptLanded before markOpenCallsCut).
+    bridge.cutInterruptLanded(); // sets cutLanded = true
+    bridge.markOpenCallsCut(); // adds c1 to cutCalls
+    // Now the write-up's own step starts — the cut tool is still in openTools (settle not yet received).
+    bridge.observe(ev("session.step.started", { sessionID: "ses_c", assistantMessageID: "msg_b0" }));
+    // cutLanded is true and c1 is in cutCalls: doingNow skips it and reports the model call instead.
+    expect(doingWords(bridge.doingNow())).toBe(MODEL_CALL_IN_FLIGHT);
+  });
+
   it("F1: a steer the server never took is recorded as undelivered and handed back to the inbox, never as folded in, and no input event carries it", async () => {
     const r = await openCodeDriver({ steerPostFails: true }).run({
       turns: [

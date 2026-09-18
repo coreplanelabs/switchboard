@@ -194,10 +194,17 @@ export const finaleAbortReason = (boundMs: number): string =>
   `aborted at the finale bound (${elapsedMinutes(boundMs)})`;
 
 /** The clause a wind-down answer carries when no write-up came because the
- *  model call the wind-down waited on failed: the thread reads why there are no
- *  findings while the run still ends by the wind-down's words. */
-const noWriteUp = (failed: string | undefined): string =>
-  failed ? `; the model call failed during the wind-down (${failed}), so no write-up came` : "";
+ *  model call (or, for OpenCode, a tool call) the wind-down waited on failed
+ *  or the finale bound ended the wait: the thread reads why there are no
+ *  findings while the run still ends by the wind-down's words. `onTool` true
+ *  when the finale fell on a tool call, not a model call — the wording differs
+ *  so the thread is not told a model call failed where none did. */
+const noWriteUp = (failed: string | undefined, onTool?: true): string =>
+  failed
+    ? onTool
+      ? `; the finale bound ended the wait on a tool call (${failed}), so no write-up came`
+      : `; the model call failed during the wind-down (${failed}), so no write-up came`
+    : "";
 
 // ---- what the ending established (item 6) -----------------------------------
 //
@@ -241,12 +248,14 @@ export interface EndingFacts {
 }
 
 /** A wind-down's ending as the harness hands it to the run loop: the label's
- *  kind, the text the model settled on (empty when no write-up came) and the
- *  failed call when that is why. */
+ *  kind, the text the model settled on (empty when no write-up came), and the
+ *  failed call when that is why. `writeUpFailedOnTool` true when the finale
+ *  bound fell on a tool call rather than a model call (OpenCode only), so the
+ *  thread answer's clause is worded as a wait, not a failed model call. */
 export type WindDownEnding =
-  | { kind: "time"; text: string; writeUpFailed?: string }
-  | { kind: "turns"; pace: string; text: string; writeUpFailed?: string }
-  | { kind: "soft"; text: string; writeUpFailed?: string }
+  | { kind: "time"; text: string; writeUpFailed?: string; writeUpFailedOnTool?: true }
+  | { kind: "turns"; pace: string; text: string; writeUpFailed?: string; writeUpFailedOnTool?: true }
+  | { kind: "soft"; text: string; writeUpFailed?: string; writeUpFailedOnTool?: true }
   /** No wind-down label applies (the wrap-up never reached the model) but a
    *  failure ended the wait: what ended it is said (`unlabelledAnswer`). */
   | { kind: "unlabelled"; text: string; writeUpFailed: string; ended: "failed" | "finale" };
@@ -254,14 +263,21 @@ export type WindDownEnding =
 /** The ending a harness hands over beside its answer: the wind-down that
  *  labelled it, with the text and the failed call; the unlabelled ending when a
  *  failure ended a wait no label owns; nothing when the answer is the model's
- *  own. Each harness reads its wind-down state into this one shape. */
+ *  own. Each harness reads its wind-down state into this one shape.
+ *  `writeUpFailedOnTool` true when the finale fell on a tool call (OpenCode). */
 export function windDownEndingOf(
   writeUp: { kind: "time" } | { kind: "turns"; pace: string } | { kind: "soft" } | undefined,
   text: string,
   writeUpFailed: string | undefined,
   ended: "failed" | "finale" = "failed",
+  writeUpFailedOnTool?: true,
 ): WindDownEnding | undefined {
-  const failed = writeUpFailed !== undefined ? { writeUpFailed } : {};
+  const failed =
+    writeUpFailed !== undefined
+      ? writeUpFailedOnTool
+        ? { writeUpFailed, writeUpFailedOnTool }
+        : { writeUpFailed }
+      : {};
   if (writeUp?.kind === "time") return { kind: "time", text, ...failed };
   if (writeUp?.kind === "turns") return { kind: "turns", pace: writeUp.pace, text, ...failed };
   if (writeUp?.kind === "soft") return { kind: "soft", text, ...failed };
@@ -274,11 +290,11 @@ export function windDownEndingOf(
 export function windDownAnswer(ending: WindDownEnding, maxMinutes: number, facts?: EndingFacts): string {
   switch (ending.kind) {
     case "time":
-      return timeBudgetAnswer(ending.text, maxMinutes, ending.writeUpFailed, facts);
+      return timeBudgetAnswer(ending.text, maxMinutes, ending.writeUpFailed, facts, ending.writeUpFailedOnTool);
     case "turns":
-      return turnGuardAnswer(ending.text, ending.pace, ending.writeUpFailed, facts);
+      return turnGuardAnswer(ending.text, ending.pace, ending.writeUpFailed, facts, ending.writeUpFailedOnTool);
     case "soft":
-      return softStopAnswer(ending.text, ending.writeUpFailed, facts);
+      return softStopAnswer(ending.text, ending.writeUpFailed, facts, ending.writeUpFailedOnTool);
     case "unlabelled":
       return unlabelledAnswer(ending.text, ending.writeUpFailed, ending.ended, facts);
   }
@@ -337,23 +353,30 @@ function beforeFindings(facts: EndingFacts | undefined): string {
 }
 
 /** The thread's answer when the wall clock ran out: the write-up under its
- *  label, or the reason alone — naming the failed model call when that is why
- *  no write-up came (`writeUpFailed`) — and what the ending established
- *  (`facts`) where the run loop has it. */
+ *  label, or the reason alone — naming the failed model call (or tool wait for
+ *  OpenCode) when that is why no write-up came (`writeUpFailed`) — and what
+ *  the ending established (`facts`) where the run loop has it. */
 export const timeBudgetAnswer = (
   text: string,
   maxMinutes: number,
   writeUpFailed?: string,
   facts?: EndingFacts,
+  writeUpFailedOnTool?: true,
 ): string =>
   text
     ? `⚠️ _Hit the ${maxMinutes}-minute budget before finishing${beforeFindings(facts)}_\n\n${text}`
-    : `Stopped at the ${maxMinutes}-minute budget without finishing${noWriteUp(writeUpFailed)}.${nothingWritten(facts, TIME_ADVICE)}`;
+    : `Stopped at the ${maxMinutes}-minute budget without finishing${noWriteUp(writeUpFailed, writeUpFailedOnTool)}.${nothingWritten(facts, TIME_ADVICE)}`;
 /** The thread's answer when the turn guard fired. */
-export const turnGuardAnswer = (text: string, pace: string, writeUpFailed?: string, facts?: EndingFacts): string =>
+export const turnGuardAnswer = (
+  text: string,
+  pace: string,
+  writeUpFailed?: string,
+  facts?: EndingFacts,
+  writeUpFailedOnTool?: true,
+): string =>
   text
     ? `⚠️ _Stopped after ${pace} — that pace looks like a loop${established(facts, undefined) ? beforeFindings(facts) : "; findings so far:"}_\n\n${text}`
-    : `Stopped after ${pace} — that pace looks like a loop — without finishing${noWriteUp(writeUpFailed)}.${nothingWritten(facts, TURN_ADVICE)}`;
+    : `Stopped after ${pace} — that pace looks like a loop — without finishing${noWriteUp(writeUpFailed, writeUpFailedOnTool)}.${nothingWritten(facts, TURN_ADVICE)}`;
 
 /** The thread's answer when no wind-down label applies — the wrap-up never
  *  reached the model (OpenCode's never-posted prompt) — with what ended the
@@ -378,10 +401,15 @@ export const unlabelledAnswer = (
     : `⚠️ The model call failed (${writeUpFailed}) and no answer came.${nothingWritten(facts, undefined)}`;
 };
 /** The thread's answer after a soft stop. */
-export const softStopAnswer = (text: string, writeUpFailed?: string, facts?: EndingFacts): string =>
+export const softStopAnswer = (
+  text: string,
+  writeUpFailed?: string,
+  facts?: EndingFacts,
+  writeUpFailedOnTool?: true,
+): string =>
   text
     ? `⏹ _Stopped early by an operator (soft stop)${beforeFindings(facts)}_\n\n${text}`
-    : `⏹ Stopped early by an operator (soft stop) before any findings were written${noWriteUp(writeUpFailed)}.${nothingWritten(facts, undefined)}`;
+    : `⏹ Stopped early by an operator (soft stop) before any findings were written${noWriteUp(writeUpFailed, writeUpFailedOnTool)}.${nothingWritten(facts, undefined)}`;
 
 function elapsedMinutes(ms: number): string {
   const minutes = Math.round(ms / 60_000);
