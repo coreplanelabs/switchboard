@@ -90,9 +90,12 @@ function setup(over: { user?: string; text?: string; residents?: boolean } = {})
   const gate: GateContext = {
     msg: message,
     io,
-    refuse: async (outcome, fn) => {
-      refusals.push(outcome);
-      return fn();
+    // The production wrap's shape (record 0054): the side work inside the
+    // span, then the Refusal's sentence through the one renderer.
+    refuse: async (refusal, side) => {
+      refusals.push(refusal.code);
+      await side?.();
+      await io.reply(refusal.text);
     },
   };
   const closes: StatusUpdate[] = [];

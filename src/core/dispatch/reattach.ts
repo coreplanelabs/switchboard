@@ -17,6 +17,7 @@ import type { Clock } from "../trace/types.js";
 import type { IncomingMessage } from "../types.js";
 import { closeResumedRow, type ResumeContext } from "./admission.js";
 import type { GateCard, GateContext } from "./authorize.js";
+import type { RefusalCode } from "../refusal.js";
 import type { PersonFollowUp } from "./settle.js";
 
 /**
@@ -62,7 +63,11 @@ export function lostWorkspaceNote(why: string, restarts: boolean): string {
 }
 
 /** What `abandonLostWorkspace` reads off the dispatch. */
-export interface LostWorkspaceContext extends GateContext, GateCard {
+export interface LostWorkspaceContext extends Omit<GateContext, "refuse">, GateCard {
+  /** The dispatch's silent refusal wrap: the card and the run's own note say
+   *  why, so nothing is rendered in the thread — stamped and counted like any
+   *  other refusal. */
+  refuse: <T>(outcome: RefusalCode, side: () => Promise<T>) => Promise<T>;
   run: RunHandle;
   registry: RunRegistry;
   resume: ResumeContext;

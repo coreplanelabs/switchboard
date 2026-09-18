@@ -26,6 +26,11 @@ export interface AttrDomain {
   requester: "message" | "relay-footer" | "thread-parent" | "bot";
   // dispatch.* / run.* / post.*
   outcome: string;
+  /** The refusal's code (src/core/refusal.ts) — on the `dispatch.refuse` span
+   *  and the request's root, so refusals are countable from the trace alone. */
+  refusal: string;
+  /** The refusal's cause, from the one code→cause table in src/core/refusal.ts. */
+  cause: "request" | "policy" | "system";
   count: number;
   backend: Backend;
   // run.command
@@ -114,6 +119,8 @@ export type SpanAttrs = { readonly [K in SpanAttrKey]?: AttrDomain[K] };
 const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
   "runId",
   "outcome",
+  "refusal",
+  "cause",
   "command",
   "route",
   "host",
@@ -163,6 +170,8 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   dedupe: "string",
   requester: "string",
   outcome: "string",
+  refusal: "string",
+  cause: "string",
   count: "number",
   backend: "string",
   command: "string",

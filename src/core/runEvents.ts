@@ -462,7 +462,7 @@ export type RouteInputValue = RouteInputLeafOrList | RouteInputObject3;
  *  `pasted` — the typed line that followed a hand-back in its thread, with the
  *  same receipt, ran. A routed read carries no outcome: it is not a decision
  *  about a state change. */
-export type RouteOutcome = "hand_back" | "offered" | "confirmed" | "pasted";
+export type RouteOutcome = "hand_back" | "offered" | "confirmed" | "pasted" | "refused";
 
 export type RunEvent =
   /** `callId` is the provider's tool_use id — the explicit pair key between a
@@ -864,6 +864,10 @@ export type RunEvent =
       input?: { readonly [key: string]: RouteInputValue };
       receipt?: string;
       outcome?: RouteOutcome;
+      /** The refusal's code (src/core/refusal.ts) when `outcome` is `refused`
+       *  (record 0054): a refusal after a command was bound is a run
+       *  record, and the door report counts it by cause and code. */
+      refusalCode?: string;
       handBackRunId?: string;
       seq?: number;
       at?: number;

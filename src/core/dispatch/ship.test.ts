@@ -131,9 +131,10 @@ function setup(
     ending,
     trace,
     closeLines: () => ({}),
-    refuse: <T>(outcome: string, fn: () => Promise<T>) => {
-      refusals.push(outcome);
-      return fn();
+    refuse: async (refusal: { code: string; text: string }, side?: () => Promise<void>) => {
+      refusals.push(refusal.code);
+      await side?.();
+      await io.reply(refusal.text);
     },
     doneLines: () => ({}),
   };

@@ -196,9 +196,13 @@ function request(d: ProvisionDeps, text: string, agentName = "general") {
   });
   const admitted = new ThreadAdmission<DispatchFollowUp>().claim(THREAD, { agent: agent.name }).live;
   const refusals: string[] = [];
-  const refuse = async <T>(outcome: string, fn: () => Promise<T>) => {
-    refusals.push(outcome);
-    return fn();
+  const refusalTexts: string[] = [];
+  // The production wrap's shape (record 0054): the side work first, then the
+  // Refusal's sentence — captured here instead of rendered.
+  const refuse = async (refusal: { code: string; text: string }, side?: () => Promise<void>) => {
+    refusals.push(refusal.code);
+    await side?.();
+    refusalTexts.push(refusal.text);
   };
   return {
     message,
@@ -213,6 +217,7 @@ function request(d: ProvisionDeps, text: string, agentName = "general") {
     shell,
     admitted,
     refusals,
+    refusalTexts,
     refuse,
   };
 }
@@ -769,7 +774,8 @@ describe("attachWorkspace — the workspace attach and the ask-once refusal", ()
     expect(out).toEqual({ kind: "refused", reason: "which_branch" });
     expect(r.refusals).toEqual(["which_branch"]);
     expect(JSON.stringify(closes)).toContain("which branch?");
-    expect(replies[0]).toMatch(/^🌿 Which branch of `acme\/api` should this thread work on\?/);
+    expect(r.refusalTexts[0]).toMatch(/^🌿 Which branch of `acme\/api` should this thread work on\?/);
+    expect(replies).toEqual([]);
   });
 });
 

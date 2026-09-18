@@ -178,9 +178,14 @@ function setup(
     ...(over.restartOf !== undefined ? { restartOf: over.restartOf } : {}),
     clock: () => NOW,
     root: trace.root,
-    refuse: async (outcome, fn) => {
+    refuse: async (refusal, side) => {
+      refusals.push(refusal.code);
+      await side?.();
+      await io.reply(refusal.text);
+    },
+    refuseSilently: async (outcome, side) => {
       refusals.push(outcome);
-      return fn();
+      return side();
     },
     admission,
     hooks,

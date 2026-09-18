@@ -88,6 +88,7 @@ import {
 } from "../confirmations.js";
 import { repoFromThread } from "../repoContext.js";
 import { postSettledOutcome, recordRoutedDecision, runChatCommand, type RouteEventFields } from "./commandRun.js";
+import { renderConfirmationOffer } from "./reply.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { maxChildrenOf } from "./spawn.js";
 
@@ -1358,9 +1359,8 @@ async function answerHandBack(
     return { kind: "command", command: def.id, outcome };
   };
   const handBack = `${HAND_BACK_PREFIX} ${receipt}`;
-  const offer = io.offer?.bind(io);
   const store = deps.confirmations;
-  if (!offer || !store) return answer(handBack, "hand_back", () => io.reply(handBack));
+  if (!io.offer || !store) return answer(handBack, "hand_back", () => io.reply(handBack));
   const line = chatInvocation(def, input);
   if (redactSecrets(line) !== line) return answer(UNSHOWABLE_LINE, "hand_back", () => io.reply(UNSHOWABLE_LINE));
   const risk = def.annotations?.risk?.(input) ?? "";
@@ -1389,7 +1389,10 @@ async function answerHandBack(
   }
   const shown: ConfirmationOffer = { id: row.id, line, risk, footer, expiresAt: row.expiresAt };
   console.log(`[route] ${msg.threadKey} offered ${def.id} as confirmation ${row.id} (${footer})`);
-  return answer(renderOffer(shown), "offered", () => offer(shown));
+  // The Block Kit goes out through the reply stage's one offer renderer
+  // (record 0054): the same shape as before, one seam for the unit that gives
+  // a `request` refusal its question and Yes.
+  return answer(renderOffer(shown), "offered", () => renderConfirmationOffer(io, shown));
 }
 
 /** A bound input as the record may carry it: every string redacted and cut at

@@ -54,7 +54,15 @@ import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, ty
 import type { AdmissionDeps, DispatchFollowUp, RestartContext, ResumeContext, RunHooks } from "./admission.js";
 import type { AuthorizeDeps, GateCard, GateContext } from "./authorize.js";
 import { channelVisibilityOf, type RecordDeps } from "./record.js";
-import { attachmentSuffix, composeRunLabel, humanizeMessageText, isMrkdwnChannel, liveViewLink } from "./reply.js";
+import {
+  attachmentSuffix,
+  composeRunLabel,
+  humanizeMessageText,
+  isMrkdwnChannel,
+  liveViewLink,
+  REFUSAL_SENTENCES,
+} from "./reply.js";
+import { refusalOf } from "../refusal.js";
 import { contextMessageTexts, type TextTurn } from "./messages.js";
 import { ROUTED_CARD_FOOTER, routedLabel, routedPartLines, type RouteDecided } from "./route.js";
 import type { HarnessProcessDeps } from "./run.js";
@@ -833,7 +841,7 @@ export async function attachWorkspace(
   deps: ProvisionDeps,
   ctx: GateContext & GateCard & Omit<AttachContext, "threadKey">,
 ): Promise<WorkspaceAttach> {
-  const { msg, io, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach, stopSignal } = ctx;
+  const { msg, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach, stopSignal } = ctx;
   const { remainingMs } = ctx;
   let round: RoundWorkspace;
   try {
@@ -859,15 +867,11 @@ export async function attachWorkspace(
     // next message and re-attach binds it.
     if (err instanceof ResidentNeedsRefError) {
       const repo = repoCtx.repo;
-      await refuse("which_branch", async () => {
-        await card.done(
+      await refuse(refusalOf("which_branch", REFUSAL_SENTENCES.which_branch({ repo })), () =>
+        card.done(
           shell.close({ kind: "not_started", icon: "🌿", reason: "which branch?", ...closeLines(clock(), false) }),
-        );
-        await io.reply(
-          `🌿 Which branch of \`${repo}\` should this thread work on? ` +
-            `No branch is bound yet — reply naming one (e.g. "on main" or "on branch fix/login") and I'll pick it up from there.`,
-        );
-      });
+        ),
+      );
       return { kind: "refused", reason: "which_branch" };
     }
     // A resumed run's workspace is where its row says or nowhere (item 54):
