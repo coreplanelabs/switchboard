@@ -16,7 +16,7 @@
 // its seams: the file read, the instance store, the create and the status read.
 
 import { DEFAULT_GRANT, type Grant, type GrantSource } from "../budgets.js";
-import { unitTitleOf } from "../ship/contract.js";
+import { PLAN_MAX_CHARS, unitTitleOf } from "../ship/contract.js";
 import type { ShipEntry } from "../ship/preflight.js";
 import { shipTaskText, shipUnitText } from "../ship/preflight.js";
 import {
@@ -74,8 +74,15 @@ export interface HandOffInput {
 }
 
 export interface HandOffDeps {
-  /** The repository's file at a ref — the App's read. */
-  readFile: (repo: string, path: string, ref: string) => Promise<{ content: string }>;
+  /** The repository's file at a ref — the App's read, with the caller's bound
+   *  on its length (`ReadFileOptions`): the plan is read whole up to
+   *  `PLAN_MAX_CHARS`, and an answer still `truncated` is refused, never parsed. */
+  readFile: (
+    repo: string,
+    path: string,
+    ref: string,
+    opts?: { maxChars?: number },
+  ) => Promise<{ content: string; truncated?: boolean }>;
   instances: CoordinatorInstanceStore;
   /** The shim's `POST /admin/coordinator/instances` for the id. */
   create: (id: string) => Promise<CreateInstanceAnswer>;
@@ -209,7 +216,13 @@ async function plan(
   }
   let text: string;
   try {
-    text = (await deps.readFile(entry.repo, request.planPath, base)).content;
+    const file = await deps.readFile(entry.repo, request.planPath, base, { maxChars: PLAN_MAX_CHARS });
+    if (file.truncated === true)
+      return {
+        ok: false,
+        reply: `🚫 The plan \`${request.planPath}\` is longer than ${PLAN_MAX_CHARS.toLocaleString("en-US")} characters at \`${base}\` in ${entry.repo}; its later units would be lost, so nothing was run — split the plan.`,
+      };
+    text = file.content;
   } catch (err) {
     return {
       ok: false,

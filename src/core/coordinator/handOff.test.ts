@@ -3,6 +3,8 @@ import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 import { InMemoryCoordinatorInstanceStore, NullCoordinatorInstanceStore } from "./instanceStore.js";
 import { handOffToCoordinator, type HandOffDeps, type HandOffInput } from "./handOff.js";
 import type { CreateInstanceAnswer, InstanceStatusAnswer } from "./instancesRoute.js";
+import { MAX_FILE_CHARS } from "../../execution/githubApi.js";
+import { PLAN_MAX_CHARS } from "../ship/contract.js";
 
 // Feature: docs/reference/specs/agent-ship.md item 16 — every `agent:ship`
 // request the preflight admitted is handed to the plan runner: the bot writes
@@ -69,11 +71,14 @@ function harness(
   const statusAsked: string[] = [];
   const reads: Array<[string, string, string]> = [];
   const deps: HandOffDeps = {
-    readFile: async (repo, path, ref) => {
+    // The App's read as `GithubApi.readFile` answers it: clipped at the caller's
+    // bound (the tool clip when none is given), `truncated` saying so.
+    readFile: async (repo, path, ref, opts) => {
       reads.push([repo, path, ref]);
       const content = files[path];
       if (content === undefined) throw new Error(`HTTP 404 Not Found: ${path}`);
-      return { content };
+      const maxChars = opts?.maxChars ?? MAX_FILE_CHARS;
+      return content.length > maxChars ? { content: content.slice(0, maxChars), truncated: true } : { content };
     },
     instances,
     create: async (id) => {
@@ -618,5 +623,59 @@ describe("the grant — resolved once, written on the instance beside `merge` (d
     const d = harness();
     await handOffToCoordinator(d.deps, input());
     expect(await d.instances.get("plan-fixture")).toMatchObject({ grant: { renewals: 0 }, grantSource: "org" });
+  });
+});
+
+describe("handOffToCoordinator — the plan is read whole, never through the tool clip (item 16)", () => {
+  /** A plan whose last unit begins past the tool clip: filler units of prose
+   *  until the file is longer than `MAX_FILE_CHARS`, then the unit asked for. */
+  const filler = (n: number) =>
+    [
+      `### U${n}. Filler unit ${n}`,
+      "",
+      `- **Goal**: ${"the runner reads every unit of a long plan. ".repeat(60)}`,
+      "",
+      "---",
+      "",
+    ].join("\n");
+  const longPlan = (() => {
+    const parts = ["# Long - Plan", ""];
+    for (let n = 10; parts.join("\n").length <= MAX_FILE_CHARS; n++) parts.push(filler(n));
+    parts.push("### U99. The unit past the clip", "", "- **Goal**: lands.", "- **Dependencies**: none.", "");
+    return parts.join("\n");
+  })();
+
+  it("a unit whose heading lies past the tool clip is found: the seed asks for the plan up to PLAN_MAX_CHARS, so a plan longer than the clip keeps every unit", async () => {
+    expect(longPlan.length).toBeGreaterThan(MAX_FILE_CHARS);
+    const h = harness({ files: { "docs/plans/long.md": longPlan } });
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({ requestText: "in acme/api: plan docs/plans/long.md units U99" }),
+    );
+    expect(out.status).toBe("completed");
+    expect(out.reply).toContain("U99");
+    expect(await h.instances.get("plan-long")).not.toBeNull();
+    expect((await h.instances.listUnits("plan-long")).map((u) => u.unit)).toEqual(["U99"]);
+  });
+
+  it("a plan longer than PLAN_MAX_CHARS is refused naming the bound, with nothing created: its later units would be lost, and a short parse is never a plan", async () => {
+    const h = harness({ files: { "docs/plans/long.md": longPlan } });
+    const clipped: HandOffDeps = {
+      ...h.deps,
+      readFile: async (repo, path, ref, opts) => {
+        const file = await h.deps.readFile(repo, path, ref, opts);
+        return { content: file.content, truncated: true };
+      },
+    };
+    const out = await handOffToCoordinator(
+      clipped,
+      input({ requestText: "in acme/api: plan docs/plans/long.md units U99" }),
+    );
+    expect(out.status).toBe("aborted");
+    expect(out.reply).toBe(
+      `🚫 The plan \`docs/plans/long.md\` is longer than ${PLAN_MAX_CHARS.toLocaleString("en-US")} characters at \`main\` in acme/api; its later units would be lost, so nothing was run — split the plan.`,
+    );
+    expect(h.created).toEqual([]);
+    expect(await h.instances.get("plan-long")).toBeNull();
   });
 });

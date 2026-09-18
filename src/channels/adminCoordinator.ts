@@ -1652,9 +1652,10 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
 function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance): BriefReaders {
   const ref = instance.base ?? "main";
   return {
-    readRepoFile: async (path) => {
+    readRepoFile: async (path, opts) => {
       try {
-        return (await deps.github.readFile(instance.repo, path, ref)).content;
+        const file = await deps.github.readFile(instance.repo, path, ref, opts);
+        return { content: file.content, truncated: file.truncated };
       } catch {
         return undefined;
       }
