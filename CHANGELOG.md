@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.251.0](https://github.com/coreplanelabs/switchboard/compare/v1.250.0...v1.251.0) (2026-09-18)
+
+
+### Features
+
+* **config:** thread scope sets the intake gate's mode for one thread ([#1828](https://github.com/coreplanelabs/switchboard/issues/1828)) ([62b9d54](https://github.com/coreplanelabs/switchboard/commit/62b9d542aa8fcc63459d80eb6f7c2b8287dda5a4))
+* **core:** confirmation store reads a thread's pending offer by key ([#1816](https://github.com/coreplanelabs/switchboard/issues/1816)) ([0492104](https://github.com/coreplanelabs/switchboard/commit/0492104f5c78293b56a21462575a6be83014a052))
+* **core:** the bot is quiet by default; verbosity:verbose says more ([#1818](https://github.com/coreplanelabs/switchboard/issues/1818)) ([70f6406](https://github.com/coreplanelabs/switchboard/commit/70f64065fc14ce9a52e6cc67e8d72ee5e666d12b))
+* **harness:** pi's models.json carries the biller's compat words ([#1839](https://github.com/coreplanelabs/switchboard/issues/1839)) ([a3e8bf2](https://github.com/coreplanelabs/switchboard/commit/a3e8bf252420a8cdfc16988d8b006dca4cb7e83c))
+* **providers:** opencode speaks the aggregator's protocol, markers real ([#1819](https://github.com/coreplanelabs/switchboard/issues/1819)) ([8a9e3db](https://github.com/coreplanelabs/switchboard/commit/8a9e3db496e7f8fc277c60736e8a452b37ceb892))
+* **runs:** a ship parent claims the host key and files by its metadata ([#1823](https://github.com/coreplanelabs/switchboard/issues/1823)) ([d82a12d](https://github.com/coreplanelabs/switchboard/commit/d82a12d58b5325c7f9043dcd9c6a7a1b8a3e110b))
+* **ship:** the child contract names the fast gates before every push ([#1817](https://github.com/coreplanelabs/switchboard/issues/1817)) ([b7a17d8](https://github.com/coreplanelabs/switchboard/commit/b7a17d8501decd943fffb35b7e0e0091848c18aa))
+* **slack:** an unmentioned thread reply passes the intake gate first ([#1841](https://github.com/coreplanelabs/switchboard/issues/1841)) ([9a55d31](https://github.com/coreplanelabs/switchboard/commit/9a55d31d9b1f79f260c6ab3c8a21561a6d891de7))
+
+
+### Bug fixes
+
+* **coding:** the wind-down names the pull request its branch heads ([#1810](https://github.com/coreplanelabs/switchboard/issues/1810)) ([84401f7](https://github.com/coreplanelabs/switchboard/commit/84401f760fea1e07382ae0be006b0214362fb360))
+* **harness:** a finale over a posted write-up names the tool wait ([#1800](https://github.com/coreplanelabs/switchboard/issues/1800)) ([75ccac2](https://github.com/coreplanelabs/switchboard/commit/75ccac258ef99d2537b5c82bfff41f00bc68b131))
+* **runs:** store-only readers render a provisional run as unfinished ([#1791](https://github.com/coreplanelabs/switchboard/issues/1791)) ([3dc4ea5](https://github.com/coreplanelabs/switchboard/commit/3dc4ea58ad7a885f315e7a263c809e31a567a408))
+* **ship:** a re-issue naming the thread's own PR adopts it ([#1812](https://github.com/coreplanelabs/switchboard/issues/1812)) ([5cd4efe](https://github.com/coreplanelabs/switchboard/commit/5cd4efe1ec2ca082aaabc7cffab92f52caa59683))
+* **ship:** unit-end report links the child's write-up, never repeats it ([#1815](https://github.com/coreplanelabs/switchboard/issues/1815)) ([99e3a4c](https://github.com/coreplanelabs/switchboard/commit/99e3a4c4d4d387a10839448499847a2ca7a20993))
+* **web:** a slow hook import cannot time out the web test suite ([#1833](https://github.com/coreplanelabs/switchboard/issues/1833)) ([56e78a4](https://github.com/coreplanelabs/switchboard/commit/56e78a45996691c75b0850a0baf61ea62b9b3258))
+
+
+### Documentation
+
+* **docs:** the program plan marks U44 built ([#1829](https://github.com/coreplanelabs/switchboard/issues/1829)) ([e8c904e](https://github.com/coreplanelabs/switchboard/commit/e8c904e3e828664efa0a09bbb3f763b42e6a4197))
+
 ## [1.250.0](https://github.com/coreplanelabs/switchboard/compare/v1.249.1...v1.250.0) (2026-09-18)
 
 
