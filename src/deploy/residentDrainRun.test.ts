@@ -107,9 +107,23 @@ describe("the pure pieces", () => {
     expect(drainSkippedLine("resident", RESIDENT_DRAIN_TOKEN_ENV)).toContain(
       "RESIDENT_DRAIN_TOKEN is not set — waiting without a drain",
     );
-    expect(drainLiftedLine("resident", lifted, UNTIL)).toBe("[deploy:all] resident: fleet reopened");
-    expect(drainLiftedLine("resident", { error: "POST x failed: fetch failed" }, UNTIL)).toBe(
+    const stood = { drained: true, until: UNTIL };
+    expect(drainLiftedLine("resident", lifted, stood)).toBe("[deploy:all] resident: fleet reopened");
+    expect(drainLiftedLine("resident", { error: "POST x failed: fetch failed" }, stood)).toBe(
       `[deploy:all] resident: fleet NOT reopened (POST x failed: fetch failed) — it reopens by itself at ${UNTIL}; \`POST /undrain\` with the drain or admin bearer reopens it now`,
+    );
+  });
+
+  it("the lift line after a drain the runner never saw land tells the truth: cleared → it had landed; not cleared → nothing stood; a failed lift names the doubt, never a drain that ends", () => {
+    const unconfirmed = { drained: false, until: undefined };
+    expect(drainLiftedLine("resident", lifted, unconfirmed)).toBe(
+      "[deploy:all] resident: fleet reopened — the drain had landed although its answer was lost",
+    );
+    expect(drainLiftedLine("resident", { status: 200, body: { draining: null, cleared: false } }, unconfirmed)).toBe(
+      "[deploy:all] resident: no drain stood to lift — the fleet was never closed",
+    );
+    expect(drainLiftedLine("resident", { status: 401, body: { error: "unauthorized" } }, unconfirmed)).toBe(
+      "[deploy:all] resident: the lift answered HTTP 401: unauthorized and no drain was confirmed — the fleet should be open; `GET /residents` says (`draining`), and `POST /undrain` with the drain or admin bearer reopens it if not",
     );
   });
 });
@@ -151,7 +165,7 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(r.ok).toBe(true);
     expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "postJson"]);
     expect(h.plain()[0]).toContain("could NOT be drained (HTTP 401: unauthorized)");
-    expect(h.plain().at(-1)).toContain("fleet NOT reopened (HTTP 401: unauthorized)");
+    expect(h.plain().at(-1)).toContain("the lift answered HTTP 401: unauthorized and no drain was confirmed");
   });
 
   it("a /drain whose answer was lost (the transport failed after the record may have landed) waits the undrained budget and still lifts the drain after", async () => {
@@ -160,7 +174,9 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(r.ok).toBe(true);
     expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "exec", "postJson"]);
     expect(h.plain().some((l) => l.includes("(30 min left)"))).toBe(true);
-    expect(h.plain().at(-1)).toBe("[deploy:all] resident: fleet reopened");
+    expect(h.plain().at(-1)).toBe(
+      "[deploy:all] resident: fleet reopened — the drain had landed although its answer was lost",
+    );
   });
 
   it("refusing past the drained budget fails by name with the drained suffix — and the fleet is still reopened", async () => {
