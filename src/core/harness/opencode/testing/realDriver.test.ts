@@ -234,6 +234,15 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
     const toolResults = events.filter((e): e is Extract<RunEvent, { type: "tool_result" }> => e.type === "tool_result");
     expect(toolResults.some((r) => r.tool === "bash" && r.ok)).toBe(true); // echo hi ran
     expect(toolResults.some((r) => r.tool === "bash" && !r.ok)).toBe(true); // git push refused
+    // The record clause's naming notes: every event the real server streamed
+    // for these calls — the `shell` tool's own `shell.created`/`shell.exited`
+    // among them — has a disposition that is not a `harness_error`. A kind the
+    // table gets wrong shows here as its note's text (the live flood was two
+    // notes per shell call).
+    const harnessErrors = events.filter(
+      (e): e is Extract<RunEvent, { type: "run_note" }> => e.type === "run_note" && e.kind === "harness_error",
+    );
+    expect(harnessErrors.map((n) => n.summary)).toEqual([]);
     // The record clause: the run's events are the record's vocabulary.
     for (const e of events)
       expect(["tool_call", "tool_result", "run_note", "assistant", "input", "lease"]).toContain(e.type);
