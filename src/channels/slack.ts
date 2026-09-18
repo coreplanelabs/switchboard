@@ -9,6 +9,17 @@ import {
 } from "@slack/bolt";
 import { dispatch, dispatchClick, type CoreDeps } from "../core/dispatcher.js";
 import { chatActorOf } from "../core/authz/actor.js";
+import {
+  decideIntake as coreDecideIntake,
+  degradedIntakeLine,
+  type IntakeDeps,
+  type IntakeFacts,
+  type IntakeTurn,
+} from "../core/intake.js";
+import { readThread, requesterOf } from "../core/dispatch/thread.js";
+import type { RunView, RunsService } from "../core/runsService.js";
+import type { ConfirmationStore } from "../core/confirmations.js";
+import type { IntakeMode } from "../config/validate.js";
 import { renderOffer } from "../core/confirmations.js";
 import { type SlackThreadMessage, stripAppFooter, threadTurns } from "./slack/threadTurns.js";
 import {
@@ -134,7 +145,7 @@ const LOADING_PHRASES = [
   "is clearing the static…",
 ];
 
-export function createSlackApp(deps: CoreDeps) {
+export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
   const clock = deps.clock ?? systemClock;
   // The receiver is built explicitly (rather than `socketMode: true`) so the
   // adapter can listen to its websocket lifecycle: every `connected` — first
@@ -230,7 +241,14 @@ export function createSlackApp(deps: CoreDeps) {
                   files: m.files as SlackFile[] | undefined,
                   botUserId: id,
                   caughtUp: true,
+                  // Truthful label: the scan replays mentions AND plain thread
+                  // replies in bot-participating threads (item 7,
+                  // `findMissed`). The gate deliberately skips caught-up
+                  // replays for now — see `receiveSlackMessage` — until the
+                  // catch-up reads receipts and hands `intakeDecided` over.
+                  trigger: m.text.includes(`<@${id}>`) ? "mention" : "thread-follow-up",
                 },
+                intake,
               ).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
             },
           });
@@ -273,7 +291,9 @@ export function createSlackApp(deps: CoreDeps) {
         threadTs: event.thread_ts ?? event.ts,
         files: (event as { files?: SlackFile[] }).files,
         botUserId,
+        trigger: "mention",
       },
+      intake,
     );
   });
 
@@ -319,7 +339,9 @@ export function createSlackApp(deps: CoreDeps) {
         files: m.files,
         botUserId,
         thread,
+        trigger: decision === "handle-if-bot-in-thread" ? "thread-follow-up" : "dm",
       },
+      intake,
     );
   });
 
@@ -364,6 +386,15 @@ interface SlackEvent {
   /** Set when the reconnect catch-up replayed this message (it arrived while
    *  the socket was down); the thread is told how late the pickup was. */
   caughtUp?: true;
+  /** What fired this event: a mention, a DM, or an unmentioned thread
+   *  follow-up — the one trigger the intake gate reads (record 0058). Absent
+   *  on an IO built without a triggering event (a resume, a click, a child
+   *  thread's lead), which never passes through `receiveSlackMessage`. */
+  trigger?: "mention" | "dm" | "thread-follow-up";
+  /** Set when a stored receipt already decided this message; the gate never
+   *  decides it twice. Nothing sets it yet — the catch-up's receipt read (a
+   *  later unit) will, lifting the gate's caught-up bypass. */
+  intakeDecided?: true;
 }
 
 /** The one-line thread note a replayed message gets, so a caller who waited
@@ -378,7 +409,12 @@ export function catchUpDelayNote(messageTs: string, nowMs: number): string {
   return `⏱ Picked up ${late} after it was posted: the bot was restarting (a deploy or platform move) and Slack does not queue events while it is down. Handling it now — no need to re-send.`;
 }
 
-async function handle(deps: CoreDeps, { client, statusClient }: SlackClients, ev: SlackEvent): Promise<void> {
+async function handle(
+  deps: CoreDeps,
+  { client, statusClient }: SlackClients,
+  ev: SlackEvent,
+  intake?: SlackIntakeGate,
+): Promise<void> {
   // The request's root (docs/reference/specs/tracing.md): our process saw the message NOW,
   // before the redelivery guard — a dropped redelivery is a root with one
   // child and no run. Everything the adapter does before `dispatch()` is one
@@ -400,6 +436,7 @@ async function handle(deps: CoreDeps, { client, statusClient }: SlackClients, ev
             deps.config.config.artifacts?.inbound?.maxBytesPerMessage ?? ARTIFACT_DEFAULTS.maxBytesPerMessage,
         },
         relayAppsOf(deps),
+        intake,
       ),
     );
     if (!received) {
@@ -408,9 +445,11 @@ async function handle(deps: CoreDeps, { client, statusClient }: SlackClients, ev
     }
     await dispatch(
       deps,
-      { ...received, receivedAt, originAt: tsMs(ev.ts) },
+      { ...received.message, receivedAt, originAt: tsMs(ev.ts) },
       new SlackIO(client, ev, { statusClient }),
-      { trace },
+      // The runs page the gate read rides on (record 0058, R2): the dispatcher
+      // uses it in place of its own thread read, one page per reply.
+      { trace, ...(received.thread ? { thread: received.thread } : {}) },
     );
   } finally {
     // Reached un-ended only when the receive itself threw (a download, a lookup):
@@ -437,13 +476,61 @@ function relayAppsOf(deps: CoreDeps): readonly string[] {
   return deps.config.config.slack?.relayApps ?? [];
 }
 
-async function receiveSlackMessage(
+/** What the thread-reply intake gate runs on (record 0058; docs/reference/specs/
+ *  slack-channel.md item 15), wired by the composition root (`wireIntakeGate`
+ *  in src/index.ts) and handed whole by tests: the mode resolver
+ *  (`config.intakeModeFor`), the verdict seam (the core's `decideIntake`,
+ *  injectable so tests script it), what it runs on (`deps`: the fast model
+ *  behind the router's seam, the receipt ledger or null, the clock), the
+ *  receipt row's model ref and process generation, and the two best-effort
+ *  reads the facts come from — the runs service and the confirmation store. */
+export interface SlackIntakeGate {
+  intakeModeFor(threadKey: string, userId: string | undefined, channelId: string): IntakeMode;
+  decideIntake: typeof coreDecideIntake;
+  deps: IntakeDeps;
+  /** The resolved `<provider>/<model>` ref the verdict runs on, for the receipt row. */
+  modelRef: string;
+  /** The deciding process's generation counter, for the receipt row. */
+  gen: number;
+  /** The thread's runs page: the live-run fact, the requester, and the page
+   *  handed on to `dispatch()` so it is read once per reply (R2). */
+  runs?: Pick<RunsService, "listRuns">;
+  /** The pending confirmation in this thread, for the facts. */
+  confirmations?: Pick<ConfirmationStore, "pendingByThread">;
+}
+
+/** The gate as production wires it: the core's `decideIntake` bound in, and
+ *  the degraded startup line printed exactly once when the process runs
+ *  without a receipt ledger — verdicts are still made, addressed replies
+ *  still run (record 0058: degrade, never fall silent). */
+export function wireIntakeGate(gate: Omit<SlackIntakeGate, "decideIntake">): SlackIntakeGate {
+  if (gate.deps.ledger === null) console.warn(degradedIntakeLine());
+  return { decideIntake: coreDecideIntake, ...gate };
+}
+
+/** What the adapter hands `dispatch()`: the message, and — when the gate read
+ *  it — the thread's runs page, used in place of the dispatcher's own read. */
+export interface ReceivedSlackMessage {
+  message: Omit<IncomingMessage, "receivedAt" | "originAt">;
+  thread?: RunView[];
+}
+
+/** How many of the thread's newest turns the verdict sees (record 0058). */
+const INTAKE_TURNS = 12;
+/** The page `threadIfBotInIt` fetches; a page this full may not be the thread's end. */
+const THREAD_PAGE_LIMIT = 50;
+/** How many more `conversations.replies` pages the gate follows toward a long
+ *  thread's end (replies page oldest-first) before judging over what it has. */
+const INTAKE_TAIL_PAGES = 5;
+
+export async function receiveSlackMessage(
   client: SlackClient,
   ev: SlackEvent,
   span: Span,
   policy: StagingPolicy,
   relayApps: readonly string[],
-): Promise<Omit<IncomingMessage, "receivedAt" | "originAt"> | undefined> {
+  intake?: SlackIntakeGate,
+): Promise<ReceivedSlackMessage | undefined> {
   // Redelivery guard: claim (channel, ts) and drop the event when it
   // demonstrably ran already — in this process, or (for a stale delivery)
   // visibly answered in its own thread. Before the ack: a dropped redelivery
@@ -455,6 +542,33 @@ async function receiveSlackMessage(
     return undefined;
   }
   span.setAttrs({ dedupe: "fresh", caughtUp: ev.caughtUp === true, files: ev.files?.length ?? 0 });
+  // The gate before the 👀 (record 0058; item 15): an unmentioned reply in a
+  // bot thread gets its verdict after the guard's claim and before anything
+  // visible or costly — the ack, the note, the downloads — so `silent`
+  // produces nothing and downloads nothing. Only this trigger passes through
+  // it: a mention, a DM and a top-level post are addressed by construction,
+  // and a message a stored receipt already decided (`intakeDecided`) is never
+  // decided twice. A caught-up replay bypasses the gate for now, deliberately:
+  // the catch-up does not read receipts yet, and deciding a replay fresh would
+  // refuse re-running an addressed reply whose run died (its receipt reads as
+  // another caller's row) — the silent drop the catch-up exists to prevent.
+  // The catch-up's receipt read wires `intakeDecided` and lifts this bypass.
+  // `always` never reaches intake and never touches the ledger: today's path
+  // byte for byte.
+  let threadRuns: RunView[] | undefined;
+  if (intake && ev.trigger === "thread-follow-up" && !ev.intakeDecided && ev.caughtUp !== true) {
+    const threadKey = `${PLATFORM}:${ev.channel}:${ev.threadTs}`;
+    const mode = intake.intakeModeFor(
+      threadKey,
+      ev.user !== undefined ? `${PLATFORM}:${ev.user}` : undefined,
+      `${PLATFORM}:${ev.channel}`,
+    );
+    if (mode !== "always") {
+      const gated = await gateThreadReply(client, ev, span, intake, mode, threadKey);
+      if (!gated.proceed) return undefined;
+      threadRuns = gated.thread;
+    }
+  }
   // Immediate receipt: react to the triggering message so the sender knows it
   // was accepted, before any model/tool work starts. Fire-and-forget — a
   // missing reactions:write scope (or a re-run reacting twice) must never
@@ -521,20 +635,143 @@ async function receiveSlackMessage(
       ? `\n\n(Note: ${skipped.length} attachment(s) could not be passed through: ${skipped.join(", ")})`
       : "";
   return {
-    channelId: `${PLATFORM}:${ev.channel}`,
-    userId: requester.userId,
-    ...(requester.relayedBy !== undefined ? { relayedBy: requester.relayedBy } : {}),
-    ...(requester.postedBy !== undefined ? { postedBy: requester.postedBy } : {}),
-    threadKey: `${PLATFORM}:${ev.channel}:${ev.threadTs}`,
-    text: ev.text + note,
-    messageId: ev.ts,
-    channelName,
-    userName,
-    sourceUrl: team ? slackPermalink(team, ev.channel, ev.ts, ev.threadTs) : undefined,
-    images: images.length > 0 ? images : undefined,
-    documents: documents.length > 0 ? documents : undefined,
-    ...(staged.length > 0 ? { staged } : {}),
+    message: {
+      channelId: `${PLATFORM}:${ev.channel}`,
+      userId: requester.userId,
+      ...(requester.relayedBy !== undefined ? { relayedBy: requester.relayedBy } : {}),
+      ...(requester.postedBy !== undefined ? { postedBy: requester.postedBy } : {}),
+      threadKey: `${PLATFORM}:${ev.channel}:${ev.threadTs}`,
+      text: ev.text + note,
+      messageId: ev.ts,
+      channelName,
+      userName,
+      sourceUrl: team ? slackPermalink(team, ev.channel, ev.ts, ev.threadTs) : undefined,
+      images: images.length > 0 ? images : undefined,
+      documents: documents.length > 0 ? documents : undefined,
+      ...(staged.length > 0 ? { staged } : {}),
+    },
+    ...(threadRuns ? { thread: threadRuns } : {}),
   };
+}
+
+/**
+ * The gate's one decision for an unmentioned thread reply in `mention` or
+ * `classify` (record 0058; item 15). Gathers what the verdict sees — the
+ * thread's newest turns labelled by user id, the facts only code can compute —
+ * calls the seam, stamps the span's three closed keys (`intake`,
+ * `intakeSource`, `intakeReceipt`; the reason is free text and stays on the
+ * receipt row and the log line), and answers whether the reply proceeds:
+ * only an `addressed` verdict whose receipt this caller holds — `inserted`, or
+ * the degraded `failed`/`absent` — does; a row another caller stored means the
+ * message is already someone's, whatever the verdict reads.
+ */
+async function gateThreadReply(
+  client: SlackClient,
+  ev: SlackEvent,
+  span: Span,
+  intake: SlackIntakeGate,
+  mode: "mention" | "classify",
+  threadKey: string,
+): Promise<{ proceed: boolean; thread?: RunView[] }> {
+  const now = intake.deps.now();
+  // The verdict sees the thread's NEWEST turns: the page `threadIfBotInIt`
+  // already fetched covers a thread of 50 replies or fewer; a full page may
+  // not be the thread's end — Slack pages replies OLDEST-first (`fetchReplies`
+  // in slackCatchUp.ts pages whole threads for the same reason), so a
+  // `latest`-bounded page would return the thread's head, not its tail. Cursor
+  // forward from the prefetched page's end instead, bounded pages; the
+  // `.slice(-INTAKE_TURNS)` below keeps the tail. Best-effort: a failed or
+  // truncated fetch judges over what is in hand.
+  let page = ev.thread ?? [];
+  const lastTs = page[page.length - 1]?.ts;
+  if (page.length >= THREAD_PAGE_LIMIT && lastTs !== undefined) {
+    try {
+      const seen = new Set(page.map((m) => m.ts));
+      let cursor: string | undefined;
+      for (let p = 0; p < INTAKE_TAIL_PAGES; p++) {
+        const res = await client.conversations.replies({
+          channel: ev.channel,
+          ts: ev.threadTs,
+          limit: THREAD_PAGE_LIMIT,
+          ...(cursor !== undefined ? { cursor } : { oldest: lastTs, inclusive: false }),
+        });
+        const fresh = ((res.messages ?? []) as SlackThreadMessage[]).filter((m) => !seen.has(m.ts));
+        for (const m of fresh) seen.add(m.ts);
+        page = [...page, ...fresh];
+        cursor = res.response_metadata?.next_cursor || undefined;
+        if (!cursor) break;
+      }
+    } catch {
+      // the tail is an improvement, not a requirement
+    }
+  }
+  // The two store reads only the adapter can ask for the facts — the runs page
+  // (read ONCE: it rides out to dispatch, R2) and the pending confirmation —
+  // both best-effort: a failed read leaves the fact empty, never blocks the verdict.
+  const [thread, pending] = await Promise.all([
+    intake.runs ? readThread(intake.runs, threadKey) : Promise.resolve(undefined),
+    intake.confirmations
+      ? intake.confirmations.pendingByThread(threadKey).catch(() => undefined)
+      : Promise.resolve(undefined),
+  ]);
+  const requester = thread ? requesterOf(thread) : undefined;
+  // The labeller compares each turn's `user` to the bot's own user id (no role
+  // change in `threadTurns`): the bot's posts carry it, a relay app's post
+  // carries only the app's bot_id and stays a person's turn.
+  const kept = threadTurns(page, { skipTs: ev.ts, botUserId: ev.botUserId }).slice(-INTAKE_TURNS);
+  const turns: IntakeTurn[] = kept.map((t) => ({
+    role:
+      t.user !== undefined && t.user === ev.botUserId
+        ? "bot"
+        : t.user !== undefined && `${PLATFORM}:${t.user}` === requester
+          ? "requester"
+          : "person",
+    text: t.text,
+  }));
+  const lastBotTurn = [...kept].reverse().find((t) => t.user !== undefined && t.user === ev.botUserId);
+  const live = thread?.find((r) => !r.finished);
+  // The parent is on the prefetched page (it is the page's first message);
+  // the newest-window fetch above may not carry it, so ask the original.
+  const parent = (ev.thread ?? page).find((m) => m.ts === ev.threadTs);
+  const mentioned = [...(ev.rawText ?? ev.text).matchAll(/<@([A-Z0-9]+)>/g)].map((m) => m[1]);
+  const facts: IntakeFacts = {
+    ...(live
+      ? {
+          liveRun: {
+            agent: live.agent ?? "unknown",
+            secondsInFlight: Math.max(0, Math.round((now - live.startedAt) / 1000)),
+          },
+        }
+      : {}),
+    replierIsRequester: requester !== undefined && ev.user !== undefined && `${PLATFORM}:${ev.user}` === requester,
+    ...(lastBotTurn?.at !== undefined
+      ? { botLastSpokeSeconds: Math.max(0, Math.round((now - lastBotTurn.at) / 1000)) }
+      : {}),
+    mentionsOther: mentioned.some((id) => id !== ev.botUserId),
+    ...(pending !== undefined ? { pendingConfirmation: pending.message.userId } : {}),
+    threadStartedByBot: parent !== undefined && parent.user !== undefined && parent.user === ev.botUserId,
+  };
+  const decision = await intake.decideIntake(
+    {
+      key: `${ev.channel}:${ev.ts}`,
+      threadKey,
+      mode,
+      model: intake.modelRef,
+      gen: intake.gen,
+      message: ev.text,
+      turns,
+      facts,
+    },
+    intake.deps,
+  );
+  span.setAttrs({ intake: decision.verdict, intakeSource: decision.source, intakeReceipt: decision.receipt });
+  if (decision.verdict !== "addressed" || decision.receipt === "existing") {
+    console.log(
+      `[intake] ${ev.channel}:${ev.ts} ${decision.verdict} (${decision.source}, receipt ${decision.receipt}): ${decision.reason}`,
+    );
+    return { proceed: false };
+  }
+  return { proceed: true, ...(thread ? { thread } : {}) };
 }
 
 /** Exported for tests. */

@@ -6876,6 +6876,27 @@ channels:
     expect(sys).not.toMatch(/this message's/i);
   });
 
+  // Record 0058 (R2): a channel adapter whose intake gate already read the
+  // thread's runs page hands it on, so the eight-run page is read once per reply.
+  it("DispatchOptions.thread is used in place of the thread read: the handed page yields the sticky agent and the runs service is not asked again", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    await threadWithFinishedRun(deps, "review");
+    const service = deps.runs!;
+    const page = (
+      await service.listRuns({ status: "all", visibleTo: { kind: "all" }, threadKey: "slack:CX:1.0", limit: 8 })
+    ).runs;
+    const listRuns = vi.fn(service.listRuns.bind(service));
+    deps.runs = { ...service, listRuns };
+    const history: HistoryItem[] = [
+      { role: "user", text: "look at this" },
+      { role: "assistant", text: "looked" },
+    ];
+    await dispatch(deps, msg("and now?"), fakeIO(history).io, { thread: page });
+    expect(listRuns.mock.calls.filter((c) => c[0]?.threadKey === "slack:CX:1.0")).toHaveLength(0);
+    expect(provider.requests[0].system).toContain("agent `review`"); // sticky by the handed page's transcript
+  });
+
   it("channel-config gating is stated per the invoking user", async () => {
     const gatedYaml = YAML_FIXTURE; // config:write is never a baseline: gated unless granted
     const user = capturingProvider();

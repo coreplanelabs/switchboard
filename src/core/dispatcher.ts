@@ -101,7 +101,7 @@ import { ownerOf, readThread, stickyAgentOf, threadPrOf, threadRouteOf } from ".
 import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
-import { createRunsService, type RunsService } from "./runsService.js";
+import { createRunsService, type RunsService, type RunView } from "./runsService.js";
 import { unitKeyOf, unitNudgeEventType, type CoordinatorTag, type CoordinatorUnit } from "./coordinator/contract.js";
 import type { DispatchOutcome } from "./dispatch/outcome.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
@@ -280,6 +280,11 @@ export function activeRunCount(): number {
 export interface DispatchOptions {
   resume?: ResumeContext;
   restart?: RestartContext;
+  /** Set by a channel adapter whose intake gate already read the thread's runs
+   *  page (record 0058, R2; docs/reference/specs/slack-channel.md item 15):
+   *  used in place of `readThread`, so the page is read once per reply.
+   *  Absent for every other request. */
+  thread?: RunView[];
   /** The request's root, started by the channel adapter at receipt
    *  (docs/reference/specs/tracing.md). Absent (tests, a caller without one) → the
    *  dispatcher starts its own at entry. Ended in the outermost finally. */
@@ -561,9 +566,10 @@ export async function dispatch(
     // resolved, the previous run its seed continues from (session-log item 9).
     const runsService = deps.runs ?? createRunsService({ registry, store: deps.runStore });
     const thread =
-      opts.parent || opts.coordinator || resume || restart || history.length === 0
+      opts.thread ??
+      (opts.parent || opts.coordinator || resume || restart || history.length === 0
         ? undefined
-        : await readThread(runsService, msg.threadKey);
+        : await readThread(runsService, msg.threadKey));
     const lineage = lineageOf(thread?.[0]);
     const parent: ParentRun | undefined = opts.parent ?? (lineage ? lineageParent(lineage) : undefined);
     const tellLineage = async (heard: LineageHeard) => {

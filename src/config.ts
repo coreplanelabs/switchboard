@@ -978,13 +978,14 @@ export class ConfigStore {
    * The thread-reply intake gate's mode for one reply (routing-and-config
    * item 27, record 0058): thread scope > user scope > channel scope > the
    * top-level `intake` block's default (`defaultIntakeMode`, `classify` when
-   * unset). The user scope is the replier's. The one reader of the thread
+   * unset). The user scope is the replier's — skipped when the event carries
+   * no user, never resolved for a made-up id. The one reader of the thread
    * layer — no other setting resolves through it.
    */
-  intakeModeFor(threadKey: string, userId: string, channelId: string): IntakeMode {
+  intakeModeFor(threadKey: string, userId: string | undefined, channelId: string): IntakeMode {
     return (
       this.threadScope(threadKey).intake?.threadReplies ??
-      this.userScope(userId).intake?.threadReplies ??
+      (userId !== undefined ? this.userScope(userId).intake?.threadReplies : undefined) ??
       this.channelScope(channelId).intake?.threadReplies ??
       defaultIntakeMode(this.config)
     );
