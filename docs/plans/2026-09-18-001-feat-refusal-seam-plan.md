@@ -16,7 +16,7 @@ extends: ../decisions/0054-a-refusal-the-person-caused-is-one-question-with-a-be
 
 - **Objective**: Build [record 0054](../decisions/0054-a-refusal-the-person-caused-is-one-question-with-a-best-guess.md): every refusal the bot makes is one `Refusal` object with a cause, produced from every layer and rendered in one place, fenced by a lint rule so a new stage cannot write its own; a refusal the person's words caused becomes one question carrying the bot's best guess, answered by a Yes button or by the next typed message; a write runs only from a button that shows its exact line.
 - **Authority**: record 0054 (proposed; this plan is the artifact its acceptance is judged on) over [record 0044](../decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md) (the confirmation store, the button, the rule that a write is confirmed in proportion to its blast radius, all reused, none changed), [record 0039](../decisions/0039-the-front-door-writes-nothing-from-prose-and-never-routes-twice.md) as amended (nothing here writes from prose) and [record 0036](../decisions/0036-one-front-door-the-router-offers-every-command-and-ship.md) (the door). The living specs named in each unit are updated in the same pull request.
-- **Execution profile**: eight units in two cuts, each one pull request through the review loop, in dependency order. Tests first in every unit. U1 to U4 are the **seam cut**: U1 and U2 change no sentence a person reads; U3 is the first visible change and fixes the trace; U4 adds the Yes button. U5 to U8 are the rest of the bundle: U5 measures the router on the answer task before U6 gives it the task; U7 lets the router ask; U8 finishes the guess sites. The units are seedable to the plan runner one at a time (`agent:ship in <owner/repo>: plan <this path> units U<n>`), which holds the merge grant on a plan branch; a unit run by a person merges under `merge: person`.
+- **Execution profile**: nine units in two cuts, each one pull request through the review loop, in dependency order. Tests first in every unit. U1 to U4 are the **seam cut**: U1 and U2 change no sentence a person reads; U3 is the first visible change and fixes the trace; U4 adds the Yes button. U9 and U5 to U8 are the rest of the bundle: U9 gives every repository a README-derived card so the thread knows its repositories by what they are; U5 measures the router on the answer task before U6 gives it the task; U7 lets the router ask; U8 finishes the guess sites. The units are seedable to the plan runner one at a time (`agent:ship in <owner/repo>: plan <this path> units U<n>`), which holds the merge grant on a plan branch; a unit run by a person merges under `merge: person`.
 - **Stop conditions**: a unit that cannot pass `npm run verify` within its listed files hands back a deviation. Nothing here adds a Worker, a table or a credential; the one store change is a new row kind in an existing table. A unit stops and asks if it would: run a write from anything but a button showing the exact line (a typed yes, a router answer, a guess); change a sentence a person reads during U1 or U2 other than by moving it into the renderer unchanged; introduce a word the person must type to answer; let a `system` refusal carry a Yes; or run a proposal as anyone but the person whose message it corrects.
 
 ---
@@ -25,7 +25,7 @@ extends: ../decisions/0054-a-refusal-the-person-caused-is-one-question-with-a-be
 
 ### Summary
 
-The bot refuses through 19 mechanisms across 71 inventory rows as the record groups them, or 24 producer shapes across 155 sites when the appendix counts one row per site, and one typo in a repository name on 2026-09-17 produced two dead ends although two lists in the codebase named the right repository. Record 0054 decides one seam for every refusal, a cause on each, a best guess from a list the bot holds, and two ways to say yes. This plan lands the decision in eight units: the seam and its count, the fence and the migration, the repository guesses, the Yes button, the replay row that measures the router reading answers, the words path, the router's own question, and the remaining guess sites. Cut after U4 and the trace is fixed with the button alone; the words and the router's question ship only behind their replay rows.
+The bot refuses through 19 mechanisms across 71 inventory rows as the record groups them, or 24 producer shapes across 155 sites when the appendix counts one row per site, and one typo in a repository name on 2026-09-17 produced two dead ends although two lists in the codebase named the right repository. Record 0054 decides one seam for every refusal, a cause on each, a best guess from a list the bot holds, and two ways to say yes. This plan lands the decision in nine units: the seam and its count, the fence and the migration, the repository guesses, the Yes button, the replay row that measures the router reading answers, the words path, the router's own question, the remaining guess sites, and the repository cards the maintainer added on 2026-09-18 so the thread knows its repositories by what they are. Cut after U4 and the trace is fixed with the button alone; the words and the router's question ship only behind their replay rows.
 
 ### Problem Frame
 
@@ -42,11 +42,12 @@ The maintainer asked that this plan be checked against the puck research and aga
 | git `help.autocorrect`, Clang's typo correction, the Rust compiler's suggestions: a unique best candidate within an edit budget that scales with the length of what was typed; no suggestion when two tie | Deterministic "did you mean" over a known list | U3's helper: the edit budget is a third of the typed name's length, at least one and at most two edits, or a unique prefix; two candidates within budget list both and propose none. The record's open question 1 (prefix or two edits) is answered this way. |
 | Python's `difflib.get_close_matches`: at most three suggestions above a similarity cutoff | The list when there is no single guess | U3: a question without a guess lists at most three candidates. |
 | Rasa's two-stage fallback: below the confidence threshold, ask "did you mean X?" with affirm and deny buttons; on deny ask for a rephrase; after that fall back for good | A bounded clarification loop | U6: at most two questions per thread without an accept; the third render is record 0039's hand-back line with no question. Without this bound an `amend` loop never ends. |
-| MCP elicitation (`elicitation/create`): a server asks the client a structured question mid-call and gets `accept`, `decline` or `cancel` with content | The wire shape of a question and its answer | U6's `answer` tool uses `accept` and `decline` in MCP's sense; `amend` is `accept` with changed content. Rendering a `request` refusal as an elicitation on the MCP ingress is named as a later unit (U9), not built here. |
-| RFC 9457 Problem Details (`type`, `title`, `detail`, `instance`) and gRPC's status classes (`INVALID_ARGUMENT`, `PERMISSION_DENIED`, `UNAVAILABLE`) | One machine-readable error object with a class | The `Refusal` fields map onto it (`code` as `type`, `text` as `detail`, `wayForward` as an extension) and the three causes onto the three status classes. The HTTP and MCP surfaces keep their shapes in this plan (U9 later). |
+| MCP elicitation (`elicitation/create`): a server asks the client a structured question mid-call and gets `accept`, `decline` or `cancel` with content | The wire shape of a question and its answer | U6's `answer` tool uses `accept` and `decline` in MCP's sense; `amend` is `accept` with changed content. Rendering a `request` refusal as an elicitation on the MCP ingress is named as a later item (U10), not built here. |
+| RFC 9457 Problem Details (`type`, `title`, `detail`, `instance`) and gRPC's status classes (`INVALID_ARGUMENT`, `PERMISSION_DENIED`, `UNAVAILABLE`) | One machine-readable error object with a class | The `Refusal` fields map onto it (`code` as `type`, `text` as `detail`, `wayForward` as an extension) and the three causes onto the three status classes. The HTTP and MCP surfaces keep their shapes in this plan (U10, later). |
 | GitHub Copilot CLI and Amazon Q CLI: a suggested command runs only after "Execute?" is answered; Alexa's dialog model confirms high-risk intents before fulfilment | A suggestion never runs itself | Confirms record 0044 and success criterion 3: a write runs only from a button showing its exact line. |
 | Dialogflow contexts with a lifespan; Alexa's per-session dialog state | A pending question expires | Confirms the record: the row lives ten minutes, the words path takes only the newest bot turn. |
 | Architecture tests (ArchUnit, dependency-cruiser) and this repository's `no-raw-env` lint rule | A structural rule that fails the build by file and line | U2's fence is written the same way as `no-raw-env`, as a rule over syntax in named directories, never over sentences. |
+| Alexa's entity resolution: a slot type carries each canonical value with its synonyms, so "the infra repo" resolves to one id before the skill runs | Resolving a thing by what it is called, not only by its exact name | U9's repository card: the README's title, first paragraph and headings are the synonyms, built when the resident is provisioned or refreshed and carried into the router's turn, never fetched per request (the maintainer's addition of 2026-09-18). |
 
 ### Requirements
 
@@ -93,6 +94,14 @@ The maintainer asked that this plan be checked against the puck research and aga
 
 - R22. Presets at the `agent:` directive and the agent gate, MCP server names in scope, command and option names in the grammar, efforts, providers, cost groups, memory ids, plan paths, ops and refs each get a guess through the one helper over the list the site holds.
 
+**The repository cards (the maintainer's addition of 2026-09-18)**
+
+- R24. A **repository card** is `{ slug, sentence, keywords, sha }`: the sentence is the README's title and first paragraph capped at 160 characters, the keywords are up to ten of the README's headings, the sha is the default-branch commit the card was read at. The resident Worker builds it from the mirror's README at the two moments that already write `RepoFacts`, onboarding provisioning and the default-branch refresh, stores it beside the facts, and returns it on the `/residents` index. No card is built on a request path, and no new timer or cycle is added.
+- R25. A repository the installation can see but no resident holds has a card whose sentence is GitHub's `description` from `listRepos()` and no keywords; the near-match and the installation-list read of U3 use it as evidence.
+- R26. The router's user turn carries, after the thread's repository line, the cards of the repositories the thread has touched and then the residents' cards, capped at forty cards of two hundred characters, oldest residents dropped first. When the ask names no repository and its subject matches one card, the router may bind that repository; the bind is a bind like any other under records 0039 and 0044: a read runs with its receipt naming the repository, a write meets the offer, and a doubt is U7's `clarify` with the candidate cards as the question's list.
+- R27. Every question with repository candidates, U3's near-match, U6's `amend` and U7's `clarify`, carries each candidate's sentence in its evidence, so a person reads what a repository is and not only its name.
+- R28. The replay gains a repository row: fixtures that name a subject and no repository, with the expected slug or none; the bar is nine in ten bound right and no fixture whose subject matches no card bound at all.
+
 **Specs and records**
 
 - R23. Every unit updates the spec items it changes in its own pull request; record 0054's validation rows are rebound to the tests these units add when its status moves.
@@ -113,6 +122,7 @@ The maintainer asked that this plan be checked against the puck research and aga
 - KTD8. **The thread is the memory for the words; the row is for the click.** The bot's own reply comes back in the thread history as an assistant turn (`threadTurns`), so the renderer stamps the question with a marker its reader recognises, on the `STATUS_PREFIXES` precedent, and the router's user turn gains the question the way it gains the thread's repository today. A typed answer needs no row and works after the button expired; `accept` cancels the row by thread so a click cannot follow a typed yes. Governs R16, R17.
 - KTD9. **The clarification loop is bounded.** Rasa's two-stage fallback asks at most twice; the third render in a thread without an `accept` is the hand-back line. Without the bound an `amend` that the router misreads produces a question forever. Governs R19.
 - KTD10. **Every unit is behaviour-identical until U3.** U1 moves sentences and adds attributes; U2 adds the fence and moves the rest; U3 is the first question a person sees; U4 the first button on a question; U6 the first typed answer. Each unit's dispatcher tests assert the sentences unchanged where they should be. Governs the execution profile.
+- KTD11. **A card is built where the facts are written, never per request.** `RepoFacts` is written only by onboarding provisioning and the default-branch refresh, so the card is computed there from the mirror's README and stored beside the facts; the request path reads it with the registry index call the fleet already makes and U3's one gate call. The sentence is deterministic (title and first paragraph), not a model digest, so the Worker gains no model dependency and the card is reproducible from the sha. A card is context for the router and evidence for a question; it never binds a repository by itself, the router does, under the same rules as any bind. Governs R24 to R27.
 
 ### High-Level Technical Design
 
@@ -135,7 +145,7 @@ flowchart TB
 
 ### Sequencing
 
-U1 first: the seam and the count are the record's own first unit, and nothing a person reads changes. U2 next: the fence lands while the migration is fresh, and the remaining producers move onto the seam behind it. U3 is the trace's fix and the first visible question. U4 gives the question its button. The seam cut ends there, and the maintainer decides on the count whether to continue. U5 measures before U6 trusts: the answer row runs on the replay with the router pieces built but not wired. U6 wires the words behind U5's bar. U7 and U8 are independent of each other and of U6; both depend on U3.
+U1 first: the seam and the count are the record's own first unit, and nothing a person reads changes. U2 next: the fence lands while the migration is fresh, and the remaining producers move onto the seam behind it. U3 is the trace's fix and the first visible question. U4 gives the question its button. The seam cut ends there, and the maintainer decides on the count whether to continue. U9, the repository cards, comes next when the bundle continues, because it sharpens every later question's evidence and the router's repository binds; it depends on U3 alone. U5 measures before U6 trusts: the answer row runs on the replay with the router pieces built but not wired. U6 wires the words behind U5's bar. U7 and U8 are independent of each other and of U6; both depend on U3, and U7's candidates are cards once U9 has landed.
 
 ### Risks and Dependencies
 
@@ -158,7 +168,7 @@ U1 first: the seam and the count are the record's own first unit, and nothing a 
 ### U1. The seam and the count
 
 - **Goal**: every gate refusal is a `Refusal` rendered in one place with the same sentence as today; every refusal carries `refusal` and `cause` on its spans; a refusal after a command was bound is a run record; `npm run load -- door` prints refusals per day, per cause and per code. No reply text changes.
-- **Requirements**: R1, R2, R3, R4, R5, R23 (routing-and-config items 4 and 21, run-history item 2, tracing item 3, load-harness item 17).
+- **Requirements**: R1, R2, R3, R4, R5, R23 (routing-and-config items 4 and 21, run-history item 2, tracing item 3, load-harness item 19, the door report).
 - **Dependencies**: none.
 - **Files**: `src/core/refusal.ts` (new: `Refusal`, `Guess`, `RefusalError`, `causeOf`, the code union); `src/core/dispatch/reply.ts` (`renderRefusal(refusal, io)`: the only caller of `offer`; the sentence table keyed by code; `errorReply` becomes the `system`/`uncaught` rendering); `src/core/dispatch/route.ts` (the offer call moves out); `src/core/dispatcher.ts` (the two `refuse` helpers take a `Refusal`, set `cause` on the span and the ending, and call the renderer; the catch-all); `src/core/dispatch/authorize.ts`, `provision.ts`, `references.ts` (the 17 sites return `Refusal`s; the references constant's eight reasons become eight codes); `src/core/trace/attrs.ts` (the two keys and their domains); `src/core/dispatch/commandRun.ts` (`route.outcome: "refused"` and the code on the event); `src/load/doorReport.ts` and `scripts/load.ts` (the refusal lines); tests `refusal.test.ts` (new), `reply.test.ts`, `dispatcher.test.ts`, `authorize.test.ts`, `provision.test.ts`, `references.test.ts`, `doorReport.test.ts`; the inventory appendix below names every site by file and line.
 - **Approach**:
@@ -167,7 +177,7 @@ U1 first: the seam and the count are the record's own first unit, and nothing a 
   3. Migrate the 18 `refuse(code)` sites and the two click sites; delete each site's own sentence.
   4. Record: in `answerCommand` and the confirm path, a refusal after a bind calls `recordRoutedDecision` with `outcome: "refused"` and the code.
   5. The report: group refused records by day, cause and code; print the telemetry query for the root spans as one line of the report's footer.
-  6. Spec rows: routing-and-config item 4 (a gate refusal is a `Refusal` with a cause) and item 21 (the offer is rendered from a `Refusal`); run-history item 2 (`route.outcome: refused`); tracing item 3 (the two keys); load-harness item 17 (the refusal lines).
+  6. Spec rows: routing-and-config item 4 (a gate refusal is a `Refusal` with a cause) and item 21 (the offer is rendered from a `Refusal`); run-history item 2 (`route.outcome: refused`); tracing item 3 (the two keys); load-harness item 19 (the door report's refusal lines).
 - **Execution note**: nothing a person reads changes; the diff is a move. A reviewer diffs the sentence table against the inventory's quotes.
 - **Patterns to follow**: `errorReply` and `STATUS_PREFIXES` in `reply.ts`; the `refuse` helper and `ended.refusal` in `dispatcher.ts`; `recordRoutedDecision` in `commandRun.ts`; the closed attribute table in `src/core/trace`.
 - **Test scenarios**:
@@ -269,9 +279,24 @@ U1 first: the seam and the count are the record's own first unit, and nothing a 
 - **Approach**: one pull request per group in the appendix's order, each a table test over the group's real names and one dispatcher test per site.
 - **Verification**: the test files green; `npm run specs:check`; `npm run verify`.
 
-### U9. Later, not in this plan's definition of done
+### U9. Repository cards
 
-Problem Details on the HTTP ingress and an elicitation on the MCP ingress for a `request` refusal when the client declares the capability. Named so the seam's renderer is written with a JSON rendering in mind; built under its own decision.
+- **Goal**: every resident has a README-derived card built at provisioning and at the default-branch refresh; the router's turn carries the cards; a question about a repository names each candidate by what it is; the replay's repository row measures binds from the subject alone.
+- **Requirements**: R24, R25, R26, R27, R28, R23 (resident-repos, routing-and-config item 21, load-harness item 17).
+- **Dependencies**: U3 (the near-match evidence and the gate's registry call).
+- **Files**: `deploy/cloudflare-resident/worker.ts` (`RepoFacts` gains `card`; the card is read from the mirror's README where the facts are written at provisioning and refresh; the `/residents` index returns it) and its test; `src/core/residentFleet.ts` and `src/core/repoContext.ts` (`ResidentSlugs` becomes a cards read, slugs derived from it); `src/execution/githubApi.ts` (`listRepos()` already returns `description`; the card shape for an installation repository); `src/core/dispatch/route.ts` (the cards lines after the thread's repository line, capped; the repository bound from the subject rides the existing `repo` argument of the command tools and the ship hand-off); `src/core/dispatch/authorize.ts` and `src/core/commands/repo.ts` (evidence carries the sentence); `src/load/routeRepoFixtures.ts` (new) and `src/load/routeReplay.ts` (the repository row); tests beside each.
+- **Approach**:
+  1. Tests first: the Worker's test builds a card from a fixture README (title, first paragraph capped, ten headings) at provisioning and rebuilds it on refresh when the sha moves, and leaves it when the sha does not; `route.test.ts` asserts the cards lines, the cap, and a scripted bind from a subject with no repository named; `authorize.test.ts` asserts the evidence sentence; `routeReplay.test.ts` scores the repository row with a scripted model.
+  2. Build the card in the Worker at the two facts-writing sites; return it on the index; read it on the bot; render the lines; carry the sentence in the evidence; add the fixtures and the row.
+  3. Spec rows: resident-repos (the card and when it is written), routing-and-config item 21 (the cards lines and the bind from a subject), load-harness item 17 (the repository row).
+- **Execution note**: the card is deterministic text from the README, never a model digest, so the Worker gains no model dependency; a README-less repository has a card with the slug alone. The bind from a subject is measured by the replay row before anyone relies on it, as U5 measures the answers.
+- **Patterns to follow**: `RepoFacts` and the snapshot stamp (written only at provisioning and refresh); the thread's repository line in `route.ts`; `RouteCommandFixture` and the decoy row.
+- **Test scenarios**: a README with no headings; a README over the cap; two residents whose sentences share a keyword (the router asks, per U7, or binds none); an installation repository with a description and no resident; the cards line absent when the fleet has no residents.
+- **Verification**: the test files green, red first; `npm run load -- route` with the repository row posted on the receipts tracker; `npm run specs:check`; `npm run verify`; live, human-gated: in a thread with no repository, an ask naming only a subject one card matches routes to that repository with a receipt naming it, or asks with the card as evidence.
+
+### U10. Later, not in this plan's definition of done
+
+Problem Details on the HTTP ingress and an elicitation on the MCP ingress for a `request` refusal when the client declares the capability. Named so the seam's renderer is written with a JSON rendering in mind; built under its own decision. A model-written card sentence, if the deterministic one proves too thin on the replay's repository row, is also later and its own decision.
 
 ---
 
@@ -287,6 +312,8 @@ Problem Details on the HTTP ingress and an elicitation on the MCP ingress for a 
 | The count | `npm run load -- door --since <date>` prints refusals per day, per cause and per code; the root-span query over the same window; both posted on the receipts tracker after one week | U1 |
 | Replay: the answer row | `npm run load -- route --limit 0 --provider anthropic --model <fast model>`, run by the maintainer: four rates; the bar is R15's | U5, U6 |
 | Replay: the clarify row | the same run: fixtures whose right answer is a question get one; no bind fixture does | U7 |
+| Replay: the repository row | the same run: fixtures naming a subject and no repository; nine in ten bound right, none bound where no card matches | U9 |
+| Live, human-gated: a repository from the subject | In a thread with no repository, "run the tests on the booking site" where one card names it. Expect the `routed: repo test <slug>` receipt, or a question with the card's sentence as evidence | U9 |
 | Live, human-gated: the trace | `agent:ship in <a typo of an onboarded repository> …`. Expect one question with the corrected line and the evidence, Yes and No; Yes starts ship on the right repository; one `refused` record and one ship run | U3, U4 |
 | Live, human-gated: onboard | `repo onboard <the same typo>`. Expect the same question, no mint | U3 |
 | Live, human-gated: yes-but | After a question, "yes but on staging". Expect a new question with staging in the line and nothing run | U6 |
@@ -298,7 +325,7 @@ Problem Details on the HTTP ingress and an elicitation on the MCP ingress for a 
 ## Definition of Done
 
 - U1 to U4 merged on `main` in order, each through the review loop with its spec rows in the same pull request; the count posted after one week; the maintainer's cut decision recorded on the receipts tracker.
-- U5 to U8 merged when the maintainer continues, U6 only after U5's row holds at the bar, U7 only after the clarify row holds.
+- U9 and U5 to U8 merged when the maintainer continues, U9 first; U6 only after U5's row holds at the bar, U7 only after the clarify row holds.
 - The live rows posted after the releases that carry U3, U4 and U6.
 - Record 0054's validation rows rebound to these units' tests and its status moved by the maintainer.
 
