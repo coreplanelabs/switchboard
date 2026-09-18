@@ -56,6 +56,7 @@ import type { WindDownEnding } from "../windDown.js";
 import { OPENCODE_EVENT_DISPOSITION } from "./dispositions.js";
 import {
   driveOpenCode,
+  InboxFate,
   OpenCodeRequestRefusedError,
   OpenCodeWriteUnresolvedError,
   openCodeToolNameWord,
@@ -518,6 +519,7 @@ export async function openOpenCodeRun(
       knownMessageIds: known,
       writes: { seq: 0, ownPrompts: new Map<string, number>(), imported },
       boundaries: new StepBoundaries(),
+      inboxFate: new InboxFate(),
       failure: {},
       paths: server.paths,
       port: server.port,
@@ -961,8 +963,36 @@ function drainFollowUps(
             if (res.status < 200 || res.status >= 300) failure = `the server answered ${res.status}`;
             else {
               const id = parseAnswerId(res.body);
-              if (id !== undefined) conn.knownMessageIds?.add(id);
-              else if (!(await resolve(steerSeq, knownAtSteer, seenAtSteer, readOnce))) {
+              if (id !== undefined) {
+                conn.knownMessageIds?.add(id);
+                // The steer's POST has answered and its id is known: signal
+                // `promptLanded` (which waits on `conn.posted`) that any store
+                // read bounded by this steer's row is unblocked — the id IS
+                // known, so the prompt's resolution stops at the right row.
+                // The inbox-fate wait runs OUTSIDE the `posted` set (the same
+                // rule as the step-boundary wait in `resolve`): a loop waiting
+                // on this steer's `posted` slot would never call the feed that
+                // delivers `session.inbox.delivered`, so the two cannot wait
+                // on each other (`conn.boundaries`' circular-wait comment).
+                readOnce();
+                // Resolve the steer's fate from the server's own event: a
+                // `session.inbox.delivered` for this id (the loop calls
+                // `conn.inboxFate.deliver`) confirms the steer landed; an
+                // interrupted execution (`conn.inboxFate.interruptAll`) means
+                // the steer was enqueued but never delivered and is dropped
+                // with the execution — no store row, no model call, lost.
+                // The store read is kept only as the reset-cut fallback (the
+                // `catch` below), where the POST answer's id was lost and the
+                // inbox-fate wait cannot be armed (`id` was never named).
+                if (conn.inboxFate !== undefined) {
+                  const delivered = await conn.inboxFate.wait(id);
+                  if (!delivered) {
+                    lost = true;
+                    failure =
+                      "the server enqueued the steer (session.inbox.enqueued) but the execution was interrupted before it was delivered (no session.inbox.delivered)";
+                  }
+                }
+              } else if (!(await resolve(steerSeq, knownAtSteer, seenAtSteer, readOnce))) {
                 lost = true;
                 failure = "the server answered with no message id and the store holds no row of the steer";
               }

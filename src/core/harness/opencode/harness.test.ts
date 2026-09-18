@@ -613,6 +613,48 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
     expect(r.steps.map((s) => [s.firstIdx, s.turns.map((t) => t.role)])).toEqual([[3, ["assistant"]]]);
   });
 
+  it("a dead generation's `session.execution.interrupted` replayed while catching up does not poison the resumed run's steer fate: a follow-up steered into the live execution is delivered and folded in, never recorded as not delivered", async () => {
+    // The dead generation's execution ended interrupted before the bot died — its
+    // end sits in the feed after the row's offset, so the re-attach replays it
+    // catching up. Acting on it (`inboxFate.interruptAll`) would mark every later
+    // steer of the resumed run dropped while the live server delivers it — the
+    // model reading it twice. The inbox-fate lines are gated `!reattachCatchUp`
+    // like the step-boundary line beside them.
+    const feedAfter = [feedEvent("session.execution.interrupted", { sessionID: "ses_run-c", reason: "aborted" })];
+    const driver = openCodeDriver({ reattach: { feedAfter }, followUpAtPrompt: "also check the docs" });
+    const rowFacts = rowFor(driver, { logOffset: feedByteLength(TAILER_READY_NOTES) });
+    const r = await driver.run({
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "echo hi" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "resumed done" }], stopReason: "end_turn" },
+      ],
+      processAliveOnResume: true,
+      resume: resume(
+        rowFacts,
+        [request, { role: "assistant", content: [{ type: "text", text: "was answering" }] }],
+        [],
+      ),
+    });
+    expect(r.outcome).toEqual({ kind: "answered", answer: "resumed done" });
+    const followUps = notes(r)
+      .filter((n) => n.kind === "follow_up")
+      .map((n) => n.summary);
+    expect(followUps.some((s) => /folded in/.test(s))).toBe(true);
+    expect(followUps.some((s) => /not delivered/.test(s))).toBe(false);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+    expect(
+      r.modelCalls.some((c) =>
+        c.messages.some(
+          (m) =>
+            m.role === "user" && m.content.some((p) => p.type === "text" && p.text.includes("also check the docs")),
+        ),
+      ),
+    ).toBe(true);
+  });
+
   it("the row's bearer joins this generation's proxy only once every check has passed: after a refused re-attach the dead generation's bearer is still refused at the proxy, after one that went through it verifies there", async () => {
     const clock = () => 1_700_000_000_000;
     const grant = (): RunBearerGrant => ({
@@ -1885,6 +1927,24 @@ describe("OpenCodeHarness — the resident's control plane resets under a write"
     expect(notes(r).some((n) => n.kind === "follow_up" && /not delivered/.test(n.summary))).toBe(false);
     expect(notes(r).some((n) => n.kind === "follow_up" && /folded in/.test(n.summary))).toBe(false);
     expect(r.inboxLeft.map((i) => i.text)).toEqual(["also check the docs"]);
+  });
+
+  it("a follow-up's steer into a running execution that the finale's interrupt drops — enqueued (the server answered the POST with an id) but not delivered before the interrupt lands — is handed back to the inbox, never recorded as folded in", async () => {
+    // The steer POST answers with an id (session.inbox.enqueued), but the model call hangs and the
+    // finale's interrupt lands before any session.inbox.delivered — the execution ends interrupted,
+    // the steer is dropped. The harness must record it as not delivered and hand it back, never as
+    // folded in on the POST answer's id.
+    const r = await openCodeDriver({
+      followUpAtPrompt: "also check the docs",
+      interruptSettlesLate: "interrupted",
+    }).run(hungCall);
+    // The run fails at the finale: the loop left the feed with the execution still showing, the
+    // steer unresolvable from the store — handed back with the run's failure, never folded in.
+    expect(r.inboxLeft.map((i) => i.text)).toEqual(["also check the docs"]);
+    expect(notes(r).some((n) => n.kind === "follow_up" && /folded in/.test(n.summary))).toBe(false);
+    expect(notes(r).some((n) => n.kind === "follow_up" && /not delivered/.test(n.summary))).toBe(true);
+    // The model never saw it.
+    expect(modelSaw(r, "also check the docs")).toBe(false);
   });
 
   it("a follow-up's steer into a RUNNING execution the reset cut before the server took it: no row when its execution ends — the idle marker newest since the steer, the store's word — is the steer lost: handed back to the inbox, the run continuing, the model never shown it", async () => {

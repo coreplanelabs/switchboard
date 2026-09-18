@@ -14,6 +14,7 @@ import { TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import type { DrivenRun, RunScript } from "../testing/scenarios.js";
 import { readStoreSince, type OpenCodeFeedRecord } from "./client.js";
 import {
+  InboxFate,
   judgeOpenCodeAsk,
   openCodeToolNameWord,
   OpenCodeBridge,
@@ -1860,6 +1861,42 @@ describe("the bridge's observing mode — an earlier execution's tail is not thi
       "a model call failed while the bot was away (the proxy answered 400); continuing",
       "the execution reached the proxy's turn budget while the bot was away (403 turn_budget_exhausted: the run is past its 60-turn guard); continuing",
     ]);
+  });
+});
+
+// Feature: docs/reference/specs/harness.md item 13 — a steer's fate is the
+// server's own events, and only the loop's leaving closes the tracker: an
+// interrupt drops the steers waiting at that moment, never one posted after it.
+describe("InboxFate — delivery confirmed by event, an interrupt drops only what waits, close latches", () => {
+  it("a delivery before or after the wait resolves it true", async () => {
+    const fate = new InboxFate();
+    fate.deliver("i1");
+    await expect(fate.wait("i1")).resolves.toBe(true);
+    const later = fate.wait("i2");
+    fate.deliver("i2");
+    await expect(later).resolves.toBe(true);
+  });
+
+  it("interruptAll drops the waiters pending at that moment — and no others: a steer posted after the interrupt (the write-up's execution) is still delivered true", async () => {
+    const fate = new InboxFate();
+    const dropped = fate.wait("i1");
+    fate.interruptAll();
+    await expect(dropped).resolves.toBe(false);
+    // F2: the tracker stays open — the loop-end cut's interrupted end must not
+    // latch a follow-up steered into the write-up's execution as dropped.
+    const afterCut = fate.wait("i2");
+    fate.deliver("i2");
+    await expect(afterCut).resolves.toBe(true);
+  });
+
+  it("close resolves every pending waiter false and answers every later wait false on the spot — idempotent", async () => {
+    const fate = new InboxFate();
+    const pending = fate.wait("i1");
+    fate.close();
+    await expect(pending).resolves.toBe(false);
+    await expect(fate.wait("i2")).resolves.toBe(false);
+    fate.close();
+    await expect(fate.wait("i3")).resolves.toBe(false);
   });
 });
 
