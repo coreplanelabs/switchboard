@@ -439,31 +439,55 @@ export const TIMEOUT_ON_LONG_COMMANDS =
   "State a timeout on any command you expect to run longer than a minute: a timeout that reaches past the loop's " +
   "end is refused before the command runs, never cut midway.";
 
-/** The fast gates a plan child runs before every push, named one by one
- *  (agent-ship item 13; agent-coding item 9). "Its cheapest proving checks"
- *  left the choice to the child, and children chose wrong: prettier was
- *  reported clean while `format:check` was red, and hygiene imprints reached
- *  CI that `hygiene:check` would have caught locally. Naming the commands
- *  makes each gate a receipt — the exit line goes into the PR description's
- *  validation table as the row's proof (the handoff has no verified list;
- *  parseHandoff carries deviations, followUps, unproven and landed), and a
- *  gate the child could not run goes under the handoff's unproven list,
- *  never claimed clean. */
+/** The fast gates a plan child runs before every push, named one by one and
+ *  each scoped to the changed set (agent-ship item 13; agent-coding item 9).
+ *  "Its cheapest proving checks" left the choice to the child, and children
+ *  chose wrong in both directions: prettier was reported clean while
+ *  `format:check` was red, hygiene imprints reached CI that `hygiene:check`
+ *  would have caught locally — and children ran the whole suite and the whole
+ *  typecheck on the shared resident, minutes each call, time-sliced against
+ *  every other run. So the gates are the changed-set forms, the full runs are
+ *  said to be CI's alone in the same breath, and each gate is a receipt — the
+ *  exit line goes into the PR description's validation table as the row's proof
+ *  (the handoff has no verified list; parseHandoff carries deviations, followUps,
+ *  unproven and landed), and a gate the child could not run goes under the
+ *  handoff's unproven list, never claimed clean. The tests compare against the
+ *  pull request's own base — `origin/<base>` — which the render substitutes
+ *  from the rebase's `onto` when the contract knows it. */
+/** The changed-set test command as the contract renders it before the base is
+ *  known; the render substitutes the unit's base for `<base>` (`renderFirstInstruction`). */
+export const CHANGED_SET_TEST_PLACEHOLDER = "`npx vitest run --changed origin/<base>`";
+
 export const FAST_GATES_BEFORE_PUSH =
-  "The fast gates, before every push: `npx prettier --check` on the changed files, `npm run hygiene:check`, " +
-  "`npm run specs:check`, and `tsc --noEmit` on the touched project under `NODE_OPTIONS=--max-old-space-size=6144`. " +
+  "The fast gates, before every push — each scoped to the changed set, never the whole project: " +
+  `${CHANGED_SET_TEST_PLACEHOLDER} (the pull request's base; or the touched test files), ` +
+  "`tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`, " +
+  "`npx prettier --check` on the changed files, `npm run hygiene:check` and `npm run specs:check` — " +
+  "then your judgement on what else this change needs, not a longer checklist. Every CI pipeline runs the " +
+  "tests, the types, the formatting and the full verification on your push, so you never run them again: " +
+  "you validate and fix your own change before pushing, at the changed-set scope. Passing the full test suite " +
+  "and the full typecheck is NOT part of your criteria: CI is that gate and the only place they run — on a " +
+  "shared resident they cost minutes that every other run pays for. " +
   "Paste each command's exit line into the PR description's validation table as the row's proof; a gate you " +
   "could not run goes under the handoff's unproven list and is never claimed clean.";
 
 function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
   const branch = rebase.branch ? `\`${rebase.branch}\`` : "the unit's branch";
   const onto = rebase.onto ? `\`${rebase.onto}\`` : "the merged parent";
+  // the changed-set test run compares against the unit's own base, which the
+  // contract knows as the rebase target; unknown, the placeholder stands
+  // split/join, never String.replace: a `$` in a branch name is literal text here
+  const gates = rebase.onto
+    ? FAST_GATES_BEFORE_PUSH.split(`${CHANGED_SET_TEST_PLACEHOLDER} (the pull request's base; or`).join(
+        `\`npx vitest run --changed origin/${rebase.onto}\` (or`,
+      )
+    : FAST_GATES_BEFORE_PUSH;
   return (
     `Rebase ${branch} onto ${onto} before any other work — the parent unit has merged and the base has moved; ` +
     `the only writes are your own on that branch. A conflict ends the unit: report it as the handoff and stop. ` +
-    `Push the branch as soon as the change exists and the fast gates pass — before the project's ` +
-    `full verification, which runs after that push with any fix as a further commit; an unpushed tree does not ` +
-    `survive the run's end. ${FAST_GATES_BEFORE_PUSH} Right before each push, fetch ${onto} again and rebase ` +
+    `Push the branch as soon as the change exists and the fast gates pass — the project's full verification ` +
+    `is CI's gate, run there after the push with any fix as a further commit; an unpushed tree does not ` +
+    `survive the run's end. ${gates} Right before each push, fetch ${onto} again and rebase ` +
     `once more if it moved while you worked, so the pull request is not born conflicting. At the wind-down note, ` +
     `commit and push what compiles, say what does not, then answer. ${TIMEOUT_ON_LONG_COMMANDS}`
   );

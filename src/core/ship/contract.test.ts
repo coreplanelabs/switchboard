@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CHANGED_SET_TEST_PLACEHOLDER,
   CONTRACT_HEADING,
   CONTRACT_SECTION_HEADINGS,
   DEFAULT_CONTRACT_MAX_CHARS,
@@ -369,13 +370,17 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect(text).toContain("At the wind-down note, commit and push what compiles, say what does not, then answer.");
     // and the timeout clause the coding contract carries: a timeout past the loop's end is refused, not cut
     expect(text).toContain(TIMEOUT_ON_LONG_COMMANDS);
-    // the first instruction orders the push before the full verification (agent-coding item 13:
-    // an unpushed tree does not survive the run's end) and carries the pre-push re-fetch, so the
-    // pull request is not born conflicting when main moved while the child worked
+    // the first instruction orders the push once the fast gates pass, hands the full verification
+    // to CI (agent-coding item 13: an unpushed tree does not survive the run's end) and carries the
+    // pre-push re-fetch, so the pull request is not born conflicting when main moved while the child worked
+    const gatesForMain = FAST_GATES_BEFORE_PUSH.replace(
+      `${CHANGED_SET_TEST_PLACEHOLDER} (the pull request's base; or`,
+      "`npx vitest run --changed origin/main` (or",
+    );
     expect(text).toContain(
-      "Push the branch as soon as the change exists and the fast gates pass — before the project's " +
-        "full verification, which runs after that push with any fix as a further commit; an unpushed tree does not " +
-        `survive the run's end. ${FAST_GATES_BEFORE_PUSH} Right before each push, fetch \`main\` again and rebase ` +
+      "Push the branch as soon as the change exists and the fast gates pass — the project's full verification " +
+        "is CI's gate, run there after the push with any fix as a further commit; an unpushed tree does not " +
+        `survive the run's end. ${gatesForMain} Right before each push, fetch \`main\` again and rebase ` +
         "once more if it moved while you worked, so the pull request is not born conflicting.",
     );
     expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(
@@ -401,15 +406,38 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect(text).not.toContain("Cut to fit");
   });
 
-  it("the first instruction names the fast gates a child runs before every push — never a vague 'cheapest proving checks' — and routes each exit line to the description's validation table, an unrun gate to the handoff's unproven", () => {
+  it("the first instruction names the fast gates a child runs before every push — the changed-set forms, never the whole suite — and routes each exit line to the description's validation table, an unrun gate to the handoff's unproven", () => {
     const { text } = renderContract(u10(), {});
-    // the four gates by name, each a command a child can run verbatim
+    // the five gates by name, each a command a child can run verbatim, each scoped to the changed set;
+    // the test run compares against the pull request's own base — the placeholder in the constant,
+    // the known rebase target in the render
+    expect(FAST_GATES_BEFORE_PUSH).toContain(CHANGED_SET_TEST_PLACEHOLDER);
+    expect(text).toContain("`npx vitest run --changed origin/main`");
+    expect(text).not.toContain("origin/<base>");
+    expect(FAST_GATES_BEFORE_PUSH).toContain(
+      "`tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`",
+    );
     expect(FAST_GATES_BEFORE_PUSH).toContain("`npx prettier --check` on the changed files");
     expect(FAST_GATES_BEFORE_PUSH).toContain("`npm run hygiene:check`");
     expect(FAST_GATES_BEFORE_PUSH).toContain("`npm run specs:check`");
+    // the full suite and the full typecheck are not the child's criteria — CI is that gate,
+    // and the only place they run; the gates are the changed set, judgement beyond them
     expect(FAST_GATES_BEFORE_PUSH).toContain(
-      "`tsc --noEmit` on the touched project under `NODE_OPTIONS=--max-old-space-size=6144`",
+      "Passing the full test suite and the full typecheck is NOT part of your criteria",
     );
+    expect(FAST_GATES_BEFORE_PUSH).toContain("CI is that gate and the only place they run");
+    // the principle, stated plainly: CI runs everything on the push; the child validates its own
+    // change before pushing, at the changed-set scope
+    expect(FAST_GATES_BEFORE_PUSH).toContain(
+      "Every CI pipeline runs the tests, the types, the formatting and the full verification on your push",
+    );
+    expect(FAST_GATES_BEFORE_PUSH).toContain("at the changed-set scope");
+    expect(FAST_GATES_BEFORE_PUSH).toContain("judgement");
+    expect(FAST_GATES_BEFORE_PUSH).not.toContain("`npm test`");
+    expect(FAST_GATES_BEFORE_PUSH).not.toContain("`npm run verify`");
+    // a contract that does not know its base keeps the placeholder rather than inventing a ref
+    const unknown = renderContract({ ...u10(), rebase: { branch: undefined, onto: undefined } }, {});
+    expect(unknown.text).toContain(`${CHANGED_SET_TEST_PLACEHOLDER} (the pull request's base; or`);
     // the receipts point at what exists: the exit line is the proof column of the PR description's
     // validation table (the handoff has no verified list); a gate the child could not run goes under
     // the handoff's unproven list and is never claimed clean
@@ -420,14 +448,16 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
       "a gate you could not run goes under the handoff's unproven list and is never claimed clean",
     );
     expect(FAST_GATES_BEFORE_PUSH).not.toContain("verified list");
-    // the rendered first instruction carries the gates and no longer the vague phrase
-    expect(text).toContain(FAST_GATES_BEFORE_PUSH);
+    // the rendered first instruction carries the gates (base substituted) and no longer the vague phrase
+    const gates = FAST_GATES_BEFORE_PUSH.replace(
+      `${CHANGED_SET_TEST_PLACEHOLDER} (the pull request's base; or`,
+      "`npx vitest run --changed origin/main` (or",
+    );
+    expect(text).toContain(gates);
     expect(text).not.toContain("cheapest proving checks");
     // the gates sit between the push order and the pre-push re-fetch
-    expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(
-      text.indexOf(FAST_GATES_BEFORE_PUSH),
-    );
-    expect(text.indexOf(FAST_GATES_BEFORE_PUSH)).toBeLessThan(text.indexOf("Right before each push"));
+    expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(text.indexOf(gates));
+    expect(text.indexOf(gates)).toBeLessThan(text.indexOf("Right before each push"));
   });
 
   it("a unit with no spec rows and no rules says so under the same headings", () => {
