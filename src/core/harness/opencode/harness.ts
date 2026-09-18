@@ -81,6 +81,7 @@ import {
   openCodeRunPaths,
   openCodeRunPathsAt,
   openCodeTailerEnv,
+  openCodeVariantId,
   OPENCODE_AGENT,
   TAILER_BIN,
   type OpenCodeCompactionConfig,
@@ -112,12 +113,12 @@ export class OpenCodeHarness implements Harness {
 
   /** Switchboard's effort tier in OpenCode's word: the tier selects a model
    *  `variant` on the session's model ref (item 11: variants are declared per
-   *  model and a session selects one by id). Stage A's configuration writer
-   *  declares no reasoning variants, so there is none to select and the tier is
-   *  left to OpenCode's default — the honest answer until a deployment declares
-   *  them (a follow-up to the configuration word). */
-  effort(_tier: Effort | undefined): string | undefined {
-    return undefined;
+   *  model and a session selects one by id). The configuration writer declares
+   *  one variant per tier from the run's card (record 0052), the tier as its
+   *  id, so the tier IS the variant's word; the session guards the selection
+   *  against the document it wrote (`openCodeVariantId`). */
+  effort(tier: Effort | undefined): string | undefined {
+    return tier;
   }
 
   /** OpenCode's own tools a run of this identity holds — what the deny rules
@@ -173,8 +174,10 @@ export class OpenCodeHarness implements Harness {
  *  the bot's provider name (`run.model.provider`, `anthropic` on a live
  *  deployment): OpenCode resolves the ref against its configuration and a
  *  provider it does not define is `Model unavailable: <provider>/<id>`. The id
- *  is the run's, and the effort tier is its variant when the harness names
- *  one (none in stage A). */
+ *  is the run's, and the effort tier is its variant exactly when the run's
+ *  configuration declares it (`openCodeVariantId` over the card's variants,
+ *  record 0052) — the session selects `<model>#<tier>` and the variant's
+ *  `body` overlay spells the wire's word for the tier. */
 function modelRef(run: HarnessRun, variant: string | undefined): { providerID: string; id: string; variant?: string } {
   return { providerID: PROXY_PROVIDER, id: run.model.id, ...(variant ? { variant } : {}) };
 }
@@ -272,11 +275,15 @@ export async function openOpenCodeRun(
     paths,
     model: { id: run.model.id, providerType: run.model.providerType, maxTokens: run.agent.maxTokens },
     harnessUrl: deps.harnessUrl,
+    ...(run.card ? { card: run.card } : {}),
     identity,
     system: run.system,
     relayTools: run.tools.map((t) => t.name),
     ...(settings.compaction ? { compaction: settings.compaction } : {}),
   };
+  // The tier's variant on the session's model ref, exactly when the run's
+  // configuration declares it (record 0052).
+  const variant = openCodeVariantId(run.effort, spec.model, run.card);
 
   // What the run continues on: the fresh launch, or the re-attached server.
   let server: OpenCodeLive | undefined;
@@ -458,7 +465,7 @@ export async function openOpenCodeRun(
         await importInto(run.resume.messages, {
           sessionID: server.sessionID,
           location: { directory: cwd },
-          model: modelRef(run, undefined),
+          model: modelRef(run, variant),
           agent: OPENCODE_AGENT,
           at,
           ...(run.resume.compactions ? { compactions: run.resume.compactions.map((c) => c.entry) } : {}),
@@ -470,7 +477,7 @@ export async function openOpenCodeRun(
           await importInto(seed, {
             sessionID: server.sessionID,
             location: { directory: cwd },
-            model: modelRef(run, undefined),
+            model: modelRef(run, variant),
             agent: OPENCODE_AGENT,
             at,
           });
@@ -479,7 +486,7 @@ export async function openOpenCodeRun(
             id: server.sessionID,
             agent: OPENCODE_AGENT,
             location: { directory: cwd },
-            model: modelRef(run, undefined),
+            model: modelRef(run, variant),
           });
           if (res.status < 200 || res.status >= 300) throw refusedBy("session create", res);
           const created = parseAnswerId(res.body);

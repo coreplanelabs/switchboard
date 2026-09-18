@@ -13,6 +13,7 @@ import type { AgentDef, Identity } from "../../agents/registry.js";
 import type { Effort } from "../../effort.js";
 import type { RunnableTool, ToolContext } from "../../tools/runnableTool.js";
 import type { ChatMessage } from "../chatMessage.js";
+import type { ModelCard } from "../modelCard.js";
 import type { RunBearerStore } from "../modelProxy/runBearers.js";
 import type { ProviderConfig } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
@@ -432,6 +433,12 @@ export interface HarnessRun {
   agent: AgentDef;
   effort?: Effort;
   model: { id: string; provider: string; providerType: ProviderConfig["type"] };
+  /** The run's resolved model card (record 0052), what the dispatcher decided
+   *  the controls against: the harness writes it into its process's own
+   *  configuration — pi's `models.json`, OpenCode's document — in place of an
+   *  invented one, so the word on the wire is the card's. Absent on a
+   *  hand-built run (a test): the harness's wire-default card stands. */
+  card?: ModelCard;
   system: string;
   /** The seed conversation as the dispatcher composed it — the thread's earlier
    *  turns, then the request as the last user turn (the conversation clause). */

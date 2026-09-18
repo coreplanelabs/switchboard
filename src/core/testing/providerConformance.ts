@@ -6,13 +6,17 @@
 // the pull request carries. Nothing here touches the network: the upstream is
 // a capturing function, so every cell is scripted.
 //
-// This is the scaffold this slice lands: the first rows are the record's trace steps
-// 2, 3, 5, 7 and 12. The harness-write rows — the card written into pi's
-// models.json and OpenCode's configuration — need a later slice and are declared
-// `cannot` on every driver with the reason, so the table already shows the gap
-// it will close. No vitest import: plain TypeScript the test drives.
+// The first rows are the record's trace steps 2, 3, 5, 7 and 12. The
+// harness-write rows are green since the harnesses receive the card: each
+// driver's request body is derived from the harness's own write — pi's
+// `models.json` (the level map, the cap field, the marker compat), OpenCode's
+// configuration (the tier's variant `body` overlay, `compatibility`'s cap
+// field) — so a cell proves the FILE carries the wire's word, not just the
+// record. No vitest import: plain TypeScript the test drives.
 
 import { parseModelRef, wireOf, WIRES, type ProviderConfig, type Wire } from "../provider.js";
+import { piModelsJson, piRunPaths, PROXY_PROVIDER, type PiLaunchSpec } from "../harness/pi/process.js";
+import { openCodeConfig, openCodeRunPaths, type OpenCodeLaunchSpec } from "../harness/opencode/process.js";
 import {
   decideControls,
   resolveModelCard,
@@ -61,28 +65,121 @@ export interface ProviderScenarioRow {
   needsHarnessWrite?: string;
 }
 
-/** One harness's driver: the blocks and catalog it runs against, and the rows
- *  it declares it cannot pass. */
+/** One harness's driver: the blocks and catalog it runs against, the request
+ *  body its own harness write renders for a card, and the rows it declares it
+ *  cannot pass. */
 export interface ProviderDriver {
   harness: string;
   blocks: Readonly<Record<string, ProviderConfig>>;
   registry: CardRegistry;
+  /** The request body this harness's process would send for the card: derived
+   *  from the harness's own configuration write, never from the decision. */
+  body: (card: ModelCard, asked: AskedControls) => Record<string, unknown>;
   /** Rows this driver cannot pass, by id, each with why — asserted, never
    *  skipped (the harness suite's rule). */
   cannot?: Readonly<Record<string, string>>;
 }
 
-/** The request body a harness would send for the decided card (the payload
- *  half of a cell): the cap under the card's field, the effort word the card
- *  mapped, and nothing for a control the card does not decide. This is the
- *  capture the proxy's own `fetch` seam records once a later slice writes the card into
- *  a harness; here it is scripted from the decision. */
-export function capturedBody(card: ModelCard, decisions: readonly ControlDecision[]): Record<string, unknown> {
-  const body: Record<string, unknown> = { model: card.model };
-  const effort = decisions.find((d) => d.control === "effort" && d.outcome !== "refused");
-  if (effort?.applied !== undefined) body.reasoning_effort = effort.applied;
-  const cap = decisions.find((d) => d.control === "cap");
-  if (cap?.applied !== undefined) body[cap.applied] = 4096;
+const providerTypeOf = (card: ModelCard): ProviderConfig["type"] =>
+  card.wire === "anthropic-messages" ? "anthropic" : "openai-compatible";
+
+/** The request body pi sends for the card, derived from the `models.json` the
+ *  harness writes (record 0052): the effort word read from the file's level
+ *  map — `output_config.effort` on the Anthropic shape, `reasoning_effort` on
+ *  the completions shape — the cap under the file's `compat.maxTokensField`
+ *  (the wire's spelling when the file names none), and `cache_control` markers
+ *  exactly when the file says `compat.cacheControlFormat: "anthropic"` or the
+ *  shape is Anthropic's own. */
+export function piCapturedBody(card: ModelCard, asked: AskedControls): Record<string, unknown> {
+  const spec: PiLaunchSpec = {
+    runId: "conformance",
+    paths: piRunPaths("conformance"),
+    model: { id: card.model, providerType: providerTypeOf(card), maxTokens: 4096 },
+    harnessUrl: "http://bot.internal",
+    identity: "write",
+    system: "",
+    relayTools: [],
+    card,
+    ...(asked.effort !== undefined ? { effort: asked.effort } : {}),
+  };
+  const models = JSON.parse(piModelsJson(spec)) as {
+    providers: Record<
+      string,
+      {
+        models: Array<{
+          id: string;
+          maxTokens: number;
+          thinkingLevelMap?: Record<string, string | null>;
+          compat?: { maxTokensField?: string; cacheControlFormat?: string };
+        }>;
+      }
+    >;
+  };
+  const entry = models.providers[PROXY_PROVIDER]!.models[0]!;
+  const anthropic = card.wire === "anthropic-messages";
+  const body: Record<string, unknown> = { model: entry.id };
+  if (asked.effort !== undefined) {
+    const word = entry.thinkingLevelMap === undefined ? asked.effort : entry.thinkingLevelMap[asked.effort];
+    if (typeof word === "string") {
+      if (anthropic) body.output_config = { effort: word };
+      else body.reasoning_effort = word;
+    }
+  }
+  const capField =
+    entry.compat?.maxTokensField ??
+    (anthropic ? "max_tokens" : card.wire === "openai-responses" ? "max_output_tokens" : "max_completion_tokens");
+  body[capField] = entry.maxTokens;
+  if (anthropic || entry.compat?.cacheControlFormat === "anthropic") body.cache_control = { type: "ephemeral" };
+  return body;
+}
+
+/** The request body OpenCode sends for the card, derived from the
+ *  configuration the harness writes (record 0052): the model's own `body`
+ *  overlay, then the asked tier's variant `body` overlay — the overlays reach
+ *  the wire as the document spells them — the cap under the document's
+ *  `compatibility.maxTokensField` (the wire's spelling when it names none),
+ *  and `cache_control` markers on the Anthropic dialect alone: OpenCode's
+ *  openai-compatible provider has no marker knob, so an aggregator's markers
+ *  stay pi's (the driver declares the marker payload row `cannot`). */
+export function openCodeCapturedBody(card: ModelCard, asked: AskedControls): Record<string, unknown> {
+  const spec: OpenCodeLaunchSpec = {
+    runId: "conformance",
+    paths: openCodeRunPaths("conformance"),
+    model: { id: card.model, providerType: providerTypeOf(card), maxTokens: 4096 },
+    harnessUrl: "http://bot.internal",
+    identity: "write",
+    system: "",
+    relayTools: [],
+    card,
+  };
+  const config = openCodeConfig(spec) as {
+    providers: Record<
+      string,
+      {
+        models: Record<
+          string,
+          {
+            limit: { output: number };
+            body?: Record<string, unknown>;
+            variants?: Array<{ id: string; body: Record<string, unknown> }>;
+            compatibility?: { maxTokensField?: string };
+          }
+        >;
+      }
+    >;
+  };
+  const entry = config.providers[PROXY_PROVIDER]!.models[card.model]!;
+  const anthropic = card.wire === "anthropic-messages";
+  const body: Record<string, unknown> = { model: card.model, ...(entry.body ?? {}) };
+  if (asked.effort !== undefined) {
+    const variant = entry.variants?.find((v) => v.id === asked.effort);
+    if (variant) Object.assign(body, variant.body);
+  }
+  const capField =
+    entry.compatibility?.maxTokensField ??
+    (anthropic ? "max_tokens" : card.wire === "openai-responses" ? "max_output_tokens" : "max_completion_tokens");
+  body[capField] = entry.limit.output;
+  if (anthropic) body.cache_control = { type: "ephemeral" };
   return body;
 }
 
@@ -104,7 +201,7 @@ export function runProviderRow(driver: ProviderDriver, row: ProviderScenarioRow)
   if (declared !== undefined) throw new Error(declared);
   const card = resolveModelCard(row.ref, driver.blocks, driver.registry);
   const decisions = decideControls(card, row.asked);
-  const body = capturedBody(card, decisions);
+  const body = driver.body(card, row.asked);
   return { card, decisions, body, decision: decisions.find((d) => d.control === row.control) };
 }
 
@@ -356,7 +453,10 @@ export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
     ref: "anthropic/claude-opus-4-6",
     asked: { effort: "max" },
     expect: { outcome: "native", applied: "max", vouched: true },
-    needsHarnessWrite: "a later slice writes the card into the harness; this slice records it only",
+    payload: (body) => {
+      const word = (body.output_config as { effort?: string } | undefined)?.effort ?? body.reasoning_effort;
+      if (word !== "max") throw new Error("the harness's write does not carry the card's effort word on the wire");
+    },
   },
   {
     id: "harness-write-cap-field",
@@ -365,32 +465,46 @@ export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
     ref: "deepseek/deepseek-v4-pro",
     asked: {},
     expect: { outcome: "native", applied: "max_tokens", vouched: true },
-    needsHarnessWrite: "a later slice writes the card into the harness; this slice records it only",
+    payload: (body) => {
+      if (!("max_tokens" in body) || "max_completion_tokens" in body)
+        throw new Error("the harness's write does not spell the cap with the card's field");
+    },
+  },
+  {
+    id: "harness-write-cache-markers",
+    control: "cache",
+    title: "an Anthropic vendor's markers ride the request through an aggregator once the card is written",
+    ref: "openrouter/anthropic/claude-sonnet-4",
+    asked: {},
+    expect: { outcome: "native", applied: "markers", vouched: true },
+    payload: (body) => {
+      if (!("cache_control" in body)) throw new Error("the payload carries no cache_control marker");
+    },
   },
 ];
 
-/** The two drivers the scaffold runs: pi and OpenCode. Both read the same card
- *  in this slice — a later slice makes each harness receive it — so the harness-write
- *  rows are declared cannot on both, with the reason. */
+/** The two drivers: pi and OpenCode, each rendering the request body from its
+ *  own harness write (`piCapturedBody`, `openCodeCapturedBody`), so the
+ *  harness-write rows prove the card reached the process's configuration.
+ *  OpenCode's openai-compatible provider has no cache-marker knob, so the
+ *  marker payload row is its one declared `cannot`, with the reason. */
 export const PROVIDER_DRIVERS: readonly ProviderDriver[] = [
   {
     harness: "pi",
     blocks: PROVIDER_BLOCKS,
     registry,
-    cannot: {
-      "harness-write-effort-map": "a later slice writes the card into pi's models.json; this slice records it only",
-      "harness-write-cap-field": "a later slice writes the card into pi's models.json; this slice records it only",
-    },
+    body: piCapturedBody,
   },
   {
     harness: "opencode",
     blocks: PROVIDER_BLOCKS,
     registry,
+    body: openCodeCapturedBody,
+    // OpenCode's openai-compatible provider has no marker knob, so an
+    // aggregator's markers are pi's alone; the declared reason is the payload
+    // check's own words (a declared cannot must fail for exactly its reason).
     cannot: {
-      "harness-write-effort-map":
-        "a later slice writes the card into OpenCode's configuration; this slice records it only",
-      "harness-write-cap-field":
-        "a later slice writes the card into OpenCode's configuration; this slice records it only",
+      "harness-write-cache-markers": "the payload carries no cache_control marker",
     },
   },
 ];

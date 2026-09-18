@@ -1366,6 +1366,7 @@ export async function dispatch(
       coordinator,
       seed,
       ...(bearer !== undefined ? { bearer } : {}),
+      ...(modelCard ? { modelCard } : {}),
     });
     if (ran.kind === "interrupted") {
       // The run was interrupted, not failed (harness.md item 7): the harness's

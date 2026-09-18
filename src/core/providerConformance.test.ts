@@ -77,7 +77,11 @@ describe("the provider table", () => {
     const matrix = renderProviderMatrix(buildProviderMatrix(PROVIDER_DRIVERS, PROVIDER_ROWS), PROVIDER_ROWS);
     expect(matrix).toContain("| Control | Row | pi | opencode |");
     expect(matrix).toContain("trace-12-effort-refused");
-    expect(matrix).toContain("✖ pi cannot `harness-write-effort-map`");
+    // The harness-write rows are green on both drivers since the card reaches
+    // the harnesses (U39); the one declared cannot left is OpenCode's marker knob.
+    expect(matrix).not.toContain("cannot `harness-write-effort-map`");
+    expect(matrix).not.toContain("cannot `harness-write-cap-field`");
+    expect(matrix).toContain("✖ opencode cannot `harness-write-cache-markers`");
   });
 
   // Feature: docs/reference/specs/model-proxy.md item 11 — one parser for a ref.
