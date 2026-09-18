@@ -17,6 +17,7 @@
  *  fully owned by the thread user, overwritable, and still isolated from the
  *  warm checkout (a copy shares nothing). */
 
+import { nestedNodeModulesListCmd } from "./residentDepsStore.js";
 import { shellQuote } from "./shellQuote.js";
 
 export const DEP_CACHE_DIRS = ["node_modules", "dist", "build", "out", ".next"] as const;
@@ -217,6 +218,10 @@ export interface DepCacheScriptParse {
    *  node_modules) it left in place because the source has no counterpart —
    *  tree-private entries, not shared inodes (see `mutableCacheSwapScript`). */
   skipped: string[];
+  /** Tree-relative nested node_modules dirs the script hardlinked from the
+   *  store entry (`deploy/w/node_modules`): each needs its own tool-cache
+   *  swap, scoped to that root. */
+  nested: string[];
   failedStep: string | null;
 }
 
@@ -273,6 +278,47 @@ export function depCacheScript(
       `fi`,
     ].join("\n");
   });
+  // A store-backed view also materializes every NESTED node_modules the entry
+  // carries (item 59: the entry holds everything the install produced under a
+  // node_modules — npm installs a workspace's conflicting versions into the
+  // workspace's own node_modules, and a tree without them drifts from its
+  // lockfile: hoisted packages lose their dependent and `npm ls --omit=dev`
+  // misattributes their subtrees to production). Same mechanism per dir as the
+  // top-level one — cp -al, the combined chown/harden walk, the mutable-cache
+  // listing — gated on the tree having the parent dir (a worktree at another
+  // sha may not) and nothing already there. Each hardlinked dir is named on a
+  // `nested=<tree-relative path>` line so the Worker swaps its tool caches.
+  const entryRoot = opts.nodeModulesSrc?.endsWith("/node_modules")
+    ? opts.nodeModulesSrc.slice(0, -"/node_modules".length)
+    : undefined;
+  if (entryRoot) {
+    const entryQ = shellQuote(entryRoot);
+    const wtQ = shellQuote(worktree);
+    const nestedWalk = `find "$dst" \\( -type d -exec chown ${owner} {} + \\) -o \\( -type f \\( -perm -g+w -o -perm -o+w \\) -exec chmod go-w {} + \\)`;
+    blocks.push(
+      [
+        `if test -d ${entryQ}; then`,
+        `  ${nestedNodeModulesListCmd(entryRoot)} | while IFS= read -r rel; do`,
+        `    src=${entryQ}/"$rel"`,
+        `    dst=${wtQ}/"$rel"`,
+        `    pdir="\${dst%/node_modules}"`,
+        `    if test -d "$pdir" && ! test -e "$dst"; then`,
+        `      if cp -al "$src" "$dst"; then`,
+        `        ${nestedWalk} || { echo err=deps-perms; exit 1; }`,
+        `        if ! mlist=$(find "$dst" -mindepth 1 \\( -path "$dst/.*" -o -type d -name .cache \\)); then echo err=deps-mutable-list; exit 1; fi`,
+        `        if [ -n "$mlist" ]; then printf '%s\\n' "$mlist" | sed 's/^/mutable=/'; fi`,
+        `        echo "nested=$rel"`,
+        `      else`,
+        `        rm -rf "$dst"`,
+        `        cp -R "$src" "$dst" || { echo err=deps-copy; exit 1; }`,
+        `        chown -Rh ${owner} "$dst" || { echo err=deps-copy-chown; exit 1; }`,
+        `      fi`,
+        `    fi`,
+        `  done || exit 1`,
+        `fi`,
+      ].join("\n"),
+    );
+  }
   return blocks.join("\n");
 }
 
@@ -280,6 +326,7 @@ export function parseDepCacheScriptOutput(stdout: string): DepCacheScriptParse {
   let mech: DepCacheMaterialization | "none" = "none";
   const mutableListing: string[] = [];
   const skipped: string[] = [];
+  const nested: string[] = [];
   let failedStep: string | null = null;
   for (const raw of stdout.split("\n")) {
     const line = raw.trim();
@@ -292,11 +339,13 @@ export function parseDepCacheScriptOutput(stdout: string): DepCacheScriptParse {
       mutableListing.push(m[1]);
     } else if ((m = /^skipped=(.+)$/.exec(line))) {
       skipped.push(m[1]);
+    } else if ((m = /^nested=(.+)$/.exec(line))) {
+      nested.push(m[1]);
     } else if ((m = /^err=(.+)$/.exec(line))) {
       failedStep ??= m[1];
     }
   }
-  return { mech, mutableListing, skipped, failedStep };
+  return { mech, mutableListing, skipped, nested, failedStep };
 }
 
 /** The per-path swaps for a hardlinked node_modules' tool-managed entries
