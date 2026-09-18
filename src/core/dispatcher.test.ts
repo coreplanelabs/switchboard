@@ -1344,6 +1344,7 @@ describe("resident repo dispatch", () => {
         consume: (id, ids) => w.store.consume(id, ids),
         cancel: (id, ids) => w.store.cancel(id, ids),
         cancelByThread: (key, ids) => w.store.cancelByThread(key, ids),
+        pendingByThread: (key) => w.store.pendingByThread(key),
         describe: () => "throwing",
       };
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -16761,6 +16762,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
       consume: (id, ids) => store.consume(id, ids),
       cancel: (id, ids) => store.cancel(id, ids),
       cancelByThread: (key, ids) => store.cancelByThread(key, ids),
+      pendingByThread: (key) => store.pendingByThread(key),
       describe: () => "throwing",
     };
     deps.confirmations = throwing;
@@ -16868,6 +16870,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
       put: (row, ttl) => store.put(row, ttl),
       cancel: (id, ids) => store.cancel(id, ids),
       cancelByThread: (key, ids) => store.cancelByThread(key, ids),
+      pendingByThread: (key) => store.pendingByThread(key),
       describe: () => "throwing",
       consume: async () => {
         throw new Error("object unreachable");
@@ -16937,6 +16940,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
       put: (row, ttl) => store.put(row, ttl),
       cancel: (id, ids) => store.cancel(id, ids),
       cancelByThread: (key, ids) => store.cancelByThread(key, ids),
+      pendingByThread: (key) => store.pendingByThread(key),
       describe: () => "throwing",
       consume: async () => {
         throw new Error("object unreachable");
@@ -16963,6 +16967,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
       put: (row, ttl) => store.put(row, ttl),
       cancel: (id, ids) => store.cancel(id, ids),
       cancelByThread: (key, ids) => store.cancelByThread(key, ids),
+      pendingByThread: (key) => store.pendingByThread(key),
       describe: () => "gated",
       consume: async (id, ids) => {
         await gate;
