@@ -20,10 +20,18 @@ export const DEFAULT_WEIGHTS: ScoreWeights = { keyword: 0.7, recency: 0.3 };
  *  sweeper job (decay lives in the score). */
 export const RECENCY_TAU_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Default read budget: at most 8 records / ~800 tokens injected, regardless of
- *  store size — context never bloats. */
-export const DEFAULT_MEMORY_LIMIT = 8;
-export const DEFAULT_MEMORY_TOKENS = 800;
+/** Default read budget: at most 32 records / ~3000 tokens injected, regardless
+ *  of store size — context never bloats. Raised from 8/800 with the repository
+ *  window (docs/decisions/0061-…): the window's 24 facts plus the keyword hits
+ *  must fit in one pool under one budget. */
+export const DEFAULT_MEMORY_LIMIT = 32;
+export const DEFAULT_MEMORY_TOKENS = 3000;
+
+/** Default size of the repository window (`memory.repoWindow`): the newest
+ *  facts of the run's bound repository, rendered ahead of the keyword hits.
+ *  `0` disables the window. At ~320 chars per repository fact, 24 render in
+ *  about 2000 tokens — the rest of the budget is the hits'. */
+export const DEFAULT_REPO_WINDOW = 24;
 
 export interface MemoryBudget {
   maxRecords: number;

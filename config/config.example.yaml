@@ -325,8 +325,10 @@ workspaceDir: ./workspaces
 #   # and — when the run is bound to a repo — that repo's scope (repo:owner/name)
 #   # plus the requesting user's own scope (user:slack:U…) — a
 #   # person's records never surface for anyone else.
-#   limit: 8            # max records retrieved/injected per request (default 8)
-#   maxTokens: 800      # hard token budget for the injected block (default 800)
+#   limit: 32           # max records retrieved/injected per request (default 32)
+#   maxTokens: 3000     # hard token budget for the injected block (default 3000)
+#   repoWindow: 24      # newest repo facts injected ahead of the keyword hits when
+#                       # the run is bound to a repo (default 24; 0 disables the window)
 #   maxRecordsPerScope: 500
 #                       # per-scope cap on ACTIVE records (default 500): a write
 #                       # that would exceed it evicts the least recently used

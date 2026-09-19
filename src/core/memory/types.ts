@@ -71,6 +71,14 @@ export interface WriteCounts {
   evicted: number;
 }
 
+/** Narrowing filters for `MemoryStore.list` — each narrows, never ranks. */
+export interface MemoryListOptions {
+  /** Whole-token text/keyword filter (the human command's `<words>`). */
+  query?: string;
+  /** Keep only records of this kind (the repository window lists facts). */
+  kind?: MemoryRecord["kind"];
+}
+
 /** A retrieval request: which resource, what to match, how many at most. */
 export interface MemoryQuery {
   scopeKey: string;
@@ -92,12 +100,13 @@ export interface MemoryStore {
    *  Answers what the batch did (`WriteCounts`), so the caller's outcome line
    *  reports the store's actions, never a guess. */
   write(scopeKey: string, records: MemoryCandidate[]): Promise<WriteCounts>;
-  /** Human view: a scope's ACTIVE records, newest first, at most
-   *  `limit`. Unlike `retrieve` this never bumps usage. */
-  /** `query`: when given, only records that a query token hits
+  /** Human view and the repository window's read: a scope's ACTIVE records,
+   *  newest first, at most `limit`. Unlike `retrieve` this never bumps usage.
+   *  `opts.query`: when given, only records that a query token hits
    *  (whole-token, text or keywords) are listed — the filter narrows, it
-   *  never ranks or bumps usage. */
-  list(scopeKey: string, limit: number, query?: string): Promise<MemoryRecord[]>;
+   *  never ranks or bumps usage. `opts.kind`: when given, only records of
+   *  that kind (the repository window lists facts, never summaries). */
+  list(scopeKey: string, limit: number, opts?: MemoryListOptions): Promise<MemoryRecord[]>;
   /** Human control: soft-delete one ACTIVE record of this scope
    *  (`status: "forgotten"`, row kept for provenance). Resolves true when a
    *  record was forgotten, false when the id names nothing active in this
@@ -117,10 +126,16 @@ export type MemoryScope = "org" | "user" | "repo" | "channel";
 export interface MemoryConfig {
   /** Master switch. Default false → `NullMemoryStore` → zero behavior change. */
   enabled?: boolean;
-  /** Max records retrieved/injected per request. Default 8. */
+  /** Max records retrieved/injected per request. Default 32. */
   limit?: number;
-  /** Hard token budget for the injected block. Default ~800. */
+  /** Hard token budget for the injected block. Default ~3000. */
   maxTokens?: number;
+  /** The repository window: a run bound to a repository leads its block with
+   *  that repository's newest facts — at most this many, read with
+   *  `list(repoScope, repoWindow, { kind: "fact" })` — ahead of the keyword
+   *  hits, under the same budget. Default 24; `0` disables the window (the
+   *  repository scope is retrieved by keyword like the others). */
+  repoWindow?: number;
   /** Per-scope cap on ACTIVE records. A write that would leave a scope
    *  over the cap evicts the least recently used records (soft delete, status
    *  `evicted`) down to it, inside the same write. Default 500. */

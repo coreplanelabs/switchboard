@@ -213,7 +213,7 @@ export const memoryList = defineCommand({
     if (want("org")) wanted.push({ key: keys.org, label: "shared org records" });
     const scopes: ListedScope[] = [];
     for (const w of wanted) {
-      const records = await viaStore(() => store.list(w.key, limit, query));
+      const records = await viaStore(() => store.list(w.key, limit, query === undefined ? undefined : { query }));
       scopes.push({ ...w, records, limitReached: records.length === limit });
     }
     // Stored free text leaves machine surfaces wrapped; chat renders it as the person's own records.

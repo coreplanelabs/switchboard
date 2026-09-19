@@ -1,9 +1,16 @@
 import { parseModelRef, type Provider } from "../provider.js";
 import type { Actor, ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";
-import type { MemoryConfig, MemoryStore } from "./types.js";
+import type { MemoryConfig, MemoryRecord, MemoryStore } from "./types.js";
 import type { Span } from "../trace/types.js";
-import { applyBudget, DEFAULT_MEMORY_LIMIT, DEFAULT_MEMORY_TOKENS, renderMemoryBlock, scoreRecord } from "./scorer.js";
+import {
+  applyBudget,
+  DEFAULT_MEMORY_LIMIT,
+  DEFAULT_MEMORY_TOKENS,
+  DEFAULT_REPO_WINDOW,
+  renderMemoryBlock,
+  scoreRecord,
+} from "./scorer.js";
 import { listScopeKeys, requestScopeKeys } from "./scope.js";
 import { selectMemoryStore } from "./stores.js";
 import { reflect, reflectionActor, shouldReflect, trackReflection, type ReflectGateInput } from "./reflection.js";
@@ -12,6 +19,7 @@ import { systemClock } from "../trace/clock.js";
 export type {
   MemoryRecord,
   MemoryCandidate,
+  MemoryListOptions,
   MemoryQuery,
   MemoryStore,
   MemoryScope,
@@ -23,6 +31,7 @@ export {
   RECENCY_TAU_MS,
   DEFAULT_MEMORY_LIMIT,
   DEFAULT_MEMORY_TOKENS,
+  DEFAULT_REPO_WINDOW,
   tokenize,
   keywordMatch,
   recencyScore,
@@ -152,10 +161,11 @@ export interface MemoryScopeInputs {
 /**
  * The dispatcher-facing read path: select the store (NullMemoryStore when
  * disabled), derive the request's scope keys (org + the requesting user's own
- * scope), retrieve each, merge into ONE ranked pool, apply the hard
- * budget, and render the dedicated advisory context block. Returns `undefined`
- * when memory is off or nothing matches — the caller then injects nothing,
- * leaving the model input byte-identical to memory-off.
+ * scope), retrieve each, merge into ONE ranked pool — led by the repository
+ * window when the run is bound to a repository — apply the hard budget, and
+ * render the dedicated advisory context block. Returns `undefined` when memory
+ * is off or nothing matches — the caller then injects nothing, leaving the
+ * model input byte-identical to memory-off.
  *
  * Isolation is by construction: the only user scope ever queried is the one
  * derived from `userId`, so another person's records cannot be returned.
@@ -186,7 +196,30 @@ export async function memoryContextBlock(
   const repo = await Promise.resolve(scopes.repo).catch(() => undefined);
   const keys = requestScopeKeys(organization, userId, { channelId: scopes.channelId, repo });
   const scopeKeys = listScopeKeys(keys);
-  const repoRecords = keys.repo ? await store.retrieve({ scopeKey: keys.repo, query, limit }, trace) : [];
+  // The repository window: the bound repository's newest facts, read with
+  // `list` (kind: fact, newest first, no usage bump) and rendered ahead of the
+  // keyword hits — a run in a repository sees its lessons whatever the brief
+  // happens to mention. The window replaces the repository `retrieve`;
+  // `repoWindow: 0` restores the retrieve-only read. Advisory like `retrieve`:
+  // a throwing `list` (WorkerMemoryStore's throws — built for the human
+  // command) costs the run its window and one `[memory]` warning, never the
+  // block of hits.
+  const repoWindow = cfg?.repoWindow ?? DEFAULT_REPO_WINDOW;
+  let windowRecords: MemoryRecord[] = [];
+  let repoRecords: MemoryRecord[] = [];
+  if (keys.repo) {
+    if (repoWindow > 0) {
+      try {
+        windowRecords = await store.list(keys.repo, repoWindow, { kind: "fact" });
+      } catch (err) {
+        console.warn(
+          `[memory] repo window read failed (${err instanceof Error ? err.message : String(err)}); continuing without the window`,
+        );
+      }
+    } else {
+      repoRecords = await store.retrieve({ scopeKey: keys.repo, query, limit }, trace);
+    }
+  }
   const perScope = [...(await immediateP), repoRecords];
   // Each store call returns its scope's top `limit`, already ranked; re-scoring
   // the union with the same pure scorer gives one cross-scope order so the
@@ -200,7 +233,9 @@ export async function memoryContextBlock(
     .map((r) => ({ r, score: scoreRecord(r, query, t) }))
     .sort((a, b) => b.score - a.score)
     .map(({ r }) => r);
-  const budgeted = applyBudget(merged, {
+  // One pool, window first: the budget (records and tokens) applies across the
+  // window and the hits together, and the first record is always kept as today.
+  const budgeted = applyBudget([...windowRecords, ...merged], {
     maxRecords: limit,
     maxTokens: cfg?.maxTokens ?? DEFAULT_MEMORY_TOKENS,
   });

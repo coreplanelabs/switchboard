@@ -219,6 +219,146 @@ describe("memoryContextBlock — repo + channel scopes", () => {
   });
 });
 
+// Feature: docs/reference/specs/memory.md §6/§19/§22 — the repository window: a run
+// bound to a repository leads its block with that repository's newest facts (a
+// `list` with `kind: "fact"`, `memory.repoWindow` records at most), then the
+// keyword hits from the other scopes, under the one budget. The window read is
+// advisory: a throwing `list` costs the run its window and one `[memory]`
+// warning, never the block of hits. `repoWindow: 0` restores the retrieve-only
+// read.
+describe("memoryContextBlock — the repository window", () => {
+  const repoFacts = (n: number, text: (i: number) => string = (i) => `repository lesson ${i + 1}`) =>
+    Array.from({ length: n }, (_, i) =>
+      rec({
+        id: `mem:repo:acme/api:${i}`,
+        scopeKey: "repo:acme/api",
+        text: text(i),
+        keywords: [],
+        createdAt: NOW - (n - i) * 1000,
+      }),
+    );
+  const orgHits = [
+    rec({ id: "mem:org:acme:1", text: "deploy is npm run deploy", keywords: ["deploy"] }),
+    rec({ id: "mem:org:acme:2", text: "previews come before deploy", keywords: ["deploy", "preview"] }),
+  ];
+
+  it("renders 24 repository facts newest first, then the hits, and no repository record twice", async () => {
+    const store = new InMemoryMemoryStore([...repoFacts(30), ...orgHits], { now: () => NOW });
+    const block = await memoryContextBlock("acme", { enabled: true }, store, "deploy preview", undefined, {
+      repo: "acme/api",
+    });
+    const bullets = block!.split("\n").filter((l) => l.startsWith("- "));
+    expect(bullets).toHaveLength(26);
+    // The window: the 24 newest repository facts (30 down to 7), ahead of every hit.
+    expect(bullets[0]).toContain("repository lesson 30");
+    expect(bullets[23]).toContain("repository lesson 7");
+    expect(bullets.slice(0, 24).every((b) => b.includes("repository lesson"))).toBe(true);
+    // Then the keyword hits (ranked: both query tokens beat one), and each
+    // repository record exactly once.
+    expect(bullets[24]).toContain("previews come before deploy");
+    expect(bullets[25]).toContain("deploy is npm run deploy");
+    expect(new Set(bullets).size).toBe(26);
+    // Summaries stay out of the window: only facts were listed.
+    const withSummary = new InMemoryMemoryStore(
+      [
+        ...repoFacts(3),
+        rec({
+          id: "mem:repo:acme/api:s",
+          scopeKey: "repo:acme/api",
+          kind: "summary",
+          text: "thread summary",
+          keywords: [],
+          createdAt: NOW,
+        }),
+        ...orgHits,
+      ],
+      { now: () => NOW },
+    );
+    const b2 = await memoryContextBlock("acme", { enabled: true }, withSummary, "deploy preview", undefined, {
+      repo: "acme/api",
+    });
+    expect(b2).not.toContain("thread summary");
+  });
+
+  it("24 facts of 320 characters fit under the 3000-token budget with the hits; a 4000-token first record is kept alone", async () => {
+    const store = new InMemoryMemoryStore(
+      [...repoFacts(24, (i) => `lesson ${i + 1} ${"x".repeat(320 - `lesson ${i + 1} `.length)}`), ...orgHits],
+      { now: () => NOW },
+    );
+    const block = await memoryContextBlock("acme", { enabled: true }, store, "deploy preview", undefined, {
+      repo: "acme/api",
+    });
+    const bullets = block!.split("\n").filter((l) => l.startsWith("- "));
+    expect(bullets).toHaveLength(26); // 24 × ~85 tokens ≈ 2100, room for both hits
+    // The first-record rule as today: one record over the whole budget still lands.
+    const huge = new InMemoryMemoryStore([...repoFacts(3, (i) => `${i + 1}${"y".repeat(16000)}`), ...orgHits], {
+      now: () => NOW,
+    });
+    const hugeBlock = await memoryContextBlock("acme", { enabled: true }, huge, "deploy preview", undefined, {
+      repo: "acme/api",
+    });
+    expect(hugeBlock!.split("\n").filter((l) => l.startsWith("- "))).toHaveLength(1);
+  });
+
+  it("a repository promise that rejects yields a block of hits only", async () => {
+    const store = new InMemoryMemoryStore([...repoFacts(5), ...orgHits], { now: () => NOW });
+    const block = await memoryContextBlock("acme", { enabled: true }, store, "deploy preview", undefined, {
+      repo: Promise.reject(new Error("github down")),
+    });
+    expect(block).toContain("deploy is npm run deploy");
+    expect(block).not.toContain("repository lesson");
+  });
+
+  it("a store whose list throws yields the hits and exactly one [memory] warning", async () => {
+    const inner = new InMemoryMemoryStore([...repoFacts(5), ...orgHits], { now: () => NOW });
+    const store: MemoryStore = {
+      retrieve: (q) => inner.retrieve(q),
+      write: (s, r) => inner.write(s, r),
+      forget: (s, id) => inner.forget(s, id),
+      list: async () => {
+        throw new Error("worker /list HTTP 500");
+      },
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const block = await memoryContextBlock("acme", { enabled: true }, store, "deploy preview", undefined, {
+        repo: "acme/api",
+      });
+      expect(block).toContain("deploy is npm run deploy");
+      expect(block).toContain("previews come before deploy");
+      expect(block).not.toContain("repository lesson");
+      const memoryWarnings = warn.mock.calls.filter((c) => String(c[0]).includes("[memory]"));
+      expect(memoryWarnings).toHaveLength(1);
+      expect(String(memoryWarnings[0][0])).not.toContain("repository lesson"); // never a record's text
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("repoWindow: 0 yields today's block — the repository scope is retrieved, never listed", async () => {
+    const store = new InMemoryMemoryStore(
+      [
+        rec({
+          id: "mem:repo:acme/api:0",
+          scopeKey: "repo:acme/api",
+          text: "acme/api deploys via make release",
+          keywords: ["deploy", "release"],
+        }),
+        ...repoFacts(3), // no query token → invisible to retrieve
+        ...orgHits,
+      ],
+      { now: () => NOW },
+    );
+    const listSpy = vi.spyOn(store as MemoryStore, "list");
+    const block = await memoryContextBlock("acme", { enabled: true, repoWindow: 0 }, store, "deploy", undefined, {
+      repo: "acme/api",
+    });
+    expect(listSpy).not.toHaveBeenCalled();
+    expect(block).toContain("make release"); // the keyword hit still arrives, via retrieve
+    expect(block).not.toContain("repository lesson"); // no window
+  });
+});
+
 describe("memoryContextBlock — user scope", () => {
   const orgRec = rec({ id: "mem:org:acme:1", text: "deploy is npm run deploy", keywords: ["deploy"] });
   const u1Rec = rec({
