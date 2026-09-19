@@ -71,6 +71,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   selfImprovement: true,
   schedules: true,
   costs: true,
+  metrics: true,
   delivery: true,
   dashboard: true,
   review: true,

@@ -10,6 +10,7 @@ import { dayOf } from "./runUsage.js";
 import { pointOf } from "./runMetrics.js";
 import {
   describeError,
+  metricsDatasetWarning,
   PermanentStoreError,
   RouteMissingError,
   TransientStoreError,
@@ -277,6 +278,37 @@ describe("WorkerRunStore", () => {
     await expect(mk({ status: 400, body: { error: "record must be a RunRecord" } }).put(record("a"))).rejects.toThrow(
       /HTTP 400: record must be a RunRecord/,
     );
+  });
+});
+
+// Feature: docs/reference/specs/run-metrics.md item 6 — the boot probe compares the bot's
+// configured `metrics.dataset` with the dataset the state Worker's /healthz `features` names
+// (`runMetrics:<dataset>`), and warns once when the two sides disagree; advisory on both sides.
+describe("metricsDatasetWarning — the name held on both sides", () => {
+  it("says nothing when neither side names a dataset, or when both name the same one", () => {
+    expect(metricsDatasetWarning(undefined, ["runs"])).toBeUndefined();
+    expect(metricsDatasetWarning("switchboard_runs", ["runs", "runMetrics:switchboard_runs"])).toBeUndefined();
+  });
+
+  it("warns one [runs] line naming both datasets when they differ", () => {
+    const warning = metricsDatasetWarning("switchboard_runs", ["runs", "runMetrics:other_runs"]);
+    expect(warning).toMatch(/^\[runs\] /);
+    expect(warning).toContain('"switchboard_runs"');
+    expect(warning).toContain('"other_runs"');
+  });
+
+  it("warns when only the bot's config names one — the Worker deployed without the binding", () => {
+    const warning = metricsDatasetWarning("switchboard_runs", ["runs"]);
+    expect(warning).toMatch(/^\[runs\] /);
+    expect(warning).toContain('"switchboard_runs"');
+    expect(warning).toContain("no RUN_METRICS binding");
+  });
+
+  it("warns when only the Worker binds one — the bot's config names none", () => {
+    const warning = metricsDatasetWarning(undefined, ["runs", "runMetrics:switchboard_runs"]);
+    expect(warning).toMatch(/^\[runs\] /);
+    expect(warning).toContain('"switchboard_runs"');
+    expect(warning).toContain("no metrics.dataset");
   });
 });
 

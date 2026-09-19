@@ -40,8 +40,9 @@ export const GENERATED_HEADER: readonly string[] = [
 /** What a Worker's template may name: `{{account}}`, `{{zone}}`, `{{script}}`, `{{hostname}}`,
  *  `{{image}}` (a Worker with a container), `{{urls.publicBaseUrl}}`, `{{urls.stateWorkerUrl}}`
  *  (inside an `{{#if urls.stateWorkerUrl}}` block — the state Worker is optional), inside an
- *  `{{#if access}}` block `{{access.teamDomain}}` / `{{access.aud}}`, and inside an
- *  `{{#if resident}}` block `{{resident.script}}` (the resident is optional too). */
+ *  `{{#if access}}` block `{{access.teamDomain}}` / `{{access.aud}}`, inside an
+ *  `{{#if metrics}}` block `{{metrics.dataset}}` (the run-metrics dataset is optional), and inside
+ *  an `{{#if resident}}` block `{{resident.script}}` (the resident is optional too). */
 export interface TemplateView {
   account: string;
   zone: string;
@@ -65,6 +66,10 @@ export interface TemplateView {
   /** The artifacts bucket the bot Worker binds (`{{#if artifacts}}` around its `r2_buckets`
    *  block and the `ARTIFACTS_BUCKET_NAME` var), when the profile names one. */
   artifacts: { bucket: string } | undefined;
+  /** The run-metrics dataset the state Worker binds (`{{#if metrics}}` around its
+   *  `analytics_engine_datasets` block and the `RUN_METRICS_DATASET` var, rendered together —
+   *  docs/reference/specs/run-metrics.md item 6), when the profile names one. */
+  metrics: { dataset: string } | undefined;
   /** The bot Worker — every profile has one — as another Worker's template names it: the
    *  state Worker binds the bot's `ShipCoordinator` Workflow across scripts by the bot's
    *  script name (`{{bot.script}}`), and a Workflow's name carries its script's. */
@@ -98,6 +103,7 @@ export function templateView(
     urls: { publicBaseUrl: urls.publicBaseUrl, stateWorkerUrl: urls.stateWorkerUrl },
     access: profile.access,
     artifacts: profile.artifacts,
+    metrics: profile.metrics,
     bot: { script: profile.workers.bot.script },
     resident: profile.workers.resident ? { script: profile.workers.resident.script } : undefined,
   };

@@ -100,6 +100,22 @@ export const profileSchema = z.object({
         .regex(/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/, "an R2 bucket name: 3–63 lowercase letters, digits and hyphens"),
     })
     .optional(),
+  /** The run-metrics dataset (docs/reference/specs/run-metrics.md item 6), when the installation
+   *  writes points: the state Worker's template binds it as `RUN_METRICS` with the name beside it
+   *  in `RUN_METRICS_DATASET`, and `deploy plan` names the binding on the memory step. Nothing is
+   *  created ahead of the deploy — the platform creates a dataset on first write. The bot's runtime
+   *  config (`metrics.dataset`) must name the same dataset; the two are held together by the bot's
+   *  boot warning, not by the profile. Analytics Engine's own dataset-name rules. */
+  metrics: z
+    .object({
+      dataset: z
+        .string()
+        .regex(
+          /^[A-Za-z_][A-Za-z0-9_]{0,63}$/,
+          "an Analytics Engine dataset name: 1–64 letters, digits and underscores, not starting with a digit",
+        ),
+    })
+    .optional(),
 });
 
 export type DeploymentProfile = z.infer<typeof profileSchema>;

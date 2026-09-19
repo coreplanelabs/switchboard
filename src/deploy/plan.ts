@@ -505,7 +505,13 @@ export function planDeploy(
     ...(w.drain ? { drain: { url: w.baseUrl, tokenEnv: w.drain.tokenEnv } } : {}),
     ...(w.liveGate ? { liveGate: w.liveGate } : {}),
     ...(!w.liveGate && !w.healthBearerEnv ? { wakeUrl: w.healthUrl } : {}),
-    why: w.why,
+    // The plan says where a run's points will land (run-metrics.md item 6): the state Worker's
+    // template binds the dataset the profile names, and the platform creates it on first write —
+    // no resource is created ahead of the deploy and no extra credential capability is needed.
+    why:
+      w.name === "memory" && profile.metrics
+        ? `${w.why}; binds RUN_METRICS to Analytics Engine dataset ${profile.metrics.dataset} (created by the platform on first write)`
+        : w.why,
   }));
   const forcedNames = opts.force ? chosen.filter((w) => w.preflight).map((w) => w.name) : [];
   // `--only` may name a Worker this profile does not have: nothing to deploy for it, said out loud.

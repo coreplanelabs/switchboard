@@ -54,6 +54,7 @@ import { ARTIFACT_DEFAULTS } from "./artifacts/config.js";
 import { startProcessMetrics } from "./channels/processMetrics.js";
 import { selectFrictionLedger } from "./core/frictionLedger.js";
 import { buildRunStore, FileRunStore, NullRunStore, retentionPolicyOf } from "./core/runStore.js";
+import { metricsDatasetWarning } from "./core/runStoreWorker.js";
 import { createRunsService } from "./core/runsService.js";
 import { createPlaneService } from "./core/planeService.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./core/runHistoryWriter.js";
@@ -412,6 +413,15 @@ export async function runBot(): Promise<void> {
         } else {
           console.log(`[run-history] state Worker ${base} reports runs support`);
         }
+        // The name held on both sides (run-metrics.md item 6): the bot's configured
+        // metrics.dataset against the dataset the Worker's deploy bound — one warning
+        // when they disagree, advisory on both sides.
+        const metricsCfg = config.config.metrics as { dataset?: unknown } | undefined;
+        const datasetWarning = metricsDatasetWarning(
+          typeof metricsCfg?.dataset === "string" ? metricsCfg.dataset : undefined,
+          features,
+        );
+        if (datasetWarning !== undefined) console.warn(datasetWarning);
       })
       .catch((err: unknown) =>
         console.warn(
