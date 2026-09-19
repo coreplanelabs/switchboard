@@ -762,12 +762,19 @@ export interface BillerTieOutDay {
   invoiceUsd?: number;
   invoiceFeeUsd?: number;
   invoiceByokUsd?: number;
-  /** The summed `model.turn` dollars whose ref names this block. */
+  /** The summed `model.turn` dollars whose ref names this block — the meter's
+   *  charged figure from each turn's own `usd` (the provider's, the operator's
+   *  or the registry's price at the time), never the price table's repricing
+   *  the dimension views show (`buildCostsByReport`). */
   attributedUsd: number;
   /** The summed BYOK fees — the half an aggregator's `usage` ties against. */
   attributedFeeUsd?: number;
   /** `attributedUsd − attributedFeeUsd` — the half `byok_usage_inference` ties against. */
   attributedUpstreamUsd?: number;
+  /** The day's tokens whose turns carried no `usd` (null or absent) — spend the
+   *  attributed side could not count, so a gap against the invoice is explained
+   *  rather than silent. Absent when every turn was priced. */
+  unpricedTokens?: number;
 }
 
 /** One biller's daily tie-out over the range. */
@@ -784,15 +791,20 @@ const billerOfRef = (ref: string): string | undefined => (ref.includes("/") ? pa
 
 /**
  * Pure: each biller's invoice compared with the summed `model.turn` rows whose
- * ref names that block, per UTC day of the range. An aggregator's invoice
- * halves (`feeUsd`, `byokUsd`) sit beside the summed fees and the remainder. A
- * model whose `usd` is null or absent (unpriced, or from before the meter row)
- * contributes nothing to `attributedUsd` — an understated side is honest, an
- * invented one is not, so a day the source returned no row for keeps its
+ * ref names that block, per UTC day of the range. The attributed side is the
+ * meter's charged figure — each turn's own `usd`, never the price table's
+ * repricing. An aggregator's invoice halves (`feeUsd`, `byokUsd`) sit beside
+ * the summed fees and the remainder. A model whose `usd` is null or absent
+ * (unpriced, or from before the meter row) contributes nothing to
+ * `attributedUsd` — its tokens are counted as the day's `unpricedTokens`
+ * instead, so the understated side is visible: honest, never invented — and
+ * a day the source returned no row for keeps its
  * invoice side absent (the page renders —): the source holds closed days only,
  * and a trailing uninvoiced day beside real spend is not a $0 invoice. A day
- * with neither an invoice row nor a nonzero attributed figure is dropped; a
- * biller without a source (`invoice: false`) ties out against nothing.
+ * with no invoice row, no nonzero attributed figure and no unpriced tokens is
+ * dropped — but unpriced spend alone keeps its day, so the token count renders
+ * instead of vanishing; a biller without a source (`invoice: false`) ties out
+ * against nothing.
  */
 export function buildBillerTieOuts(
   billers: ReadonlyArray<{ name: string; invoice: boolean }>,
@@ -801,12 +813,12 @@ export function buildBillerTieOuts(
   range: DateRange,
 ): BillerTieOut[] {
   return billers.map(({ name, invoice }) => {
-    const attributed = new Map<string, { usd: number; fee: number; hasFee: boolean }>();
+    const attributed = new Map<string, { usd: number; fee: number; hasFee: boolean; unpricedTokens: number }>();
     for (const cell of cells) {
       if (cell.day < range.from || cell.day > range.to) continue;
       for (const [ref, m] of Object.entries(cell.usage.byModel)) {
         if (billerOfRef(ref) !== name) continue;
-        const day = attributed.get(cell.day) ?? { usd: 0, fee: 0, hasFee: false };
+        const day = attributed.get(cell.day) ?? { usd: 0, fee: 0, hasFee: false, unpricedTokens: 0 };
         // An unpriced model's feeUsd is skipped with its usd: adding the fee
         // alone would drive attributedUpstreamUsd (usd − fee) negative.
         if (typeof m.usd === "number") {
@@ -815,6 +827,8 @@ export function buildBillerTieOuts(
             day.fee += m.feeUsd;
             day.hasFee = true;
           }
+        } else {
+          day.unpricedTokens += m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheWriteTokens;
         }
         attributed.set(cell.day, day);
       }
@@ -824,7 +838,7 @@ export function buildBillerTieOuts(
       for (const d of invoices[name] ?? []) if (d.date >= range.from && d.date <= range.to) invoiced.set(d.date, d);
     const dates = [...new Set([...attributed.keys(), ...invoiced.keys()])].sort().filter((date) => {
       const a = attributed.get(date);
-      return invoiced.has(date) || (a !== undefined && (a.usd !== 0 || a.hasFee));
+      return invoiced.has(date) || (a !== undefined && (a.usd !== 0 || a.hasFee || a.unpricedTokens > 0));
     });
     const days: BillerTieOutDay[] = dates.map((date) => {
       const a = attributed.get(date);
@@ -836,6 +850,7 @@ export function buildBillerTieOuts(
         ...(inv?.byokUsd !== undefined ? { invoiceByokUsd: inv.byokUsd } : {}),
         attributedUsd: a?.usd ?? 0,
         ...(a?.hasFee ? { attributedFeeUsd: a.fee, attributedUpstreamUsd: a.usd - a.fee } : {}),
+        ...(a !== undefined && a.unpricedTokens > 0 ? { unpricedTokens: a.unpricedTokens } : {}),
       };
     });
     return {

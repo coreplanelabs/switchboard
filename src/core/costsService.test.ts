@@ -403,7 +403,13 @@ describe("invoice sources per biller through the wiring", () => {
       const report = await wired!.service.report("switchboard", "3");
       const byBiller = Object.fromEntries((report.billers ?? []).map((t) => [t.biller, t]));
       expect(byBiller.anthropic.invoice).toBe(true);
-      expect(byBiller.anthropic.days).toContainEqual({ date: AUG_28, invoiceUsd: 40, attributedUsd: 0 });
+      // the fixture's haiku row carries no usd, so its tokens count as the day's unpriced
+      expect(byBiller.anthropic.days).toContainEqual({
+        date: AUG_28,
+        invoiceUsd: 40,
+        attributedUsd: 0,
+        unpricedTokens: 1_000_000,
+      });
       expect(byBiller.openrouter.days).toContainEqual({
         date: AUG_28,
         invoiceUsd: 0.55,
