@@ -9473,7 +9473,7 @@ workspaceDir: __WORKDIR__
   const SHIP_ROUTED_YAML = SHIP_YAML.replace("routing: { auto: false }", "routing: { auto: true }");
   const shipRouter = () => vi.fn(async () => JSON.stringify({ preset: "ship", reason: "a change to land" }));
 
-  it("a routed ship on a task hands off merge: person — the card reads `ship … routed:` and the instance is the generated plan's", async () => {
+  it("a routed ship on a task hands off merge: person — the card's route note (`route reason:` at debug) and the instance is the generated plan's", async () => {
     const { deps, instances, created } = shipDeps(SHIP_ROUTED_YAML);
     deps.routeModel = shipRouter();
     const registry = new RunRegistry({ genId: () => "run-shiprouted", genToken: () => "tok" });
@@ -15133,7 +15133,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     expect(routeEvents(registry, "r1")).toEqual([]);
   });
 
-  it("routing on, a bare message: routed to review — its own model, the card's `routed:` line from the first paint, the record's route event, and it runs at once", async () => {
+  it("routing on, a bare message: routed to review — its own model, the card's route note (`route reason:` at debug) from the first paint, the record's route event, and it runs at once", async () => {
     let ids = 0;
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
     const provider = capturingProvider();
@@ -15352,7 +15352,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
       expect(brief).toContain("Routed as a compound request: 2 independent parts");
       expect(brief).toContain("1. `general`: summarize the open issues in acme/api");
       expect(brief).toContain("2. `research`: find out why the staging resident went down last night");
-      // The card: the routed line in the label, one line per part under it, from the first paint.
+      // The card: the route note in the label, one line per part under it, from the first paint.
       expect(parent.statuses[0].title).toContain(
         "*conductor* on `anthropic/conductor-model` · route reason: two independent asks",
       );

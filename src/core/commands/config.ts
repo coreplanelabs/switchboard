@@ -37,7 +37,8 @@ import {
 //                           [--harness.<agent> pi|opencode] [--intake.threadReplies mention|classify|always]
 //                           [--boundary.maxMinutes n] [--boundary.maxIdentity none|read|write] [--boundary.machines a,b]
 //                           [--channel <id>] [--thread <key>]
-//   config clear <channel|me|thread> [--channel <id>] [--thread <key>]//   config instructions <channel|me> [text…] [--channel <id>]
+//   config clear <channel|me|thread> [--channel <id>] [--thread <key>]
+//   config instructions <channel|me> [text…] [--channel <id>]
 // The caller's own channel (`caller.origin`) is the default target; `--channel`
 // names another (or is required where there is no origin — a machine surface).
 // The `thread` scope is the caller's own thread (`--thread <key>` on a machine
