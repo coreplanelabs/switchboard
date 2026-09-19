@@ -117,6 +117,9 @@ function setup(
     reply: async (t) => void replies.push(t),
     status: async () => ({ update: () => {}, done: async () => {} }),
     history: async () => [],
+    // The request handle's capability (record 0060): the preflight admits by
+    // it, and a Slack handle can open a thread of its own.
+    openThread: async () => ({ thread: { threadKey: `${THREAD}/child` }, io: { ...io } }),
   };
   const frames: StatusUpdate[] = [];
   const closes: StatusUpdate[] = [];
@@ -181,6 +184,17 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect(s.registry.getById("run-s")).toBeNull();
     expect(s.created).toEqual([]);
     expect(await s.instances.listUnits("ship-run-s")).toEqual([]);
+  });
+
+  it("the ship branch passes the request handle's capability (agent-ship item 1, record 0060): a handle without openThread is refused at the channel gate with the spawn's reason, nothing handed to the runner", async () => {
+    const s = setup("slack:UADMIN");
+    delete s.io.openThread;
+    await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+    expect(s.refusals).toEqual(["ship_preflight_channel"]);
+    expect(s.replies).toHaveLength(1);
+    expect(s.replies[0]).toContain("cannot open a thread of its own");
+    expect(s.replies[0].toLowerCase()).not.toContain("single-shot");
+    expect(s.created).toEqual([]);
   });
 
   it("a task: the request becomes a generated one-unit plan instance named by the task and the thread — the record carries the requester, thread, card, caps (the profile's minutes, the block's rounds) and run id, the shim is asked, the answer is published and replied, the run ends completed with the ship profile on its record, the card closes ✅", async () => {

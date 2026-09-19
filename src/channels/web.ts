@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { allOf, authorize, ownedBy, type Actor } from "../core/authz/index.js";
+import { resolveChatActor, type GrantsLookup } from "../core/authz/actor.js";
 import type { Capabilities } from "../core/capabilities.js";
 import { NO_NAMES, namesOf, type NameDirectory } from "../core/names.js";
 import { acceptsUndefined, type CommandDef, type CommandInvoker } from "../core/commandRegistry.js";
@@ -10,7 +11,7 @@ import { startRequestRoot } from "../core/requestTrace.js";
 import type { RunRegistry } from "../core/runRegistry.js";
 import type { RunRecordView, RunsService, RunView } from "../core/runsService.js";
 import { systemClock } from "../core/trace/clock.js";
-import type { HistoryItem, IncomingMessage } from "../core/types.js";
+import type { ChannelIO, HistoryItem, IncomingMessage, OpenedThread } from "../core/types.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import { originAllowed } from "./commandHttp.js";
 import { HttpIO, MAX_BODY_BYTES, readBody, type DispatchFn } from "./http.js";
@@ -194,6 +195,121 @@ export function historyOf(turns: readonly (HomeTurnSeed | HomeReceiptTurnSeed)[]
   return items;
 }
 
+/** What a conversation read needs — the runs service and the registry the
+ *  request handler holds, lifted out of its closure (record 0060) so a handle
+ *  can be rebuilt from a bare thread key with no request behind it. */
+export interface ConversationDeps {
+  service: RunsService;
+  registry: Pick<RunRegistry, "getById">;
+  /** The thread's silent receipts (item 12); absent or null — the runs alone. */
+  intake?: { listIntake(query: IntakeQuery): Promise<IntakeReceipt[]> } | null;
+  warn?: (message: string) => void;
+}
+
+/** The thread's silent receipts as turns (item 12), read only when the viewer
+ *  may see the thread — at least one of its runs — so a receipt never reveals
+ *  a thread its runs would not; a failing ledger seeds the runs alone. */
+async function silentReceiptsOf(
+  deps: ConversationDeps,
+  threadKey: string,
+  visible: boolean,
+): Promise<HomeReceiptTurnSeed[]> {
+  if (!deps.intake || !visible) return [];
+  try {
+    const rows = await deps.intake.listIntake({ threadKey });
+    return rows
+      .filter((r) => r.verdict === "silent")
+      .map((r): HomeReceiptTurnSeed => ({ kind: "receipt", reason: r.reason, decidedAt: r.decidedAt }));
+  } catch (err) {
+    deps.warn?.(
+      `intake receipts unavailable (${err instanceof Error ? err.message : String(err)}): ${threadKey} seeds its runs alone`,
+    );
+    return [];
+  }
+}
+
+/** The thread's runs the viewer may read, oldest first, with their messages — one read per run, in
+ *  parallel — and its silent receipts interleaved by decidedAt (item 12). */
+export async function turnsOf(
+  deps: ConversationDeps,
+  threadKey: string,
+  actor: Actor,
+): Promise<{ turns: (HomeTurnSeed | HomeReceiptTurnSeed)[]; runs: RunView[] }> {
+  const listed = await deps.service.listRuns({
+    status: "all",
+    visibleTo: readableRuns(actor),
+    threadKey,
+    limit: CONVERSATION_RUNS,
+  });
+  if (listed.storeUnavailable) deps.warn?.(`the run store is unavailable: ${threadKey} seeds its live runs only`);
+  const runs = [...listed.runs].sort((a, b) => a.startedAt - b.startedAt);
+  const liveToken = (run: RunView): string | undefined =>
+    run.finished ? undefined : deps.registry.getById(run.id)?.token;
+  const [turns, receipts] = await Promise.all([
+    Promise.all(
+      runs.map(async (run) => {
+        const read = await deps.service.getRun(run.id, { include: "messages" });
+        return turnOf(read.ok ? read.value : { ...run }, liveToken(run));
+      }),
+    ),
+    silentReceiptsOf(deps, threadKey, runs.length > 0),
+  ]);
+  return { turns: interleaveReceipts(turns, receipts), runs };
+}
+
+/** ConversationDeps plus the handle's own knobs: the id generator `openThread`
+ *  mints with and where an out-of-request line goes. */
+export interface WebHandleDeps extends ConversationDeps {
+  mintId?: () => string;
+  log?: (line: string) => void;
+}
+
+/** A reply with no browser response to ride resolves and logs, never delivers
+ *  (run-history item 38's shape): the seal reads this and says `replyOk: false`. */
+const WEB_UNDELIVERABLE = "no open web request to deliver to";
+
+/** A web thread's channel handle over a known actor and no request — what
+ *  `openThread` hands a child and what `resumeWebIO` rebuilds (record 0060):
+ *  `history()` reads the thread's runs as the actor, `openThread` mints a
+ *  conversation in the same lane, and a reply is logged as undeliverable. */
+export function webThreadIO(deps: WebHandleDeps, thread: { threadKey: string; actor: Actor }): WebIO {
+  const [, sub] = thread.threadKey.split(":");
+  const log = deps.log ?? ((line: string) => console.log(`[web] ${line}`));
+  return new WebIO(
+    async (exceptRunId) =>
+      historyOf(
+        (await turnsOf(deps, thread.threadKey, thread.actor)).turns.filter(
+          (t) => isReceiptTurn(t) || t.id !== exceptRunId,
+        ),
+      ),
+    {
+      sub,
+      mintId: deps.mintId ?? mintConversationId,
+      ioFor: (threadKey) => webThreadIO(deps, { threadKey, actor: thread.actor }),
+      log,
+    },
+    { threadKey: thread.threadKey, undeliverable: WEB_UNDELIVERABLE, log },
+  );
+}
+
+/** The `web:` arm of the bot's `threadIoFor` (record 0060): the handle rebuilt
+ *  from a bare thread key and the requester's id alone — the actor resolved as
+ *  every chat message's is (`resolveChatActor`), so `history()` lists the
+ *  thread's runs as the session's own reader. Undefined for a key that is not
+ *  `web:<sub>:<conversation>`. */
+export function resumeWebIO(
+  deps: WebHandleDeps & { grantsFor: GrantsLookup },
+  thread: { threadKey: string; userId: string },
+): WebIO | undefined {
+  const [platform, sub, conversation] = thread.threadKey.split(":");
+  if (platform !== PLATFORM || !sub || !conversation) return undefined;
+  const actor = resolveChatActor(
+    { userId: thread.userId, channelId: `${PLATFORM}:${sub}`, threadKey: thread.threadKey },
+    deps.grantsFor,
+  );
+  return webThreadIO(deps, { threadKey: thread.threadKey, actor });
+}
+
 /** One thread of the viewer's, grouped from their runs: the key, its channel's
  *  platform, its runs (oldest first), when it last moved, whether one is live. */
 export interface ThreadGroup {
@@ -288,17 +404,57 @@ export function suggestionsFor(input: {
   return chips;
 }
 
+/** The lane a web handle opens child threads in (thread-admission item 6,
+ *  record 0060): a conversation id minted under the same sub, the child's
+ *  handle built by the same reader, the lead's length logged — the browser is
+ *  told nothing live; the conversation renders from the run records. */
+export interface WebLane {
+  sub: string;
+  mintId: () => string;
+  ioFor: (threadKey: string) => ChannelIO;
+  log: (line: string) => void;
+}
+
 /** The web channel's `ChannelIO`: the ingress IO's single-shot shape (replies
  *  collected, `runStarted` raced against completion, the receipt kept) with
  *  the thread's history read from the run store when a run asks for it. The
  *  run this request became is registered — its `input` published — before the
  *  core reads history, so it is in the thread's runs; history excludes the
  *  triggering message on every channel (`ChannelIO.history`), so the asking
- *  run's own turn is left out here. */
+ *  run's own turn is left out here. With a `lane` the handle can open a thread
+ *  of its own — what admits the web to `agent:ship` (record 0060); a `resume`
+ *  handle (rebuilt with no request behind it) logs its replies as
+ *  undeliverable instead of collecting them for a response nobody awaits. */
 export class WebIO extends HttpIO {
   private runId: string | undefined;
-  constructor(private readonly turns: (exceptRunId: string | undefined) => Promise<HistoryItem[]>) {
+  /** Present when this handle can open a thread of its own (thread-admission item 6). */
+  openThread?: (lead: string) => Promise<OpenedThread>;
+  /** Set on a rebuilt handle: the seal reads it (`replyOk: false`). */
+  readonly undeliverable?: string;
+  private replyLog?: (text: string) => void;
+  constructor(
+    private readonly turns: (exceptRunId: string | undefined) => Promise<HistoryItem[]>,
+    lane?: WebLane,
+    private readonly resume?: { threadKey: string; undeliverable: string; log: (line: string) => void },
+  ) {
     super();
+    if (lane)
+      this.openThread = async (lead: string): Promise<OpenedThread> => {
+        const threadKey = `${PLATFORM}:${lane.sub}:${lane.mintId()}`;
+        lane.log(`${threadKey} opened for a child run: ${lead.length} chars`);
+        return { thread: { threadKey }, io: lane.ioFor(threadKey) };
+      };
+    if (resume) {
+      this.undeliverable = resume.undeliverable;
+      this.replyLog = (text) => resume.log(`${resume.threadKey} reply (${resume.undeliverable}): ${text.length} chars`);
+    }
+  }
+  override async reply(text: string): Promise<void> {
+    if (this.resume) {
+      this.replyLog?.(text);
+      return;
+    }
+    return super.reply(text);
   }
   override runStarted(started: { id: string }): void {
     this.runId = started.id;
@@ -357,52 +513,9 @@ export function createWebChatHandler(
   const retentionDays = deps.retention ? deps.retention.retentionDays : null;
 
   const subOf = (actor: Actor): string => actor.id.replace(/^access:/, "");
-  const liveToken = (run: RunView): string | undefined =>
-    run.finished ? undefined : deps.registry.getById(run.id)?.token;
-
-  /** The thread's silent receipts as turns (item 12), read only when the viewer
-   *  may see the thread — at least one of its runs — so a receipt never reveals
-   *  a thread its runs would not; a failing ledger seeds the runs alone. */
-  async function silentReceiptsOf(threadKey: string, visible: boolean): Promise<HomeReceiptTurnSeed[]> {
-    if (!deps.intake || !visible) return [];
-    try {
-      const rows = await deps.intake.listIntake({ threadKey });
-      return rows
-        .filter((r) => r.verdict === "silent")
-        .map((r): HomeReceiptTurnSeed => ({ kind: "receipt", reason: r.reason, decidedAt: r.decidedAt }));
-    } catch (err) {
-      warn(
-        `intake receipts unavailable (${err instanceof Error ? err.message : String(err)}): ${threadKey} seeds its runs alone`,
-      );
-      return [];
-    }
-  }
-
-  /** The thread's runs the viewer may read, oldest first, with their messages — one read per run, in
-   *  parallel — and its silent receipts interleaved by decidedAt (item 12). */
-  async function turnsOf(
-    threadKey: string,
-    actor: Actor,
-  ): Promise<{ turns: (HomeTurnSeed | HomeReceiptTurnSeed)[]; runs: RunView[] }> {
-    const listed = await deps.service.listRuns({
-      status: "all",
-      visibleTo: readableRuns(actor),
-      threadKey,
-      limit: CONVERSATION_RUNS,
-    });
-    if (listed.storeUnavailable) warn(`the run store is unavailable: ${threadKey} seeds its live runs only`);
-    const runs = [...listed.runs].sort((a, b) => a.startedAt - b.startedAt);
-    const [turns, receipts] = await Promise.all([
-      Promise.all(
-        runs.map(async (run) => {
-          const read = await deps.service.getRun(run.id, { include: "messages" });
-          return turnOf(read.ok ? read.value : { ...run }, liveToken(run));
-        }),
-      ),
-      silentReceiptsOf(threadKey, runs.length > 0),
-    ]);
-    return { turns: interleaveReceipts(turns, receipts), runs };
-  }
+  /** The conversation reader, shared with the rebuilt handles (record 0060). */
+  const conv: ConversationDeps = { service: deps.service, registry: deps.registry, intake: deps.intake, warn };
+  const readTurns = (threadKey: string, actor: Actor) => turnsOf(conv, threadKey, actor);
 
   /** The rail: the viewer's own threads across every channel, titled by each first request. */
   async function railOf(actor: Actor, sub: string): Promise<{ rows: HomeConversationRowSeed[]; runs: RunView[] }> {
@@ -556,8 +669,20 @@ export function createWebChatHandler(
       text,
       receivedAt,
     };
-    const io = new WebIO(async (exceptRunId) =>
-      historyOf((await turnsOf(threadKey, ctx.actor)).turns.filter((t) => isReceiptTurn(t) || t.id !== exceptRunId)),
+    const io = new WebIO(
+      async (exceptRunId) =>
+        historyOf(
+          (await readTurns(threadKey, ctx.actor)).turns.filter((t) => isReceiptTurn(t) || t.id !== exceptRunId),
+        ),
+      // The lane: this handle can open a thread of its own — a conversation in
+      // the session's lane — which is what admits the web to `agent:ship`
+      // (record 0060; thread-admission item 6).
+      {
+        sub,
+        mintId,
+        ioFor: (key) => webThreadIO({ ...conv, mintId, log: warn }, { threadKey: key, actor: ctx.actor }),
+        log: warn,
+      },
     );
     // Started, not awaited: the dispatcher counts the run from its first line,
     // so the shutdown drain waits for it like any run; its errors are its own.
@@ -627,7 +752,7 @@ export function createWebChatHandler(
       return true;
     }
     const threadKey = threadKeyFor(sub, route.id);
-    turnsOf(threadKey, ctx.actor)
+    readTurns(threadKey, ctx.actor)
       .then(async (open) => {
         // A thread from another channel the viewer may see nothing of is the
         // same 404 an unknown run gives (live-view item 19): existence is never

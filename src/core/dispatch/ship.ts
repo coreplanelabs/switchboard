@@ -209,6 +209,10 @@ export async function runShipBranch(
     shipPreflight({
       channelId: msg.channelId,
       threadKey: msg.threadKey,
+      // The request handle's capability (record 0060, agent-ship item 1): the
+      // runner opens each unit's thread through this handle, so what admits a
+      // channel is that it can — never a prefix list.
+      canOpenThread: io.openThread !== undefined,
       requestText: directives.text,
       repoCtx,
       ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates } : {}),

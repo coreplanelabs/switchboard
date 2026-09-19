@@ -372,6 +372,9 @@ function fakeIO(history: HistoryItem[] = []) {
       };
     },
     history: async () => history,
+    // The request handle's capability (record 0060): the ship preflight admits
+    // by it, and the channels these tests fake (Slack, CLI) can open a thread.
+    openThread: async () => ({ thread: { threadKey: "slack:CX:child" }, io: { ...io } }),
   };
   return { io, replies, statuses };
 }
@@ -9181,12 +9184,15 @@ workspaceDir: __WORKDIR__
     vi.mocked(runPiHarnessOpen).mockClear();
   });
 
-  it("channel guard: agent:ship over an HTTP/MCP-originated dispatch is refused with a run-page pointer, nothing handed to the runner", async () => {
+  it("channel guard: agent:ship over a dispatch whose handle cannot open a thread (HTTP/MCP) is refused with the spawn's reason and a run-page pointer, nothing handed to the runner", async () => {
     const { deps, provider, created } = shipDeps();
     // An unrestricted repo (open-when-absent), so the CHANNEL refusal is the
     // one that fires — not the repo allowlist, which has its own test above.
     deps.resolveRepoContext = () => ({ repo: "acme/web" });
     const { io, replies } = fakeIO();
+    // The real HTTP and MCP handles have no `openThread` (thread-admission
+    // item 6): the preflight admits by that capability, never a prefix list.
+    delete io.openThread;
     await dispatch(
       deps,
       { channelId: "http:ingress", userId: "http:token-ci", threadKey: "http:ingress:t1", text: TASK_MSG },
@@ -9194,7 +9200,7 @@ workspaceDir: __WORKDIR__
     );
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("🚫");
-    expect(replies[0]).toContain("Slack or the CLI");
+    expect(replies[0]).toContain("cannot open a thread of its own");
     expect(replies[0]).toContain("/runs");
     expect(provider.requests).toHaveLength(0);
     expect(created).toEqual([]);
@@ -9687,6 +9693,7 @@ workspaceDir: __WORKDIR__
       },
       status: async () => ({ handle: { channel: "CX", ts: "9.9" }, update: () => {}, done: async () => {} }),
       history: async () => [],
+      openThread: async () => ({ thread: { threadKey: "slack:CX:child" }, io: { ...io } }),
     };
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     await writer.settled();
@@ -9733,6 +9740,7 @@ workspaceDir: __WORKDIR__
       },
       status: async () => ({ update: () => {}, done: async () => {} }),
       history: async () => [],
+      openThread: async () => ({ thread: { threadKey: "slack:CX:child" }, io: { ...io } }),
     };
     await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
     await writer.settled();

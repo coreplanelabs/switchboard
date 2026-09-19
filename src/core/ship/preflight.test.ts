@@ -26,6 +26,7 @@ function input(over: Partial<ShipPreflightInput> = {}): ShipPreflightInput {
   return {
     channelId: "slack:CX",
     threadKey: "slack:CX:1.0",
+    canOpenThread: true,
     requestText: "in acme/api: add a rate limit",
     repoCtx: { repo: "acme/api" },
     gates: { canRunAgent: () => true, adminsHint: () => "an admin" },
@@ -245,7 +246,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
         gate: "channel",
         code: "ship_preflight_channel",
         cause: "system",
-        input: input({ channelId: "http:CX" }),
+        input: input({ channelId: "http:CX", canOpenThread: false }),
       },
       {
         gate: "permission",
@@ -323,6 +324,28 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
       codes.add(res.refusal.code);
     }
     expect(codes.size, "one code per gate, never a shared one").toBe(10);
+  });
+});
+
+describe("shipPreflight — the channel capability (agent-ship item 1, record 0060)", () => {
+  it("admits by the request handle's capability: a web or CLI handle that can open a thread passes", async () => {
+    const web = await shipPreflight(input({ channelId: "web:s", threadKey: "web:s:c9", canOpenThread: true }));
+    expect(web.ok).toBe(true);
+    const cli = await shipPreflight(input({ channelId: "cli:local", threadKey: "cli:local:t1", canOpenThread: true }));
+    expect(cli.ok).toBe(true);
+  });
+
+  it("refuses a handle that cannot open a thread — HTTP and MCP — with the spawn's reason and the run-page pointer, never calling the channel single-shot", async () => {
+    for (const channelId of ["http:ingress", "mcp:client"]) {
+      const res = await shipPreflight(input({ channelId, canOpenThread: false, runsBase: "https://bot.example" }));
+      expect(res.ok, channelId).toBe(false);
+      if (res.ok) continue;
+      expect(res.refusal.code, channelId).toBe("ship_preflight_channel");
+      expect(res.reply, channelId).toContain("cannot open a thread of its own");
+      expect(res.reply, channelId).toContain(channelId.split(":")[0]);
+      expect(res.reply, channelId).toContain("https://bot.example/runs");
+      expect(res.reply.toLowerCase(), channelId).not.toContain("single-shot");
+    }
   });
 });
 
