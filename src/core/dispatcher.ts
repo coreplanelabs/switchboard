@@ -511,6 +511,12 @@ export async function dispatch(
   // then the outer finally discards the row — the run never started — as it
   // abandons the reservation.
   let runLoopStarted = false;
+  // The ship fork ran, and whether its branch deliberately left its run live —
+  // the hosted parent of a completed hand-off (record 0060). Read by the outer
+  // finally's second net (run-history item 42), which finishes any run a
+  // branch opened and left `running` behind it.
+  let shipForked = false;
+  let shipHostedLive = false;
   // The run's row on the ledger (item 35), once claimed; undefined for an
   // untracked run. Read by the record writer (the finish goes through it) and
   // the outer finally (its heartbeat stops with the run).
@@ -929,7 +935,8 @@ export async function dispatch(
     if (agent.name === "ship") {
       setupCard = undefined; // the ship branch owns the card from here
       clearInterval(setupHeartbeat);
-      await runShipBranch(deps, msg, io, {
+      shipForked = true;
+      const branchEnd = await (deps.shipBranch ?? runShipBranch)(deps, msg, io, {
         agent,
         profile,
         modelRef: resolved.modelRef,
@@ -948,8 +955,12 @@ export async function dispatch(
         refuse,
         doneLines,
         agentSource,
+        onHosted: () => {
+          shipHostedLive = true;
+        },
         ...(route ? { route } : {}),
       });
+      shipHostedLive ||= branchEnd.hostedLive;
       return ended;
     }
 
@@ -1817,6 +1828,26 @@ export async function dispatch(
     // …and the registry row created with it goes the same way: no finished
     // frame, no record — a run that never started is not listed as one that did.
     if (registered && !runLoopStarted) registry.discard(registered.id);
+    // The second net under that discard (run-history item 42): a branch that
+    // opens its own registry row — `runShipBranch` does — and throws or returns
+    // before finishing it would leave the row `running` with no runner behind
+    // it: a stop is a request to the runner, so it can never take, and the
+    // shutdown drain waits on the row to its deadline. Finish, `failed`, any
+    // run bound to this dispatch — the trace's bound run, the thread slot's —
+    // still unfinished once the branch has returned. The one deliberate
+    // survivor is the hosted parent of a completed hand-off (record 0060): the
+    // branch names it (`ShipBranchEnd.hostedLive`) and the plan runner's
+    // `finish` ends it, so the net leaves it live.
+    if (!shipHostedLive) {
+      for (const boundId of new Set([trace.runId, admitted?.runId])) {
+        if (boundId === undefined || registry.snapshotById?.(boundId)?.finished !== false) continue;
+        console.warn(
+          `[dispatch] ${msg.threadKey} run ${boundId} left running by the ${shipForked ? "ship branch" : "dispatch"} — finished failed by the outer finally (run-history item 42)`,
+        );
+        registry.finish(boundId, "failed");
+        io.runFinished?.({ id: boundId, status: "failed" });
+      }
+    }
     const settled = settleThread(deps, {
       msg,
       admitted,

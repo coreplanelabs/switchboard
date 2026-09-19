@@ -104,6 +104,23 @@ export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegi
    * tests assert the guess without a network call.
    */
   residentSlugs?: ResidentSlugs;
+  /**
+   * The ship branch itself, so `dispatch()`'s outer finally — the second net
+   * of run-history item 42 — is testable with a branch double that opens a
+   * registry row and returns without finishing it. Default: `runShipBranch`.
+   */
+  shipBranch?: typeof runShipBranch;
+}
+
+/** How the branch ended, for `dispatch()`'s outer finally (run-history item
+ *  42): `hostedLive` names the one run deliberately left `running` — the
+ *  hosted parent of a completed hand-off (record 0060), which the plan
+ *  runner's `finish` ends — so the second net leaves it live and finishes any
+ *  other run the branch left unfinished. The return travels only on the
+ *  return path; the net's own signal is the fork's `onHosted`, fired at the
+ *  hand-off, so a branch that throws after hosting still leaves the parent live. */
+export interface ShipBranchEnd {
+  hostedLive: boolean;
 }
 
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
@@ -150,6 +167,12 @@ export interface ShipContext {
   doneLines: (diagnosis: FrictionDiagnosis | undefined) => { shape?: string; queued?: string };
   /** How the ship preset was chosen (`run_meta.agentSource`). */
   agentSource: AgentSource;
+  /** Called the moment the parent becomes the hosted run of a completed
+   *  hand-off (record 0060), BEFORE anything after it can throw: the second
+   *  net (run-history item 42) reads this signal, not the return value, so
+   *  a throw on the reply or card-close path never finishes the hosted
+   *  parent `failed`. */
+  onHosted?: () => void;
   /** The router's decision when it chose ship (routing-and-config item 21):
    *  the record's `route` event, published like the main path's. */
   route?: RouteDecided;
@@ -171,7 +194,7 @@ export async function runShipBranch(
   msg: IncomingMessage,
   io: ChannelIO,
   ctx: ShipContext,
-): Promise<void> {
+): Promise<ShipBranchEnd> {
   const { agent, profile, card, directives, history, repoCtx, label, ending, trace, closeLines, refuse, doneLines } =
     ctx;
   const root = trace.root;
@@ -204,7 +227,7 @@ export async function runShipBranch(
     await refuse(pre.refusal, () =>
       card.done(shell.close({ kind: "refused", icon: "🚫", reason: pre.card, ...closeLines(clock(), false) })),
     );
-    return;
+    return { hostedLive: false };
   }
   const entry = pre.entry;
 
@@ -236,7 +259,7 @@ export async function runShipBranch(
       ),
       () => card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
     );
-    return;
+    return { hostedLive: false };
   }
 
   // The one run record: registered and stamped exactly like the main
@@ -268,7 +291,6 @@ export async function runShipBranch(
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
   });
-  io.runStarted?.({ id: run.id });
   let ledgerRun: LedgerRun | undefined;
   let outcome: HandOffOutcome | undefined;
   let shipDiagnosis: FrictionDiagnosis | undefined;
@@ -289,6 +311,7 @@ export async function runShipBranch(
   // to its deadline — so no such exit leaves one; the hosted row stays
   // `running` deliberately, with the plan runner behind it (record 0060).
   try {
+    io.runStarted?.({ id: run.id });
     const publishText = (
       type: "input" | "context" | "answer",
       text: string,
@@ -504,6 +527,7 @@ export async function runShipBranch(
         // second `run_meta` naming the instance, the fact every reader of a
         // run's instance id resolves from the last `run_meta` carrying one.
         hostedLive = true;
+        ctx.onHosted?.();
         const hosting: HostingState = {
           instanceId: outcome.instanceId,
           until: clock() + minutesToMs(caps.maxMinutes + HOSTED_DEADLINE_MARGIN_MINUTES),
@@ -580,7 +604,7 @@ export async function runShipBranch(
           .catch(() => {});
     }
   }
-  if (!outcome) return; // unreachable: the finally above rethrew
+  if (!outcome) return { hostedLive }; // unreachable: the finally above rethrew
   console.log(
     `[${hostedLive ? "hosted" : "done"}] ${msg.threadKey} ship ${outcome.reply.length} chars (${outcome.status})`,
   );
@@ -599,13 +623,13 @@ export async function runShipBranch(
         root.span("post.card_close", () => card.done(shell.close({ kind: "done", icon, ...doneLines(shipDiagnosis) }))),
       () => root.span("post.reply", () => replyAck(io, ctx.verbosity, handOffAck(outcome, ctx.verbosity))),
     );
-    return;
+    return { hostedLive };
   }
   ledgerRun?.setState({ finalStatus: "completed" });
   if ((await root.span("post.ledger_finishing", () => ledgerRun?.finishing())) === "fenced") {
     console.log(`[ship] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
     ending.drop(run.id); // the record is the other generation's; the outer finally still seals the stream here
-    return;
+    return { hostedLive };
   }
   // The card close, the reply, then the drain: sealed with how the reply went,
   // the record written after the seal (fire-and-forget; the writer's
@@ -623,6 +647,7 @@ export async function runShipBranch(
           : replyAck(io, ctx.verbosity, handOffAck(outcome, ctx.verbosity)),
       ),
   );
+  return { hostedLive };
 }
 
 /** The accepted hand-off's ack: its reply, and at `debug` the runner
