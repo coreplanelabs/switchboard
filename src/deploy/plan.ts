@@ -6,10 +6,10 @@
 // Why this order (README "Deploying on Cloudflare Containers"):
 //   1. memory   — the state Worker: Durable Object migrations must exist before
 //                 the bot writes to them (friction ledger, memory, schedule firings).
-//   2. bot      — the container shim; its own preflight refuses while runs are
-//                 in flight (a rollout rolls the container under them; the
-//                 handoff of docs/decisions/0019-durable-run-ledger-resume-after-kill.md
-//                 is a recovery, not a guarantee) and over a rollout in progress.
+//   2. bot      — the container shim; its own preflight refuses over a rollout in
+//                 progress and only warns about runs in flight, which are handed
+//                 to the next generation on SIGTERM
+//                 (docs/decisions/0019-durable-run-ledger-resume-after-kill.md).
 //   3. resident — per-repo DOs; its preflight refuses while a resident has work
 //                 in flight; needs the admin bearer in the env.
 //   4. sandbox  — the per-thread exec proxy; stateless per run, no preflight.
@@ -175,21 +175,13 @@ export interface WorkerDef extends Omit<WorkerSpec, "preflight" | "liveGate"> {
 export const RESIDENT_BEARER_ENVS = ["RESIDENT_ADMIN_TOKEN", "RESIDENT_OPERATOR_TOKEN", "RESIDENT_READ_TOKEN"] as const;
 
 /** The resident step's own wait budget (release-and-deploy item 13). The
- *  plan's default (10 min) is sized for a container rollout still settling.
- *  The resident preflight refuses for runs in flight
+ *  plan's default (10 min) is sized for the bot's one refusal, a container
+ *  rollout still settling. The resident preflight refuses for runs in flight
  *  (a coding run is up to 25 min) and for a provisioning (up to its 5-min
  *  deadline) — states that clear on their own within half an hour, and that a
  *  10-min budget once turned into a red release. Past this budget a refusal is
  *  a real anomaly and fails like any stopped run. */
 export const RESIDENT_WAIT_MAX_MS = 30 * 60_000;
-
-/** The bot step's own wait budget (release-and-deploy item 13). Its preflight
- *  refuses for runs in flight on the bot, and the longest of those is a coding
- *  lease of 90 minutes — a state that clears on its own. The plan's 10-min
- *  default, sized for a rollout, goes red behind one such lease with nothing
- *  retrying, where holding for the lease costs only the wait. Past this budget
- *  a refusal is a real anomaly and fails like any stopped run. */
-export const BOT_WAIT_MAX_MS = 90 * 60_000;
 
 /** Every Worker with a container image needs this: the bot's preflight reads the
  *  application with it, and `wrangler deploy` pushes the image with it. */
@@ -254,8 +246,7 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
     liveGate: { kind: "health" },
     // The preflight reads the container application and the deploy pushes the image: both need Containers.
     capabilities: [CONTAINERS_CAPABILITY],
-    waitMaxMs: BOT_WAIT_MAX_MS,
-    why: "container shim — preflight refuses while runs are in flight; done only when the new container is live. A rotated bot secret needs no build: `wrangler secret put` alone leaves the running container on its old env — `deploy restart` restarts it on the current env",
+    why: "container shim — preflight refuses only over a rollout in progress (runs in flight hand off); done only when the new container is live. A rotated bot secret needs no build: `wrangler secret put` alone leaves the running container on its old env — `deploy restart` restarts it on the current env",
   },
   {
     name: "resident",

@@ -101,9 +101,11 @@ import {
 // materialised under `.switchboard/` before anything runs in them
 // (src/deploy/workArea.ts) — where the git checks give way to the package's own
 // version and commit, since there is no tree to check. A step whose
-// preflight refuses (runs in flight) is waited out and retried — never forced
-// unless the plan says so — and the wait is never silent: every poll prints a
-// heartbeat with the in-flight count. The bot step is done only when it is
+// preflight refuses (a bot rollout still in progress, a resident with work in
+// flight — never bot runs in flight, which hand off and only warn) is waited
+// out and retried — never forced unless the plan says so — and the wait is
+// never silent: every poll prints a heartbeat naming what still refuses.
+// The bot step is done only when it is
 // LIVE, not merely deployed: after `wrangler deploy` the old container keeps
 // answering while it drains (up to 15 min), so the runner polls `/healthz`
 // until a non-draining container reports the deployed commit as its
@@ -1368,9 +1370,9 @@ async function fetchHealthzWith(deps: RestartRunnerDeps, url: string): Promise<H
 
 /**
  * Restart the bot container without a build: POST the Worker's `/admin/restart`
- * (bearer from `plan.tokenEnv`); a 409 (runs in flight — a stop would roll the
- * container under them — or the bot not answering with JSON, the fail-closed
- * cases) is waited out with a heartbeat and retried every `pollMs` up to
+ * (bearer from `plan.tokenEnv`); a 409 (the bot not answering with JSON — the
+ * fail-closed cases; runs in flight hand off and never refuse, run-history item
+ * 39) is waited out with a heartbeat and retried every `pollMs` up to
  * `waitMaxMs`, then FAILS by name — never forced unless the plan says so; then poll `/healthz` until a
  * non-draining container reports a `startedAt` later than the old one's
  * (`decideRestarted`), logging every poll so the drain is visible.

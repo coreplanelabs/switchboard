@@ -197,8 +197,10 @@ export class SwitchboardServer extends Container<Env> {
    * and exits, and the NEXT request through `fetch` starts the container again
    * (`startBot`, env computed then). The keep-alive cron GETs /healthz every
    * minute and the CLI's live gate polls it every 15 s, so the next request is
-   * never more than seconds away. Refuses (the deploy preflight's rules) while
-   * runs are in flight or a drain is already under way unless `force`.
+   * never more than seconds away. Refuses (the deploy preflight's rules) only the
+   * fail-closed cases — no JSON body, an impossible `inFlight` — unless
+   * `force`; runs in flight or a drain under way warn and the stop proceeds
+   * (the handoff rule).
    */
   async restart(opts: { force: boolean }): Promise<RestartOutcome> {
     if (!this.ctx.container?.running) return { kind: "not-running" };
@@ -265,7 +267,8 @@ export class SwitchboardServer extends Container<Env> {
  *  `deploy:write` in the bot's config). The Worker authenticates the bearer
  *  against the map it holds — an unknown bearer never touches the container —
  *  and the Container DO asks the bot for the grant before stopping anything.
- *  Body `{ "force": true }` bypasses the in-flight/draining refusal. */
+ *  Body `{ "force": true }` bypasses the fail-closed refusals (no JSON body,
+ *  impossible `inFlight`); runs in flight or a drain warn and never refuse. */
 async function handleAdminRestart(request: Request, env: Env): Promise<Response> {
   const json = (status: number, body: Record<string, unknown>) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });

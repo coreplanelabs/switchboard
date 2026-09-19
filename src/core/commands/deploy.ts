@@ -146,14 +146,12 @@ const deployOptions = z.object({
   force: flag
     .optional()
     .describe(
-      "bypass the bot/resident preflights — deploy over a rollout in progress, over runs in flight (this kills the ones no resume recovers), or blind when a Worker cannot be consulted",
+      "bypass the bot/resident preflights — deploy over a rollout in progress, or blind when a Worker cannot be consulted (in-flight bot runs hand off regardless)",
     ),
   allowBranch: flag.optional().describe("deploy from a branch other than origin/main (deliberately)"),
   waitMax: positiveInt
     .optional()
-    .describe(
-      "minutes to wait out a refusing preflight — runs in flight, a container rollout still settling — before failing by name, never deploying over it (default 10)",
-    ),
+    .describe("minutes to wait out a refusing preflight — a container rollout still settling (default 10)"),
   poll: positiveInt.optional().describe("seconds between preflight retries (default 60)"),
 });
 
@@ -378,7 +376,7 @@ const restartOptions = z.object({
   force: flag
     .optional()
     .describe(
-      "restart over runs in flight (this kills the ones no resume recovers) or when the bot cannot be consulted (no JSON on /healthz) — the fail-closed cases",
+      "restart even when the bot cannot be consulted (no JSON on /healthz) — the fail-closed cases; runs in flight never refuse, they hand off",
     ),
   waitMax: positiveInt
     .optional()
@@ -393,7 +391,7 @@ export const deployRestart = defineCommand({
   effect: "write",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): refused while runs are in flight (waited out, then failed by name); done once /healthz answers with a later startedAt.",
+    "Restart the bot container without an image build — how a rotated bot secret goes live (~30 s): runs in flight hand off to the next container; done once /healthz answers with a later startedAt.",
   render: (output) => {
     const o = output as JsonObject;
     return `${o.target} restarted — startedAt ${o.startedAt} (was ${o.previousStartedAt ?? "unknown"}), live after ${Math.round((o.waitedMs as number) / 1000)}s`;

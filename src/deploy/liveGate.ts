@@ -219,25 +219,28 @@ export interface GaveUpWords {
   force: string;
 }
 
-/** `deploy all`'s words: the release job is re-run once the runs finish. */
+/** `deploy all`'s words: the release job is re-run once what refuses clears.
+ *  In-flight bot runs never refuse (they hand off — run-history item 39); what
+ *  a bot refusal names is a rollout still settling, and a resident refusal is
+ *  its runs in flight — which `--force` over the resident would kill. */
 export const DEPLOY_GAVE_UP_WORDS: GaveUpWords = {
   notDone: "NOT deployed",
-  rerun: "re-run the deploy once they finish (a CI job: `gh run rerun RUN_ID --failed`)",
-  force: "--force to deploy over them (kills the runs in flight that no resume recovers)",
+  rerun: "re-run the deploy once it clears (a CI job: `gh run rerun RUN_ID --failed`)",
+  force: "--force to deploy over it (kills any resident runs in flight that no resume recovers)",
 };
 
-/** `deploy restart`'s words. */
+/** `deploy restart`'s words. Its refusals are the fail-closed cases only —
+ *  runs in flight hand off and never refuse. */
 export const RESTART_GAVE_UP_WORDS: GaveUpWords = {
   notDone: "NOT restarted",
-  rerun: "re-run `deploy restart` once they finish",
-  force: "--force to stop over them (kills the runs in flight that no resume recovers)",
+  rerun: "re-run `deploy restart` once the bot answers",
+  force: "--force to stop blind",
 };
 
 /** The failure a preflight still refusing at the end of the wait budget
  *  produces. The wait is only how long to hold before failing: it never ends
- *  in a deploy over what refused (a rolled container kills the runs it drives,
- *  and a handoff is a recovery, not a guarantee), so the line names the budget,
- *  the refusal, that nothing was done, and the two ways forward. */
+ *  in a deploy over what refused, so the line names the budget, the refusal,
+ *  that nothing was done, and the two ways forward. */
 export function preflightGaveUpLine(
   waitMaxMs: number,
   reason: string,

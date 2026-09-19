@@ -247,23 +247,22 @@ describe("heartbeatLine", () => {
 });
 
 describe("preflightGaveUpLine", () => {
-  it("a preflight still refusing at the end of the wait budget FAILS by name: the budget, what still refuses, that nothing was rolled, and the two ways forward (re-run the job, or --force over the runs)", () => {
-    const line = preflightGaveUpLine(10 * 60_000, "2 run(s) in flight — a rollout would roll the container under them");
-    expect(line).toMatch(/^preflight still refusing after 10 min \(2 run\(s\) in flight — /);
+  it("a preflight still refusing at the end of the wait budget FAILS by name: the budget, what still refuses (a rollout still settling, a resident's runs — in-flight bot runs hand off and never refuse), that nothing was rolled, and the two ways forward (re-run the job, or --force)", () => {
+    const line = preflightGaveUpLine(10 * 60_000, "container rollout in progress: state=updating");
+    expect(line).toMatch(/^preflight still refusing after 10 min \(container rollout in progress: state=updating\)/);
     expect(line).toContain("NOT deployed");
     expect(line).toContain("gh run rerun RUN_ID --failed");
     expect(line).toMatch(/--force/);
-    expect(line).toMatch(/kill/);
   });
 
   it("the restart's line carries its own words (what was not done, how to re-run, what --force does), same shape", () => {
-    const line = preflightGaveUpLine(2 * 60_000, "1 run(s) in flight — a stop kills it", {
+    const line = preflightGaveUpLine(2 * 60_000, "bot not answering with JSON on /healthz", {
       notDone: "NOT restarted",
-      rerun: "re-run `deploy restart` once it finishes",
-      force: "--force to stop over it (kills the run)",
+      rerun: "re-run `deploy restart` once the bot answers",
+      force: "--force to stop blind",
     });
     expect(line).toBe(
-      "preflight still refusing after 2 min (1 run(s) in flight — a stop kills it) — NOT restarted; re-run `deploy restart` once it finishes, or --force to stop over it (kills the run)",
+      "preflight still refusing after 2 min (bot not answering with JSON on /healthz) — NOT restarted; re-run `deploy restart` once the bot answers, or --force to stop blind",
     );
   });
 });

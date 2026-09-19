@@ -60,30 +60,24 @@ describe("bot deploy preflight — decide()", () => {
     expect(d.message).toMatch(/preflight ok/);
   });
 
-  it("runs in flight → REFUSE naming the count: a rollout rolls the container under them, so the deploy waits for them (the runner retries) and never proceeds over a live run", () => {
+  it("runs in flight → allow with a WARNING naming the count and the handoff (run-history item 39) — never a refusal, nobody waits", () => {
     const d = decide({ health: health(2), apps: apps("active") });
-    expect(d.allow).toBe(false);
+    expect(d.allow).toBe(true);
     expect(d.forced).toBe(false);
-    expect(d.problems).toEqual([expect.stringMatching(/^2 run\(s\) in flight — /)]);
-    expect(d.warnings).toEqual([]);
-    expect(d.message).toMatch(/^preflight REFUSED/);
+    expect(d.problems).toEqual([]);
+    expect(d.warnings).toEqual([expect.stringMatching(/^2 run\(s\) in flight — handed to the next generation/)]);
+    expect(d.message).toMatch(/preflight ok/);
+    expect(d.message).toMatch(/WARNING/);
     expect(d.message).toContain("2 run(s) in flight");
-    expect(d.message).toMatch(/wait/);
-    expect(d.message).toContain("SWITCHBOARD_DEPLOY_FORCE=1");
+    expect(d.message).not.toMatch(/SWITCHBOARD_DEPLOY_FORCE=1/); // nothing to force
   });
 
-  it("bot already draining with nothing in flight (a previous deploy's SIGTERM landed) → allow with a WARNING: the draining instance exits on its own, nothing is rolled over", () => {
+  it("bot already draining (a previous deploy's SIGTERM landed) → allow with a WARNING: its resumable runs were handed off; a ship pipeline still in flight is what the warning names", () => {
     const d = decide({ health: health(0, true), apps: apps("active") });
     expect(d.allow).toBe(true);
     expect(d.problems).toEqual([]);
     expect(d.warnings).toEqual([expect.stringMatching(/draining/)]);
-  });
-
-  it("draining WITH runs in flight → the runs refuse (a second rollout replaces the draining instance at once, mid-run); the drain is said alongside", () => {
-    const d = decide({ health: health(1, true), apps: apps("active") });
-    expect(d.allow).toBe(false);
-    expect(d.problems).toEqual([expect.stringContaining("1 run(s) in flight")]);
-    expect(d.warnings).toEqual([expect.stringMatching(/draining/)]);
+    expect(d.message).toMatch(/ship pipeline/);
   });
 
   it("container rollout still in progress (provisioning / updating / anything not settled) → refuse", () => {
@@ -114,24 +108,20 @@ describe("bot deploy preflight — decide()", () => {
     expect(decide(cases[1]).message).toMatch(/not the JSON this preflight reads/);
   });
 
-  it("force → allow, flagged, with a warning that names the runs it WILL kill and the rollout it lands on", () => {
+  it("force → allow with a warning that names what will be killed", () => {
     const d = decide({ health: health(1, true), apps: apps("provisioning") }, { force: true });
     expect(d.allow).toBe(true);
     expect(d.forced).toBe(true);
     expect(d.message).toMatch(/WARNING/);
     expect(d.message).toContain("1 run(s) in flight");
     expect(d.message).toContain("state=provisioning");
-    expect(d.message).toMatch(/kill/);
   });
 
-  it("every problem is reported at once: runs in flight AND a rollout in progress both refuse and are both named", () => {
+  it("problems and warnings are all reported at once: a rollout in progress refuses, the runs in flight are said alongside", () => {
     const d = decide({ health: health(3, false), apps: apps("updating") });
     expect(d.allow).toBe(false);
-    expect(d.problems).toEqual([
-      expect.stringContaining("3 run(s) in flight"),
-      expect.stringContaining("state=updating"),
-    ]);
-    expect(d.warnings).toEqual([]);
+    expect(d.problems).toEqual([expect.stringContaining("state=updating")]);
+    expect(d.warnings).toEqual([expect.stringContaining("3 run(s) in flight")]);
     expect(d.message).toContain("3 run(s) in flight");
     expect(d.message).toContain("state=updating");
   });
