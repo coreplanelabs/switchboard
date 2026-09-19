@@ -466,7 +466,7 @@ describe("CommandRegistry.invoke — auth before parse", () => {
       expect(res).toMatchObject({
         ok: false,
         error: "unauthorized",
-        decidedBy: "registry",
+        decidedBy: "door",
         message: "not yours to type",
       });
       expect(audit.mock.calls.at(-1)?.[0]).toMatchObject({
