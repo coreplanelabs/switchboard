@@ -65,6 +65,22 @@ describe("reasonOf — the machine token inside a client's error", () => {
     e.name = "mirror-busy";
     expect(reasonOf(e)).toBe("mirror-busy");
   });
+
+  it("an AggregateError with an empty message whose first inner error names a known token is unknown", () => {
+    // reasonOf builds the scan string from err.name + err.message only; it does
+    // not walk AggregateError#errors, so the inner token is not reached and the
+    // result is `unknown`.
+    const inner = new Error("disk-pressure: volume full");
+    const agg = new AggregateError([inner], "");
+    expect(reasonOf(agg)).toBe("unknown");
+  });
+
+  it("a plain object with a message property that names a known token is unknown", () => {
+    // The value is not instanceof Error so reasonOf calls String(value), which
+    // yields '[object Object]' — the token in .message is not reached.
+    const obj = { message: "seed-missing: backup gone" };
+    expect(reasonOf(obj)).toBe("unknown");
+  });
 });
 
 describe("timed", () => {
