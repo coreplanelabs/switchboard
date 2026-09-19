@@ -125,11 +125,22 @@ COPY skills ./skills
 RUN mkdir -p /app/data /app/workspaces && chown -R switchboard:switchboard /app
 USER switchboard
 
+# The shared agent-trailer hook (deploy/hooks/prepare-commit-msg): every
+# commit made in this image gains the bot pair's Co-Authored-By trailer.
+COPY --chmod=755 deploy/hooks/prepare-commit-msg /opt/switchboard/hooks/prepare-commit-msg
+
 # gh auth: set GH_TOKEN (fine-grained PAT for a machine account); gh and git
 # (via gh's credential helper, configured below) pick it up automatically.
+# The fallback user.email stays OFF the GitHub domain (a noreply-shaped
+# address would render as a GitHub account it is not); the real pairs ride
+# the per-exec environment. The global core.hooksPath replaces repo-local
+# .git/hooks entirely — deliberate: an untrusted checkout's own hooks never
+# run here (a repo-local core.hooksPath still wins) —
+# docs/reference/specs/execution.md item 5.
 RUN git config --global credential.helper '!gh auth git-credential' \
   && git config --global user.name "switchboard-bot" \
-  && git config --global user.email "switchboard-bot@users.noreply.github.com"
+  && git config --global user.email "switchboard-bot@switchboard.invalid" \
+  && git config --global core.hooksPath /opt/switchboard/hooks
 
 ENV NODE_ENV=production
 # PORT enables the /healthz-style probe endpoint (any path returns 200).

@@ -74,11 +74,11 @@ const runRewrite = (
   });
 
 describe("rewriteRunCommits — the run's commits carry only the allowed identities (record 0062)", () => {
-  it("ships with the author env off: the flag is false and no requester pair is read without it", () => {
-    expect(authorEnvEnabled).toBe(false);
-    expect(requesterPairFor({ login: "ivy-dev", id: 4242 })).toBeUndefined();
-    expect(requesterPairFor({ login: "ivy-dev", id: 4242 }, true)).toEqual(IVY);
-    expect(requesterPairFor(undefined, true)).toBeUndefined();
+  it("the author env is on: a bound requester's pair is read, an unbound one yields none, and off reads no pair", () => {
+    expect(authorEnvEnabled).toBe(true);
+    expect(requesterPairFor({ login: "ivy-dev", id: 4242 })).toEqual(IVY);
+    expect(requesterPairFor(undefined)).toBeUndefined();
+    expect(requesterPairFor({ login: "ivy-dev", id: 4242 }, false)).toBeUndefined();
   });
 
   it("start state empty; two run commits authored by the requester pair, committed by the bot pair, trailer the bot pair, the flag on: clean", async () => {

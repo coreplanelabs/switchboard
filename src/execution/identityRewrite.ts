@@ -60,10 +60,12 @@ export type BranchStartState =
  *  themselves rewritten before their pull request opened, so they pass). */
 export const EMPTY_START_STATE: BranchStartState = { kind: "known", commits: [] };
 
-/** The author-env flag (record 0062): until the author-env unit flips it, the
- *  requester pair is not read — the allowed authors are the bot pair and start
- *  pairs by fingerprint, and a rewrite sets the bot pair. */
-export const authorEnvEnabled = false;
+/** The author-env flag (record 0062): on, now that the per-exec environment
+ *  carries the pairs (`gitIdentityEnvs`) — a bound requester's pair is read
+ *  and allowed as author, and a rewrite corrects a failing author to it. Off
+ *  was the bot-only rollout: the requester pair unread, a rewrite setting the
+ *  bot pair. */
+export const authorEnvEnabled = true;
 
 /** The exact pair a binding authors commits as (record 0062): the login and the
  *  id-anchored noreply address. */
@@ -365,7 +367,10 @@ export function dispatchIdentityRewrite(store: BindingSource): DispatchIdentityR
     readStartState: (repo, base, branch) => readBranchStartState(repo, base, branch, compareRange),
     rewrite: async ({ repo, base, branch, startState, requester }) => {
       const bot = await resolveGithubIdentity();
-      const binding = await bindingOf(requester, store).catch(() => undefined);
+      // The authoritative read: `fresh` bypasses the binding's TTL cache, so a
+      // rename inside the exec path's window is still refused before the PR
+      // opens — the cache is for the per-exec pair reads, never for this one.
+      const binding = await bindingOf(requester, store, { fresh: true }).catch(() => undefined);
       const requesterPair = requesterPairFor(binding);
       return rewriteRunCommits({
         repo,

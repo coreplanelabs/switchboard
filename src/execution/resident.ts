@@ -541,6 +541,14 @@ export interface ResidentExecutorOptions {
    *  9). Never sent to the Worker. Absent for an executor built with no run
    *  (staging, the CLI): the default alone bounds. */
   remainingMs?: () => number | undefined;
+  /** The run's commit identity pairs (`gitIdentityEnvs`; record 0062),
+   *  resolved on EVERY exec and sent in the `/exec` body's `env` under a
+   *  caller's own variables — the Worker reads the map through its one
+   *  validated reader and injects its own variables over it. The resident
+   *  holds its GitHub credential itself, so this carries the pairs only,
+   *  never a token. Absent (a test, the CLI), the body carries only what a
+   *  caller gave. */
+  resolveEnvs?: () => Promise<Record<string, string>>;
 }
 
 /** What a successful /attach reports about the thread's worktree. */
@@ -1690,9 +1698,14 @@ export class ResidentExecutor implements Executor {
     if (opts?.timeoutMs !== undefined) body.timeoutMs = timeoutMs;
     // A caller's extra environment (docs/reference/specs/harness-pi.md item 4)
     // rides in the body as `env`, the same convention as timeoutMs: only when
-    // given, so an older resident sees the body it always did; the Worker reads
-    // it through the one validated reader and hands it to the exec's env option.
-    if (opts?.env !== undefined) body.env = opts.env;
+    // there is one, so an older resident sees the body it always did; the
+    // Worker reads it through the one validated reader and hands it to the
+    // exec's env option. The run's commit identity pairs (record 0062) join it
+    // on every exec, resolved fresh and winning a clash — the same order as
+    // the sandbox's credential over a caller's variables.
+    const identityEnv = this.opts.resolveEnvs ? await this.opts.resolveEnvs() : {};
+    const env = { ...(opts?.env ?? {}), ...identityEnv };
+    if (Object.keys(env).length > 0) body.env = env;
     const { status, data } = await this.opWithReattach("/exec", body, {
       signal: opts?.signal,
       callTimeoutMs: timeoutMs + EXEC_CALL_MARGIN_MS,

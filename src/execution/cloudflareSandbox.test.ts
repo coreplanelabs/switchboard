@@ -107,6 +107,25 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
     expect(sentEnv(calls[0])).toEqual({ GH_TOKEN: "ghs_real", SWITCHBOARD_RUN_BEARER: "sbr_x.y" });
   });
 
+  // Feature: docs/reference/specs/execution.md item 5 — the commit identity
+  // (record 0062) rides the same shared resolver: the four variables reach
+  // the body's env beside the credential on every command.
+  it("the four commit identity variables reach the body's env beside the credential", async () => {
+    const { calls } = stubFetch({ stdout: "ok", stderr: "", exitCode: 0 });
+    const FOUR = {
+      GIT_AUTHOR_NAME: "ivy-dev",
+      GIT_AUTHOR_EMAIL: "4242+ivy-dev@users.noreply.github.com",
+      GIT_COMMITTER_NAME: "switchboard-app[bot]",
+      GIT_COMMITTER_EMAIL: "111+switchboard-app[bot]@users.noreply.github.com",
+    };
+    const ex = new CloudflareSandboxExecutor({
+      ...OPTS,
+      resolveEnvs: async () => ({ GH_TOKEN: "ghs_write", ...FOUR }),
+    });
+    await ex.exec("git commit -m x");
+    expect(sentEnv(calls[0])).toEqual({ GH_TOKEN: "ghs_write", ...FOUR });
+  });
+
   it("resolves nothing at construction — building the executor mints no credential", () => {
     const resolveEnvs = vi.fn(async () => ({ GH_TOKEN: "ghs_x" }));
     new CloudflareSandboxExecutor({ ...OPTS, resolveEnvs });

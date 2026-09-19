@@ -61,7 +61,17 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/* \
   && git config --system credential.helper '!gh auth git-credential' \
   && git config --system user.name "switchboard-bot" \
-  && git config --system user.email "switchboard-bot@users.noreply.github.com"
+  && git config --system user.email "switchboard-bot@switchboard.invalid" \
+  && git config --system core.hooksPath /opt/switchboard/hooks
+
+# The shared agent-trailer hook (deploy/hooks/prepare-commit-msg — this copy is
+# byte-identical, held so by a test: the build context is this directory, so
+# COPY cannot reach the canonical file). The fallback user.email above stays
+# OFF the GitHub domain; the real pairs ride the per-exec environment. The
+# system-level core.hooksPath above replaces repo-local .git/hooks entirely —
+# deliberate: an untrusted checkout's own hooks never run here (a repo-local
+# core.hooksPath still wins) — docs/reference/specs/execution.md item 5.
+COPY --chmod=0755 prepare-commit-msg /opt/switchboard/hooks/prepare-commit-msg
 
 # `docker` resolves to this wrapper (/usr/local/bin precedes /usr/bin on PATH):
 # it starts dockerd in its own session on first use — a plain background

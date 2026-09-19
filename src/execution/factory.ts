@@ -34,7 +34,9 @@ import {
 } from "./resident.js";
 import { repoResourceId } from "../core/residentAdmin.js";
 import { nearMatch } from "../core/nearMatch.js";
-import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
+import { resolveGithubIdentity, resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
+import { bindingOf, type BindingSource } from "./authorBinding.js";
+import { pairOfBinding, requesterPairFor } from "./identityRewrite.js";
 import { isServiceable } from "./residentState.js";
 import { systemClock } from "../core/trace/clock.js";
 import { processSecrets, type Secret, type Secrets } from "../secrets.js";
@@ -81,6 +83,11 @@ export interface ExecutorFactoryOptions {
   execution?: ExecutionConfig;
   workspaceDir: string; // local mode: base dir for per-thread workspaces
   dataDir: string; // e2b mode: where the thread->sandbox map is persisted
+  /** Where a requester's stored GitHub binding is read (`ConfigStore`):
+   *  `gitIdentityEnvs` resolves the author pair from it (record 0062). Absent
+   *  (a test, a caller without config), no binding is read and the bot pair
+   *  authors. */
+  bindings?: BindingSource;
 }
 
 /** What executor selection knows about the run it is provisioning for.
@@ -128,6 +135,10 @@ export interface ExecutorContext {
    *  run (execution.md item 9). Absent for a caller without a run: the attach
    *  default alone bounds. */
   remainingMs?: () => number | undefined;
+  /** The run's requester (the platform-namespaced user id), whose stored
+   *  GitHub binding names the commits' author pair (record 0062;
+   *  `gitIdentityEnvs`). Absent, the bot pair authors. */
+  requester?: string;
 }
 
 /** Where a run's workspace is (docs/reference/specs/run-history.md item 54):
@@ -362,7 +373,10 @@ export async function makeExecutor(
   // neither refuse nor delay the run. Cold is the class, not a fallback, so
   // there is no note.
   if (machine === "repo-cold") {
-    return { executor: await makePerThreadExecutor(opts, perThreadCheckout(ctx)), backend: perThreadBackend(opts) };
+    return {
+      executor: await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx)),
+      backend: perThreadBackend(opts),
+    };
   }
 
   // `repo-resident`. Resident selection: only when a target repo was resolved
@@ -454,6 +468,9 @@ export async function makeExecutor(
             refHint: ctx.ref,
             readonly,
             sha: ctx.headSha,
+            // The run's commit identity pairs, resolved per exec (record 0062):
+            // the resident holds its own credential, so the pairs alone ride.
+            resolveEnvs: () => gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
             ...(ctx.ownPr !== undefined ? { ownPr: ctx.ownPr } : {}),
             ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
           },
@@ -519,7 +536,7 @@ export async function makeExecutor(
       // resident answers no body; a Worker that is not the cloudflare one has
       // no /seed) → the cold path as before, and so does a refused seed, with
       // the refusal on the note.
-      const executor = await makePerThreadExecutor(opts, perThreadCheckout(ctx));
+      const executor = await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx));
       const handle = probe.kind === "status" ? probe.seed : undefined;
       const outcome =
         handle && executor instanceof CloudflareSandboxExecutor
@@ -544,7 +561,7 @@ export async function makeExecutor(
   }
 
   return {
-    executor: await makePerThreadExecutor(opts, perThreadCheckout(ctx)),
+    executor: await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx)),
     note,
     backend: perThreadBackend(opts),
     ...(failedAttach ? { trace: failedAttach.steps } : {}),
@@ -635,7 +652,7 @@ async function reattachWorkspace(
     const input =
       ctx.profile.machine === "blank"
         ? { threadKey: ctx.threadKey, resolveEnvs: async () => ({}) }
-        : perThreadCheckout(ctx);
+        : perThreadCheckout(opts, ctx);
     return { executor: await makePerThreadExecutor(opts, input), backend: perThreadBackend(opts) };
   }
   const resident = opts.execution?.resident;
@@ -712,6 +729,9 @@ async function reattachWorkspace(
     readonly: ctx.profile.identity === "read" ? true : undefined,
     sha: ctx.headSha,
     reuse: true,
+    // The run's commit identity pairs, resolved per exec (record 0062): the
+    // resident holds its own credential, so the pairs alone ride.
+    resolveEnvs: () => gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
     ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
   });
   let binding: ResidentBinding;
@@ -1090,13 +1110,14 @@ interface PerThreadInputs {
 }
 
 /** The per-thread inputs of a class that carries the checkout: the resolved
- *  repo and ref, and the run's GitHub credential — the profile's identity — in the env. */
-function perThreadCheckout(ctx: ExecutorContext): PerThreadInputs {
+ *  repo and ref, and the run's GitHub credential — the profile's identity —
+ *  plus its commit identity pairs in the env. */
+function perThreadCheckout(opts: ExecutorFactoryOptions, ctx: ExecutorContext): PerThreadInputs {
   return {
     threadKey: ctx.threadKey,
     repo: ctx.repo,
     ref: ctx.ref,
-    resolveEnvs: () => githubEnvs(ctx.profile.identity),
+    resolveEnvs: () => githubEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
   };
 }
 
@@ -1184,14 +1205,71 @@ export function githubTokenScopeFor(identity: Identity): GithubTokenScope | unde
   return identity === "none" ? undefined : identity;
 }
 
+/** Where `gitIdentityEnvs` reads the author from: the run's requester and the
+ *  binding store, off the factory's inputs. */
+function authorSourceOf(opts: ExecutorFactoryOptions, ctx: ExecutorContext): AuthorEnvSource {
+  return {
+    ...(ctx.requester !== undefined ? { requester: ctx.requester } : {}),
+    ...(opts.bindings !== undefined ? { bindings: opts.bindings } : {}),
+  };
+}
+
+/** Where the commit identity's author comes from: the run's requester (the
+ *  platform-namespaced user id) and the store their binding is read from.
+ *  Either absent → no binding is read and the bot pair authors. */
+export interface AuthorEnvSource {
+  requester?: string;
+  bindings?: BindingSource;
+}
+
+/** The seams `gitIdentityEnvs` resolves the pairs over — the production
+ *  defaults in the bot process, stubs in tests. */
+interface GitIdentitySeams {
+  bot?: typeof resolveGithubIdentity;
+  binding?: typeof bindingOf;
+}
+
+/** The commit identity for a run's workspace (record 0062): a `write`
+ *  identity's commits are committed by the bot pair always and authored by the
+ *  requester's stored binding's pair when the author env is on and the
+ *  requester is bound (`bindingOf` — the stored binding only), else by the bot
+ *  pair; a `read` or `none` identity gets none of the four. An unknown bot
+ *  pair (no GitHub credential) yields none: the images' fallback identity
+ *  stands, whose address is off the GitHub domain. The sandbox and E2B receive
+ *  the four through the resolver they share with the credential
+ *  (docs/reference/specs/execution.md item 5); the resident receives them in
+ *  each `/exec` body's `env`. */
+export async function gitIdentityEnvs(
+  identity: Identity,
+  author: AuthorEnvSource,
+  seams: GitIdentitySeams = {},
+): Promise<Record<string, string>> {
+  if (identity !== "write") return {};
+  const bot = await (seams.bot ?? resolveGithubIdentity)();
+  if (bot === undefined) return {};
+  const botPair = pairOfBinding(bot);
+  const bound =
+    author.requester !== undefined && author.bindings !== undefined
+      ? await (seams.binding ?? bindingOf)(author.requester, author.bindings).catch(() => undefined)
+      : undefined;
+  const authorPair = requesterPairFor(bound) ?? botPair;
+  return {
+    GIT_AUTHOR_NAME: authorPair.name,
+    GIT_AUTHOR_EMAIL: authorPair.email,
+    GIT_COMMITTER_NAME: botPair.name,
+    GIT_COMMITTER_EMAIL: botPair.email,
+  };
+}
+
 /** GitHub credential for the sandbox env: freshly-minted App installation
  *  token when a GitHub App is configured, else static GH_TOKEN, else none —
- *  and none at all for an identity that mints nothing. */
-async function githubEnvs(identity: Identity): Promise<Record<string, string>> {
+ *  and none at all for an identity that mints nothing — with the commit
+ *  identity pairs (`gitIdentityEnvs`) beside it for a `write` identity. */
+async function githubEnvs(identity: Identity, author: AuthorEnvSource): Promise<Record<string, string>> {
   const scope = githubTokenScopeFor(identity);
   if (scope === undefined) return {};
   const token = await resolveGithubToken(scope);
-  return token ? { GH_TOKEN: token } : {};
+  return { ...(token ? { GH_TOKEN: token } : {}), ...(await gitIdentityEnvs(identity, author)) };
 }
 
 /** The per-thread executor's backend, from the configured execution type. */

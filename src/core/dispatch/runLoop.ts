@@ -1169,6 +1169,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             decision = await prepareRelaunch(deps, {
               runId: run.id,
               threadKey: msg.threadKey,
+              requester: msg.userId,
               agent: ctx.agent,
               profile,
               repoCtx,

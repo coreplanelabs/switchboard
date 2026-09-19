@@ -46,6 +46,20 @@ export const CONFIRMATION_TTL_MS = 10 * MINUTE_MS;
  *  and only loses answers. People answer a question in minutes to hours. */
 export const QUESTION_TTL_MS = DAY_MS;
 
+/** How long a resolved author binding is reused before the stored `{ login,
+ *  id }` pair is re-read from GitHub (docs/decisions/0062;
+ *  docs/reference/specs/authorization.md item 18). The commit identity pairs
+ *  are resolved per EXEC (`gitIdentityEnvs`), and the pi harness's log polls,
+ *  FIFO sends and file writes ride the same executor — without a cache a
+ *  write run costs one `GET /user/<id>` per command, drawing down the
+ *  installation's shared rate limit for a freshness nothing needs: the
+ *  identity rewrite re-reads the binding fresh before the PR opens, so a
+ *  rename is caught there whatever this window holds. Read by `bindingOf`
+ *  (`src/execution/authorBinding.ts`) for the resolved pair and the rename
+ *  refusal alike (one `[identity]` line per window, not one per exec); a read
+ *  that FAILED is never cached — the next read asks again. */
+export const AUTHOR_BINDING_TTL_MS = 15 * MINUTE_MS;
+
 /** How long a dispatch's FIRST attach to a resident — a fresh run's, or a
  *  resumed run's re-attach to its recorded worktree — waits for the resident
  *  to wake when the Worker typed its refusal as the platform's transient

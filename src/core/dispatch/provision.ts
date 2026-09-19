@@ -752,6 +752,10 @@ export interface AttachContext {
    *  every attach the run's resident executor opens is clipped to it
    *  (execution.md item 9). Absent for a caller with no run control. */
   remainingMs?: () => number | undefined;
+  /** The run's requester (the platform-namespaced user id), whose stored
+   *  GitHub binding names the commits' author pair in the workspace's env
+   *  (record 0062; execution.md item 5). Absent, the bot pair authors. */
+  requester?: string;
 }
 
 /** How a recorded workspace's re-attach ended: the round's workspace
@@ -785,7 +789,7 @@ async function attachRound(
   deps: Pick<ProvisionDeps, "config" | "dataDir">,
   ctx: AttachContext,
 ): Promise<RoundWorkspace> {
-  const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal, remainingMs } = ctx;
+  const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal, remainingMs, requester } = ctx;
   const ownPr = ownPrOf(repoCtx);
   return root.span("dispatch.workspace.attach", async (span) => {
     // The resident's own steps (clone, install, the mutex wait…) graft under
@@ -806,6 +810,9 @@ async function attachRound(
           execution: deps.config.config.execution,
           workspaceDir: deps.config.config.workspaceDir ?? "./workspaces",
           dataDir: deps.dataDir ?? "./data",
+          // Where a requester's stored GitHub binding is read: the commit
+          // identity env resolves the author pair from it (record 0062).
+          bindings: deps.config,
         },
         round: {
           threadKey,
@@ -820,6 +827,7 @@ async function attachRound(
           ...(reattach !== undefined ? { reattach } : {}),
           ...(stopSignal !== undefined ? { stopSignal } : {}),
           ...(remainingMs !== undefined ? { remainingMs } : {}),
+          ...(requester !== undefined ? { requester } : {}),
         },
         logKey: threadKey,
         span,
@@ -892,6 +900,8 @@ export async function attachWorkspace(
       repoCtx,
       root,
       clock,
+      // The requester whose binding names the author pair (record 0062).
+      requester: msg.userId,
       ...(reattach !== undefined ? { reattach } : {}),
       ...(stopSignal !== undefined ? { stopSignal } : {}),
       ...(remainingMs !== undefined ? { remainingMs } : {}),

@@ -847,6 +847,9 @@ describe("reattachWorkspace — the run's recorded workspace re-attached without
       root: r.root,
       clock: () => NOW,
       reattach: binding,
+      // The relaunch hands the run's requester through, so the re-attached
+      // round resolves the same author pair as the dispatch-time attach.
+      requester: r.message.userId,
     });
     expect(mid).toEqual({ kind: "attached", round: bound });
     const closes: StatusUpdate[] = [];

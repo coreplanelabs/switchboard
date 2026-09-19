@@ -22,8 +22,20 @@ FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1
 # installed here — matching the resident system prompts and the tests that pin
 # that claim. No system credential.helper is configured; each worktree sets its
 # own per-attach helper.
+# The fallback user.email stays OFF the GitHub domain (a noreply-shaped
+# address would render as a GitHub account it is not); the real pairs ride
+# each /exec body's env. The system-level core.hooksPath replaces repo-local
+# .git/hooks entirely — deliberate: an untrusted checkout's own hooks never
+# run here (a repo-local core.hooksPath still wins, git's ordinary
+# precedence) — docs/reference/specs/execution.md item 5.
 RUN git config --system user.name "switchboard-resident" \
-  && git config --system user.email "switchboard-resident@users.noreply.github.com"
+  && git config --system user.email "switchboard-resident@switchboard.invalid" \
+  && git config --system core.hooksPath /opt/switchboard/hooks
+
+# The shared agent-trailer hook (deploy/hooks/prepare-commit-msg — this copy is
+# byte-identical, held so by a test: the build context is this directory, so
+# COPY cannot reach the canonical file).
+COPY --chmod=0755 prepare-commit-msg /opt/switchboard/hooks/prepare-commit-msg
 
 # The container is FOUR vCPUs shared by up to 16 threads (wrangler.jsonc).
 # Node test runners size their worker pools from the CPU count the kernel
