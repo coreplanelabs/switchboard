@@ -141,6 +141,32 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     expect(wrapper.find('[data-run-id="ship"]').attributes("data-parent-id")).toBeUndefined();
   });
 
+  // Feature: docs/reference/specs/live-view.md item 32 — the hosted head's
+  // pace cell borrows its newest live child's pace, and reads `waiting on the
+  // runner` when no child on the page lends one.
+  it("a hosted head's pace cell borrows the newest live child's pace; with no live child it reads `waiting on the runner`; a finished head shows nothing", () => {
+    const now = 1_252_000;
+    const ship = live("ship", { startedAt: 10, hosted: true, instanceId: "wf-1" });
+    const kid = live("kid", {
+      startedAt: now - 6 * 60_000,
+      parentInstanceId: "wf-1",
+      eventsLast5m: 14,
+      lastToolCallAt: now - 9_000,
+    });
+    const { wrapper } = mountIndex(seed([ship, kid]));
+    expect(wrapper.find('[data-run-id="ship"] .pace').text()).toBe("2.8/min");
+    expect(wrapper.find('[data-run-id="kid"] .pace').text()).toBe("2.8/min");
+
+    const idle = live("ship2", { startedAt: 10, hosted: true, instanceId: "wf-2" });
+    const doneKid = done("oldkid", { startedAt: 20, parentInstanceId: "wf-2" });
+    const alone = mountIndex(seed([idle, doneKid], { all: true }));
+    expect(alone.wrapper.find('[data-run-id="ship2"] .pace').text()).toBe("waiting on the runner");
+
+    const sealed = done("ship3", { hosted: true, instanceId: "wf-3" });
+    const past = mountIndex(seed([sealed], { all: true }));
+    expect(past.wrapper.find('[data-run-id="ship3"] .pace').exists()).toBe(false);
+  });
+
   it("?all=1 titles the page All runs and opens the all feed", () => {
     const { wrapper, es } = mountIndex(seed([done("c")], { all: true }));
     expect(wrapper.find("h1 .title").text()).toBe("All runs");

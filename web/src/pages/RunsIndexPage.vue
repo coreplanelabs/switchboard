@@ -222,7 +222,7 @@ onUnmounted(() => {
 
     <ul id="runs" class="m-0 list-none border-t border-muted p-0">
       <template v-for="g in beforeDivider" :key="g.head.id">
-        <RunRow :run="g.head" :now="now" :retention-ms="retentionMs" />
+        <RunRow :run="g.head" :now="now" :retention-ms="retentionMs" :children="g.children" />
         <RunRow
           v-for="child in g.children"
           :key="child.id"
@@ -243,7 +243,7 @@ onUnmounted(() => {
         <span class="normal-case tracking-normal text-dimmed max-sm:hidden">— each row says when it is removed</span>
       </li>
       <template v-for="g in afterDivider" :key="g.head.id">
-        <RunRow :run="g.head" :now="now" :retention-ms="retentionMs" />
+        <RunRow :run="g.head" :now="now" :retention-ms="retentionMs" :children="g.children" />
         <RunRow
           v-for="child in g.children"
           :key="child.id"
