@@ -572,7 +572,14 @@ export async function executeOperatorDecision(
       continue;
     }
     const radius = boundBlastRadius(def as CommandDef<unknown>, parsed.input);
-    if (!routedRunsAtOnce(def as CommandDef<unknown>, confirm.value, parsed.input)) {
+    // A bind of `steer` is admission's, not the paste ladder's (the one-door
+    // plan's admission unit; thread-admission item 1): the fold is the act a
+    // thread reply performs with no confirmation, and its fence is the owner
+    // rule the wired sender asks (`authorizeSteerOwner`, authorization item
+    // 16a) plus the live agent's allowlist — so the write class that hands any
+    // other bind back does not queue a person's own words behind a paste.
+    const runsNow = def.id === "steer.run" || routedRunsAtOnce(def as CommandDef<unknown>, confirm.value, parsed.input);
+    if (!runsNow) {
       await io.reply(`${renderOperatorReceipt(bind.line, radius, bind.reason)}\n${HAND_BACK_PREFIX}\n\`${bind.line}\``);
       continue;
     }

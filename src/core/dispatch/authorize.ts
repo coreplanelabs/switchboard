@@ -23,6 +23,8 @@ import type { Clock, Span } from "../trace/types.js";
 import type { ChannelIO, IncomingMessage, StatusHandle } from "../types.js";
 import type { ResumeContext } from "./admission.js";
 import { refusalOf, type Guess, type Refusal } from "../refusal.js";
+import { hasAction } from "../authz/authorize.js";
+import type { Grants } from "../authz/types.js";
 import { REFUSAL_SENTENCES } from "./reply.js";
 
 /** What the gates read off the dispatcher's dependencies. `CoreDeps` extends
@@ -478,4 +480,55 @@ export async function authorizeAttachedHead(
     }
   }
   return { kind: "allowed", repoCtx, verifiedAtAttach, headAdopted };
+}
+
+/** How the steer owner rule ended: refused for not being the run's requester
+ *  (nor holding the grant), or — for a run's own steer — for naming a run
+ *  outside its lineage. */
+export type SteerOwnerGate =
+  { kind: "allowed" } | { kind: "refused"; reason: "steer_not_requester" | "steer_outside_instance" };
+
+/**
+ * The steer owner rule (docs/reference/specs/authorization.md item 16a; the
+ * one-door plan's admission unit). A bind of `steer` — and any destructive
+ * bind aimed at a run — is a person reaching into work someone requested, so
+ * it is authorized against the TARGET run, not only the command: the author
+ * must be that run's requester (any id the identity record links to them), or
+ * hold the `runs:write` grant. A run authoring a steer (`from` set — the
+ * runner standing in for the plan's requester) reaches ONLY runs its own
+ * lineage names: its direct child (`target.parentRunId` is the sender), its
+ * own parent (`from.parentRunId` is the target — a child telling its parent of
+ * a reply in its thread), or a run of its own plan instance
+ * (`target.parentInstanceId` equals the sender's instance). The borrowed
+ * requester's grants lend a run's steer nothing, and the stand-in reaches no
+ * destructive bind (R2: every other bind the runner authors is authorized as
+ * the runner itself). Fail closed: a target with no requester on record
+ * admits nobody but a grant holder.
+ */
+export function authorizeSteerOwner(input: {
+  /** The author, resolved: every id that means "me" (`Actor.self`) and the effective grants. */
+  caller: { ids: readonly string[]; grants: Grants };
+  /** The run the bind names. */
+  target: { runId?: string; requesterId?: string; parentInstanceId?: string; parentRunId?: string };
+  /** Set when a RUN authored the bind (a steer's `from`): its id, its own
+   *  parent when it has one, and its plan instance when it runs under one. */
+  from?: { runId: string; parentRunId?: string; instanceId?: string };
+  /** The bind's kind: the run stand-in reaches only a bind of `steer`. */
+  bind?: "steer" | "destructive";
+}): SteerOwnerGate {
+  const bind = input.bind ?? "steer";
+  if (input.from) {
+    if (bind !== "steer") return { kind: "refused", reason: "steer_not_requester" };
+    const { from, target } = input;
+    const ownChild = target.parentRunId !== undefined && target.parentRunId === from.runId;
+    const ownParent = from.parentRunId !== undefined && from.parentRunId === target.runId;
+    const ownInstance = from.instanceId !== undefined && from.instanceId === target.parentInstanceId;
+    return ownChild || ownParent || ownInstance
+      ? { kind: "allowed" }
+      : { kind: "refused", reason: "steer_outside_instance" };
+  }
+  const requester = input.target.requesterId;
+  if (requester !== undefined && input.caller.ids.includes(requester)) return { kind: "allowed" };
+  if (hasAction(input.caller.grants.actions, "runs:write")) return { kind: "allowed" };
+  return { kind: "refused", reason: "steer_not_requester" };
 }

@@ -183,9 +183,22 @@ export type FollowUpDecision = { kind: "steer" } | { kind: "refuse"; reason: "ag
  * Steer unless the follow-up explicitly asks for a different agent than the
  * one running (`agent:review` in a live coding thread is a new request, not a
  * nudge). The live agent's identity is the only input: every agent takes
- * mid-run follow-ups.
+ * mid-run follow-ups. Under the operator the DECISION outranks the directive
+ * (the one-door plan's admission unit): a decision whose bind of `steer`
+ * names THIS run folds in whatever tokens the message carried — the operator
+ * read them already — and a decision that names another run never lands here
+ * (its fold is that run's own, whichever thread holds it). No production
+ * caller passes `decision` yet: under `on` the dispatcher executes the
+ * decision before admission, so today a steer bind folds through the wired
+ * sender (`createSteerSender`), not this path — the parameter is the seam the
+ * plan's runner units wire when a decision rides a reply into admission.
  */
-export function decideFollowUp(live: LiveThread, requested: { agent?: string }): FollowUpDecision {
+export function decideFollowUp(
+  live: LiveThread,
+  requested: { agent?: string; decision?: { steersRun?: string } },
+): FollowUpDecision {
+  const steers = requested.decision?.steersRun;
+  if (steers !== undefined && steers === live.runId) return { kind: "steer" };
   if (requested.agent !== undefined && requested.agent !== live.agent)
     return { kind: "refuse", reason: "agent_mismatch", requestedAgent: requested.agent };
   return { kind: "steer" };

@@ -143,6 +143,8 @@ import { RestGithubApi } from "./execution/githubApi.js";
 import { resolveGithubIdentity } from "./execution/githubApp.js";
 import { DEPLOY_RESTART_NOTICE, setShutdownNotice } from "./core/dispatch/run.js";
 import { channelVisibilityOf, writeAbandonedRunRecords } from "./core/dispatch/record.js";
+import { createSteerSender, defaultAdmission } from "./core/dispatch/admission.js";
+import { CommandError } from "./core/commandRegistry.js";
 import { buildScheduleStore, NullScheduleStore } from "./core/scheduleStore.js";
 import { SCHEDULES } from "./core/schedules.js";
 // --- command registry adapters ---
@@ -637,6 +639,30 @@ export async function runBot(): Promise<void> {
     }),
     scheduleStore,
     mcp: () => mcpWiring.service ?? { unavailable: mcpWiring.unavailable ?? "MCP is not enabled" },
+    // `steer.run`'s wired sender (the one-door plan's admission unit): the fold
+    // by run id under the steer owner rule, over the same admission map and
+    // ledger the dispatcher steers through. A steer into a run that ended
+    // re-dispatches the words as a fresh request on the run's own thread
+    // (`threadIoFor` and `dispatch` are bound below; the sender defers every
+    // read to the invoke, long after both exist).
+    steer: () =>
+      createSteerSender({
+        config,
+        runLedger,
+        runs: defaultRunRegistry,
+        admission: defaultAdmission,
+        redispatch: async (m) => {
+          const io = threadIoFor({ threadKey: m.threadKey, userId: m.userId });
+          // The named refusal the sender's contract promises: no channel handle
+          // for the run's thread means the fresh request cannot run here.
+          if (!io)
+            throw new CommandError(
+              "unavailable",
+              `no channel handle for ${m.threadKey} — re-send the words in the run's thread to run them fresh.`,
+            );
+          await dispatch(deps, m, io);
+        },
+      }),
   });
   // The same bound registry serves HTTP, MCP, and the chat fast path (U13): one
   // registration, every surface.

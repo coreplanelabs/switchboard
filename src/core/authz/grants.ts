@@ -60,6 +60,12 @@ export const CHAT_OPEN_ACTIONS: readonly string[] = [
   "schedule:read",
   "memory:write",
   "mcp:write",
+  // `steer.run` (chat-only): the door admits every chat user because the real
+  // fence is the steer OWNER rule at the wired sender — the named run's
+  // requester, an id their identity record links, or a `runs:write` grant
+  // (authorization item 16a) — which the command door cannot see. Never held
+  // by a token: the machine surfaces have `send_to_run` and the ingress.
+  "steer:write",
 ];
 
 /** The two writes a browser session holds beside its reads (record 0043): the

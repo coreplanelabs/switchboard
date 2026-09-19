@@ -124,7 +124,9 @@ export async function tellParent(
       channelId: msg.channelId,
       ...(msg.channelName !== undefined ? { channelName: msg.channelName } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-      from: { runId: lineage.child.runId },
+      // The child's own parent IS the target: the owner rule's own-parent arm
+      // (authorization item 16a) admits the tell, and nothing wider.
+      from: { runId: lineage.child.runId, parentRunId: lineage.parentRunId },
     },
     { runId: parent.id, threadKey: parent.threadKey, agent: parent.agent },
     lineageNote(lineage, msg, heard),

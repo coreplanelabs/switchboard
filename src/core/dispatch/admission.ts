@@ -11,6 +11,10 @@
 // exactly what the inline code used to.
 import type { ConfigStore } from "../../config.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
+import { CommandError } from "../commandRegistry.js";
+import { effectiveGrants } from "../authz/authorize.js";
+import type { Actor } from "../authz/types.js";
+import { authorizeSteerOwner } from "./authorize.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { RequestDirectives } from "../../directives.js";
@@ -538,11 +542,20 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
 }
 
 /** A run a steer is aimed at: its id, the thread it holds, and the agent live
- *  in it — the allowlist the sender must pass, as for a thread reply. */
+ *  in it — the allowlist the sender must pass, as for a thread reply. The
+ *  owner rule (authorization item 16a) reads the rest: who requested it, the
+ *  run that spawned it, and the plan instance it runs under. */
 export interface SteerTarget {
   runId: string;
   threadKey: string;
   agent: string;
+  /** The run's requester, when known: the owner rule's anchor. */
+  requesterId?: string;
+  /** The run that spawned it, when one did: a parent may steer its own child. */
+  parentRunId?: string;
+  /** The plan instance it runs under, when one does: the runner's stand-in
+   *  reaches only runs of its own instance. */
+  parentInstanceId?: string;
 }
 
 /** Who sends a steer on a run's behalf: the requesting user, in the channel
@@ -557,7 +570,15 @@ export interface SteerSender {
   channelId: string;
   channelName?: string;
   sourceUrl?: string;
-  from: { runId: string };
+  /** The run that authored the steer. Absent for a person's typed steer
+   *  (`steer.run`'s wired sender), whose owner rule the sender itself asked. */
+  from?: {
+    runId: string;
+    /** The sending run's own parent, when it has one: a child may tell its parent (lineage). */
+    parentRunId?: string;
+    /** The sending run's plan instance, when it runs under one. */
+    instanceId?: string;
+  };
 }
 
 /** How a steer ended: folded into the run here (its slot's inbox, the durable
@@ -567,7 +588,7 @@ export interface SteerSender {
  *  refused — so nothing landed. */
 export type SteerOutcome =
   | { kind: "steered"; where: "here" | "elsewhere"; at: number; ledgerSeq?: number }
-  | { kind: "refused"; reason: "live_agent_allowlist" }
+  | { kind: "refused"; reason: "live_agent_allowlist" | "steer_owner" }
   | { kind: "not_live" };
 
 /**
@@ -589,7 +610,7 @@ export async function steerRun(
     config: Pick<ConfigStore, "canRunAgent" | "grantsFor">;
     runLedger: Pick<LedgerWriteThrough, "pushInbox">;
     clock?: Clock;
-    admission: ThreadAdmission<DispatchFollowUp>;
+    admission: Pick<ThreadAdmission<DispatchFollowUp>, "get">;
   },
   sender: SteerSender,
   target: SteerTarget,
@@ -597,6 +618,25 @@ export async function steerRun(
 ): Promise<SteerOutcome> {
   if (!deps.config.canRunAgent(chatActorOf(deps.config, { ...sender, threadKey: target.threadKey }), target.agent))
     return { kind: "refused", reason: "live_agent_allowlist" };
+  // The owner rule for a run's steer (authorization item 16a): the sending run
+  // reaches only runs its lineage names — its own child, its own parent, or a
+  // run of its own plan instance. The requester it stands in for lends it
+  // nothing beyond that, so a run cannot reach into unrelated work. A person's
+  // steer carries no `from`: the wired sender asked the rule against the
+  // person's own ids and grants before calling here.
+  if (sender.from) {
+    const owner = authorizeSteerOwner({
+      caller: { ids: [], grants: { actions: new Set(), channels: new Set(), repos: new Set() } },
+      target,
+      from: sender.from,
+    });
+    if (owner.kind === "refused") {
+      console.log(
+        `[steer] run ${sender.from.runId} → run ${target.runId} refused (${owner.reason}): the target's lineage does not name the sender`,
+      );
+      return { kind: "refused", reason: "steer_owner" };
+    }
+  }
   const at = (deps.clock ?? systemClock)();
   const msg: IncomingMessage = {
     channelId: sender.channelId,
@@ -613,19 +653,158 @@ export async function steerRun(
   const ledgerSeq = await deps.runLedger.pushInbox(target.runId, durableInboxMessage(msg, text, at, sender.from));
   const live = deps.admission.get(target.threadKey);
   if (live && live.runId === target.runId) {
-    live.inbox.push(followUpOf(msg, text, at, { ledgerSeq, from: sender.from }));
+    live.inbox.push(followUpOf(msg, text, at, { ledgerSeq, ...(sender.from ? { from: sender.from } : {}) }));
     console.log(
-      `[steer] run ${sender.from.runId} → ${target.agent} run ${target.runId} in ${target.threadKey} (${live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
+      `[steer] ${sender.from ? `run ${sender.from.runId}` : sender.userId} → ${target.agent} run ${target.runId} in ${target.threadKey} (${live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
     );
     return { kind: "steered", where: "here", at, ...(ledgerSeq !== undefined ? { ledgerSeq } : {}) };
   }
   if (ledgerSeq !== undefined) {
     console.log(
-      `[steer] run ${sender.from.runId} → ${target.agent} run ${target.runId} live on another generation (durable seq ${ledgerSeq})`,
+      `[steer] ${sender.from ? `run ${sender.from.runId}` : sender.userId} → ${target.agent} run ${target.runId} live on another generation (durable seq ${ledgerSeq})`,
     );
     return { kind: "steered", where: "elsewhere", at, ledgerSeq };
   }
   return { kind: "not_live" };
+}
+
+/** What the `steer.run` command's wired sender reads of its caller: the
+ *  resolved actor (its `self` ids and effective grants decide the owner rule)
+ *  and, for a chat caller, where they spoke from. */
+export interface SteerSendCaller {
+  kind: string;
+  id: string;
+  actor: Actor;
+  name?: string;
+  origin?: { channelId: string; threadKey: string };
+}
+
+/** The credential behind a steer's caller, read back off the resolved actor
+ *  (authorization items 14 and 15): a relay's actor is the app acting
+ *  `onBehalfOf` the person — the fold carries `postedBy` — and a bound
+ *  credential's actor IS the credential with the person as `asUser` — it
+ *  carries `authenticatedAs`. Both ride the fold, the durable row and the
+ *  ended-run redispatch whole, so a leftover's fresh turn and the durable
+ *  copy re-resolve the same intersection, never the bare person. */
+function steerCredentialOf(caller: SteerSendCaller): { authenticatedAs?: string; postedBy?: string } {
+  const actor = caller.actor;
+  if (actor.onBehalfOf) return { postedBy: actor.id };
+  if (actor.asUser && actor.id !== caller.id) return { authenticatedAs: actor.id };
+  return {};
+}
+
+/** The sentence a refused steer answers with: the owner rule, said once. */
+export const STEER_OWNER_REFUSED =
+  "Only the run's requester (or a `runs:write` grant holder) may steer it. Ask them to send it, or reply in the run's own thread with your finding.";
+
+/**
+ * The sender behind the `steer.run` registry command (the one-door plan's
+ * admission unit; routing-and-config item 29): the typed line — and the line
+ * the operator binds — that folds words into a live run BY ID, whichever
+ * thread holds it. The owner rule first (authorization item 16a:
+ * `authorizeSteerOwner` — the requester, any id their identity record links,
+ * or a `runs:write` grant), then `steerRun`'s own gates and pushes exactly as
+ * a run's steer takes them: the live agent's allowlist, the durable copy
+ * first, the slot matched by run id. A steer into a run that ended is
+ * re-dispatched as a bind of the same words — a fresh request in the run's
+ * own thread, under the caller's identity — through the `redispatch` hook;
+ * without one wired, the reply says the run ended and what to do.
+ */
+export function createSteerSender(deps: {
+  config: Pick<ConfigStore, "canRunAgent" | "grantsFor">;
+  runLedger: Pick<LedgerWriteThrough, "pushInbox">;
+  /** The run the id names, as the process knows it (the registry's live row). */
+  runs: { getById(id: string): SteerableRun | null };
+  admission: Pick<ThreadAdmission<DispatchFollowUp>, "get">;
+  clock?: Clock;
+  /** Run the words as a fresh request (a bind of the same words) when the
+   *  target ended: the dispatcher's own door, on the target's thread. */
+  redispatch?: (msg: IncomingMessage) => Promise<void>;
+}): { send(runId: string, words: string, caller: SteerSendCaller): Promise<string> } {
+  return {
+    async send(runId, words, caller) {
+      const run = deps.runs.getById(runId);
+      if (!run) throw new CommandError("not_found", `run ${runId} is not known here.`);
+      const owner = authorizeSteerOwner({
+        caller: { ids: caller.actor.self ?? [caller.actor.id], grants: effectiveGrants(caller.actor) },
+        target: {
+          runId,
+          ...(run.userId !== undefined ? { requesterId: run.userId } : {}),
+          ...(run.parentInstanceId !== undefined ? { parentInstanceId: run.parentInstanceId } : {}),
+          ...(run.parentRunId !== undefined ? { parentRunId: run.parentRunId } : {}),
+        },
+      });
+      if (owner.kind === "refused") throw new CommandError("unauthorized", STEER_OWNER_REFUSED);
+      const credential = steerCredentialOf(caller);
+      const at = (deps.clock ?? systemClock)();
+      const ended = run.finished || run.threadKey === undefined || run.agent === undefined;
+      const fresh = async (): Promise<string> => {
+        // A steer into a run that ended is re-dispatched as a bind of the same
+        // words (the one-door plan's admission unit): the words still run, as
+        // their own request in the run's thread, never dropped with the row.
+        if (!deps.redispatch || run.threadKey === undefined)
+          throw new CommandError(
+            "unavailable",
+            `run ${runId} has ended — re-send the words in its thread to run them fresh.`,
+          );
+        await deps.redispatch({
+          channelId: run.channelId ?? caller.origin?.channelId ?? "",
+          userId: caller.id,
+          ...(caller.name !== undefined ? { userName: caller.name } : {}),
+          ...credential,
+          threadKey: run.threadKey,
+          text: words,
+          receivedAt: at,
+        });
+        return `run ${runId} had ended — the words ran as a fresh request in its thread instead.`;
+      };
+      if (ended) return fresh();
+      const out = await steerRun(
+        deps,
+        {
+          userId: caller.id,
+          ...(caller.name !== undefined ? { userName: caller.name } : {}),
+          ...credential,
+          channelId: caller.origin?.channelId ?? run.channelId ?? "",
+        },
+        {
+          runId,
+          threadKey: run.threadKey!,
+          agent: run.agent!,
+          ...(run.userId !== undefined ? { requesterId: run.userId } : {}),
+          ...(run.parentRunId !== undefined ? { parentRunId: run.parentRunId } : {}),
+          ...(run.parentInstanceId !== undefined ? { parentInstanceId: run.parentInstanceId } : {}),
+        },
+        words,
+      );
+      switch (out.kind) {
+        case "steered":
+          return `↪ Folded into the *${run.agent}* run ${runId} — it picks this up at its next step${out.where === "elsewhere" ? " (live on another bot generation, through its durable inbox)" : ""}.`;
+        case "refused":
+          throw new CommandError(
+            "unauthorized",
+            out.reason === "steer_owner"
+              ? STEER_OWNER_REFUSED
+              : `you may not run the ${run.agent} agent, so its run cannot hear you.`,
+          );
+        case "not_live":
+          return fresh();
+      }
+    },
+  };
+}
+
+/** The row `createSteerSender` reads of the named run: identity, occupancy,
+ *  lineage — the `RunSummary` slice the owner rule and the fold need. */
+export interface SteerableRun {
+  id: string;
+  finished: boolean;
+  agent?: string;
+  threadKey?: string;
+  channelId?: string;
+  userId?: string;
+  parentRunId?: string;
+  parentInstanceId?: string;
 }
 
 /** The ledger handles a resumed or restarted run is taken up with: the adopted
