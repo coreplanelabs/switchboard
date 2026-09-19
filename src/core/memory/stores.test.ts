@@ -23,12 +23,12 @@ function rec(over: Partial<MemoryRecord> = {}): MemoryRecord {
 }
 
 describe("NullMemoryStore", () => {
-  it("retrieve always returns [] and write is a no-op", async () => {
+  it("retrieve always returns [] and write is a no-op answering zero counts", async () => {
     const store = new NullMemoryStore();
     expect(await store.retrieve({ scopeKey: "org:acme", query: "deploy", limit: 8 })).toEqual([]);
     await expect(
       store.write("org:acme", [{ kind: "fact", text: "x", sourceThreadKey: "slack:C1:1.0" }]),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ inserted: 0, deduped: 0, restated: 0, superseded: 0, evicted: 0 });
   });
 
   it("list returns [] and forget returns false (human controls)", async () => {
@@ -261,6 +261,34 @@ describe("InMemoryMemoryStore.write", () => {
     const out = await store.retrieve({ scopeKey: "org:acme", query: "deploy rotation", limit: 8 });
     expect(out.filter((r) => r.text === cand.text)).toHaveLength(3); // original + both corrections landed
     expect(out.some((r) => r.text === "the on-call rotation is biweekly")).toBe(true);
+  });
+
+  // Feature: docs/reference/specs/memory.md item 8 — the seam speaks: `write`
+  // answers what the batch actually did, so the reflection outcome line can
+  // carry real counters instead of guessing from the candidates.
+  it("answers WriteCounts matching its actions: insert, exact dedup and supersede in one batch", async () => {
+    const store = new InMemoryMemoryStore([], { now: () => NOW });
+    await store.write("org:acme", [cand]);
+    const [old] = await store.list("org:acme", 8);
+    const counts = await store.write("org:acme", [
+      { ...cand, text: "npm ci must run before the license check" }, // insert
+      cand, // exact dedup → bump
+      { ...cand, text: "the deploy command is npm run ship", supersedes: old.id }, // supersede + insert
+    ]);
+    expect(counts).toEqual({ inserted: 2, deduped: 1, superseded: 1, restated: 0, evicted: 0 });
+    expect(await store.write("org:acme", [])).toEqual({
+      inserted: 0,
+      deduped: 0,
+      restated: 0,
+      superseded: 0,
+      evicted: 0,
+    });
+  });
+
+  it("counts evictions when the per-scope cap flips records within the batch", async () => {
+    const store = new InMemoryMemoryStore([], { now: () => NOW, cap: 1 });
+    const counts = await store.write("org:acme", [cand, { ...cand, text: "the on-call rotation is weekly" }]);
+    expect(counts).toEqual({ inserted: 2, deduped: 0, restated: 0, superseded: 0, evicted: 1 });
   });
 
   it("superseded records never match retrieval and are not dedup targets", async () => {

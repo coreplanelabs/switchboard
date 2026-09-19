@@ -9,7 +9,15 @@ import { selectMemoryStore } from "./stores.js";
 import { reflect, reflectionActor, shouldReflect, trackReflection, type ReflectGateInput } from "./reflection.js";
 import { systemClock } from "../trace/clock.js";
 
-export type { MemoryRecord, MemoryCandidate, MemoryQuery, MemoryStore, MemoryScope, MemoryConfig } from "./types.js";
+export type {
+  MemoryRecord,
+  MemoryCandidate,
+  MemoryQuery,
+  MemoryStore,
+  MemoryScope,
+  MemoryConfig,
+  WriteCounts,
+} from "./types.js";
 export {
   DEFAULT_WEIGHTS,
   RECENCY_TAU_MS,
@@ -34,6 +42,7 @@ export {
   planWrite,
   planEviction,
   mintRecord,
+  rejectionMarkers,
   DEFAULT_SCOPE_CAP,
   type WritePlan,
 } from "./engine.js";

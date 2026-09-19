@@ -6232,7 +6232,9 @@ describe("cross-session memory WRITE path", () => {
     await run(MEMORY_WRITE_YAML, [], { toolFirst: true });
     const lines = log.mock.calls.map(([l]) => String(l)).filter((l) => l.startsWith("[memory] "));
     log.mockRestore();
-    expect(lines).toEqual(["[memory] slack:CX:1.0 reflection wrote 1 fact(s), summary"]);
+    expect(lines).toEqual([
+      "[memory] slack:CX:1.0 reflection offered 1, rejected 0, restated 0, inserted 2, deduped 0, summary",
+    ]);
   });
 
   // Feature: docs/reference/specs/memory.md item 11, harness-pi.md item 13 —

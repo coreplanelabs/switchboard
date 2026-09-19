@@ -1,4 +1,4 @@
-import type { MemoryCandidate, MemoryConfig, MemoryQuery, MemoryRecord, MemoryStore } from "./types.js";
+import type { MemoryCandidate, MemoryConfig, MemoryQuery, MemoryRecord, MemoryStore, WriteCounts } from "./types.js";
 import { DEFAULT_SCOPE_CAP, mintRecord, planEviction, planWrite, rankRecords } from "./engine.js";
 import { keywordMatch, tokenize } from "./scorer.js";
 
@@ -17,8 +17,8 @@ export class NullMemoryStore implements MemoryStore {
   async retrieve(_q: MemoryQuery): Promise<MemoryRecord[]> {
     return [];
   }
-  async write(_scopeKey: string, _records: MemoryCandidate[]): Promise<void> {
-    // intentionally nothing
+  async write(_scopeKey: string, _records: MemoryCandidate[]): Promise<WriteCounts> {
+    return { inserted: 0, deduped: 0, restated: 0, superseded: 0, evicted: 0 }; // intentionally nothing
   }
   async list(_scopeKey: string, _limit: number, _query?: string): Promise<MemoryRecord[]> {
     return [];
@@ -65,22 +65,34 @@ export class InMemoryMemoryStore implements MemoryStore {
     return ranked;
   }
 
-  async write(scopeKey: string, records: MemoryCandidate[]): Promise<void> {
+  async write(scopeKey: string, records: MemoryCandidate[]): Promise<WriteCounts> {
     const list = this.bucket(scopeKey);
     const now = this.now();
+    const counts: WriteCounts = { inserted: 0, deduped: 0, restated: 0, superseded: 0, evicted: 0 };
     for (const cand of records) {
       const plan = planWrite(list, cand, (c) => mintRecord(scopeKey, this.seq++, now, c));
       if (plan.action === "dedup") {
         plan.target.useCount += 1;
+        counts.deduped += 1;
         continue;
       }
       // Soft delete the contradicted record (status flip, never a removal —
       // provenance stays auditable).
-      if (plan.supersede) plan.supersede.status = "superseded";
+      if (plan.supersede) {
+        plan.supersede.status = "superseded";
+        counts.superseded += 1;
+      }
       list.push(plan.record);
+      counts.inserted += 1;
     }
     // Per-scope cap: the batch never leaves the scope over the cap.
-    if (this.cap !== undefined) for (const r of planEviction(list, this.cap)) r.status = "evicted";
+    if (this.cap !== undefined) {
+      for (const r of planEviction(list, this.cap)) {
+        r.status = "evicted";
+        counts.evicted += 1;
+      }
+    }
+    return counts;
   }
 
   async list(scopeKey: string, limit: number, query?: string): Promise<MemoryRecord[]> {

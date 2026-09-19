@@ -5,7 +5,8 @@ import type { Actor, ChannelVisibility, Resource } from "../authz/types.js";
 import { redactSecrets } from "../runEvents.js";
 import { jsonOutput } from "../llmOutput/index.js";
 import type { HistoryItem } from "../types.js";
-import type { MemoryCandidate, MemoryRecord, MemoryScope, MemoryStore } from "./types.js";
+import type { MemoryCandidate, MemoryRecord, MemoryScope, MemoryStore, WriteCounts } from "./types.js";
+import { rejectionMarkers } from "./engine.js";
 import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
 
 // Cross-session memory WRITE path: the post-run reflection
@@ -88,8 +89,9 @@ export const REFLECTION_SYSTEM = [
   "You distill a finished assistant thread into durable, reusable memory for the resource it concerns.",
   "Return ONLY a JSON object of the form:",
   '{"facts":[{"text":"...","keywords":["..."],"confidence":0.0-1.0,"audience":"org"|"user"|"repo"|"channel","supersedes":"<existing id, optional>"}],"summary":"..."}',
-  `Rules: at most ${MAX_REFLECTION_FACTS} facts. Each fact is ONE self-contained sentence that will still be true and useful in a future, unrelated thread`,
-  "(commands, conventions, decisions, preferences, architecture). Ignore ephemeral or one-off details (timestamps, transient errors, chit-chat).",
+  `Rules: at most ${MAX_REFLECTION_FACTS} facts. Each fact is ONE self-contained lesson that will still be true and useful in a future, unrelated thread,`,
+  "in the shape: what fails or surprises, why, and what to do — a cause and its remedy, a command that must run first, a convention, a decision.",
+  "Ignore ephemeral or one-off details (timestamps, transient errors, chit-chat).",
   'PR-specific state is ephemeral by definition — PR numbers, commit SHAs, test counts, CI results, review verdicts, "approved at …", what a given PR changes — and must never become a fact; only a convention or decision that outlives the PR may.',
   "Never include secrets, tokens, passwords, or keys — omit the fact instead.",
   '`audience` is "user" when the fact is about the requesting person specifically (their preferences, habits, personal conventions, their own setup — write it as "this user …"),',
@@ -147,7 +149,16 @@ function parseAudience(v: unknown): MemoryAudience {
  *  the `MemoryStore` contract and the Worker's wire format are unchanged. */
 export type RoutedCandidate = MemoryCandidate & { audience: MemoryAudience };
 
-export type ParsedReflection = { ok: true; candidates: RoutedCandidate[] } | { ok: false; error: string };
+export type ParsedReflection =
+  | {
+      ok: true;
+      candidates: RoutedCandidate[];
+      /** Facts the extractor offered (the envelope's `facts` length). */
+      offered: number;
+      /** Facts the marker gate refused (rejectionMarkers — memory.md item 13). */
+      rejected: number;
+    }
+  | { ok: false; error: string };
 
 /** The reflection reply's envelope as a typed LLM output (docs/reference/specs/llm-output.md
  *  item 6): the JSON type owns the format (the value out of its surroundings,
@@ -161,7 +172,9 @@ const REFLECTION_ENVELOPE = jsonOutput(z.object({ facts: z.array(z.unknown()), s
  *  on the envelope (non-JSON / non-object → error). Every text field is
  *  redacted; `supersedes` survives only when it names a record the extractor was
  *  shown; `audience` is `user`/`repo`/`channel` only when it says exactly that,
- *  else `org`. The summary inherits the narrowest audience any fact carried —
+ *  else `org`. A fact whose text carries any rejection marker (the pure gate in
+ *  engine.ts — status and change descriptions never become facts) is dropped
+ *  and counted in `rejected`; a summary is never gated. The summary inherits the narrowest audience any fact carried —
  *  user > repo > channel > org: a thread that yielded personal (or
  *  repo-/channel-specific) knowledge has a summary that restates it, and
  *  routing that to org would leak it to everyone. */
@@ -171,17 +184,26 @@ export function parseReflection(raw: string, prov: ReflectionProvenance, knownId
   const obj = parsed.value;
 
   const candidates: RoutedCandidate[] = [];
+  let rejected = 0;
   for (const f of obj.facts) {
     if (candidates.length >= MAX_REFLECTION_FACTS) break;
     const fact = parseFact(f, prov, knownIds);
-    if (fact) candidates.push(fact);
+    if (!fact) continue;
+    // The write gate: a fact carrying a status or change-description marker is
+    // rejected here, before authorization and write — markers are named
+    // patterns, so the counter is loggable without the text.
+    if (rejectionMarkers(fact.text).length > 0) {
+      rejected += 1;
+      continue;
+    }
+    candidates.push(fact);
   }
   const summary = cleanText(obj.summary);
   if (summary) {
     const audience = SUMMARY_INHERITANCE.find((a) => candidates.some((c) => c.audience === a)) ?? "org";
     candidates.push({ kind: "summary", text: summary, audience, ...prov });
   }
-  return { ok: true, candidates };
+  return { ok: true, candidates, offered: obj.facts.length, rejected };
 }
 
 function parseFact(raw: unknown, prov: ReflectionProvenance, knownIds: Set<string>): RoutedCandidate | undefined {
@@ -410,7 +432,7 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
       return;
     }
     const outcomeTail = stopNote ? ` (${stopNote})` : "";
-    if (parsed.candidates.length === 0) {
+    if (parsed.candidates.length === 0 && parsed.offered === 0) {
       info(`reflection: nothing to write${outcomeTail}`);
       return;
     }
@@ -445,13 +467,24 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
       warn(`write narrowed by policy: ${[...narrowed].map(([line, n]) => `${n}× ${line}`).join(", ")}`);
     if (dropped.length > 0)
       warn(`write denied by policy, ${dropped.length} candidate(s) dropped: ${dropped.join(", ")}`);
-    for (const [scopeKey, records] of byScope) await deps.store.write(scopeKey, records);
-    // What reached the store — after the write gate, so a pass the policy
-    // emptied says `0 fact(s)` beside its denial line, never "nothing to write".
-    const written = [...byScope.values()].flat();
-    const facts = written.filter((r) => r.kind === "fact").length;
-    const summary = written.some((r) => r.kind === "summary") ? ", summary" : "";
-    info(`reflection wrote ${facts} fact(s)${summary}${outcomeTail}`);
+    const totals: WriteCounts = { inserted: 0, deduped: 0, restated: 0, superseded: 0, evicted: 0 };
+    for (const [scopeKey, records] of byScope) {
+      const counts = await deps.store.write(scopeKey, records);
+      totals.inserted += counts.inserted;
+      totals.deduped += counts.deduped;
+      totals.restated += counts.restated;
+      totals.superseded += counts.superseded;
+      totals.evicted += counts.evicted;
+    }
+    // The counters: offered/rejected from the parse gate, the rest summed off
+    // the stores' own answers — so a pass the policy emptied, or one the gate
+    // rejected outright, says its zeros beside the denial line, never a bare
+    // "nothing to write". No fact text ever rides this line.
+    const summary = [...byScope.values()].flat().some((r) => r.kind === "summary") ? ", summary" : "";
+    info(
+      `reflection offered ${parsed.offered}, rejected ${parsed.rejected}, restated ${totals.restated}, ` +
+        `inserted ${totals.inserted}, deduped ${totals.deduped}${summary}${outcomeTail}`,
+    );
   } catch (err) {
     warn(`reflection failed: ${err instanceof Error ? err.message : String(err)}`);
   }

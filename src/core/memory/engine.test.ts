@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mintRecord, normalizeText, planEviction, planWrite, rankRecords } from "./engine.js";
+import { mintRecord, normalizeText, planEviction, planWrite, rankRecords, rejectionMarkers } from "./engine.js";
 import type { MemoryCandidate, MemoryRecord } from "./types.js";
 
 // Feature: docs/reference/specs/memory.md — the store-agnostic engine shared by the
@@ -159,5 +159,86 @@ describe("planEviction", () => {
     expect(planEviction(active, 2).map((r) => r.id)).toEqual(["older"]);
     const withDead = [...active, { ...mk("gone", NOW - 999), status: "forgotten" as const }];
     expect(planEviction(withDead, 2).map((r) => r.id)).toEqual(["older"]);
+  });
+});
+
+// Feature: docs/reference/specs/memory.md item 13 — the write gate. One pure,
+// total function names the markers a fact text carries; a non-empty answer
+// rejects the fact before authorization and write, and the same exported
+// function will decide the sweep. The fixtures are paraphrases of the real
+// rejected and surviving texts from the calibration dry run, written before
+// the patterns so the split is the test and not the patterns' own echo.
+describe("rejectionMarkers", () => {
+  const FORTY_HEX = "0123456789abcdef0123456789abcdef01234567";
+
+  // The dry run's two sides, paraphrased: status lines carry markers, lessons
+  // naming a command, file, cause or remedy carry none.
+  const lessons = [
+    "the license check fails on a resident tree whose nested node_modules were dropped; a clean npm ci of the same commit passes",
+    "npm ci must run before the license check after a version bump",
+    "the staged rebuild (issue 170) must budget the swap",
+    "prettier ignores markdown here, so the formatter never rewrites a spec table",
+    "the retry backoff caps at 1234567890 milliseconds",
+    "the defaced banner must be regenerated from the template, never edited in place",
+    "config scopes resolve directive over thread over user over channel over defaults",
+  ];
+
+  it.each(lessons)("keeps a lesson: %s", (text) => {
+    expect(rejectionMarkers(text)).toEqual([]);
+  });
+
+  it("rejects a delivery report with reference, sha and count markers", () => {
+    const markers = rejectionMarkers("pull request 1423 was pushed at sha 3f9ab2c1d with all 449 tests passing");
+    expect(markers).toEqual(expect.arrayContaining(["reference", "sha", "count"]));
+  });
+
+  it("a reference in subject position rejects on its own; a citation mid-sentence does not", () => {
+    expect(rejectionMarkers("Issue 170 in the repository is fixed and pushed on branch x")).toEqual([
+      "reference",
+      "delivery",
+    ]);
+    expect(rejectionMarkers("PR 12 needs a rebase before anything else")).toEqual(["reference"]);
+    expect(rejectionMarkers("the staged rebuild (issue 170) must budget the swap")).toEqual([]);
+  });
+
+  it("a `#`-number beside a delivery predicate in the same clause rejects; alone it does not", () => {
+    expect(rejectionMarkers("#7 was merged after the countdown")).toEqual(["reference", "delivery"]);
+    expect(rejectionMarkers("the rollout described in #7 must budget the swap")).toEqual([]);
+  });
+
+  it("the sha pattern requires a digit and a letter, bounded by non-alphanumerics", () => {
+    expect(rejectionMarkers("the build finished at 1234567890")).toEqual([]); // all digits
+    expect(rejectionMarkers("defaced or accede never trip the sha pattern")).toEqual([]); // all letters
+    expect(rejectionMarkers(`the tree sits at ${FORTY_HEX} today`)).toEqual(["sha"]);
+    expect(rejectionMarkers("commit 3f9ab2c1d landed")).toEqual(["sha"]);
+  });
+
+  it("a test or check count with an outcome word in the same clause rejects, in either order", () => {
+    expect(rejectionMarkers("all 449 tests passing on the branch build")).toEqual(["count"]);
+    expect(rejectionMarkers("green across 13 checks this afternoon")).toEqual(["count"]);
+    // The number and the outcome must share a clause.
+    expect(rejectionMarkers("13 checks exist for providers; none may fail silently")).toEqual([]);
+  });
+
+  it("delivery predicates and run/branch identifiers each reject", () => {
+    expect(rejectionMarkers("the change is complete and awaits CI")).toEqual(["delivery"]);
+    expect(rejectionMarkers("LGTM from the reviewer")).toEqual(["delivery"]);
+    // A run id is 8 hex chars, so the sha pattern fires on it too — both name status.
+    expect(rejectionMarkers("run 85dd54f5 restarted twice")).toEqual(["sha", "identifier"]);
+    expect(rejectionMarkers("branch codex/stage-rebuild carries the fix")).toEqual(["identifier"]);
+    expect(rejectionMarkers("npm ci must run before the license check")).toEqual([]);
+  });
+
+  it("change descriptions reject: `now` + present-tense verb, a change participle, a plan unit, spec rows", () => {
+    expect(rejectionMarkers("spec rows now document the idle ending")).toEqual(["spec-row"]);
+    expect(rejectionMarkers("the table now includes the extra column")).toEqual(["now"]);
+    expect(rejectionMarkers("the idle ending was documented alongside the timers")).toEqual(["changed"]);
+    expect(rejectionMarkers("unit U12 covers the sweep")).toEqual(["unit"]);
+    expect(rejectionMarkers("the idle ending must be documented alongside the timers")).toEqual([]);
+  });
+
+  it("is pure and total: empty and whitespace texts carry no markers and nothing throws", () => {
+    expect(rejectionMarkers("")).toEqual([]);
+    expect(rejectionMarkers("   \n  ")).toEqual([]);
   });
 });

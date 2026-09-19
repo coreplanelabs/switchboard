@@ -93,16 +93,39 @@ describe("WorkerMemoryStore.retrieve", () => {
 });
 
 describe("WorkerMemoryStore.write", () => {
-  it("POSTs /write with the scope and candidates and resolves on 2xx", async () => {
-    const { fetch, calls } = fakeFetch(() => jsonRes({ ok: true, inserted: 1, deduped: 0, superseded: 0 }));
-    await expect(store(fetch).write("org:acme", [cand])).resolves.toBeUndefined();
+  it("POSTs /write with the scope and candidates and answers the Worker's counts on 2xx (memory.md item 8)", async () => {
+    const { fetch, calls } = fakeFetch(() => jsonRes({ ok: true, inserted: 2, deduped: 1, superseded: 1, evicted: 0 }));
+    await expect(store(fetch).write("org:acme", [cand])).resolves.toEqual({
+      inserted: 2,
+      deduped: 1,
+      restated: 0, // absent from an older Worker's answer → reads 0
+      superseded: 1,
+      evicted: 0,
+    });
     expect(calls[0].url).toBe("https://memory.example/write");
     expect(JSON.parse(calls[0].init.body as string)).toEqual({ scopeKey: "org:acme", records: [cand] });
   });
 
-  it("skips the round trip entirely for an empty batch", async () => {
+  it("an answer without counters reads as zeros, never NaN", async () => {
+    const { fetch } = fakeFetch(() => jsonRes({ ok: true }));
+    await expect(store(fetch).write("org:acme", [cand])).resolves.toEqual({
+      inserted: 0,
+      deduped: 0,
+      restated: 0,
+      superseded: 0,
+      evicted: 0,
+    });
+  });
+
+  it("skips the round trip entirely for an empty batch, answering zeros", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ ok: true }));
-    await store(fetch).write("org:acme", []);
+    await expect(store(fetch).write("org:acme", [])).resolves.toEqual({
+      inserted: 0,
+      deduped: 0,
+      restated: 0,
+      superseded: 0,
+      evicted: 0,
+    });
     expect(calls).toHaveLength(0);
   });
 
