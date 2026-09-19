@@ -102,7 +102,7 @@ commands:
   runs get             — One run's record, its cost in dollars per model (or unpriced) included; \`--include messages\` adds its events with free text wrapped as untrusted content.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
-  runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+  runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A hosted pipeline's parent refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the actor.
   runs unit            — A ship unit's runs in round order — its coding thread's and its review thread's, live and finished, each with its round and thread — from one read.
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
   runs findings        — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
@@ -262,7 +262,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
-• \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+• \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A hosted pipeline's parent refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the actor.
 • \`runs unit\` — A ship unit's runs in round order — its coding thread's and its review thread's, live and finished, each with its round and thread — from one read.
 • \`runs children\` — The runs one run spawned — a conductor's children, live and finished — oldest started first.
 • \`runs findings\` — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
@@ -364,7 +364,7 @@ commands:
   runs get             — One run's record, its cost in dollars per model (or unpriced) included; \`--include messages\` adds its events with free text wrapped as untrusted content.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
-  runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+  runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A hosted pipeline's parent refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the actor.
   runs unit            — A ship unit's runs in round order — its coding thread's and its review thread's, live and finished, each with its round and thread — from one read.
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
   runs findings        — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
@@ -497,7 +497,7 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
-• \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+• \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A hosted pipeline's parent refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the actor.
 • \`runs unit\` — A ship unit's runs in round order — its coding thread's and its review thread's, live and finished, each with its round and thread — from one read.
 • \`runs children\` — The runs one run spawned — a conductor's children, live and finished — oldest started first.
 • \`runs findings\` — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
@@ -587,7 +587,7 @@ commands:
   runs get             — One run's record, its cost in dollars per model (or unpriced) included; \`--include messages\` adds its events with free text wrapped as untrusted content.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
-  runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+  runs stop            — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A hosted pipeline's parent refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the actor.
   runs unit            — A ship unit's runs in round order — its coding thread's and its review thread's, live and finished, each with its round and thread — from one read.
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
   runs search          — Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content.
@@ -681,7 +681,7 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 • \`config instructions\` — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
-• \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). Records the caller as the actor.
+• \`runs stop\` — Request a live run to stop (\`--mode soft\` = finish the current step; \`hard\` = abort now). A hosted pipeline's parent refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the actor.
 • \`runs unit\` — A ship unit's runs in round order — its coding thread's and its review thread's, live and finished, each with its round and thread — from one read.
 • \`runs children\` — The runs one run spawned — a conductor's children, live and finished — oldest started first.
 *repo*
