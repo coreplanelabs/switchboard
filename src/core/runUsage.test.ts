@@ -117,7 +117,7 @@ describe("usageOfEvents", () => {
     expect(isRunUsage(null)).toBe(false);
   });
 
-  it("the meter row folds per model: usd sums when every turn carries one, null when one lacks it, absent when no turn carried price attrs; the sources collect sorted", () => {
+  it("the meter row folds per model: usd sums when every turn that counted tokens carries one, null when such a turn lacks it, kept over a zero-token turn, absent when no turn carried price attrs; the sources collect sorted", () => {
     const tokens = { inputTokens: 10, outputTokens: 5 };
     const priced = usageOfEvents([
       turn("m1", { ...tokens, usd: 0.5, priceSource: "provider" }, 1),
@@ -126,13 +126,26 @@ describe("usageOfEvents", () => {
     expect(priced.byModel.m1.usd).toBe(0.75);
     expect(priced.byModel.m1.priceSources).toEqual(["provider", "registry"]);
 
-    // one turn without a figure (a broken stream's `none`, an errored turn): the model reads unpriced
+    // a turn that counted tokens but carries no figure: the model reads unpriced — a sum would leave those tokens out
     const mixed = usageOfEvents([
       turn("m1", { ...tokens, usd: 0.5, priceSource: "provider" }, 1),
       turn("m1", { ...tokens, priceSource: "none" }, 2),
     ]);
     expect(mixed.byModel.m1.usd).toBeNull();
     expect(mixed.byModel.m1.priceSources).toEqual(["none", "provider"]);
+
+    // a turn that counted no tokens — an upstream error (no price attrs at all), a retry the
+    // harness's SDK spent, a stream broken before its usage (`none`) — leaves nothing out of the
+    // sum, so it never turns a priced model unpriced
+    const errored = usageOfEvents([
+      turn("m1", { ...tokens, usd: 0.5, priceSource: "provider" }, 1),
+      turn("m1", { httpStatus: 529 }, 2),
+      turn("m1", { priceSource: "none" }, 3),
+      turn("m1", { ...tokens, usd: 0.25, priceSource: "provider" }, 4),
+    ]);
+    expect(errored.byModel.m1.turns).toBe(4);
+    expect(errored.byModel.m1.usd).toBe(0.75);
+    expect(errored.byModel.m1.priceSources).toEqual(["none", "provider"]);
 
     // a record from before the meter row: no fields, the table prices it (costs.md item 4b)
     const legacy = usageOfEvents([turn("m1", tokens, 1)]);

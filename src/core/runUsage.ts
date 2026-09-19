@@ -24,10 +24,12 @@ export interface ModelUsage {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   /** The model's dollars summed from its turns' own `usd` attrs (the proxy's
-   *  meter row, model-proxy item 6): a number when every turn carried one,
-   *  null when one lacked it (unpriced — a sum that left a turn out would
-   *  understate the model), absent on a record whose turns predate the meter
-   *  row (the price table then prices the tokens, costs.md item 4b). */
+   *  meter row, model-proxy item 6): a number when every turn that counted
+   *  tokens carried one, null when such a turn lacked it (unpriced — a sum
+   *  that left counted tokens out would understate the model; a turn that
+   *  counted none, an errored call or a retry, leaves nothing out), absent on
+   *  a record whose turns predate the meter row (the price table then prices
+   *  the tokens, costs.md item 4b). */
   usd?: number | null;
   /** The distinct `priceSource` words the turns carried, sorted — what the
    *  by-model view names as the source. Absent when no turn carried one. */
@@ -56,10 +58,13 @@ export const emptyUsage = (): RunUsage => ({ turns: 0, byModel: {} });
 export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
   const usage = emptyUsage();
   // The meter row per model (model-proxy item 6): the turns' own dollars and
-  // sources. `usd` sums only when every turn carried one; a model none of
-  // whose turns carried price attrs stays without the fields (a record from
-  // before the meter row — the table prices it, costs.md item 4b).
-  const priced = new Map<string, { usd: number; pricedTurns: number; sources: Set<string> }>();
+  // sources. `usd` sums only when every turn that counted tokens carried one —
+  // a turn that counted none (an upstream error, a retry the harness's SDK
+  // spent, a stream broken before its usage) has nothing a sum could leave
+  // out, so it never turns the model unpriced; a model none of whose turns
+  // carried price attrs stays without the fields (a record from before the
+  // meter row — the table prices it, costs.md item 4b).
+  const priced = new Map<string, { usd: number; pricedTurns: number; tokenTurns: number; sources: Set<string> }>();
   for (const e of events) {
     if (e.type !== "span_end" || e.name !== MODEL_TURN) continue;
     const attrs = (e.attrs ?? {}) as Record<string, unknown>;
@@ -71,6 +76,8 @@ export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
     };
+    const counted =
+      num(attrs.inputTokens) + num(attrs.outputTokens) + num(attrs.cacheReadTokens) + num(attrs.cacheWriteTokens);
     m.turns += 1;
     m.inputTokens += num(attrs.inputTokens);
     m.outputTokens += num(attrs.outputTokens);
@@ -80,8 +87,8 @@ export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
     usage.turns += 1;
     const hasUsd = typeof attrs.usd === "number" && Number.isFinite(attrs.usd);
     const hasSource = typeof attrs.priceSource === "string" && attrs.priceSource !== "";
-    if (!hasUsd && !hasSource) continue;
-    const p = priced.get(model) ?? { usd: 0, pricedTurns: 0, sources: new Set<string>() };
+    const p = priced.get(model) ?? { usd: 0, pricedTurns: 0, tokenTurns: 0, sources: new Set<string>() };
+    if (counted > 0) p.tokenTurns += 1;
     if (hasUsd) {
       p.usd += attrs.usd as number;
       p.pricedTurns += 1;
@@ -90,8 +97,9 @@ export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
     priced.set(model, p);
   }
   for (const [model, p] of priced) {
+    if (p.pricedTurns === 0 && p.sources.size === 0) continue;
     const m = usage.byModel[model]!;
-    m.usd = p.pricedTurns === m.turns ? p.usd : null;
+    m.usd = p.pricedTurns >= p.tokenTurns ? p.usd : null;
     if (p.sources.size > 0) m.priceSources = [...p.sources].sort();
   }
   return usage;

@@ -159,7 +159,9 @@ export function modelPriceOf(ref: string, prices: ModelPriceTable = NO_PRICES): 
 export type PriceSource = "provider" | "operator" | "registry" | "none";
 
 /** The meter row's dollars: `usd` when a layer priced the turn, `feeUsd` on a
- *  BYOK turn (the aggregator's fee, already inside `usd`), and the layer. */
+ *  BYOK turn (the aggregator's fee — inside `usd` when the vendor's charge was
+ *  reported beside it, otherwise beside the layer that priced the tokens),
+ *  and the layer. */
 export interface TurnPrice {
   usd?: number;
   feeUsd?: number;
@@ -214,8 +216,14 @@ export function priceTurn(
   prices: ModelPriceTable = NO_PRICES,
 ): TurnPrice {
   if (reported) {
-    const usd = reported.byok ? reported.cost + (reported.upstreamCost ?? 0) : reported.cost;
-    return { usd, priceSource: "provider", ...(reported.byok ? { feeUsd: reported.cost } : {}) };
+    if (!reported.byok) return { usd: reported.cost, priceSource: "provider" };
+    if (reported.upstreamCost !== undefined) {
+      return { usd: reported.cost + reported.upstreamCost, priceSource: "provider", feeUsd: reported.cost };
+    }
+    // A BYOK chunk without the vendor's charge: the fee is not the turn's
+    // dollars, so it rides beside whatever layer below prices the tokens —
+    // never as an authoritative figure that understates the turn.
+    return { ...priceTurn(card, undefined, usage, prices), feeUsd: reported.cost };
   }
   if (!usage) return { priceSource: "none" };
   const operator = prices[card.ref];

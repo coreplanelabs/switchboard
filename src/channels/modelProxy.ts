@@ -100,8 +100,10 @@ export interface ModelProxyDeps {
   /** One line per call — the run id, the turn, the status and byte counts; never a body or a credential. */
   log?: (line: string) => void;
   maxBodyBytes?: number;
-  /** The operator's `costs.prices` table (costs.md item 4b), read at each call
-   *  like `providers`; absent → no operator layer in the turn's price. */
+  /** The operator's `costs.prices` table (costs.md item 4b), read through the
+   *  thunk at each call; the process wires the costs configuration it parsed
+   *  at startup, so unlike `providers` a reload reaches it with the process,
+   *  not before. Absent → no operator layer in the turn's price. */
   prices?: () => ModelPriceTable;
 }
 

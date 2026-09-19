@@ -227,11 +227,16 @@ describe("priceTurn — the meter row's precedence (model-proxy item 6)", () => 
     expect(priced.priceSource).toBe("provider");
     expect(priced.usd).toBeCloseTo(0.051, 12);
     expect(priced.feeUsd).toBe(0.001);
-    // a BYOK chunk without the upstream column is the fee alone, never a guess
-    expect(priceTurn({ ref }, { cost: 0.001, byok: true }, usage)).toEqual({
-      usd: 0.001,
+    // a BYOK chunk without the upstream column: the fee is not the turn's dollars, so it rides
+    // beside the layer that prices the tokens — the operator's table here, none when no layer does
+    const prices = parseModelPrices({ [ref]: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } });
+    const layered = priceTurn({ ref }, { cost: 0.001, byok: true }, usage, prices);
+    expect(layered.priceSource).toBe("operator");
+    expect(layered.feeUsd).toBe(0.001);
+    expect(layered.usd).toBe(priceTurn({ ref }, undefined, usage, prices).usd);
+    expect(priceTurn({ ref: "local/some-model" }, { cost: 0.001, byok: true }, usage)).toEqual({
       feeUsd: 0.001,
-      priceSource: "provider",
+      priceSource: "none",
     });
   });
 
