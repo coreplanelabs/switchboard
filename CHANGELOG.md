@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.254.1](https://github.com/coreplanelabs/switchboard/compare/v1.254.0...v1.254.1) (2026-09-19)
+
+
+### Bug fixes
+
+* **dispatcher:** the operator's preset binds start the run they name ([#1996](https://github.com/coreplanelabs/switchboard/issues/1996)) ([98c9209](https://github.com/coreplanelabs/switchboard/commit/98c9209ddf98b7e7a323bcb5d3b74b84f703c4d2))
+
+
+### Documentation
+
+* **docs:** record 0067 and unit U19 add the structured-answer seam ([#1994](https://github.com/coreplanelabs/switchboard/issues/1994)) ([4477624](https://github.com/coreplanelabs/switchboard/commit/447762473b6c18d4cb3a219f5619a8552efad322))
+
 ## [1.254.0](https://github.com/coreplanelabs/switchboard/compare/v1.253.0...v1.254.0) (2026-09-19)
 
 
