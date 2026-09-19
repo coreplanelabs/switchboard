@@ -9,6 +9,8 @@ import { formatDuration } from "./format";
 import {
   buildTimeline,
   CURRENTLY_DELIVERING,
+  CUT_NOTE,
+  cutMarkOf,
   NO_ROOT_NOTE,
   NO_TIMING_NOTE,
   RANKED_NOTE,
@@ -333,6 +335,71 @@ describe("buildTimeline", () => {
       delivery: {},
     });
     expect(asAgent.lede).toBe("10s — getting ready");
+  });
+
+  it("a step still open at the run's terminal event is closed at that event with the `cut by …` mark and left out of the ranking; live and delivering keep it ranked", () => {
+    // The run died a minute into three open steps; the window runs 28 more
+    // minutes to the terminal event. None of that time is a step's.
+    const DEATH: SpanRecord[] = [
+      sp("root", "request", 0, undefined, { attrs: { channel: "slack" } }),
+      sp("agent", "run.agent", 0, undefined, { parent: "root" }),
+      sp("t1", "model.turn", 0, 30_000, { parent: "agent" }),
+      sp("c1", "tool.bash", 30_000, 60_000, { parent: "agent", attrs: { callId: "c1" } }),
+      sp("c2", "tool.read", 60_000, undefined, { parent: "agent", attrs: { callId: "c2" } }), // open at death
+      sp("c3", "tool.update_status", 62_000, undefined, { parent: "agent", attrs: { callId: "c3" } }), // open at death
+    ];
+    const input: TimelineInput = {
+      spans: DEATH,
+      losses: [],
+      window: { start: 0, end: 1_740_000 }, // the terminal event, 28 more minutes on
+      owner: "agent",
+      totalMs: 1_740_000,
+      phase: "ended",
+      delivery: {},
+      endedBy: "interrupted",
+    };
+    const vm = buildTimeline(input);
+    // The cut steps never rank: the 30 s model turn and the 30 s bash lead.
+    expect(vm.ranked.map((r) => r.anchor)).toEqual(["span-t1", "call-c1"]);
+    // Each cut step is closed at the terminal event, marked, and keeps its link.
+    expect(vm.cut.map((c) => [c.anchor, c.facts[0]])).toEqual([
+      ["call-c2", "cut by the interruption"],
+      ["call-c3", "cut by the interruption"],
+    ]);
+    expect(vm.cut[0].ms).toBe(1_740_000 - 60_000); // closed at the terminal event: the cut, not a measurement
+    expect(vm.cutNote).toBe(CUT_NOTE);
+    // The mark names the terminal cause; without one the generic mark stands.
+    expect(cutMarkOf("failed")).toBe("cut by the failure");
+    expect(cutMarkOf("stopped_hard")).toBe("cut by the hard stop");
+    expect(cutMarkOf("stopped_soft")).toBe("cut by the stop");
+    expect(cutMarkOf(undefined)).toBe("cut at the run's end");
+    expect(buildTimeline({ ...input, endedBy: undefined }).cut[0].facts).toEqual(["cut at the run's end"]);
+    // Live: the open step is genuinely running — ranked, no cut list.
+    const live = buildTimeline({ ...input, phase: "live", endedBy: undefined });
+    expect(live.cut).toEqual([]);
+    expect(live.ranked.some((r) => r.anchor === "call-c2")).toBe(true);
+    // Delivering: the reply is in flight; an open step still ranks.
+    expect(buildTimeline({ ...input, phase: "delivering" }).cut).toEqual([]);
+  });
+
+  it("a restart's caption names its predecessor by id and never prints a `behind the previous run` wait beside it", () => {
+    const restarted = buildTimeline({
+      ...finishedReview,
+      spans: REVIEW.map((s) =>
+        s.spanId === "root"
+          ? { ...s, attrs: { ...s.attrs, restartOfRunId: "run-prev", queuedBehindMs: 1_718_000 } }
+          : s,
+      ),
+    });
+    expect(restarted.captions).toEqual(["restarted from run run-prev", "queued 6m 00s before we saw it"]);
+    // Without the predecessor the behind caption stands as before.
+    const behind = buildTimeline({
+      ...finishedReview,
+      spans: REVIEW.map((s) =>
+        s.spanId === "root" ? { ...s, attrs: { channel: "slack" as const, queuedBehindMs: 250_000 } } : s,
+      ),
+    });
+    expect(behind.captions).toEqual(["queued 4m 10s behind the previous run"]);
   });
 
   it("debug carries the partition and the raw names — the one place they appear", () => {

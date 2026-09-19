@@ -204,6 +204,51 @@ describe("RunPage — the timeline (item 25)", () => {
     expect(tl.find(".lede .shape").text()).toBe(w.find(".conn .dur").text());
   });
 
+  it("history: a step still open at the run's death is closed at the terminal event under Cut steps with its `cut by` mark and out of the ranking, and a restart's caption names its predecessor instead of a `behind` wait", () => {
+    const { factory } = fakeEventSourceFactory();
+    const w = mountApp(RunPage, {
+      seed: historySeed(
+        [
+          {
+            type: "span_start",
+            spanId: "root",
+            name: "request",
+            attrs: { channel: "slack", restartOfRunId: "run-prev", queuedBehindMs: 1_718_000 },
+            at: 1000,
+          },
+          input,
+          spanEnd("hist", "dispatch.history", 1000, 21_000, { parentSpanId: "root" }),
+          { type: "span_start", spanId: "agent", name: "run.agent", parentSpanId: "root", at: 21_000 },
+          spanEnd("t1", "model.turn", 21_000, 51_000, { parentSpanId: "agent", attrs: { stopReason: "tool_use" } }),
+          call("c1", "$ npm test", 51_000),
+          // c1's tool span never ends: the run died mid-call, 28 minutes before the terminal event.
+          {
+            type: "span_start",
+            spanId: "c1s",
+            name: "tool.bash",
+            parentSpanId: "agent",
+            attrs: { callId: "c1" },
+            at: 51_000,
+          },
+        ] as LiveFrame[],
+        { status: "interrupted", receivedAt: 1000, finishedAt: 1_741_000, durationMs: 1_740_000 },
+      ),
+      eventSource: factory,
+    });
+    const tl = w.find("#timeline");
+    // The cut step is out of the ranking and on its own list, marked and linked.
+    expect(tl.findAll(".ranked li .label").map((l) => l.text())).toEqual(["a model turn", "reading the thread"]);
+    expect(tl.find(".cut-head").text()).toBe("Cut steps");
+    const cut = tl.findAll(".cut li");
+    expect(cut).toHaveLength(1);
+    expect(cut[0].find(".label").text()).toBe("npm test");
+    expect(cut[0].find(".label").attributes("href")).toBe("#call-c1");
+    expect(cut[0].findAll(".fact").map((f) => f.text())).toContain("cut by the interruption");
+    // The restart names its predecessor; the invented wait is gone.
+    expect(tl.text()).toContain("restarted from run run-prev");
+    expect(tl.text()).not.toContain("behind the previous run");
+  });
+
   it("history: an `untimed` record (written before span schema) renders its transcript and calls, and the timeline states `no timing data` — no bar, no shape, no crash on the event kinds it carries", () => {
     const { factory } = fakeEventSourceFactory();
     const w = mountApp(RunPage, {

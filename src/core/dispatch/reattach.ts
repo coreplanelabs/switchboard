@@ -223,7 +223,15 @@ export function prepareRestartTurn(
     receivedAt,
     originAt: undefined,
   };
-  const trace = startRequestRoot(deps, { channel: channelOf(msg.channelId), receivedAt });
+  // The restart's own dispatch opens the window (`receivedAt` is this clock
+  // read, `originAt` cleared above): its queue lines measure from here, and
+  // the root names the run it restarts so the page says `restarted from run
+  // <id>` instead of counting the predecessor's lifetime as a wait.
+  const trace = startRequestRoot(deps, {
+    channel: channelOf(msg.channelId),
+    receivedAt,
+    ...(restartOf !== undefined ? { restartOfRunId: restartOf } : {}),
+  });
   return {
     msg,
     opts: {

@@ -17,6 +17,10 @@ export interface AttrDomain {
   status: "completed" | "failed" | "refused" | "stopped";
   queuedBeforeMs: number;
   queuedBehindMs: number;
+  /** The run this request restarts (a restart from its request, run-history
+   *  item 54): the page names the predecessor by id instead of inventing a
+   *  wait out of its lifetime. On the root at start, like the queued numbers. */
+  restartOfRunId: string;
   runId: string;
   // slack.receive
   caughtUp: boolean;
@@ -135,6 +139,7 @@ export type SpanAttrs = { readonly [K in SpanAttrKey]?: AttrDomain[K] };
  *  from a closed table, never free text (no whitespace, no `?`/`&`, at most 64
  *  chars). */
 const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
+  "restartOfRunId",
   "runId",
   "outcome",
   "refusal",
@@ -184,6 +189,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   status: "string",
   queuedBeforeMs: "number",
   queuedBehindMs: "number",
+  restartOfRunId: "string",
   runId: "string",
   caughtUp: "boolean",
   files: "number",

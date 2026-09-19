@@ -320,6 +320,17 @@ describe("prepareRestartTurn: the request runs again as its own dispatch", () =>
     expect(turn.opts.restartOf).toBe("run-closed");
   });
 
+  it("stamps the predecessor on its root at start (restartOfRunId) and no queued numbers, so the page names the run it restarts instead of counting its lifetime as a wait", () => {
+    const turn = prepareRestartTurn(
+      { clock: () => NOW },
+      { request: { ...REQUEST, originAt: NOW - 1_718_000 }, pending: [], clock: () => NOW, restartOf: "run-old" },
+    );
+    expect(turn.opts.trace.root.record().attrs).toEqual({ channel: "slack", restartOfRunId: "run-old" });
+    // Without a predecessor (nothing to name) the root carries neither.
+    const bare = prepareRestartTurn({ clock: () => NOW }, { request: REQUEST, pending: [], clock: () => NOW });
+    expect(bare.opts.trace.root.record().attrs).toEqual({ channel: "slack" });
+  });
+
   it("appends the follow-ups the resumed run never consumed, their attachments merged after the request's own", () => {
     const pending: PersonFollowUp[] = [
       {

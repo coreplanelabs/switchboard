@@ -62,6 +62,10 @@ export interface RequestRootOptions {
   /** A fresh turn's wait behind the run it was parked on: `queuedBehindMs` on
    *  the root at start, for the same reason. */
   queuedBehindMs?: number;
+  /** The run this request restarts (run-history item 54): on the root at
+   *  start, for the same reason — the page's caption names the predecessor by
+   *  id instead of counting its lifetime as a wait. */
+  restartOfRunId?: string;
   attrs?: SpanAttrs;
 }
 
@@ -99,7 +103,12 @@ export function startRequestRoot(deps: RequestTraceDeps, opts: RequestRootOption
   const root = tracer.start("request", {
     sinks: [...leadingSinks(deps), stream, card, collector],
     startedAt: opts.receivedAt,
-    attrs: { ...(opts.channel ? { channel: opts.channel } : {}), ...queuedAttrsOf(opts), ...(opts.attrs ?? {}) },
+    attrs: {
+      ...(opts.channel ? { channel: opts.channel } : {}),
+      ...queuedAttrsOf(opts),
+      ...(opts.restartOfRunId !== undefined ? { restartOfRunId: opts.restartOfRunId } : {}),
+      ...(opts.attrs ?? {}),
+    },
   });
   return {
     root,
