@@ -2076,6 +2076,17 @@ describe("verifierPrompt — one bound line checked against the author's turns, 
     expect(prompt.system).not.toContain(line);
   });
 
+  it("the system half says what a preset line is — the request running as that preset, judged by fit, never by whether the author typed the word — and lists every routable preset with its description", () => {
+    expect(prompt.system).toContain(
+      "judge it by whether the preset fits the ask, never by whether the author typed the word",
+    );
+    expect(prompt.system).toContain("A request to fix, change, add or harden code fits `ship`");
+    for (const p of routablePresets()) {
+      expect(prompt.system).toContain(`- \`agent:${p.name} <the request>\`: `);
+    }
+    expect(prompt.system).toContain("- `agent:ship <the request>`: Coding → review → fix pipeline to LGTM");
+  });
+
   it("the user half quotes each author turn between the router's request tags, oldest first — a tag inside bent, each turn cut at the cap — and the line as the person would type it", () => {
     expect(prompt.user).toBe(`<request>\n${text}\n</request>\n\nThe line bound to them: ${line}`);
     const two = verifierPrompt({ turns: ["first ask", text], line });
