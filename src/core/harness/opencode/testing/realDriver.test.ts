@@ -188,9 +188,9 @@ afterEach(async () => {
   }
 });
 
-async function listen(server: Server): Promise<number> {
+async function listen(server: Server, port = 0): Promise<number> {
   servers.push(server);
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  await new Promise<void>((r) => server.listen(port, "127.0.0.1", () => r()));
   const address = server.address();
   return typeof address === "object" && address ? address.port : 0;
 }
@@ -208,6 +208,10 @@ interface RealRun {
   /** Every span the grant's tracer ended — the proxy's `model.turn` meter rows among them. */
   spans: SpanRecord[];
   container: BotHostHarnessContainer;
+  /** The bot generation this run answered from: closed and re-listened on the same port for a roll. */
+  botServer: Server;
+  botPort: number;
+  homeDir: string;
 }
 
 /** How a run is steered off the default hand-built spec: the run's card and
@@ -219,6 +223,11 @@ interface RealRunOptions {
   effort?: NonNullable<HarnessRun["effort"]>;
   grant?: Partial<RunBearerGrant>;
   proxy?: { providers: Record<string, ProviderConfig>; env: Record<string, string> };
+  /** A bot roll: this generation's bot is fresh (new stores, new handlers) but
+   *  listens on the DEAD generation's port, in the same container and home —
+   *  the live OpenCode server's relay and model URLs keep resolving. The caller
+   *  closes the dead generation's server first. */
+  roll?: { container: BotHostHarnessContainer; homeDir: string; botPort: number };
 }
 
 /** A run driven end to end through the real `OpenCodeHarness` against the
@@ -284,14 +293,16 @@ async function driveRealRun(
     res.writeHead(404, { "content-type": "application/json" });
     res.end(JSON.stringify({ error: "not found" }));
   });
-  const botPort = await listen(bot);
+  const botPort = await listen(bot, opts?.roll?.botPort ?? 0);
   const harnessUrl = `http://127.0.0.1:${botPort}`;
 
-  const homeDir = mkdtempSync(join(tmpdir(), "oc-real-home-"));
-  roots.push(homeDir);
-  const container = new BotHostHarnessContainer({
-    env: { PATH: `${resolve(BIN, "..")}:${process.env.PATH ?? ""}`, HOME: homeDir },
-  });
+  const homeDir = opts?.roll?.homeDir ?? mkdtempSync(join(tmpdir(), "oc-real-home-"));
+  if (opts?.roll === undefined) roots.push(homeDir);
+  const container =
+    opts?.roll?.container ??
+    new BotHostHarnessContainer({
+      env: { PATH: `${resolve(BIN, "..")}:${process.env.PATH ?? ""}`, HOME: homeDir },
+    });
 
   const events: RunEvent[] = [];
   const steps: StepReport[] = [];
@@ -336,7 +347,20 @@ async function driveRealRun(
   };
 
   const session = await openThroughSeam(new OpenCodeHarness(), deps, run);
-  return { session, events, steps, facts, statusReports, modelSeen, upstreamBodies, spans, container };
+  return {
+    session,
+    events,
+    steps,
+    facts,
+    statusReports,
+    modelSeen,
+    upstreamBodies,
+    spans,
+    container,
+    botServer: bot,
+    botPort,
+    homeDir,
+  };
 }
 
 /** The run's feed, as the tailer wrote it, read whole. */
@@ -510,6 +534,49 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
     ]);
     await session.end();
   }, 120_000);
+
+  // Feature: docs/reference/specs/harness.md item 6 (survival) — a bot roll
+  // under a live process re-attaches in place, no rebuild, on the real binary:
+  // the new generation — fresh stores and handlers on the dead generation's
+  // port — finds the row's server alive, reads its session's store back through
+  // the messages route, and continues the same server and session instead of
+  // ending it and rebuilding from the record.
+  it("a bot roll under a live process re-attaches in place, no rebuild: the new generation continues the same server and session, and the run answers", async () => {
+    const first = await driveRealRun("run-real-roll", (_r, chunks) => chunks.text("first answer"));
+    expect(first.session.answer).toBe("first answer");
+    const rowFacts = first.facts.at(-1)!;
+    roots.push((rowFacts as { root: string }).root);
+    // The roll: the dead generation's bot closes; the server and its tailer live on.
+    await new Promise<void>((r) => first.botServer.close(() => r()));
+    const resume: HarnessResume = {
+      messages: [
+        { role: "user", content: [{ type: "text", text: "earlier question" }] },
+        { role: "assistant", content: [{ type: "text", text: "earlier answer" }] },
+        { role: "user", content: [{ type: "text", text: "do the work" }] },
+        ...first.steps.flatMap((s) => s.turns),
+      ],
+      settlements: [],
+      remainingMs: 5 * 60_000,
+      turn: 2,
+      inboxConsumedSeq: 0,
+      facts: rowFacts,
+    };
+    const second = await driveRealRun("run-real-roll", (_r, chunks) => chunks.text("rolled on"), resume, {
+      roll: { container: first.container, homeDir: first.homeDir, botPort: first.botPort },
+    });
+    expect(notesOf(second.events).filter((n) => n.kind === "harness_error")).toEqual([]);
+    const resumed = notesOf(second.events).filter((n) => n.kind === "resumed");
+    expect(resumed).toHaveLength(1);
+    expect(resumed[0].summary).toMatch(
+      /^resumed after a restart: OpenCode still runs in the container \(pid \d+, port \d+\); continuing its session/,
+    );
+    // In place, no rebuild: the row's pid, port, root and session are this run's too.
+    const after = second.facts.at(-1)! as unknown as Record<string, unknown>;
+    const row = rowFacts as unknown as Record<string, unknown>;
+    for (const key of ["pid", "port", "root", "sessionID"]) expect(after[key]).toBe(row[key]);
+    expect(second.session.answer).toBe("rolled on");
+    await second.session.end();
+  }, 240_000);
 
   // Feature: docs/reference/specs/harness.md item 2 (the gate) — a step with
   // two shell calls, one the gate refuses and one it allows, on the real

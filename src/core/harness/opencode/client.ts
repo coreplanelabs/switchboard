@@ -347,11 +347,21 @@ export const STORE_PAGES = 10_000;
 export type StoreRead =
   { ok: true; messages: OpenCodeMessage[]; stopped?: OpenCodeMessage } | { ok: false; why: string };
 
+/** The most of the answer's first bytes a refusal quotes, beside the shape expected. */
+const REFUSAL_ANSWER_BYTES = 160;
+
 /** The store paged as the binary pages it: the order on every page (never the
  *  route's default), `limit=STORE_PAGE_LIMIT`, `cursor.next` followed, each
  *  row handed to `take` — it keeps the row and goes on, or ends the read
- *  there. Refused by name, never partial: a page the server refuses, a page
- *  of another shape, a store that does not end within `STORE_PAGES`. `get` is
+ *  there. A page that does not parse is first re-asked smaller — the same
+ *  cursor, half the rows — down to one row a page: the transport under the
+ *  read caps a command's output (the resident's exec truncates curl's answer
+ *  past its per-stream cap), so a fat page of a long run's store comes back
+ *  cut mid-JSON while the server's shape is right; only a one-row page that
+ *  still does not parse is a shape mismatch, refused with the answer's first
+ *  bytes beside the shape expected. Refused by name, never partial: that
+ *  mismatch, a page the server refuses, a store that does not end within
+ *  `STORE_PAGES`. `get` is
  *  the seam's GET (idempotent: the seam re-sends it once itself on a control
  *  reset). Measured against the pinned binary: the listing's order is the
  *  server's insertion order — an import stamped an hour AHEAD of the server's
@@ -369,19 +379,39 @@ async function readStorePages(
   const route = openCodeSessionRoutes(sessionID)["session.messages"].path;
   const messages: OpenCodeMessage[] = [];
   let cursor: string | undefined;
+  let limit = STORE_PAGE_LIMIT;
   for (let page = 0; ; page++) {
     if (page === STORE_PAGES)
       return {
         ok: false,
         why: `the session's store did not end within ${STORE_PAGES} pages; the run does not continue on a partial store`,
       };
-    const query = `${cursor !== undefined ? `cursor=${encodeURIComponent(cursor)}&` : ""}order=${order}&limit=${STORE_PAGE_LIMIT}`;
+    // Measured against the pinned binary: `cursor` cannot be combined with
+    // `order` (a 400 `InvalidCursorError`) — the cursor itself carries the
+    // order and direction — so a cursor page sends the cursor and the limit
+    // alone, as the tailer's refill does.
+    const query =
+      cursor !== undefined ? `cursor=${encodeURIComponent(cursor)}&limit=${limit}` : `order=${order}&limit=${limit}`;
     const res = await get(`${route}?${query}`);
     if (res.status < 200 || res.status >= 300)
-      return { ok: false, why: `the server refused the session (${res.status})` };
+      return {
+        ok: false,
+        why: `the server refused the session (${res.status}): ${JSON.stringify(res.body.slice(0, REFUSAL_ANSWER_BYTES))}`,
+      };
     const listed = parseMessagesPage(res.body);
-    if (listed === undefined)
-      return { ok: false, why: "the session's messages answered something that is not the page shape" };
+    if (listed === undefined) {
+      // The same cursor, half the rows: a page the transport cut fits once it
+      // is small enough, and a true shape mismatch costs a handful of re-asks
+      // before the one-row page refuses it with the evidence.
+      if (limit > 1) {
+        limit = Math.ceil(limit / 2);
+        continue;
+      }
+      return {
+        ok: false,
+        why: `the session's messages answered something that is not the page shape (expected { data: [{ id, type, … }], cursor: { next? } }, down to limit=1); the answer began: ${JSON.stringify(res.body.slice(0, REFUSAL_ANSWER_BYTES))}`,
+      };
+    }
     for (const m of listed.data) {
       if (!take(m)) return { ok: true, messages, stopped: m };
       messages.push(m);

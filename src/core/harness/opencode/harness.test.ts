@@ -722,6 +722,40 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
     expect(r.steps[0].turns[0].content[0]).toMatchObject({ type: "tool_result", toolUseId: "c-s" });
   });
 
+  // Feature: docs/reference/specs/harness.md item 6 (survival) — a bot roll
+  // under a live process re-attaches in place, no rebuild: the store read
+  // decodes what the transport actually delivers, re-asking a page the exec's
+  // per-stream cap cut mid-JSON smaller until it fits, instead of refusing the
+  // shape and falling to the rebuild that costs the live process's context.
+  it("a bot roll under a live process whose store overflows the transport's page cap re-attaches in place — the read pages smaller, no rebuild", async () => {
+    const driver = openCodeDriver({ reattach: { storeCutChars: 2_000 } });
+    const rowFacts = rowFor(driver);
+    const fatTranscript: ChatMessage[] = [request];
+    for (let i = 0; i < 6; i++) {
+      fatTranscript.push({ role: "assistant", content: [{ type: "text", text: `step ${i}: ${"x".repeat(400)}` }] });
+      fatTranscript.push({ role: "user", content: [{ type: "text", text: `go on ${i}` }] });
+    }
+    const r = await driver.run({
+      turns: [{ content: [{ type: "text", text: "picked up in place" }], stopReason: "end_turn" }],
+      processAliveOnResume: true,
+      resume: resume(rowFacts, fatTranscript, []),
+    });
+    expect(r.outcome).toEqual({ kind: "answered", answer: "picked up in place" });
+    // No rebuild: no second server started, no import posted; the one resumed note is the in-place path's.
+    expect(r.starts).toHaveLength(0);
+    expect(r.requests.filter((q) => q.method === "POST" && q.path.endsWith("/import"))).toHaveLength(0);
+    const resumed = notes(r).filter((n) => n.kind === "resumed");
+    expect(resumed).toHaveLength(1);
+    expect(resumed[0].summary).toMatch(/OpenCode still runs in the container \(pid 999.*continuing its session/);
+    // The store was read back whole through pages the cap let through: the
+    // first read asked the full limit, then re-asked at half the rows.
+    const reads = r.requests.filter((q) => q.method === "GET" && q.path.includes("/message?"));
+    const limits = reads.map((q) => Number(new URLSearchParams(q.path.split("?")[1]).get("limit")));
+    expect(limits[0]).toBe(200);
+    expect(limits.some((l) => l < 200)).toBe(true);
+    expect(notes(r).filter((n) => n.kind === "harness_error")).toEqual([]);
+  });
+
   it.each([
     {
       fault: "refuses the session",
@@ -747,6 +781,11 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
       fault: "has an unreadable feed",
       options: { reattach: { feedUnreadable: true } },
       why: /the feed could not be read from byte 0/,
+    },
+    {
+      fault: "answers store pages the transport cuts even one row at a time",
+      options: { reattach: { storeCutChars: 40 } },
+      why: /not the page shape \(expected \{ data: \[\{ id, type, … \}\], cursor: \{ next\? \} \}, down to limit=1\); the answer began: "/,
     },
     {
       fault: "is named by a row with no bearer hash",

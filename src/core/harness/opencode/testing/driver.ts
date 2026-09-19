@@ -495,6 +495,10 @@ export interface ReattachOptions {
   otherVersion?: string;
   /** Every store page answers a next cursor: the store never ends, and the re-attach refuses rather than continue on a partial one. */
   endlessStore?: boolean;
+  /** The transport's per-stream cap as the resident's exec applies it: every
+   *  `GET …/message` answer longer than this many chars comes back cut at it,
+   *  mid-JSON — the shape a bot roll's re-attach met on a long run's store. */
+  storeCutChars?: number;
   /** The feed cannot be read at the re-attach (the container's next read fails): the re-attach falls back. */
   feedUnreadable?: boolean;
   /** Records the dead generation's tailer wrote before the row's offset, after
@@ -1083,13 +1087,17 @@ class ScriptedServe {
         return j(400, { _tag: "InvalidRequestError", message: "Expected a value less than or equal to 200" });
       // The cursor carries the order, as the binary's does (its cursor is the
       // last row's id with the order and direction, base64): a page reached by
-      // cursor keeps the order the first page asked for.
+      // cursor keeps the order the first page asked for — and, measured against
+      // the pinned binary, a cursor combined with `order` is refused 400
+      // (`InvalidCursorError: Cursor cannot be combined with order`).
+      if (query.has("cursor") && query.has("order"))
+        return j(400, { _tag: "InvalidCursorError", message: "Cursor cannot be combined with order" });
       const cursor = /^c:(asc|desc):(\d+)$/.exec(String(query.get("cursor") ?? ""));
       const order = cursor?.[1] ?? (query.get("order") === "asc" ? "asc" : "desc");
       const ordered = order === "asc" ? [...this.store] : [...this.store].reverse();
       const from = cursor ? Number(cursor[2]) : 0;
       const next = from + limit < ordered.length ? `c:${order}:${from + limit}` : undefined;
-      return j(200, {
+      const answer = j(200, {
         data: ordered.slice(from, from + limit),
         cursor:
           this.role === "recorded" && this.reattach.endlessStore
@@ -1098,6 +1106,10 @@ class ScriptedServe {
               ? { next }
               : {},
       });
+      // The cap is the transport's, not the server's: whatever the page held,
+      // only its first bytes reach the client.
+      const cut = this.reattach.storeCutChars;
+      return cut !== undefined && answer.body.length > cut ? { ...answer, body: answer.body.slice(0, cut) } : answer;
     }
     if (req.method === "GET" && req.path === `/api/session/${this.sessionID}/permission`) {
       // The listing the harness resolves a reset reply by meets the reset too (`controlResetOnReply: "unlistable"`).
