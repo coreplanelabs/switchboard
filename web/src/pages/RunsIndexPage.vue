@@ -9,7 +9,7 @@ import { useSeed } from "../lib/seed";
 import { useWallClock } from "../lib/wallClock";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
-import { expiresAt, feedAction, LEAVING_WINDOW_MS, mergeRow, RUNS_PREF, type IndexRow } from "../lib/indexRow";
+import { expiresAt, feedAction, LEAVING_WINDOW_MS, mergeRow, rowStalled, RUNS_PREF, type IndexRow } from "../lib/indexRow";
 import { formatDateTime } from "../lib/format";
 import { retentionSentence } from "@core/channels/webSeed.js";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
@@ -55,9 +55,15 @@ for (const r of seed?.rows ?? []) rows.set(r.id, r);
 const now = useWallClock(seed?.now);
 const conn = ref<{ tone: "green" | "amber" | "red"; text: string }>({ tone: "amber", text: "connecting…" });
 
-// Newest-first by start stamp — startedAt is immutable, so an update never
-// reorders the list (the sort is stable).
-const ordered = computed(() => [...rows.values()].sort((a, b) => b.startedAt - a.startedAt));
+// Stalled live rows first (live-view item 32) — a run with no tool call for
+// the whole pace window is the row to look at, so it never hides below newer
+// healthy ones — then newest-first by start stamp (immutable; the sort is
+// stable, so a repaint only reorders when a row's stall state changes).
+const ordered = computed(() =>
+  [...rows.values()].sort(
+    (a, b) => Number(rowStalled(b, now.value)) - Number(rowStalled(a, now.value)) || b.startedAt - a.startedAt,
+  ),
+);
 const liveCount = computed(() => ordered.value.filter((r) => !r.finished).length);
 
 // The expiry cut (item 20): one divider before the first row leaving within a

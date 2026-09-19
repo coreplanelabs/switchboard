@@ -366,6 +366,8 @@ describe("RunRegistry.listActive", () => {
       stepCount: 2,
       schema: 2,
       activity: "x", // the latest tool call (item 20)
+      eventsLast5m: 2, // the stall signal's pace facts (item 32)
+      lastToolCallAt: 1010,
     });
     expect(list[1]).toEqual({
       id: "id-1",
@@ -376,6 +378,7 @@ describe("RunRegistry.listActive", () => {
       eventCount: 0,
       stepCount: 0,
       schema: 2,
+      eventsLast5m: 0, // live from create: a run hung before its first event still reads as one
     });
     expect(a.id).toBe("id-1");
   });
@@ -420,6 +423,7 @@ describe("RunRegistry.listActive", () => {
     expect(bare.label).toBeUndefined();
     expect(Object.keys(bareRow).sort()).toEqual([
       "eventCount",
+      "eventsLast5m", // the stall signal's one always-on live fact (item 32)
       "finished",
       "id",
       "schema",
@@ -457,6 +461,56 @@ describe("RunRegistry.listActive", () => {
   it("returns an empty list when there are no runs", () => {
     const { reg } = testRegistry();
     expect(reg.listActive()).toEqual([]);
+  });
+});
+
+// Feature: docs/reference/specs/live-view.md item 32 (issue #1836) — the stall
+// signal's pace facts on the live summary: events per minute are countable from
+// `eventsLast5m`, the stall from `lastToolCallAt`, the bound-exceeded mark from
+// `inFlight`. Live rows only — a finished row has no pace to misread.
+describe("RunRegistry — the stall signal's pace facts (live-view item 32)", () => {
+  it("counts only the content events of the last five minutes, and stamps the newest tool call", () => {
+    const { reg, tick } = testRegistry();
+    const run = reg.create();
+    reg.publish(run.id, call("old"));
+    reg.publish(run.id, result(true, "ok"));
+    tick(6 * 60_000); // both stamps age out of the window
+    reg.publish(run.id, { type: "assistant", text: "reading" });
+    const [s] = reg.listActive();
+    expect(s.eventsLast5m).toBe(1);
+    expect(s.lastToolCallAt).toBe(1000); // the newest tool_call's clock stamp, however old
+    expect(s.inFlight).toBeUndefined(); // the result closed the call
+  });
+
+  it("a span record is timing, not activity: it neither counts nor opens a call", () => {
+    const { reg } = testRegistry();
+    const run = reg.create();
+    reg.publish(run.id, spanEnd("model.turn"));
+    const [s] = reg.listActive();
+    expect(s.eventsLast5m).toBe(0);
+    expect(s.lastToolCallAt).toBeUndefined();
+  });
+
+  it("an open tool call rides the summary with its declared bound, so a reader can mark one past it", () => {
+    const { reg, tick } = testRegistry();
+    const run = reg.create();
+    reg.publish(run.id, { type: "tool_call", tool: "bash", summary: "$ npm test", boundMs: 600_000 });
+    tick(2_000_000);
+    const [s] = reg.listActive();
+    expect(s.inFlight).toEqual({ tool: "bash", since: 1000, boundMs: 600_000 });
+    expect(s.lastToolCallAt).toBe(1000);
+    expect(s.eventsLast5m).toBe(0); // the call aged out of the window: no events, the stall reads
+  });
+
+  it("a finished run carries none of the pace facts — there is no pace to misread", () => {
+    const { reg } = testRegistry();
+    const run = reg.create();
+    reg.publish(run.id, call("x"));
+    reg.finish(run.id, "completed");
+    const [s] = reg.listActive();
+    expect(s.eventsLast5m).toBeUndefined();
+    expect(s.lastToolCallAt).toBeUndefined();
+    expect(s.inFlight).toBeUndefined();
   });
 });
 

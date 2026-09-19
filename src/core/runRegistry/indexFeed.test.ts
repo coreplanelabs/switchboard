@@ -29,6 +29,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
           eventCount: 0,
           stepCount: 0,
           schema: 2,
+          eventsLast5m: 0, // the stall signal's pace fact (item 32), live rows only
         },
       },
       {
@@ -42,6 +43,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
           eventCount: 0,
           stepCount: 0,
           schema: 2,
+          eventsLast5m: 0,
         },
       },
     ]);
@@ -71,6 +73,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
           eventCount: 0,
           stepCount: 0,
           schema: 2,
+          eventsLast5m: 0,
         },
       },
     ]);
@@ -95,6 +98,9 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
           stepCount: 1,
           schema: 2,
           activity: "x",
+          eventsLast5m: 1,
+          lastToolCallAt: 1000, // the tool_call's clock stamp; its call is in flight
+          inFlight: { tool: "bash", since: 1000 },
         },
       },
     ]);
@@ -171,6 +177,7 @@ describe("RunRegistry.subscribeIndex — live runs-index feed", () => {
         eventCount: 0,
         stepCount: 0,
         schema: 2,
+        eventsLast5m: 0,
       },
     });
     // …and registry state is uncorrupted.

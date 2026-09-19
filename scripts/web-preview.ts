@@ -93,6 +93,25 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
     userName: "alice",
     sourceUrl: "https://example.slack.com/archives/C1/p1",
     startedAt: NOW - 252_000,
+    // The stall signal's pace facts (live-view item 32): a healthy run — a
+    // tool call seconds ago, a steady rate — so the pace cell reads `N/min`.
+    eventsLast5m: 14,
+    lastToolCallAt: NOW - 9_000,
+  }),
+  // A stalled run (live-view item 32): a bash call hung past its declared
+  // bound — the row sorts first, wears the `stalled` badge and the red
+  // bound-exceeded mark (`bash 2083s, bound 600s`) in its pace cell.
+  row({
+    id: "live-3",
+    token: "tok-live-3",
+    label: 'coding · acme/etl · "migrate the nightly export"',
+    activity: "$ cat /tmp/export.fifo",
+    userName: "sam",
+    startedAt: NOW - 46 * 60_000,
+    eventCount: 14,
+    eventsLast5m: 0,
+    lastToolCallAt: NOW - 2_083_000,
+    inFlight: { tool: "bash", since: NOW - 2_083_000, boundMs: 600_000 },
   }),
   row({
     id: "live-2",
@@ -100,6 +119,8 @@ const INDEX_ROWS: RunIndexRowSeed[] = [
     label: 'general · #dev · alice · "what changed in the last deploy?"',
     startedAt: NOW - 61_000,
     eventCount: 3,
+    eventsLast5m: 3,
+    lastToolCallAt: NOW - 21_000,
   }),
   row({
     id: "hist-1",

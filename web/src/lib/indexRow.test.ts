@@ -22,6 +22,10 @@ import {
   countTip,
   countText,
   PROVISIONAL_LABEL,
+  rowPace,
+  rowStalled,
+  rowBound,
+  paceTip,
 } from "./indexRow";
 import { formatLocalIso } from "./format";
 
@@ -257,6 +261,52 @@ describe("feed reconciliation", () => {
     const withOwn = mergeRow(kept, finished("failed", { finishedAt: 42 }));
     expect(withOwn.status).toBe("failed");
     expect(withOwn.finishedAt).toBe(42);
+  });
+});
+
+// Feature: docs/reference/specs/live-view.md item 32 (issue #1836) — the stall
+// signal on the row: events per minute over the last five minutes, or "no tool
+// call for N min"; a call past its declared bound named with the bound; only a
+// row that carries the fact can stall (an older writer's row has no signal).
+describe("the stall signal (item 32)", () => {
+  const MIN = 60_000;
+  const live = (over: Partial<IndexRow> = {}) => row({ startedAt: 0, ...over });
+
+  it("rowPace: a healthy live row reads events per minute; a stalled one `no tool call for N min`", () => {
+    expect(rowPace(live({ eventsLast5m: 14, lastToolCallAt: 60 * MIN - 9_000 }), 60 * MIN)).toBe("2.8/min");
+    expect(rowPace(live({ eventsLast5m: 0, lastToolCallAt: 16 * MIN }), 60 * MIN)).toBe("no tool call for 44 min");
+  });
+
+  it("rowPace is empty for a finished row and for a row without the fact", () => {
+    expect(rowPace(live({ finished: true, eventsLast5m: 3 }), 60 * MIN)).toBe("");
+    expect(rowPace(live(), 60 * MIN)).toBe("");
+  });
+
+  it("rowStalled: live with no tool call for a window — never a finished row, never a row without the fact", () => {
+    expect(rowStalled(live({ eventsLast5m: 0, lastToolCallAt: 16 * MIN }), 60 * MIN)).toBe(true);
+    expect(rowStalled(live({ eventsLast5m: 2, lastToolCallAt: 59 * MIN }), 60 * MIN)).toBe(false);
+    expect(rowStalled(live({ finished: true, eventsLast5m: 0, lastToolCallAt: 16 * MIN }), 60 * MIN)).toBe(false);
+    expect(rowStalled(live(), 60 * MIN)).toBe(false);
+  });
+
+  it("rowBound names a call past its declared bound — `bash 2083s, bound 600s` — and nothing inside it or without one", () => {
+    const hung = live({ inFlight: { tool: "bash", since: 0, boundMs: 600_000 } });
+    expect(rowBound(hung, 2_083_000)).toBe("bash 2083s, bound 600s");
+    expect(rowBound(hung, 500_000)).toBeUndefined();
+    expect(rowBound(live({ inFlight: { tool: "bash", since: 0 } }), 2_083_000)).toBeUndefined();
+    expect(rowBound(live({ finished: true, inFlight: { tool: "bash", since: 0, boundMs: 1 } }), 9)).toBeUndefined();
+  });
+
+  it("paceTip says what the cell shows: the rate's window, the stall's clock, or the outrun bound", () => {
+    expect(paceTip(live({ eventsLast5m: 14, lastToolCallAt: 60 * MIN - 9_000 }), 60 * MIN)).toBe(
+      "events per minute over the last five minutes",
+    );
+    expect(paceTip(live({ eventsLast5m: 0, lastToolCallAt: 16 * MIN }), 60 * MIN)).toBe(
+      "time since the run's last tool call",
+    );
+    expect(
+      paceTip(live({ eventsLast5m: 0, inFlight: { tool: "bash", since: 0, boundMs: 600_000 } }), 2_083_000),
+    ).toBe("this call ran past the bound it declared — it should have been cut");
   });
 });
 

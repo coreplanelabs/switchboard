@@ -118,6 +118,31 @@ describe("the bridge speaks the loop's vocabulary — the same turn, the same ev
     expect(events.every((e) => e.at === NOW)).toBe(true);
   });
 
+  // Feature: docs/reference/specs/live-view.md item 32 (issue #1836) — the stall
+  // signal judges a call against the bound it declared, so the tool_call event
+  // carries it: pi's bash `timeout` is seconds, stamped as `boundMs`.
+  it("a bash call's declared timeout rides the tool_call as boundMs (seconds → ms); a call without one carries none", () => {
+    const { bridge, events } = harness();
+    bridge.observe({
+      type: "tool_execution_start",
+      toolCallId: "b1",
+      toolName: "bash",
+      args: { command: "npm test", timeout: 600 },
+    });
+    bridge.observe({ type: "tool_execution_start", toolCallId: "b2", toolName: "bash", args: { command: "ls" } });
+    bridge.observe({
+      type: "tool_execution_start",
+      toolCallId: "b3",
+      toolName: "bash",
+      args: { command: "ls", timeout: "600" }, // malformed: not a number
+    });
+    bridge.observe({ type: "tool_execution_start", toolCallId: "r", toolName: "read", args: { path: "x", timeout: 9 } });
+    expect(events[0]).toMatchObject({ type: "tool_call", tool: "bash", callId: "b1", boundMs: 600_000 });
+    expect(events[1]).not.toHaveProperty("boundMs");
+    expect(events[2]).not.toHaveProperty("boundMs");
+    expect(events[3]).not.toHaveProperty("boundMs"); // only bash declares a bound
+  });
+
   it("a nonzero bash exit reads as the native result does: not ok, the code on the event", async () => {
     const { bridge, events } = harness();
     bridge.observe({ type: "tool_execution_start", toolCallId: "c", toolName: "bash", args: { command: "false" } });

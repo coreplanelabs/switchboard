@@ -30,6 +30,10 @@ import {
   type IndexRow,
   countTip,
   countText,
+  paceTip,
+  rowBound,
+  rowPace,
+  rowStalled,
 } from "../../lib/indexRow";
 
 // One runs-index row — the ONE renderer for seed rows and live feed repaints
@@ -76,6 +80,12 @@ const outcome = computed(() =>
 const stopBadge = computed(() =>
   props.run.stop && !(props.run.finished && props.run.status) ? stopLabel(props.run.stop) : "",
 );
+// The stall signal (live-view item 32): the pace cell — the bound-exceeded
+// mark winning over the rate — and the `stalled` badge; live rows that carry
+// the fact only, so an older writer's row shows no signal, not a false stall.
+const bound = computed(() => rowBound(props.run, props.now));
+const pace = computed(() => bound.value ?? rowPace(props.run, props.now));
+const stalled = computed(() => rowStalled(props.run, props.now));
 
 const disabled = reactive({ soft: false, hard: false });
 
@@ -143,6 +153,7 @@ function onRowClick(ev: MouseEvent): void {
     :data-run-id="run.id"
     :data-started-at="String(run.startedAt)"
     :data-persisted="run.persisted ? '1' : undefined"
+    :data-stalled="stalled ? '1' : undefined"
     :data-expires-at="expires !== undefined ? String(expires) : undefined"
     @click="onRowClick"
   >
@@ -235,6 +246,14 @@ function onRowClick(ev: MouseEvent): void {
         :class="run.stop?.state === 'stopped' ? 'border-accented text-muted' : 'border-warn/30 text-warn'"
         >{{ stopBadge }}</span
       >
+      <!-- The stall badge (live-view item 32): a live run with no tool call for
+           the whole pace window — the pace cell says for how long. -->
+      <span
+        v-if="stalled"
+        class="stalled shrink-0 rounded border px-1.5 font-mono text-[0.7rem] max-sm:order-10"
+        :class="bound ? 'border-bad/30 text-bad' : 'border-warn/30 text-warn'"
+        >stalled</span
+      >
       <!-- The source mark is a hover affordance — pointer devices only; the touch menu carries the same link. -->
       <span class="hidden sm:contents">
         <SourceMark :kind="src.kind" :tip="sourceTip(run)" :url="sourceUrl || undefined" />
@@ -264,6 +283,17 @@ function onRowClick(ev: MouseEvent): void {
         >
           {{ countText(run) }}
         </span>
+      </UTooltip>
+      <!-- The pace cell (live-view item 32): events per minute over the last
+           five minutes, `no tool call for N min` once stalled, or the
+           bound-exceeded mark (`bash 2083s, bound 600s`) — live rows that
+           carry the fact only, so a hung bash and a slow suite read apart. -->
+      <UTooltip v-if="pace" :text="paceTip(run, now)">
+        <span
+          class="pace pointer-events-auto shrink-0 text-right font-mono text-xs tabular-nums max-sm:order-9"
+          :class="bound ? 'text-bad font-medium' : stalled ? 'text-warn' : 'text-dimmed'"
+          >{{ pace }}</span
+        >
       </UTooltip>
       <!-- The actions cell: one ⋮ menu at every width (Stop/Kill while the run
            is stoppable, the thread link when there is one), in a fixed-width

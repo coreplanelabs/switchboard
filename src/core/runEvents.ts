@@ -536,6 +536,11 @@ export type RunEvent =
       callId?: string;
       spanId?: string;
       logIndex?: number;
+      /** The bound the call itself declared, in ms (a bash `timeout`, clamped
+       *  by nothing here — pi runs an unbounded call until the loop's end).
+       *  The stall signal (docs/reference/specs/live-view.md item 32) marks a
+       *  call past it; absent when the call declared none. */
+      boundMs?: number;
       seq?: number;
       at?: number;
     }

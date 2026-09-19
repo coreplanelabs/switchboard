@@ -19,6 +19,7 @@ import { ledgerOf, type FindingRow, type LedgerRun } from "./findingsLedger.js";
 import type { ReviewVerdictKind } from "./reviewVerdict.js";
 import type { RunRegistry, StopRequestResult, SubscribeOptions, Subscribed } from "./runRegistry.js";
 import type { RunSnapshot, RunStopStatus, RunSummary } from "./runRegistry/projections.js";
+import type { InFlightCall } from "./runPace.js";
 import type { RunStore } from "./runStore.js";
 import type { RunLedger } from "./runLedger/ledger.js";
 import type { LiveRunRow } from "./runLedger/types.js";
@@ -109,6 +110,13 @@ export interface RunView {
   stop?: RunStopStatus;
   /** The run's latest one-line activity (`RunSummary.activity` live; `RunRecord.activity` persisted). */
   activity?: string;
+  /** The stall signal's pace facts (`RunSummary.eventsLast5m` / `lastToolCallAt` /
+   *  `inFlight`, live-view item 32): this process's LIVE rows only — absent on a
+   *  persisted row and on a ledger row live under another generation, so a
+   *  missing signal is never read as a stall. */
+  eventsLast5m?: number;
+  lastToolCallAt?: number;
+  inFlight?: InFlightCall;
   /** The thread that started the run (`RunMeta.sourceUrl` / `RunRecord.sourceUrl`). */
   sourceUrl?: string;
   /** Who started it, resolved (`RunMeta.userName` / `RunRecord.userName`). */
@@ -482,6 +490,9 @@ function liveView(s: RunSummary): RunView {
     eventCount: s.eventCount,
     ...(s.stop ? { stop: s.stop } : {}),
     ...(s.activity !== undefined ? { activity: s.activity } : {}),
+    ...(s.eventsLast5m !== undefined ? { eventsLast5m: s.eventsLast5m } : {}),
+    ...(s.lastToolCallAt !== undefined ? { lastToolCallAt: s.lastToolCallAt } : {}),
+    ...(s.inFlight !== undefined ? { inFlight: s.inFlight } : {}),
     ...(s.sourceUrl !== undefined ? { sourceUrl: s.sourceUrl } : {}),
     ...(s.userName !== undefined ? { userName: s.userName } : {}),
     ...(s.authenticatedAs !== undefined ? { authenticatedAs: s.authenticatedAs } : {}),

@@ -2,6 +2,7 @@ import type { ChannelVisibility } from "../authz/types.js";
 import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import type { RunEvent, StopMode } from "../runEvents.js";
 import type { RunSeed, RunStatus } from "../runRecord.js";
+import { eventsInWindow, type InFlightCall } from "../runPace.js";
 import type { RunState, SealedFrame } from "./state.js";
 
 // What a run's state looks like from outside: the read shapes the registry
@@ -54,6 +55,15 @@ export interface RunSummary {
    *  absent until the first such event. The index shows it on the status dot so
    *  a glance answers "what step is it on" without opening the run. */
   activity?: string;
+  /** The stall signal's pace facts (live-view item 32), LIVE rows only — all
+   *  absent once the run finishes, and on a row an older writer built, so no
+   *  reader mistakes a missing signal for a stall. `eventsLast5m`: content
+   *  events published in the last five minutes, counted when this summary was
+   *  built; `lastToolCallAt`: the newest `tool_call`'s clock stamp;
+   *  `inFlight`: the call without a result yet, with the bound it declared. */
+  eventsLast5m?: number;
+  lastToolCallAt?: number;
+  inFlight?: InFlightCall;
   /** `RunMeta.sourceUrl`: the thread that started the run, for the index's hover link. */
   sourceUrl?: string;
   /** `RunMeta.userName`: who started it, resolved. */
@@ -129,8 +139,9 @@ export interface SealResult {
 
 /** Build the index summary for one run. The single source of the run→summary
  *  mapping, shared by `listActive()` and the `subscribeIndex` feed so the two
- *  can never drift. `label` is omitted (not set to `undefined`) when absent. */
-export function summaryOf(run: RunState): RunSummary {
+ *  can never drift. `label` is omitted (not set to `undefined`) when absent.
+ *  `now` is the registry's clock read, for the pace facts' window (item 32). */
+export function summaryOf(run: RunState, now: number): RunSummary {
   const m = run.meta;
   return {
     id: run.id,
@@ -161,6 +172,15 @@ export function summaryOf(run: RunState): RunSummary {
     stepCount: run.stepCount,
     schema: SPAN_SCHEMA, // a registry run is this runner's: spans carry its timing
     ...(run.activity !== undefined ? { activity: run.activity } : {}),
+    // The stall signal's pace facts (item 32): live rows only — a finished row
+    // has no pace to misread.
+    ...(run.finished
+      ? {}
+      : {
+          eventsLast5m: eventsInWindow(run.paceEventAts, now),
+          ...(run.lastToolCallAt !== undefined ? { lastToolCallAt: run.lastToolCallAt } : {}),
+          ...(run.inFlight !== undefined ? { inFlight: { ...run.inFlight } } : {}),
+        }),
     ...(run.control.requested !== undefined
       ? { stop: { mode: run.control.requested, state: run.finished ? ("stopped" as const) : ("stopping" as const) } }
       : {}),

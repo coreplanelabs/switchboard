@@ -371,12 +371,20 @@ export class PiBridge {
       tool === "bash" && typeof input?.command === "string"
         ? { command: redactAndCap(input.command, COMMAND_CAP) }
         : {};
+    // The bound the call declared (live-view item 32): pi's bash `timeout` is
+    // seconds, optional and unbounded when absent (toolRules.ts) — stamped as
+    // ms so the stall signal can mark a call that outran it.
+    const bound =
+      tool === "bash" && typeof input?.timeout === "number" && Number.isFinite(input.timeout) && input.timeout > 0
+        ? { boundMs: Math.round(input.timeout * 1000) }
+        : {};
     this.emit({
       type: "tool_call",
       tool,
       summary: redactAndCap(describePiToolCall(tool, event.args)),
       callId,
       ...command,
+      ...bound,
       ...(span ? { spanId: span.id } : {}),
     });
   }

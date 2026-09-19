@@ -181,6 +181,11 @@ export const SHIP_WAIT = { marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes:
  *  `commandWriteUp` is what the last command leaves for that answer; `execCall`
  *  is the exec client's wait past a command's own budget; `bearerGrace` is how
  *  far past the lease the model bearer stays valid for the last call's tail. */
+/** The stall signal's window in minutes (docs/reference/specs/live-view.md
+ *  item 32): a run's pace is counted over the last this-many minutes, and a
+ *  run with no tool call for a whole window reads as stalled. */
+export const PACE_WINDOW_MINUTES = 5;
+
 export const ALLOWANCES = {
   provision: 3,
   writeUp: 3,

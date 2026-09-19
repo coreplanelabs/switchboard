@@ -286,6 +286,38 @@ describe("RunRow", () => {
     expect(nav).not.toHaveBeenCalled();
   });
 
+  // Feature: docs/reference/specs/live-view.md item 32 (issue #1836) — the row
+  // carries the stall signal: the pace cell, the `stalled` badge, and the
+  // bound-exceeded mark, so a hung bash and a slow suite read apart at a glance.
+  it("a healthy live row shows its pace — events per minute over the last five minutes — and no stalled badge", () => {
+    const w = mountRow(row({ eventsLast5m: 14, lastToolCallAt: NOW - 9_000 }));
+    // The row is 252 s old — younger than the window — so 14 events rate over its own age: 3.3/min.
+    expect(w.find(".pace").text()).toBe("3.3/min");
+    expect(w.find(".stalled").exists()).toBe(false);
+  });
+
+  it("a stalled live row reads `no tool call for N min`, wears the stalled badge and data-stalled", () => {
+    const w = mountRow(row({ eventsLast5m: 0, lastToolCallAt: NOW - 44 * 60_000 }));
+    expect(w.find(".pace").text()).toBe("no tool call for 44 min");
+    expect(w.find(".stalled").text()).toBe("stalled");
+    expect(w.find("li.run").attributes("data-stalled")).toBe("1");
+  });
+
+  it("a call past its declared bound is the mark — `bash 2083s, bound 600s` — in the pace cell, red", () => {
+    const w = mountRow(
+      row({ eventsLast5m: 0, lastToolCallAt: NOW - 2_083_000, inFlight: { tool: "bash", since: NOW - 2_083_000, boundMs: 600_000 } }),
+    );
+    expect(w.find(".pace").text()).toBe("bash 2083s, bound 600s");
+    expect(w.find(".pace").classes()).toContain("text-bad");
+  });
+
+  it("a finished row and a live row without the fact (an older writer's) show no pace and no badge", () => {
+    expect(mountRow(finished("completed", { eventsLast5m: 0 })).find(".pace").exists()).toBe(false);
+    const w = mountRow(row());
+    expect(w.find(".pace").exists()).toBe(false);
+    expect(w.find(".stalled").exists()).toBe(false);
+  });
+
   it("marks a leaving row and says when it is removed", () => {
     const DAY = 86_400_000;
     const nowMs = 100 * DAY;

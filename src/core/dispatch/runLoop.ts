@@ -93,7 +93,8 @@ import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
 import type { WaitCapability } from "./awaitChildren.js";
 import type { SpawnCapability } from "./spawn.js";
 import type { SessionCapability } from "../../tools/session.js";
-import { inFlightToolAfter, quietSuffix } from "../statusCardLabel.js";
+import { inFlightCallAfter, quietSuffix, type InFlightTool } from "../statusCardLabel.js";
+import { eventsInWindow, paceText, PACE_WINDOW_MS } from "../runPace.js";
 import { activityText, type CardShell } from "../statusCardFrame.js";
 import type { RunEnding } from "../runEnding.js";
 import type { LiveThread } from "../threadAdmission.js";
@@ -339,9 +340,25 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // Typed (`StatusActivity`): a bash call rides as its full command, which
   // the Slack card draws as a code block; everything else as its one line.
   let lastActivity: StatusActivity | undefined;
-  // The tool whose call has no result yet — the title says the wait is the
-  // tool's (`running bash (Ns)`), not the model's (`thinking …`).
-  let inFlightTool: string | undefined;
+  // The call whose tool has no result yet — the title says the wait is the
+  // tool's (`running bash (Ns)`, or the bound-exceeded mark), not the model's
+  // (`thinking …`).
+  let inFlightTool: InFlightTool | undefined;
+  // The stall signal's pace facts (live-view item 32): the content events'
+  // clock stamps inside the window, and the newest tool call's — the card's
+  // title carries `· 2.8/min`, or `· no tool call for N min` once nothing has
+  // landed for a window, the same words the runs-index row shows.
+  const paceEventAts: number[] = [];
+  let lastToolCallAt: number | undefined;
+  const cardPace = () => {
+    const now = clock();
+    while (paceEventAts.length > 0 && paceEventAts[0] <= now - PACE_WINDOW_MS) paceEventAts.shift();
+    const pace = paceText(
+      { startedAt: ctx.loopStartedAt, lastToolCallAt, eventsLast5m: eventsInWindow(paceEventAts, now) },
+      now,
+    );
+    return pace ? ` · ${pace}` : "";
+  };
   // The shutdown notice rides on the LIVE frame only: the closed card is
   // built from `shell.close` and never mentions the restart.
   // The quiet-wait suffix and the running command's code block are for
@@ -350,7 +367,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const chatty = shows(resolved.verbosity, "verbose");
   const currentFrame = () =>
     shell.live({
-      suffix: chatty ? quietSuffix(clock() - lastActivityAt, inFlightTool) : "",
+      // the pace mark rides every level (the stall signal is a fact, not chatter); the quiet suffix is verbose-and-above's
+      suffix: chatty ? `${quietSuffix(clock() - lastActivityAt, inFlightTool)}${cardPace()}` : cardPace(),
       notice: shutdownNotice(),
       detail: [checklist],
       activity: chatty ? lastActivity : quietActivity(lastActivity),
@@ -411,8 +429,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ledgerRun?.setState({ pushedBranch });
       }
     }
-    inFlightTool = inFlightToolAfter(inFlightTool, e);
+    inFlightTool = inFlightCallAfter(inFlightTool, e);
     lastActivityAt = clock();
+    paceEventAts.push(lastActivityAt);
+    if (e.type === "tool_call") lastToolCallAt = lastActivityAt;
     lastActivity = cardActivity(e);
     console.log(`[tool] ${msg.threadKey} ${activityText(lastActivity)}`);
     card.update(currentFrame());

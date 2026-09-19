@@ -103,6 +103,19 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     expect(wrapper.find("h1 .title").text()).toBe("Live runs");
   });
 
+  // Feature: docs/reference/specs/live-view.md item 32 (issue #1836) — stalled
+  // runs sort first: a live row with no tool call for the whole pace window
+  // rises above newer healthy rows, so the stall is the first thing seen.
+  it("sorts stalled live rows first, newest-first within each group", () => {
+    const now = 1_252_000;
+    const stalledRow = live("hung", { startedAt: 5, eventsLast5m: 0, lastToolCallAt: now - 44 * 60_000 });
+    const healthy = live("busy", { startedAt: 9, eventsLast5m: 12, lastToolCallAt: now - 10_000 });
+    const noFact = live("old-writer", { startedAt: 7 }); // an older writer's row: no signal, never "stalled"
+    const { wrapper } = mountIndex(seed([healthy, stalledRow, noFact]));
+    expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual(["hung", "busy", "old-writer"]);
+    expect(wrapper.find('[data-run-id="hung"]').attributes("data-stalled")).toBe("1");
+  });
+
   it("?all=1 titles the page All runs and opens the all feed", () => {
     const { wrapper, es } = mountIndex(seed([done("c")], { all: true }));
     expect(wrapper.find("h1 .title").text()).toBe("All runs");

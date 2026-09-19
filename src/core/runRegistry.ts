@@ -32,6 +32,11 @@ import {
   type SealResult,
 } from "./runRegistry/projections.js";
 import { IndexFeed, type IndexSubscriber } from "./runRegistry/indexFeed.js";
+import { PACE_WINDOW_MS } from "./runPace.js";
+
+/** Hard cap on the pace ring (item 32): the window's stamps for a run far
+ *  chattier than any real one; past it the oldest go first, like the backlog. */
+const PACE_RING_CAP = 1_200;
 
 // The run registry is the unit-testable core of the external live-view page
 // (docs/reference/specs/live-view.md) and the ONE per-run event store while a run is live
@@ -225,6 +230,7 @@ export class RunRegistry {
       stepCount: 0,
       headLen: 0,
       headBytes: 0,
+      paceEventAts: [],
       control: new RunControl(),
       persisted: false,
     };
@@ -240,7 +246,7 @@ export class RunRegistry {
       if (!isSpanRecord(event)) run.stepCount++;
       appendToBacklog(run, this.bounds, { ...event, seq });
     }
-    this.index.notify({ type: "upsert", run: summaryOf(run) });
+    this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
     return { id, token, control: run.control, ...(stored !== undefined ? { label: stored } : {}) };
   }
 
@@ -304,6 +310,23 @@ export class RunRegistry {
     // stamped on the event — the SSE `id:` a client resumes from.
     const seq = ++run.eventCount;
     if (!span) run.stepCount++;
+    // The stall signal's pace facts (live-view item 32): content events only —
+    // a span record is timing, not activity. The ring is pruned to the window
+    // here (and hard-capped), so a chatty run cannot grow it without bound.
+    if (!span) {
+      const at = this.now();
+      run.paceEventAts.push(at);
+      const cut = at - PACE_WINDOW_MS;
+      while (run.paceEventAts.length > PACE_RING_CAP || (run.paceEventAts.length > 0 && run.paceEventAts[0] <= cut)) {
+        run.paceEventAts.shift();
+      }
+      if (event.type === "tool_call") {
+        run.lastToolCallAt = at;
+        run.inFlight = { tool: event.tool, since: at, ...(event.boundMs !== undefined ? { boundMs: event.boundMs } : {}) };
+      } else if (event.type === "tool_result") {
+        run.inFlight = undefined;
+      }
+    }
     const stamped: RunEvent = { ...event, seq };
     appendToBacklog(run, this.bounds, stamped);
     for (const sub of run.subscribers) {
@@ -318,7 +341,7 @@ export class RunRegistry {
     // events are seconds apart, so one upsert per event is not chatty; the
     // summary is built cheaply from the run we already hold. A span record is
     // timing, not activity: it never repaints the index.
-    if (!span) this.index.notify({ type: "upsert", run: summaryOf(run) });
+    if (!span) this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
   }
 
   /** Mark a run finished — the agent stopped: stamp `finishedAt`, send every
@@ -345,7 +368,7 @@ export class RunRegistry {
     }
     // A finished run stays on the index (marked finished) until the TTL evicts
     // it — so finish is an upsert, not a removal. Eviction emits the removal.
-    this.index.notify({ type: "upsert", run: summaryOf(run) });
+    this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
   }
 
   /**
@@ -427,7 +450,7 @@ export class RunRegistry {
           // A dead sink must not break the seal for the remaining subscribers.
         }
       }
-      if (opts.upsert) this.index.notify({ type: "upsert", run: summaryOf(run) });
+      if (opts.upsert) this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
     }
     return sealResultOf(run);
   }
@@ -444,7 +467,7 @@ export class RunRegistry {
     const run = this.runs.get(id);
     if (!run) return;
     run.persisted = true;
-    this.index.notify({ type: "upsert", run: summaryOf(run) });
+    this.index.notify({ type: "upsert", run: summaryOf(run, this.now()) });
   }
 
   /** True iff the run exists (not yet evicted) and the token matches — the same
@@ -531,7 +554,7 @@ export class RunRegistry {
   getById(id: string): RunSummary | null {
     this.sweep();
     const run = this.runs.get(id);
-    return run ? summaryOf(run) : null;
+    return run ? summaryOf(run, this.now()) : null;
   }
 
   /** Token-free `snapshot` for `RunsService`: the same copied
@@ -563,7 +586,7 @@ export class RunRegistry {
     this.sweep();
     return [...this.runs.values()]
       .sort((a, b) => b.startedAt - a.startedAt || b.seq - a.seq)
-      .map((run) => summaryOf(run));
+      .map((run) => summaryOf(run, this.now()));
   }
 
   /** Constant-time token check against a live run. Unknown id → null (fast);
