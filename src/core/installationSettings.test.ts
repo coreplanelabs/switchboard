@@ -70,7 +70,7 @@ describe("installationSettings", () => {
     expect(rows.get("review.readingDiff.provider")).toMatchObject({ value: "meat", isDefault: false });
     expect(rows.get("runHistory.retentionDays")).toMatchObject({ value: "30", isDefault: false });
     expect(rows.get("runHistory.maxRuns")).toMatchObject({ value: "5000", isDefault: true });
-    expect(rows.get("memory.limit")).toMatchObject({ value: "8", isDefault: true });
+    expect(rows.get("memory.limit")).toMatchObject({ value: "32", isDefault: true });
     expect(rows.get("artifacts.retentionDays")).toMatchObject({ value: "14", isDefault: false });
     expect(rows.get("selfImprovement.repo")).toMatchObject({ value: "acme/switchboard", isDefault: false });
     expect(rows.get("delivery.snapshot.everyMinutes")).toMatchObject({ value: "30", isDefault: false });

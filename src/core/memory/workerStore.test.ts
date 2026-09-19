@@ -151,7 +151,7 @@ describe("WorkerMemoryStore.list / forget", () => {
 
   it("list sends `query` only when a filter is given", async () => {
     const { fetch, calls } = fakeFetch(() => jsonRes({ records: [] }));
-    await store(fetch).list("org:acme", 20, "deploy command");
+    await store(fetch).list("org:acme", 20, { query: "deploy command" });
     expect(JSON.parse(String(calls[0].init.body))).toEqual({
       scopeKey: "org:acme",
       limit: 20,
@@ -159,6 +159,19 @@ describe("WorkerMemoryStore.list / forget", () => {
     });
     await store(fetch).list("org:acme", 20);
     expect(JSON.parse(String(calls[1].init.body))).toEqual({ scopeKey: "org:acme", limit: 20 });
+  });
+
+  it("list sends `kind` only when a filter is given (the repository window's fact read)", async () => {
+    const { fetch, calls } = fakeFetch(() => jsonRes({ records: [record] }));
+    expect(await store(fetch).list("repo:acme/api", 24, { kind: "fact" })).toEqual([record]);
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ scopeKey: "repo:acme/api", limit: 24, kind: "fact" });
+    await store(fetch).list("repo:acme/api", 24, { kind: "fact", query: "deploy" });
+    expect(JSON.parse(String(calls[1].init.body))).toEqual({
+      scopeKey: "repo:acme/api",
+      limit: 24,
+      query: "deploy",
+      kind: "fact",
+    });
   });
 
   it("list is a human command, so a failure THROWS (never silently shows an empty list)", async () => {

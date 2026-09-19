@@ -297,6 +297,43 @@ describe("list / forget (human controls)", () => {
     expect((await post("/list", { scopeKey: s, limit: 10, query: "x".repeat(4001) })).status).toBe(400);
   });
 
+  // Feature: docs/reference/specs/memory.md §22/§26 — the repository window's fact
+  // read: /list with `kind` keeps only that kind, newest first, no usage bump.
+  it("/list with `kind: 'fact'` over three facts and two summaries returns the three facts newest first; without kind, five rows", async () => {
+    const s = scope();
+    await post("/write", {
+      scopeKey: s,
+      records: [
+        cand("fact one"),
+        cand("summary one", { kind: "summary" }),
+        cand("fact two"),
+        cand("summary two", { kind: "summary" }),
+        cand("fact three"),
+      ],
+    });
+    const facts = (await post("/list", { scopeKey: s, limit: 5, kind: "fact" })).data.records as Array<
+      Record<string, unknown>
+    >;
+    expect(facts.map((r) => r.text)).toEqual(["fact three", "fact two", "fact one"]);
+    expect(facts.every((r) => r.kind === "fact" && r.useCount === 0 && r.lastUsedAt === undefined)).toBe(true);
+    const summaries = (await post("/list", { scopeKey: s, limit: 5, kind: "summary" })).data.records as Array<
+      Record<string, unknown>
+    >;
+    expect(summaries.map((r) => r.text)).toEqual(["summary two", "summary one"]);
+    expect(((await post("/list", { scopeKey: s, limit: 5 })).data.records as unknown[]).length).toBe(5);
+    // kind composes with the query prefilter.
+    expect(
+      (
+        (await post("/list", { scopeKey: s, limit: 5, query: "two", kind: "fact" })).data.records as Array<
+          Record<string, unknown>
+        >
+      ).map((r) => r.text),
+    ).toEqual(["fact two"]);
+    // Anything but "fact"/"summary" is a 400, never a silent full list.
+    expect((await post("/list", { scopeKey: s, limit: 5, kind: "nope" })).status).toBe(400);
+    expect((await post("/list", { scopeKey: s, limit: 5, kind: 5 })).status).toBe(400);
+  });
+
   it("/forget soft-deletes one active record: hidden from /list, /retrieve, and dedup; row kept; second call → false", async () => {
     const s = scope();
     await post("/write", { scopeKey: s, records: [cand("keep this fact"), cand("drop this fact")] });

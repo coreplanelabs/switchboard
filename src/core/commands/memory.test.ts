@@ -192,9 +192,9 @@ describe("memory.list", () => {
     const store = seeded();
     const seen: Array<[string, number, string | undefined]> = [];
     const inner = store.list.bind(store);
-    store.list = async (key, limit, query) => {
-      seen.push([key, limit, query]);
-      return inner(key, limit, query);
+    store.list = async (key, limit, opts) => {
+      seen.push([key, limit, opts?.query]);
+      return inner(key, limit, opts);
     };
     const commands = bind(store);
     const { text } = await list(commands, chat("slack:UALICE"), { args: ["deploy"], options: { limit: "1" } });

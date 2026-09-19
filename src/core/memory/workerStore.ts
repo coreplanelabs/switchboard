@@ -1,4 +1,11 @@
-import type { MemoryCandidate, MemoryQuery, MemoryRecord, MemoryStore, WriteCounts } from "./types.js";
+import type {
+  MemoryCandidate,
+  MemoryListOptions,
+  MemoryQuery,
+  MemoryRecord,
+  MemoryStore,
+  WriteCounts,
+} from "./types.js";
 import { tracedFetch } from "../trace/tracedFetch.js";
 import type { Span, TraceOptions } from "../trace/types.js";
 
@@ -11,7 +18,7 @@ import type { Span, TraceOptions } from "../trace/types.js";
 // nothing). Route contracts (JSON in/out, bearer MEMORY_TOKEN):
 //   POST /retrieve {scopeKey, query, limit} → {records: MemoryRecord[]}
 //   POST /write    {scopeKey, records: MemoryCandidate[], cap?} → {ok, inserted, deduped, superseded, evicted}
-//   POST /list     {scopeKey, limit, query?} → {records: MemoryRecord[]}  (human controls)
+//   POST /list     {scopeKey, limit, query?, kind?} → {records: MemoryRecord[]}  (human controls + the repository window)
 //   POST /forget   {scopeKey, id} → {ok, forgotten: boolean}
 
 /** Per-request ceiling. Retrieval sits on the critical path of every model
@@ -109,10 +116,17 @@ export class WorkerMemoryStore implements MemoryStore {
     };
   }
 
-  /** Human command: failures THROW — a person asked to see the list, so
-   *  an empty reply on error would be a lie; the command layer renders ⚠️. */
-  async list(scopeKey: string, limit: number, query?: string): Promise<MemoryRecord[]> {
-    const res = await this.post("/list", { scopeKey, limit, ...(query !== undefined ? { query } : {}) });
+  /** Human command and the repository window's read: failures THROW — a person
+   *  asked to see the list, so an empty reply on error would be a lie; the
+   *  command layer renders ⚠️, and the block builder catches around its
+   *  advisory window read (docs/reference/specs/memory.md §22). */
+  async list(scopeKey: string, limit: number, opts?: MemoryListOptions): Promise<MemoryRecord[]> {
+    const res = await this.post("/list", {
+      scopeKey,
+      limit,
+      ...(opts?.query !== undefined ? { query: opts.query } : {}),
+      ...(opts?.kind !== undefined ? { kind: opts.kind } : {}),
+    });
     const data = await parseBody(res);
     if (!res.ok)
       throw new Error(`memory worker /list HTTP ${res.status}${data.error ? `: ${String(data.error)}` : ""}`);

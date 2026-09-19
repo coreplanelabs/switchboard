@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { MemoryRecord } from "./types.js";
 import {
   applyBudget,
+  DEFAULT_MEMORY_LIMIT,
+  DEFAULT_MEMORY_TOKENS,
+  DEFAULT_REPO_WINDOW,
   DEFAULT_WEIGHTS,
   estimateTokens,
   keywordMatch,
@@ -18,6 +21,16 @@ import {
 // the hard budget cap, and the injected-block rendering.
 
 const NOW = 1_700_000_000_000;
+
+// Feature: docs/reference/specs/memory.md §6/§22 — the raised read budget and the
+// repository window's size are named constants, not literals in the block builder.
+describe("read-budget defaults", () => {
+  it("limit 32, ~3000 tokens, repo window 24", () => {
+    expect(DEFAULT_MEMORY_LIMIT).toBe(32);
+    expect(DEFAULT_MEMORY_TOKENS).toBe(3000);
+    expect(DEFAULT_REPO_WINDOW).toBe(24);
+  });
+});
 
 function rec(over: Partial<MemoryRecord> = {}): MemoryRecord {
   return {

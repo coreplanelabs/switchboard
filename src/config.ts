@@ -305,7 +305,11 @@ export interface AppConfig {
   /**
    * Cross-session self-learning memory. Absent or `enabled:
    * false` (the default) → the dispatcher uses a NullMemoryStore and model
-   * input is byte-identical to memory-off. See docs/reference/specs/memory.md.
+   * input is byte-identical to memory-off. When enabled, a run bound to a
+   * repository leads its block with that repository's newest facts (the
+   * `repoWindow`, default 24; `0` disables it) ahead of the keyword hits,
+   * under the one budget (`limit` default 32, `maxTokens` default ~3000).
+   * See docs/reference/specs/memory.md.
    */
   memory?: MemoryConfig;
   /**

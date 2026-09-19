@@ -1,4 +1,12 @@
-import type { MemoryCandidate, MemoryConfig, MemoryQuery, MemoryRecord, MemoryStore, WriteCounts } from "./types.js";
+import type {
+  MemoryCandidate,
+  MemoryConfig,
+  MemoryListOptions,
+  MemoryQuery,
+  MemoryRecord,
+  MemoryStore,
+  WriteCounts,
+} from "./types.js";
 import { DEFAULT_SCOPE_CAP, mintRecord, planEviction, planWrite, rankRecords } from "./engine.js";
 import { keywordMatch, tokenize } from "./scorer.js";
 
@@ -20,7 +28,7 @@ export class NullMemoryStore implements MemoryStore {
   async write(_scopeKey: string, _records: MemoryCandidate[]): Promise<WriteCounts> {
     return { inserted: 0, deduped: 0, restated: 0, superseded: 0, evicted: 0 }; // intentionally nothing
   }
-  async list(_scopeKey: string, _limit: number, _query?: string): Promise<MemoryRecord[]> {
+  async list(_scopeKey: string, _limit: number, _opts?: MemoryListOptions): Promise<MemoryRecord[]> {
     return [];
   }
   async forget(_scopeKey: string, _id: string): Promise<boolean> {
@@ -95,13 +103,21 @@ export class InMemoryMemoryStore implements MemoryStore {
     return counts;
   }
 
-  async list(scopeKey: string, limit: number, query?: string): Promise<MemoryRecord[]> {
+  async list(scopeKey: string, limit: number, opts?: MemoryListOptions): Promise<MemoryRecord[]> {
     // A query narrows to records some token hits (whole-token, text or
     // keywords — the same test as retrieval's relevance gate); a query with no
-    // tokens matches nothing. Never bumps usage: this is a human view.
+    // tokens matches nothing. A kind keeps only records of that kind (the
+    // repository window lists facts). Never bumps usage: this is a view, not a
+    // retrieval.
+    const query = opts?.query;
     const hasTokens = query !== undefined && tokenize(query).length > 0;
     return this.bucket(scopeKey)
-      .filter((r) => r.status === "active" && (query === undefined || (hasTokens && keywordMatch(r, query) > 0)))
+      .filter(
+        (r) =>
+          r.status === "active" &&
+          (opts?.kind === undefined || r.kind === opts.kind) &&
+          (query === undefined || (hasTokens && keywordMatch(r, query) > 0)),
+      )
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, limit);
   }

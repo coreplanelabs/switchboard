@@ -463,14 +463,19 @@ export class MemoryDO extends DurableObject<Env> {
     return counts;
   }
 
-  /** Human view (docs/reference/specs/memory.md item 24): the scope's ACTIVE rows, newest first, no usage
-   *  bump. With `query`, only rows an FTS token hits (the same quoted-OR MATCH
-   *  as retrieve, so user text never reaches the FTS parser as syntax); a
-   *  query with no tokens lists nothing. */
-  async list(_scopeKey: string, limit: number, query?: string): Promise<MemoryRecord[]> {
+  /** Human view and the repository window's read (docs/reference/specs/memory.md items 22, 26): the
+   *  scope's ACTIVE rows, newest first, no usage bump. With `query`, only rows
+   *  an FTS token hits (the same quoted-OR MATCH as retrieve, so user text
+   *  never reaches the FTS parser as syntax); a query with no tokens lists
+   *  nothing. With `kind`, only rows of that kind (the window lists facts). */
+  async list(_scopeKey: string, limit: number, query?: string, kind?: MemoryRecord["kind"]): Promise<MemoryRecord[]> {
     if (query === undefined) {
       return this.sql
-        .exec<Row>(`SELECT * FROM records WHERE status = 'active' ORDER BY seq DESC LIMIT ?`, limit)
+        .exec<Row>(
+          `SELECT * FROM records WHERE status = 'active'${kind === undefined ? "" : " AND kind = ?"} ORDER BY seq DESC LIMIT ?`,
+          ...(kind === undefined ? [] : [kind]),
+          limit,
+        )
         .toArray()
         .map(toRecord);
     }
@@ -480,9 +485,10 @@ export class MemoryDO extends DurableObject<Env> {
       .exec<Row>(
         `SELECT r.* FROM records r
            JOIN records_fts f ON f.id = r.id
-          WHERE r.status = 'active' AND records_fts MATCH ?
+          WHERE r.status = 'active'${kind === undefined ? "" : " AND r.kind = ?"} AND records_fts MATCH ?
           ORDER BY r.seq DESC
           LIMIT ?`,
+        ...(kind === undefined ? [] : [kind]),
         match,
         limit,
       )
@@ -3121,8 +3127,10 @@ function parseLimit(v: unknown): Validated<number> {
   return { ok: true, value: v };
 }
 
-/** `POST /list {scopeKey, limit, query?}`. */
-function parseList(body: unknown): Validated<{ scopeKey: string; limit: number; query?: string }> {
+/** `POST /list {scopeKey, limit, query?, kind?}`. */
+function parseList(
+  body: unknown,
+): Validated<{ scopeKey: string; limit: number; query?: string; kind?: MemoryRecord["kind"] }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const b = body as Record<string, unknown>;
   const scope = parseScopeKey(b.scopeKey);
@@ -3133,9 +3141,16 @@ function parseList(body: unknown): Validated<{ scopeKey: string; limit: number; 
     if (typeof b.query !== "string") return invalid("query must be a string");
     if (b.query.length > MAX_QUERY_CHARS) return invalid(`query must be at most ${MAX_QUERY_CHARS} characters`);
   }
+  if (b.kind !== undefined && b.kind !== "fact" && b.kind !== "summary")
+    return invalid('kind must be "fact" or "summary"');
   return {
     ok: true,
-    value: { scopeKey: scope.value, limit: limit.value, ...(typeof b.query === "string" ? { query: b.query } : {}) },
+    value: {
+      scopeKey: scope.value,
+      limit: limit.value,
+      ...(typeof b.query === "string" ? { query: b.query } : {}),
+      ...(b.kind === "fact" || b.kind === "summary" ? { kind: b.kind } : {}),
+    },
   };
 }
 
@@ -4422,8 +4437,8 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
   if (url.pathname === "/list") {
     const parsed = parseList(body);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
-    const { scopeKey, limit, query } = parsed.value;
-    const records = await env.MEMORY.get(env.MEMORY.idFromName(scopeKey)).list(scopeKey, limit, query);
+    const { scopeKey, limit, query, kind } = parsed.value;
+    const records = await env.MEMORY.get(env.MEMORY.idFromName(scopeKey)).list(scopeKey, limit, query, kind);
     console.log(`[list] ${scopeKey} -> ${records.length} records`);
     return json({ records });
   }

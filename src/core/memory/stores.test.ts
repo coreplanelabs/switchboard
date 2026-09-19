@@ -64,14 +64,36 @@ describe("InMemoryMemoryStore.list / forget", () => {
 
   it("list with a query keeps only records a query token hits (whole-token, text or keywords), newest first, no usage bump", async () => {
     const store = seed();
-    const hits = await store.list("org:acme", 10, "newest oldest");
+    const hits = await store.list("org:acme", 10, { query: "newest oldest" });
     expect(hits.map((r) => r.id)).toEqual(["c", "a"]);
     expect(hits.every((r) => r.useCount === 0 && r.lastUsedAt === undefined)).toBe(true);
-    expect((await store.list("org:acme", 10, "npm")).map((r) => r.id)).toEqual(["c", "b", "a"]); // keyword hit
-    expect(await store.list("org:acme", 10, "new")).toEqual([]); // substring is not a token
-    expect(await store.list("org:acme", 10, "!!!")).toEqual([]); // no tokens → nothing
-    expect((await store.list("org:acme", 1, "deploy")).map((r) => r.id)).toEqual(["c"]); // limit applies after the filter
-    expect(await new NullMemoryStore().list("org:acme", 10, "deploy")).toEqual([]);
+    expect((await store.list("org:acme", 10, { query: "npm" })).map((r) => r.id)).toEqual(["c", "b", "a"]); // keyword hit
+    expect(await store.list("org:acme", 10, { query: "new" })).toEqual([]); // substring is not a token
+    expect(await store.list("org:acme", 10, { query: "!!!" })).toEqual([]); // no tokens → nothing
+    expect((await store.list("org:acme", 1, { query: "deploy" })).map((r) => r.id)).toEqual(["c"]); // limit applies after the filter
+    expect(await new NullMemoryStore().list("org:acme", 10, { query: "deploy" })).toEqual([]);
+  });
+
+  // Feature: docs/reference/specs/memory.md §22/§26 — the repository window reads
+  // the scope's newest FACTS with `list`'s `kind` filter; summaries stay out.
+  it("list with kind 'fact' over three facts and two summaries returns the three facts newest first; without kind, five rows", async () => {
+    const store = new InMemoryMemoryStore(
+      [
+        rec({ id: "f1", createdAt: NOW - 5000, text: "fact one" }),
+        rec({ id: "s1", createdAt: NOW - 4000, text: "summary one", kind: "summary" }),
+        rec({ id: "f2", createdAt: NOW - 3000, text: "fact two" }),
+        rec({ id: "s2", createdAt: NOW - 2000, text: "summary two", kind: "summary" }),
+        rec({ id: "f3", createdAt: NOW - 1000, text: "fact three" }),
+      ],
+      { now: () => NOW },
+    );
+    expect((await store.list("org:acme", 5, { kind: "fact" })).map((r) => r.id)).toEqual(["f3", "f2", "f1"]);
+    expect((await store.list("org:acme", 5, { kind: "summary" })).map((r) => r.id)).toEqual(["s2", "s1"]);
+    expect((await store.list("org:acme", 5)).map((r) => r.id)).toEqual(["f3", "s2", "f2", "s1", "f1"]);
+    // kind composes with the query filter and never bumps usage.
+    expect((await store.list("org:acme", 5, { kind: "fact", query: "two" })).map((r) => r.id)).toEqual(["f2"]);
+    expect((await store.list("org:acme", 5, { kind: "fact" })).every((r) => r.useCount === 0)).toBe(true);
+    expect(await new NullMemoryStore().list("org:acme", 5, { kind: "fact" })).toEqual([]);
   });
 
   it("list does not bump usage (it is a human view, not a retrieval)", async () => {
