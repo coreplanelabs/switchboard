@@ -44,6 +44,21 @@ export function percentile(sorted: readonly number[], p: number): number {
   return sorted[Math.min(sorted.length - 1, Math.max(0, rank - 1))];
 }
 
+/** The Wilson score interval for `k` successes of `n` at `z` (default 1.96,
+ *  the 95% level): the interval a small-n rate is quoted with, so a rate off
+ *  ten rows is never read as if it were off a thousand (load-harness item 20).
+ *  NaN bounds over `n = 0` — the caller states the missing denominator
+ *  instead of printing NaN. */
+export function wilsonInterval(k: number, n: number, z = 1.96): { low: number; high: number } {
+  if (n === 0) return { low: NaN, high: NaN };
+  const p = k / n;
+  const z2 = z * z;
+  const centre = p + z2 / (2 * n);
+  const margin = z * Math.sqrt((p * (1 - p) + z2 / (4 * n)) / n);
+  const denom = 1 + z2 / n;
+  return { low: Math.max(0, (centre - margin) / denom), high: Math.min(1, (centre + margin) / denom) };
+}
+
 export function summarize(samples: readonly Sample[]): Summary {
   const byOp = new Map<string, Sample[]>();
   for (const s of samples) {

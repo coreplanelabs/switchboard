@@ -11,12 +11,15 @@
 //   npm run load -- pi --suite review --checkout ../repo --task all --provider anthropic --model <id>   (merged PRs reviewed, verdicts recorded)
 //   npm run load -- route --since <date> --limit 200 --provider anthropic --model <id>   (singles + the compound and imperative sets)
 //   npm run load -- route --verify --limit 0 --provider anthropic --model <id>   (the checked-in sets, plus the verifier on every write-class bind)
+//   npm run load -- intake --fixtures <path> --provider anthropic --model <id>   (the labelled replies scored against a live model)
+//   npm run load -- intake --live --since <date>                            (the live false-silence ratio, printed)
 //   npm run load -- door --since <date>                                    (the door's hand-backs and pastes, printed)
 //
-// Every command but `door` writes `load-results/<command>-<runId>.json` (the
-// samples and the summary) and `.md` (the receipt) and exits non-zero when a
-// configured check fails; `door` is a report over the run store, printed and
-// not judged. Targets and bearers come from flags or the environment named in
+// Every command but `door` and `intake --live` writes
+// `load-results/<command>-<runId>.json` (the samples and the summary) and
+// `.md` (the receipt) and exits non-zero when a configured check fails;
+// `door` and the live ratio are reports over the stores, printed and not
+// judged. Targets and bearers come from flags or the environment named in
 // `--help`; nothing here is hard-coded to one deployment.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -117,6 +120,17 @@ import {
 } from "../src/core/dispatch/route.js";
 import { DEFAULT_MAX_CHILDREN } from "../src/core/dispatch/spawn.js";
 import { doorReport, renderDoor } from "../src/load/doorReport.js";
+import {
+  intakeScore,
+  liveFalseSilence,
+  parseIntakeFixtures,
+  renderIntake,
+  renderLiveIntake,
+  replayIntake,
+  type ThreadMessage,
+  type ThreadRepliesReader,
+} from "../src/load/intakeReplay.js";
+import { WorkerRunLedger } from "../src/core/runLedgerWorker.js";
 import { RunRegistry } from "../src/core/runRegistry.js";
 import { createRunsService } from "../src/core/runsService.js";
 import { WorkerRunStore } from "../src/core/runStoreWorker.js";
@@ -172,6 +186,17 @@ commands
              rows as write misbinds removed and correct binds rejected — a measurement for the production decision, never a
              verdict row; nothing in production calls it]
              env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env); the model key as for pi
+  intake     the intake verdict scored on a labelled file against a live model: the false-silence rate over the
+             addressed replies and the false-answer rate over the silent ones, each with its Wilson interval, the
+             abstention shares, the model ref and the call's latency percentiles; the labelled file lives under
+             load-results/ (one JSON reply per line — the synthetic set src/load/intakeFixtures.ts is the checked-in
+             format example and runs in CI over a scripted model)
+             --fixtures PATH (default load-results/intake-fixtures.jsonl)  --provider NAME  --model ID
+             [--key-env VAR  --base-url URL  --concurrency N]; the model key as for pi
+             --live: the live false-silence ratio instead — the ledger's silent receipts joined to each thread's
+             later mentions, recovered/silent per week, printed, no model spend, no receipt file  [--since DATE]
+             env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env); SLACK_BOT_TOKEN (the
+             thread reads and the bot's own id)
   door       the door's hand-backs, the pastes that followed and the paste-through rate, per day and per command,
              read off the run store's command records; printed, nothing invoked, no receipt file
              [--since DATE]
@@ -227,6 +252,8 @@ function flags(argv: string[]): Flags {
       "print-prompt": { type: "boolean" },
       since: { type: "string" },
       limit: { type: "string" },
+      fixtures: { type: "string" },
+      live: { type: "boolean" },
       "default-agent": { type: "string" },
       concurrency: { type: "string" },
       "max-parts": { type: "string" },
@@ -1440,6 +1467,135 @@ async function routeReplay(f: Flags): Promise<boolean> {
   );
 }
 
+/** `load:intake` (docs/reference/specs/load-harness.md item 20): the intake
+ *  verdict scored on a labelled file of unmentioned thread replies against a
+ *  live model — `decideIntake` over the router's own seam, no ledger — or,
+ *  under `--live`, the live false-silence ratio off the run ledger's receipts
+ *  and each thread's later mentions. The offline receipt is a measurement,
+ *  never a verdict: the labelled set is too small to prove a rate, so no
+ *  check is configured and the live ratio is the gate. */
+async function intake(f: Flags): Promise<boolean> {
+  if (f.live === true) return intakeLive(f);
+  const id = runId();
+  const startedAt = new Date(systemClock()).toISOString();
+  const providerName = str(f, "provider", "anthropic");
+  const keyEnv = str(f, "key-env", piKeyEnvFor(providerName));
+  if (!processSecrets.named(keyEnv)) {
+    process.stderr.write(
+      `load intake: the model key must be in the environment variable ${keyEnv} (name another with --key-env); refusing to start\n`,
+    );
+    return false;
+  }
+  const modelId = str(f, "model");
+  const baseUrl = typeof f["base-url"] === "string" ? f["base-url"] : undefined;
+  // The verdict's model exactly as production builds it: the one-block table
+  // on pi's model library, the same construction as `load -- route`.
+  const providers = new PiAiProviders({
+    [providerName]: {
+      type: providerName === "anthropic" ? "anthropic" : "openai-compatible",
+      apiKeyEnv: keyEnv,
+      ...(baseUrl ? { baseUrl } : {}),
+    },
+  });
+  const model = providerRouteModel(providers.get(providerName), modelId);
+  const modelRef = `${providerName}/${modelId}`;
+  const path = str(f, "fixtures", `${RESULTS_DIR}/intake-fixtures.jsonl`);
+  const fixtures = parseIntakeFixtures(readFileSync(path, "utf8"));
+  const concurrency = num(f, "concurrency", 4);
+  const results = await replayIntake(fixtures, model, { modelRef, now: systemClock, concurrency });
+  const score = intakeScore(results);
+  // One sample per call: the percentiles are over the calls that answered — a
+  // timeout or a provider error is counted by name, never in the latency.
+  const samples: Sample[] = results.map((r): Sample => ({
+    op: "intake",
+    startedAt: systemClock(),
+    ms: r.ms,
+    ok: r.source === "model" || r.source === "mode",
+    status: r.verdict,
+    ...(r.source === "timeout" || r.source === "error" ? { reason: r.source } : {}),
+  }));
+  const redactReason = <T extends { reason: string }>(r: T): T => ({ ...r, reason: redactSecrets(r.reason) });
+  return writeResults(
+    "intake",
+    id,
+    startedAt,
+    { fixtures: path, rows: fixtures.length, model: modelRef, concurrency, keyEnv },
+    summarize(samples),
+    [],
+    { score: { ...score, misses: score.misses.map(redactReason) }, results: results.map(redactReason) },
+    renderIntake(score, { modelRef }),
+  );
+}
+
+/** One Slack Web API call over fetch — the harness never links the SDK; the
+ *  two methods the live join needs are plain form posts. */
+async function slackCall(
+  token: string,
+  method: string,
+  args: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`https://slack.com/api/${method}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams(args).toString(),
+  });
+  const body = (await res.json()) as Record<string, unknown>;
+  if (body.ok !== true) throw new Error(`slack ${method} failed: ${String(body.error ?? res.status)}`);
+  return body;
+}
+
+/** A thread's messages, oldest first, paged to the cursor's end (bounded). */
+const slackReplies =
+  (token: string): ThreadRepliesReader =>
+  async (channel, threadTs) => {
+    const messages: ThreadMessage[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const body = await slackCall(token, "conversations.replies", {
+        channel,
+        ts: threadTs,
+        limit: "200",
+        ...(cursor ? { cursor } : {}),
+      });
+      for (const m of Array.isArray(body.messages) ? (body.messages as Record<string, unknown>[]) : []) {
+        if (typeof m.ts !== "string") continue;
+        messages.push({
+          ts: m.ts,
+          ...(typeof m.user === "string" ? { user: m.user } : {}),
+          ...(typeof m.text === "string" ? { text: m.text } : {}),
+        });
+      }
+      const meta = body.response_metadata as Record<string, unknown> | undefined;
+      cursor = typeof meta?.next_cursor === "string" && meta.next_cursor.length > 0 ? meta.next_cursor : undefined;
+      if (!cursor) break;
+    }
+    return messages;
+  };
+
+/** `load:intake --live` (load-harness item 20): the ledger's silent receipts
+ *  joined to each thread's later mentions and printed — a count, not a load
+ *  test, like the door report. */
+async function intakeLive(f: Flags): Promise<boolean> {
+  const base = str(f, "state-url", process.env.SWITCHBOARD_STATE_WORKER_URL).replace(/\/$/, "");
+  const ledger = new WorkerRunLedger({
+    baseUrl: base,
+    token: bearer(str(f, "token-env", "MEMORY_TOKEN")),
+    storeKey: "runs:default",
+  });
+  const since = typeof f.since === "string" ? Date.parse(f.since) : undefined;
+  if (since !== undefined && Number.isNaN(since)) throw new Error(`--since must be a date (got ${String(f.since)})`);
+  const slackToken = bearer("SLACK_BOT_TOKEN");
+  const auth = await slackCall(slackToken, "auth.test", {});
+  if (typeof auth.user_id !== "string" || auth.user_id.length === 0)
+    throw new Error("slack auth.test answered no user_id — is SLACK_BOT_TOKEN a bot token?");
+  const ratio = await liveFalseSilence(ledger, slackReplies(slackToken), {
+    botUserId: auth.user_id,
+    ...(since !== undefined ? { since } : {}),
+  });
+  process.stdout.write(`${renderLiveIntake(ratio).join("\n")}\n`);
+  return true;
+}
+
 /** The door report (load-harness item 19; record 0044): the run store's
  *  command records read through the one runs service — over a bare registry,
  *  since this process drives no runs — and printed. No model, no invoke, no
@@ -1479,6 +1635,7 @@ async function main(): Promise<number> {
     provider,
     pi,
     route: routeReplay,
+    intake,
     door,
   };
   const run = commands[command];

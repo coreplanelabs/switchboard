@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { evaluateSlo, operationsTable, percentile, renderMarkdown, summarize, type Sample } from "./aggregate.js";
+import {
+  evaluateSlo,
+  operationsTable,
+  percentile,
+  renderMarkdown,
+  summarize,
+  wilsonInterval,
+  type Sample,
+} from "./aggregate.js";
 
 // The load harness's result math (docs/reference/specs/load-harness.md items 1–3): every
 // command records one Sample per operation and this module turns them into the
@@ -166,5 +174,26 @@ describe("renderMarkdown — the receipt", () => {
       "**Verdict: FAIL**",
     );
     expect(renderMarkdown({ ...base, checks: [] })).toContain("**Verdict: no checks**");
+  });
+});
+
+describe("wilsonInterval — the interval a small-n rate is quoted with (load-harness item 20)", () => {
+  it("computes the 95% Wilson score interval for 1 of 4", () => {
+    const { low, high } = wilsonInterval(1, 4);
+    expect(low).toBeCloseTo(0.0455, 3);
+    expect(high).toBeCloseTo(0.6994, 3);
+  });
+
+  it("stays inside [0, 1] at the edges", () => {
+    expect(wilsonInterval(0, 10).low).toBe(0);
+    expect(wilsonInterval(10, 10).high).toBe(1);
+    expect(wilsonInterval(0, 10).high).toBeGreaterThan(0);
+    expect(wilsonInterval(10, 10).low).toBeLessThan(1);
+  });
+
+  it("answers NaN bounds over an empty denominator — the caller states the missing denominator instead", () => {
+    const { low, high } = wilsonInterval(0, 0);
+    expect(Number.isNaN(low)).toBe(true);
+    expect(Number.isNaN(high)).toBe(true);
   });
 });
