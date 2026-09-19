@@ -2,7 +2,9 @@ import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare
 import { describe, expect, it } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
-import { RUN_EVENT_INSERT_BATCH, RunHistoryDO } from "./worker.ts";
+import { LEASE_MS } from "../../src/core/runLedger/types.ts";
+import { blobOf, pointOf, type RunMetricsPoint } from "../../src/core/runMetrics.ts";
+import { featuresOf, RUN_EVENT_INSERT_BATCH, RunHistoryDO } from "./worker.ts";
 
 // Feature: docs/reference/specs/run-history.md — the RunHistoryDO: the durable
 // run store behind the bot's WorkerRunStore. Runs in workerd against the real
@@ -619,10 +621,10 @@ describe("run history routes", () => {
     expect(await rowCount(key, "run_events")).toBe(8);
     expect((await post("/runs/get", { storeKey: key, id: "a" })).data).toEqual({ record: null });
     const again = await putDirect(key, record("c", now - 1000, { events: events(3) }));
-    expect(again).toEqual({ ok: true, retained: 2, stored: true, rewritten: true });
+    expect(again).toEqual({ ok: true, retained: 2, stored: true, rewritten: true, turnedFinal: false });
     expect(await rowCount(key, "run_events")).toBe(7);
     const outside = await putDirect(key, record("older", now - 40 * DAY, { events: events(2) }));
-    expect(outside).toEqual({ ok: true, retained: 2, stored: false, rewritten: false });
+    expect(outside).toEqual({ ok: true, retained: 2, stored: false, rewritten: false, turnedFinal: true });
     expect(await rowCount(key, "runs")).toBe(2);
   });
 
@@ -1331,5 +1333,197 @@ describe("run history routes", () => {
     expect((await post("/runs/get", { storeKey: key, id: "a" })).data).toEqual({ record: null });
     expect((await post("/runs/list", { storeKey: key })).data.items as Array<{ id: string }>).toHaveLength(1);
     expect((await post("/runs/delete", { storeKey: key, id: "a" })).data).toEqual({ ok: true, deleted: false });
+  });
+});
+
+// docs/reference/specs/run-metrics.md items 2–5: the state Worker writes one
+// metrics point per run, after the commit, only when the row turned final —
+// and behaves byte-identically without the binding, with no point, and when
+// the sink throws. The pool's env has no RUN_METRICS binding, so the default
+// sink is the NullSink; the recording and throwing sinks are installed on the
+// live object, the coordinatorDouble pattern.
+describe("run metrics — the point, the guard and the emission rule", () => {
+  const claimBody = (key: string, runId: string, threadKey: string, gen = "g1") => ({
+    storeKey: key,
+    run: {
+      runId,
+      threadKey,
+      gen,
+      leaseMs: LEASE_MS,
+      startedAt: 1_000,
+      meta: { agent: "review", channelId: "slack:C1", userId: "slack:UALICE", threadKey },
+      card: null,
+      system: "you review",
+      tools: [],
+    },
+  });
+
+  /** A RunMetricsSink double on the live object: records, or throws. */
+  async function metricsDouble(key: string, behaviour: "record" | "throw" = "record"): Promise<RunMetricsPoint[]> {
+    const written: RunMetricsPoint[] = [];
+    await runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
+      Object.defineProperty(inst, "metrics", {
+        value: {
+          write(p: RunMetricsPoint) {
+            if (behaviour === "throw") throw new TypeError("dataset refused");
+            written.push(p);
+          },
+        },
+      });
+    });
+    return written;
+  }
+
+  const putDirectWithPoint = (key: string, rec: RunRecord, point?: RunMetricsPoint) =>
+    runInDurableObject(stubOf(key), (inst: RunHistoryDO) => inst.put(rec, undefined, point));
+
+  it("a tombstone then the finish writes one point; a review-artifact rewrite and an identical retry write none more", async () => {
+    const key = storeKey();
+    const written = await metricsDouble(key);
+    expect((await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"))).status).toBe(200);
+    // The start tombstone: provisional, no point beside it (pointOf answers undefined).
+    const started = Date.now() - 60_000;
+    const tombstone = record("r1", started, {
+      status: "interrupted",
+      provisional: true,
+      startedAt: started,
+      events: events(1),
+      eventCount: 1,
+      storedEventCount: 1,
+    });
+    expect(pointOf(tombstone)).toBeUndefined();
+    await post("/runs/put", { storeKey: key, record: tombstone });
+    expect(written).toHaveLength(0);
+    // The finish replaces the tombstone: the row turns final, one point.
+    const final = record("r1", Date.now() - 1_000);
+    const point = pointOf(final)!;
+    const fin = await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: final, point });
+    expect(fin).toEqual({ status: 200, data: { ok: true, stored: true, event: "none" } });
+    expect(written).toHaveLength(1);
+    expect(blobOf(written[0], "run id")).toBe("r1");
+    expect(written[0].indexes).toEqual(["review"]);
+    // The review artifact's whole-record rewrite (run-history item 44): rewritten, not turned final.
+    const grown = { ...final, events: events(5), eventCount: 5, storedEventCount: 5 };
+    expect(await putDirectWithPoint(key, grown, pointOf(grown))).toMatchObject({
+      stored: true,
+      rewritten: true,
+      turnedFinal: false,
+    });
+    // The retry's landing: the same record again, still no second point.
+    expect(await putDirectWithPoint(key, grown, pointOf(grown))).toMatchObject({
+      stored: true,
+      rewritten: false,
+      turnedFinal: false,
+    });
+    expect(written).toHaveLength(1);
+  });
+
+  it("a plain put of an interrupted record over no row writes one point; one outside retention (stored: false) writes none", async () => {
+    const key = storeKey();
+    const written = await metricsDouble(key);
+    const interrupted = record("lost", Date.now() - 1_000, { status: "interrupted" });
+    expect(await putDirectWithPoint(key, interrupted, pointOf(interrupted))).toMatchObject({
+      stored: true,
+      turnedFinal: true,
+    });
+    expect(written).toHaveLength(1);
+    // A record outside the 30-day window is written and trimmed in its own put: no point.
+    const expired = record("expired", Date.now() - 40 * DAY);
+    expect(await putDirectWithPoint(key, expired, pointOf(expired))).toMatchObject({
+      stored: false,
+      turnedFinal: true,
+    });
+    expect(written).toHaveLength(1);
+  });
+
+  it("a provisional put over a final row writes nothing: the row, its events and the sessions table stay, and no point lands", async () => {
+    const key = storeKey();
+    const written = await metricsDouble(key);
+    const final = record("r1", Date.now() - 1_000, {
+      session: { key: "slack:C1:1:review", seedFrom: 0, request: 0, range: { from: 1, to: 3 } },
+    });
+    expect(await putDirectWithPoint(key, final, pointOf(final))).toMatchObject({ stored: true, turnedFinal: true });
+    expect(written).toHaveLength(1);
+    const before = (await post("/runs/get", { storeKey: key, id: "r1" })).data.record;
+    const sessionsBefore = await rowCount(key, "sessions");
+    // A late provisional write (a drain upgrade racing the finish) is answered
+    // stored and writes nothing (run-history item 27's store-side guard).
+    const late = record("r1", final.startedAt, {
+      status: "interrupted",
+      provisional: true,
+      startedAt: final.startedAt,
+      events: events(6),
+      eventCount: 6,
+      storedEventCount: 6,
+      session: { key: "slack:C1:9:review", seedFrom: 0, request: 0, range: "broken" },
+    });
+    expect(await putDirectWithPoint(key, late, pointOf(late))).toEqual({
+      ok: true,
+      retained: 1,
+      stored: true,
+      rewritten: false,
+      turnedFinal: false,
+    });
+    expect((await post("/runs/get", { storeKey: key, id: "r1" })).data.record).toEqual(before);
+    expect(await rowCount(key, "run_events")).toBe(final.events.length);
+    expect(await rowCount(key, "sessions")).toBe(sessionsBefore);
+    expect(written).toHaveLength(1);
+  });
+
+  it("a throwing sink leaves the JSON answers deep-equal to a recording run's and to a bindingless Worker's, and warns once with the run id", async () => {
+    const recording = storeKey();
+    const throwing = storeKey();
+    const bare = storeKey(); // no double installed: the pool has no binding, so this is the NullSink
+    const written = await metricsDouble(recording);
+    await metricsDouble(throwing, "throw");
+    const warns: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => warns.push(args.map(String).join(" "));
+    try {
+      const rec = record("r1", Date.now() - 1_000);
+      const answers = await Promise.all(
+        [recording, throwing, bare].map((key) =>
+          post("/runs/put", { storeKey: key, record: rec, point: pointOf(rec) }),
+        ),
+      );
+      expect(answers[0]).toEqual(answers[1]);
+      expect(answers[0]).toEqual(answers[2]);
+      // The wire answer is exactly today's put shape — turnedFinal stays internal.
+      expect(answers[0].data).toEqual({ ok: true, retained: 1, stored: true, rewritten: false });
+    } finally {
+      console.warn = realWarn;
+    }
+    expect(written).toHaveLength(1);
+    const metricWarns = warns.filter((w) => w.includes("[runs/metrics]"));
+    expect(metricWarns).toHaveLength(1);
+    expect(metricWarns[0]).toContain("r1");
+    expect(metricWarns[0]).toContain("TypeError");
+  });
+
+  it("a malformed point is refused by name on put and finish, before any write", async () => {
+    const key = storeKey();
+    const bad = await post("/runs/put", {
+      storeKey: key,
+      record: record("r1", Date.now() - 1_000),
+      point: { junk: 1 },
+    });
+    expect(bad).toEqual({ status: 400, data: { error: "point must be a RunMetricsPoint" } });
+    expect((await post("/runs/get", { storeKey: key, id: "r1" })).data).toEqual({ record: null });
+    await post("/runs/claim", claimBody(key, "r2", "slack:C1:2.0"));
+    const fin = await post("/runs/finish", {
+      storeKey: key,
+      runId: "r2",
+      gen: "g1",
+      record: record("r2", Date.now() - 1_000),
+      point: { junk: 1 },
+    });
+    expect(fin).toEqual({ status: 400, data: { error: "point must be a RunMetricsPoint" } });
+  });
+
+  it("features names the dataset only when the binding is present", () => {
+    expect(featuresOf({})).toEqual(["memory", "schedules", "runs", "config", "delivery", "costs"]);
+    expect(
+      featuresOf({ RUN_METRICS: { writeDataPoint() {} } as AnalyticsEngineDataset, RUN_METRICS_DATASET: "swb_runs" }),
+    ).toEqual(["memory", "schedules", "runs", "config", "delivery", "costs", "runMetrics:swb_runs"]);
   });
 });

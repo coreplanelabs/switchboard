@@ -3,6 +3,7 @@ import { secretsFrom } from "../secrets.js";
 import type { ChatMessage } from "./chatMessage.js";
 import { buildRunLedger, WorkerRunLedger, type WorkerRunLedgerOptions } from "./runLedgerWorker.js";
 import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
+import { pointOf } from "./runMetrics.js";
 import { ATTACHMENT_REF_BYTES, LEASE_MS, type ClaimRequest, type IntakeReceipt } from "./runLedger/types.js";
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 
@@ -37,6 +38,25 @@ function stubWorker(
   });
   return { ledger, calls };
 }
+
+/** A finished record as `finish` posts one — minimal but whole enough for the
+ *  point the client computes beside it (`pointOf`). */
+const finishRecord = (over: Record<string, unknown> = {}) =>
+  ({
+    id: "r1",
+    channelId: "slack:C1",
+    userId: "slack:UALICE",
+    threadKey: "slack:C1:1.0",
+    startedAt: 1_000,
+    finishedAt: 2_000,
+    status: "completed",
+    eventCount: 0,
+    storedEventCount: 0,
+    truncated: false,
+    events: [],
+    diagnosis: { eventCount: 0, toolCalls: 0, byCategory: {}, findings: [], verdict: "ok" },
+    ...over,
+  }) as unknown as import("./runRecord.js").RunRecord;
 
 const claimReq: ClaimRequest = {
   runId: "r1",
@@ -133,10 +153,10 @@ describe("WorkerRunLedger", () => {
     );
     expect(await w.ledger.append("r1", "g1", [])).toEqual({ ok: true });
     expect(w.calls).toHaveLength(0);
-    const plain = { id: "r1" } as never;
+    const plain = finishRecord();
     expect(await w.ledger.finish("r1", "g1", plain)).toEqual({ ok: true, stored: true });
     expect(w.calls.map((c) => c.path)).toEqual(["/runs/finish"]);
-    const withSession = { id: "r1", session: { ...session, range: { from: 0, to: 4 } } } as never;
+    const withSession = finishRecord({ session: { ...session, range: { from: 0, to: 4 } } });
     expect(await w.ledger.finish("r1", "g1", withSession)).toEqual({ ok: true, stored: true });
     expect(w.calls.slice(1).map((c) => [c.path, c.body.key ?? c.body.runId])).toEqual([
       ["/runs/finish", "r1"],
@@ -281,6 +301,29 @@ describe("WorkerRunLedger", () => {
     expect(w.calls.at(-1)).toMatchObject({ path: "/runs/inbox/read", body: { runId: "r1", afterSeq: 2 } });
     const empty = stubWorker(() => ({ status: 200, data: {} }));
     expect(await empty.ledger.readInbox("r1", 0)).toEqual([]);
+  });
+
+  it("finish posts the record's metrics point beside it, priced through the configured table, and none for a provisional record (run-metrics.md)", async () => {
+    const prices = { "anthropic/m": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } };
+    const w = stubWorker(
+      (path) => ({ status: 200, data: path === "/runs/finish" ? { ok: true, stored: true } : { ok: true } }),
+      {
+        prices,
+      },
+    );
+    const final = finishRecord({
+      usage: {
+        turns: 2,
+        byModel: {
+          "anthropic/m": { turns: 2, inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+      },
+    });
+    expect(await w.ledger.finish("r1", "g1", final)).toEqual({ ok: true, stored: true });
+    expect(w.calls[0].body.point).toEqual(pointOf(final, prices));
+    const tombstone = finishRecord({ status: "interrupted", provisional: true, finishedAt: 1_000 });
+    await w.ledger.finish("r1", "g1", tombstone);
+    expect(w.calls[1].body.point).toBeUndefined();
   });
 
   it("readTranscript assembles the Worker's rows and attachments", async () => {

@@ -14,7 +14,7 @@
 //   POST /runs/stop             {storeKey, runId, mode}                  → {ok, ownerLive}
 //   POST /runs/handoff          {storeKey, gen, runIds}                  → {marked}
 //   POST /runs/finishing        {storeKey, runId, gen}                   → {ok} | 409 fenced
-//   POST /runs/finish           {storeKey, runId, gen, record}           → {ok, stored} | 409 fenced
+//   POST /runs/finish           {storeKey, runId, gen, record, point?}   → {ok, stored} | 409 fenced
 //   POST /runs/abandon          {storeKey, runId, gen}                   → {ok} | 409 fenced   (the live rows go, no record)
 //   POST /runs/reclaim          {storeKey, gen, now, leaseMs}            → {runs: ReclaimedRun[]}
 //   POST /runs/live             {storeKey}                               → {runs: LiveRunRow[]}
@@ -37,6 +37,8 @@
 //   POST /runs/intake/list      {storeKey, threadKey?, since?}           → {receipts: IntakeReceipt[]}
 
 import { RUN_ID_PATTERN, SESSION_KEY_PATTERN, type RunRecord } from "./runRecord.js";
+import { pointOf } from "./runMetrics.js";
+import type { ModelPriceTable } from "./modelPricing.js";
 import type { Notepad, SessionHit } from "./runLedger/types.js";
 import { retentionPolicyOf, type RunHistoryConfig } from "./runStore.js";
 import {
@@ -84,6 +86,9 @@ export interface WorkerRunLedgerOptions {
    *  object prunes by run-history item 59's bound (24 h, or the window plus
    *  the drain deadline); absent, the object keeps the 24-hour floor. */
   catchUpWindowMs?: number;
+  /** The price table the finish's metrics point is priced through (`pointOf`,
+   *  docs/reference/specs/run-metrics.md). Absent: the list prices alone. */
+  prices?: ModelPriceTable;
   fetch?: typeof fetch;
 }
 
@@ -94,7 +99,7 @@ export interface WorkerRunLedgerOptions {
 export function buildRunLedger(
   cfg: RunHistoryConfig | undefined,
   secrets: Secrets,
-  deps: { fetch?: typeof fetch } = {},
+  deps: { fetch?: typeof fetch; prices?: ModelPriceTable } = {},
 ): WorkerRunLedger | null {
   if (!cfg || cfg.store === "file") return null;
   const worker = cfg.worker;
@@ -108,6 +113,7 @@ export function buildRunLedger(
     // The same clamped policy the run store proposes, so the session logs and
     // the run records are bounded by one configuration.
     sessionLogMaxBytes: retentionPolicyOf(cfg).sessionLogMaxBytes,
+    ...(deps.prices ? { prices: deps.prices } : {}),
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
   });
 }
@@ -386,7 +392,16 @@ export class WorkerRunLedger implements RunLedger {
 
   async finish(runId: string, gen: string, record: RunRecord): Promise<FinishResult> {
     this.checkIds(runId, gen);
-    const r = await this.post("/runs/finish", { storeKey: this.opts.storeKey, runId, gen, record });
+    // The record's metrics point rides the finish (run-metrics.md): the object
+    // writes it after its commit, only when the row turned final.
+    const point = pointOf(record, this.opts.prices);
+    const r = await this.post("/runs/finish", {
+      storeKey: this.opts.storeKey,
+      runId,
+      gen,
+      record,
+      ...(point !== undefined ? { point } : {}),
+    });
     const f = this.fenceResult(r);
     if (!f.ok) return f;
     // The session log is kept whole for the thread's next run; only the owner

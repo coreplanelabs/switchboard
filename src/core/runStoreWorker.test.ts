@@ -7,6 +7,7 @@ import { createTracer } from "./trace/tracer.js";
 import type { RunEvent } from "./runEvents.js";
 import { DEFAULT_RETENTION_POLICY, type RunRecord } from "./runRecord.js";
 import { dayOf } from "./runUsage.js";
+import { pointOf } from "./runMetrics.js";
 import {
   describeError,
   PermanentStoreError,
@@ -100,6 +101,28 @@ describe("WorkerRunStore", () => {
     expect(calls[0].body.policy).toEqual(DEFAULT_RETENTION_POLICY);
     expect(calls[0].body.policyUpdatedAt).toBe(NOW);
     expect((calls[0].body.record as RunRecord).id).toBe("a");
+  });
+
+  it("put sends the record's metrics point beside it — priced through the configured table — and none for a provisional record (run-metrics.md)", async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      status: 200,
+      body: { ok: true, retained: 1, stored: true, rewritten: false },
+    }));
+    const prices = { "anthropic/m": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } };
+    const store = new WorkerRunStore({ ...OPTS, prices, fetch });
+    const final = {
+      ...record("a"),
+      usage: {
+        turns: 2,
+        byModel: {
+          "anthropic/m": { turns: 2, inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        },
+      },
+    };
+    await store.put(final);
+    expect(calls[0].body.point).toEqual(pointOf(final, prices));
+    await store.put({ ...record("b"), status: "interrupted", provisional: true });
+    expect(calls[1].body.point).toBeUndefined();
   });
 
   it("get/list/events/delete send no policy; get and list re-validate what comes back", async () => {
