@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { analyzeRunFriction } from "./runFriction.js";
+import { isRunRecord } from "./runRecord.js";
 import {
   TOOL_OUTPUT_CAP,
   type RunEvent,
@@ -311,5 +313,48 @@ describe("RUN_NOTE_KINDS", () => {
     ]) {
       expect(RUN_NOTE_KINDS).toContain(kind);
     }
+  });
+});
+
+// Feature: docs/reference/specs/run-history.md — the record's shape for a hosted
+// ship parent (record 0060): its stream carries `ship_unit` facts and TWO
+// `run_meta` events (the second, at the hand-off, names the runner instance —
+// the LAST one carrying an id is the fact readers resolve), and such a record
+// still reads as a run record.
+describe("the hosted parent's record shape (record 0060)", () => {
+  it("a run record with a ship_unit event and two run_meta events passes isRunRecord", () => {
+    const events: RunEvent[] = [
+      { type: "input", messageId: "m1", text: "agent:ship in acme/api: plan p units U16", seq: 1, at: 1 },
+      { type: "run_meta", agent: "ship", model: "anthropic/m", seq: 2, at: 2 },
+      { type: "run_meta", agent: "ship", model: "anthropic/m", instanceId: "plan-p-1", seq: 3, at: 3 },
+      {
+        type: "ship_unit",
+        unit: "U16",
+        state: "merge_ready",
+        threadKey: "web:s:c9",
+        report: "✅ Merge-ready after 1 review round",
+        pr: 7,
+        seq: 4,
+        at: 4,
+      },
+      { type: "answer", text: "✅ U16 — merge_ready", seq: 5, at: 5 },
+    ];
+    const record = {
+      id: "run-parent",
+      agent: "ship",
+      channelId: "web:s",
+      userId: "access:s",
+      threadKey: "web:s:c9",
+      channelVisibility: "public",
+      startedAt: 1,
+      finishedAt: 5,
+      status: "completed",
+      eventCount: events.length,
+      storedEventCount: events.length,
+      truncated: false,
+      events,
+      diagnosis: analyzeRunFriction(events, { finished: true }),
+    };
+    expect(isRunRecord(record)).toBe(true);
   });
 });

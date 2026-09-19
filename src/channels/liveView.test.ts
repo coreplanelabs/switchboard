@@ -2849,13 +2849,18 @@ describe("the unit page and what a run is the parent of (item 28)", () => {
     ]);
     expect(seed.units).toBeUndefined();
 
+    // A hosted parent's record (record 0060): the dispatch's first
+    // `run_meta` names no instance — the SECOND, published at the hand-off,
+    // does — and the page resolves the LAST `run_meta` carrying one.
     await h.store.put(
       record("ship-parent", {
         agent: "ship",
         threadKey: "slack:C1:parent",
         events: [
-          { type: "run_meta", agent: "ship", repo: "acme/api", instanceId: "plan-p-1", seq: 1 },
-          { type: "answer", text: "✅ U16 — merge_ready", seq: 2 },
+          { type: "run_meta", agent: "ship", repo: "acme/api", seq: 1 },
+          { type: "run_meta", agent: "ship", repo: "acme/api", instanceId: "plan-p-1", seq: 2 },
+          { type: "ship_unit", unit: "U16", state: "merge_ready", report: "✅ ready", pr: 42, seq: 3 },
+          { type: "answer", text: "✅ U16 — merge_ready", seq: 4 },
         ] as RunEvent[],
       }),
     );

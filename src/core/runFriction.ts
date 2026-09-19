@@ -413,8 +413,10 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     // call that already produced its own tool pair, and artifact beside the
     // attach_file call (or the dispatcher's staging) that moved the file;
     // review_artifact, pr_description, pr_opened, review_posted, the ship_round
-    // boundaries and the router's route are published by the dispatcher/pipeline
-    // outside the model loop entirely. Counting any of them would distort the story.
+    // boundaries, the hosted parent's ship_unit facts (record 0060 — written by
+    // the runner's routes, not the model) and the router's route are published
+    // by the dispatcher/pipeline outside the model loop entirely. Counting any
+    // of them would distort the story.
     if (
       ev.type === "skill_use" ||
       ev.type === "artifact" ||
@@ -427,6 +429,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       ev.type === "child_resumed" ||
       ev.type === "review_posted" ||
       ev.type === "ship_round" ||
+      ev.type === "ship_unit" ||
       ev.type === "route" ||
       ev.type === "refusal" ||
       ev.type === "reference" ||

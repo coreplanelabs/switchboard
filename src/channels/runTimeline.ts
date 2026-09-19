@@ -362,6 +362,15 @@ export function createRunTimeline(): RunTimeline {
         if (!str(e.ref) || !str(e.sha)) return [];
         return [{ kind: "pushed_head", ref: str(e.ref), sha: str(e.sha), at: num(e.at) }];
       }
+      case "ship_unit": {
+        // A hosted ship parent's unit fact (record 0060; agent-ship.md item
+        // 17): drawn as its own step — the unit and its state head the row,
+        // the ending's report (else the thread's lead) is the step's detail.
+        if (!str(e.unit) || !str(e.state)) return [];
+        const detail = str(e.report) || str(e.lead);
+        const text = `**${str(e.unit)} · ${str(e.state)}**${detail ? "\n\n" + detail : ""}`;
+        return [{ kind: "step", step: openStep({ text, at: num(e.at) }) }];
+      }
       case "run_meta": {
         // Optional fields ride only when present (and well-typed) — the page
         // shows exactly what was resolved, never an empty slot.

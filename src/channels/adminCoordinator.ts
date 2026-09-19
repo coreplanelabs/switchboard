@@ -43,7 +43,7 @@
 // The handler here is pure over a parsed request (`handleCoordinatorRequest`),
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
-import { DEFAULT_GRANT } from "../core/budgets.js";
+import { DEFAULT_GRANT, HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "../core/budgets.js";
 import { DEFAULT_VERBOSITY } from "../core/verbosity.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { AGENTS } from "../agents/registry.js";
@@ -64,6 +64,7 @@ import {
   type ThreadEvent,
 } from "../core/coordinator/contract.js";
 import { foldThreadAttachments, foldThreadEvents } from "../core/dispatch/admission.js";
+import { assembleRunRecord } from "../core/dispatch/record.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
@@ -72,7 +73,10 @@ import { CHANGES_TOKEN, isAddressSeverity, LGTM_TOKEN, type ReviewVerdictKind } 
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent, ShipRoundOutcome } from "../core/runEvents.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
-import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, type RunRecord } from "../core/runRecord.js";
+import { RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
+import type { RunRegistry } from "../core/runRegistry.js";
+import type { LedgerRun } from "../core/runLedger/writeThrough.js";
+import type { HostingState } from "../core/runLedger/types.js";
 import type { RunsService, RunView } from "../core/runsService.js";
 import { parsePlanBranch, type Brief } from "../core/ship/coordinator.js";
 import { isHandoffShape, renderHandoffComment, type Handoff } from "../core/ship/handoff.js";
@@ -130,6 +134,15 @@ export interface AdminCoordinatorDeps {
   runPageBase?: string;
   /** The one runs service every surface reads: the live and finished runs of the instance's thread. */
   runs: RunsService;
+  /** The registry the hosted parent run lives in (record 0060): the four
+   *  runner routes write the pipeline's facts to it through `hostPublish`,
+   *  and `finish` ends and seals the row. */
+  registry: Pick<RunRegistry, "publish" | "finish" | "getById" | "snapshotById" | "seal">;
+  /** The ledger runs this generation drives (`LedgerWriteThrough.liveRuns`):
+   *  the hosted parent's handle, whose state carries the deadline every runner
+   *  write renews (`hosting.until`) and whose sink `finish` seals the record
+   *  through the ledger — releasing the host key with the row. */
+  ledgerRuns: () => LedgerRun[];
   /** `dispatch()` bound over the process's deps: the child as the requesting
    *  user, tagged, with the unit's contract for a round-0 child. */
   dispatch: (
@@ -1119,6 +1132,62 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   }
 }
 
+// ---- the hosted parent's write door (record 0060) --------------------------------------------
+
+/** Where the pipeline's parent run lives, resolved server-side from the
+ *  instance's own `runId` — never a body field. `host`: this process's
+ *  registry holds the run live, the routes write to it. `not_host`: a ledger
+ *  row for the run is live under another generation — the route answers
+ *  `409 not_host` and writes nothing (the driver re-asks under its retry policy).
+ *  `untracked`: no live row anywhere — an untracked hand-off, whose
+ *  parent finished at the hand-off — so the routes publish nothing and answer
+ *  as before. */
+type HostAnswer = { kind: "host"; runId: string } | { kind: "not_host" } | { kind: "untracked" };
+
+async function hostRunOf(deps: AdminCoordinatorDeps, instance: CoordinatorInstance): Promise<HostAnswer> {
+  const runId = instance.runId;
+  if (runId === undefined) return { kind: "untracked" };
+  const here = deps.registry.getById(runId);
+  if (here && !here.finished) return { kind: "host", runId };
+  const res = await deps.runs.getRun(runId).catch(() => undefined);
+  if (res !== undefined && res.ok && !res.value.finished && res.value.ownerGen !== undefined)
+    return { kind: "not_host" };
+  return { kind: "untracked" };
+}
+
+/** The runner routes' one write to the hosted parent (record 0060): the
+ *  events enter the registry's stream (the ship branch's write-through
+ *  subscription mirrors them onto the ledger row), and the row's deadline
+ *  moves forward by the pipeline's wall clock plus the runner's scheduling
+ *  slack (record 0046's lease shape) — so a pipeline whose Workflow dies
+ *  without `finish` is closed by the reclaim within that window of its last
+ *  word, and a live one is never closed under it. */
+function hostPublish(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  runId: string,
+  events: RunEvent[],
+  at: number,
+): void {
+  for (const event of events) deps.registry.publish(runId, event);
+  const caps = instance.caps ?? resolveShipCaps(undefined);
+  const hosting: HostingState = {
+    instanceId: instance.id,
+    until: at + minutesToMs(caps.maxMinutes + HOSTED_DEADLINE_MARGIN_MINUTES),
+  };
+  deps
+    .ledgerRuns()
+    .find((run) => run.runId === runId)
+    ?.setState({ hosting });
+}
+
+/** Record 0060: the run the routes write to is the instance's own — a body naming any
+ *  other run id publishes nothing and answers `not_found`, byte-identical to a
+ *  missing run (`readRecord`'s instance-scoped rule). */
+function namesForeignRun(instance: CoordinatorInstance, body: Record<string, unknown>): boolean {
+  return typeof body.runId === "string" && body.runId !== instance.runId;
+}
+
 // ---- the plan runner's own steps: the plan, a unit's start and end, the branch, the card, the record ----
 
 /** What the coordinator reads first: the instance's units with where each
@@ -1182,6 +1251,9 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
+  if (namesForeignRun(instance, body)) return json(404, { ok: false, error: "not_found" });
+  const host = await hostRunOf(deps, instance);
+  if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
   const unit = await unitRowOf(deps, instance, body.unit);
   if (!unit.ok) return unit.response;
   let row = unit.row!;
@@ -1204,6 +1276,24 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
   }
   row = { ...row, startedAt: row.startedAt ?? at };
   await deps.instances.putUnits([row]);
+  if (host.kind === "host")
+    hostPublish(
+      deps,
+      instance,
+      host.runId,
+      [
+        {
+          type: "ship_unit",
+          unit: row.unit,
+          state: "started",
+          ...(row.threadKey !== undefined ? { threadKey: row.threadKey } : {}),
+          lead: unitLead(instance, row),
+          ...(row.pr !== undefined ? { pr: row.pr.number } : {}),
+          at,
+        },
+      ],
+      at,
+    );
   (deps.log ?? console.log)(`[coordinator] ${instance.id} ${row.unit}: started in ${row.threadKey}`);
   return json(200, {
     ok: true,
@@ -1347,6 +1437,9 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
+  if (namesForeignRun(instance, body)) return json(404, { ok: false, error: "not_found" });
+  const host = await hostRunOf(deps, instance);
+  if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
@@ -1358,6 +1451,33 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     ],
   };
   await deps.instances.putUnits([updated]);
+  if (host.kind === "host") {
+    const thread = unitThread(instance, updated);
+    hostPublish(
+      deps,
+      instance,
+      host.runId,
+      [
+        {
+          type: "ship_round",
+          index: body.index,
+          agent: body.agent,
+          outcome: body.outcome as ShipRoundOutcome,
+          ...(gate ? { gate } : {}),
+          at,
+        },
+        {
+          type: "ship_unit",
+          unit: updated.unit,
+          state: body.outcome as string,
+          ...(thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
+          ...(updated.pr !== undefined ? { pr: updated.pr.number } : {}),
+          at,
+        },
+      ],
+      at,
+    );
+  }
   if (gate)
     (deps.log ?? console.warn)(
       `[coordinator] ${instance.id} ${row.unit}: severity gate fired on round ${body.index} — the review's approve carried ${gate.findings.join(", ")} at or above ${gate.level}, the level in force; the verdict was parsed at another level (agent-ship item 9)`,
@@ -1407,6 +1527,9 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
+  if (namesForeignRun(instance, body)) return json(404, { ok: false, error: "not_found" });
+  const host = await hostRunOf(deps, instance);
+  if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
   const units = await deps.instances.listUnits(instance.id);
   const row = units.find((u) => u.unit === body.unit);
   if (!row) return json(404, { ok: false, error: "unit_not_found", unit: body.unit });
@@ -1435,6 +1558,24 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   };
   await deps.instances.putUnits([updated]);
   const thread = unitThread(instance, updated);
+  if (host.kind === "host")
+    hostPublish(
+      deps,
+      instance,
+      host.runId,
+      [
+        {
+          type: "ship_unit",
+          unit: updated.unit,
+          state: ending.kind,
+          ...(thread.threadKey !== undefined ? { threadKey: thread.threadKey } : {}),
+          report: ending.report,
+          ...(updated.pr !== undefined ? { pr: updated.pr.number } : {}),
+          at,
+        },
+      ],
+      at,
+    );
   const io =
     thread.threadKey !== undefined ? deps.ioFor({ threadKey: thread.threadKey, userId: instance.userId }) : undefined;
   // The leftovers (record 0051's fold rule): events still unconsumed when the unit ends
@@ -1725,66 +1866,6 @@ const ENDING_ICON: Readonly<Record<string, string>> = {
   done: "✅",
 };
 
-/** The parent's one record, assembled from the instance and its unit rows
- *  when the instance ends: the round boundaries every unit drew, in order, and
- *  the summary as the answer — the pipeline's record without a process. */
-export function parentRunRecord(
-  instance: CoordinatorInstance,
-  units: readonly CoordinatorUnit[],
-  outcome: "completed" | "failed",
-  channelVisibility: ChannelVisibility,
-  finishedAt: number,
-): RunRecord {
-  const events: RunEvent[] = [
-    // The instance the record is the story of (agent-ship item 17): the run
-    // page reads it to list the instance's units.
-    {
-      type: "run_meta",
-      agent: "ship",
-      repo: instance.repo,
-      instanceId: instance.id,
-      // The grant the request carried (decision 0046): what a renewal could spend.
-      grant: instance.grant ?? DEFAULT_GRANT,
-      at: instance.createdAt,
-    },
-    ...units.flatMap((u) =>
-      u.rounds.map((r): RunEvent => ({
-        type: "ship_round",
-        index: r.index,
-        agent: r.agent,
-        outcome: r.outcome as ShipRoundOutcome,
-        ...(r.gate !== undefined ? { gate: r.gate } : {}),
-        at: r.at,
-      })),
-    ),
-    { type: "answer", text: planSummary(units, isGenerated(instance)), at: finishedAt },
-  ];
-  events.forEach((e, i) => {
-    e.seq = i + 1;
-  });
-  return {
-    id: instance.runId ?? instance.id.slice(0, 64),
-    ...(instance.label !== undefined ? { label: instance.label } : {}),
-    agent: "ship",
-    channelId: instance.channelId,
-    userId: instance.userId,
-    threadKey: instance.threadKey,
-    channelVisibility,
-    repo: instance.repo,
-    startedAt: instance.createdAt,
-    finishedAt,
-    status: outcome,
-    eventCount: events.length,
-    storedEventCount: events.length,
-    truncated: false,
-    events,
-    diagnosis: analyzeRunFriction(events, { finished: true, truncated: false }),
-    ...(instance.userName !== undefined ? { userName: instance.userName } : {}),
-    ...(instance.authenticatedAs !== undefined ? { authenticatedAs: instance.authenticatedAs } : {}),
-    ...(instance.sourceUrl !== undefined ? { sourceUrl: instance.sourceUrl } : {}),
-  };
-}
-
 /** The plan's summary — one line per unit with how it ended and its pull
  *  request; the task wording (no unit id) for a generated plan's one unit. */
 export function planSummary(units: readonly CoordinatorUnit[], generated = false): string {
@@ -1796,9 +1877,15 @@ export function planSummary(units: readonly CoordinatorUnit[], generated = false
   return lines.join("\n");
 }
 
-/** The instance ended: the parent's record is written, the card closes, and a
- *  plan's requesting thread gets the summary (a task's thread already has its
- *  unit's report). */
+/** The instance ended (record 0060): the hosted parent gets the summary as
+ *  its `answer`, its registry row finishes and its ONE record — the run's own
+ *  events, in seq order — seals through the ledger sink under the metadata's
+ *  thread, releasing the host key with the row; the card closes and a plan's
+ *  requesting thread gets the summary (a task's thread already has its unit's
+ *  report). On a run another generation hosts: `409 not_host`, nothing
+ *  written. On an untracked pipeline: no record — the parent finished at
+ *  the hand-off and its record already exists — the card and the summary as
+ *  before. */
 async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -1807,10 +1894,22 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
+  if (namesForeignRun(instance, body)) return json(404, { ok: false, error: "not_found" });
+  const host = await hostRunOf(deps, instance);
+  if (host.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
   const units = await deps.instances.listUnits(instance.id);
-  const visibility = await deps.channelVisibilityOf(instance.channelId);
-  const record = parentRunRecord(instance, units, body.outcome, visibility, at);
-  deps.runHistoryWriter.write(record);
+  if (host.kind === "host") {
+    // The answer enters the stream before finish() — a publish on a finished
+    // run is a no-op — so the record's last content event is the summary.
+    hostPublish(
+      deps,
+      instance,
+      host.runId,
+      [{ type: "answer", text: planSummary(units, isGenerated(instance)), at }],
+      at,
+    );
+    deps.registry.finish(host.runId, body.outcome);
+  }
   await drawCard(deps, instance, units, { icon: body.outcome === "completed" ? "✅" : "⚠️" }).catch(() => {});
   // A generated plan's one unit ran in the requesting thread, so its report is
   // already there — only a seeded plan's summary is posted back.
@@ -1818,8 +1917,47 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
     const io = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId });
     await io?.reply(`Plan ${instance.plan?.id ?? ""} ended (${body.outcome}):\n${planSummary(units)}`).catch(() => {});
   }
-  (deps.log ?? console.log)(`[coordinator] ${instance.id}: finished ${body.outcome} — record ${record.id}`);
-  return json(200, { ok: true, runId: record.id, at });
+  const runId = instance.runId ?? instance.id.slice(0, 64);
+  if (host.kind === "host") {
+    // The one record: the run's own stream (snapshot BEFORE the seal, so the
+    // seal's span records are not counted twice), filed under the metadata's
+    // thread and written through the ledger sink — the one-transaction finish
+    // that also closes the row and releases the host key. Without the handle
+    // (a detached row) the writer's default sink keeps the record.
+    const snap = deps.registry.snapshotById(host.runId);
+    const seal = deps.registry.seal(host.runId);
+    const summary = deps.registry.getById(host.runId);
+    const visibility = await deps.channelVisibilityOf(instance.channelId);
+    const finishedAt = snap?.finishedAt ?? at;
+    const record = assembleRunRecord({
+      run: { id: host.runId, ...(summary?.label !== undefined ? { label: summary.label } : {}) },
+      snap,
+      agent: "ship",
+      ...(summary?.model !== undefined ? { model: summary.model } : {}),
+      msg: {
+        channelId: instance.channelId,
+        userId: instance.userId,
+        threadKey: instance.threadKey,
+        ...(instance.sourceUrl !== undefined ? { sourceUrl: instance.sourceUrl } : {}),
+        ...(instance.userName !== undefined ? { userName: instance.userName } : {}),
+        ...(instance.authenticatedAs !== undefined ? { authenticatedAs: instance.authenticatedAs } : {}),
+      },
+      channelVisibility: visibility,
+      repo: instance.repo,
+      finishedAt,
+      status: body.outcome,
+      diagnosis: analyzeRunFriction(snap?.events ?? [], {
+        finished: true,
+        truncated: snap?.truncated ?? false,
+        window: { start: snap?.receivedAt ?? snap?.startedAt ?? instance.createdAt, end: finishedAt },
+      }),
+      seal,
+    });
+    const handle = deps.ledgerRuns().find((run) => run.runId === host.runId);
+    deps.runHistoryWriter.write(record, handle !== undefined ? { via: handle.sink } : undefined);
+  }
+  (deps.log ?? console.log)(`[coordinator] ${instance.id}: finished ${body.outcome} — record ${runId}`);
+  return json(200, { ok: true, runId, at });
 }
 
 /** What the brief composer reads through the bot: the target repository at the

@@ -676,8 +676,12 @@ export type RunEvent =
    *  and — for a repo run — the repo, ref, PR number and PR head as resolved
    *  BEFORE the first model turn (`RepoContext`). Published by the dispatcher
    *  right after `input`, once per run, so the run page can head its Request
-   *  block with linked `owner/repo · ref · #PR · sha`. Additive: every
-   *  consumer that only knows the other types keeps working. */
+   *  block with linked `owner/repo · ref · #PR · sha`. A HOSTED ship parent
+   *  (record 0060) carries a second one at the hand-off naming its runner
+   *  instance (`instanceId`): `run_meta` may repeat on such a run, and every
+   *  reader of a run's instance id resolves it from the LAST `run_meta`
+   *  carrying one. Additive: every consumer that only knows the other types
+   *  keeps working. */
   | {
       type: "run_meta";
       agent: string;
@@ -924,6 +928,25 @@ export type RunEvent =
        *  in force and the gated findings as `id (severity)` — a mismatch the
        *  child's own parser should have made impossible, kept visible. */
       gate?: { level: string; findings: string[] };
+      seq?: number;
+      at?: number;
+    }
+  /** A hosted ship parent's unit fact (record 0060; docs/reference/specs/agent-ship.md
+   *  item 17): the runner's routes write it to the parent run through the
+   *  coordinator's `hostPublish` — `unit-start` publishes state `started` with
+   *  the unit's thread key and lead, `round` the round's outcome as the unit's
+   *  state, `unit-end` the ending's kind with its report — carrying the pull
+   *  request number when the unit's row knows one. The run page draws it as a
+   *  step whose detail is the report; the friction analyzer counts it as a
+   *  side fact, never activity. Additive: unknown → ignored. */
+  | {
+      type: "ship_unit";
+      unit: string;
+      state: string;
+      threadKey?: string;
+      lead?: string;
+      report?: string;
+      pr?: number;
       seq?: number;
       at?: number;
     }

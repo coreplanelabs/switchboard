@@ -296,6 +296,8 @@ export function activityLine(e: RunEvent): string {
       return `round ${e.index} (${e.agent}): ${e.outcome}`; // published straight to the registry — never arrives here
     case "ship_handoff":
       return "handed to the plan runner"; // published straight to the registry — never arrives here
+    case "ship_unit":
+      return `unit ${e.unit}: ${e.state}`; // published straight to the registry — never arrives here
     case "route":
       return `routed to ${e.preset}`; // published straight to the registry — never arrives here
     case "refusal":

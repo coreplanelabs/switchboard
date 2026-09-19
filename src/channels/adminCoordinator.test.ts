@@ -7,10 +7,12 @@ import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceSt
 import type { CoordinatorInstance, CoordinatorTag, CoordinatorUnit } from "../core/coordinator/contract.js";
 import type { ChildContract } from "../core/ship/contract.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
-import { RunRegistry } from "../core/runRegistry.js";
+import { REPLAY_EVERYTHING, RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import { createLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
 import { hostKeyOf } from "../core/runLedger/hostKey.js";
+import { HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "../core/budgets.js";
 import { createRunsService } from "../core/runsService.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
@@ -157,6 +159,15 @@ function harness(
     clock: () => NOW + 1,
     ...(over.prices !== undefined ? { prices: over.prices } : {}),
   });
+  // The write-through this generation drives (record 0060): the hosted
+  // parent's ledger handle — its state carries the deadline the routes renew,
+  // its sink seals the record through the ledger.
+  const writeThrough = createLedgerWriteThrough({
+    ledger,
+    gen: "gen-A",
+    fallback: { put: (r) => store.put(r), abandoned: () => {} },
+    warn: () => {},
+  });
   const instances = new InMemoryCoordinatorInstanceStore();
   const dispatched: Array<{ msg: IncomingMessage; opts?: { coordinator: CoordinatorTag } }> = [];
   const replies: string[] = [];
@@ -171,6 +182,7 @@ function harness(
   const branches: Array<[string, string, string]> = [];
   const threadsAsked: Array<{ threadKey: string; userId: string; cardTs?: string }> = [];
   const written: RunRecord[] = [];
+  const sunk: Array<Promise<unknown>> = [];
   const merges: Array<{ pr: { repo: string; number: number }; opts: { sha: string; title: string } }> = [];
   const opens: Array<{ repo: string; headBranch: string; base: string; title: string; body: string }> = [];
   const compares: Array<[string, string, string]> = [];
@@ -183,6 +195,8 @@ function harness(
     instances,
     ...(over.runPageBase !== undefined ? { runPageBase: over.runPageBase } : {}),
     runs,
+    registry,
+    ledgerRuns: () => writeThrough.liveRuns(),
     dispatch: async (msg, dispatchIo, opts) => {
       dispatched.push({ msg, opts });
       return (over.script ?? registers("run-child"))(msg, dispatchIo, opts);
@@ -240,7 +254,13 @@ function harness(
       return over.merge ?? { ok: true, sha: "9".repeat(40) };
     },
     runHistoryWriter: {
-      write: (record: RunRecord) => void written.push(record),
+      // The real writer routes a record with `via` through that sink (the
+      // ledger's one-transaction finish); this stub does the same so a test
+      // can see the host key released. `sunk` holds the puts for awaiting.
+      write: (record: RunRecord, opts?: { via?: { put(r: RunRecord): Promise<unknown> } }) => {
+        written.push(record);
+        if (opts?.via) sunk.push(opts.via.put(record).catch(() => {}));
+      },
       pending: () => 0,
       settled: async () => {},
     } as unknown as RunHistoryWriter,
@@ -257,6 +277,8 @@ function harness(
     registry,
     store,
     ledger,
+    writeThrough,
+    sunk,
     instances,
     dispatched,
     replies,
@@ -1185,6 +1207,82 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     await h.instances.putUnits([unitRow("U10"), unitRow("U11")]);
     return h;
   }
+
+  /** The hosted parent as the ship branch leaves it after a tracked hand-off
+   *  (record 0060): the registry row live under the instance's `runId`, the
+   *  ledger row claimed under the HOST KEY with the metadata's thread, the
+   *  write-through subscribed, `hosting` set and a second `run_meta` naming
+   *  the instance. */
+  async function hostParent(h: ReturnType<typeof harness>, instance: CoordinatorInstance = PLAN_INSTANCE) {
+    const run = h.registry.create(
+      instance.label,
+      {
+        hosted: true,
+        agent: "ship",
+        channelId: instance.channelId,
+        userId: instance.userId,
+        threadKey: instance.threadKey,
+        channelVisibility: "public",
+        repo: instance.repo,
+        ...(instance.userName !== undefined ? { userName: instance.userName } : {}),
+      },
+      { id: instance.runId!, startedAt: instance.createdAt },
+    );
+    const opened = await h.writeThrough.open({
+      runId: run.id,
+      threadKey: hostKeyOf(instance.threadKey),
+      startedAt: instance.createdAt,
+      meta: {
+        hosted: true,
+        ...(instance.label !== undefined ? { label: instance.label } : {}),
+        agent: "ship",
+        channelId: instance.channelId,
+        userId: instance.userId,
+        threadKey: instance.threadKey,
+        channelVisibility: "public",
+        repo: instance.repo,
+      },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    if (opened.kind !== "tracked") throw new Error(`the host-key claim was not tracked: ${JSON.stringify(opened)}`);
+    h.registry.subscribe(run.id, run.token, {
+      onEvent: (event, seq) => opened.run.event(event, seq),
+      ...REPLAY_EVERYTHING,
+    });
+    opened.run.setState({ hosting: { instanceId: instance.id, until: NOW + 1 } });
+    h.registry.publish(run.id, { type: "run_meta", agent: "ship", model: "anthropic/m", at: NOW - 50_000 });
+    h.registry.publish(run.id, {
+      type: "run_meta",
+      agent: "ship",
+      model: "anthropic/m",
+      instanceId: instance.id,
+      at: NOW - 40_000,
+    });
+    return { run, ledgerRun: opened.run };
+  }
+
+  /** The instance's parent run claimed live under ANOTHER generation — what a
+   *  stale bot sees after a re-host: not in its registry, live on the ledger. */
+  const claimedElsewhere = (h: ReturnType<typeof harness>, instance: CoordinatorInstance = PLAN_INSTANCE) =>
+    h.ledger.claim({
+      runId: instance.runId!,
+      threadKey: hostKeyOf(instance.threadKey),
+      gen: "gen-OTHER",
+      leaseMs: 30_000,
+      startedAt: instance.createdAt,
+      meta: {
+        agent: "ship",
+        hosted: true,
+        channelId: instance.channelId,
+        userId: instance.userId,
+        threadKey: instance.threadKey,
+      },
+      card: null,
+      system: "",
+      tools: [],
+    });
 
   it("plan answers the instance's units with where each stands, who merges from the instance's field, the caps as clipped and the base; an instance without the field is a person's merge; an unknown instance is 404", async () => {
     const h = await planHarness();
@@ -2200,6 +2298,141 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     ).toBe(400);
   });
 
+  // Record 0060 — the runner's four routes write the pipeline's facts to
+  // the hosted parent through `hostPublish`, moving its deadline; a non-host
+  // answers `not_host`; an untracked pipeline writes nothing.
+  it("hostPublish through the routes — a run this registry holds: unit-start publishes ship_unit `started` with the thread and lead, round publishes ship_round and the unit's state, unit-end the ending with its report (still replied through the handle), all with increasing seq, the write-through mirrors them and hosting.until moves forward", async () => {
+    const opened: string[] = [];
+    const replies: string[] = [];
+    const h = await planHarness({
+      ioFor: () => ({ ...openingIo(opened), reply: async (t: string) => void replies.push(t) }),
+    });
+    const { run, ledgerRun } = await hostParent(h);
+    await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
+    await call(h, "round", {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      index: 0,
+      agent: "coding",
+      outcome: "started",
+    });
+    await call(h, "unit-end", {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      ending: { kind: "merge_ready", report: "✅ ready" },
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    });
+    const events = h.registry.snapshotById(run.id)!.events;
+    const published = events.filter((e) => e.type === "ship_unit" || e.type === "ship_round");
+    expect(published.map((e) => e.type)).toEqual(["ship_unit", "ship_round", "ship_unit", "ship_unit"]);
+    expect(published[0]).toMatchObject({ unit: "U10", state: "started", threadKey: "slack:C1:2.0" });
+    expect((published[0] as { lead?: string }).lead).toContain("U10");
+    expect(published[1]).toMatchObject({ index: 0, agent: "coding", outcome: "started" });
+    expect(published[2]).toMatchObject({ unit: "U10", state: "started", threadKey: "slack:C1:2.0" });
+    expect(published[3]).toMatchObject({ unit: "U10", state: "merge_ready", report: "✅ ready", pr: 7 });
+    // Increasing seq: the registry stamps each publish past the last.
+    const seqs = events.map((e) => e.seq!);
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(new Set(seqs).size).toBe(seqs.length);
+    // The report still reaches the unit's thread through the handle.
+    expect(replies).toContain("✅ ready");
+    // Every write moved the deadline: the caps' wall clock plus the margin, from the route's clock.
+    await ledgerRun.close(); // flush the write-through's mirror
+    expect(h.ledger.live.get(run.id)?.state.hosting).toEqual({
+      instanceId: PLAN_INSTANCE.id,
+      until: NOW + minutesToMs(45 + HOSTED_DEADLINE_MARGIN_MINUTES),
+    });
+    const mirrored = (h.ledger.events.get(run.id) ?? []).map((e) => e.type);
+    expect(mirrored.filter((t) => t === "ship_unit")).toHaveLength(3);
+    expect(mirrored.filter((t) => t === "ship_round")).toHaveLength(1);
+  });
+
+  it("a run live under another generation answers 409 not_host on every route and writes nothing — no round row, no ending, no record", async () => {
+    const h = await planHarness();
+    await claimedElsewhere(h);
+    const bodies: Array<Record<string, unknown>> = [
+      { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" },
+      { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", index: 0, agent: "coding", outcome: "started" },
+      { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", ending: { kind: "merge_ready", report: "r" } },
+      { parentInstanceId: PLAN_INSTANCE.id, outcome: "completed" },
+    ];
+    for (const [step, body] of (["unit-start", "round", "unit-end", "finish"] as const).map(
+      (s, i) => [s, bodies[i]!] as const,
+    )) {
+      expect(await call(h, step, body)).toEqual({ status: 409, body: { ok: false, error: "not_host", at: NOW } });
+    }
+    const rows = await h.instances.listUnits(PLAN_INSTANCE.id);
+    expect(rows[0]!.rounds).toEqual([]);
+    expect(rows[0]!.ending).toBeUndefined();
+    expect(h.written).toEqual([]);
+    expect(h.ledger.events.get("run-parent") ?? []).toEqual([]);
+  });
+
+  it("an untracked pipeline (no ledger row anywhere) publishes nothing and the routes answer as before — finish writes no record, the parent's was written at the hand-off", async () => {
+    const replies: Array<{ threadKey: string; text: string }> = [];
+    const closes: StatusUpdate[] = [];
+    const h = await planHarness({
+      ioFor: (thread) => ({
+        reply: async (text) => void replies.push({ threadKey: thread.threadKey, text }),
+        status: async () => ({ update: () => {}, done: async (frame) => void closes.push(frame) }),
+        history: async () => [],
+      }),
+    });
+    await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    expect(
+      (
+        await call(h, "round", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          index: 0,
+          agent: "coding",
+          outcome: "started",
+        })
+      ).status,
+    ).toBe(200);
+    expect(await call(h, "finish", { parentInstanceId: PLAN_INSTANCE.id, outcome: "completed" })).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-parent", at: NOW },
+    });
+    expect(h.written).toEqual([]);
+    expect(h.registry.getById("run-parent")).toBeNull();
+    // The card still closes and the seeded plan's summary still lands.
+    expect(closes).toHaveLength(1);
+    expect(replies.at(-1)?.threadKey).toBe(INSTANCE.threadKey);
+  });
+
+  it("a route body naming a run id other than the instance's publishes nothing and answers not_found", async () => {
+    const h = await planHarness();
+    const { run } = await hostParent(h);
+    const before = h.registry.snapshotById(run.id)!.events.length;
+    for (const [step, body] of [
+      ["unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", runId: "run-other" }],
+      [
+        "round",
+        {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          index: 0,
+          agent: "coding",
+          outcome: "started",
+          runId: "run-other",
+        },
+      ],
+      [
+        "unit-end",
+        { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", ending: { kind: "done", report: "r" }, runId: "run-other" },
+      ],
+      ["finish", { parentInstanceId: PLAN_INSTANCE.id, outcome: "completed", runId: "run-other" }],
+    ] as const) {
+      expect(await call(h, step, body as Record<string, unknown>)).toEqual({
+        status: 404,
+        body: { ok: false, error: "not_found" },
+      });
+    }
+    expect(h.registry.snapshotById(run.id)!.events).toHaveLength(before);
+    expect(h.written).toEqual([]);
+  });
+
   it("unit-end writes the ending and the pull request on the row, posts the report in the unit's thread and redraws the card; finish writes the parent's record from the rows, closes the card and tells the requesting thread the plan's summary", async () => {
     const replies: Array<{ threadKey: string; text: string }> = [];
     const closes: StatusUpdate[] = [];
@@ -2210,6 +2443,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
         history: async () => [],
       }),
     });
+    await hostParent(h);
     await h.instances.putUnits([
       unitRow("U10", {
         threadKey: "slack:C1:2.0",
@@ -2337,6 +2571,10 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
     });
 
+    // The hosted parent (record 0060): finish publishes the answer,
+    // finishes the registry row and seals the ONE record — the run's own
+    // stream, in seq order — through the ledger sink under the metadata's
+    // thread, releasing the host key.
     expect(await call(h, "finish", { parentInstanceId: PLAN_INSTANCE.id, outcome: "completed" })).toEqual({
       status: 200,
       body: { ok: true, runId: "run-parent", at: NOW },
@@ -2357,23 +2595,50 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       status: "completed",
       userName: "alice",
     });
+    // The run's own events, in seq order: the ship branch's two run_meta (the
+    // second naming the instance), each unit-end's ship_unit, the answer.
     expect(rec.events.map((e) => e.type)).toEqual([
       "run_meta",
-      "ship_round",
-      "ship_round",
-      "ship_round",
-      "ship_round",
+      "run_meta",
+      "ship_unit",
+      "ship_unit",
+      "ship_unit",
+      "ship_unit",
       "answer",
     ]);
-    expect(rec.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]);
-    // The record names the instance whose story it is (agent-ship item 17), so its page can list the units.
-    expect(rec.events[0]).toMatchObject({ type: "run_meta", agent: "ship", instanceId: PLAN_INSTANCE.id });
+    expect(rec.events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    // The record names the instance whose story it is (agent-ship item 17) in
+    // its LAST run_meta carrying one, so its page can list the units.
+    expect(rec.events[1]).toMatchObject({ type: "run_meta", agent: "ship", instanceId: PLAN_INSTANCE.id });
     expect(rec.parentInstanceId).toBeUndefined(); // the pipeline's own record is nobody's child
     const summary = rec.events.at(-1);
     expect(summary?.type === "answer" ? summary.text : "").toBe(
       "✅ U10 — merge_ready — https://github.com/acme/api/pull/7\n• U11 — not started",
     );
     expect(isRunRecord(rec)).toBe(true);
+    // The registry row finished and the record went through the ledger sink:
+    // the row goes with it, releasing the host key for the next `agent:ship`.
+    expect(h.registry.getById("run-parent")?.finished).toBe(true);
+    await Promise.all(h.sunk);
+    expect(h.ledger.live.get("run-parent")).toBeUndefined();
+    const nextClaim = await h.ledger.claim({
+      runId: "run-next",
+      threadKey: hostKeyOf(INSTANCE.threadKey),
+      gen: "gen-A",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta: {
+        agent: "ship",
+        hosted: true,
+        channelId: INSTANCE.channelId,
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+      },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    expect(nextClaim.ok).toBe(true);
     expect(closes).toHaveLength(1);
     expect(JSON.stringify(closes[0])).toContain("✅");
     expect(replies.at(-1)).toEqual({
@@ -2401,6 +2666,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       branch: "plan/warm-abc123/u1",
     };
     await h.instances.put(generated);
+    await hostParent(h, generated);
     await h.instances.putUnits([
       {
         instanceId: generated.id,
