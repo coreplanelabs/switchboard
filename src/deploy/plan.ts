@@ -45,6 +45,10 @@ import { profileUrls, type DeploymentProfile, type LoadedProfile, type WorkerKin
 /** Env vars removed from every deploy step's environment. */
 export const UNSET_ENV = ["CLOUDFLARE_ACCOUNT_ID"] as const;
 
+/** The deploy's force switch: bypasses the bot preflight (`--force` sets it for the step)
+ *  and overrides the supersede guard for a deliberate rollback (src/deploy/supersede.ts). */
+export const DEPLOY_FORCE_ENV = "SWITCHBOARD_DEPLOY_FORCE";
+
 export type WorkerName = "memory" | "bot" | "resident" | "sandbox";
 
 /** What a Worker is built from, beyond the import closure of its `entry`
@@ -246,7 +250,7 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
         { workspace: "deploy/cloudflare", includeDev: false },
       ],
     },
-    preflight: { forceEnv: "SWITCHBOARD_DEPLOY_FORCE", baseUrlEnv: "SWITCHBOARD_BASE_URL" },
+    preflight: { forceEnv: DEPLOY_FORCE_ENV, baseUrlEnv: "SWITCHBOARD_BASE_URL" },
     liveGate: { kind: "health" },
     // The preflight reads the container application and the deploy pushes the image: both need Containers.
     capabilities: [CONTAINERS_CAPABILITY],

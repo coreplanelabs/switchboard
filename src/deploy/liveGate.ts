@@ -55,7 +55,8 @@ export type ReadyDecision<Identity> =
 export type LiveDecision = ReadyDecision<{ commit: string }>;
 export type RestartDecision = ReadyDecision<{ startedAt: string }>;
 
-function servedCommit(body: HealthzBody): string | undefined {
+/** The `build.commit` a Worker's `/healthz` reports — the commit it serves; undefined when absent. */
+export function servedCommit(body: HealthzBody): string | undefined {
   const b = body.build;
   if (typeof b !== "object" || b === null) return undefined;
   const c = (b as { commit?: unknown }).commit;

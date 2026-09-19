@@ -39,7 +39,12 @@
 # `deploy all` retries a refusal every minute for its default budget and then
 # fails by name — it never proceeds over what refused, and this job never
 # re-dispatches itself. Any failure is red, for a person: once the runs finish,
-# `gh run rerun RUN_ID --failed` deploys.
+# `gh run rerun RUN_ID --failed` deploys. And a deploy never rolls an older
+# build over a newer one: the concurrency group below queues a second deploy
+# instead of racing it, and `deploy all` refuses a Worker whose live /healthz
+# commit already contains the commit being deployed — a queued re-run of a
+# superseded release fails by name instead of rolling production back
+# (release-and-deploy.md item 32; `force` overrides for a deliberate rollback).
 #
 # Secrets — declared below so a caller in another repository passes them by
 # name (`secrets:`); this repository's own call passes `secrets: inherit`. Set
