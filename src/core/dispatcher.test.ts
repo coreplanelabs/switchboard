@@ -102,7 +102,7 @@ import type { ClaimRequest, LiveRunRow, StepRecord } from "./runLedger/types.js"
 import { PermanentStoreError, RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 import { buildCoreCommands, defaultOperations } from "./commandCatalogue.js";
 import { cliWords, mcpToolName } from "./commandSurface.js";
-import { ROUTE_RECEIPT_CAP, type RouteModel, type RoutePrompt } from "./dispatch/route.js";
+import { HAND_BACK_CUT_NOTE, ROUTE_RECEIPT_CAP, type RouteModel, type RoutePrompt } from "./dispatch/route.js";
 import { capabilitiesFrom } from "./capabilities.js";
 import { NO_FLEET } from "./residentFleet.js";
 import { InMemoryCoordinatorInstanceStore } from "./coordinator/instanceStore.js";
@@ -16531,10 +16531,38 @@ describe("the command menu through dispatch() (record 0036 unit 2; record 0039)"
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("use that model for coding here", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toMatch(/^To run this: config set channel --models\.coding /);
+    const [line] = replies[0]!.split("\n");
+    expect(line).toMatch(/^To run this: config set channel --models\.coding /);
     expect(replies[0]).not.toContain(token);
-    expect(replies[0]!.length).toBeLessThanOrEqual("To run this: ".length + ROUTE_RECEIPT_CAP + 1);
+    expect(line!.length).toBeLessThanOrEqual("To run this: ".length + ROUTE_RECEIPT_CAP + 1);
     expect(deps.invoked).toEqual([]);
+  });
+
+  it("a hand-back whose chat form was cut at the cap carries one second line: cut at the cap, not runnable as pasted, spell the long option by hand", async () => {
+    const { deps } = wired();
+    const long = `anthropic/${"x".repeat(ROUTE_RECEIPT_CAP + 100)}`;
+    deps.routeModel = call("config_set", { scope: "channel", models: { coding: long } });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("use that long model name for coding here", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    const lines = replies[0]!.split("\n");
+    expect(lines).toHaveLength(2);
+    // The first line is exactly the capped hand-back — the web home page
+    // recognizes it and the record keeps the same capped receipt.
+    expect(lines[0]).toMatch(/^To run this: config set channel --models\.coding anthropic\/x+…$/);
+    expect(lines[0]!.length).toBe("To run this: ".length + ROUTE_RECEIPT_CAP + 1);
+    expect(lines[1]).toBe(HAND_BACK_CUT_NOTE);
+    expect(HAND_BACK_CUT_NOTE).toContain(`cut at ${ROUTE_RECEIPT_CAP} characters`);
+    expect(deps.invoked).toEqual([]);
+  });
+
+  it("a hand-back under the cap has no second line", async () => {
+    const { deps } = wired();
+    deps.routeModel = call("config_set", { scope: "channel", models: { coding: "anthropic/claude-opus-5" } });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io);
+    expect(replies).toEqual(["To run this: config set channel --models.coding anthropic/claude-opus-5"]);
+    expect(replies[0]).not.toContain("\n");
   });
 
   it("a thread naming a repository puts it in the router's user turn as a fact", async () => {
@@ -16706,14 +16734,17 @@ describe("the door's counts through dispatch(): a hand-back and its paste are ru
     deps.routeModel = call("config_set", { scope: "channel", models: { coding: long } });
     const first = fakeIO();
     await dispatch(deps, msg("use that long model name for coding here", "slack:UADMIN"), first.io);
-    expect(first.replies[0]).toMatch(/^To run this: config set channel --models\.coding anthropic\/x+…$/);
+    // The reply's first line is the capped hand-back; its second is the cut
+    // note (the receipt on the record stays the first line's, capped).
+    const handBackLine = first.replies[0]!.split("\n")[0]!;
+    expect(handBackLine).toMatch(/^To run this: config set channel --models\.coding anthropic\/x+…$/);
     const { io } = fakeIO();
     await dispatch(deps, msg(`config set channel --models.coding ${long}`, "slack:UADMIN"), io);
     expect(deps.invoked).toEqual(["config.set"]);
     expect(registry.snapshotById("r2")?.events.find((e) => e.type === "route")).toMatchObject({
       outcome: "pasted",
       handBackRunId: "r1",
-      receipt: first.replies[0]!.slice("To run this: ".length),
+      receipt: handBackLine.slice("To run this: ".length),
     });
   });
 
