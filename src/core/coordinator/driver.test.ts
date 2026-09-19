@@ -157,6 +157,7 @@ function bot(script: Partial<Record<CoordinatorStepRoute, Scripted[]>>) {
   const queues: Partial<Record<CoordinatorStepRoute, Scripted[]>> = Object.fromEntries(
     Object.entries(script).map(([k, v]) => [k, [...(v ?? [])]]),
   );
+  let lastPlan: BotReply | undefined;
   const client: CoordinatorBot = {
     async step(route, body) {
       calls.push({ route, body });
@@ -167,9 +168,14 @@ function bot(script: Partial<Record<CoordinatorStepRoute, Scripted[]>>) {
       // machine's own (src/core/ship/coordinator.test.ts).
       if (next === undefined && route === "checks" && queues.checks === undefined)
         return ok({ ok: true, checks: { total: 2, pending: [], failed: [] } }, T0 + 20 * MIN);
+      // The walk re-reads its selection at every unit boundary (the orchestration-plane plan): a test
+      // that scripts one plan answer keeps its selection — the last answer is
+      // replayed — and one probing the re-read scripts more.
+      if (next === undefined && route === "plan" && lastPlan !== undefined) return lastPlan;
       if (next === undefined) throw new Error(`the test scripted no ${route} answer for ${JSON.stringify(body)}`);
       const answer = typeof next === "function" ? next(body) : next;
       if (answer instanceof Error) throw answer;
+      if (route === "plan" && !(answer instanceof Error)) lastPlan = answer;
       return answer;
     },
   };
@@ -218,6 +224,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "U10/1/review/checks/1",
       "U10/merge/1",
       "U10/end",
+      "plan/2",
       "finish",
     ]);
     // The merge is asked for at exactly the head the review approved.
@@ -252,8 +259,9 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       },
       { kind: "wait", name: "U10/1/review/wait/1/resumed", type: "child-resumed-run-r1", timeout: WAIT_CHUNK_MS },
     ]);
-    // What the bot was asked, in the machine's words.
-    expect(b.of("plan")).toEqual([{ parentInstanceId: INSTANCE }]);
+    // What the bot was asked, in the machine's words — the plan twice: the
+    // opening read and the unit boundary's re-read of the selection.
+    expect(b.of("plan")).toEqual([{ parentInstanceId: INSTANCE }, { parentInstanceId: INSTANCE }]);
     expect(b.of("unit-start")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10" }]);
     expect(b.of("branch")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10" }]);
     expect(b.of("spawn")).toEqual([
@@ -382,6 +390,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "U10/s2/1/review/checks/1",
       "U10/s2/end/pr-facts",
       "U10/s2/end",
+      "plan/2",
       "finish",
     ]);
     // Segment two's coding child is briefed as a continuation from the recorded sha and the previous run.
@@ -779,7 +788,14 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     const summary = await runPlan(s.runner, b.client, INSTANCE);
     expect(summary.units).toEqual({ U10: "merge_refused" });
     expect(summary.outcome).toBe("failed");
-    expect(s.names().slice(-5)).toEqual(["U10/merge/1", "U10/merge/wait/1", "U10/merge/2", "U10/end", "finish"]);
+    expect(s.names().slice(-6)).toEqual([
+      "U10/merge/1",
+      "U10/merge/wait/1",
+      "U10/merge/2",
+      "U10/end",
+      "plan/2",
+      "finish",
+    ]);
     // The wait is `waitForEvent` typed with the approved head — the intake's
     // event, not a poll — with one chunk (the old poll cadence) as the fallback
     // timeout, so an undelivered event never slows the door's re-ask.
@@ -966,6 +982,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "U10/note/2",
       "U10/1/review",
       "U10/end",
+      "plan/2",
       "finish",
     ]);
     expect(s.taken.find((t) => t.name === "U10/0/coding/busy/1")).toEqual({
@@ -1172,6 +1189,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "U10/2/review/checks/1",
       "U10/merge/1",
       "U10/end",
+      "plan/2",
       "finish",
     ]);
     expect(s.names().some((n) => /\/fix\b/.test(n))).toBe(false);
@@ -1415,7 +1433,127 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     });
   });
 
-  it("transientRefusal: the answers the bot itself calls a passing condition — GitHub unavailable, no channel to rebuild the thread on, a unit not yet started, a bot that is not the host — are a reason to retry the step; every other answer, refusals included, is the machine's to judge", () => {
+  it("a 409 queued on the spawn step — the plane holds the child's admission (record 0064) — is a passing condition like not_host: the spawn is re-asked under its own policy, never thrown out of the machine or read as its return, and the plan completes once the child is admitted", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [
+        ok({ ok: false, error: "queued", message: "position 1" }, T0, 409),
+        spawned("run-c0", T0 + MIN),
+        spawned("run-r1", T0 + 10 * MIN),
+      ],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+      round: [acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 21 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 21 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merged" });
+    expect(summary.outcome).toBe("completed");
+    // The queued answer was a retry of the same spawn step — one step name,
+    // two attempts — never a busy wait, a refusal or a failed instance.
+    expect(s.attempts["U10/0/coding"]).toBe(2);
+    expect(s.names().filter((n) => n === "U10/0/coding")).toHaveLength(1);
+    expect(s.names().some((n) => n.startsWith("U10/0/coding/busy"))).toBe(false);
+  });
+
+  it("a selection that grows mid-walk (the orchestration-plane plan): the unit boundary's re-read — its own `plan/<n>` step — finds a unit appended to the rows and walks it after the current one", async () => {
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U10/1/review/wait/1": "event",
+      "U11/0/coding/wait/1": "event",
+      "U11/1/review/wait/1": "event",
+    });
+    const b = bot({
+      plan: [
+        planAnswer([row("U10")]),
+        // The boundary's re-read: a later bot appended U11 while U10 ran.
+        planAnswer([row("U10"), row("U11", { dependsOn: ["U10"] })], T0 + 22 * MIN),
+      ],
+      "unit-start": [started("U10"), started("U11", T0 + 22 * MIN)],
+      branch: [branched("U10"), branched("U11", T0 + 22 * MIN)],
+      spawn: [
+        spawned("run-c0"),
+        spawned("run-r1", T0 + 10 * MIN),
+        spawned("run-c1", T0 + 23 * MIN),
+        spawned("run-r2", T0 + 33 * MIN),
+      ],
+      "read-record": [
+        codingDone("run-c0", T0 + 10 * MIN),
+        reviewApproved("run-r1", T0 + 20 * MIN),
+        codingDone("run-c1", T0 + 33 * MIN),
+        reviewApproved("run-r2", T0 + 43 * MIN),
+      ],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN), prNone(T0 + 22 * MIN), prOpen(T0 + 33 * MIN)],
+      round: Array.from({ length: 8 }, () => acked()),
+      merge: [
+        ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN),
+        ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 44 * MIN),
+      ],
+      "unit-end": [acked(), acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merged", U11: "merged" });
+    expect(summary.outcome).toBe("completed");
+    // Three reads: the opening one and one per unit boundary, each its own
+    // durable step; the appended unit started only after the re-read saw it.
+    expect(s.names().filter((n) => n === "plan" || n.startsWith("plan/"))).toEqual(["plan", "plan/2", "plan/3"]);
+    expect(s.names().indexOf("U11/start")).toBeGreaterThan(s.names().indexOf("plan/2"));
+    expect(b.of("plan")).toHaveLength(3);
+  });
+
+  it("a selection that shrinks (the orchestration-plane plan): a unit gone from the rows at the boundary's re-read — merged by hand — is walked as merged with nothing run and nothing told for it, and a dependency on it counts satisfied like any dependency outside the selection", async () => {
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U10/1/review/wait/1": "event",
+      "U12/0/coding/wait/1": "event",
+      "U12/1/review/wait/1": "event",
+    });
+    const b = bot({
+      plan: [
+        planAnswer([row("U10"), row("U11"), row("U12", { dependsOn: ["U11"] })]),
+        // The re-read after U10: U11 was merged by hand and its row removed;
+        // U12's row keeps naming it, a dependency now outside the selection.
+        planAnswer([row("U10"), row("U12", { dependsOn: ["U11"] })], T0 + 22 * MIN),
+      ],
+      "unit-start": [started("U10"), started("U12", T0 + 22 * MIN)],
+      branch: [branched("U10"), branched("U12", T0 + 22 * MIN)],
+      spawn: [
+        spawned("run-c0"),
+        spawned("run-r1", T0 + 10 * MIN),
+        spawned("run-c1", T0 + 23 * MIN),
+        spawned("run-r2", T0 + 33 * MIN),
+      ],
+      "read-record": [
+        codingDone("run-c0", T0 + 10 * MIN),
+        reviewApproved("run-r1", T0 + 20 * MIN),
+        codingDone("run-c1", T0 + 33 * MIN),
+        reviewApproved("run-r2", T0 + 43 * MIN),
+      ],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN), prNone(T0 + 22 * MIN), prOpen(T0 + 33 * MIN)],
+      round: Array.from({ length: 8 }, () => acked()),
+      merge: [
+        ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN),
+        ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 44 * MIN),
+      ],
+      "unit-end": [acked(), acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    // The hand-merged unit reads merged in the summary — walked as merged —
+    // and its dependent ran on the assertion its removal makes.
+    expect(summary.units).toEqual({ U10: "merged", U11: "merged", U12: "merged" });
+    expect(summary.outcome).toBe("completed");
+    expect(s.names().some((n) => n.startsWith("U11/"))).toBe(false);
+    expect((b.of("unit-end") as Array<{ unit: string }>).map((e) => e.unit)).toEqual(["U10", "U12"]);
+  });
+
+  it("transientRefusal: the answers the bot itself calls a passing condition — GitHub unavailable, no channel to rebuild the thread on, a unit not yet started, a bot that is not the host, a spawn the plane holds queued — are a reason to retry the step; every other answer, refusals included, is the machine's to judge", () => {
     expect(transientRefusal(answer({ ok: false, error: "github_unavailable", message: "HTTP 502" }, T0, 502))).toBe(
       "the bot answered github_unavailable: HTTP 502",
     );
@@ -1425,6 +1563,9 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     );
     expect(transientRefusal(answer({ ok: false, error: "unit_not_started" }, T0, 409))).toContain("unit_not_started");
     expect(transientRefusal(answer({ ok: false, error: "not_host" }, T0, 409))).toBe("the bot answered not_host");
+    expect(transientRefusal(answer({ ok: false, error: "queued", message: "position 2" }, T0, 409))).toBe(
+      "the bot answered queued: position 2",
+    );
     expect(transientRefusal(answer({ ok: false, error: "busy" }, T0, 409))).toBeUndefined();
     expect(transientRefusal(answer({ ok: false, error: "agent_allowlist" }, T0, 403))).toBeUndefined();
     expect(transientRefusal(answer({ ok: false, error: "spawn_failed", message: "x" }, T0, 502))).toBeUndefined();
@@ -1594,6 +1735,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       "task/1/review/checks/1",
       "task/end/pr-facts",
       "task/end",
+      "plan/2",
       "finish",
     ]);
     // The one pr-check is the ending's facts read at the approved head — no
@@ -1738,11 +1880,12 @@ describe("the plan runner's driver — a unit whose pull request already merged 
       units: { U10: "merged", U11: "merged" },
       outcome: "completed",
     });
-    expect(s.names().slice(0, 7)).toEqual([
+    expect(s.names().slice(0, 8)).toEqual([
       "plan",
       "U10/start",
       "U10/pr-check",
       "U10/end",
+      "plan/2",
       "U11/start",
       "U11/pr-check",
       "U11/branch",
@@ -1808,6 +1951,7 @@ describe("the plan runner's driver — a unit whose pull request already merged 
       "U10/0/coding/pr-check",
       "U10/note/2",
       "U10/end",
+      "plan/2",
       "finish",
     ]);
     expect(b.of("round")).toEqual([
