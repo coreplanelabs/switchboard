@@ -218,7 +218,11 @@ export async function composeChild(
       // named to the reviewer as dropped.
       let prior: { findings: Finding[]; dispositions: FindingDisposition[]; dropped: string[] } | undefined;
       if (brief.prior !== undefined) {
-        const findings = (await facts(readers, brief.prior.reviewRunId)).findings ?? [];
+        // The prior round's check findings ride the brief by value (record
+        // 0055): they sit on no run's record, so they join the review run's
+        // own findings here — the coding run's dispositions match them by id
+        // exactly as a reviewer's.
+        const findings = [...((await facts(readers, brief.prior.reviewRunId)).findings ?? []), ...(brief.checks ?? [])];
         const recorded =
           brief.prior.codingRunId !== undefined
             ? ((await facts(readers, brief.prior.codingRunId)).dispositions ?? [])
@@ -243,9 +247,16 @@ export async function composeChild(
     }
     case "findings": {
       const review = await facts(readers, brief.reviewRunId);
+      // The round's check findings (record 0055) join the reviewer's: they sit
+      // on no run's record, so the brief carries them by value and the coding
+      // session answers them with dispositions exactly as a reviewer's.
       return {
         preset: "coding",
-        prompt: findingsRequest({ where, findings: review.findings ?? [], review: review.finalReply ?? "" }),
+        prompt: findingsRequest({
+          where,
+          findings: [...(review.findings ?? []), ...(brief.checks ?? [])],
+          review: review.finalReply ?? "",
+        }),
         ref: unit.branch,
       };
     }

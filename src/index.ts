@@ -112,10 +112,12 @@ import { createAdminCoordinatorHandler, isCoordinatorAdminPath } from "./channel
 import { createGithubWebhookHandler, GITHUB_WEBHOOK_PATH } from "./channels/githubWebhook.js";
 import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
 import { processShimOptions, shimWorkflowSender } from "./core/coordinator/instancesClient.js";
+import { classifyRoundChecks } from "./core/ship/checkFindings.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
 import {
   commitsOverBase,
   createBranchRef,
+  fetchCheckRunDetails,
   fetchCommitChecks,
   fetchPullRequestFacts,
   fixupCommitSubjects,
@@ -124,6 +126,8 @@ import {
   findOpenPrByHead,
   mergePullRequest,
   openPullRequest,
+  pullRequestChangedPaths,
+  rerunFailedJobs,
 } from "./execution/githubPulls.js";
 import { RestGithubApi } from "./execution/githubApi.js";
 import { resolveGithubIdentity } from "./execution/githubApp.js";
@@ -852,6 +856,16 @@ export async function runBot(): Promise<void> {
       runHistoryWriter,
       channelVisibilityOf: (channelId) => channelVisibilityOf(deps, channelId),
       noteMergeWait: (headSha, instanceId, at) => mergeWaits.note(headSha, instanceId, at),
+      // The round's checks step (record 0055): the runs at the reviewed head
+      // classified against the pull request's changed paths, and the flake
+      // rule's one re-run of the failed jobs behind them.
+      fetchRoundChecks: async (repo, sha, prNumber) => {
+        const runs = await fetchCheckRunDetails(repo, sha);
+        if (runs === undefined) return undefined;
+        const changed = await pullRequestChangedPaths({ repo, number: prNumber });
+        return classifyRoundChecks(runs, changed);
+      },
+      rerunFailedChecks: rerunFailedJobs,
     });
     // Scheduled jobs arrive through /ingress like any other caller: the
     // Worker shim (deploy/cloudflare/worker.ts) POSTs each `run` schedule's

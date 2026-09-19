@@ -397,6 +397,10 @@ export type ShipRoundOutcome =
   | "approve"
   | "request_changes"
   | "no_verdict"
+  /** The round's checks step read a failed check at the reviewed head (record
+   *  0055): the failures become check findings and the findings step runs as
+   *  for any changes-requested round. */
+  | "checks_failed"
   | "aborted"
   | "stopped"
   /** The coding round ended at its lease with the unit unfinished and the row

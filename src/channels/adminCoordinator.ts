@@ -69,7 +69,13 @@ import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore
 import type { DispatchOptions } from "../core/dispatcher.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { childRequestText } from "../core/dispatch/spawn.js";
-import { CHANGES_TOKEN, isAddressSeverity, LGTM_TOKEN, type ReviewVerdictKind } from "../core/reviewVerdict.js";
+import {
+  CHANGES_TOKEN,
+  isAddressSeverity,
+  LGTM_TOKEN,
+  type Finding,
+  type ReviewVerdictKind,
+} from "../core/reviewVerdict.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent, ShipRoundOutcome } from "../core/runEvents.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
@@ -78,7 +84,7 @@ import type { RunRegistry } from "../core/runRegistry.js";
 import type { LedgerRun } from "../core/runLedger/writeThrough.js";
 import type { HostingState } from "../core/runLedger/types.js";
 import type { RunsService, RunView } from "../core/runsService.js";
-import { parsePlanBranch, type Brief } from "../core/ship/coordinator.js";
+import { parsePlanBranch, type Brief, type RoundChecks } from "../core/ship/coordinator.js";
 import { isHandoffShape, renderHandoffComment, type Handoff } from "../core/ship/handoff.js";
 import { normalizeHead, sameCommit } from "../core/reviewedHead.js";
 import {
@@ -199,8 +205,21 @@ export interface AdminCoordinatorDeps {
   ) => Promise<MergeResult>;
   /** Records "this instance's merge step waits at this head" on every `pending`
    *  answer — the check-run intake's address book (checksIntake.ts,
-   *  http-ingress.md item 12). Optional: without it the bounded wait stands alone. */
+   *  http-ingress.md item 12). The round's checks step registers through the
+   *  same book, so one settled head wakes both waits. Optional: without it the
+   *  bounded wait stands alone. */
   noteMergeWait?: (headSha: string, instanceId: string, at: number) => void;
+  /** The round's checks read (record 0055): the check runs at the reviewed
+   *  head with each failure classified against the pull request's changed
+   *  paths (githubPulls.fetchCheckRunDetails + checkFindings.classifyRoundChecks).
+   *  Optional: without it the step falls back to `fetchCommitChecks`, every
+   *  failure a real one — the flake rule simply never fires. */
+  fetchRoundChecks?: (repo: string, sha: string, prNumber: number) => Promise<RoundChecks | undefined>;
+  /** The flake rule's one re-run (record 0055): re-run the failed jobs behind
+   *  the named check runs at the head (githubPulls.rerunFailedJobs — the same
+   *  `rerun-failed-jobs` retry the deploy pipeline documents). Optional:
+   *  without it a retry ask answers false and the second read makes the finding. */
+  rerunFailedChecks?: (repo: string, sha: string, names: string[]) => Promise<boolean>;
   /** Where the parent's record goes when the instance ends. */
   runHistoryWriter: RunHistoryWriter;
   /** The channel's visibility stamp for that record (dispatch/record.ts `channelVisibilityOf`). */
@@ -249,6 +268,38 @@ function parseBrief(v: unknown): Parsed<Brief> {
     typeof b[key] === "string" && RUN_ID_PATTERN.test(b[key] as string)
       ? { ok: true, value: b[key] as string }
       : invalid(`brief.${key} must be a run id`);
+  // The round's check findings, carried by value (record 0055): finding rows
+  // whose id is `check:<name>` and whose severity is the ladder's `blocking`.
+  // The parsed rows carry `check: true` — machine provenance by construction
+  // here — though the sender's own flag is not required, so a brief from a
+  // Workflow instance deployed before the flag still parses across a roll.
+  const checkRows = (): Parsed<Finding[] | undefined> => {
+    if (b.checks === undefined) return { ok: true, value: undefined };
+    if (
+      !Array.isArray(b.checks) ||
+      !b.checks.every(
+        (f: unknown) =>
+          typeof f === "object" &&
+          f !== null &&
+          typeof (f as Finding).id === "string" &&
+          (f as Finding).id.startsWith("check:") &&
+          (f as Finding).severity === "blocking" &&
+          typeof (f as Finding).file === "string" &&
+          typeof (f as Finding).title === "string",
+      )
+    )
+      return invalid("brief.checks must be check-finding rows (id check:<name>, severity blocking)");
+    return {
+      ok: true,
+      value: (b.checks as Finding[]).map((f) => ({
+        id: f.id,
+        severity: f.severity,
+        file: f.file,
+        title: f.title,
+        check: true as const,
+      })),
+    };
+  };
   switch (b.kind) {
     case "contract": {
       const r = b.rebase as Record<string, unknown> | undefined;
@@ -279,6 +330,8 @@ function parseBrief(v: unknown): Parsed<Brief> {
           ...(p.codingRunId !== undefined ? { codingRunId: p.codingRunId as string } : {}),
         };
       }
+      const checks = checkRows();
+      if (!checks.ok) return checks;
       return {
         ok: true,
         value: {
@@ -288,6 +341,7 @@ function parseBrief(v: unknown): Parsed<Brief> {
           ...(b.headSha !== undefined ? { headSha: b.headSha as string } : {}),
           round: b.round,
           ...(prior ? { prior } : {}),
+          ...(checks.value !== undefined ? { checks: checks.value } : {}),
         },
       };
     }
@@ -296,7 +350,18 @@ function parseBrief(v: unknown): Parsed<Brief> {
       if (!n.ok) return n;
       const review = runId("reviewRunId");
       if (!review.ok) return review;
-      return { ok: true, value: { kind: "findings", unit: b.unit, pr: n.value, reviewRunId: review.value } };
+      const checks = checkRows();
+      if (!checks.ok) return checks;
+      return {
+        ok: true,
+        value: {
+          kind: "findings",
+          unit: b.unit,
+          pr: n.value,
+          reviewRunId: review.value,
+          ...(checks.value !== undefined ? { checks: checks.value } : {}),
+        },
+      };
     }
     default:
       return invalid("brief.kind must be contract, review or findings");
@@ -1342,6 +1407,7 @@ const ROUND_OUTCOMES: readonly ShipRoundOutcome[] = [
   "approve",
   "request_changes",
   "no_verdict",
+  "checks_failed",
   "aborted",
   "stopped",
 ];
@@ -1859,6 +1925,67 @@ async function merge(
   return json(200, { ok: true, outcome: "merged", sha: merged.sha, at });
 }
 
+/** The round's checks step (record 0055, agent-ship item 9): the check runs
+ *  at the reviewed head, read with the merge door's own reading and classified
+ *  for the flake rule — or, on a `retry` ask, the one re-run of the named
+ *  failed checks' jobs. A pending or unreported head registers the instance in
+ *  the merge-wait book so the intake's `checks-settled-<head>` event wakes the
+ *  machine's bounded wait; an unreadable GitHub leaves `checks` out, which the
+ *  machine treats as pending. The machine — never this route — decides what a
+ *  failure becomes: a check finding, a spent re-run, or a wait. */
+async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
+  const id = parseInstanceId(body.parentInstanceId);
+  if (!id.ok) return json(400, { ok: false, error: id.error });
+  if (typeof body.unit !== "string" || !UNIT_ID.test(body.unit))
+    return json(400, { ok: false, error: "unit must be a unit id" });
+  if (typeof body.prNumber !== "number" || !Number.isInteger(body.prNumber) || body.prNumber < 1)
+    return json(400, { ok: false, error: "prNumber must be a pull request number" });
+  const headSha = normalizeHead(body.headSha);
+  if (headSha === undefined) return json(400, { ok: false, error: "headSha must be the reviewed head (7 to 40 hex)" });
+  const at = (deps.clock ?? systemClock)();
+  const instance = await deps.instances.get(id.value);
+  if (!instance) return json(404, { ok: false, error: "unknown_instance" });
+  const unit = await unitRowOf(deps, instance, body.unit);
+  if (!unit.ok) return unit.response;
+  const log = deps.log ?? console.log;
+  if (body.retry !== undefined) {
+    if (!Array.isArray(body.retry) || body.retry.length === 0 || !body.retry.every((n) => typeof n === "string"))
+      return json(400, { ok: false, error: "retry must name the failed checks" });
+    const retried = (await deps.rerunFailedChecks?.(instance.repo, headSha, body.retry as string[])) ?? false;
+    log(
+      `[coordinator] ${instance.id} ${body.unit}: flake re-run ${retried ? "dispatched" : "not dispatched"} for ${(body.retry as string[]).join(", ")} at ${headSha.slice(0, 7)}`,
+    );
+    return json(200, { ok: true, retried, at });
+  }
+  let checks: RoundChecks | undefined;
+  if (deps.fetchRoundChecks !== undefined) {
+    checks = await deps.fetchRoundChecks(instance.repo, headSha, body.prNumber).catch(() => undefined);
+  } else {
+    // The fallback reading: the merge door's own, every failure a real one.
+    const plain = await deps.fetchCommitChecks(instance.repo, headSha).catch(() => undefined);
+    checks =
+      plain === undefined
+        ? undefined
+        : {
+            total: plain.total,
+            pending: plain.pending,
+            failed: plain.failed.map((name) => ({ name, conclusion: "failure" })),
+          };
+  }
+  // A head still pending (or with no check reported) is what the machine's
+  // checks wait rides: register it so the intake's settled event wakes it
+  // (http-ingress item 12), exactly as the merge step's pending answer does.
+  if (checks === undefined || checks.pending.length > 0 || checks.total === 0)
+    deps.noteMergeWait?.(headSha, id.value, at);
+  if (checks !== undefined && checks.failed.length > 0)
+    log(
+      `[coordinator] ${instance.id} ${body.unit}: CI red at ${headSha.slice(0, 7)} — ${checks.failed
+        .map((f) => `${f.name} (${f.conclusion}${f.flakeSuspect === true ? ", suspected flake" : ""})`)
+        .join(", ")}`,
+    );
+  return json(200, { ok: true, ...(checks !== undefined ? { checks } : {}), at });
+}
+
 const ENDING_ICON: Readonly<Record<string, string>> = {
   merged: "✅",
   merge_ready: "✅",
@@ -2008,6 +2135,7 @@ type Step =
   | "pr-check"
   | "round"
   | "unit-end"
+  | "checks"
   | "merge"
   | "finish";
 const STEPS: readonly Step[] = [
@@ -2020,6 +2148,7 @@ const STEPS: readonly Step[] = [
   "pr-check",
   "round",
   "unit-end",
+  "checks",
   "merge",
   "finish",
 ];
@@ -2077,6 +2206,8 @@ export async function answerCoordinatorStep(
       return round(parsed.value, deps);
     case "unit-end":
       return unitEnd(parsed.value, deps);
+    case "checks":
+      return checksStep(parsed.value, deps);
     case "merge":
       return merge(parsed.value, deps, door.subject);
     default:

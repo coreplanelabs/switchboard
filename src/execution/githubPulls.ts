@@ -1,4 +1,5 @@
 import { resolveGithubToken } from "./githubApp.js";
+import type { CheckRunDetail } from "../core/ship/checkFindings.js";
 import { redactAndCap } from "../core/redact.js";
 
 // Opening and editing pull requests from the bot process (agent:ship
@@ -666,6 +667,133 @@ export async function fixupCommitSubjects(pr: { repo: string; number: number }):
     if (FIXUP_SUBJECT.test(subject)) subjects.push(subject);
   }
   return subjects;
+}
+
+/** `GET /repos/{repo}/commits/{sha}/check-runs` (one page of 100) → the check
+ *  runs at the sha with their conclusions, URLs and output words — what the
+ *  ship round's `checks` step classifies (record 0055) — or undefined when
+ *  GitHub cannot be read or the answer is not the route's. Never throws. */
+export async function fetchCheckRunDetails(repo: string, sha: string): Promise<CheckRunDetail[] | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/commits/${sha}/check-runs?per_page=100`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as { check_runs?: unknown } | null;
+  if (!data || !Array.isArray(data.check_runs)) return undefined;
+  const details: CheckRunDetail[] = [];
+  for (const run of data.check_runs as Array<{
+    name?: unknown;
+    status?: unknown;
+    conclusion?: unknown;
+    html_url?: unknown;
+    details_url?: unknown;
+    output?: { title?: unknown; summary?: unknown; text?: unknown };
+  }>) {
+    const output = [run.output?.title, run.output?.summary, run.output?.text]
+      .filter((v): v is string => typeof v === "string")
+      .join("\n")
+      .slice(0, CHECK_OUTPUT_MAX);
+    const url = typeof run.html_url === "string" ? run.html_url : undefined;
+    const detailsUrl = typeof run.details_url === "string" ? run.details_url : undefined;
+    details.push({
+      name: typeof run.name === "string" ? run.name : "(unnamed)",
+      status: typeof run.status === "string" ? run.status : "completed",
+      ...(typeof run.conclusion === "string" ? { conclusion: run.conclusion } : {}),
+      ...(url !== undefined ? { url } : detailsUrl !== undefined ? { url: detailsUrl } : {}),
+      ...(output.length > 0 ? { output } : {}),
+    });
+  }
+  return details;
+}
+
+/** How much of a check run's output the classifier reads: enough for the
+ *  timeout line and the shard's test file names, bounded so a verbose
+ *  reporter's whole log never rides an admin answer. */
+const CHECK_OUTPUT_MAX = 4000;
+
+/** `GET /repos/{repo}/pulls/{n}/files` (one page of 100) → the pull request's
+ *  changed paths — what the flake rule's "never touch" is judged against — or
+ *  undefined when GitHub cannot be read. Never throws. */
+export async function pullRequestChangedPaths(pr: { repo: string; number: number }): Promise<string[] | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}/files?per_page=100`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as unknown;
+  if (!Array.isArray(data)) return undefined;
+  return (data as Array<{ filename?: unknown }>)
+    .map((f) => f.filename)
+    .filter((f): f is string => typeof f === "string");
+}
+
+const ACTIONS_RUN_URL = /\/actions\/runs\/(\d+)/;
+
+/** The flake rule's one re-run (record 0055). A check run hosted on GitHub
+ *  Actions carries an Actions run in its details URL: its FAILED jobs are
+ *  re-run — `POST …/actions/runs/{id}/rerun-failed-jobs`, the same retry the
+ *  deploy pipeline documents for a red deploy leg. Any other check run (this
+ *  repository's primary CI legs run in Depot CI, whose check runs carry
+ *  depot.dev details URLs) is re-requested through GitHub's check-run
+ *  rerequest — `POST …/check-runs/{id}/rerequest`, which asks the app that
+ *  created the run to run it again. True only when a dispatch was found for
+ *  the named checks and every one was accepted. Never throws. */
+export async function rerunFailedJobs(repo: string, sha: string, names: string[]): Promise<boolean> {
+  const token = await resolveGithubToken().catch(() => null);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/commits/${sha}/check-runs?per_page=100`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return false;
+  }
+  if (!res.ok) return false;
+  const data = (await res.json().catch(() => null)) as { check_runs?: unknown } | null;
+  if (!data || !Array.isArray(data.check_runs)) return false;
+  const wanted = new Set(names);
+  const runIds = new Set<string>();
+  const rerequestIds = new Set<number>();
+  for (const run of data.check_runs as Array<{ id?: unknown; name?: unknown; details_url?: unknown }>) {
+    if (typeof run.name !== "string" || !wanted.has(run.name)) continue;
+    const m = typeof run.details_url === "string" ? ACTIONS_RUN_URL.exec(run.details_url) : null;
+    if (m) runIds.add(m[1]!);
+    else if (typeof run.id === "number") rerequestIds.add(run.id);
+  }
+  if (runIds.size === 0 && rerequestIds.size === 0) return false;
+  const post = async (url: string): Promise<boolean> => {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: apiHeaders(token),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+  for (const id of runIds) {
+    if (!(await post(`https://api.github.com/repos/${repo}/actions/runs/${id}/rerun-failed-jobs`))) return false;
+  }
+  for (const id of rerequestIds) {
+    if (!(await post(`https://api.github.com/repos/${repo}/check-runs/${id}/rerequest`))) return false;
+  }
+  return true;
 }
 
 /** One review on a pull request as the coordinator reads it back: who posted

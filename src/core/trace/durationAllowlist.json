@@ -50,7 +50,7 @@
   "src/core/runShape.ts": 2,
   "src/core/runStore.ts": 1,
   "src/core/schedules.ts": 6,
-  "src/core/ship/coordinator.ts": 7,
+  "src/core/ship/coordinator.ts": 8,
   "src/core/snapshotAge.ts": 4,
   "src/core/statusBudget.ts": 3,
   "src/deploy/imagesHost.ts": 2,

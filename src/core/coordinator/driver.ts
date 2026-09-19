@@ -53,6 +53,7 @@ import {
   type AddressSeveritySource,
   type PlanGraph,
   type PlanUnitNode,
+  type RoundChecks,
   type ShipCaps,
   type StepReturn,
   type UnitEnding,
@@ -91,7 +92,17 @@ export interface StepRunner {
 }
 
 export type CoordinatorStepRoute =
-  "plan" | "unit-start" | "branch" | "spawn" | "read-record" | "pr-check" | "round" | "unit-end" | "merge" | "finish";
+  | "plan"
+  | "unit-start"
+  | "branch"
+  | "spawn"
+  | "read-record"
+  | "pr-check"
+  | "round"
+  | "unit-end"
+  | "checks"
+  | "merge"
+  | "finish";
 
 /** What a step stores: the bot's reply as the wire carried it — its status and
  *  its text, read the same way on replay. Two numbers and a string, so the
@@ -383,6 +394,31 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
   throw new UnreadableAnswer("pr-check", a, "state");
 }
 
+/** The round's checks read as the bot answered it (record 0055): the runs at
+ *  the reviewed head, or none when GitHub could not be read — the machine
+ *  treats an absent read as pending and asks again at the chunk's end. A retry
+ *  ask's answer carries `retried` instead: whether the re-run was dispatched,
+ *  so the machine never waits on a head an undispatched re-run left unchanged. */
+function checksReturn(step: string, a: BotAnswer): StepReturn {
+  const { ok, checks, retried, at } = a.body;
+  if (ok !== true) throw new UnreadableAnswer("checks", a, "ok");
+  return {
+    type: "checks",
+    step,
+    ...(isRoundChecks(checks) ? { checks } : {}),
+    ...(typeof retried === "boolean" ? { retried } : {}),
+    at,
+  };
+}
+
+const isRoundChecks = (v: unknown): v is RoundChecks =>
+  isRecord(v) &&
+  typeof v.total === "number" &&
+  Array.isArray(v.pending) &&
+  v.pending.every((n: unknown) => typeof n === "string") &&
+  Array.isArray(v.failed) &&
+  v.failed.every((f: unknown) => isRecord(f) && typeof f.name === "string" && typeof f.conclusion === "string");
+
 function mergeReturn(step: string, a: BotAnswer): StepReturn {
   const { ok, outcome, by, sha, mergedAt, reason, at } = a.body;
   // The door found the pull request already merged after the approval: the
@@ -552,6 +588,24 @@ async function perform(
       }
       return { type: "wait-checks", step: action.step, outcome };
     }
+    case "checks":
+      // The round's checks step (record 0055): the bot reads the check runs at
+      // the reviewed head with the merge door's own reading — or, on a retry
+      // ask, re-runs the named failed checks' jobs first.
+      return checksReturn(
+        action.step,
+        answerOf(
+          "checks",
+          await step.do(action.step, STEP_CONFIG, () =>
+            call(bot, "checks", {
+              ...tag,
+              prNumber: action.prNumber,
+              headSha: action.headSha,
+              ...(action.retry !== undefined ? { retry: action.retry } : {}),
+            }),
+          ),
+        ),
+      );
     case "merge":
       return mergeReturn(
         action.step,

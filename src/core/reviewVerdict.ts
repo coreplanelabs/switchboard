@@ -108,6 +108,10 @@ export interface Finding {
   line?: number;
   /** One line naming the issue; the full explanation lives in the prose. */
   title: string;
+  /** Machine provenance: true only on a check finding the ship round's checks
+   *  step itself appended (ship/coordinator.ts `checkFinding`) — never set from
+   *  a reviewer's input, whatever id the reviewer chose. */
+  check?: true;
 }
 
 export interface ReviewVerdict {

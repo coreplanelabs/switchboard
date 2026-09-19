@@ -12,6 +12,7 @@ import {
   findOpenPrByHead,
   mergePullRequest,
   openPullRequest,
+  rerunFailedJobs,
   updatePullRequest,
 } from "./githubPulls.js";
 
@@ -783,6 +784,60 @@ describe("githubPulls", () => {
         throw new Error("offline");
       });
       expect(await fixupCommitSubjects({ repo: "acme/api", number: 7 })).toBeUndefined();
+    });
+  });
+
+  // Feature: docs/reference/specs/agent-ship.md item 9 (record 0055's flake
+  // rule): the one re-run dispatches through the retry the check run's host
+  // understands — rerun-failed-jobs for a check backed by an Actions run,
+  // GitHub's check-run rerequest (which asks the creating app to run it again)
+  // for any other, this repository's Depot CI legs included — and answers
+  // false when nothing could be dispatched, never a silent no-op.
+  describe("rerunFailedJobs — the flake rule's one re-run (record 0055)", () => {
+    const listing = {
+      check_runs: [
+        { id: 11, name: "test 2 of 4", details_url: "https://github.com/acme/api/actions/runs/99/job/5" },
+        { id: 12, name: "test 3 of 4", details_url: "https://github.com/acme/api/actions/runs/99/job/6" },
+        { id: 42, name: "ci / depot", details_url: "https://depot.dev/orgs/acme/workflows/runs/abc" },
+        { id: 13, name: "untouched", details_url: "https://github.com/acme/api/actions/runs/77/job/1" },
+      ],
+    };
+
+    it("re-runs an Actions run's failed jobs once per run and rerequests a non-Actions check run by id — the Depot CI case — true when every dispatch was accepted", async () => {
+      stubToken();
+      const calls = stubFetch((url) =>
+        url.includes("/check-runs?")
+          ? new Response(JSON.stringify(listing), { status: 200 })
+          : new Response("{}", { status: 201 }),
+      );
+      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["test 2 of 4", "test 3 of 4", "ci / depot"])).toBe(
+        true,
+      );
+      const posts = calls.filter((c) => c.init.method === "POST").map((c) => c.url);
+      // The two shards share run 99: one rerun-failed-jobs, never two; and the
+      // Depot check run is rerequested by its check-run id, untouched runs untouched.
+      expect(posts).toEqual([
+        "https://api.github.com/repos/acme/api/actions/runs/99/rerun-failed-jobs",
+        "https://api.github.com/repos/acme/api/check-runs/42/rerequest",
+      ]);
+    });
+
+    it("answers false — never a silent no-op — when no named check is found, when the listing cannot be read, or when a dispatch is refused", async () => {
+      stubToken();
+      stubFetch(() => new Response(JSON.stringify({ check_runs: [] }), { status: 200 }));
+      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
+      stubFetch(() => new Response("nope", { status: 502 }));
+      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
+      stubFetch((url) =>
+        url.includes("/check-runs?")
+          ? new Response(JSON.stringify(listing), { status: 200 })
+          : new Response(JSON.stringify({ message: "Forbidden" }), { status: 403 }),
+      );
+      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
+      vi.stubGlobal("fetch", async () => {
+        throw new Error("offline");
+      });
+      expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
     });
   });
 });
