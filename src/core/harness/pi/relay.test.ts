@@ -711,7 +711,7 @@ describe("relayToolCall: a relayed call that outlives one request", () => {
       ),
     );
     expect(steer).toHaveBeenCalledWith(
-      { runId: "run-child", threadKey: "slack:CX:9.0", agent: "research" },
+      { runId: "run-child", threadKey: "slack:CX:9.0", agent: "research", parentRunId: "run-7" },
       "narrow it to Workers",
     );
   });

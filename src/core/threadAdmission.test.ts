@@ -135,6 +135,25 @@ describe("decideFollowUp", () => {
       requestedAgent: expect.any(String),
     });
   });
+
+  it("under the operator the decision outranks the directive: a decision whose steer names THIS run folds in, whatever agent token the message carried", () => {
+    const running: LiveThread = { ...live("coding"), runId: "run-u2" };
+    expect(decideFollowUp(running, { agent: "review", decision: { steersRun: "run-u2" } })).toEqual({
+      kind: "steer",
+    });
+  });
+
+  it("a decision that steers ANOTHER run never folds here by its say-so: the directive gate still decides, so a rival agent ask is still the refusal", () => {
+    const running: LiveThread = { ...live("coding"), runId: "run-u2" };
+    expect(decideFollowUp(running, { agent: "review", decision: { steersRun: "run-u9" } })).toEqual({
+      kind: "refuse",
+      reason: "agent_mismatch",
+      requestedAgent: "review",
+    });
+    // A bare reply beside a foreign-run decision still steers (the operator
+    // folds that decision's steer into the named run's own slot, not this one).
+    expect(decideFollowUp(running, { decision: { steersRun: "run-u9" } })).toEqual({ kind: "steer" });
+  });
 });
 
 describe("replies", () => {
