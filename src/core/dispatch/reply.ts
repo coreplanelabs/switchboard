@@ -9,7 +9,7 @@ import { shows, type Verbosity } from "../verbosity.js";
 import { visibilityOf } from "../authz/channelDirectory.js";
 import type { ChannelIO, ConfirmationOffer, DocumentAttachment, ImageAttachment } from "../types.js";
 import { confirmationMessageOf, newConfirmationId, renderOffer, type ConfirmationStore } from "../confirmations.js";
-import { CONFIRMATION_TTL_MS } from "../budgets.js";
+import { QUESTION_TTL_MS } from "../budgets.js";
 import type { ParsedChatCommand } from "../commandChat.js";
 import { cliWords } from "../commandSurface.js";
 import { toMarkdownDocument } from "../markdownDocument.js";
@@ -443,7 +443,9 @@ async function offerQuestion(refusal: Refusal, io: ChannelIO, store: Confirmatio
         evidence: guess.evidence,
         code: refusal.code,
       },
-      CONFIRMATION_TTL_MS,
+      // The question's own day, not the write's ten minutes: Yes only
+      // re-dispatches the proposal, which meets its own gates when it runs.
+      QUESTION_TTL_MS,
     );
   } catch (err) {
     console.warn(

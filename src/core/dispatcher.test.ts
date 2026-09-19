@@ -28,7 +28,7 @@ import { classifyError } from "./trace/classify.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
 import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
 import { activeRunCount, dispatch, dispatchClick, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
-import { CONFIRMATION_TTL_MS } from "./budgets.js";
+import { CONFIRMATION_TTL_MS, MINUTE_MS, QUESTION_TTL_MS } from "./budgets.js";
 import type { AuditEntry } from "./commandRegistry.js";
 import {
   InMemoryConfirmationStore,
@@ -43,6 +43,7 @@ import {
   OFFER_FOREIGN_LINE,
   OFFER_UNREADABLE_LINE,
   OFFER_USED_LINE,
+  QUESTION_EXPIRED_LINE,
 } from "./dispatch/confirm.js";
 import { setShutdownNotice } from "./dispatch/run.js";
 import { durableInboxMessage, type DispatchFollowUp } from "./dispatch/admission.js";
@@ -1238,7 +1239,7 @@ describe("resident repo dispatch", () => {
      *  everything the question needs to mint its row. */
     const wiredQuestion = () => {
       let n = 0;
-      const now = 1_000_000;
+      let now = 1_000_000;
       const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
       const provider = capturingProvider();
       const deps = makeDeps(REPO_PERMS_YAML, provider);
@@ -1253,7 +1254,8 @@ describe("resident repo dispatch", () => {
       const f = fakeIO();
       const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
       f.io.offer = vi.fn(async (o) => void offers.push(o));
-      return { deps, registry, provider, store, offers, ...f, now: () => now };
+      const tick = (ms: number) => void (now += ms);
+      return { deps, registry, provider, store, offers, ...f, now: () => now, tick };
     };
     const ask = (deps: TestDeps, io: ChannelIO) =>
       dispatch(deps, msg("agent:coding in acme/apj: say hi", "slack:UADMIN"), io);
@@ -1266,7 +1268,8 @@ describe("resident repo dispatch", () => {
       const offer = w.offers[0]!;
       expect(offer).toMatchObject({
         line: "agent:coding in acme/api: say hi",
-        expiresAt: w.now() + CONFIRMATION_TTL_MS,
+        // The question's row lives its own day, not the write's ten minutes.
+        expiresAt: w.now() + QUESTION_TTL_MS,
         question: {
           text: expect.stringContaining("not onboarded"),
           evidence: expect.stringContaining("which is onboarded"),
@@ -1311,6 +1314,32 @@ describe("resident repo dispatch", () => {
       const again = await dispatchClick(w.deps, { kind: "confirm", id, actor: requester, io: fakeIO().io });
       expect(again).toMatchObject({ status: "refused", refusal: "confirmation_used" });
       expect(w.provider.requests).toHaveLength(1);
+    });
+
+    it("a Yes at eleven minutes still redispatches: the question's row lives its own day, not the write's ten minutes", async () => {
+      const w = wiredQuestion();
+      await ask(w.deps, w.io);
+      const id = w.offers[0]!.id;
+      // The corrected slug resolves now — that is what the fix fixed.
+      w.deps.resolveRepoContext = () => ({ repo: "acme/api" });
+      w.tick(CONFIRMATION_TTL_MS + MINUTE_MS);
+      const clickIO = fakeIO();
+      const outcome = await dispatchClick(w.deps, { kind: "confirm", id, actor: requester, io: clickIO.io });
+      expect(outcome).toEqual({ status: "completed" });
+      expect(clickIO.replies).toContain("answer");
+      expect(w.provider.requests).toHaveLength(1); // the redispatched run's one model turn
+    });
+
+    it("a Yes after the question's day is refused as expired, the reply naming the day it missed", async () => {
+      const w = wiredQuestion();
+      await ask(w.deps, w.io);
+      const id = w.offers[0]!.id;
+      w.tick(QUESTION_TTL_MS);
+      const clickIO = fakeIO();
+      const outcome = await dispatchClick(w.deps, { kind: "confirm", id, actor: requester, io: clickIO.io });
+      expect(outcome).toMatchObject({ status: "refused", refusal: "confirmation_expired" });
+      expect(clickIO.replies).toEqual([QUESTION_EXPIRED_LINE]);
+      expect(w.provider.requests).toHaveLength(0);
     });
 
     it("a stranger's Yes is refused with the requester line and the row stays; No cancels for the requester — `Cancelled; nothing ran`, the row gone", async () => {

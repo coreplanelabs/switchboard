@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { processSecrets } from "../../secrets.js";
 import { ConfigStore } from "../../config.js";
-import { CONFIRMATION_TTL_MS } from "../budgets.js";
+import { CONFIRMATION_TTL_MS, MINUTE_MS, QUESTION_TTL_MS } from "../budgets.js";
 import { buildCoreCommands } from "../commandCatalogue.js";
 import type { AuditEntry } from "../commandRegistry.js";
 import {
@@ -31,6 +31,7 @@ import {
   OFFER_FOREIGN_LINE,
   OFFER_UNREADABLE_LINE,
   OFFER_USED_LINE,
+  QUESTION_EXPIRED_LINE,
   refusalLine,
 } from "./confirm.js";
 
@@ -128,9 +129,12 @@ const codingModelIn = (d: FastPathDeps) =>
 describe("the named lines and the clicker's ids", () => {
   it("refusalLine names each refusal; the cancel and the unreadable store have lines of their own", () => {
     expect(refusalLine("expired")).toBe(OFFER_EXPIRED_LINE);
+    expect(refusalLine("expired", { kind: "run" })).toBe(OFFER_EXPIRED_LINE);
+    expect(refusalLine("expired", { kind: "redispatch" })).toBe(QUESTION_EXPIRED_LINE);
     expect(refusalLine("foreign")).toBe(OFFER_FOREIGN_LINE);
     expect(refusalLine("used")).toBe(OFFER_USED_LINE);
-    expect(OFFER_EXPIRED_LINE).toBe("this offer expired; type the line to run it");
+    expect(OFFER_EXPIRED_LINE).toBe("this offer expired; its ten minutes passed — type the line to run it");
+    expect(QUESTION_EXPIRED_LINE).toBe("this question expired; its day passed — type the line to run it");
     expect(OFFER_FOREIGN_LINE).toBe("only the requester can confirm this");
     expect(OFFER_USED_LINE).toBe("this offer was already used");
     expect(OFFER_UNREADABLE_LINE).toBe("the confirmation could not be read; type the line to run it");
@@ -235,6 +239,20 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     });
     expect(d.audits).toEqual([]);
     expect(codingModelIn(d)).toBe("anthropic/coding-model");
+  });
+
+  it("a click at eleven minutes on a write's row is still `expired`: the write keeps its ten-minute window", async () => {
+    const d = deps();
+    await d.store.put(pending("c1"), CONFIRMATION_TTL_MS);
+    tick(CONFIRMATION_TTL_MS + MINUTE_MS);
+    const { io, ending, trace } = request(d);
+    expect(await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch)).toEqual({
+      kind: "refused",
+      refusal: "confirmation_expired",
+      text: OFFER_EXPIRED_LINE,
+      row: expect.objectContaining({ id: "c1", kind: "run" }),
+    });
+    expect(d.audits).toEqual([]);
   });
 
   it("a clicker whose id and `self` miss the requester reads `only the requester can confirm this`; the row stays for the requester", async () => {
@@ -382,6 +400,30 @@ describe("consumeAndRun — a question's Yes hands the stored proposal to dispat
     expect(seen).toHaveLength(1);
     // No typed-path command ran: the outcome is the redispatched request's own.
     expect(d.audits).toEqual([]);
+  });
+
+  it("a Yes at eleven minutes on a question's row minted with its own day still redispatches", async () => {
+    const d = deps();
+    await d.store.put(redispatchRow("c1"), QUESTION_TTL_MS);
+    tick(CONFIRMATION_TTL_MS + MINUTE_MS);
+    const { io, ending, trace } = request(d);
+    const res = await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, async () => ({
+      status: "completed" as const,
+    }));
+    expect(res).toMatchObject({ kind: "redispatched", outcome: { status: "completed" } });
+  });
+
+  it("a Yes after the question's day is refused as expired, the line naming the day it missed", async () => {
+    const d = deps();
+    await d.store.put(redispatchRow("c1"), QUESTION_TTL_MS);
+    tick(QUESTION_TTL_MS);
+    const { io, ending, trace } = request(d);
+    expect(await consumeAndRun(d, { id: "c1", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch)).toEqual({
+      kind: "refused",
+      refusal: "confirmation_expired",
+      text: QUESTION_EXPIRED_LINE,
+      row: expect.objectContaining({ id: "c1", kind: "redispatch" }),
+    });
   });
 
   it("a foreign Yes is refused with the requester line and the row stays for the requester", async () => {

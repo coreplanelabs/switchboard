@@ -23,7 +23,10 @@ import { runChatCommand } from "./commandRun.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { redactedInput, ROUTED_RECEIPT_PREFIX } from "./route.js";
 
-export const OFFER_EXPIRED_LINE = "this offer expired; type the line to run it";
+export const OFFER_EXPIRED_LINE = "this offer expired; its ten minutes passed — type the line to run it";
+/** A question's Yes lives `QUESTION_TTL_MS` (a day), not the write's ten
+ *  minutes, so its expired click names the window it missed. */
+export const QUESTION_EXPIRED_LINE = "this question expired; its day passed — type the line to run it";
 export const OFFER_FOREIGN_LINE = "only the requester can confirm this";
 export const OFFER_USED_LINE = "this offer was already used";
 export const OFFER_UNREADABLE_LINE = "the confirmation could not be read; type the line to run it";
@@ -37,11 +40,13 @@ export const CONFIRMED_REASON = "confirmed after offer";
  *  item 2): the door's no about the command the row had bound. */
 export const REFUSED_REASON = "refused after offer";
 
-/** The one line for each refusal the store names. */
-export function refusalLine(refused: ConfirmationRefusal): string {
+/** The one line for each refusal the store names. An expired click names the
+ *  window it missed — the write's ten minutes, or the question's day when the
+ *  store's refusal still carries a `redispatch` row. */
+export function refusalLine(refused: ConfirmationRefusal, row?: Pick<Confirmation, "kind">): string {
   switch (refused) {
     case "expired":
-      return OFFER_EXPIRED_LINE;
+      return row?.kind === "redispatch" ? QUESTION_EXPIRED_LINE : OFFER_EXPIRED_LINE;
     case "foreign":
       return OFFER_FOREIGN_LINE;
     case "used":
@@ -85,7 +90,7 @@ function refused(
   r: ConfirmationRefusal,
   row?: Confirmation,
 ): { kind: "refused"; refusal: ClickRefusal; text: string; row?: Confirmation } {
-  return { kind: "refused", refusal: `confirmation_${r}`, text: refusalLine(r), ...(row ? { row } : {}) };
+  return { kind: "refused", refusal: `confirmation_${r}`, text: refusalLine(r, row), ...(row ? { row } : {}) };
 }
 
 const UNREADABLE = { kind: "refused", refusal: "confirmation_unreadable", text: OFFER_UNREADABLE_LINE } as const;

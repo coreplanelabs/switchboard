@@ -38,6 +38,14 @@ export const WEEK_MS = 7 * DAY_MS;
  *  which stamps the expiry on its own clock. */
 export const CONFIRMATION_TTL_MS = 10 * MINUTE_MS;
 
+/** How long a question's Yes stays pending (docs/decisions/0054, as amended;
+ *  docs/reference/specs/routing-and-config.md item 25): one day. A Yes only
+ *  re-dispatches the corrected message, which is then routed, authorized and,
+ *  for a write, offered its own graded button — the write's ten-minute
+ *  freshness is enforced downstream, so a short window here protects nothing
+ *  and only loses answers. People answer a question in minutes to hours. */
+export const QUESTION_TTL_MS = DAY_MS;
+
 /** How long a dispatch's FIRST attach to a resident — a fresh run's, or a
  *  resumed run's re-attach to its recorded worktree — waits for the resident
  *  to wake when the Worker typed its refusal as the platform's transient
