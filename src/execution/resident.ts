@@ -1511,7 +1511,11 @@ export class ResidentExecutor implements Executor {
    *  spent, poll every `WAKE_POLL_MS` and re-attach as soon as the engine
    *  says it serves (the attach's own hydrate is the wake when nothing else
    *  has started it; a refusal that still names a rolling container keeps
-   *  the wait going). Answers the wait and the fresh binding. Throws the
+   *  the wait going, and a `draining` answer hands the wait to the drain
+   *  wait, item 69: the drain record survives the Durable Object reset the
+   *  deploy's own isolate swap lands during its drain, so the run waits out
+   *  the drain under its lease, never this budget). Answers the wait and the
+   *  fresh binding. Throws the
    *  strike (an `ExecInfraError` the tracker counts) when nothing is
    *  recovering, when the resident goes down mid-wait, when a re-attach does
    *  not answer, or when the budget is spent; a hard stop rejects at once with
@@ -1625,6 +1629,19 @@ export class ResidentExecutor implements Executor {
             );
           }
           if (answer.ok) return { end: { waitedMs: spent(), binding: answer.binding } };
+          // A drained fleet answering the re-attach (item 69): the drain record
+          // survives the Durable Object reset that began this wait — the
+          // deploy's own isolate swap lands inside its own drain — so this is
+          // the drain's case, not a wake failure. The wait moves under the
+          // drain wait (the run's lease less the reserve), never the wake
+          // budget, whose minute would strike exactly the requests the drain
+          // exists to hold and fall them back cold; the binding carries the
+          // whole wait, and a drain still in force past the drain budget is
+          // the typed ResidentDrainingError, as a first draining answer's is.
+          if (isDrainingRefusal(answer)) {
+            const reopened = await this.awaitDrainEnd(answer, { signal: opts.signal }, opts.span);
+            return { end: { waitedMs: spent(), binding: reopened.binding } };
+          }
           // A 500 the Worker typed transient (the Durable Object reset or lost under
           // the re-attach): the resident is coming back as far as anyone can tell,
           // so the wait goes on — the next probe and re-attach follow — instead of
@@ -1633,7 +1650,7 @@ export class ResidentExecutor implements Executor {
           // too; anything else is the attach's own error, a needs-ref carrying the
           // wait so its caller's retry draws on one budget and names the total.
           if (isTransientRefusal(answer)) transient = true;
-          else if (!isContainerRolling(answer.data.error) && !isDrainingRefusal(answer)) {
+          else if (!isContainerRolling(answer.data.error)) {
             const refused = this.attachRefusal(answer);
             if (refused instanceof ResidentNeedsRefError) refused.wokeAfterMs = spent();
             throw refused;
