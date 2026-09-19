@@ -461,6 +461,12 @@ export type CoordinatorAction =
   | {
       type: "pr-check";
       step: string;
+      /** The unit-start's pre-check (issue 1689): the bot reads the entry facts
+       *  beside the listing — the branch's own tip, whether its approval
+       *  stands at the head, and the checks there — so a re-issued plan's
+       *  unit resumes at review, or at the merge decision, never at coding
+       *  over an already-shipped pull request. */
+      entry?: true;
       /** Set after a coding child died: the bot opens the pull request from the
        *  pushed branch itself (title from the unit, body from this run's
        *  submitted description when the record holds one) instead of answering
@@ -545,6 +551,15 @@ export type PrCheck =
       prNumber: number;
       url: string;
       headSha?: string;
+      /** The unit branch's own tip, read beside the listing on the entry check
+       *  (issue 1689): the listing's `headSha` can lag a force-push, so the
+       *  machine resumes at review only when the pull request heads the
+       *  branch's actual tip — a head behind the branch is round 0's. */
+      branchHead?: string;
+      /** Whether an approving review by the bot stands at the head (the entry
+       *  check, issue 1689): with green checks the attempt resumes straight at
+       *  the merge decision instead of a review round. */
+      approved?: boolean;
       autoMergeEnabled?: boolean;
       /** The check runs at the head, when the read asked for them (the ending's facts). */
       checks?: CommitChecksFacts;
@@ -1081,7 +1096,7 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
   const p = s.phase;
   switch (p.at) {
     case "pre-check":
-      return { type: "pr-check", step: `${unit}/pr-check` };
+      return { type: "pr-check", step: `${unit}/pr-check`, entry: true };
     case "branch":
       return { type: "branch", step: `${unit}/branch`, branch: s.input.unit.branch, from: s.input.base };
     case "spawn": {
@@ -1859,19 +1874,40 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       // by the coding child and adopted at the round's own pr-check.
       const r = ret as Extract<StepReturn, { type: "pr-check" }>;
       if (r.pr.state === "merged") return foundMerged(clocked, r.pr);
-      // The open pull request still heads at the child's own last push (the
-      // previous attempt ended `review_pending`): nothing to code, so the
-      // attempt adopts it and starts at the review round — never a fresh
-      // coding round on an already-shipped pull request.
+      // The open pull request still heads the branch — its head is the
+      // branch's own tip (the entry facts, issue 1689) or the child's own last
+      // push (the previous attempt ended `review_pending`, the row's
+      // `lastPush`): nothing to code, so the attempt adopts it and starts at
+      // the review round — never a fresh coding round on an already-shipped
+      // pull request. Approved at that very head with green checks, there is
+      // nothing to review either: the attempt resumes straight at the merge
+      // decision — `merge_ready` for a person, the merge door under
+      // `merge: runner`, which re-verifies the approval and the checks itself.
       if (r.pr.state === "open") {
         const head = normalizeHead(r.pr.headSha);
+        const branchHead = normalizeHead(r.pr.branchHead);
         const lastPush = normalizeHead(s.input.lastPush);
-        if (head !== undefined && lastPush !== undefined && sameCommit(head, lastPush))
-          return nextReview({
+        const atBranchHead = head !== undefined && branchHead !== undefined && sameCommit(head, branchHead);
+        const atLastPush = head !== undefined && lastPush !== undefined && sameCommit(head, lastPush);
+        if (atBranchHead || atLastPush) {
+          // The entry facts — the approval and the checks — were read at the
+          // branch's own tip when GitHub answered it (`branchHead`, the
+          // fresher read of the same head ref), else at the listing's sha.
+          // The resume pins the review — and the merge decision — at that
+          // same head, so the approved+green shortcut never fires at a stale
+          // listing sha the facts do not describe.
+          const entryHead = branchHead ?? head;
+          const adopted: UnitPipelineState = {
             ...clocked,
             pr: { number: r.pr.prNumber, url: r.pr.url },
-            lastReviewHead: head,
-          });
+            lastReviewHead: entryHead,
+          };
+          const checks = r.pr.checks;
+          const green =
+            checks !== undefined && checks.total > 0 && checks.failed.length === 0 && checks.pending.length === 0;
+          if (r.pr.approved === true && green) return approveOutcome(adopted, []);
+          return nextReview(adopted);
+        }
       }
       return { state: { ...clocked, phase: { at: "branch" } }, notes: [] };
     }

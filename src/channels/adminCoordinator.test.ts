@@ -1102,6 +1102,89 @@ describe("pr-check follows the machine's adopted pull request when nothing heads
   });
 });
 
+describe("pr-check entry — the unit-start's resume facts beside the listing (agent-ship item 10, issue 1689)", () => {
+  const SHA = "a".repeat(40);
+  const entryCheck = (deps: Parameters<typeof handleCoordinatorRequest>[1], body: Record<string, unknown> = {}) =>
+    handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id, entry: true, ...body }),
+      deps,
+    );
+
+  it("an entry check on an open pull request answers the branch's own tip (the facts read's ref-tip-preferred head), whether the bot's approval stands at it, and the checks there — so a re-issued plan's unit resumes instead of recoding; a plain check reads none of them", async () => {
+    const h = harness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: SHA },
+      prFacts: { state: "open", sameRepoHead: true, headSha: SHA, htmlUrl: "https://github.com/acme/api/pull/12" },
+      reviews: [
+        { author: { login: "acme-switchboard[bot]", id: 4242 }, state: "APPROVED", commitId: SHA, body: "LGTM: clean" },
+      ],
+      checks: { total: 2, pending: [], failed: [] },
+    });
+    await h.instances.put(INSTANCE);
+    expect((await entryCheck(h.deps)).body).toEqual({
+      ok: true,
+      state: "open",
+      prNumber: 12,
+      url: "https://github.com/acme/api/pull/12",
+      headSha: SHA,
+      branchHead: SHA,
+      approved: true,
+      checks: { total: 2, pending: [], failed: [] },
+      at: NOW,
+    });
+
+    const plain = harness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: SHA },
+      prFacts: { state: "open", sameRepoHead: true, headSha: SHA },
+      reviews: [
+        { author: { login: "acme-switchboard[bot]", id: 4242 }, state: "APPROVED", commitId: SHA, body: "LGTM: clean" },
+      ],
+      checks: { total: 2, pending: [], failed: [] },
+    });
+    await plain.instances.put(INSTANCE);
+    expect(
+      (
+        await handleCoordinatorRequest(
+          post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, { parentInstanceId: INSTANCE.id }),
+          plain.deps,
+        )
+      ).body,
+    ).toEqual({
+      ok: true,
+      state: "open",
+      prNumber: 12,
+      url: "https://github.com/acme/api/pull/12",
+      headSha: SHA,
+      at: NOW,
+    });
+  });
+
+  it("an approval by another author, or at another head, answers approved false; each entry fact GitHub would not answer is left out — the check still answers open, never 502", async () => {
+    const other = harness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: SHA },
+      prFacts: { state: "open", sameRepoHead: true, headSha: SHA },
+      reviews: [{ author: { login: "a-person" }, state: "APPROVED", commitId: SHA, body: "LGTM: fine" }],
+      checks: { total: 1, pending: [], failed: [] },
+    });
+    await other.instances.put(INSTANCE);
+    expect((await entryCheck(other.deps)).body).toMatchObject({ state: "open", approved: false });
+
+    const unreadable = harness({
+      pr: { number: 12, htmlUrl: "https://github.com/acme/api/pull/12", headSha: SHA },
+      prFacts: new Error("GitHub 502"),
+      checks: new Error("GitHub 502"),
+    });
+    await unreadable.instances.put(INSTANCE);
+    expect((await entryCheck(unreadable.deps)).body).toEqual({
+      ok: true,
+      state: "open",
+      prNumber: 12,
+      url: "https://github.com/acme/api/pull/12",
+      headSha: SHA,
+      at: NOW,
+    });
+  });
+});
+
 describe("createAdminCoordinatorHandler — the node adapter decides the door from the headers alone (item 9)", () => {
   /** A node request: headers, method, url and a body the adapter may or may not read. */
   function nodeRequest(method: string, url: string, auth: string | null, body: string) {

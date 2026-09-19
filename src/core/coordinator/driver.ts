@@ -390,6 +390,11 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
         prNumber,
         url,
         ...(typeof headSha === "string" ? { headSha } : {}),
+        // The entry facts (issue 1689): the branch's own tip and whether the
+        // bot's approval stands at the head, read at the unit-start's pre-check
+        // so a re-issued plan resumes at review or at the merge decision.
+        ...(typeof a.body.branchHead === "string" ? { branchHead: a.body.branchHead } : {}),
+        ...(typeof a.body.approved === "boolean" ? { approved: a.body.approved } : {}),
         ...(typeof a.body.autoMergeEnabled === "boolean" ? { autoMergeEnabled: a.body.autoMergeEnabled } : {}),
         ...(isCommitChecks(a.body.checks) ? { checks: a.body.checks } : {}),
         // The ready-state facts beside the checks (agent-ship item 9): the
@@ -584,6 +589,10 @@ async function perform(
           await step.do(action.step, STEP_CONFIG, () =>
             call(bot, "pr-check", {
               ...tag,
+              // `entry` is the unit-start's pre-check (issue 1689): the bot
+              // reads the branch's tip, the approval and the checks beside the
+              // listing, so a re-issued plan's unit resumes instead of recoding.
+              ...(action.entry === true ? { entry: true } : {}),
               ...(action.recover !== undefined ? { recover: action.recover } : {}),
               ...(action.pr !== undefined ? { pr: action.pr } : {}),
             }),
