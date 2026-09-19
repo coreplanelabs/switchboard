@@ -20,9 +20,13 @@ extends: ../decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat
 
 **Amendment, 2026-09-19, while proposed: what U3 shipped of the volume line.** U3 shipped the volume line with routed requests and shadow events per day but without refusals per day, so U4 adds the refusals count, read from the door run records (agent `door`, the rows the door report already reads).
 
+**Amendment, 2026-09-19, while proposed: the operator ships on — the shadow week is one entry test.** The maintainer decided the operator's default is `on`. A new unit after U6, U17 "The default is on", flips `operatorModeOf`'s default from `off` to `on` in `src/config.ts`; the flag stays as the rollback lever, never a setting a person is told about. U17's gate is U5 and U6 merged plus one strong-tier replay run (`npm run load -- route --provider anthropic --model <strong tier> --verify`) whose write row and misses row hold, posted in its pull request body. The plan's "on gate" is U17, and every dependency on it — U9, U12, U13 and U16's gates — now names U17. The Definition of Done's shadow-week line becomes U17's replay receipt; the Verification Contract's agreement row is kept as a measurement posted after one day under `on`, never a gate. `shadow` stays a mode of the flag, not a rollout phase, and record 0058's intake gate stays a dependency of `on` as the Scope Boundaries state. No existing unit or requirement id is renumbered.
+
+**Amendment, 2026-09-19, while proposed: images are first-class operator input.** The maintainer decided the request's images enter the operator's turn as provider-native image blocks, so the operator's card must be vision-capable. A new unit in cut three, U18 "Images reach the operator": every attachment of a thread is copied into the R2 artifacts store by reference when it arrives (record 0033; `deploy/cloudflare/artifactsCopy.ts`, `src/artifacts/store.ts`), the reference stored on the session row so a later turn's "this" resolves; the same references are handed to the child at the bind; a new replay row of image-anchored fixtures (a screenshot plus an order, expected bind `ship`) lands in `src/load`. Spec rows: slack-channel item 5, routing-and-config item 29, load-harness item 17.
+
 - **Objective**: Build [record 0057](../decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat-input-and-deterministic-code-authorizes-fences-and-executes.md) as amended: one model turn, the operator, binds every admitted chat input into typed registry calls from the thread's session, the registry's projection and repository briefs; deterministic code authorizes the bound call as its author, classes it over its parsed input, fences the refusal and executes. The chat-side readers leave shape by shape as fixtures hold, the session is keyed by thread with working sessions per unit and lane, plan units carry their own repository, and the confirm default moves to destructive last, when the replay's write and planted rows hold twice against the final prompt and the verifier is live.
 - **Authority**: record 0057 (proposed; this plan is the artifact its acceptance is judged on) over [record 0054](../decisions/0054-a-refusal-the-person-caused-is-one-question-with-a-best-guess.md) (the seam, the fence and the button reused; its deterministic-first ordering superseded; its remaining units absorbed here), [record 0044](../decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md) (the class ladder and the confirmation store, extended not replaced), [record 0051](../decisions/0051-a-thread-has-one-owner-for-its-life-a-message-is-one-event-in-a-chosen-mode-and-a-pipeline-idles-instead-of-ending.md) (the owner rule, read through the operator), [record 0055](../decisions/0055-a-unit-has-one-thread-and-a-round-reads-the-checks-at-its-head.md) (one thread per unit, kept), [record 0058](../decisions/0058-a-thread-reply-is-read-before-it-is-answered-intake-decides-whether-the-bot-was-addressed.md) (the intake gate ahead of the operator for an unmentioned reply; a dependency of the `on` mode), [record 0060](../decisions/0060-a-ship-pipeline-is-a-live-run-for-its-whole-life-and-runs-on-every-channel-that-can-open-a-thread.md) (the hosted parent run and the host key own thread occupancy and the pipeline's posts; a dependency of cut four), [record 0034](../decisions/0034-one-agent-per-unit-a-run-continues-a-transcript.md) and [record 0035](../decisions/0035-a-session-log-outlives-its-runs-compaction-is-a-pointer.md) (the session log, re-keyed). The maintainer's answers recorded in the record's last amendment are settled.
-- **Execution profile**: sixteen units in five cuts, each one pull request through the review loop, in dependency order. Tests first in every unit. Cut one (U1 to U3) changes no sentence a person reads and ships the measurements. Cut two (U4 to U6) ships the operator behind a three-mode flag, in shadow. Cut three (U7, U8) re-keys the memory and adds the briefs; the flip to `on` is a named gate after cut three. Cut four (U9 to U11) widens the projection to the plan form, the runner and the tiers. Cut five (U12 to U15) deletes the readers one shape at a time, and U16 moves the default. Units are seedable to the plan runner one at a time (`agent:ship in <owner/repo>: plan <this path> units U<n>`); a unit run by a person merges under `merge: person`. A child proves its unit with changed-set forms: `npx vitest run` on the unit's test files, `tsc --noEmit` on the touched project, prettier on the changed files, `npm run specs:check`, and `node scripts/public-hygiene.mjs` where the unit touches fixtures or docs; it pushes a head within twenty minutes of a round's start and lets CI's `npm run verify` judge it. A unit touching a Worker under `deploy/` also runs that Worker's own `npm run typecheck` and `npm run test` from its directory, since the root typecheck does not read a Worker's sources.
+- **Execution profile**: eighteen units in five cuts (U17 and U18 added by the 2026-09-19 amendments), each one pull request through the review loop, in dependency order. Tests first in every unit. Cut one (U1 to U3) changes no sentence a person reads and ships the measurements. Cut two (U4 to U6, then U17) ships the operator behind a three-mode flag and flips its default to `on` on U17's entry test. Cut three (U7, U8, U18) re-keys the memory, adds the briefs and puts images on the operator's turn; the `on` gate is U17, at cut two's close. Cut four (U9 to U11) widens the projection to the plan form, the runner and the tiers. Cut five (U12 to U15) deletes the readers one shape at a time, and U16 moves the default. Units are seedable to the plan runner one at a time (`agent:ship in <owner/repo>: plan <this path> units U<n>`); a unit run by a person merges under `merge: person`. A child proves its unit with changed-set forms: `npx vitest run` on the unit's test files, `tsc --noEmit` on the touched project, prettier on the changed files, `npm run specs:check`, and `node scripts/public-hygiene.mjs` where the unit touches fixtures or docs; it pushes a head within twenty minutes of a round's start and lets CI's `npm run verify` judge it. A unit touching a Worker under `deploy/` also runs that Worker's own `npm run typecheck` and `npm run test` from its directory, since the root typecheck does not read a Worker's sources.
 - **Stop conditions**: a unit whose pull request cannot turn CI's `verify` green within its listed files hands back a deviation. A unit stops and asks if it would: run a write from an operator decision while the flag is not `on`; flip `on` before its four gates hold; delete a reader whose fixture row does not hold; move the confirm default before U16's gates hold; honour a relay footer from an unlisted app; change a spec item without its bound test in the same pull request; put coding, ship or review on the fast tier; let a coordinator tag stand in for a requester on anything but a steer into its own plan's runs.
 
 ---
@@ -31,7 +35,7 @@ extends: ../decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat
 
 ### Summary
 
-The plan makes the operator the only interpreter of chat input in five cuts: measure and secure the identity first, ship the operator in shadow beside today's readers with its tail cap and its comparison log, give it the thread's memory and the repositories' briefs and only then flip it on, widen its projection to plans that span repositories, then delete the readers as their fixtures hold and move the button to destructive acts only.
+The plan makes the operator the only interpreter of chat input in five cuts: measure and secure the identity first, ship the operator in shadow beside today's readers with its tail cap and its comparison log, flip it on once U17's entry test holds, give it the thread's memory, the repositories' briefs and the request's images, widen its projection to plans that span repositories, then delete the readers as their fixtures hold and move the button to destructive acts only.
 
 ### Problem Frame
 
@@ -120,7 +124,7 @@ Nineteen router issues were filed in eight days. Seven of the seventeen distinct
 
 ### Key Technical Decisions
 
-- KTD1. **The operator ships behind a three-mode flag, is called ahead of every reader, and is measured in shadow before it acts.** `routing.operator: off | shadow | on` follows `routing.auto`'s shape (an optional field on `RoutingConfig`, a strict-key entry and a by-name refusal in `validate.ts`, a commented example). Under `shadow` and `on` the dispatcher calls the operator once per admitted event before stage A and outside `routeRequest`'s live-thread and directive short-circuits, or the shadow week would never see the replies and typed lines the record amended in. The shadow decision is stored beside the routed request in the run store, redacted like the receipt; the agreement row is defined over single-bind decisions. The flip to `on` is a named gate: the misses row holds, the agreement row on typed lines is at or above the command row's bar, the directive row holds, U7 and U8 are merged, and record 0058's intake gate is in place. Governs R6, R8.
+- KTD1. **The operator ships behind a three-mode flag, is called ahead of every reader, and is measured in shadow before it acts.** `routing.operator: off | shadow | on` follows `routing.auto`'s shape (an optional field on `RoutingConfig`, a strict-key entry and a by-name refusal in `validate.ts`, a commented example). Under `shadow` and `on` the dispatcher calls the operator once per admitted event before stage A and outside `routeRequest`'s live-thread and directive short-circuits, or the shadow week would never see the replies and typed lines the record amended in. The shadow decision is stored beside the routed request in the run store, redacted like the receipt; the agreement row is defined over single-bind decisions. The flip to `on` is U17 (amended 2026-09-19): U5 and U6 merged, one strong-tier `--verify` replay whose write row and misses row hold posted in its pull request body, record 0058's intake gate in place; the agreement row is a measurement posted after one day under `on`, never a gate. Governs R6, R8.
 - KTD2. **No fast path for a typed command line in chat.** Stage A leaves with U13; a typed line is words the operator binds; the lint rule has no exception to defend. (session-settled: user-directed — chosen over a replay-proven deterministic fast path: a proven-identical parser is a second interpreter by another name, and every miss this week came from a reader outranking the model.) Governs R25.
 - KTD3. **The operator runs on the strong tier with a 12,000-token tail and a cache-friendly prompt order, and the cap ships with the flag.** The cost arm found the tail, not the projection, is the whole cost and the latency; capping the operator's tail below the run seed's 60,000 and ordering the prompt rules, projection, briefs, tail oldest-first, request lets consecutive events in a thread hit the prompt cache for everything but the new turns. The cap, the order and the latency measurement land in U4 so the shadow week measures the operator that will go live. (session-settled: user-directed — chosen over the fast tier: the fast model misread eight of seventeen distinct cases with words it could see; the maintainer noted the operator's model is the likeliest to change later.) Governs R7, R17.
 - KTD4. **Three outcomes; steer and answer are binds.** A steer is a bind of a `steer` registry command (run id, words; declared for the chat surface only); an answer is a bind of the pending question's proposed line. Both pass authorization, which is what gives a steer an owner and lets R2 hold with one rule. Governs R8, R9.
@@ -170,9 +174,9 @@ The five cuts and what gates each:
 ```mermaid
 flowchart TB
   C1[Cut 1: authored rows, class over input, write / misses / directive / planted rows] --> C2[Cut 2: operator off/shadow with cap and log, admission after, verifier]
-  C2 --> C3[Cut 3: thread session by thread, working sessions by instance:unit:lane, briefs]
-  C3 --> ON[Gate: flip to on = misses + agreement + directive rows hold, U7 and U8 merged, 0058 gate in place]
-  ON --> C4[Cut 4: repo per unit, preflight before instance, tiers, merge, decision row]
+  C2 --> ON[Gate U17: default on = U5 + U6 merged, write and misses rows hold on one strong-tier verify replay]
+  ON --> C3[Cut 3: thread session by thread, working sessions by instance:unit:lane, briefs, images to the operator]
+  C3 --> C4[Cut 4: repo per unit, preflight before instance, tiers, merge, decision row]
   C4 --> C5[Cut 5: readers leave one shape per unit as fixture rows hold]
   C5 --> D[U16: confirm default to destructive]
   W[write + planted rows hold twice on the post-U15 prompt] --> D
@@ -182,16 +186,16 @@ flowchart TB
 
 ### Sequencing
 
-U1 to U3 first: nothing a person reads changes, and every later unit's tests need authored rows, the class predicate and the replay rows. U4 ships the operator in shadow with its cap, its order and its log; U5 moves admission after the operator and adds the steer owner rule, with no store or Worker change; U6 wires the verifier while shadow data accrues. U7 re-keys the memory and U8 adds the briefs and wraps the two unfenced child paths. The flip to `on` follows cut three on its named gate. U9 to U11 widen the projection and the runner. U12 to U15 delete the readers in the order of least risk: directives, the typed line, the repository scan, then the attach token and the link unwrapping with the lint rule. U16 last, on its four gates.
+U1 to U3 first: nothing a person reads changes, and every later unit's tests need authored rows, the class predicate and the replay rows. U4 ships the operator in shadow with its cap, its order and its log; U5 moves admission after the operator and adds the steer owner rule, with no store or Worker change; U6 wires the verifier while shadow data accrues. U17 flips the default to `on` on its entry test once U5 and U6 are merged, so cut three lands under `on`. U7 re-keys the memory, U8 adds the briefs and wraps the two unfenced child paths, and U18 puts the request's images and the thread's attachments on the operator's turn. U9 to U11 widen the projection and the runner. U12 to U15 delete the readers in the order of least risk: directives, the typed line, the repository scan, then the attach token and the link unwrapping with the lint rule. U16 last, on its four gates.
 
 ### Risks and Dependencies
 
 - **The write row or the planted row never reaches the bar.** The button stays at write and every other unit still ships; nothing else depends on U16.
-- **Shadow disagreement is high on typed lines.** The agreement row says so before anything runs from the operator; the flip to `on` waits, and U13 waits on the command row.
+- **Disagreement is high on typed lines.** The agreement row, posted after one day under `on`, says so; `routing.operator: off` is the rollback lever, and U13 waits on the command row.
 - **The keyed append and the migration lose or double a row.** U7's tests replay ten real threads with the fold and a live run at cutover; the old keys stay readable for recall so nothing is unrecoverable.
 - **The operator's latency on the strong tier exceeds three seconds at the median.** U4 measures with the tail attached and records output-token counts beside the median; the cap drops; the tier stays.
 - **A predicate is wrong for one shape.** The suite proves totality, not correctness; U2's audit table carries a table test per predicate.
-- **The shadow week's cost.** One strong-tier call with a capped tail per admitted event on top of today's router; the volume line sizes it in the first week and the cap is the lever.
+- **The operator's cost under `on`.** One strong-tier call with a capped tail per admitted event on top of today's router; the volume line sizes it in the first week under `on` and the cap is the lever.
 - **Depends on** the requester fix's deployment (U16's gate), record 0058's intake gate (the `on` mode's gate, not `shadow`'s), record 0060's host key, hosted parent and host-only write path ahead of cut four, record 0054's first two units as merged, record 0044's store and buttons, the resident plane's `/residents` index, and the review loop.
 - **Runner notes** (from the first unit's run): the runner refuses a merge when its head conflicts with `main`; the recovery is a rebase, a re-review and a merge by a person, never a re-issue, since a re-issued seeded plan starts its unit at coding round zero and adopts no open pull request. A steer into a live round folds at the round's next boundary; one is sent when a round reaches its fifteenth minute with nothing pushed and none after its seventieth, when it costs the round its rebase. A steer never asks for the suite or for green; it names the changed-set forms above. Unit ids in code, tests or specs trip the public hygiene ratchet's plan-id class; a unit's prose lives in this plan alone.
 
@@ -207,16 +211,18 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 | U4 | The operator behind `routing.operator`, with its cap and its log | `src/core/dispatch/operator.ts`, `src/core/dispatch/seed.ts`, `src/core/dispatcher.ts`, `src/core/dispatch/route.ts`, `src/config.ts`, `src/config/validate.ts`, `src/core/commands/steer.ts`, `src/core/dispatch/record.ts` | U1, U2, U3 |
 | U5 | Admission after the operator | `src/core/dispatcher.ts`, `src/core/dispatch/admission.ts`, `src/core/threadAdmission.ts`, `src/core/dispatch/authorize.ts` | U1, U4 |
 | U6 | The verifier wired | `src/core/dispatch/route.ts`, `src/core/dispatch/operator.ts`, `src/core/dispatch/reply.ts` | U1, U4 |
+| U17 | The default is on | `src/config.ts`, `config/config.example.yaml`, `src/config/validate.ts` | U5, U6, the write and misses rows on one strong-tier `--verify` replay |
 | U7 | The thread session and the working sessions | `src/core/runLedger/sessionLog.ts`, `src/core/runLedger/writeThrough.ts`, `src/core/runLedger/ledger.ts`, `deploy/cloudflare-memory/worker.ts`, `src/core/dispatch/seed.ts`, `src/channels/adminCoordinator.ts`, `src/core/unitRuns.ts`, `web/src/pages/UnitPage.vue` | U1, U4 |
 | U8 | Repository briefs, and the two unfenced paths | `deploy/cloudflare-resident/worker.ts`, `src/core/residentFleet.ts`, `src/core/repoContext.ts`, `src/execution/githubApi.ts`, `src/core/dispatch/operator.ts`, `src/core/coordinator/briefs.ts`, `src/load/routeRepoFixtures.ts` | U4 |
-| U9 | A repository per unit, the unit cap, preflight before the instance | `src/core/coordinator/contract.ts`, `src/core/coordinator/handOff.ts`, `src/core/ship/coordinator.ts`, `src/core/coordinator/driver.ts`, `src/channels/adminCoordinator.ts` | the `on` gate, U7, record 0060's hosted parent and host-only write path |
+| U18 | Images reach the operator | `src/core/dispatch/operator.ts`, `src/core/dispatch/seed.ts`, `deploy/cloudflare/artifactsCopy.ts`, `src/artifacts/store.ts`, `src/load/routeImageFixtures.ts`, `src/load/routeReplay.ts` | U4, U7 |
+| U9 | A repository per unit, the unit cap, preflight before the instance | `src/core/coordinator/contract.ts`, `src/core/coordinator/handOff.ts`, `src/core/ship/coordinator.ts`, `src/core/coordinator/driver.ts`, `src/channels/adminCoordinator.ts` | U17, U7, record 0060's hosted parent and host-only write path |
 | U10 | Tiers at spawn | `src/agents/registry.ts`, `src/core/dispatch/spawn.ts`, `src/tools/runs.ts`, `src/config.ts`, `src/channels/adminCoordinator.ts` | U4 |
 | U11 | The merge command, the decision row, the re-bind row | `src/core/commands/merge.ts`, `src/core/confirmations.ts`, `src/core/dispatch/confirm.ts`, `src/core/dispatch/reply.ts`, `src/core/dispatch/authorize.ts`, `deploy/cloudflare-memory/worker.ts` | U4, U9 |
-| U12 | The directive words leave | `src/directives.ts`, `src/core/dispatch/resolve.ts` | the `on` gate, U3 |
-| U13 | The typed command line leaves stage A | `src/core/dispatch/fastPath.ts`, `src/core/commandChat.ts`, `src/core/dispatcher.ts` | U12 |
+| U12 | The directive words leave | `src/directives.ts`, `src/core/dispatch/resolve.ts` | U17, U3 |
+| U13 | The typed command line leaves stage A | `src/core/dispatch/fastPath.ts`, `src/core/commandChat.ts`, `src/core/dispatcher.ts` | U12, U17 |
 | U14 | The repository token scan leaves | `src/core/repoContext.ts`, `src/core/dispatch/resolve.ts`, `src/load/routeRepoFixtures.ts` | U8, U13 |
 | U15 | The attach token and the link unwrapping leave; the lint rule | `src/core/dispatch/route.ts`, `src/core/commandChat.ts`, `src/channels/slack.ts`, `src/chatTextFence.mjs`, `eslint.config.mjs` | U14 |
-| U16 | The confirm default moves | `src/config/profile.ts`, `src/config/validate.ts`, `src/core/dispatch/route.ts` | U6, U15, the write and planted rows twice on the post-U15 prompt, the requester fix deployed |
+| U16 | The confirm default moves | `src/config/profile.ts`, `src/config/validate.ts`, `src/core/dispatch/route.ts` | U6, U15, U17, the write and planted rows twice on the post-U15 prompt, the requester fix deployed |
 
 ### U1. Authored session rows
 
@@ -284,7 +290,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   1. Tests first: a scripted operator returns two binds and the dispatcher, under `shadow`, runs the readers' result and writes the decision beside the request; a reply into a live thread under `shadow` writes the operator's steer-or-bind decision beside admission's fold; a typed command line under `shadow` writes the operator's bind beside stage A's result; under `on`, the binds run; a decision mixing binds and a question is refused by the parser; a pending question's marker in the tail plus "yes" yields a bind of the proposed line; the projection excludes a preset the author may not run; a 30,000-token log yields a 12,000-token tail with folded reports whole ahead of older turns; the shadow row carries the intake verdict when the gate is present and no message text; the volume line counts refusals per day from the door run records and a record of another agent counts none.
   2. Write the operator module; add the flag; wire the call site and the write; add `steer`; cap and order the tail; add the refusals count to the volume line from the door run records; measure the median latency and output tokens on the replay and post them.
   3. Spec rows: routing-and-config, a new item for the operator (its inputs, its three outcomes, the flag's modes, the call ahead of stage A); load-harness item 17 (the agreement row); run-history (the shadow row).
-- **Execution note**: under `shadow` nothing a person reads changes; the first visible change is `on`, which stays off in production until its gate holds after cut three.
+- **Execution note**: under `shadow` nothing a person reads changes; the first visible change is `on`, whose default U17 flips on its entry test (amended 2026-09-19).
 - **Patterns to follow**: `buildRoutePrompt` and `RouteInput`; `routableCommands` and `routablePresets`; `routing.auto` and `routingOn`; the question marker of record 0054's renderer; `ROUTE_RECEIPT_CAP`.
 - **Test scenarios**:
   - Shadow: readers and operator disagree on a typed line; the row holds both; nothing runs from the operator.
@@ -330,6 +336,25 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   - `runs list`: no verifier call.
 - **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request.
 
+### U17. The default is on
+
+- **Goal**: `operatorModeOf`'s default flips from `off` to `on` in `src/config.ts`: a deployment whose config never names `routing.operator` runs the operator as the one door. The flag stays as the rollback lever (`routing.operator: off` turns it back), never a setting a person is told about — no how-to offers it.
+- **Requirements**: R6, R27 (routing-and-config item 29, the default).
+- **Dependencies**: U5, U6, one strong-tier replay run (`npm run load -- route --provider anthropic --model <strong tier> --verify`) whose write row and misses row hold, posted in the pull request body; record 0058's intake gate in place (the Scope Boundaries' dependency of `on`).
+- **Files**: `src/config.ts` (`operatorModeOf` returns `on` where the block is silent — the one place the default lives); `config/config.example.yaml` (the commented example names `off` as the rollback lever, not a choice to make); `src/config/validate.ts` (unchanged refusals proven still to hold); tests `src/config.test.ts`, `src/core/dispatcher.test.ts`.
+- **Approach**:
+  1. Tests first: a config with no `routing.operator` resolves `on`; `routing.operator: off` still resolves `off` and `shadow` resolves `shadow`; the dispatcher under a silent config calls the operator ahead of stage A and runs its decision.
+  2. Flip the default in `operatorModeOf`; reword the example comment to the rollback lever.
+  3. Run the entry test: one strong-tier replay under `--verify`; the write row and the misses row hold; the receipt with the head sha it ran against goes in the pull request body.
+  4. Spec rows: routing-and-config item 29 (the default and the rollback lever).
+- **Execution note**: this unit replaces the shadow week with one entry test (amended 2026-09-19); the agreement row is posted after one day under `on` as a measurement, never read as a gate.
+- **Patterns to follow**: `operatorModeOf` and its comment block; `routingOn`'s default note.
+- **Test scenarios**:
+  - No `routing.operator` key: `operatorModeOf` returns `on`.
+  - `routing.operator: off`: `off` — the rollback lever; `shadow`: `shadow`.
+  - The dispatcher with a silent config runs the operator's decision, not the readers'.
+- **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request; the entry replay's write and misses rows posted in the body with their head sha.
+
 ### U7. The thread session and the working sessions
 
 - **Goal**: the operator reads and writes one session per thread; a unit's coding and review lanes each continue one working session across rounds and re-issues; folds and connector turns append once under a row id; old per-agent logs read into the thread session once at cutover in run order; the unit page's session search derives the new keys; deletion and retention of a thread session are stated.
@@ -368,11 +393,29 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   - The two paths fenced.
 - **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request; the repository row posted.
 
+### U18. Images reach the operator
+
+- **Goal**: the request's images enter the operator's turn as provider-native image blocks and the operator's card is vision-capable; every attachment of a thread is copied into the R2 artifacts store by reference when it arrives (record 0033), the reference stored on the session row so a later turn's "this" resolves; the same references are handed to the child at the bind; a replay row of image-anchored fixtures holds.
+- **Requirements**: R7 (the operator's turn, extended to the request's images by the 2026-09-19 amendment), R13, R27 (slack-channel item 5; routing-and-config item 29; load-harness item 17).
+- **Dependencies**: U4, U7.
+- **Files**: `src/core/dispatch/operator.ts` (the image blocks on the turn; the vision requirement on the operator's model); `src/core/dispatch/seed.ts` (the references handed to the child at the bind); `deploy/cloudflare/artifactsCopy.ts` and `src/artifacts/store.ts` (record 0033's copy by reference on arrival); `src/core/runLedger/sessionLog.ts` (the reference on the session row); `src/load/routeImageFixtures.ts` (new) and `src/load/routeReplay.ts` (the image row); tests beside each.
+- **Approach**:
+  1. Tests first: a message with a screenshot yields an operator turn carrying one provider-native image block, never a transcription; the attachment lands in the artifacts store by reference when it arrives and the session row carries the reference; a later turn's "fix this" resolves the stored reference; the bound child's seed carries the same references; an operator model without vision is refused by name.
+  2. Copy on arrival; store the reference on the row; render the blocks; hand the references down at the bind; add the fixtures and the row.
+  3. Spec rows: slack-channel item 5 (attachments to the operator and the store), routing-and-config item 29 (the image blocks on the operator's turn), load-harness item 17 (the image row).
+- **Patterns to follow**: record 0033's copy path in `deploy/cloudflare/artifactsCopy.ts`; slack-channel item 5's attachment budgets; U3's fixture and row shapes.
+- **Test scenarios**:
+  - A screenshot plus an order binds `ship` with the image on the turn (the replay's image-anchored fixture).
+  - A later turn's "this" resolves the reference stored on the session row.
+  - The child's seed at the bind carries the reference the operator saw.
+  - An attachment on a silent reply still lands in the store by reference.
+- **Verification**: the test files green, red first; `npm run specs:check`; `node scripts/public-hygiene.mjs` over the fixtures; CI's `verify` green on the pull request; the image row posted.
+
 ### U9. A repository per unit, the unit cap, preflight before the instance
 
 - **Goal**: a plan unit names its repository; the runner cuts each unit's branch there, attaches its children to that repository's resident and lets it mint the token; a plan bind over the per-requester unit cap is refused naming the cap; preflight runs per unit before the instance exists; a failed unit is a question whose answer re-issues that unit alone into the same instance; a generated plan's id derives from the thread and the decision.
 - **Requirements**: R19, R20, R21, R27 (agent-ship items 5, 7, 16, 17; resident-repos item 29).
-- **Dependencies**: the `on` gate, U7, record 0060's hosted parent and host-only write path (its plan's U3 and U5), since both rewrite the hand-off and the coordinator's channel code.
+- **Dependencies**: U17, U7, record 0060's hosted parent and host-only write path (its plan's U3 and U5), since both rewrite the hand-off and the coordinator's channel code.
 - **Files**: `src/core/coordinator/contract.ts` (`CoordinatorUnit.repo`; the instance keeps `repo` as the default); `src/core/ship/coordinator.ts` (`generatedPlanId(threadKey, decisionId)`; branch per unit repository); `src/core/coordinator/handOff.ts` (the unit cap; preflight per unit before creation; the question with the corrected line; re-issue of one unit into the instance); `src/core/coordinator/driver.ts` (attach by unit repository); `src/channels/adminCoordinator.ts` (the first receipt names every unit's repository); tests `handOff.test.ts`, `coordinator.test.ts`, `driver.test.ts`, `adminCoordinator.test.ts`.
 - **Approach**:
   1. Tests first: a two-repository plan cuts two branches and attaches two residents; a unit whose repository the installation cannot see fails preflight before the instance exists and renders a question; the answer re-issues only that unit; a re-bound plan after a runtime branch failure lands in the same instance; a plan over the cap is refused naming the cap.
@@ -419,7 +462,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 
 - **Goal**: `agent:`, `model:`, `effort:`, `budget:`, `severity:` are words the operator reads; `renewals:` is the plan bind's `renewals` argument; the sticky read of directives from history is gone.
 - **Requirements**: R25, R27 (routing-and-config items 1, 2 and 3).
-- **Dependencies**: the `on` gate (which includes the directive row), U3.
+- **Dependencies**: U17, U3; the directive row holds on this unit's own replay.
 - **Files**: `src/directives.ts` (the chat parse removed; what the CLI keeps stays); `src/core/dispatch/resolve.ts` (`readRequest` and `resolveRun` without directives or sticky); tests `route.test.ts`, `resolve.test.ts`.
 - **Approach**: the directive row from U3 holds on the replay; delete the parse and the sticky read; spec rows: routing-and-config items 1 to 3 (directives are words; no stickiness).
 - **Test scenarios**: each word as a fixture, in first position and mid-sentence; `renewals` bound to the plan.
@@ -429,9 +472,9 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 
 - **Goal**: a typed command line in chat is words the operator binds; stage A and the chat grammar entry are gone; the invoker and its types stay for the paths that call them; the typed surfaces keep the grammar.
 - **Requirements**: R25, R27 (routing-and-config item 10; command-registry the chat surface item).
-- **Dependencies**: U12.
+- **Dependencies**: U12, U17.
 - **Files**: `src/core/dispatch/fastPath.ts` (removed); `src/core/commandChat.ts` (`parseChatCommand`, `handleChatCommand` and the grammar entry removed; `invokeChatCommand`, `chatCallerFor`, `ChatCommandResult`, `ParsedChatCommand` and `unwrapChatLinks` stay, since `confirm.ts`, `commandRun.ts`, `reply.ts`, `route.ts` and `conformanceFixture.ts` import them and U15 moves `unwrapChatLinks`); `src/core/dispatcher.ts` (stage A gone); tests `dispatcher.test.ts`, `fastPath.test.ts` (removed), `routeReplay.test.ts`.
-- **Approach**: the command row holds on the replay and the shadow agreement row on typed lines is at or above the command row's bar; then remove stage A and the parse; spec rows: routing-and-config item 10 (no fast path).
+- **Approach**: the command row holds on the replay and the agreement row on typed lines, measured under `on`, is at or above the command row's bar; then remove stage A and the parse; spec rows: routing-and-config item 10 (no fast path).
 - **Test scenarios**: a typed line with flags binds the same call the grammar bound; a typed line with a typo is a question with the corrected line; `npm run typecheck` passes with the invoker in place.
 - **Verification**: the test files green; both rows hold; `npm run specs:check`; CI's `verify` green on the pull request.
 
@@ -460,7 +503,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 
 - **Goal**: the built-in confirm default is destructive; a guest's binds keep the write-class button; the validator accepts the new default; the change lands only when its four gates hold.
 - **Requirements**: R26, R27 (routing-and-config item 25; authorization item 14).
-- **Dependencies**: U6, U15, the write and planted rows held twice on the operator prompt at or after U15's head, the requester fix deployed.
+- **Dependencies**: U6, U15, U17, the write and planted rows held twice on the operator prompt at or after U15's head, the requester fix deployed.
 - **Files**: `src/config/profile.ts` (`BUILT_IN_CONFIRM`); `src/config/validate.ts`; `src/core/dispatch/route.ts` (the guest rule); tests `profile.test.ts`, `route.test.ts`, `dispatcher.test.ts`.
 - **Approach**: tests first (a member's `config set me` runs with a receipt; a guest's renders the button; `memory forget` renders the button for both); flip the default; spec rows: routing-and-config item 25; authorization item 14 (guests).
 - **Execution note**: the pull request body carries the two write-row receipts and the two planted-row receipts, each naming the head sha its replay ran against (at or after U15's merged head, no prompt change between them), and the deployment receipt of the requester fix.
@@ -478,12 +521,13 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 | Public hygiene over fixtures and docs | `node scripts/public-hygiene.mjs` | U3, U8, U14 |
 | The lint rule | `npm run lint` | U15 |
 | The whole gate | `npm run verify`, run by CI on the pull request | U1 to U16 |
-| Replay: the write row | `npm run load -- route --provider anthropic --model <strong tier> --verify`: zero misbinds on imperative and command fixtures, at most one in fifty on paraphrases; posted with the head sha it ran against | U3, U16 |
+| Replay: the write row | `npm run load -- route --provider anthropic --model <strong tier> --verify`: zero misbinds on imperative and command fixtures, at most one in fifty on paraphrases; posted with the head sha it ran against | U3, U17, U16 |
 | Replay: the planted row | the same run: zero binds the verifier lets pass that no author turn asked for | U3, U6, U16 |
-| Replay: the misses row | the same run: the seventeen filed misses bound as the person meant | U3, the `on` gate |
-| Replay: the directive row | the same run: the six words bound as words | U3, the `on` gate, U12 |
-| Replay: the agreement row | the shadow log over one week of production events: agreement on typed lines at or above the command row's bar | U4, the `on` gate, U13 |
+| Replay: the misses row | the same run: the seventeen filed misses bound as the person meant | U3, U17 |
+| Replay: the directive row | the same run: the six words bound as words | U3, U12 |
+| Replay: the agreement row | the decision log over one day of production events under `on`: agreement on typed lines beside the readers' comparison, posted as a measurement, never a gate (amended 2026-09-19) | U4, U13 |
 | Replay: the repository row | the same run: binds from a subject alone | U8, U14 |
+| Replay: the image row | the same run: the image-anchored fixtures, a screenshot plus an order, bind `ship` | U18 |
 | The volume line | `npm run load -- route` prints routed requests, refusals and events per day; posted after one week under the flag | U3, U4 |
 | Latency | the operator's median bind at the tail cap on the strong tier, under three seconds, with output-token counts beside it; posted | U4 |
 | Live, human-gated: the trace | in a thread with one idle unit, three bullets across two repositories. Expect two binds, one setting run with its receipt, one plan whose first receipt names both repositories, the idle unit untouched | U9 |
@@ -497,9 +541,9 @@ A posted row is a comment on the receipts ledger of the spec that owns it, namin
 
 ## Definition of Done
 
-- U1 to U3 merged on `main`, then U4 in `shadow` in production for one week with the agreement row, the misses row, the directive row, the volume line and the latency posted on the receipts tracker.
-- U5 and U6 merged; U7 and U8 merged with the repository row posted.
-- The maintainer flips `routing.operator` to `on` when the misses and directive rows hold, the agreement row on typed lines is at or above the command row's bar, and record 0058's intake gate is in place; the flip is posted on the receipts tracker as its own row.
+- U1 to U3 merged on `main`, then U4 merged with the misses row, the directive row, the volume line and the latency posted on the receipts tracker; the shadow week is replaced by U17's replay receipt (amended 2026-09-19).
+- U5 and U6 merged, then U17; U7, U8 and U18 merged with the repository row and the image row posted.
+- U17 flips `operatorModeOf`'s default to `on` on its entry test — U5 and U6 merged, the write and misses rows holding on one strong-tier `--verify` replay posted in its pull request body — with record 0058's intake gate in place; the agreement row is posted after one day under `on` as a measurement; the flip is posted on the receipts tracker as its own row.
 - U9 to U11 merged with the two-repository staging receipt.
 - U12 to U15 merged in order, each with its row holding in the same pull request; the lint rule green on the tree.
 - U16 merged when its four gates hold, with the receipts in its body.
