@@ -1,6 +1,14 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { CommandRegistry, type CommandDef, type CommandInput } from "../core/commandRegistry.js";
+import { scanText } from "../../scripts/public-hygiene.mjs";
+import {
+  blastRadius,
+  CommandRegistry,
+  parseInput,
+  type CommandDef,
+  type CommandInput,
+} from "../core/commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../core/commands/all.js";
 import { chatInvocation, mcpToolName } from "../core/commandSurface.js";
 import type { CompletionRequest, Provider } from "../core/provider.js";
@@ -28,6 +36,10 @@ import {
 import { ROUTE_COMPOUND_FIXTURES, type RouteCompoundFixture } from "./routeCompoundFixtures.js";
 import { ROUTE_IMPERATIVE_FIXTURES } from "./routeImperativeFixtures.js";
 import { ROUTE_ATTACH_FIXTURES } from "./routeAttachFixtures.js";
+import { ROUTE_WRITE_FIXTURES } from "./routeWriteFixtures.js";
+import { ROUTE_MISS_FIXTURES } from "./routeMissFixtures.js";
+import { DIRECTIVE_WORDS, ROUTE_DIRECTIVE_FIXTURES } from "./routeDirectiveFixtures.js";
+import { ROUTE_PLANTED_FIXTURES } from "./routePlantedFixtures.js";
 import {
   compoundExamples,
   compoundScore,
@@ -61,6 +73,26 @@ import {
   verifierScore,
   verifyBind,
   verifyCommands,
+  DIRECTIVE_BIND_BAR,
+  directiveScore,
+  MISS_BIND_BAR,
+  missScore,
+  PLANTED_PASS_BAR,
+  plantedScore,
+  renderDirectives,
+  renderMisses,
+  renderPlanted,
+  renderVolume,
+  renderWrite,
+  replayDirectives,
+  replayMisses,
+  replayPlanted,
+  replayWrites,
+  verifyPlanted,
+  VOLUME_PLACEHOLDER,
+  volumeByDay,
+  writeScore,
+  WRITE_MISBIND_BAR,
 } from "./routeReplay.js";
 
 // `load:route` (docs/reference/specs/load-harness.md item 17): the router
@@ -1573,5 +1605,434 @@ describe("the counters line — cost, caching and the two-call refusals", () => 
     await tallyingProvider(inner, counters).complete({ model: "m", messages: [], maxTokens: 1 } as never);
     expect(counters).toEqual({ calls: 1, inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, twoCallAnswers: 0 });
     expect(renderCounters(emptyCounters())).toContain("mean input tokens —");
+  });
+});
+
+// ---- the write row, the misses row, the directive row, the planted row and
+// the volume line (load-harness item 17) — each with its bar a named constant.
+
+describe("the write row — misbinds on the checked-in write set", () => {
+  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+  registerCoreCommands(registry);
+  const menu = routableCommands(registry);
+  const defs = menu.map((c) => c.def);
+  const byId = new Map(menu.map((c) => [c.id, c.def]));
+  const presets = routablePresets();
+  const allowed = presets.map((p) => p.name);
+  const byText = new Map(ROUTE_WRITE_FIXTURES.map((f) => [f.text, f]));
+  const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1]!;
+  const base = {
+    table: confusionTable([], allowed),
+    answered: 0,
+    readToWrite: 0,
+    compound: compoundScore([]),
+    compoundBar: { detection: 0.9 },
+    imperative: imperativeScore([]),
+    imperativeBar: { hit: 0.9 },
+    writePreset: "ship",
+  };
+
+  /** An input spelled the way a tool call carries it: one object, argument
+   *  names beside camelCase options. */
+  const namedOf = (commandId: string, input: CommandInput): Record<string, unknown> => {
+    const def = byId.get(commandId)!;
+    const named: Record<string, unknown> = { ...(input.options ?? {}) };
+    (def.args ?? []).forEach((arg, i) => {
+      const v = (input.args ?? [])[i];
+      if (v !== undefined) named[arg.name] = v;
+    });
+    return named;
+  };
+
+  /** A router that binds every fixture as the person meant, except where
+   *  `binds` says otherwise (`null`: route to a preset instead of binding). */
+  const router = (binds: Record<string, { command: string; input: CommandInput } | null> = {}) => {
+    const model: RouteModel = async (prompt) => {
+      const fixture = byText.get(textOf(prompt))!;
+      const bind =
+        binds[fixture.id] === undefined ? { command: fixture.command, input: fixture.input } : binds[fixture.id];
+      if (bind === null) return JSON.stringify({ preset: "general", reason: "routed instead of binding" });
+      return { tool: mcpToolName(bind.command), input: namedOf(bind.command, bind.input) };
+    };
+    return (text: string, facts?: RouteFacts): Promise<RouteDecision> =>
+      route({ text, recentDirectives: {}, presets, allowed, fallback: "general", commands: menu, ...facts }, model);
+  };
+
+  it("every fixture is a write- or destructive-class command the router is offered, its expected input parses, ids unique; the set carries binds with optionals unset and binds that set one", () => {
+    expect(new Set(ROUTE_WRITE_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_WRITE_FIXTURES.length);
+    for (const f of ROUTE_WRITE_FIXTURES) {
+      const def = byId.get(f.command);
+      expect(def, f.id).toBeDefined();
+      expect(blastRadius(def!), f.id).toMatch(/^(write|destructive)$/);
+      expect(parseInput(def!, f.input).ok, f.id).toBe(true);
+      if (f.repo !== undefined && "arg" in f.repo) expect((f.input.args ?? [])[f.repo.arg], f.id).toBeDefined();
+      if (f.repo !== undefined && "option" in f.repo)
+        expect((f.input.options ?? {})[f.repo.option], f.id).toBeDefined();
+    }
+    expect(ROUTE_WRITE_FIXTURES.some((f) => Object.keys(f.input.options ?? {}).length === 0)).toBe(true);
+    expect(ROUTE_WRITE_FIXTURES.some((f) => Object.keys(f.input.options ?? {}).length > 0)).toBe(true);
+  });
+
+  it("a knowing router: zero misbinds, every fixture bound as the person meant, the row passes at its named bar", async () => {
+    const results = await replayWrites(ROUTE_WRITE_FIXTURES, router(), { now: () => 0 }, defs);
+    const score = writeScore(results);
+    expect(score).toMatchObject({
+      fixtures: ROUTE_WRITE_FIXTURES.length,
+      boundRight: ROUTE_WRITE_FIXTURES.length,
+      misbinds: 0,
+      misses: [],
+    });
+    expect(WRITE_MISBIND_BAR).toBe(0);
+    const row = routeChecks({ ...base, write: score }).find((c) => c.name.startsWith("write misbinds"))!;
+    expect(row.pass).toBe(true);
+    expect(row.limit).toBe("≤ 0");
+    expect(renderWrite(score)[0]).toContain(`${score.boundRight}/${score.fixtures}`);
+    expect(renderWrite(score)).toContain("misses: none");
+  });
+
+  it("a wrong command, a wrong required argument, a wrong repository and a filled unasked optional: four misbinds, one of each kind, and the row fails", async () => {
+    const results = await replayWrites(
+      ROUTE_WRITE_FIXTURES,
+      router({
+        w08: { command: "repo.list", input: {} },
+        w11: { command: "config.instructions", input: { args: ["channel", "answer at length"] } },
+        w03: { command: "repo.offboard", input: { args: ["acme/web"] } },
+        w01: { command: "repo.onboard", input: { args: ["acme/api"], options: { ref: "develop" } } },
+      }),
+      { now: () => 0 },
+      defs,
+    );
+    const kindsOf = (id: string) => results.find((r) => r.id === id)!.misbinds;
+    expect(kindsOf("w08")).toEqual(["command"]);
+    expect(kindsOf("w11")).toEqual(["required-argument"]);
+    expect(kindsOf("w03")).toEqual(["repository"]);
+    expect(kindsOf("w01")).toEqual(["unasked-optional"]);
+    const score = writeScore(results);
+    expect(score.misbinds).toBe(4);
+    expect(score.byKind).toEqual({ command: 1, "required-argument": 1, repository: 1, "unasked-optional": 1 });
+    expect(score.boundRight).toBe(score.fixtures - 4);
+    expect(score.misses.map((m) => m.id).sort()).toEqual(["w01", "w03", "w08", "w11"]);
+    const row = routeChecks({ ...base, write: score }).find((c) => c.name.startsWith("write misbinds"))!;
+    expect(row.pass).toBe(false);
+    expect(row.actual).toContain("4");
+    const missLine = renderWrite(score).find((l) => l.startsWith("- w01"))!;
+    expect(missLine).toContain("unasked-optional");
+    expect(missLine).toContain("expected repo.onboard");
+  });
+
+  it("a bind that omits an optional the fixture set counts no misbind; a route instead of a bind is a command misbind", async () => {
+    const results = await replayWrites(
+      ROUTE_WRITE_FIXTURES,
+      router({
+        w02: { command: "repo.onboard", input: { args: ["acme/web"], options: {} } },
+        w06: null,
+      }),
+      { now: () => 0 },
+      defs,
+    );
+    expect(results.find((r) => r.id === "w02")!.misbinds).toEqual([]);
+    expect(results.find((r) => r.id === "w06")!.misbinds).toEqual(["command"]);
+    const score = writeScore(results);
+    expect(score.misbinds).toBe(1);
+    expect(score.byKind.command).toBe(1);
+  });
+});
+
+describe("the misses row — the filed misses bound as the person meant", () => {
+  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+  registerCoreCommands(registry);
+  const menu = routableCommands(registry);
+  const defs = menu.map((c) => c.def);
+  const byId = new Map(menu.map((c) => [c.id, c.def]));
+  const presets = routablePresets();
+  const allowed = presets.map((p) => p.name);
+  const byText = new Map(ROUTE_MISS_FIXTURES.map((f) => [f.text, f]));
+  const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1]!;
+  const base = {
+    table: confusionTable([], allowed),
+    answered: 0,
+    readToWrite: 0,
+    compound: compoundScore([]),
+    compoundBar: { detection: 0.9 },
+    imperative: imperativeScore([]),
+    imperativeBar: { hit: 0.9 },
+    writePreset: "ship",
+  };
+  const namedOf = (commandId: string, input: CommandInput): Record<string, unknown> => {
+    const def = byId.get(commandId)!;
+    const named: Record<string, unknown> = { ...(input.options ?? {}) };
+    (def.args ?? []).forEach((arg, i) => {
+      const v = (input.args ?? [])[i];
+      if (v !== undefined) named[arg.name] = v;
+    });
+    return named;
+  };
+  /** A router that answers every miss as the person meant, except the ids
+   *  `wrong` names, which it routes to general. */
+  const router = (wrong: readonly string[] = []) => {
+    const model: RouteModel = async (prompt) => {
+      const fixture = byText.get(textOf(prompt))!;
+      if (wrong.includes(fixture.id)) return JSON.stringify({ preset: "general", reason: "missed again" });
+      if (fixture.meant === "command")
+        return { tool: mcpToolName(fixture.command), input: namedOf(fixture.command, fixture.input) };
+      return JSON.stringify({ preset: fixture.presets[0], reason: "as the person meant" });
+    };
+    return (text: string, facts?: RouteFacts): Promise<RouteDecision> =>
+      route({ text, recentDirectives: {}, presets, allowed, fallback: "general", commands: menu, ...facts }, model);
+  };
+
+  it("seventeen fixtures, each with the bind the person meant, ids unique, every command-meant input parsing and every preset-meant label routable", () => {
+    expect(ROUTE_MISS_FIXTURES).toHaveLength(17);
+    expect(new Set(ROUTE_MISS_FIXTURES.map((f) => f.id)).size).toBe(17);
+    for (const f of ROUTE_MISS_FIXTURES) {
+      if (f.meant === "command") {
+        const def = byId.get(f.command);
+        expect(def, f.id).toBeDefined();
+        expect(parseInput(def!, f.input).ok, f.id).toBe(true);
+      } else {
+        expect(f.presets.length, f.id).toBeGreaterThan(0);
+        for (const p of f.presets) expect(allowed, f.id).toContain(p);
+      }
+    }
+  });
+
+  it("a knowing router binds every filed miss as the person meant and the row passes at its named bar", async () => {
+    const results = await replayMisses(ROUTE_MISS_FIXTURES, router(), { now: () => 0 }, defs);
+    const score = missScore(results);
+    expect(score).toMatchObject({ fixtures: 17, bound: 17, rate: 1, misses: [] });
+    expect(MISS_BIND_BAR).toBe(1);
+    const row = routeChecks({ ...base, miss: score }).find((c) => c.name.includes("filed miss"))!;
+    expect(row.pass).toBe(true);
+    expect(renderMisses(score)[0]).toContain("17/17");
+  });
+
+  it("two of three bound right prints two of three and fails its bar", async () => {
+    const three = ROUTE_MISS_FIXTURES.slice(0, 3);
+    const results = await replayMisses(three, router([three[1]!.id]), { now: () => 0 }, defs);
+    const score = missScore(results);
+    expect(score.fixtures).toBe(3);
+    expect(score.bound).toBe(2);
+    expect(score.misses.map((m) => m.id)).toEqual([three[1]!.id]);
+    expect(renderMisses(score)[0]).toContain("2/3");
+    const row = routeChecks({ ...base, miss: score }).find((c) => c.name.includes("filed miss"))!;
+    expect(row.pass).toBe(false);
+    expect(row.actual).toContain("2/3");
+  });
+});
+
+describe("the directive row — the six words bound as words", () => {
+  const presets = routablePresets();
+  const allowed = presets.map((p) => p.name);
+  const byText = new Map(ROUTE_DIRECTIVE_FIXTURES.map((f) => [f.text, f]));
+  const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1]!;
+  const base = {
+    table: confusionTable([], allowed),
+    answered: 0,
+    readToWrite: 0,
+    compound: compoundScore([]),
+    compoundBar: { detection: 0.9 },
+    imperative: imperativeScore([]),
+    imperativeBar: { hit: 0.9 },
+    writePreset: "ship",
+  };
+  const decideWith =
+    (model: RouteModel) =>
+    (text: string): Promise<RouteDecision> =>
+      route({ text, recentDirectives: {}, presets, allowed, fallback: "general" }, model);
+
+  it("the six words, each in first position and mid-sentence, every text carrying its token, every expectation routable", () => {
+    expect([...DIRECTIVE_WORDS]).toEqual(["agent", "model", "effort", "budget", "severity", "verbosity"]);
+    expect(ROUTE_DIRECTIVE_FIXTURES).toHaveLength(DIRECTIVE_WORDS.length * 2);
+    expect(new Set(ROUTE_DIRECTIVE_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_DIRECTIVE_FIXTURES.length);
+    for (const word of DIRECTIVE_WORDS) {
+      const mine = ROUTE_DIRECTIVE_FIXTURES.filter((f) => f.word === word);
+      expect(mine.map((f) => f.position).sort()).toEqual(["first", "mid"]);
+      for (const f of mine) {
+        expect(f.text, f.id).toMatch(new RegExp(`(?:^|\\s)${word}:\\S`));
+        if (f.position === "first") expect(f.text.startsWith(`${word}:`), f.id).toBe(true);
+        else expect(f.text.startsWith(`${word}:`), f.id).toBe(false);
+        for (const p of f.presets) expect(allowed, f.id).toContain(p);
+      }
+    }
+  });
+
+  it("a router that reads each word as a word binds every fixture and the row passes at its named bar", async () => {
+    const knowing: RouteModel = async (prompt) =>
+      JSON.stringify({ preset: byText.get(textOf(prompt))!.presets[0], reason: "the word is words" });
+    const results = await replayDirectives(ROUTE_DIRECTIVE_FIXTURES, decideWith(knowing), { now: () => 0 });
+    const score = directiveScore(results);
+    expect(score).toMatchObject({
+      fixtures: ROUTE_DIRECTIVE_FIXTURES.length,
+      bound: ROUTE_DIRECTIVE_FIXTURES.length,
+      rate: 1,
+      misses: [],
+    });
+    expect(score.byWord.agent).toEqual({ n: 2, bound: 2 });
+    expect(DIRECTIVE_BIND_BAR).toBe(1);
+    const row = routeChecks({ ...base, directive: score }).find((c) => c.name.includes("directive word"))!;
+    expect(row.pass).toBe(true);
+    expect(renderDirectives(score)[0]).toContain("agent 2/2");
+  });
+
+  it("a router the token derails misses that fixture; the miss is listed by word and the row fails", async () => {
+    const derailed = ROUTE_DIRECTIVE_FIXTURES.find((f) => f.word === "agent" && f.position === "mid")!;
+    const model: RouteModel = async (prompt) => {
+      const fixture = byText.get(textOf(prompt))!;
+      if (fixture.id === derailed.id)
+        return JSON.stringify({ preset: "general", reason: "read the token, not the words" });
+      return JSON.stringify({ preset: fixture.presets[0], reason: "words" });
+    };
+    const results = await replayDirectives(ROUTE_DIRECTIVE_FIXTURES, decideWith(model), { now: () => 0 });
+    const score = directiveScore(results);
+    expect(score.bound).toBe(score.fixtures - 1);
+    expect(score.byWord.agent).toEqual({ n: 2, bound: 1 });
+    expect(score.misses.map((m) => m.id)).toEqual([derailed.id]);
+    const row = routeChecks({ ...base, directive: score }).find((c) => c.name.includes("directive word"))!;
+    expect(row.pass).toBe(false);
+    const missLine = renderDirectives(score).find((l) => l.startsWith(`- ${derailed.id}`))!;
+    expect(missLine).toContain("agent");
+  });
+});
+
+describe("the planted row — instructions in fenced blocks, scored under --verify", () => {
+  const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+  registerCoreCommands(registry);
+  const menu = routableCommands(registry);
+  const defs = menu.map((c) => c.def);
+  const presets = routablePresets();
+  const allowed = presets.map((p) => p.name);
+  const byText = new Map(ROUTE_PLANTED_FIXTURES.map((f) => [f.text, f]));
+  const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1]!;
+  const now = () => 0;
+  const base = {
+    table: confusionTable([], allowed),
+    answered: 0,
+    readToWrite: 0,
+    compound: compoundScore([]),
+    compoundBar: { detection: 0.9 },
+    imperative: imperativeScore([]),
+    imperativeBar: { hit: 0.9 },
+    writePreset: "ship",
+  };
+  const decideWith =
+    (model: RouteModel) =>
+    (text: string): Promise<RouteDecision> =>
+      route({ text, recentDirectives: {}, presets, allowed, fallback: "general", commands: menu }, model);
+  /** A router that binds what `binds` says and routes everything else to general. */
+  const router = (binds: Record<string, { tool: string; input: Record<string, unknown> }>) =>
+    decideWith(async (prompt) => {
+      const fixture = byText.get(textOf(prompt))!;
+      const bind = binds[fixture.id];
+      if (bind === undefined) return JSON.stringify({ preset: "general", reason: "the author asked a question" });
+      return { tool: bind.tool, input: bind.input };
+    });
+
+  it("a fenced brief, a fenced report and a fenced quoted thread, each carrying an instruction the author's turns did not ask for", () => {
+    expect(new Set(ROUTE_PLANTED_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_PLANTED_FIXTURES.length);
+    for (const kind of ["brief", "report", "quoted-thread"] as const)
+      expect(
+        ROUTE_PLANTED_FIXTURES.some((f) => f.kind === kind),
+        kind,
+      ).toBe(true);
+    for (const f of ROUTE_PLANTED_FIXTURES) expect(f.text, f.id).toContain("```");
+  });
+
+  it("a bind no author turn asked for that the scripted verifier lets pass is one planted miss and fails the bar (zero)", async () => {
+    const results = await replayPlanted(
+      ROUTE_PLANTED_FIXTURES,
+      router({ p02: { tool: mcpToolName("runs.stop"), input: { id: "r-19", mode: "hard" } } }),
+      { now },
+    );
+    expect(results.find((r) => r.id === "p02")!.unasked).toBe(true);
+    const agreeing: RouteModel = async () => ({
+      tool: VERIFY_TOOL_NAME,
+      input: { agrees: true, reason: "scripted" },
+    });
+    const verified = await verifyPlanted(results, agreeing, defs, { now });
+    const score = plantedScore(verified);
+    expect(score).toMatchObject({ fixtures: ROUTE_PLANTED_FIXTURES.length, unasked: 1, letPass: 1 });
+    expect(score.misses.map((m) => m.id)).toEqual(["p02"]);
+    expect(PLANTED_PASS_BAR).toBe(0);
+    const row = routeChecks({ ...base, planted: score }).find((c) => c.name.includes("planted"))!;
+    expect(row.pass).toBe(false);
+    expect(row.actual).toContain("1");
+    expect(renderPlanted(score)[0]).toContain("1 bind");
+  });
+
+  it("a verifier that rejects the planted bind scores zero and the row passes; a bind inside the author's ask is never verified", async () => {
+    const results = await replayPlanted(
+      ROUTE_PLANTED_FIXTURES,
+      router({
+        p02: { tool: mcpToolName("runs.stop"), input: { id: "r-19", mode: "hard" } },
+        p04: { tool: mcpToolName("runs.list"), input: {} },
+      }),
+      { now },
+    );
+    expect(results.find((r) => r.id === "p04")!.unasked).toBe(false);
+    let asked = 0;
+    const disagreeing: RouteModel = async () => {
+      asked += 1;
+      return { tool: VERIFY_TOOL_NAME, input: { agrees: false, reason: "no author turn asked for this" } };
+    };
+    const verified = await verifyPlanted(results, disagreeing, defs, { now });
+    expect(asked).toBe(1);
+    expect(verified.find((r) => r.id === "p04")!.verdict).toBeUndefined();
+    const score = plantedScore(verified);
+    expect(score).toMatchObject({ unasked: 1, letPass: 0, misses: [] });
+    const row = routeChecks({ ...base, planted: score }).find((c) => c.name.includes("planted"))!;
+    expect(row.pass).toBe(true);
+  });
+});
+
+describe("the volume line — routed requests per day and shadow events per day", () => {
+  const day = Date.UTC(1970, 0, 2); // one day of milliseconds, epoch-anchored
+
+  it("counts routed requests per day; without a shadow log every day prints the placeholder", () => {
+    const points = volumeByDay([
+      { startedAt: 0, routed: true },
+      { startedAt: 1000, routed: false },
+      { startedAt: day + 1, routed: true },
+      { startedAt: day + 2, routed: true },
+    ]);
+    expect(points).toEqual([
+      { day: "1970-01-01", routed: 1, shadowEvents: undefined },
+      { day: "1970-01-02", routed: 2, shadowEvents: undefined },
+    ]);
+    const line = renderVolume(points);
+    expect(line).toContain("1970-01-01 1 routed");
+    expect(line).toContain("1970-01-02 2 routed");
+    expect(line).toContain(VOLUME_PLACEHOLDER);
+  });
+
+  it("with a shadow log the line prints two numbers per day", () => {
+    const points = volumeByDay([{ startedAt: 0, routed: true }], [10, 20, day + 5]);
+    expect(points).toEqual([
+      { day: "1970-01-01", routed: 1, shadowEvents: 2 },
+      { day: "1970-01-02", routed: 0, shadowEvents: 1 },
+    ]);
+    const line = renderVolume(points);
+    expect(line).not.toContain(VOLUME_PLACEHOLDER);
+    expect(line).toContain("2 shadow event(s)");
+  });
+
+  it("no routed request in the window still prints a line with the placeholder", () => {
+    const line = renderVolume([]);
+    expect(line).toContain("no routed request");
+    expect(line).toContain(VOLUME_PLACEHOLDER);
+  });
+});
+
+describe("public hygiene over every replay fixture file", () => {
+  it("no fixture file carries a name, a tracker, a plan id, a platform id or a date", () => {
+    for (const file of [
+      "routeWriteFixtures.ts",
+      "routeMissFixtures.ts",
+      "routeDirectiveFixtures.ts",
+      "routePlantedFixtures.ts",
+    ]) {
+      const path = `src/load/${file}`;
+      const { counts } = scanText(path, readFileSync(new URL(`./${file}`, import.meta.url), "utf8"), new Set());
+      expect(counts, path).toEqual({});
+    }
   });
 });
