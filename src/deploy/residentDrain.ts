@@ -39,6 +39,10 @@ export function undrainUrl(baseUrl: string): string {
   return new URL("/undrain", baseUrl).toString();
 }
 
+export function reconcileUrl(baseUrl: string): string {
+  return new URL("/reconcile", baseUrl).toString();
+}
+
 /** The drain the step asks for: as long as its wait plus the margin, named by the commit it deploys. */
 export function drainBody(waitMaxMs: number, commit: string): { minutes: number; reason: string; by: string } {
   return {
@@ -102,6 +106,28 @@ export function drainLiftedLine(
       : `[${tag}] ${step}: no drain stood to lift — the fleet was never closed`;
   }
   return `[${tag}] ${step}: the lift answered ${answerWords(answer)} and no drain was confirmed — the fleet should be open; \`GET /residents\` says (\`draining\`), and \`POST /undrain\` with the drain or admin bearer reopens it if not`;
+}
+
+/** One resident's word in a `/reconcile` answer, as the line prints it. */
+type ReconcileRow = { resource?: unknown; result?: unknown };
+
+const reconcileWords = (rows: ReconcileRow[]): string =>
+  rows.map((r) => `${typeof r.resource === "string" ? r.resource : "?"} ${String(r.result ?? "?")}`).join(", ");
+
+/** The line after the deploy landed and `/reconcile` answered: every touched
+ *  resident's container reconciled onto the new image inside the drain window
+ *  (resident-repos item 69's order), or which resident deferred or failed —
+ *  those restart on their own next quiet attach or refresh — or the request's
+ *  own failure; the drain is lifted right after, whatever this answered. */
+export function reconcileLine(step: string, answer: PostAnswer, tag = "deploy:all"): string {
+  const ok = !("error" in answer) && answer.status >= 200 && answer.status < 300;
+  if (!ok)
+    return `[${tag}] ${step}: the fleet could NOT be reconciled onto the new image (${answerWords(answer)}) — a stale container restarts on its next quiet attach or refresh instead`;
+  const rows: ReconcileRow[] = Array.isArray(answer.body.reconciled) ? (answer.body.reconciled as ReconcileRow[]) : [];
+  const incomplete = rows.filter((r) => r.result === "deferred" || r.result === "error");
+  if (incomplete.length > 0)
+    return `[${tag}] ${step}: fleet reconciled onto the new image with exceptions (${reconcileWords(rows)}) — a deferred or failed resident restarts on its next quiet attach or refresh`;
+  return `[${tag}] ${step}: fleet reconciled onto the new image (${reconcileWords(rows) || "no residents"})`;
 }
 
 /** Appended to the gave-up line when the fleet was drained for the whole wait:

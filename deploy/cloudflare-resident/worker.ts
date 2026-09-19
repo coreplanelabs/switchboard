@@ -1193,6 +1193,13 @@ interface ThreadBinding {
   depsKey?: string;
 }
 
+/** What one image reconcile decided (`reconcileImage`): the container was
+ *  stopped to restart on the current image (`restarted`), already runs it
+ *  (`current`), is not running so the next start uses it anyway (`inactive`),
+ *  or is busy — an operation, an attach or a registered run in flight — and
+ *  the restart is deferred to the next quiet check (`deferred`). */
+type ImageReconcileResult = "restarted" | "current" | "inactive" | "deferred";
+
 interface AttachOk {
   workspace: string;
   ref: string;
@@ -3366,7 +3373,7 @@ export class ResidentDO extends Sandbox<Env> {
     // RUNNING container keeps the old one, so new Worker code can name pool
     // users the image lacks. Reconcile here (every cycle, cheap) — see
     // reconcileImage — so a rollout self-applies within one refresh.
-    if (await this.reconcileImage("refresh")) {
+    if ((await this.reconcileImage("refresh")) === "restarted") {
       // Container stopping; it restarts on the new image in seconds. The
       // engine's retry re-enters this step thirty seconds on and re-warms the
       // resident within the minute, instead of the next bucket.
@@ -4831,27 +4838,51 @@ export class ResidentDO extends Sandbox<Env> {
   /** Pool users live in the IMAGE (Dockerfile useradd loop) while THREAD_USERS
    *  lives in the Worker. After a deploy that grows the pool, a still-running
    *  container lacks the new users and `install -o workerN` fails. Check the
-   *  last pool user exists; if not and nothing is in flight, stop the container
-   *  so it restarts on the current image (state is DO storage + R2 — the
-   *  disk is a cache). Returns true when a stop was issued. */
-  private async reconcileImage(where: string): Promise<boolean> {
-    if (!(await this.isRuntimeActive().catch(() => false))) return false;
+   *  last pool user exists; if not and nothing is in flight — the in-memory
+   *  counters AND the durable run registrations (item 44): a harness run's
+   *  process lives in the container between the bot's operator calls, so a
+   *  restart decided on the op counters alone stops the container under a live
+   *  run — stop the container so it restarts on the current image (state is DO
+   *  storage + R2 — the disk is a cache). A deferred restart re-checks on
+   *  every later attach and refresh cycle until the resident is quiet; a
+   *  registration whose release never came defers it only until the clean-idle
+   *  sweep drains that registration. Answers `restarted` when a stop was
+   *  issued, else why not. */
+  private async reconcileImage(where: string): Promise<ImageReconcileResult> {
+    if (!(await this.isRuntimeActive().catch(() => false))) return "inactive";
     const last = THREAD_USERS[THREAD_USERS.length - 1];
     const probe = await this.run(["id", "-u", last]);
-    if (probe.exitCode === 0) return false;
+    if (probe.exitCode === 0) return "current";
     const busy = this.inFlightCount();
     if (busy > 0) {
       console.log(
         `image-stale (${where}): ${last} missing but ${busy} operation(s)/attach(es) in flight — deferring restart`,
       );
-      return false;
+      return "deferred";
+    }
+    const registered = await this.registeredRunsBeyondOps();
+    if (registered > 0) {
+      console.log(
+        `image-stale (${where}): ${last} missing but ${registered} run registration(s) live — deferring restart until the resident is quiet`,
+      );
+      return "deferred";
     }
     console.log(
       `image-stale (${where}): ${last} missing in the running container — stopping so it restarts on the current image`,
     );
     this.swapIncarnation(); // deliberate incarnation swap
     await this.stop().catch((err) => console.log(`image-stale: stop failed: ${errMsg(err)}`));
-    return true;
+    return "restarted";
+  }
+
+  /** The deploy's reconcile, inside the drain window (item 69's order: the
+   *  runs in flight end, the swap lands, the containers reconcile, the fleet
+   *  reopens): `POST /reconcile` calls this on every resident after the Worker
+   *  deploy landed and BEFORE the drain is lifted, so a container that
+   *  predates the new image restarts while nothing can be admitted onto it —
+   *  never under the first run the reopened fleet admits. */
+  async reconcileForDeploy(): Promise<{ result: ImageReconcileResult }> {
+    return { result: await this.reconcileImage("deploy") };
   }
 
   // -- watchdog (the sparse cron; it re-arms nothing) --------------------------
@@ -5193,7 +5224,7 @@ export class ResidentDO extends Sandbox<Env> {
       const memory = await this.memoryGate("attach", registered);
       if (memory) return memory;
       const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
-      if (await this.reconcileImage("attach")) {
+      if ((await this.reconcileImage("attach")) === "restarted") {
         return {
           error: "image-stale: the container predates the current pool and is restarting; retry shortly",
           status: 503,
@@ -8459,6 +8490,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/rebuild": { scope: "admin", method: "POST" },
   "/drain": { scope: "drain", method: "POST" }, // close the fleet to new runs for a deploy (item 69; admin implied)
   "/undrain": { scope: "drain", method: "POST" }, // reopen it
+  "/reconcile": { scope: "drain", method: "POST" }, // reconcile every container onto the current image, inside the drain window
   "/residents": { scope: "read", method: "GET" }, // admin implied; read-only bearer allowed
   "/debug": { scope: "read", method: "POST" }, // per-op: READ_DEBUG_OPS for read scope, everything for admin
   "/status": { scope: "operator", method: "GET" },
@@ -8563,6 +8595,8 @@ export default {
             return await handleDrain(env, body);
           case "/undrain":
             return await handleUndrain(env);
+          case "/reconcile":
+            return await handleReconcile(env);
           case "/residents":
             return await handleResidents(env);
           case "/debug": {
@@ -9002,6 +9036,28 @@ async function handleUndrain(env: Env): Promise<Response> {
   const cleared = await registryStub(env).clearDrain();
   console.log(`[drain] fleet reopened (${cleared ? "a drain stood" : "no drain stood"})`);
   return json({ draining: null, cleared });
+}
+
+/** POST /reconcile (drain scope): reconcile every resident's container onto
+ *  the current image — the deploy runner posts it after its Worker deploy
+ *  landed and BEFORE its `/undrain`, so a stale container restarts inside the
+ *  drain window (item 69's order) and never under a run the reopened fleet
+ *  admits. Each resident answers what its reconcile decided; a failing one
+ *  degrades to `error` without touching its neighbors, and a `deferred` or
+ *  failed one restarts on its own next quiet attach or refresh cycle. */
+async function handleReconcile(env: Env): Promise<Response> {
+  const residents = await registryStub(env).list();
+  const settled = await Promise.allSettled(
+    residents.map((record) => residentStub(env, record.resource).reconcileForDeploy()),
+  );
+  const reconciled = residents.map((record, i) => {
+    const s = settled[i];
+    return s.status === "fulfilled"
+      ? { resource: record.resource, result: s.value.result }
+      : { resource: record.resource, result: "error" as const, error: errMsg(s.reason) };
+  });
+  console.log(`[reconcile] deploy image reconcile: ${JSON.stringify(reconciled)}`);
+  return json({ reconciled });
 }
 
 async function handleResidents(env: Env): Promise<Response> {

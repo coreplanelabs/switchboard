@@ -64,9 +64,12 @@ describe("the preflight-facing counts see registered runs the op counters miss",
     expect(source).toMatch(/runsInFlight: this\.runsInFlightCount\(\) \+ registeredRuns,/);
   });
 
-  it("the container-lifecycle predicates (isIdle, reconcileImage) keep the in-memory count alone — a stale registration must not pin a container awake", () => {
+  it("isIdle keeps the in-memory count alone — a stale registration must not pin a container awake — while reconcileImage reads the registrations too and DEFERS its restart: a restart is what kills the run the registration protects, and a stale one defers it only until the clean-idle sweep drains it", () => {
     const idle = method("isIdle");
     expect(idle).toMatch(/return this\.inFlightCount\(\) === 0;/);
     expect(idle).not.toMatch(/registeredRunsBeyondOps/);
+    const reconcile = method("reconcileImage");
+    expect(reconcile).toMatch(/await this\.registeredRunsBeyondOps\(\)/);
+    expect(reconcile).toMatch(/deferring restart until the resident is quiet/);
   });
 });

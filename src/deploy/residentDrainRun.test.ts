@@ -7,6 +7,7 @@ import {
   drainSet,
   drainSkippedLine,
   drainUntil,
+  reconcileLine,
   RESIDENT_DRAINED_WAIT_MAX_MS,
   RESIDENT_DRAIN_TOKEN_ENV,
   type PostAnswer,
@@ -27,6 +28,10 @@ const drained: PostAnswer = {
   body: { draining: { since: "…", until: UNTIL, by: "deploy all", reason: "deploy 62e4e9a" } },
 };
 const lifted: PostAnswer = { status: 200, body: { draining: null, cleared: true } };
+const reconciled: PostAnswer = {
+  status: 200,
+  body: { reconciled: [{ resource: "repo:acme/api", result: "restarted" }] },
+};
 const REFUSED = [
   "[resident-preflight] preflight REFUSED: a Worker deploy swaps every ResidentDO isolate and kills in-flight runs and provisions —",
   "  - in flight: repo:acme/api (2 in flight)",
@@ -114,6 +119,34 @@ describe("the pure pieces", () => {
     );
   });
 
+  it("the reconcile line: every resident's word on a clean pass, the exceptions named when one deferred or failed (it restarts on its own next quiet check), and the request's own failure — never a failed deploy", () => {
+    expect(reconcileLine("resident", reconciled)).toBe(
+      "[deploy:all] resident: fleet reconciled onto the new image (repo:acme/api restarted)",
+    );
+    expect(reconcileLine("resident", { status: 200, body: { reconciled: [] } })).toBe(
+      "[deploy:all] resident: fleet reconciled onto the new image (no residents)",
+    );
+    expect(
+      reconcileLine("resident", {
+        status: 200,
+        body: {
+          reconciled: [
+            { resource: "repo:acme/api", result: "current" },
+            { resource: "repo:acme/web", result: "deferred" },
+          ],
+        },
+      }),
+    ).toBe(
+      "[deploy:all] resident: fleet reconciled onto the new image with exceptions (repo:acme/api current, repo:acme/web deferred) — a deferred or failed resident restarts on its next quiet attach or refresh",
+    );
+    expect(reconcileLine("resident", { status: 401, body: { error: "unauthorized" } })).toBe(
+      "[deploy:all] resident: the fleet could NOT be reconciled onto the new image (HTTP 401: unauthorized) — a stale container restarts on its next quiet attach or refresh instead",
+    );
+    expect(reconcileLine("resident", { error: "POST x failed: fetch failed" })).toContain(
+      "could NOT be reconciled onto the new image (POST x failed: fetch failed)",
+    );
+  });
+
   it("the lift line after a drain the runner never saw land tells the truth: cleared → it had landed; not cleared → nothing stood; a failed lift names the doubt, never a drain that ends", () => {
     const unconfirmed = { drained: false, until: undefined };
     expect(drainLiftedLine("resident", lifted, unconfirmed)).toBe(
@@ -129,19 +162,22 @@ describe("the pure pieces", () => {
 });
 
 describe("deployStep (resident) drains the fleet", () => {
-  it("with the admin bearer: /drain is posted BEFORE the first attempt, the refusals are waited out, the deploy lands, /undrain is posted after", async () => {
-    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" });
+  it("with the admin bearer: /drain is posted BEFORE the first attempt, the refusals are waited out, the deploy lands, /reconcile is posted INSIDE the drain window, /undrain after it", async () => {
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 2));
     expect(r).toEqual({ ok: true, versionId: "0c48b341-f216-4262-81c0-bc62ecb5669a", live: "n/a" });
-    expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "exec", "exec", "postJson"]);
+    expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "exec", "exec", "postJson", "postJson"]);
     expect(h.calls[0].args).toEqual([
       "https://switchboard-resident.example.test/drain",
       "drn",
       { minutes: 65, reason: "deploy 62e4e9a", by: "deploy all" },
     ]);
-    expect(h.calls[4].args).toEqual(["https://switchboard-resident.example.test/undrain", "drn", {}]);
+    // The reconcile runs while the fleet is still drained; the lift follows it.
+    expect(h.calls[4].args).toEqual(["https://switchboard-resident.example.test/reconcile", "drn", {}]);
+    expect(h.calls[5].args).toEqual(["https://switchboard-resident.example.test/undrain", "drn", {}]);
     const lines = h.plain();
     expect(lines[0]).toBe(drainBeganLine("resident", drained));
+    expect(lines.at(-2)).toBe("[deploy:all] resident: fleet reconciled onto the new image (repo:acme/api restarted)");
     expect(lines.at(-1)).toBe("[deploy:all] resident: fleet reopened");
     // The drained wait is the longer budget: the heartbeat counts against 60 min, not 30.
     expect(lines.some((l) => l.includes("(60 min left)"))).toBe(true);
@@ -156,30 +192,36 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(h.plain().some((l) => l.includes("(30 min left)"))).toBe(true);
   });
 
-  it("a drain the Worker refused (a rejected bearer) is said, the wait is today's — and /undrain is still posted after: a drain whose answer was lost may have landed", async () => {
+  it("a drain the Worker refused (a rejected bearer) is said, the wait is today's — and the reconcile and /undrain are still posted after: a drain whose answer was lost may have landed", async () => {
     const h = harness({ RESIDENT_DRAIN_TOKEN: "stale" }, [
+      { status: 401, body: { error: "unauthorized" } },
       { status: 401, body: { error: "unauthorized" } },
       { status: 401, body: { error: "unauthorized" } },
     ]);
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
     expect(r.ok).toBe(true);
-    expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "postJson"]);
+    expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "postJson", "postJson"]);
     expect(h.plain()[0]).toContain("could NOT be drained (HTTP 401: unauthorized)");
+    expect(h.plain().at(-2)).toContain("could NOT be reconciled onto the new image (HTTP 401: unauthorized)");
     expect(h.plain().at(-1)).toContain("the lift answered HTTP 401: unauthorized and no drain was confirmed");
   });
 
-  it("a /drain whose answer was lost (the transport failed after the record may have landed) waits the undrained budget and still lifts the drain after", async () => {
-    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [{ error: "POST … failed: The operation was aborted" }, lifted]);
+  it("a /drain whose answer was lost (the transport failed after the record may have landed) waits the undrained budget and still reconciles and lifts the drain after", async () => {
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [
+      { error: "POST … failed: The operation was aborted" },
+      reconciled,
+      lifted,
+    ]);
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 1));
     expect(r.ok).toBe(true);
-    expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "exec", "postJson"]);
+    expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "exec", "postJson", "postJson"]);
     expect(h.plain().some((l) => l.includes("(30 min left)"))).toBe(true);
     expect(h.plain().at(-1)).toBe(
       "[deploy:all] resident: fleet reopened — the drain had landed although its answer was lost",
     );
   });
 
-  it("refusing past the drained budget fails by name with the drained suffix — and the fleet is still reopened", async () => {
+  it("refusing past the drained budget fails by name with the drained suffix — the fleet is still reopened, and NOT reconciled: nothing deployed, so there is no new image to reconcile onto", async () => {
     const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" });
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 1_000));
     expect(r.ok).toBe(false);

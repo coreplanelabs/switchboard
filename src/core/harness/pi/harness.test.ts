@@ -248,6 +248,10 @@ function world(
     tickMs?: number;
     /** The ledger run's `logIndexOf` (run-history item 53): where the run's rows sit in its session log. */
     logIndexOf?: (localIndex: number) => number | undefined;
+    /** The run's workspace backend; the resident — where a run is registered
+     *  from attach to release, so a standing transport failure resumes it —
+     *  unless a test pins the sandbox's fail-by-name behavior. */
+    backend?: "resident" | "sandbox";
   } = {},
 ) {
   const clock = opts.clock ?? { now: NOW };
@@ -289,7 +293,7 @@ function world(
     rules: { checkout: "/workspace/threads/t/main", protectedBranches: ["main"] },
     ...(opts.notepad ? { notepad: opts.notepad } : {}),
     ...(opts.onCompactionFailed ? { onCompactionFailed: opts.onCompactionFailed } : {}),
-    backend: "resident",
+    backend: opts.backend ?? "resident",
     span: root,
     control,
     inbox,
@@ -2326,8 +2330,8 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(w.container.removed).toEqual([]);
   });
 
-  it("a transport loss whose one more command answers the identity recorded leaves the failure standing, NAMED as the transport error it was — never the verdict, never 'pi exited before the run settled' — with a harness_error note saying the one more command named no replacement, no sandbox_restarted note, pi ended and its root removed", async () => {
-    const w = world();
+  it("a transport loss whose one more command answers the identity recorded, on a sandbox-backed run, leaves the failure standing, NAMED as the transport error it was — never the verdict, never 'pi exited before the run settled' — with a harness_error note saying the one more command named no replacement, no sandbox_restarted note, pi ended and its root removed", async () => {
+    const w = world({ backend: "sandbox" });
     w.container.files.set(paths.errLog, "Error: cannot find module 'foo'\n");
     piMidCall(w, (c) => c.loseTransport("same", "vm-new"));
     const err = await w.start().catch((e: unknown) => e);
@@ -2341,6 +2345,30 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(w.container.identityAsked).toBe(2);
     expect(w.container.killed).toEqual([4242]);
     expect(w.container.removed).toEqual([paths.dir]);
+  });
+
+  it("the same transport loss on a resident-backed run — registered from attach to release, its worktree and record surviving whatever broke the transport — is the replaced verdict by the transport condition: the run enters the resume path for the loop's relaunch, never the plain failure; one sandbox_restarted note, the call in flight settled with the restart note, pi ended best-effort (it may still run where the transport broke)", async () => {
+    const w = world({ withSpans: true });
+    piMidCall(w, (c) => c.loseTransport("same", "vm-new"));
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PiContainerReplacedError);
+    expect(err).toMatchObject({ was: "vm-fake", now: undefined, condition: "transport" });
+    expect((err as PiContainerReplacedError).said).toMatch(/resident \/exec: Peer closed WebSocket: 1006/);
+    expect((err as Error).message).toMatch(
+      /^the container running pi stopped answering \(vm-fake; a container command failed on its transport \(resident \/exec: Peer closed WebSocket: 1006 .*\) and the one more command named no replacement; the run is registered on its resident, so it resumes through a re-attach instead of ending\)$/,
+    );
+    expect(w.events.filter((e) => e.type === "tool_result")).toEqual([
+      expect.objectContaining({ tool: "bash", ok: false, callId: "c1", summary: replacedCallNote("bash") }),
+    ]);
+    expect((err as PiContainerReplacedError).record.settlements.map((s) => s.toolUse.id)).toEqual(["c1"]);
+    expect(noteKinds(w)).toEqual(["sandbox_restarted"]);
+    expect(noteSummaries(w)).toEqual([(err as Error).message]);
+    // The transport condition's container may still run the old pi, so the
+    // teardown ends it best-effort — unlike the word/identity verdicts, whose
+    // container is known gone and gets no kill.
+    expect(w.container.killed).toEqual([4242]);
+    expect(w.container.removed).toEqual([paths.dir]);
+    expect(w.registry.get("run-7")).toBeDefined();
   });
 
   it("the live shape, typed: the container command fails with the executor's `Network connection lost.` typed transport-lost at a rollout's onset — the third shape by the type, whatever the words: the one more command runs, waits through the container restoring, and the word after the wait is the replaced verdict with the record, never the run failed at once", async () => {
@@ -2372,8 +2400,8 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(w.registry.get("run-7")).toBeDefined();
   });
 
-  it("the live shape, untyped: the same `Network connection lost.` on a plain container error is the third shape by the SDK's words — the one more command runs; the recorded identity then leaves the failure standing, named as the transport error it was, with the note that no replacement was named", async () => {
-    const w = world();
+  it("the live shape, untyped: the same `Network connection lost.` on a plain container error is the third shape by the SDK's words — the one more command runs; the recorded identity then leaves the failure standing on a sandbox-backed run, named as the transport error it was, with the note that no replacement was named", async () => {
+    const w = world({ backend: "sandbox" });
     const failure = new HarnessContainerError("read", NETWORK_LOST_TEXT);
     piMidCall(w, (c) => c.loseTransport("same", "vm-new", 0, failure));
     const err = await w.start().catch((e: unknown) => e);
@@ -2412,7 +2440,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
       slept.push(ms);
       clock.now += ms;
     };
-    const same = world({ clock, sleep });
+    const same = world({ clock, sleep, backend: "sandbox" });
     piMidCall(same, (c) => c.loseTransport("same", "vm-new", 2));
     const err = await same.start().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ExecInfraError);
@@ -2540,7 +2568,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(w.container.killed).toEqual([4242]);
   });
 
-  it("a follow-up turn meets the three shapes as the loop does: a read that fails on its transport takes the one more command — the word on it is the replaced verdict thrown from the turn with the record, the same identity leaves the turn failing with the transport error named and a harness_error note, and pi is ended", async () => {
+  it("a follow-up turn meets the three shapes as the loop does: a read that fails on its transport takes the one more command — the word on it is the replaced verdict thrown from the turn with the record, the same identity leaves a sandbox-backed turn failing with the transport error named and a harness_error note, and pi is ended — while a resident-backed turn resumes on the transport condition", async () => {
     const word = world();
     scriptedPi(word.container, (n, c) => {
       if (n === 0) {
@@ -2573,7 +2601,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(word.container.killed).toEqual([]);
     expect(word.container.removed).toEqual([]);
 
-    const same = world();
+    const same = world({ backend: "sandbox" });
     scriptedPi(same.container, (n, c) => {
       if (n === 0) {
         bashTurn(same, "call_0", "npm test", "ok");
@@ -2595,6 +2623,31 @@ describe("runPiHarness — the container replaced under a live run", () => {
     expect(noteKinds(same)).not.toContain("sandbox_restarted");
     await s2.end();
     expect(same.container.killed).toEqual([4242]);
+
+    // The resident-backed turn: the same standing transport failure is the
+    // replaced verdict by the transport condition, thrown from the turn for
+    // the loop's relaunch — the resume path — never the plain failure.
+    const resident = world();
+    scriptedPi(resident.container, (n, c) => {
+      if (n === 0) {
+        bashTurn(resident, "call_0", "npm test", "ok");
+        finalTurn(c, "All green.");
+        return;
+      }
+      c.emit({ type: "turn_start" });
+      c.loseTransport("same", "vm-new");
+    });
+    const s3 = await resident.open();
+    const err3 = await s3
+      .followUp({ text: "one more", maxTurns: 4, maxMinutes: 5, toolContext: { executor } })
+      .catch((e: unknown) => e);
+    expect(err3).toBeInstanceOf(PiContainerReplacedError);
+    expect(err3).toMatchObject({ was: "vm-fake", now: undefined, condition: "transport" });
+    expect(noteKinds(resident)).toContain("sandbox_restarted");
+    expect(noteSummaries(resident)).not.toContainEqual(expect.stringMatching(/so the failure stands$/));
+    await s3.end();
+    // The transport condition's teardown ends a pi that may still run there.
+    expect(resident.container.killed).toEqual([4242]);
   });
 
   it("a follow-up turn's wait observes the run as the loop's does: a hard stop requested while the container is down ends the turn as the hard stop — the abort line as the turn's answer, one stopped note in mode hard, no thrown transport error, no verdict", async () => {
@@ -2667,7 +2720,7 @@ describe("runPiHarness — the container replaced under a live run", () => {
   });
 
   it("after a follow-up turn's wait only the hard stop is read: a soft stop or the turn's deadline landing during the wait neither notes a stop nor steers a write-up into the dead transport — the turn fails with the transport error, named, and nothing is sent to pi", async () => {
-    const w = world();
+    const w = world({ backend: "sandbox" });
     scriptedPi(w.container, (n, c) => {
       if (n === 0) {
         bashTurn(w, "call_0", "npm test", "ok");

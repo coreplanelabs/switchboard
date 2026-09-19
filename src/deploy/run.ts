@@ -9,6 +9,8 @@ import {
   drainUntil,
   drainUrl,
   postJson,
+  reconcileLine,
+  reconcileUrl,
   RESIDENT_DRAINED_WAIT_MAX_MS,
   undrainUrl,
   type PostAnswer,
@@ -920,12 +922,20 @@ async function deployStepTraced(
     : (step.waitMaxMs ?? plan.waitMaxMs);
   const deadline = started + waitMaxMs;
   try {
-    return await deployStepLoop(step, plan, expectedCommit, io, deps, exec, root, {
+    const r = await deployStepLoop(step, plan, expectedCommit, io, deps, exec, root, {
       started,
       waitMaxMs,
       deadline,
       drained: drain.drained,
     });
+    // The swap landed: reconcile every resident's container onto the new image
+    // INSIDE the drain window — before the `finally` below lifts it — so no
+    // run is admitted into a container the reconcile is about to restart
+    // (release-and-deploy item 31; resident-repos item 69's order). Only after
+    // a deployed step: a failed or refused one changed no image, and the drain
+    // must still lift promptly.
+    if (r.ok && drain.attempted) await reconcileFleet(step, io, deps);
+    return r;
   } finally {
     // Whatever the step ended as — live, refused past the budget, failed — the
     // fleet reopens; a drain nobody lifted would end by itself, but a run should
@@ -962,6 +972,18 @@ async function beginDrain(
   );
   io.log(drainBeganLine(step.name, answer));
   return { attempted: true, drained: drainSet(answer), until: drainUntil(answer) };
+}
+
+/** The reconcile inside the drain window: `POST /reconcile` walks every
+ *  resident and restarts each container that predates the image just deployed
+ *  while the fleet is still closed; the line says what each resident answered.
+ *  Best-effort like the lift — a refused or lost answer never fails the deploy:
+ *  a stale container then restarts on its own next quiet attach or refresh. */
+async function reconcileFleet(step: DeployStep, io: DeployRunnerIO, deps: SandboxGateDeps): Promise<void> {
+  const bearer = step.drain ? deps.env[step.drain.tokenEnv] : undefined;
+  if (!step.drain || !bearer || !deps.postJson) return;
+  const answer = await deps.postJson(reconcileUrl(step.drain.url), bearer, {});
+  io.log(reconcileLine(step.name, answer));
 }
 
 async function endDrain(

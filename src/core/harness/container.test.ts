@@ -418,6 +418,12 @@ describe("replacedVerdict — one more container command before a dead process i
     expect(replacedBecause("identity", undefined)).toBe(identityChangedCondition());
     expect(replacedBecause("identity", "ignored")).toBe(identityChangedCondition());
     expect(identityChangedCondition()).toMatch(/^the changed identity was the condition: /);
+    // `transport`: the standing transport failure on a resident-backed run —
+    // the words are the failing command's, and the sentence says the run
+    // resumes through a re-attach instead of ending.
+    expect(replacedBecause("transport", "resident /exec:  Peer closed\nWebSocket: 1006")).toBe(
+      "a container command failed on its transport (resident /exec: Peer closed WebSocket: 1006) and the one more command named no replacement; the run is registered on its resident, so it resumes through a re-attach instead of ending",
+    );
   });
 });
 

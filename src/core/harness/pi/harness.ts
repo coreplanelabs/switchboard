@@ -350,7 +350,9 @@ export class PiContainerReplacedError extends HarnessContainerReplacedError {
     condition: ReplacedCondition = "word",
   ) {
     super(
-      `the container running pi was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; ${replacedBecause(condition, said)})`,
+      condition === "transport"
+        ? `the container running pi stopped answering (${was ?? "unknown"}; ${replacedBecause(condition, said)})`
+        : `the container running pi was replaced (${was ?? "unknown"} → ${now ?? "unknown"}; ${replacedBecause(condition, said)})`,
       said,
       was,
       now,
@@ -759,7 +761,19 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     // executor ends both. On a replaced container no kill runs and the run
     // loop relaunches pi, so the line says the replacement carries on.
     const teardown = (async () => {
-      if (replaced !== undefined) return;
+      if (replaced !== undefined) {
+        // A replaced container has nothing to kill, and the registration
+        // stands for the run loop's relaunch to take over. The transport
+        // condition's container is the one exception to the kill: the
+        // command's transport failed, not provably the container, so a pi
+        // still alive there is ended best-effort before the relaunch starts a
+        // fresh one — on a container that is in fact gone both commands fail
+        // silently — while the registration still stands for the relaunch.
+        if (replaced.condition !== "transport") return;
+        if (pid !== undefined) await container.kill(pid).catch(() => {});
+        if (paths !== undefined) await container.remove(paths).catch(() => {});
+        return;
+      }
       forget();
       if (pid !== undefined) await container.kill(pid).catch(() => {});
       if (paths !== undefined) await container.remove(paths).catch(() => {});
@@ -1845,7 +1859,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  container that is down (the restore window) rather than judging by its
      *  silence, and ends its wait with the run's own stop — then nothing is
      *  thrown here, and the run ends as the stop below; past both the failure
-     *  stands, named as the transport error it was. */
+     *  stands, named as the transport error it was — on every backend but the
+     *  resident, where the registered run resumes through the replaced
+     *  verdict's transport condition instead. */
     const judgeUnsettled = async (): Promise<void> => {
       replaced = await containerReplaced(containerSaid);
       if (replaced === undefined) {
@@ -1861,6 +1877,25 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       if (run.control?.requested === "hard") return;
       if (transportLost !== undefined) {
+        // A resident-backed run is registered on its resident from attach to
+        // release, so its worktree and its record survive whatever broke the
+        // transport (a container the resident restarted under it included):
+        // the standing transport failure is the replaced verdict by the
+        // transport condition, and the run enters the resume path — the
+        // relaunch re-attaches the workspace through the resident's restore —
+        // never an ending (resident-repos item 44).
+        if (run.backend === "resident") {
+          replaced = new PiContainerReplacedError(
+            transportLost.message,
+            facts?.container,
+            undefined,
+            recordNow(),
+            "transport",
+          );
+          bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
+          note("sandbox_restarted", replaced.message);
+          throw replaced;
+        }
         note(
           "harness_error",
           `a container command failed on its transport (${redactAndCap(transportLost.message, 240)}); the one more command named no replacement, so the failure stands`,
@@ -2134,6 +2169,22 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             return HARD_STOP_MESSAGE;
           }
           if (turnTransportLost !== undefined) {
+            // The loop's rule (`judgeUnsettled`): a resident-backed run's
+            // standing transport failure is the replaced verdict by the
+            // transport condition, and the run resumes rather than ends.
+            if (run.backend === "resident") {
+              const turnVerdict = new PiContainerReplacedError(
+                turnTransportLost.message,
+                facts?.container,
+                undefined,
+                recordNow(),
+                "transport",
+              );
+              replaced = turnVerdict;
+              bridge.closeOpenSpans((open) => replacedCallNote(open.tool));
+              note("sandbox_restarted", turnVerdict.message);
+              throw turnVerdict;
+            }
             note(
               "harness_error",
               `a container command failed on its transport (${redactAndCap(turnTransportLost.message, 240)}); the one more command named no replacement, so the failure stands`,
