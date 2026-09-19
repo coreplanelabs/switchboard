@@ -58,6 +58,11 @@
   // deploy/cloudflare/wrangler.template.jsonc). The class is deployed with the
   // bot, which deploys after this Worker — so this binding lands one release
   // after the class did, never in the same one.
+  // The bot Worker, for the plane's effect push (record 0064, "Where it
+  // lives"): committed effects POST to the bot's bearer-gated /plane/effects,
+  // which forwards them to the container. A push that fails is not retried by
+  // a timer — the effect rides the next heartbeat or reclaim-sweep answer.
+  "services": [{ "binding": "BOT", "service": "{{bot.script}}" }],
   "workflows": [
     {
       "name": "{{bot.script}}-ship-coordinator",

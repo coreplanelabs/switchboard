@@ -504,29 +504,41 @@ export default {
       const eventsId = parseInstanceEventPath(pathname);
       const statusId = eventsId === undefined ? parseInstanceStatusPath(pathname) : undefined;
       const res =
-        pathname === "/admin/restart"
-          ? await handleAdminRestart(forwarded, env)
-          : pathname === COORDINATOR_INSTANCES_PATH
-            ? await handleCoordinatorInstances(forwarded, env)
-            : eventsId !== undefined
-              ? await handleCoordinatorInstanceEvent(forwarded, env, eventsId)
-              : statusId !== undefined
-                ? await handleCoordinatorInstanceStatus(forwarded, env, statusId)
-                : pathname === COPY_PATH
-                  ? // The artifact copy (artifactsCopy.ts): the R2 binding and the Slack
-                    // token are this Worker's; the bot only asks, with its copy bearer.
-                    // `forwarded`, never `inbound`: `withTraceContext` rebuilt the request
-                    // with `new Request(inbound, …)`, which takes the body stream with it —
-                    // `inbound.text()` is empty afterwards and the route read "not JSON" live.
-                    await handleArtifactsCopy(forwarded, {
-                      bucket: env.ARTIFACTS,
-                      bucketName: env.ARTIFACTS_BUCKET_NAME,
-                      copyToken: env.ARTIFACTS_COPY_TOKEN,
-                      slackToken: env.SLACK_BOT_TOKEN,
-                      fetch: (input, init) => fetch(input, init),
-                      lengthPipe: (size) => new FixedLengthStream(size),
-                    })
-                  : withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded));
+        pathname === "/plane/effects"
+          ? // The plane's effect push (record 0064, "Where it lives"): the state
+            // Worker POSTs committed effects over its service binding with the
+            // shared bearer; the shim checks it and forwards to the container,
+            // which executes or defers each effect. A refused bearer never
+            // reaches the container.
+            request.headers.get("authorization") === `Bearer ${env.MEMORY_TOKEN}` && env.MEMORY_TOKEN
+            ? withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded))
+            : new Response(JSON.stringify({ error: "unauthorized" }), {
+                status: 401,
+                headers: { "content-type": "application/json" },
+              })
+          : pathname === "/admin/restart"
+            ? await handleAdminRestart(forwarded, env)
+            : pathname === COORDINATOR_INSTANCES_PATH
+              ? await handleCoordinatorInstances(forwarded, env)
+              : eventsId !== undefined
+                ? await handleCoordinatorInstanceEvent(forwarded, env, eventsId)
+                : statusId !== undefined
+                  ? await handleCoordinatorInstanceStatus(forwarded, env, statusId)
+                  : pathname === COPY_PATH
+                    ? // The artifact copy (artifactsCopy.ts): the R2 binding and the Slack
+                      // token are this Worker's; the bot only asks, with its copy bearer.
+                      // `forwarded`, never `inbound`: `withTraceContext` rebuilt the request
+                      // with `new Request(inbound, …)`, which takes the body stream with it —
+                      // `inbound.text()` is empty afterwards and the route read "not JSON" live.
+                      await handleArtifactsCopy(forwarded, {
+                        bucket: env.ARTIFACTS,
+                        bucketName: env.ARTIFACTS_BUCKET_NAME,
+                        copyToken: env.ARTIFACTS_COPY_TOKEN,
+                        slackToken: env.SLACK_BOT_TOKEN,
+                        fetch: (input, init) => fetch(input, init),
+                        lengthPipe: (size) => new FixedLengthStream(size),
+                      })
+                    : withLength(await getContainer(env.SWITCHBOARD, INSTANCE).fetch(forwarded));
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
     } catch (err) {

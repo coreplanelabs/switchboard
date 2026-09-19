@@ -24,7 +24,8 @@ import type { FenceResult, Notepad, SessionHit } from "./types.js";
 import { PermanentStoreError, RouteMissingError } from "../runStoreWorker.js";
 import { createAppendFlusher } from "./flusher.js";
 import type { RunLedger } from "./ledger.js";
-import type { PlaneOutcomePost } from "../plane/decide.js";
+import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost } from "../plane/decide.js";
+import type { PlaneAdmitPost } from "./ledger.js";
 import { requestIndex, sessionKey } from "./sessionLog.js";
 import {
   APPEND_FLUSH_EVENTS,
@@ -76,6 +77,14 @@ export interface LedgerWriteThroughOptions {
   /** Attempts for the whole claim (the ledger's convention: retry the claim,
    *  never proceed past one that did not resolve `ok`). Default 3. */
   claimAttempts?: number;
+  /** The plane's effect execution (record 0064, "The queue"): how an `admit`
+   *  riding a heartbeat answer runs — absent (an older wiring, tests), every
+   *  effect defers and stays offered. `draining()` true defers `admit` too: a
+   *  draining generation starts nothing it cannot finish. */
+  planeEffects?: {
+    draining(): boolean;
+    admit(effect: PlaneEffect): Promise<PlaneAckOutcome>;
+  };
   /** Injectable timers (tests). */
   sleep?: (ms: number) => Promise<void>;
   setInterval?: (fn: () => void, ms: number) => { unref?(): void };
@@ -300,6 +309,12 @@ export interface LedgerWriteThrough {
    *  missing route is one warning, never a throw. The caller gates on
    *  `plane.admission`; this seam only carries the post. */
   planeOutcome(post: PlaneOutcomePost): void;
+  /** The admission-stage ask (record 0064, "The queue"): awaited — the door's
+   *  answer IS the plane's. A failed or missing route answers `admitted` with
+   *  one warning: the plane must never take the door down. */
+  planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer>;
+  /** `runs stop` on a queued id: the waiting row goes withdrawn. */
+  planeWithdraw(runId: string): Promise<{ withdrawn: boolean }>;
 }
 
 /** The write-through of a process without a run ledger (a Null Object,
@@ -351,6 +366,13 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   }
   planeOutcome(_post: PlaneOutcomePost): void {
     // No ledger, no plane: the post has nowhere to land and shadow is moot.
+  }
+  async planeAdmit(_post: PlaneAdmitPost): Promise<PlaneAskAnswer> {
+    // No ledger, no queue: every ask proceeds as it did before the plane existed.
+    return { kind: "admitted", reservation: "none" };
+  }
+  async planeWithdraw(_runId: string): Promise<{ withdrawn: boolean }> {
+    return { withdrawn: false };
   }
   async recordIntake(_key: string, _receipt: IntakeReceipt): Promise<IntakeWriteResult | undefined> {
     return undefined;
@@ -999,13 +1021,18 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           this.stopRelayed = result.stop;
           this.onStop(result.stop);
         }
-        // The plane's effects (orchestration-plane; record 0064; orchestration-plane item 7): this
-        // generation cannot execute any yet — the admit path lands with the
-        // transport unit — so each is deferred by name and stays offered for a
-        // bot that can. Best-effort: a failed ack leaves the offer standing.
+        // The plane's effects (orchestration-plane; record 0064; orchestration-plane item 7):
+        // an `admit` runs through the wired executor — the restart-from-request
+        // path under the plane's id — unless this generation is draining, which
+        // defers it (it starts nothing it cannot finish); a process without the
+        // wiring defers everything, and the offer stays for a bot that can.
+        // Best-effort: a failed ack leaves the offer standing.
         for (const effect of result.effects ?? []) {
           try {
-            await ledger.planeAck(effect.id, "deferred");
+            const executor = opts.planeEffects;
+            const outcome: PlaneAckOutcome =
+              executor === undefined || executor.draining() ? "deferred" : await executor.admit(effect);
+            await ledger.planeAck(effect.id, outcome);
           } catch (err) {
             warn(`[ledger] plane ack failed for effect ${effect.id}: ${describe(err)} — it stays offered`);
           }
@@ -1162,6 +1189,19 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
     },
 
+    async planeAdmit(post) {
+      try {
+        return await ledger.planeAdmit(post);
+      } catch (err) {
+        // The plane must never take the door down: an unreachable object or an
+        // older state Worker without the route admits, as before the queue.
+        warn(`[ledger] plane admit failed for ${post.threadKey}: ${describe(err)} — the ask proceeds`);
+        return { kind: "admitted", reservation: "unasked" };
+      }
+    },
+    async planeWithdraw(runId) {
+      return ledger.planeWithdraw(runId);
+    },
     planeOutcome(post) {
       void ledger.planeOutcome(post).catch((err: unknown) => {
         warn(

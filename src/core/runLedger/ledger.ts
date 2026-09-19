@@ -6,7 +6,16 @@
 // means the transcript is complete up to it.
 
 import type { RunRecord } from "../runRecord.js";
-import type { PlaneAckOutcome, PlaneEffect, PlaneOutcomePost } from "../plane/decide.js";
+import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost, PlaneQueueRow } from "../plane/decide.js";
+
+/** The admission-stage ask's body (record 0064, "The queue"): the thread key,
+ *  the requester and the request in the durable inbox's shape — what the
+ *  object stores under the minted id and the admitted run restarts from. */
+export interface PlaneAdmitPost {
+  requester: string;
+  threadKey: string;
+  request: Record<string, unknown>;
+}
 import type { AssembledTranscript } from "./transcript.js";
 import type { Notepad, SessionHit } from "./types.js";
 import type {
@@ -132,6 +141,17 @@ export interface RunLedger {
   /** One effect's acknowledgement by id (orchestration-plane item 7): `done` and `skipped` close it,
    *  `deferred` leaves it offered. An unknown id is the object's no-op. */
   planeAck(id: string, outcome: PlaneAckOutcome): Promise<void>;
+  /** The admission-stage ask (record 0064, "The queue"): `admitted` with a
+   *  reservation on the thread, or `queued` with the stored request's minted
+   *  id, its position and the conditions it waits on. */
+  planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer>;
+  /** `runs stop` on a queued id: the waiting row goes withdrawn; false for an
+   *  id the queue does not hold waiting. */
+  planeWithdraw(runId: string): Promise<{ withdrawn: boolean }>;
+  /** One queued row by id (the queued id's page and `runs show`): the stored
+   *  ask with its position, conditions and state; null for an id the queue
+   *  does not hold. */
+  planeQueued(runId: string): Promise<PlaneQueueRow | null>;
   /** The events appended so far for a LIVE run, in `seq` order — what a
    *  reclaim closes an unresumable run's record with (the finished-runs routes
    *  never see a live run). Empty for an unknown run. */

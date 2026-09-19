@@ -77,15 +77,19 @@ import {
   reclaimPhase,
   selectReclaim,
 } from "../../src/core/runLedger/decisions.ts";
-import { intakeReceiptRetentionMs } from "../../src/core/budgets.ts";
+import { intakeReceiptRetentionMs, minutesToMs, PLANE } from "../../src/core/budgets.ts";
 import {
   decide,
+  effectCapRefusal,
+  planeAskAnswerOf,
   planeAskWordOf,
+  type PlaneAskAnswer,
   type PlaneAckOutcome,
   type PlaneEffect,
   type PlaneEvent,
   type PlaneOutcomePost,
   type PlaneQueueRow,
+  type PlaneReservation,
   type PlaneStage,
   type PlaneState,
   type PlaneWrite,
@@ -220,6 +224,11 @@ export interface Env {
   /** The dataset's name, rendered beside the binding, so `/healthz` can answer
    *  `runMetrics:<dataset>` and the bot's boot probe can compare names. */
   RUN_METRICS_DATASET?: string;
+  /** The bot Worker, for the plane's effect push (record 0064, "Where it
+   *  lives"): committed effects are POSTed to its bearer-gated
+   *  `/plane/effects`, which forwards to the container. Optional like
+   *  SHIP_COORDINATOR — without it effects ride the heartbeat answers alone. */
+  BOT?: Fetcher;
   MEMORY_TOKEN?: string;
 }
 
@@ -1777,6 +1786,22 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  dispatch it describes claimed the thread must not read its own claim as
    *  "thread live" (orchestration-plane item 8). */
   private planeState(excludeRunId?: string): PlaneState {
+    const now = systemClock();
+    // A reservation not yet promoted into a live row expires after its window:
+    // a dispatch that died between the admission answer and its claim must not
+    // hold the thread forever. Promotion deletes the row (the live row holds
+    // the thread from there), so age alone is the test.
+    const reservations = this.sql
+      .exec<{ kind: string; key: string; run_id: string; at: number }>(
+        `SELECT * FROM plane_reservations WHERE kind = 'thread' AND at > ?`,
+        now - minutesToMs(PLANE.reservationMinutes),
+      )
+      .toArray()
+      .map((r): PlaneReservation => ({ kind: "thread", key: r.key, runId: r.run_id, at: r.at }));
+    const openWindows = this.sql
+      .exec<{ kind: string }>(`SELECT kind FROM plane_windows WHERE phase = 'open'`)
+      .toArray()
+      .map((r) => r.kind);
     const queue = this.sql
       .exec<{
         run_id: string;
@@ -1805,7 +1830,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ thread_key: string }>(`SELECT thread_key FROM live_runs WHERE run_id IS NOT ?`, excludeRunId ?? null)
       .toArray()
       .map((r) => r.thread_key);
-    return { queue, liveThreads };
+    return { queue, liveThreads, reservations, openWindows };
   }
 
   /** The decider's writes, applied inside the same `transactionSync` that read
@@ -1829,7 +1854,47 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       } else if (w.table === "plane_queue" && w.op === "state") {
         this.sql.exec(`UPDATE plane_queue SET state = ? WHERE run_id = ?`, w.state, w.runId);
+      } else if (w.table === "plane_reservations" && w.op === "put") {
+        this.sql.exec(
+          `INSERT OR REPLACE INTO plane_reservations (kind, key, run_id, at) VALUES (?, ?, ?, ?)`,
+          w.row.kind,
+          w.row.key,
+          w.row.runId,
+          w.row.at,
+        );
+      } else if (w.table === "plane_reservations" && w.op === "del") {
+        this.sql.exec(`DELETE FROM plane_reservations WHERE kind = 'thread' AND key = ?`, w.key);
+      } else if (w.table === "plane_windows" && w.op === "put") {
+        this.sql.exec(
+          `INSERT OR REPLACE INTO plane_windows (kind, key, phase, opened_at, reason_json) VALUES (?, ?, 'open', ?, '{}')`,
+          w.window,
+          w.window,
+          w.at,
+        );
+      } else if (w.table === "plane_windows" && w.op === "del") {
+        this.sql.exec(`DELETE FROM plane_windows WHERE kind = ?`, w.window);
       } else {
+        // The effect bounds (record 0064): an offer past the per-run or total
+        // cap is refused by the cap's name — the throw aborts the transaction,
+        // so the queue row stays waiting and the next event re-decides.
+        const total = Number(
+          this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM plane_effects WHERE acked_at IS NULL`).toArray()[0]
+            ?.n ?? 0,
+        );
+        const forRun = Number(
+          this.sql
+            .exec<{
+              n: number;
+            }>(
+              // Exact id matching (`admit:<runId>`): the seal runs with bot-minted
+              // run ids, and a LIKE would read `%`/`_` in one as wildcards.
+              `SELECT COUNT(*) AS n FROM plane_effects WHERE acked_at IS NULL AND id = 'admit:' || ?`,
+              w.effect.runId,
+            )
+            .toArray()[0]?.n ?? 0,
+        );
+        const refusal = effectCapRefusal({ total, forRun }, w.effect);
+        if (refusal !== undefined) throw new Error(refusal);
         // An offer keeps its first `offered_at`: a re-decided admit after a
         // roll is the same effect, not a younger one.
         this.sql.exec(
@@ -1838,6 +1903,22 @@ export class RunHistoryDO extends DurableObject<Env> {
           JSON.stringify(w.effect),
           w.at,
         );
+        // The admitted run's attaching row, in the same transaction as the
+        // effect (record 0064, "The queue"): owner `plane`, lease already
+        // expired, request in the meta — exactly the row a reserved run whose
+        // owner died leaves (run-history item 42), so the bot's reclaim sweep
+        // restarts it from the stored request under this id.
+        if (w.effect.kind === "admit") {
+          this.sql.exec(
+            `INSERT OR IGNORE INTO live_runs (run_id, thread_key, owner_gen, lease_until, started_at, phase, stop, meta_json, card_json, system_text, tools_json, state_json)
+             VALUES (?, ?, 'plane', ?, ?, 'attaching', NULL, ?, NULL, '', '[]', '{}')`,
+            w.effect.runId,
+            w.effect.threadKey,
+            w.at,
+            w.at,
+            JSON.stringify({ request: w.effect.request }),
+          );
+        }
       }
     }
   }
@@ -1851,7 +1932,111 @@ export class RunHistoryDO extends DurableObject<Env> {
       this.applyPlaneWrites(decision.writes);
       effects = decision.effects;
     });
+    this.pushPlaneEffects(effects);
     return { effects };
+  }
+
+  /** The admission ask (`POST /plane/admit`, record 0064 "The queue"): one
+   *  transaction decides and writes — `admitted` reserves the thread,
+   *  `queued` stores the request under the minted id. */
+  planeAdmit(
+    post: { runId: string; requester: string; threadKey: string; request: Record<string, unknown> },
+    now: number,
+  ): PlaneAskAnswer {
+    let answer!: PlaneAskAnswer;
+    this.ctx.storage.transactionSync(() => {
+      const decision = decide(this.planeState(), {
+        kind: "ask",
+        at: now,
+        runId: post.runId,
+        requester: post.requester,
+        threadKey: post.threadKey,
+        stage: "admission",
+        request: post.request,
+      });
+      this.applyPlaneWrites(decision.writes);
+      answer = planeAskAnswerOf(decision, post.runId);
+    });
+    console.log(
+      `[plane/admit] ${post.threadKey} → ${answer.kind}${answer.kind === "queued" ? ` position ${answer.position}` : ""} (run ${post.runId})`,
+    );
+    return answer;
+  }
+
+  /** A window's open or lift over the RPC seam (`/plane/deploy`; a later
+   *  unit's `plane window lift`): kind `deploy` is the pending deploy. */
+  planeWindow(window: string, phase: "opened" | "lifted", now: number): { admitted: number } {
+    const r = this.planeApply({ kind: "window", at: now, window, phase });
+    return { admitted: r.effects.length };
+  }
+
+  /** `runs stop` on a queued id (record 0064): the waiting row is withdrawn;
+   *  an id the queue does not hold waiting answers false. */
+  planeWithdraw(runId: string, now: number): { withdrawn: boolean } {
+    let withdrawn = false;
+    this.ctx.storage.transactionSync(() => {
+      const decision = decide(this.planeState(), { kind: "withdraw", at: now, runId });
+      this.applyPlaneWrites(decision.writes);
+      withdrawn = decision.writes.length > 0;
+    });
+    return { withdrawn };
+  }
+
+  /** One queued row, for the queued id's page. */
+  planeQueueRowOf(runId: string): PlaneQueueRow | null {
+    return this.planeState().queue.find((r) => r.runId === runId) ?? null;
+  }
+
+  /** The seal (record 0064, "The queue"): the run's own open effects are
+   *  dropped — an admit for a run that just ended is stale — then the sealed
+   *  event frees the thread and walks the queue, all in one transaction. */
+  private planeSealed(runId: string, threadKey: string, now: number): void {
+    let effects: PlaneEffect[] = [];
+    try {
+      this.ctx.storage.transactionSync(() => {
+        // Exact id matching (`admit:<runId>`), never LIKE: a bot-minted run id
+        // can carry `%` or `_`, which a pattern would read as wildcards.
+        this.sql.exec(`DELETE FROM plane_effects WHERE acked_at IS NULL AND id = 'admit:' || ?`, runId);
+        const decision = decide(this.planeState(), { kind: "sealed", at: now, threadKey });
+        this.applyPlaneWrites(decision.writes);
+        effects = decision.effects;
+      });
+    } catch (err) {
+      // A cap refusal here must not undo the finish that already committed.
+      console.warn(`[plane/sealed] ${threadKey}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    this.pushPlaneEffects(effects);
+  }
+
+  /** The transport's push (record 0064, "Where it lives"): committed effects
+   *  are pushed to the bot Worker over the service binding, which forwards to
+   *  the container. Fire and forget — a push that fails is not retried by a
+   *  timer; the effect rides the next heartbeat or reclaim-sweep answer. */
+  private pushPlaneEffects(effects: PlaneEffect[]): void {
+    if (effects.length === 0) return;
+    const bot = this.env.BOT;
+    if (!bot) return;
+    void bot
+      .fetch("https://bot/plane/effects", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.env.MEMORY_TOKEN ?? ""}`,
+        },
+        body: JSON.stringify({ effects }),
+      })
+      .then((r) => {
+        if (!r.ok)
+          console.warn(
+            `[plane/push] ${effects.length} effect(s) → bot answered ${r.status} — they ride the next heartbeat`,
+          );
+      })
+      .catch((err: unknown) => {
+        console.warn(
+          `[plane/push] ${effects.length} effect(s) not delivered: ${err instanceof Error ? err.message : String(err)} — they ride the next heartbeat`,
+        );
+      });
   }
 
   /** The unacknowledged effects, oldest first, at most `PLANE_EFFECTS_PER_ANSWER`
@@ -2152,6 +2337,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         req,
       );
       if (!out.ok) return;
+      // The claim promotes the thread's reservation (record 0064, "The queue"):
+      // the live row holds the thread from here, so the reservation row retires
+      // in the same transaction that writes the claim.
+      this.sql.exec(`DELETE FROM plane_reservations WHERE kind = 'thread' AND key = ?`, req.threadKey);
       switch (decideClaimWrite(existing, req)) {
         case "keep":
           return;
@@ -2359,6 +2548,9 @@ export class RunHistoryDO extends DurableObject<Env> {
       out = { ok: true, stored: put.stored };
     });
     if (!out.ok) return out;
+    // The seal flips `thread_free` (record 0064, "The queue"): the plane frees
+    // the thread, drops the sealed run's own open effects and walks the queue.
+    this.planeSealed(runId, record.threadKey, systemClock());
     // The point after the commit, never inside it (`sendRunFinished`'s placement):
     // the finish usually replaces the start tombstone, so this is where most
     // runs are counted (run-metrics.md item 2).
@@ -2376,11 +2568,16 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  started. Fenced. */
   async abandon(runId: string, gen: string): Promise<FenceResult> {
     let out: FenceResult = { ok: true };
+    let threadKey: string | undefined;
     this.ctx.storage.transactionSync(() => {
-      out = checkFence(this.liveRow(runId), gen);
+      const row = this.liveRow(runId);
+      out = checkFence(row, gen);
       if (!out.ok) return;
+      threadKey = row?.threadKey;
       this.deleteLiveRows([runId]);
     });
+    // An abandoned reservation seals like a finish does: the thread frees and the queue walks.
+    if (out.ok && threadKey !== undefined) this.planeSealed(runId, threadKey, systemClock());
     return out;
   }
 
@@ -4176,7 +4373,14 @@ const LEDGER_ROUTES = new Set([
 /** The plane's routes (record 0064; orchestration-plane items 7 and 8): the shadow outcome post and the
  *  effect acknowledgement. Both land on the ledger object of the given store
  *  key, like every `/runs/*` route. */
-const PLANE_ROUTES = new Set(["/plane/outcome", "/plane/ack"]);
+const PLANE_ROUTES = new Set([
+  "/plane/outcome",
+  "/plane/ack",
+  "/plane/admit",
+  "/plane/withdraw",
+  "/plane/deploy",
+  "/plane/queued",
+]);
 
 const PLANE_STAGES = new Set(["admission", "runner", "resident"]);
 const PLANE_OUTCOME = /^(proceeded|refused:[a-z0-9-]+|fell_cold:[a-z0-9_-]+)$/;
@@ -4223,6 +4427,59 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
     if (typeof b.outcome !== "string" || !PLANE_ACK_OUTCOMES.has(b.outcome))
       return json({ error: "outcome must be done, skipped or deferred" }, 400);
     return json(await stub.planeAck(b.id, b.outcome as PlaneAckOutcome, now));
+  }
+  if (pathname === "/plane/admit") {
+    // The admission-stage ask (record 0064, "The queue"): the thread key, the
+    // requester and the request in the durable inbox's shape. The route mints
+    // the run id: `queued` stores the request under it, `admitted` names it as
+    // the reservation.
+    if (typeof b.threadKey !== "string" || b.threadKey.length === 0)
+      return json({ error: "threadKey must be a non-empty string" }, 400);
+    if (typeof b.requester !== "string" || b.requester.length === 0)
+      return json({ error: "requester must be a non-empty string" }, 400);
+    if (typeof b.request !== "object" || b.request === null || Array.isArray(b.request))
+      return json({ error: "request must be a JSON object" }, 400);
+    try {
+      const answer = await stub.planeAdmit(
+        {
+          runId: crypto.randomUUID(),
+          requester: b.requester,
+          threadKey: b.threadKey,
+          request: b.request as Record<string, unknown>,
+        },
+        now,
+      );
+      return json(answer);
+    } catch (err) {
+      // The effect caps refuse by name (record 0064): the ask is answered with
+      // the cap's own sentence, never queued silently.
+      return json({ error: err instanceof Error ? err.message : String(err) }, 409);
+    }
+  }
+  if (pathname === "/plane/withdraw") {
+    const parsed = parseRunId(b.runId);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    return json(await stub.planeWithdraw(parsed.value, now));
+  }
+  if (pathname === "/plane/queued") {
+    const parsed = parseRunId(b.runId);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    return json({ row: await stub.planeQueueRowOf(parsed.value) });
+  }
+  if (pathname === "/plane/deploy") {
+    // The deploy runner's post (record 0064, "The queue"): `landed` lifts the
+    // pending-deploy window — `deploy_settled` flips and the queue walks;
+    // `pending` opens it. Version and workers ride the log line only.
+    if (b.phase !== "landed" && b.phase !== "pending") return json({ error: "phase must be landed or pending" }, 400);
+    try {
+      const r = await stub.planeWindow("deploy", b.phase === "landed" ? "lifted" : "opened", now);
+      console.log(
+        `[plane/deploy] ${b.phase}${typeof b.version === "string" ? ` ${b.version}` : ""} — ${r.admitted} admission(s)`,
+      );
+      return json({ ok: true, admitted: r.admitted });
+    } catch (err) {
+      return json({ error: err instanceof Error ? err.message : String(err) }, 409);
+    }
   }
   return json({ error: "not found" }, 404);
 }
