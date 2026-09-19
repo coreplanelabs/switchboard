@@ -94,6 +94,11 @@ function followUpOf(
     text,
     userId: msg.userId,
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+    // The credential behind a bound person and the app that relayed for them
+    // (authorization.md items 14 and 15) ride the item as they ride the durable
+    // row, so the fresh turn a leftover becomes is gated on the actor they make.
+    ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+    ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
     ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
     ...(msg.images !== undefined ? { images: msg.images } : {}),
     ...(msg.documents !== undefined ? { documents: msg.documents } : {}),
@@ -139,25 +144,6 @@ export interface RestartContext {
 }
 
 export { DURABLE_INBOX_MAX_BYTES, durableInboxMessage } from "../runLedger/inboxMessage.js";
-
-/** The attributed join of a unit's unconsumed thread events (record 0051's fold rule):
- *  `<sender>: <text>` in arrival order, one block per event — the shape the
- *  durable inbox's join gives a run's carried follow-ups, reused for the fold
- *  before a coding spawn and for the leftovers a unit's end runs as one fresh
- *  turn. An event that lost its attachments says so on its own line. */
-export function foldThreadEvents(
-  events: ReadonlyArray<{ sender: string; senderName?: string; text: string; attachmentsDropped?: number }>,
-): string {
-  return events
-    .map((e) => {
-      const dropped =
-        e.attachmentsDropped !== undefined && e.attachmentsDropped > 0
-          ? `\n(${e.attachmentsDropped} attachment${e.attachmentsDropped === 1 ? "" : "s"} could not be carried and ${e.attachmentsDropped === 1 ? "is" : "are"} not attached.)`
-          : "";
-      return `${e.senderName ?? e.sender}: ${e.text}${dropped}`;
-    })
-    .join("\n\n");
-}
 
 /** The stored attachments of a unit's thread events as one message's images
  *  and documents (the reader of what the append kept under the cap): an image

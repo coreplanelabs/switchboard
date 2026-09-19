@@ -65,7 +65,8 @@ import {
   type ThreadEvent,
   type UnitIdle,
 } from "../core/coordinator/contract.js";
-import { foldThreadAttachments, foldThreadEvents } from "../core/dispatch/admission.js";
+import { foldThreadAttachments } from "../core/dispatch/admission.js";
+import { foldThreadEvents } from "../core/threadEvents.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { DispatchOptions } from "../core/dispatcher.js";

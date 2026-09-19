@@ -609,7 +609,8 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     await w.start();
     const steer = w.container.commands().find((c) => c.type === "steer");
     expect(steer).toBeDefined();
-    expect(String(steer!.message)).toContain("also bump the version");
+    // The steer's prompt names the sender (record 0062): the attributed line.
+    expect(String(steer!.message)).toContain("ann: also bump the version");
     expect(w.events.filter((e) => e.type === "input")).toEqual([
       expect.objectContaining({
         type: "input",

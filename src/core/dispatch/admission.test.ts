@@ -30,7 +30,6 @@ import {
   durableInboxMessage,
   foldCarriedInbox,
   foldThreadAttachments,
-  foldThreadEvents,
   followUpFromInbox,
   steerRun,
   type AdmissionContext,
@@ -915,11 +914,26 @@ describe("steerRun — a run steers a live run through the inbox a thread reply 
       await steerRun(deps, relayed, { runId: "run-open", threadKey: "slack:CX:10.0", agent: "general" }, "go on"),
     ).toMatchObject({ kind: "steered", where: "here" });
     expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UADMIN", postedBy: "slack:bot:B0CLAUDE" });
+    // The credential and the relay ride the in-memory item too (record 0062):
+    // a leftover's fresh turn is gated on the actor they make.
+    const [item] = open.live.inbox.drain();
+    expect(item).toMatchObject({ userId: "slack:UADMIN", postedBy: "slack:bot:B0CLAUDE" });
+  });
+
+  it("the in-memory item carries the sender's bound credential (authenticatedAs), so the fresh turn a leftover becomes keeps it", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = admission.claim(CHILD_THREAD, { agent: "general" });
+    claim.live.runId = "run-child";
+    const ledger = new RecordingLedger({ pushSeq: () => 16 });
+    const deps = { config: configStore(), runLedger: ledger, clock: () => NOW, admission };
+    const bound = { ...sender, authenticatedAs: "http:t1" };
+    expect(await steerRun(deps, bound, target, "go on")).toMatchObject({ kind: "steered", where: "here" });
+    expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UX", authenticatedAs: "http:t1" });
+    const [item] = claim.live.inbox.drain();
+    expect(item).toMatchObject({ userId: "slack:UX", authenticatedAs: "http:t1" });
   });
 });
 
-// Feature: record 0051's fold rule — the attributed join reused for a unit's thread
-// events: `<sender>: <text>` in arrival order, a dropped-attachments note kept.
 describe("foldThreadAttachments — the stored attachments as one message's images and documents", () => {
   it("splits by media type in arrival order and adds neither key when there is nothing to carry", () => {
     expect(
@@ -941,18 +955,5 @@ describe("foldThreadAttachments — the stored attachments as one message's imag
       documents: [{ mediaType: "text/plain", data: "bm90ZQ==" }],
     });
     expect(foldThreadAttachments([{ text: "x" } as { attachments?: never }])).toEqual({});
-  });
-});
-
-describe("foldThreadEvents — the attributed join of a unit's thread events", () => {
-  it("attributes each text to its sender (display name first), in the order given, and notes dropped attachments", () => {
-    expect(
-      foldThreadEvents([
-        { sender: "slack:UBOB", senderName: "bob", text: "also update the readme" },
-        { sender: "slack:UCARA", text: "and bump the version", attachmentsDropped: 2 },
-      ]),
-    ).toBe(
-      "bob: also update the readme\n\nslack:UCARA: and bump the version\n(2 attachments could not be carried and are not attached.)",
-    );
   });
 });

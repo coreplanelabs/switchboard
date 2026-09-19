@@ -10263,7 +10263,8 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     expect(second.replies.at(-1)).toBe("answer 2");
     expect(second.statuses.length).toBeGreaterThan(0); // its own card
     expect(requests).toHaveLength(2);
-    expect((requests[1].messages.at(-1)!.content[0] as { text: string }).text).toBe("and also the numbers");
+    // The fresh turn's text names its sender (record 0062): the attributed join.
+    expect((requests[1].messages.at(-1)!.content[0] as { text: string }).text).toBe("uy: and also the numbers");
     const runs = registry.listActive();
     expect(runs.map((r) => r.id).sort()).toEqual(["r1", "r2"]);
     expect(runs.find((r) => r.id === "r2")?.userId).toBe("slack:UY");
@@ -10312,11 +10313,46 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await run;
     expect(requests).toHaveLength(2);
     expect((requests[1].messages.at(-1)!.content[0] as { text: string }).text).toMatch(
-      /^add the numbers\s+and a chart$/,
+      /^uy: add the numbers\s+uz: and a chart$/,
     );
-    expect(b.replies.at(-1)).toBe("answer 2"); // the most recent sender's handle carries the fresh turn
-    expect(a.replies).toHaveLength(1);
-    expect(registry.listActive().find((r) => r.id === "r2")?.userId).toBe("slack:UZ");
+    // The FIRST sender is the fresh turn's requester (record 0062): their
+    // handle carries it and their identity runs it; a later sender lends nothing.
+    expect(a.replies.at(-1)).toBe("answer 2");
+    expect(b.replies).toHaveLength(1);
+    expect(registry.listActive().find((r) => r.id === "r2")?.userId).toBe("slack:UY");
+  });
+
+  it("a fresh turn whose FIRST sender may not run the addressed agent is refused with the allowlist refusal — the second sender's grants do not admit it", async () => {
+    let ids = 0;
+    const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
+    const { provider, requests, firstStarted, settle } = gatedProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    const first = fakeIO();
+    const run = dispatch(deps, threadMsg("write the report"), first.io);
+    await firstStarted;
+    const a = fakeIO();
+    const b = fakeIO();
+    await dispatch(deps, threadMsg("add the numbers", "slack:UY"), a.io);
+    await dispatch(deps, threadMsg("and a chart", "slack:UADMIN"), b.io);
+    await foldedIn(registry, "r1", "and a chart");
+    // UY's grant is revoked while the run is in flight (a config reload): the
+    // steer was admitted, but the fresh turn is a request of its own, gated on
+    // its requester — the FIRST sender — and UADMIN's grants beside it lend nothing.
+    const realCan = deps.config.canRunAgent.bind(deps.config);
+    deps.config.canRunAgent = (actor, agent) =>
+      (typeof actor === "string" ? actor : actor.id) === "slack:UY" ? false : realCan(actor, agent);
+    settle().fail(new Error("provider exploded"));
+    await run;
+    expect(requests).toHaveLength(1); // no fresh run
+    expect(a.replies.at(-1)).toContain("not on the allowlist");
+    expect(b.replies).toHaveLength(1); // B is told nothing: the ack was their only reply
+    // No agent run started for the fresh turn — the one new row is the refusal
+    // seam's door record (record 0054), stamped under the FIRST sender.
+    const rows = registry.listActive();
+    expect(rows.filter((r) => r.agent !== "door").map((r) => r.id)).toEqual(["r1"]);
+    expect(rows.find((r) => r.agent === "door")).toMatchObject({ userId: "slack:UY" });
   });
 
   it("a run that THREW after an operator stop was requested still counts as stopped: its follow-up is not run", async () => {

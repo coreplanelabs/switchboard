@@ -153,20 +153,31 @@ describe("settleThread — the thread when the request is over", () => {
 });
 
 describe("prepareFreshTurn — the one request the unconsumed follow-ups run as", () => {
-  it("merges the follow-ups into the most recent sender's message and handle, pins the agent, stamps receivedAt now and the wait since the earliest, and drops the platform stamp", () => {
+  it("merges the follow-ups into the FIRST sender's message and handle — the fresh turn's requester, credential included — each text attributed, pins the agent, stamps receivedAt now and the wait since the earliest, and drops the platform stamp", () => {
     const a: string[] = [];
     const b: string[] = [];
-    const pending = [followUp("first", NOW - 5_000, a, "slack:UA"), followUp("second", NOW - 1_000, b, "slack:UB")];
+    const first = followUp("first", NOW - 5_000, a, "slack:UA");
+    const pending = [
+      {
+        ...first,
+        authenticatedAs: "http:t1",
+        postedBy: "slack:bot:B1",
+        msg: { ...first.msg, authenticatedAs: "http:t1", postedBy: "slack:bot:B1" },
+      },
+      followUp("second", NOW - 1_000, b, "slack:UB"),
+    ];
     const fresh = prepareFreshTurn({ clock: () => NOW }, { agent: "coding", pending, clock: () => NOW });
     expect(fresh.msg).toMatchObject({
       channelId: "slack:CX",
       threadKey: THREAD,
-      userId: "slack:UB",
-      text: "agent:coding first\n\nsecond",
+      userId: "slack:UA",
+      authenticatedAs: "http:t1",
+      postedBy: "slack:bot:B1",
+      text: "agent:coding slack:UA: first\n\nslack:UB: second",
       receivedAt: NOW,
       originAt: undefined,
     });
-    expect(fresh.io).toBe(pending[1].io);
+    expect(fresh.io).toBe(pending[0].io);
     expect(fresh.opts.queuedBehindMs).toBe(5_000);
     expect(fresh.opts.trace.receivedAt).toBe(NOW);
     expect(fresh.opts.trace.root.name).toBe("request");

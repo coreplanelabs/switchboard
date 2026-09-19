@@ -1,3 +1,4 @@
+import { attributedText, foldThreadEvents } from "./threadEvents.js";
 import type { DocumentAttachment, ImageAttachment, StagedFile } from "./types.js";
 import { systemClock } from "./trace/clock.js";
 
@@ -34,6 +35,11 @@ export interface FollowUpInput {
   text: string;
   userId: string;
   userName?: string;
+  /** The bound credential behind the person and the app that relayed for them
+   *  (authorization.md items 14 and 15): carried so the fresh turn a leftover
+   *  becomes is gated on the actor they make, not the bare user id. */
+  authenticatedAs?: string;
+  postedBy?: string;
   sourceUrl?: string;
   images?: ImageAttachment[];
   documents?: DocumentAttachment[];
@@ -218,12 +224,24 @@ const followUpHeader = (n: number) =>
 const supersededHeader = (n: number) =>
   `↪ ${n > 1 ? `${n} follow-ups` : "Follow-up"} from the thread, sent while you were writing your answer. That answer was NOT delivered — the thread has not seen it, and it will not be sent. Write ONE complete answer now that covers the original request AND ${n > 1 ? "all of these follow-ups" : "this follow-up"}:`;
 
+/** A follow-up's words as the model reads them: attributed to their sender
+ *  through the one renderer (record 0062) — the display name first, the id as
+ *  the fallback — so a steer mid-task and a merged fresh turn name who said what. */
+const attributed = (i: FollowUpInput) => ({
+  sender: i.userId,
+  ...(i.userName !== undefined ? { senderName: i.userName } : {}),
+  text: i.text,
+});
+
 /** The text block the runner hands the model for a batch of drained follow-ups
- *  (any count: one is quoted as is, several are a bulleted list in arrival
- *  order). `superseded`: the batch displaced a final answer rather than riding
- *  a tool turn. */
+ *  (any count: one is quoted whole, several are a bulleted list in arrival
+ *  order), each attributed to its sender. `superseded`: the batch displaced a
+ *  final answer rather than riding a tool turn. */
 export function followUpPrompt(inputs: FollowUpInput[], opts: { superseded?: boolean } = {}): string {
-  const body = inputs.map((i) => (inputs.length > 1 ? `- ${i.text}` : i.text)).join("\n");
+  const body = inputs
+    .map((i) => attributedText(attributed(i)))
+    .map((line) => (inputs.length > 1 ? `- ${line}` : line))
+    .join("\n");
   return `${opts.superseded ? supersededHeader(inputs.length) : followUpHeader(inputs.length)}\n\n${body}`;
 }
 
@@ -234,15 +252,20 @@ export function followUpSnippet(input: FollowUpInput, max = 80): string {
 }
 
 /**
- * Unconsumed follow-ups → the ONE message a fresh turn runs them as: texts
- * joined in arrival order, attachments concatenated, identity from the last
- * (most recent) input. Empty input → undefined (nothing to run).
+ * Unconsumed follow-ups → the ONE message a fresh turn runs them as: each text
+ * attributed to its sender and joined in arrival order (the fold's renderer),
+ * attachments concatenated, and the identity — the fresh turn's requester —
+ * from the FIRST input, its credential included (record 0062: the first
+ * unconsumed sender asked for what runs next; a later sender's wider grants
+ * lend nothing). Empty input → undefined (nothing to run).
  */
 export function mergeFollowUps(inputs: FollowUpInput[]):
   | {
       text: string;
       userId: string;
       userName?: string;
+      authenticatedAs?: string;
+      postedBy?: string;
       sourceUrl?: string;
       images?: ImageAttachment[];
       documents?: DocumentAttachment[];
@@ -250,15 +273,17 @@ export function mergeFollowUps(inputs: FollowUpInput[]):
     }
   | undefined {
   if (inputs.length === 0) return undefined;
-  const last = inputs[inputs.length - 1];
+  const first = inputs[0];
   const images = inputs.flatMap((i) => i.images ?? []);
   const documents = inputs.flatMap((i) => i.documents ?? []);
   const staged = inputs.flatMap((i) => i.staged ?? []);
   return {
-    text: inputs.map((i) => i.text).join("\n\n"),
-    userId: last.userId,
-    ...(last.userName !== undefined ? { userName: last.userName } : {}),
-    ...(last.sourceUrl !== undefined ? { sourceUrl: last.sourceUrl } : {}),
+    text: foldThreadEvents(inputs.map(attributed)),
+    userId: first.userId,
+    ...(first.userName !== undefined ? { userName: first.userName } : {}),
+    ...(first.authenticatedAs !== undefined ? { authenticatedAs: first.authenticatedAs } : {}),
+    ...(first.postedBy !== undefined ? { postedBy: first.postedBy } : {}),
+    ...(first.sourceUrl !== undefined ? { sourceUrl: first.sourceUrl } : {}),
     ...(images.length > 0 ? { images } : {}),
     ...(documents.length > 0 ? { documents } : {}),
     ...(staged.length > 0 ? { staged } : {}),
