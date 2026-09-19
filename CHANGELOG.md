@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.253.0](https://github.com/coreplanelabs/switchboard/compare/v1.252.0...v1.253.0) (2026-09-19)
+
+
+### Features
+
+* **authz:** a person's GitHub login is bound by an identity admin ([#1954](https://github.com/coreplanelabs/switchboard/issues/1954)) ([c524b52](https://github.com/coreplanelabs/switchboard/commit/c524b52da774f98fe436a28eb9304145a56f59c5))
+* **core:** quiet status cards drop the model, meta rows and debug notes ([#1956](https://github.com/coreplanelabs/switchboard/issues/1956)) ([94fc77d](https://github.com/coreplanelabs/switchboard/commit/94fc77dc0dbd2533284dbd841f3cbfd237f7b887))
+* **core:** the operator binds every chat event behind routing.operator ([#1943](https://github.com/coreplanelabs/switchboard/issues/1943)) ([52c813f](https://github.com/coreplanelabs/switchboard/commit/52c813fe5514b3668501953fdf5bb10c3f02a8d6))
+* **deploy:** the profile's metrics.dataset binds RUN_METRICS on deploy ([#1946](https://github.com/coreplanelabs/switchboard/issues/1946)) ([54cd00e](https://github.com/coreplanelabs/switchboard/commit/54cd00e87a46cf716fcc276229fc721522f67a6e))
+* **dispatcher:** a fresh turn runs as its first sender, one renderer ([#1941](https://github.com/coreplanelabs/switchboard/issues/1941)) ([4b74bcd](https://github.com/coreplanelabs/switchboard/commit/4b74bcd6df6187b38c6fbd18bc2a7de7646a5d0d))
+* **memory:** a restated fact bumps the shown record, not a new row ([#1942](https://github.com/coreplanelabs/switchboard/issues/1942)) ([cca4f56](https://github.com/coreplanelabs/switchboard/commit/cca4f56ca58cf2df8ff176e689c3188e4be9b66b))
+* **runs:** every finished run writes one metrics point at its commit ([#1944](https://github.com/coreplanelabs/switchboard/issues/1944)) ([23de31e](https://github.com/coreplanelabs/switchboard/commit/23de31e0dc7dd08c6916303e215c165f29856d23))
+* **runs:** plane show and a /plane panel over every run, unit and PR ([#1936](https://github.com/coreplanelabs/switchboard/issues/1936)) ([1c766fd](https://github.com/coreplanelabs/switchboard/commit/1c766fdad00db672db0de753aa11576adc59f994))
+* **ship:** a one-unit plan runs in the requesting thread, any source ([#1949](https://github.com/coreplanelabs/switchboard/issues/1949)) ([be00667](https://github.com/coreplanelabs/switchboard/commit/be00667bb8c97f9614f54ad0965159ed78625e3d))
+* **ship:** a unit ending idles behind ship.idleDays, shipped at zero ([#1838](https://github.com/coreplanelabs/switchboard/issues/1838)) ([8bc83f8](https://github.com/coreplanelabs/switchboard/commit/8bc83f8c8d88d423918a2521611cc0adfabe305f))
+* **ship:** the plan runner survives a queued spawn and appended units ([#1948](https://github.com/coreplanelabs/switchboard/issues/1948)) ([735cf62](https://github.com/coreplanelabs/switchboard/commit/735cf6290b2bcbccb980d0ddeb5e57316e03ab94))
+* **ship:** the web opens threads and the preflight admits by capability ([#1945](https://github.com/coreplanelabs/switchboard/issues/1945)) ([56efc97](https://github.com/coreplanelabs/switchboard/commit/56efc97962de980d42e3692f06eb223f3992e3d1))
+* **web:** a unit thread's conversation reads the parent's word ([#1957](https://github.com/coreplanelabs/switchboard/issues/1957)) ([e2e3888](https://github.com/coreplanelabs/switchboard/commit/e2e3888ba746953aae516c03ced4a595391a19d6))
+* **web:** the runs index nests a pipeline's runs under their parent ([#1947](https://github.com/coreplanelabs/switchboard/issues/1947)) ([e9c0550](https://github.com/coreplanelabs/switchboard/commit/e9c05503122bcbd54544c0f20535fb7b6d2f6464))
+
+
+### Bug fixes
+
+* **core:** a hosted ship parent no longer reads as stalled ([#1939](https://github.com/coreplanelabs/switchboard/issues/1939)) ([7e45181](https://github.com/coreplanelabs/switchboard/commit/7e45181602436a9096ad2e2612ec2e27bca62683))
+* **dispatcher:** a cut hand-back says it will not run as pasted ([#1937](https://github.com/coreplanelabs/switchboard/issues/1937)) ([2c36384](https://github.com/coreplanelabs/switchboard/commit/2c363848c9d90af5e038224bed4b19d4f2c3cc64))
+* **load:** a command's own refusal counts as a failed command run ([#1940](https://github.com/coreplanelabs/switchboard/issues/1940)) ([5a93b9d](https://github.com/coreplanelabs/switchboard/commit/5a93b9dcb254361022350788389a9509c0a47689))
+* **web:** a hand-back's second line stays out of the composer box ([#1951](https://github.com/coreplanelabs/switchboard/issues/1951)) ([a6e5289](https://github.com/coreplanelabs/switchboard/commit/a6e5289dda077d32d99d07069d662b6a6121e299))
+
+
+### Performance
+
+* **web:** the history path never reads the intake ledger ([#1953](https://github.com/coreplanelabs/switchboard/issues/1953)) ([5b79fff](https://github.com/coreplanelabs/switchboard/commit/5b79ffffbbc6ca1a18e9f36be2831936d12c3c71))
+
+
+### Documentation
+
+* **agents:** the pre-push loop is the touched test files, not --changed ([#1959](https://github.com/coreplanelabs/switchboard/issues/1959)) ([3892cbe](https://github.com/coreplanelabs/switchboard/commit/3892cbe695d14f30b83fbe0ab170a486bb6028c5))
+* **docs:** record 0058 and its intake-gate plan read implemented ([#1955](https://github.com/coreplanelabs/switchboard/issues/1955)) ([d611cfb](https://github.com/coreplanelabs/switchboard/commit/d611cfb9485aac5bd103fb587a0b9fb62b954be5))
+* drop the email match from record 0062 and its plan ([#1935](https://github.com/coreplanelabs/switchboard/issues/1935)) ([c806e07](https://github.com/coreplanelabs/switchboard/commit/c806e07200ccf2b25b6da6cfde15577d36431996))
+* **runs:** record 0064, the orchestration plane owns every run's state ([#1934](https://github.com/coreplanelabs/switchboard/issues/1934)) ([cd155cb](https://github.com/coreplanelabs/switchboard/commit/cd155cb54128b912c69b7dffb9624c58bdf0a9a9))
+* U4 gains the volume line's refusals count in the one-door plan ([#1927](https://github.com/coreplanelabs/switchboard/issues/1927)) ([0a53bd6](https://github.com/coreplanelabs/switchboard/commit/0a53bd6c6f43bea67cac65422409be0ab6cf7aef))
+
 ## [1.252.0](https://github.com/coreplanelabs/switchboard/compare/v1.251.0...v1.252.0) (2026-09-19)
 
 
