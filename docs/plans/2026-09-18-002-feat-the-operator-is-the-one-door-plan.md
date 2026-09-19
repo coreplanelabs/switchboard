@@ -223,6 +223,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 | U14 | The repository token scan leaves | `src/core/repoContext.ts`, `src/core/dispatch/resolve.ts`, `src/load/routeRepoFixtures.ts` | U8, U13 |
 | U15 | The attach token and the link unwrapping leave; the lint rule | `src/core/dispatch/route.ts`, `src/core/commandChat.ts`, `src/channels/slack.ts`, `src/chatTextFence.mjs`, `eslint.config.mjs` | U14 |
 | U16 | The confirm default moves | `src/config/profile.ts`, `src/config/validate.ts`, `src/core/dispatch/route.ts` | U6, U15, U17, the write and planted rows twice on the post-U15 prompt, the requester fix deployed |
+| U19 | One seam for a structured answer | `src/core/dispatch/structured.ts`, `src/core/dispatch/route.ts`, `src/core/dispatch/operator.ts`, `src/core/intake.ts`, `src/core/budgets.ts` | U17 |
 
 ### U1. Authored session rows
 
@@ -348,6 +349,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   3. Run the entry test: one strong-tier replay under `--verify`; the write row and the misses row hold; the receipt with the head sha it ran against goes in the pull request body.
   4. Spec rows: routing-and-config item 29 (the default and the rollback lever).
 - **Execution note**: this unit replaces the shadow week with one entry test (amended 2026-09-19); the agreement row is posted after one day under `on` as a measurement, never read as a gate.
+- **Amendment (2026-09-19)**: the fallback this unit shipped beside the flip (pull request 1988 — a seam-produced refusal marked `fallback: true` falls back to the readers' route under `on`) is the interim shape; [record 0067](../decisions/0067-one-seam-for-a-structured-answer-a-violation-is-re-asked-with-the-violation-named-and-the-callers-declared-floor-holds-never-a-refusal-shown-to-the-person.md) and U19 are the design — the seam re-asks a named violation before the declared floor holds.
 - **Patterns to follow**: `operatorModeOf` and its comment block; `routingOn`'s default note.
 - **Test scenarios**:
   - No `routing.operator` key: `operatorModeOf` returns `on`.
@@ -509,6 +511,28 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 - **Execution note**: the pull request body carries the two write-row receipts and the two planted-row receipts, each naming the head sha its replay ran against (at or after U15's merged head, no prompt change between them), and the deployment receipt of the requester fix.
 - **Test scenarios**: as in the approach.
 - **Verification**: the test files green; `npm run specs:check`; CI's `verify` green on the pull request; the gate receipts linked.
+
+### U19. One seam for a structured answer
+
+Added 2026-09-19 by [record 0067](../decisions/0067-one-seam-for-a-structured-answer-a-violation-is-re-asked-with-the-violation-named-and-the-callers-declared-floor-holds-never-a-refusal-shown-to-the-person.md). No other unit depends on U19.
+
+- **Goal**: one module asks a model for one structured answer — the tool forced, the caller's pure parser accepting or naming the violation, a named violation re-asked of the same model with the violation as a user turn, at most two retries, every attempt recorded on the caller's event — and after the retries the caller's declared floor holds, never a refusal shown to the person; the route tool, the verifier, the operator and the intake gate migrate onto it, floors unchanged except the operator's, which is the readers' route with reason `non_decision`.
+- **Requirements**: R6, R10, R27 ([record 0067](../decisions/0067-one-seam-for-a-structured-answer-a-violation-is-re-asked-with-the-violation-named-and-the-callers-declared-floor-holds-never-a-refusal-shown-to-the-person.md); routing-and-config items 21, 25 and 29; the intake item's model call, routing-and-config item 27).
+- **Dependencies**: U17 (the default is on; its interim fallback — pull request 1988's shape-A code, a seam-produced refusal marked `fallback: true` falling back to the readers' route — is what this unit collapses into the seam).
+- **Files**: `src/core/dispatch/structured.ts` (new: the seam — the forced call over `RouteModel`, the caller's parser as accepted-or-violation, the re-ask turn "your answer was not a decision: <why>; answer with the decision tool only" with each caller's noun and tool name, the bounded retries, the attempt list for the event); `src/core/budgets.ts` (the retry bound as a named constant); `src/core/dispatch/route.ts` (`route()` and the verifier call onto the seam; `parseRouteAnswer` and `parseVerifierAnswer` stay the parsers); `src/core/dispatch/operator.ts` (`runOperator` and `verifyOperatorBind` onto the seam; the shape-A fallback and its `fallback: true` mark collapsed into the seam's declared floor); `src/core/dispatcher.ts` (the fallback branch reads the seam's floor, not the mark); `src/core/intake.ts` (`decideIntake` onto the seam; `parseIntakeAnswer` stays the parser); `src/core/runEvents.ts` (the attempts on the `operator` event and the callers' records); tests `src/core/dispatch/structured.test.ts` (new), `src/core/dispatch/route.test.ts`, `src/core/dispatch/operator.test.ts`, `src/core/intake.test.ts`, `src/core/dispatcher.test.ts`; `src/cli.ask.test.ts` unchanged, passing through the floor.
+- **Approach**:
+  1. Tests first, scripted models on the seam: wrong-then-right (one re-ask whose user turn names the violation verbatim, the second answer accepted, two attempts on the event); always-wrong (two re-asks, three attempts, the caller's floor and never a rendered refusal); right-first (one attempt, no re-ask); a timeout re-asks nothing (fail closed as today).
+  2. The seam module and the retry constant; migrate the four callers onto it; collapse pull request 1988's shape-A fallback — the operator's floor is the readers' route with reason `non_decision`, the `fallback: true` mark retired; the other floors stay the default agent, disagree and silent.
+  3. The two `src/cli.ask.test.ts` process tests pass unchanged through the floor.
+  4. Spec rows: routing-and-config item 21 (the route tool's parse and floor through the seam), item 25 (the verifier's), item 29 (the operator's re-ask, attempts and `non_decision` floor), item 27 (the intake gate's model call through the seam).
+- **Patterns to follow**: `providerRouteModel` and `RouteModel` in `route.ts`; `runOperator`'s fail-closed catch; `verifyOperatorBind`; `parseIntakeAnswer`'s refused helper; the `operator` event of run-history item 60.
+- **Test scenarios**:
+  - The wrong tool, then the right call: one re-ask naming both tools; the decision runs as a first-ask decision would; two attempts on the event.
+  - Prose three times on each caller: the floor holds — the default agent, disagree, the readers' route with reason `non_decision`, silent — three attempts on the event, no refusal rendered to the person.
+  - The right call first: one attempt, no re-ask.
+  - A missing field: the re-ask's user turn carries the parser's violation line verbatim.
+  - A model-authored operator refusal (a real decision) renders as today — never re-asked, never floored.
+- **Verification**: the test files green, red first — `src/core/dispatch/structured.test.ts::the structured-answer seam::*` (the scripted-model scenarios above), and the floor proven end to end by `src/cli.ask.test.ts::the CLI process running \`ask\` against a provider::an answered run: stdout is the answer alone, the status lines and the process log go to stderr, exit 0` and `src/cli.ask.test.ts::the CLI process running \`ask\` against a provider::a run the provider refuses (a 401 on the key) exits 1 — the code every failed command exits with — with the refusal on the terminal`, both unchanged; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ---
 
