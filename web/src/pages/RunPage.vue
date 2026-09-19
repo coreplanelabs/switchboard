@@ -204,6 +204,9 @@ const timeline = computed(() => {
       totalMs,
       phase: "ended",
       delivery: { finishedAt: seed.finishedAt, sealedAt: seed.sealedAt, replyOk: seed.replyOk },
+      // The record's terminal status: what a step still open at the run's
+      // terminal event is marked cut by (live-view item 25).
+      ...(seed.status ? { endedBy: seed.status } : {}),
       ...(seed.truncated !== undefined ? { truncated: seed.truncated } : {}),
       ...(seed.untimed ? { untimed: true } : {}),
       callTitle: model.callHeadline,
@@ -221,6 +224,9 @@ const timeline = computed(() => {
     totalMs,
     phase: tlPhase,
     delivery: liveStamps.value,
+    // A live page past `end` knows the stop the viewer saw; anything else that
+    // left a step open gets the generic cut mark.
+    ...(tlPhase === "ended" && state.stopMode ? { endedBy: `stopped_${state.stopMode}` } : {}),
     callTitle: model.callHeadline,
   });
 });

@@ -41,6 +41,10 @@ export interface TimelineInput {
   /** The record predates span schema (`RunHistorySeed.untimed`): no shape is
    *  computed and the note says so. */
   untimed?: boolean;
+  /** The record's terminal status (`interrupted`, `failed`, `stopped_hard`,
+   *  `stopped_soft`, `completed`) — what a cut step's mark names. Absent on a
+   *  live page, or on a record from before the field: the generic mark. */
+  endedBy?: string;
   /** The collapsed headline of the call card a tool span decorates, by call
    *  id — the Longest steps name a tool step by its command (`$ npm test`),
    *  falling back to the display table when the page knows no card. */
@@ -95,6 +99,12 @@ export interface TimelineVm {
   legend: LegendItem[];
   ranked: RankedItem[];
   rankedNote: string;
+  /** The steps still open at the run's terminal event (docs/reference/specs/live-view.md
+   *  item 25): closed at that event, each wearing its `cut by …` mark, and left
+   *  out of the ranking — their measured time is the cut, not the step. Empty
+   *  while live: an open step is genuinely running. */
+  cut: RankedItem[];
+  cutNote: string;
   /** A record with no root: `getting ready: not recorded (too large)`. */
   note: string;
   /** Raw names and the partition, for `Copy debug JSON` only. */
@@ -113,6 +123,24 @@ export const TERM_DEFINITIONS: Record<PrintedTerm, string> = {
   "not loaded": "a stretch of the run this page did not load — the record has the full shape",
 };
 export const RANKED_NOTE = "Ranked by each step's own time, its children excluded — the bar counts every instant once.";
+export const CUT_NOTE =
+  "Steps still open when the run ended: closed at the run's terminal event and left out of the ranking — the time shown is the cut, not a measurement.";
+
+/** The mark a cut step wears: the run's terminal cause, in the record's own
+ *  vocabulary; the generic mark when the page knows none. */
+export function cutMarkOf(endedBy: string | undefined): string {
+  const cause =
+    endedBy === "interrupted"
+      ? "the interruption"
+      : endedBy === "failed"
+        ? "the failure"
+        : endedBy === "stopped_hard"
+          ? "the hard stop"
+          : endedBy === "stopped_soft"
+            ? "the stop"
+            : undefined;
+  return cause ? `cut by ${cause}` : "cut at the run's end";
+}
 export const CURRENTLY_DELIVERING = "currently delivering";
 export const NO_ROOT_NOTE = "getting ready: not recorded (too large)";
 /** A record written before span schema: the one neutral empty state. */
@@ -154,14 +182,28 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
   if (input.untimed) {
     // A record from before span schema: the header's total and the one note;
     // no shape is read from whatever the record carries.
-    const empty = { total, current, openStep, captions: [], rankedNote: RANKED_NOTE, debug };
+    const empty = {
+      total,
+      current,
+      openStep,
+      captions: [],
+      rankedNote: RANKED_NOTE,
+      cut: [],
+      cutNote: CUT_NOTE,
+      debug,
+    };
     return { ...empty, lede: total, shown: false, bar: [], legend: [], ranked: [], note: NO_TIMING_NOTE };
   }
+  // A restart names its predecessor by id: the caption is the
+  // pointer, and no `behind the previous run` wait is printed beside it — a
+  // wait measured across the predecessor would count its lifetime as a queue.
+  const restartOf = stringAttr(root, "restartOfRunId");
   const captions = [
+    restartOf !== undefined ? `restarted from run ${restartOf}` : undefined,
     queuedCaption("before", numberAttr(root, "queuedBeforeMs")),
-    queuedCaption("behind", numberAttr(root, "queuedBehindMs")),
+    restartOf === undefined ? queuedCaption("behind", numberAttr(root, "queuedBehindMs")) : undefined,
   ].filter((c): c is string => c !== undefined);
-  const base = { total, current, openStep, captions, rankedNote: RANKED_NOTE, debug };
+  const base = { total, current, openStep, captions, rankedNote: RANKED_NOTE, cutNote: CUT_NOTE, debug };
   if (!root) {
     // A record whose root was never stored, or a live page before its first
     // frame: the header's total, and on a record the one word for the missing setup.
@@ -172,6 +214,7 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
       bar: [],
       legend: [],
       ranked: [],
+      cut: [],
       note: finished ? NO_ROOT_NOTE : "",
     };
   }
@@ -195,13 +238,19 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
           term === "not recorded" && input.truncated ? `${TERM_DEFINITIONS[term]} (too large)` : TERM_DEFINITIONS[term],
       }))
     : [];
+  // Only a run that is over cuts its open steps: while live or delivering an
+  // open span is genuinely running and stays ranked.
+  const steps = shown
+    ? rankedAndCut(spans, root, owner, window, input.callTitle, input.phase === "ended", cutMarkOf(input.endedBy))
+    : { ranked: [], cut: [] };
   return {
     ...base,
     lede,
     shown,
     bar: shown ? barOf(p, open) : [],
     legend,
-    ranked: shown ? ranked(spans, root, owner, window, input.callTitle) : [],
+    ranked: steps.ranked,
+    cut: steps.cut,
     note: "",
   };
 }
@@ -209,6 +258,11 @@ export function buildTimeline(input: TimelineInput): TimelineVm {
 function numberAttr(span: SpanRecord | undefined, key: "queuedBeforeMs" | "queuedBehindMs"): number | undefined {
   const v = span?.attrs[key];
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+function stringAttr(span: SpanRecord | undefined, key: "restartOfRunId"): string | undefined {
+  const v = span?.attrs[key];
+  return typeof v === "string" && v !== "" ? v : undefined;
 }
 
 interface OpenCounted {
@@ -309,14 +363,20 @@ function barOf(p: Partition, open: OpenCounted | undefined): BarSegment[] {
  *  of their children's — the root, the agent loop and background subtrees
  *  excluded, ties by earlier start. A tool step is named by its card's command
  *  when the page knows the card, and anchored to that card; every other step
- *  to its row. */
-function ranked(
+ *  to its row. On an ended run a step with no end was cut by the run's
+ *  terminal event: it leaves the ranking — the wall clock up to that event is
+ *  the cut, not the step — and lands in `cut`, closed at that event and
+ *  wearing the mark. While live or delivering an open step is genuinely
+ *  running and ranks. */
+function rankedAndCut(
   spans: readonly SpanRecord[],
   root: SpanRecord,
   owner: RunOwner,
   window: Window,
   callTitle: TimelineInput["callTitle"],
-): RankedItem[] {
+  ended: boolean,
+  mark: string,
+): { ranked: RankedItem[]; cut: RankedItem[] } {
   const byId = new Map(spans.map((s) => [s.spanId, s]));
   const childrenOf = new Map<string, SpanRecord[]>();
   for (const s of spans) {
@@ -330,6 +390,7 @@ function ranked(
     Math.min(window.end, s.endedAt ?? window.end),
   ];
   const items: Array<RankedItem & { startedAt: number }> = [];
+  const cutItems: Array<RankedItem & { startedAt: number }> = [];
   for (const s of spans) {
     // The root and the agent loop are the page's structure, not steps a reader
     // can go to (neither has a row); their own time is the overhead term.
@@ -345,16 +406,26 @@ function ranked(
     if (own <= 0) continue;
     const callId = s.name.startsWith("tool.") && typeof s.attrs.callId === "string" ? s.attrs.callId : undefined;
     const title = callId ? callTitle?.(callId) : undefined;
-    items.push({
+    const cutHere = ended && s.endedAt === undefined;
+    (cutHere ? cutItems : items).push({
       label: title ?? displayNameOf(s.name),
       ms: own,
-      facts: factsOf(s),
+      facts: cutHere ? [mark, ...factsOf(s)] : factsOf(s),
       anchor: callId ? `call-${callId}` : `span-${s.spanId}`,
       startedAt: s.startedAt,
     });
   }
-  items.sort((x, y) => y.ms - x.ms || x.startedAt - y.startedAt);
-  return items.slice(0, 3).map(({ label, ms, facts, anchor }) => ({ label, ms, facts, anchor }));
+  const byTime = (x: RankedItem & { startedAt: number }, y: RankedItem & { startedAt: number }) =>
+    y.ms - x.ms || x.startedAt - y.startedAt;
+  items.sort(byTime);
+  cutItems.sort(byTime);
+  const strip = ({ label, ms, facts, anchor }: RankedItem & { startedAt: number }): RankedItem => ({
+    label,
+    ms,
+    facts,
+    anchor,
+  });
+  return { ranked: items.slice(0, 3).map(strip), cut: cutItems.map(strip) };
 }
 
 function unionLength(intervals: Array<[number, number]>): number {

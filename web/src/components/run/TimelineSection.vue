@@ -117,6 +117,35 @@ function copyDebug(): void {
           </li>
         </ol>
       </template>
+      <!-- The steps the run's terminal event cut: closed at that event, marked,
+           and out of the ranking — their measured time is the cut, not the step. -->
+      <template v-if="vm.cut.length > 0">
+        <h3
+          class="cut-head mt-3 block cursor-help text-xs font-medium text-muted underline decoration-dotted decoration-(--ui-border-accented) underline-offset-2"
+          :title="vm.cutNote"
+        >
+          Cut steps
+        </h3>
+        <ol class="cut mt-1 flex flex-col gap-1 font-mono text-xs">
+          <li v-for="(item, i) in vm.cut" :key="i" class="flex items-baseline gap-2">
+            <span class="ms w-14 shrink-0 tabular-nums text-toned">{{ formatDuration(item.ms, "clock") }}</span>
+            <a
+              class="label min-w-0 truncate text-muted no-underline hover:text-primary hover:underline"
+              :href="`#${item.anchor}`"
+              :data-anchor="item.anchor"
+              title="scroll to this step"
+              @click.prevent="emit('reveal', item.anchor)"
+              >{{ item.label }}</a
+            >
+            <span
+              v-for="fact in item.facts"
+              :key="fact"
+              class="fact shrink-0 rounded border border-accented px-1 text-dimmed"
+              >{{ fact }}</span
+            >
+          </li>
+        </ol>
+      </template>
     </template>
   </section>
 </template>

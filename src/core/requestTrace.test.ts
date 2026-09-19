@@ -199,4 +199,12 @@ describe("startRequestRoot — the queued numbers are on the root at start", () 
     );
     expect(plain.root.record().attrs).toEqual({ channel: "http" });
   });
+
+  it("restartOfRunId names the run this request restarts on the root's span_start, so the page's caption points at the predecessor instead of inventing a wait", () => {
+    const trace = startRequestRoot(
+      { config: config(), clock: createTickingClock(20_000).now, sinks: [recordingSink()] },
+      { channel: "slack", receivedAt: 20_000, restartOfRunId: "run-prev" },
+    );
+    expect(trace.root.record().attrs).toEqual({ channel: "slack", restartOfRunId: "run-prev" });
+  });
 });
