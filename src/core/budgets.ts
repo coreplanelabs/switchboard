@@ -96,18 +96,18 @@ export const DRAIN = {
  *  that runs after the longest allowed drain still reads the verdict instead
  *  of deciding the reply again. The window is clamped to a month so a
  *  misconfigured writer cannot make retention unbounded. */
+export const INTAKE_WINDOW_MAX_MS = 30 * DAY_MS;
+export function intakeReceiptRetentionMs(catchUpWindowMs: number): number {
+  const window = Math.min(Math.max(0, catchUpWindowMs), INTAKE_WINDOW_MAX_MS);
+  return Math.max(DAY_MS, window + minutesToMs(DRAIN.maxMinutes));
+}
+
 /** The live false-silence join's recovery window (docs/reference/specs/load-harness.md
  *  item 20; docs/decisions/0058): a `silent` intake receipt counts as a false
  *  silence when the same person mentions the bot in the same thread within
  *  this window — the mention is the ignored person's recovery move, so a
  *  prompt one bounds the ratio the gate is judged by. */
 export const INTAKE_RECOVERY_WINDOW_MS = 10 * MINUTE_MS;
-
-export const INTAKE_WINDOW_MAX_MS = 30 * DAY_MS;
-export function intakeReceiptRetentionMs(catchUpWindowMs: number): number {
-  const window = Math.min(Math.max(0, catchUpWindowMs), INTAKE_WINDOW_MAX_MS);
-  return Math.max(DAY_MS, window + minutesToMs(DRAIN.maxMinutes));
-}
 
 /** The presets that run the tool loop, and the one pipeline preset. */
 export const LOOP_PRESETS = ["general", "coding", "review", "research", "explore", "conductor"] as const;
