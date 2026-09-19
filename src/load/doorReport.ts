@@ -9,7 +9,10 @@
 // 0054, as amended: every refusal is a run record): the `door` records the
 // dispatcher writes for every refusal — gate refusals before any command is
 // bound included — and the command records whose `route` carries `outcome:
-// "refused"`, together, per day, cause and code. Nothing here invokes
+// "refused"`, together, per day, cause and code. A command's OWN refusal —
+// the command ran and answered with its refusal, a failed command run — is
+// not the door's decision and is never bucketed under the refusal causes: it
+// is counted apart as a failed command run. Nothing here invokes
 // anything: the list and the per-run events are the inputs, and a store that
 // cannot be read is said so on the report rather than guessed around.
 import { COMMAND_RUN_AGENT, DOOR_RUN_AGENT } from "../core/runOwner.js";
@@ -35,7 +38,10 @@ export interface DoorRow {
  *  writes a `door` record for every refusal it makes — a gate refusal before
  *  any command is bound included — and the confirm path writes a refused route
  *  when the store's refusal still names the row ([run-history.md] item 2), so
- *  the count reads off the run store alone. The cause comes from the one
+ *  the count reads off the run store alone. A command's own refusal (the
+ *  command ran and answered with its refusal: a `failed` command record with
+ *  no refused route) never enters these rows — it counts as a failed command
+ *  run. The cause comes from the one
  *  code→cause table; a code it does not know counts as `unknown`. */
 export interface RefusalRow {
   day: string;
@@ -53,6 +59,10 @@ export interface DoorReport {
   unmatchedPastes: number;
   /** Command runs whose events were read, door decisions or not. */
   commandRuns: number;
+  /** Command runs whose record's status is `failed`: the command ran and its
+   *  own work refused or broke. A command's own refusal lives here, never in
+   *  `refusals` — those are the door's decisions alone. */
+  failedCommandRuns: number;
   /** `door` records read — one per refusal the dispatcher recorded. */
   doorRuns: number;
   /** The store threw on a list: the counts are the live registry's rows alone. */
@@ -132,7 +142,9 @@ async function refusalOf(runs: Pick<RunsService, "getRunEvents">, id: string): P
  * by day and command, the pastes joined to them by `handBackRunId`, and every
  * refusal — a `door` record's or a refused route's — bucketed by day, cause
  * and code. A routed read (a route with no outcome) and a typed inline run
- * (no route) are read and left out.
+ * (no route) are read and left out — except that a `failed` one is counted as
+ * a failed command run: a command's own refusal answered by the command
+ * itself, never the door's, so never in the refusal buckets.
  */
 export async function doorReport(
   runs: Pick<RunsService, "listRuns" | "getRunEvents">,
@@ -197,6 +209,7 @@ export async function doorReport(
     pastes: joined,
     unmatchedPastes: pastes.length - joined,
     commandRuns: listed.runs.length,
+    failedCommandRuns: listed.runs.filter((run) => run.status === "failed").length,
     doorRuns: doorListed.runs.length,
     storeUnavailable: listed.storeUnavailable || doorListed.storeUnavailable,
     rows,
@@ -213,7 +226,7 @@ export function pasteRate(handBacks: number, pastes: number): string {
  *  commands under it, and a last line when the store could not be read. */
 export function renderDoor(report: DoorReport): string[] {
   const lines = [
-    `door: ${report.handBacks} hand-back(s), ${report.pastes} paste(s) joined (${pasteRate(report.handBacks, report.pastes)} pasted), ${report.unmatchedPastes} paste(s) whose hand-back is outside the window; ${report.commandRuns} command run(s) and ${report.doorRuns} door record(s) read`,
+    `door: ${report.handBacks} hand-back(s), ${report.pastes} paste(s) joined (${pasteRate(report.handBacks, report.pastes)} pasted), ${report.unmatchedPastes} paste(s) whose hand-back is outside the window; ${report.commandRuns} command run(s) (${report.failedCommandRuns} failed) and ${report.doorRuns} door record(s) read`,
   ];
   const days = new Map<string, DoorRow[]>();
   for (const row of report.rows) days.set(row.day, [...(days.get(row.day) ?? []), row]);
