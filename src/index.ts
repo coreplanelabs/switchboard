@@ -77,7 +77,12 @@ import type { ChannelIO } from "./core/types.js";
 import { AGENTS, getAgent, IDENTITIES, MACHINE_CLASSES } from "./agents/registry.js";
 import { systemClock } from "./core/trace/index.js";
 import { resumeSlackIO } from "./channels/slack.js";
-import { closeReclaimedCards, markForeignLiveCards, setForeignLiveCardsSource } from "./channels/slack/statusCard.js";
+import {
+  adoptLiveCard,
+  closeReclaimedCards,
+  markForeignLiveCards,
+  setForeignLiveCardsSource,
+} from "./channels/slack/statusCard.js";
 import { handleAdminCrash } from "./channels/adminCrash.js";
 import { handleAdminModelProxyBearer, MODEL_PROXY_BEARER_PATH } from "./channels/adminModelProxy.js";
 import {
@@ -1426,6 +1431,9 @@ export async function runBot(): Promise<void> {
       // The handle from the row's METADATA (record 0060): a hosted row's key
       // column carries the host suffix and names no thread of any channel.
       ioFor: (row) => threadIoFor(resumeIoTarget(row)),
+      // A re-hosted parent's card is this generation's again, so the connect's
+      // orphan sweep leaves it alone (slack-channel item 8).
+      keepCardLive: adoptLiveCard,
       close: async (run, why) => {
         const closed = await closeReclaimed(ledgerReclaim.client, generation, {
           row: run.row,
