@@ -6,6 +6,7 @@ import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { analyzeRunFriction, type FrictionOptions, type FrictionDiagnosis } from "./runFriction.js";
 import {
   clampListLimit,
+  instanceIdOfEvents,
   namesPullRequest,
   RUN_ID_PATTERN,
   RUN_LIST_MAX_LIMIT,
@@ -154,7 +155,10 @@ export interface RunView {
   idempotencyKey?: string;
   /** The plan runner instance a ship run's hand-off created (record 0051 R2;
    *  `RunRecord.instanceId`): what the thread's owner rule reads off the page's
-   *  ship run. Persisted rows only — a record written before the event has none. */
+   *  ship run — and the fact the index nests the instance's unit runs under.
+   *  On a persisted row from the record; on a live registry or ledger row from
+   *  the run's own events (`ship_handoff`, the hosted `run_meta`); absent on a
+   *  row whose run hosts nothing and on records written before the event. */
   instanceId?: string;
   /** The typed artifacts a finished run's record carries (run-history item 2) —
    *  the review's verdict, reviewed head and post, the fix round's dispositions,
@@ -197,6 +201,13 @@ export interface RunView {
    *  item 41): a row read from the run ledger — live under another container,
    *  or reclaimed here and not yet launched. Absent on this process's rows. */
   ownerGen?: string;
+}
+
+/** What `unitLineage` answers: the pipeline's own run record and the unit the
+ *  thread belongs to — each present only when the instance knows it. */
+export interface UnitLineage {
+  runId?: string;
+  unit?: { key: string; id: string; title?: string; thread: "coding" | "review" };
 }
 
 /** `getRun`'s shape: the view plus, only with `include: "messages"`, the events. */
@@ -381,6 +392,13 @@ export interface RunsService {
    *  rule `listUnitRuns` applies to a unit not started): existence is never
    *  revealed across a channel. */
   listInstanceUnits(instanceId: string, visibleTo: Predicate): Promise<UnitFacts[]>;
+  /** A pipeline child's way up (live-view item 33): the instance's parent run
+   *  record (`InstanceFacts.runId`) and — when `threadKey` is one of the
+   *  instance's unit threads — the unit that thread belongs to, with which of
+   *  its two threads the key names. Admitted exactly as `listInstanceUnits`
+   *  is; `null` for an unknown instance, a process without the coordinator's
+   *  records, and a reader outside the instance's channel. */
+  unitLineage(instanceId: string, threadKey: string | undefined, visibleTo: Predicate): Promise<UnitLineage | null>;
   /** A pull request's findings ledger (agent-ship item 18): the runs whose
    *  records name it (`ListRunsOptions.pr`) plus, when one of them belongs to a
    *  coordinator instance whose unit row names the pull request, that unit's
@@ -446,6 +464,9 @@ export interface RunsServiceDeps {
 function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
   const m = row.meta;
   const activity = activityOfEvents(events);
+  // A hosted parent live under another generation still names its instance:
+  // the ledger mirrors the run's events, so the record's rule reads it here.
+  const instanceId = instanceIdOfEvents(events);
   return {
     id: row.runId,
     ...(m.label !== undefined ? { label: m.label } : {}),
@@ -468,6 +489,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     ...(m.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
     ...(m.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),
     ...(m.hosted ? { hosted: true as const } : {}),
+    ...(instanceId !== undefined ? { instanceId } : {}),
     ...(row.stop ? { stop: { mode: row.stop, state: "stopping" as const } } : {}),
     schema: SPAN_SCHEMA, // a ledger run is a current runner's: spans carry its timing
     ownerGen: row.ownerGen,
@@ -510,6 +532,7 @@ function liveView(s: RunSummary): RunView {
     ...(s.parentInstanceId !== undefined ? { parentInstanceId: s.parentInstanceId } : {}),
     ...(s.idempotencyKey !== undefined ? { idempotencyKey: s.idempotencyKey } : {}),
     ...(s.hosted ? { hosted: true as const } : {}),
+    ...(s.instanceId !== undefined ? { instanceId: s.instanceId } : {}),
     ...(s.persisted ? { persisted: true } : {}),
   };
 }
@@ -1081,6 +1104,27 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       const instance = await units.get(instanceId);
       if (!instance || !instanceAdmits(instance, visibleTo)) return [];
       return (await units.listUnits(instanceId)).map(unitFactsOf);
+    },
+
+    async unitLineage(instanceId, threadKey, visibleTo) {
+      if (!units || visibleTo.kind === "none") return null;
+      const instance = await units.get(instanceId);
+      if (!instance || !instanceAdmits(instance, visibleTo)) return null;
+      const rows = threadKey !== undefined ? await units.listUnits(instanceId) : [];
+      const row = rows.find((u) => u.threadKey === threadKey || u.reviewThread?.threadKey === threadKey);
+      return {
+        ...(instance.runId !== undefined ? { runId: instance.runId } : {}),
+        ...(row !== undefined
+          ? {
+              unit: {
+                key: unitKeyOf(row),
+                id: row.unit,
+                ...(row.title !== undefined ? { title: row.title } : {}),
+                thread: row.threadKey === threadKey ? ("coding" as const) : ("review" as const),
+              },
+            }
+          : {}),
+      };
     },
 
     async listFindings(pr, visibleTo) {

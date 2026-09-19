@@ -443,6 +443,16 @@ const sourceUrl = computed(() => httpsUrl(state.request?.source?.url));
 const threadLink = computed(() =>
   seed && (seed.mode === "live" || seed.mode === "history") && seed.threadKey ? threadHref(seed.threadKey) : null,
 );
+/** The way up (live-view item 33): the pipeline or conductor run this one was
+ *  spawned by, and — for a ship unit's thread run — the unit it belongs to,
+ *  each opening its own page. Nothing drawn when the seed carries none. */
+const lineage = seed && (seed.mode === "live" || seed.mode === "history") ? (seed.lineage ?? null) : null;
+// A live parent's link keeps its capability token (a hosted ship parent is
+// live for the pipeline's whole life, so a tokenless link could only 404).
+const lineageParentHref = lineage?.parent
+  ? `/runs/${encodeURIComponent(lineage.parent.id)}${lineage.parent.token ? `?t=${encodeURIComponent(lineage.parent.token)}` : ""}`
+  : "";
+const lineageUnitHref = lineage?.unit ? `/runs/unit/${encodeURIComponent(lineage.unit.key)}` : "";
 /** The REVIEW/CODING row's links (item 19): the repo, the branch, the head
  *  commit and the PR, each built only from a value whose shape was verified
  *  (`githubLinks.ts`) — an odd value renders as text, never as a link. */
@@ -561,6 +571,34 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
          diff control at the right edge. Every link is built from a
          shape-verified value; an odd one stays text. A reader with three
          seconds gets the run's identity before any prose. -->
+
+      <!-- The way up (item 33): a spawned run names its pipeline (or parent)
+           run and — a ship unit's thread run — its unit, each a page here. -->
+      <div
+        v-if="lineage"
+        id="lineage"
+        class="lineage facts mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 px-(--sb-gutter) font-mono text-xs text-dimmed"
+      >
+        <span class="text-[0.68rem] font-medium uppercase tracking-wider">part of</span>
+        <RouterLink
+          v-if="lineageParentHref && lineage.parent"
+          class="parent text-primary no-underline hover:underline"
+          :to="lineageParentHref"
+          data-testid="lineage-parent"
+          :title="lineage.unit ? 'the pipeline run this one belongs to' : 'the run that spawned this one'"
+          >{{ lineage.unit ? "pipeline run" : "parent run" }} ›</RouterLink
+        >
+        <RouterLink
+          v-if="lineageUnitHref && lineage.unit"
+          class="unit text-primary no-underline hover:underline"
+          :to="lineageUnitHref"
+          data-testid="lineage-unit"
+          title="the unit this run's thread belongs to"
+          >unit {{ lineage.unit.id }}{{ lineage.unit.title ? ` · ${lineage.unit.title}` : "" }} ›</RouterLink
+        >
+        <span v-if="lineage.unit?.thread" class="threadkind">{{ lineage.unit.thread }} thread</span>
+      </div>
+
       <div
         v-if="state.meta"
         id="runmeta"

@@ -81,6 +81,10 @@ export interface RunSummary {
   seed?: RunSeed;
   /** `RunMeta.hosted`: a ship pipeline's parent, occupying no thread (record 0060). */
   hosted?: true;
+  /** The plan runner instance a ship parent hosts (record 0060): the LAST
+   *  published event naming one (`ship_handoff`, then the hosted `run_meta`) —
+   *  what lets the index nest the instance's unit runs under this row live. */
+  instanceId?: string;
   /** Present only once a stop has been requested. */
   stop?: RunStopStatus;
   /** Present (true) once the history writer confirmed the run is in the durable
@@ -161,6 +165,7 @@ export function summaryOf(run: RunState, now: number): RunSummary {
     ...(m?.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),
     ...(m?.seed !== undefined ? { seed: m.seed } : {}),
     ...(m?.hosted ? { hosted: true as const } : {}),
+    ...(run.instanceId !== undefined ? { instanceId: run.instanceId } : {}),
     finished: run.finished,
     startedAt: run.startedAt,
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),

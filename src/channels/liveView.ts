@@ -692,8 +692,21 @@ export function createLiveViewHandler(
         // live path never reads the store — in start order, live rows with
         // their tokens: the token that opened the parent's page opens no child,
         // so each child's row carries its own.
-        const children: UnitRunRowSeed[] = index
-          .listActive()
+        const active = index.listActive();
+        // The way up (item 33), from the registry alone: the spawning run, or
+        // the hosted parent whose instance this run is a child of. A LIVE
+        // parent's link carries its token — a hosted parent is live for the
+        // pipeline's whole life (record 0060), so a tokenless link could only
+        // 404 — mirroring how this parent's own page hands each live child its
+        // token; a finished parent never carries one.
+        const parentRow =
+          summary?.parentRunId !== undefined
+            ? active.find((s) => s.id === summary.parentRunId)
+            : summary?.parentInstanceId !== undefined
+              ? active.find((s) => s.instanceId === summary.parentInstanceId && s.id !== route.id)
+              : undefined;
+        const parentId = summary?.parentRunId ?? parentRow?.id;
+        const children: UnitRunRowSeed[] = active
           .filter((s) => s.parentRunId === route.id)
           .sort((a, b) => a.startedAt - b.startedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
           .map((s): UnitRunRowSeed => {
@@ -706,6 +719,16 @@ export function createLiveViewHandler(
           id: route.id,
           ...(summary?.threadKey !== undefined ? { threadKey: summary.threadKey } : {}),
           ...(children.length > 0 ? { children } : {}),
+          ...(parentId !== undefined
+            ? {
+                lineage: {
+                  parent: {
+                    id: parentId,
+                    ...(parentRow !== undefined && !parentRow.finished ? { token: parentRow.token } : {}),
+                  },
+                },
+              }
+            : {}),
           // Stop control: same token, POST-only; `&mode=` is appended client-side.
           // A hosted parent (record 0060) gets none: the token stops nothing on
           // it, so the page draws no control that could only fail.
@@ -905,13 +928,34 @@ export function createLiveViewHandler(
         // item 58): its findings ledger's unit page is linked when the viewer
         // may read the ledger and a unit row names the pull request (agent-ship item 18).
         const prNumber = view.repo !== undefined ? pullRequestNumberOf(view) : undefined;
-        const [children, units, ledger] = await Promise.all([
+        const [children, units, ledger, unitLineage] = await Promise.all([
           service.listChildren(route.id, visibleTo),
           instanceId !== undefined ? service.listInstanceUnits(instanceId, visibleTo) : Promise.resolve([]),
           prNumber !== undefined && view.repo !== undefined
             ? service.listFindings({ repo: view.repo, number: prNumber }, visibleTo)
             : Promise.resolve(undefined),
+          view.parentInstanceId !== undefined
+            ? service.unitLineage(view.parentInstanceId, view.threadKey, visibleTo)
+            : Promise.resolve(null),
         ]);
+        // The way up (item 33): the record's own parent, else the instance's
+        // parent record; the unit when the record's thread is one of its rows'.
+        // A parent LIVE in this registry gets its capability token re-attached
+        // — a hosted ship parent is live for the pipeline's whole life (record
+        // 0060), so a tokenless link could only 404 — only for a viewer whose
+        // predicate admits the parent's row, as a live child row does; a
+        // finished parent never carries one.
+        const parentId = view.parentRunId ?? unitLineage?.runId;
+        const parentRow =
+          parentId !== undefined
+            ? index.listActive().find((s) => s.id === parentId && !s.finished && matchesPredicate(visibleTo, s))
+            : undefined;
+        const lineage = {
+          ...(parentId !== undefined
+            ? { parent: { id: parentId, ...(parentRow !== undefined ? { token: parentRow.token } : {}) } }
+            : {}),
+          ...(unitLineage?.unit !== undefined ? { unit: unitLineage.unit } : {}),
+        };
         const findingsLedger =
           ledger?.ok && ledger.value.unit !== undefined
             ? { unit: ledger.value.unit, rows: ledger.value.findings.length }
@@ -925,6 +969,7 @@ export function createLiveViewHandler(
           ...(children.length > 0 ? { children: children.map((c) => withLiveToken(c, tokens)) } : {}),
           ...(units.length > 0 ? { units } : {}),
           ...(findingsLedger !== undefined ? { findingsLedger } : {}),
+          ...(lineage.parent !== undefined || lineage.unit !== undefined ? { lineage } : {}),
           // The stored stream with the truncation made visible (AE11): the
           // seed IS the stream on a history page — normalized first on a
           // span-schema record, so a pair whose twin the budget dropped gets

@@ -116,6 +116,31 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     expect(wrapper.find('[data-run-id="hung"]').attributes("data-stalled")).toBe("1");
   });
 
+  // Feature: docs/reference/specs/live-view.md item 33 — a pipeline's runs
+  // nest under their parent's row instead of interleaving with the rest.
+  it("nests a pipeline's runs under their parent — a ship unit's runs by instance, a conductor's child by parent id — oldest-first under the head, indented and naming the head; an orphan stays top-level", () => {
+    const ship = live("ship", { startedAt: 10, hosted: true, instanceId: "wf-1" });
+    const c0 = live("c0", { startedAt: 20, parentInstanceId: "wf-1" });
+    const r1 = live("r1", { startedAt: 30, parentInstanceId: "wf-1" });
+    const kid = live("kid", { startedAt: 40, parentRunId: "ship" });
+    const solo = live("solo", { startedAt: 25 });
+    const orphan = live("orphan", { startedAt: 50, parentInstanceId: "wf-gone" });
+    const { wrapper } = mountIndex(seed([c0, solo, ship, orphan, r1, kid]));
+    expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual([
+      "orphan",
+      "solo",
+      "ship",
+      "c0",
+      "r1",
+      "kid",
+    ]);
+    expect(wrapper.find('[data-run-id="c0"]').classes()).toContain("nested");
+    expect(wrapper.find('[data-run-id="c0"]').attributes("data-parent-id")).toBe("ship");
+    expect(wrapper.find('[data-run-id="kid"]').attributes("data-parent-id")).toBe("ship");
+    expect(wrapper.find('[data-run-id="orphan"]').classes()).not.toContain("nested");
+    expect(wrapper.find('[data-run-id="ship"]').attributes("data-parent-id")).toBeUndefined();
+  });
+
   it("?all=1 titles the page All runs and opens the all feed", () => {
     const { wrapper, es } = mountIndex(seed([done("c")], { all: true }));
     expect(wrapper.find("h1 .title").text()).toBe("All runs");

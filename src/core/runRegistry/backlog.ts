@@ -45,7 +45,7 @@ export interface BacklogBounds {
  *  total, the protected head, and the activity line refreshed per event. */
 export type BacklogState = Pick<
   RunState,
-  "backlog" | "backlogSizes" | "backlogBytes" | "headLen" | "headBytes" | "activity"
+  "backlog" | "backlogSizes" | "backlogBytes" | "headLen" | "headBytes" | "activity" | "instanceId"
 >;
 
 /** Append one stamped event to the run's bounded backlog and refresh its
@@ -71,6 +71,14 @@ export function appendToBacklog(run: BacklogState, bounds: BacklogBounds, publis
   // over the tool call it explains only until the next call arrives.
   const activity = activityOf(stamped);
   if (activity !== undefined) run.activity = activity;
+  // The instance a ship parent hosts (record 0060): the LAST event naming one
+  // wins — `ship_handoff` at the hand-off, then the hosted second `run_meta`
+  // restating it. Record readers (`instanceIdOfEvents`) fold `ship_handoff`
+  // alone; both events name the same instance at the hand-off, so the two
+  // rules resolve the same id — the registry also reads `run_meta` because a
+  // live row must pick the id up from whichever event publishes first.
+  if ((stamped.type === "ship_handoff" || stamped.type === "run_meta") && stamped.instanceId !== undefined)
+    run.instanceId = stamped.instanceId;
   while (
     run.backlog.length > run.headLen + 1 &&
     (run.backlog.length > bounds.limit || run.backlogBytes > bounds.bytes)

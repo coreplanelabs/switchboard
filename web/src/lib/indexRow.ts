@@ -118,6 +118,65 @@ export function rowStalled(run: IndexRow, now: number): boolean {
   return !run.finished && stalledFor(run, now) !== undefined;
 }
 
+// The index's pipeline nesting (live-view item 33): a pipeline's runs read as
+// one group — the parent's row first, the runs it stands for indented under it
+// — instead of interleaving with every other run by start time.
+
+/** One top-level index entry: the row itself and the rows nested under it. */
+export interface RunGroup {
+  head: IndexRow;
+  children: IndexRow[];
+}
+
+/** Nest each row under the parent ON THE PAGE — a conductor's child under the
+ *  row its `parentRunId` names, a ship unit's run under the parent whose
+ *  `instanceId` its `parentInstanceId` names — walking up so a grandchild
+ *  lands under the top of its pipeline. A row whose parent is not listed stays
+ *  a head: nesting never hides a run. Children read oldest-first (start
+ *  order); heads keep the index's own order — stalled groups first (a group is
+ *  stalled when any of its rows is, so a stalled child still surfaces its
+ *  pipeline), then newest-first, the sort stable. */
+export function groupRuns(rows: IndexRow[], now: number): RunGroup[] {
+  const byId = new Map(rows.map((r) => [r.id, r] as const));
+  const byInstance = new Map<string, IndexRow>();
+  for (const r of rows) if (r.instanceId !== undefined) byInstance.set(r.instanceId, r);
+  const parentOf = (r: IndexRow): IndexRow | undefined => {
+    const p =
+      (r.parentRunId !== undefined ? byId.get(r.parentRunId) : undefined) ??
+      (r.parentInstanceId !== undefined ? byInstance.get(r.parentInstanceId) : undefined);
+    return p !== undefined && p.id !== r.id ? p : undefined;
+  };
+  // The top of a row's chain, bounded so a malformed cycle cannot spin.
+  const headOf = (r: IndexRow): IndexRow => {
+    let h = r;
+    for (let i = 0; i < 8; i++) {
+      const p = parentOf(h);
+      if (!p) return h;
+      h = p;
+    }
+    return h;
+  };
+  const heads: IndexRow[] = [];
+  const children = new Map<string, IndexRow[]>();
+  for (const r of rows) {
+    const h = headOf(r);
+    // A cycle names nobody as the top: every row on it stays its own head.
+    if (h.id === r.id || headOf(h).id !== h.id) {
+      heads.push(r);
+      continue;
+    }
+    const list = children.get(h.id);
+    if (list) list.push(r);
+    else children.set(h.id, [r]);
+  }
+  const byStart = (a: IndexRow, b: IndexRow) => a.startedAt - b.startedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const groups = heads.map((head) => ({ head, children: (children.get(head.id) ?? []).sort(byStart) }));
+  const stalledGroup = (g: RunGroup) => rowStalled(g.head, now) || g.children.some((c) => rowStalled(c, now));
+  return groups.sort(
+    (a, b) => Number(stalledGroup(b)) - Number(stalledGroup(a)) || b.head.startedAt - a.head.startedAt,
+  );
+}
+
 /** The bound-exceeded mark — `bash 2083s, bound 600s` — for a live row whose
  *  in-flight call outran the bound it declared; undefined otherwise. */
 export function rowBound(run: IndexRow, now: number): string | undefined {

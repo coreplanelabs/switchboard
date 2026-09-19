@@ -26,6 +26,7 @@ import {
   rowStalled,
   rowBound,
   paceTip,
+  groupRuns,
 } from "./indexRow";
 import { formatLocalIso } from "./format";
 
@@ -307,6 +308,48 @@ describe("the stall signal (item 32)", () => {
     expect(paceTip(live({ eventsLast5m: 0, inFlight: { tool: "bash", since: 0, boundMs: 600_000 } }), 2_083_000)).toBe(
       "this call ran past the bound it declared — it should have been cut",
     );
+  });
+});
+
+describe("the pipeline nesting (item 33)", () => {
+  const MIN = 60_000;
+  const at = (id: string, startedAt: number, over: Partial<IndexRow> = {}): IndexRow => row({ id, startedAt, ...over });
+
+  it("nests a ship unit's runs under the parent whose instanceId their parentInstanceId names, and a conductor's child under its parentRunId row — children oldest-first, heads newest-first", () => {
+    const ship = at("ship", 1_000, { hosted: true, instanceId: "wf-1" });
+    const c0 = at("c0", 2_000, { parentInstanceId: "wf-1" });
+    const r1 = at("r1", 3_000, { parentInstanceId: "wf-1" });
+    const cond = at("cond", 4_000);
+    const kid = at("kid", 5_000, { parentRunId: "cond" });
+    const stranger = at("solo", 6_000);
+    const groups = groupRuns([c0, stranger, ship, kid, r1, cond], 60 * MIN);
+    expect(groups.map((g) => [g.head.id, g.children.map((c) => c.id)])).toEqual([
+      ["solo", []],
+      ["cond", ["kid"]],
+      ["ship", ["c0", "r1"]],
+    ]);
+  });
+
+  it("a row whose parent is not on the page stays a head — nesting never hides a run — and a grandchild lands under the top of its chain", () => {
+    const orphan = at("orphan", 2_000, { parentInstanceId: "wf-9", parentRunId: "gone" });
+    expect(groupRuns([orphan], 0).map((g) => g.head.id)).toEqual(["orphan"]);
+    const top = at("top", 1_000);
+    const mid = at("mid", 2_000, { parentRunId: "top" });
+    const leaf = at("leaf", 3_000, { parentRunId: "mid" });
+    expect(groupRuns([leaf, mid, top], 0).map((g) => [g.head.id, g.children.map((c) => c.id)])).toEqual([
+      ["top", ["mid", "leaf"]],
+    ]);
+    // A malformed cycle names nobody as the top: each row stays its own head.
+    const a = at("a", 1_000, { parentRunId: "b" });
+    const b = at("b", 2_000, { parentRunId: "a" });
+    expect(groupRuns([a, b], 0).map((g) => g.head.id)).toEqual(["b", "a"]);
+  });
+
+  it("a stalled child surfaces its whole group first — the group is stalled when any of its rows is", () => {
+    const ship = at("ship", 1_000, { hosted: true, instanceId: "wf-1", eventsLast5m: 3, lastToolCallAt: 59 * MIN });
+    const stuck = at("c0", 2_000, { parentInstanceId: "wf-1", eventsLast5m: 0, lastToolCallAt: 16 * MIN });
+    const fresh = at("solo", 9_000, { eventsLast5m: 2, lastToolCallAt: 59 * MIN });
+    expect(groupRuns([fresh, ship, stuck], 60 * MIN).map((g) => g.head.id)).toEqual(["ship", "solo"]);
   });
 });
 

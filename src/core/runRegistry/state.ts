@@ -126,6 +126,11 @@ export interface RunState {
   seq: number;
   /** The latest one-line activity (see `RunSummary.activity`); set by `publish()`. */
   activity?: string;
+  /** The plan runner instance a ship parent hosts (record 0060): the LAST
+   *  published event naming one — `ship_handoff` at the hand-off, the second
+   *  `run_meta` once hosted — set by `publish()` like `activity`, so the index
+   *  can nest the instance's unit runs under this row while it is live. */
+  instanceId?: string;
   /** The stall signal's raw facts (docs/reference/specs/live-view.md item 32),
    *  set by `publish()`: the clock stamps of the content events still inside
    *  the pace window (ascending; pruned on publish), the newest `tool_call`'s
