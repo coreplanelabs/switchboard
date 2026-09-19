@@ -1191,6 +1191,53 @@ export const SCENARIOS: readonly ScenarioRow[] = [
     },
   },
   {
+    id: "survival-rebuild-first-tool-call-runs",
+    clause: "survival",
+    title:
+      "the first tool call after a rebuild runs: a process rebuilt from a record whose history holds a completed bash call gives the rebuilt session the tool table the run had before the roll — a harness whose session names its tools otherwise than the record writes the session's own names into the import — so the model's first call after the rebuild is decided and runs, never refused as a tool the session does not name",
+    script: (driver) => ({
+      turns: [call("c-after", "bash", { command: "git status" }), text("rebuilt and ran")],
+      resume: {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "carry on" }] },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "c-before", name: "bash", input: { command: "make" } }],
+          },
+          { role: "user", content: [{ type: "tool_result", toolUseId: "c-before", content: "made" }] },
+        ],
+        settlements: [],
+        remainingMs: 5 * 60_000,
+        turn: 1,
+        inboxConsumedSeq: 0,
+        facts: driver.facts({ pid: 999, container: "vm-old" }),
+      },
+    }),
+    check: (run, driver) => {
+      assert.equal(answered(run), "rebuilt and ran");
+      const result = toolResults(run).find((r) => r.callId === "c-after");
+      assert.ok(result, "the first tool call after the rebuild never settled on the record");
+      assert.equal(result.ok, true, "the first tool call after the rebuild did not run");
+      assert.ok(
+        !notes(run).some((n) => n.kind === "tool_refused"),
+        "the first tool call after the rebuild was refused",
+      );
+      if (driver.harness === "opencode") {
+        // The rebuilt store names the session's own tools: the record's `bash`
+        // is imported as OpenCode's `shell`, so a model imitating its history
+        // reaches for a tool the session's table holds.
+        const imported = run.requests.find((r) => r.path.endsWith("/session/import"));
+        assert.ok(imported?.body, "no session import carried the rebuilt record");
+        const body = JSON.parse(imported.body) as { messages?: Array<{ content?: Array<Record<string, unknown>> }> };
+        const names = (body.messages ?? [])
+          .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+          .filter((c) => c.type === "tool")
+          .map((c) => c.name);
+        assert.deepEqual(names, ["shell"], "the rebuilt import does not name the session's own tools");
+      }
+    },
+  },
+  {
     id: "survival-alive-here",
     clause: "survival",
     title:

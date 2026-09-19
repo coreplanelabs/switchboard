@@ -47,6 +47,20 @@ export function openCodeSettlementNote(s: Settlement): string {
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
+/** The record's shared vocabulary back in the session's own tool names — the
+ *  inverse of the bridge's `openCodeToolNameWord`: the ledger's transcript says
+ *  `bash`/`find`, as pi's does, but the session the run had before a roll named
+ *  those tools `shell`/`glob`. A rebuild's import writes the session's names,
+ *  so the rebuilt model reads a history whose tools its own tool table holds —
+ *  a first tool call that imitates the history runs, never refused as a tool
+ *  the session does not name. A relayed tool keeps its own name, whatever it
+ *  is: the plugin registers it under that name, record word or not. */
+const SESSION_TOOL_NAME: Readonly<Record<string, string>> = { bash: "shell", find: "glob" };
+export function openCodeSessionToolName(name: string, relayedTools?: ReadonlySet<string>): string {
+  if (relayedTools?.has(name)) return name;
+  return SESSION_TOOL_NAME[name] ?? name;
+}
+
 /** The session id OpenCode holds the run under: the `ses_` prefix its schema
  *  requires (`packages/schema/src/session-id.ts`), then the run's id with every
  *  character its id allows but the session id does not folded to `-`, so two
@@ -144,6 +158,11 @@ export interface OpenCodeImportOptions {
   agent?: string;
   /** The clock the messages are stamped from; each message a millisecond later, so their order is stable. */
   at: number;
+  /** The run's relayed tool names: a tool content under one of them keeps its
+   *  name in the import; every other name is written as the session's own
+   *  (`openCodeSessionToolName`), so the rebuilt history names the tools the
+   *  session actually holds. */
+  relayedTools?: ReadonlySet<string>;
 }
 
 /** A settlement the rebuild carries for a call in flight at the death, by the
@@ -230,7 +249,8 @@ export function openCodeStoreMessages(
       if (part.type === "text") content.push({ type: "text", text: part.text });
       else if (part.type === "tool_use") {
         const result = resultOf(part.id, i + 1);
-        content.push(openCodeToolContent(part, result.text, at(), result.outcome));
+        const named = { ...part, name: openCodeSessionToolName(part.name, opts.relayedTools) };
+        content.push(openCodeToolContent(named, result.text, at(), result.outcome));
       }
     }
     const now = at();
