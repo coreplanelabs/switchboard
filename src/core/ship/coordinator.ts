@@ -1500,14 +1500,51 @@ function enterChecks(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNo
   };
 }
 
+/** The order the checks step reads a head in (record 0055, issue 1991):
+ *  a failed check is the round's answer as soon as it is read, whatever else
+ *  is still pending — with the flake rule spending its one re-run first when
+ *  every failure is a suspect — and only a head with no failed check waits on
+ *  the pending ones; a head with no check reported gets one chunk of grace;
+ *  the rest is green. One function so the siblings that fold more outcomes
+ *  into the step (a held ending, a transient round re-run) read the same order. */
+function checksVerdict(
+  checks: RoundChecks | undefined,
+  p: { retried: boolean; graced: boolean },
+):
+  | { kind: "retry"; names: string[] }
+  | { kind: "failed"; failed: CheckFailure[] }
+  | { kind: "pending" }
+  | { kind: "grace" }
+  | { kind: "green" } {
+  if (checks !== undefined && checks.failed.length > 0) {
+    // The flake rule (record 0055): a suspected flake — a test timeout or
+    // runner stall on a shard whose test files the pull request's changed
+    // paths never touch — is re-run once before it becomes a finding. One
+    // real failure among them makes the round's answer already known, so the
+    // re-run is spent only when every failure is a suspect.
+    if (!p.retried && checks.failed.every((f) => f.flakeSuspect === true))
+      return { kind: "retry", names: checks.failed.map((f) => f.name) };
+    return { kind: "failed", failed: checks.failed };
+  }
+  // GitHub unreadable answers as pending and is re-read at the chunk's end.
+  if (checks === undefined || checks.pending.length > 0) return { kind: "pending" };
+  // No check reported at the head: one chunk of grace — the first check starts
+  // within minutes where CI exists — then the round proceeds, so a repository
+  // without CI costs one chunk per round and never idles (record 0055).
+  if (checks.total === 0 && !p.graced) return { kind: "grace" };
+  return { kind: "green" };
+}
+
 /** What the checks step answered, folded into the round (record 0055). Pure
  *  over the phase: a retry ask waits for the head to settle and reads again;
- *  an unreadable or pending head waits a chunk inside the step's ask and then
+ *  a failed check becomes a check finding under a round note of its own and
+ *  the findings step runs as for any changes-requested round — never
+ *  merge_ready, never the merge door — as soon as it is read, whatever else
+ *  is still pending (issue 1991); only a head with no failed check waits a
+ *  chunk inside the step's ask on what is unreadable or pending and then
  *  proceeds — the ending's facts read names what is still pending; a head with
- *  no check reported waits one chunk of grace and never more; a failed check
- *  becomes a check finding under a round note of its own and the findings step
- *  runs as for any changes-requested round — never merge_ready, never the
- *  merge door; a green head proceeds with no wait added. */
+ *  no check reported waits one chunk of grace and never more; a green head
+ *  proceeds with no wait added. */
 function settleChecks(
   s: UnitPipelineState,
   p: Extract<Phase, { at: "checks" }>,
@@ -1546,48 +1583,43 @@ function settleChecks(
     }
     return wait({ retried: true });
   }
-  // GitHub unreadable answers as pending and is re-read at the chunk's end
-  // (record 0055); a head still pending or unreadable at the ask's end
-  // proceeds — the ending's facts read names what is still pending, and the
-  // merge door (under `merge: runner`) is the guard that never merges over it.
-  if (checks === undefined || checks.pending.length > 0) {
-    if (s.clock - p.since >= p.waitMs) return approveOutcome(s, []);
-    return wait({});
-  }
-  if (checks.failed.length > 0) {
-    // The flake rule (record 0055): a suspected flake — a test timeout or
-    // runner stall on a shard whose test files the pull request's changed
-    // paths never touch — is re-run once before it becomes a finding. One
-    // real failure among them makes the round's answer already known, so the
-    // re-run is spent only when every failure is a suspect.
-    if (!p.retried && checks.failed.every((f) => f.flakeSuspect === true))
+  const verdict = checksVerdict(checks, p);
+  switch (verdict.kind) {
+    case "retry":
       return {
-        state: { ...s, phase: { ...p, n: p.n + 1, retry: checks.failed.map((f) => f.name) } },
+        state: { ...s, phase: { ...p, n: p.n + 1, retry: verdict.names } },
         notes: [],
       };
-    const findings = [...(s.findingsByRound[round.index] ?? []), ...checks.failed.map(checkFinding)];
-    const next: UnitPipelineState = {
-      ...s,
-      findingsByRound: { ...s.findingsByRound, [round.index]: findings },
-    };
-    // The failed checks get a round note of their own (record 0055) — never
-    // the parser-mismatch gate — and the findings step runs as for any
-    // changes-requested round: dispositions, a fix round, a re-review.
-    const notes: CoordinatorNote[] = [roundNote(round, "checks_failed")];
-    if (next.reviewRounds >= next.input.caps.maxRounds)
-      return end(
-        next,
-        { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
-        notes,
-      );
-    return enterRound(next, { index: round.index, kind: "findings" }, notes);
+    case "failed": {
+      const findings = [...(s.findingsByRound[round.index] ?? []), ...verdict.failed.map(checkFinding)];
+      const next: UnitPipelineState = {
+        ...s,
+        findingsByRound: { ...s.findingsByRound, [round.index]: findings },
+      };
+      // The failed checks get a round note of their own (record 0055) — never
+      // the parser-mismatch gate — and the findings step runs as for any
+      // changes-requested round: dispositions, a fix round, a re-review.
+      const notes: CoordinatorNote[] = [roundNote(round, "checks_failed")];
+      if (next.reviewRounds >= next.input.caps.maxRounds)
+        return end(
+          next,
+          { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
+          notes,
+        );
+      return enterRound(next, { index: round.index, kind: "findings" }, notes);
+    }
+    case "pending":
+      // A head still pending or unreadable at the ask's end proceeds — the
+      // ending's facts read names what is still pending, and the merge door
+      // (under `merge: runner`) is the guard that never merges over it.
+      if (s.clock - p.since >= p.waitMs) return approveOutcome(s, []);
+      return wait({});
+    case "grace":
+      return wait({ graced: true });
+    case "green":
+      // Green (or none reported after the grace): today's path, no wait added.
+      return approveOutcome(s, []);
   }
-  // No check reported at the head: one chunk of grace — the first check starts
-  // within minutes where CI exists — then the round proceeds, so a repository
-  // without CI costs one chunk per round and never idles (record 0055).
-  if (checks.total === 0 && !p.graced) return wait({ graced: true });
-  // Green (or none reported after the grace): today's path, no wait added.
-  return approveOutcome(s, []);
 }
 
 /** An approve past the checks read: merge_ready for a person, the merge door
