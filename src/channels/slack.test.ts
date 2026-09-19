@@ -707,6 +707,79 @@ describe("SlackIO.status — status budget", () => {
   });
 });
 
+// Feature: docs/reference/specs/slack-channel.md item 3 — the card lifecycle with two
+// runs in one thread (a plan runner's children): the thread's inline shimmer is
+// one Slack-side status, so the newest run to start owns it. A finished run's
+// markers are never skipped because a sibling started: its card closes to its
+// done state, and its shimmer clear lands at once when the shimmer is its own
+// — while a sibling that started during the finish keeps its own "working"
+// status unwiped and speaks with its own phrase from its first frame.
+describe("SlackIO.status — two runs in one thread (slack-channel.md item 3)", () => {
+  const event = (ts: string) => ({ channel: "C9", user: "UA", text: "", ts, threadTs: "9.0", botUserId: "UBOT" });
+  type Client = ConstructorParameters<typeof SlackIO>[0];
+  const openBudget = () => createStatusBudget({ perMinute: 600, channelSpacingMs: 0, now: () => 0 });
+  function fixture() {
+    let cards = 0;
+    const main = {
+      update: vi.fn(async (_o: Record<string, unknown>) => ({ ok: true })),
+      postMessage: vi.fn(async (_o: Record<string, unknown>) => ({ ok: true, ts: `card.${++cards}` })),
+    };
+    const status = {
+      update: vi.fn(async (_o: Record<string, unknown>) => ({ ok: true })),
+      setStatus: vi.fn(async (_o: Record<string, unknown>) => ({ ok: true })),
+    };
+    const client = guardOutbound({ chat: main } as unknown as Client);
+    const statusClient = guardOutbound({
+      chat: { update: status.update },
+      assistant: { threads: { setStatus: status.setStatus } },
+    } as unknown as Client);
+    const io = (ts: string) => new SlackIO(client, event(ts), { statusClient, statusBudget: openBudget() });
+    const shimmerStates = () => status.setStatus.mock.calls.map((c) => (c[0] as { status: string }).status);
+    return { io, status, shimmerStates };
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("finish then start: the finished run clears the thread's shimmer at once, and the sibling that starts right after sets its own within its first frame", async () => {
+    const { io, status, shimmerStates } = fixture();
+    const a = await io("1.1").status({ title: "👀 coding" });
+    await a.done({ title: "✅ coding · done" });
+    // The finished run's markers land before any sibling exists: the done frame
+    // on its own card and the shimmer clear — the thread stops saying working.
+    expect(status.update.mock.calls.at(-1)![0]).toMatchObject({ ts: "card.1", text: "✅ coding · done" });
+    expect(shimmerStates()).toEqual([expect.stringContaining("…"), ""]);
+    await io("2.1").status({ title: "👀 review" });
+    // The sibling's own shimmer is set with its first frame, not left to a re-up.
+    expect(shimmerStates()).toHaveLength(3);
+    expect(shimmerStates().at(-1)).not.toBe("");
+  });
+
+  it("start during the other's finish: the finished run's card still closes to its done state, and its close never wipes the live sibling's shimmer", async () => {
+    vi.useFakeTimers();
+    const { io, status, shimmerStates } = fixture();
+    const a = await io("1.1").status({ title: "👀 coding" });
+    const b = await io("2.1").status({ title: "👀 review" }); // the sibling starts while A is finishing
+    // A is still running while B owns the thread's shimmer: A's live 75s re-up
+    // is silenced by the ownership guard on its timer — only B's speaks.
+    await vi.advanceTimersByTimeAsync(75_000);
+    expect(shimmerStates()).toHaveLength(3);
+    expect(shimmerStates().at(-1)).not.toBe("");
+    await a.done({ title: "✅ coding · done" });
+    // A's done marker is not skipped because a sibling started: the terminal
+    // frame is painted on A's own card.
+    expect(status.update.mock.calls.at(-1)![0]).toMatchObject({ ts: "card.1", text: "✅ coding · done" });
+    // …but the thread's shimmer is the live sibling's now: no clear was sent.
+    expect(shimmerStates()).toHaveLength(3);
+    expect(shimmerStates().at(-1)).not.toBe("");
+    // The sibling still owns its shimmer: its own done clears the thread.
+    await b.done({ title: "✅ review · done" });
+    expect(shimmerStates().at(-1)).toBe("");
+  });
+});
+
 // Feature: docs/reference/specs/slack-channel.md item 14 (record 0044) — a routed
 // write the door offers as a confirmation is two buttons in the thread. The
 // offer shows the exact line to run; the click enters the core through

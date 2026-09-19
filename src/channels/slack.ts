@@ -146,6 +146,20 @@ const LOADING_PHRASES = [
   "is clearing the static…",
 ];
 
+/** Which run's status handle speaks for each thread's inline shimmer
+ *  (`channel:threadTs` → the owning card's `channel:ts`). Slack keeps ONE
+ *  status per thread, so with two runs in one thread (a plan runner's coding
+ *  child finishing while its review child starts) the newest run to start owns
+ *  the shimmer: a finished sibling's close must not wipe the live run's
+ *  "working" status, and a run that still owns the shimmer clears it the moment
+ *  it is done — the thread stops saying the bot is working for that run at
+ *  once, its card closed to its done state right above the write-up. An entry
+ *  is shed by its owner's `done`; a run killed before `done` leaves its
+ *  thread's entry until the next run in the thread overwrites it or the
+ *  process restarts — one key/card string pair per thread, so the leak is
+ *  bounded by the threads a process ever spoke in. */
+const shimmerOwners = new Map<string, string>();
+
 export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
   const clock = deps.clock ?? systemClock;
   // The receiver is built explicitly (rather than `socketMode: true`) so the
@@ -1303,10 +1317,16 @@ export class SlackIO implements ChannelIO {
       });
       ts = posted.ts as string;
     }
-    await setShimmer();
-    const shimmerTimer = setInterval(() => void setShimmer(), 75_000);
     liveCards.add(liveCardKey(this.ev.channel, ts));
     const card = `${this.ev.channel}:${ts}`;
+    // The newest run to start speaks for the thread's shimmer from here on; a
+    // sibling that finishes later must not clear or re-up over this run's voice.
+    const shimmerKey = `${this.ev.channel}:${this.ev.threadTs}`;
+    shimmerOwners.set(shimmerKey, card);
+    await setShimmer();
+    const shimmerTimer = setInterval(() => {
+      if (shimmerOwners.get(shimmerKey) === card) void setShimmer();
+    }, 75_000);
     budget.open(card);
     const edit = (frame: StatusUpdate) => statusClient.chat.update({ channel: this.ev.channel, ts, ...render(frame) });
     // Progress frames the budget refused: the card was stale until the next
@@ -1353,7 +1373,13 @@ export class SlackIO implements ChannelIO {
           setTimeout(() => void sendTerminal(frame, 0), waitMs).unref();
         }
         if (dropped > 0) console.log(`[slack] card ${card}: ${dropped} progress frames dropped by the status budget`);
-        // reply auto-clears the shimmer; clear explicitly for error paths
+        // The shimmer is thread-level, so only its current owner clears it: a
+        // run whose shimmer is its own stops the thread's "working" status the
+        // moment it is done (the reply auto-clears too; this covers error
+        // paths), while a run whose sibling started during its finish skips the
+        // clear — the live sibling's shimmer keeps speaking for the thread.
+        if (shimmerOwners.get(shimmerKey) !== card) return;
+        shimmerOwners.delete(shimmerKey);
         await statusClient.assistant.threads
           .setStatus({ channel_id: this.ev.channel, thread_ts: this.ev.threadTs, status: "" })
           .catch(() => {});
