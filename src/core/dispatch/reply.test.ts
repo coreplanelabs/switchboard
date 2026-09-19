@@ -408,10 +408,10 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       "branch_moved",
       // (record 0054): each producer's own test proves its sentences
       // byte-identical — the ship preflight's nine (preflight.test.ts), the
-      // plan hand-off's fifteen (handOff.test.ts), the directive and resolve
-      // parsers (directives.test.ts, resolve's dispatcher coverage), the typed
-      // commands' `chatErrorLine` (commandChat.test.ts), and the resident
-      // attach errors (resident.test.ts).
+      // plan hand-off's fifteen (handOff.test.ts), the resolve parser
+      // (resolve's dispatcher coverage), the typed commands' `chatErrorLine`
+      // (commandChat.test.ts), and the resident attach errors
+      // (resident.test.ts).
       "ship_preflight_channel",
       "ship_preflight_permission",
       "ship_preflight_no_repo",
@@ -435,13 +435,6 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       "plan_runner_conflict",
       "plan_instance_orphaned",
       "plan_start_failed",
-      "directive_agent",
-      "directive_effort",
-      "directive_budget",
-      "directive_severity",
-      "directive_renewals",
-      // directives.test.ts proves the verbosity directive's refusal (item 28).
-      "directive_verbosity",
       "provider_unknown",
       // resolve.test.ts proves the card's refusal sentence — the model, the
       // refused control and the card's why (record 0052).

@@ -102,13 +102,9 @@ const CAUSE_OF = {
   plan_runner_conflict: "system",
   plan_instance_orphaned: "system",
   plan_start_failed: "system",
-  // the directive and resolve parsers' thrown errors (A6 of the inventory)
-  directive_agent: "request",
-  directive_effort: "request",
-  directive_budget: "request",
-  directive_severity: "request",
-  directive_renewals: "request",
-  directive_verbosity: "request",
+  // the resolve parser's thrown errors (A6 of the inventory); the directive
+  // parser no longer refuses — a token whose value is outside its vocabulary
+  // is text (the interim grammar, src/directives.ts)
   provider_unknown: "request",
   // the model card's refusal (record 0052, model-proxy item 11): a control the
   // resolved card does not take, named before any card or model call

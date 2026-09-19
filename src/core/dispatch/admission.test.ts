@@ -331,6 +331,22 @@ describe("admit — the thread admission claim", () => {
     expect(replies[0]).toContain("An `agent:review` request cannot start beside it");
   });
 
+  // A plain-words steer whose sentence mentions an agent token is
+  // prose, not a rival request — mid-sentence, `agent:` is text (the interim
+  // grammar in src/directives.ts), so the follow-up steers into the live run.
+  it("a mid-sentence agent token is prose, not a rival: the follow-up steers into the live run", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = admission.claim(THREAD, { agent: "general" });
+    claim.live.runId = "run-1";
+    const { deps, ctx, refusals } = setup("and the next agent:ship in the thread claims the host key", {
+      admission,
+    });
+    expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "here" });
+    expect(refusals).toEqual([]);
+    const [item] = claim.live.inbox.drain();
+    expect(item).toMatchObject({ text: "and the next agent:ship in the thread claims the host key" });
+  });
+
   it("a sender the LIVE agent's allowlist excludes is refused before anything is steered (live_agent_allowlist): being heard by an agent counts as running it", async () => {
     const admission = new ThreadAdmission<DispatchFollowUp>();
     const claim = admission.claim(THREAD, { agent: "coding" });
