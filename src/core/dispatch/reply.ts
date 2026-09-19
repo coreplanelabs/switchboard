@@ -396,6 +396,23 @@ export function errorReply(err: unknown): string {
 export function renderOperatorReceipt(line: string, radius: string, reason: string): string {
   return `bound: \`${line}\` — ${radius} — ${reason}`;
 }
+
+/** The verifier's disagreement as one hand-back (the one-door plan's verifier
+ *  hold; routing-and-config item 25): the mismatch named, then the bound line
+ *  to type — NEVER record 0054's marker, whose "yes" binds a recorded
+ *  proposal: a verifier disagreement leaves no question on the record, so the
+ *  marker here would promise a "yes" that answers nothing. The person types
+ *  the line, or asks again in their own words — rather than the door running
+ *  a line the author's own turns did not ask for. */
+export function renderVerifierHandBack(line: string, reason: string): string {
+  return `This line was bound, but it does not match what you asked (${reason}).\nTo run it, type the line yourself:\n\`${line}\``;
+}
+
+/** The one extra receipt line an agreeing verifier adds (the one-door plan): the check's
+ *  word beside the bind's receipt, so a verified bind is legible as one. */
+export function renderVerifierLine(reason: string): string {
+  return `verified: ${reason}`;
+}
 /**
  * The one place a `Refusal` becomes what the person reads (record 0054):
  * the text is the producer's own sentence, byte-identical to what the site

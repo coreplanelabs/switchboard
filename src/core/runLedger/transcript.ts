@@ -125,8 +125,24 @@ export interface AssembledCompaction {
 }
 
 export type AssembledTranscript =
-  | { complete: true; turns: number; messages: ChatMessage[]; compactions: AssembledCompaction[] }
-  | { complete: false; turns: number; messages: ChatMessage[]; compactions: AssembledCompaction[]; gap: string };
+  | {
+      complete: true;
+      turns: number;
+      messages: ChatMessage[];
+      compactions: AssembledCompaction[];
+      /** Each message's author (`StoredPart.actor`), aligned with `messages`;
+       *  present only when at least one row carries one — the verifier selects
+       *  the author's own turns by it (record 0057). */
+      actors?: (string | undefined)[];
+    }
+  | {
+      complete: false;
+      turns: number;
+      messages: ChatMessage[];
+      compactions: AssembledCompaction[];
+      actors?: (string | undefined)[];
+      gap: string;
+    };
 
 /** Rows (any order) → the turns, contiguous from `base` (a log index; 0 for a
  *  run's own object), as a conversation counted from 0. `turns` counts every
@@ -150,6 +166,8 @@ export function assembleTranscript(
   }
   const messages: ChatMessage[] = [];
   const compactions: AssembledCompaction[] = [];
+  const actorList: (string | undefined)[] = [];
+  const actorsOrNone = () => (actorList.some((a) => a !== undefined) ? { actors: actorList } : {});
   /** The `messages` index each turn index landed at (a compaction row lands nowhere). */
   const messageIndexOf = new Map<number, number>();
   const gap = (why: string): AssembledTranscript => ({
@@ -157,6 +175,7 @@ export function assembleTranscript(
     turns: messages.length + compactions.length,
     messages,
     compactions,
+    ...actorsOrNone(),
     gap: why,
   });
   const turnCount = byTurn.size === 0 ? 0 : Math.max(...byTurn.keys()) + 1;
@@ -187,11 +206,12 @@ export function assembleTranscript(
     }
     messageIndexOf.set(idx, messages.length);
     messages.push({ role: role ?? "user", content });
+    actorList.push(first && !("compaction" in first) ? first.actor : undefined);
   }
   for (const c of compactions) {
     if (c.entry.keptFrom === undefined) continue;
     const kept = messageIndexOf.get(c.entry.keptFrom - base);
     if (kept !== undefined) c.keptBefore = kept;
   }
-  return { complete: true, turns: messages.length + compactions.length, messages, compactions };
+  return { complete: true, turns: messages.length + compactions.length, messages, compactions, ...actorsOrNone() };
 }

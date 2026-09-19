@@ -240,4 +240,15 @@ describe("actor — the row's author, stored in the JSON, absent for bot turns",
     expect(msg.role).toBe("user");
     expect(msg.content).toEqual([text("hi")]);
   });
+
+  it("the assembled transcript's `actors` array carries each turn's author aligned with messages, and is absent when no row names one", () => {
+    const authored = turnRows(0, { role: "user", content: [text("hi")] }, {}, "slack:UALICE").rows[0];
+    const machine = turnRows(1, { role: "assistant", content: [text("done")] }).rows[0];
+    const out = assembleTranscript([authored, machine], []);
+    expect(out.complete).toBe(true);
+    expect(out.actors).toEqual(["slack:UALICE", undefined]);
+
+    const bare = assembleTranscript([turnRows(0, { role: "user", content: [text("hi")] }).rows[0]], []);
+    expect(bare.actors).toBeUndefined();
+  });
 });

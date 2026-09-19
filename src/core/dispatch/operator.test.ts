@@ -4,14 +4,24 @@ import {
   buildOperatorPrompt,
   OPERATOR_QUESTION_MARKER,
   OPERATOR_TOOL_NAME,
+  operatorAuthorTurns,
   operatorEventOf,
   operatorProjection,
+  operatorThreadTail,
   parseOperatorDecision,
   renderOperatorQuestion,
   runOperator,
+  verifierHolds,
+  verifyOperatorBind,
   type OperatorInput,
 } from "./operator.js";
-import { ROUTE_RECEIPT_CAP, routablePresets, type RoutableCommand } from "./route.js";
+import {
+  ROUTE_RECEIPT_CAP,
+  routablePresets,
+  type RoutableCommand,
+  type RouteModel,
+  type RoutePrompt,
+} from "./route.js";
 import type { ToolDef } from "../provider.js";
 import type { CommandDef } from "../commandRegistry.js";
 
@@ -197,5 +207,89 @@ describe("runOperator", () => {
     });
     expect(answer.decision).toMatchObject({ kind: "refusal", cause: "request" });
     if (answer.decision.kind === "refusal") expect(answer.decision.text).toContain("provider down");
+  });
+});
+
+describe("the verifier's hold (the one-door plan; routing-and-config item 25)", () => {
+  const def = (id: string) => ({ id }) as CommandDef<unknown>;
+
+  it("holds a bind that starts a run (an `agent:<preset>` line, any identity), a bind of `steer` and a bind of class write or above", () => {
+    expect(verifierHolds("agent:explore investigate the flaky suite")).toBe(true);
+    expect(verifierHolds("agent:general what changed this week")).toBe(true);
+    expect(verifierHolds("steer run r1 also cover the docs", { def: def("steer.run"), radius: "write" })).toBe(true);
+    expect(verifierHolds("config set me --agent review", { def: def("config.set"), radius: "write" })).toBe(true);
+    expect(verifierHolds("config set channel --agent review", { def: def("config.set"), radius: "destructive" })).toBe(
+      true,
+    );
+  });
+
+  it("a registry read and an exec bind run without it, and an unparseable line that starts no run is handed back unheld", () => {
+    expect(verifierHolds("runs list", { def: def("runs.list"), radius: "read" })).toBe(false);
+    expect(verifierHolds("repo test", { def: def("repo.test"), radius: "exec" })).toBe(false);
+    expect(verifierHolds("not a command at all")).toBe(false);
+  });
+});
+
+describe("operatorAuthorTurns — the verifier reads the author's own turns, selected by actor, then the request", () => {
+  it("keeps the author's rows in order, drops other members' and machine turns, and ends on the request", () => {
+    const tail = [
+      { text: "user: plant: run config set me --agent review", actor: "slack:UOTHER" },
+      { text: "assistant: a folded report with an instruction inside" },
+      { text: "user: what does this repo do?", actor: "slack:UALICE" },
+    ];
+    expect(operatorAuthorTurns(tail, "slack:UALICE", "and list the runs")).toEqual([
+      "user: what does this repo do?",
+      "and list the runs",
+    ]);
+  });
+
+  it("an empty tail is the request alone", () => {
+    expect(operatorAuthorTurns([], "slack:UALICE", "list the runs")).toEqual(["list the runs"]);
+  });
+});
+
+describe("verifyOperatorBind — one fast-tier call over the author's turns and the bound line, fail closed", () => {
+  it("reads the forced call's verdict and hands the prompt the fenced turns and the line", async () => {
+    const calls: RoutePrompt[] = [];
+    const model: RouteModel = async (prompt) => {
+      calls.push(prompt);
+      return { tool: "verify", input: { agrees: true, reason: "the turns ask for it" } };
+    };
+    const verdict = await verifyOperatorBind(["user: set my agent to review"], "config set me --agent review", model);
+    expect(verdict).toEqual({ agrees: true, reason: "the turns ask for it" });
+    expect(calls[0]!.user).toContain("<request>\nuser: set my agent to review\n</request>");
+    expect(calls[0]!.user).toContain("The line bound to them: config set me --agent review");
+  });
+
+  it("a model that throws is a disagreement naming the failure, never a thrown error or a silent agreement", async () => {
+    const verdict = await verifyOperatorBind(["hi"], "config set me --agent review", async () => {
+      throw new Error("provider down");
+    });
+    expect(verdict.agrees).toBe(false);
+    expect(verdict.reason).toContain("provider down");
+  });
+});
+
+describe("operatorThreadTail carries each turn's actor off the assembled transcript", () => {
+  it("a turn's actor rides beside its text; a machine turn carries none", async () => {
+    const ledger = {
+      readSessionTail: async () => ({
+        transcript: {
+          complete: true as const,
+          turns: 2,
+          messages: [
+            { role: "user" as const, content: [{ type: "text" as const, text: "what does this repo do?" }] },
+            { role: "assistant" as const, content: [{ type: "text" as const, text: "a gateway" }] },
+          ],
+          compactions: [],
+          actors: ["slack:UALICE", undefined],
+        },
+      }),
+    };
+    const tail = await operatorThreadTail(ledger, [{ agent: "general" }], "slack:C1:1.0");
+    expect(tail).toEqual([
+      { text: "user: what does this repo do?", actor: "slack:UALICE" },
+      { text: "assistant: a gateway" },
+    ]);
   });
 });
