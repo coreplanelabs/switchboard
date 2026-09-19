@@ -559,11 +559,40 @@ export function operatorAuthorTurns(tail: readonly OperatorTailTurn[], author: s
  *  registry read — `runs list` carries no free text to plant through — and an
  *  exec bind run without it, and an unparseable line that starts no run is
  *  handed back and runs nothing, so there is nothing to hold. */
-export function verifierHolds(line: string, bound?: { def: CommandDef<unknown>; radius: BlastRadius }): boolean {
-  if (/^agent:\S/.test(line.trim())) return true;
+export function verifierHolds(
+  line: string,
+  bound?: { def: CommandDef<unknown>; radius: BlastRadius },
+  startsRun = false,
+): boolean {
+  if (startsRun || /^agent:\S/.test(line.trim())) return true;
   if (!bound) return false;
   return bound.def.id === "steer.run" || bound.radius === "write" || bound.radius === "destructive";
 }
+
+/**
+ * The preset a bound line names, when it names one: an `agent:<preset>` head,
+ * or the preset's bare name as the line's first word — `ship`, `ship in
+ * acme/repo: fix …`, `review <url>` — among the presets the projection offers
+ * (`routablePresets`, the same table the operator reads). The registry's
+ * command grammar parses none of these, so before this seam every preset bind
+ * was handed back as a line to type — every seed and fix ask of the operator's
+ * first day on, each a dead end; a preset bind is a run to start, and it starts
+ * through the route stage on the person's own words — never the line's
+ * paraphrase, which drops the task. An unknown first word is prose and names
+ * no preset here.
+ */
+export function presetBindOf(line: string, presets: readonly string[]): string | undefined {
+  const trimmed = line.trim();
+  const head = /^agent:(\S+)/.exec(trimmed);
+  const name = head ? head[1] : /^(\S+)/.exec(trimmed)?.[1];
+  return name !== undefined && presets.includes(name) ? name : undefined;
+}
+
+/** What `executeOperatorDecision` leaves the dispatcher: the dispatch answered
+ *  here (a question, a refusal, command binds run or handed back), or a preset
+ *  to route the person's request through — the decision's event rides that
+ *  run, so the dispatcher records nothing of its own. */
+export type OperatorExecution = { kind: "answered" } | { kind: "route"; preset: string; line: string; reason: string };
 
 /**
  * One verifier call (the one-door plan): the author's own turns and the bound line through
@@ -635,7 +664,13 @@ function verifierModelOf(deps: {
  * of an unparseable run-starting line included, so the spent call stays
  * legible — and the ladder proceeds unchanged: the verifier
  * weakens no guard and outranks none. A registry read runs without the call.
- * Answers true: the dispatch is answered here.
+ * A bind that names a preset (`presetBindOf`: an `agent:<preset>` head or the
+ * preset's bare first word) is a run to start, not a command to invoke: the
+ * verifier holds it over the line the route will run — the preset on the
+ * person's own request — and, agreeing, the receipt renders and the dispatcher
+ * routes the request through that preset (`kind: "route"`), the decision's
+ * event riding the agent run; the binds after it are handed back as lines, so
+ * nothing is dropped in silence. Answers `answered`: the dispatch is answered here.
  * Every decision leaves its `operator` event on a record (run-history item
  * 60): a bind that runs carries it on its command run; a question, a refusal
  * and a decision whose every bind was handed back write a door record of
@@ -658,19 +693,22 @@ export async function executeOperatorDecision(
      *  agents whose session tails hold the author's turns. */
     thread?: readonly { agent?: string }[];
   },
-): Promise<boolean> {
+): Promise<OperatorExecution> {
   const { event, io, msg } = ctx;
+  const answered: OperatorExecution = { kind: "answered" };
   if (event.outcome === "question") {
     await io.reply(event.question ?? "");
     await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
-    return true;
+    return answered;
   }
   if (event.outcome === "refusal") {
     await io.reply(event.refusalText ?? "");
     await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
-    return true;
+    return answered;
   }
   const commands = deps.commands;
+  const presets = routablePresets();
+  const presetNames = presets.map((p) => p.name);
   const confirm = effectiveConfirm(deps.config.boundaryLayers(msg.channelId, msg.userId));
   // The author's turns, read once per decision and only when a bind is held:
   // the verifier compares the line with what THIS author asked, never with the
@@ -683,8 +721,10 @@ export async function executeOperatorDecision(
   // The event rides the FIRST bind that runs — not blindly the first bind, or
   // a decision whose first bind is handed back would lose its record.
   let carried = false;
-  for (const bind of event.binds ?? []) {
-    const parsed = commands ? parseChatCommand(bind.line, commands) : null;
+  const binds = event.binds ?? [];
+  for (const [i, bind] of binds.entries()) {
+    const preset = presetBindOf(bind.line, presetNames);
+    const parsed = commands && preset === undefined ? parseChatCommand(bind.line, commands) : null;
     const def = parsed?.kind === "invoke" ? commands?.list().find((c) => c.id === parsed.id) : undefined;
     const bound =
       parsed?.kind === "invoke" && def
@@ -692,18 +732,32 @@ export async function executeOperatorDecision(
         : undefined;
     // The verifier's hold (the one-door plan): a disagreement — a failure and a timeout
     // count as one, and so does a process with no model to verify on — hands
-    // the line back to type (never a question), and the bind runs nothing.
+    // the line back to type (never a question), and the bind runs nothing. A
+    // preset bind is verified over the line the route will run — the preset on
+    // the person's request — since that, not the operator's paraphrase, is
+    // what starts.
     let verified: string | undefined;
-    if (verifierHolds(bind.line, bound)) {
+    if (verifierHolds(bind.line, bound, preset !== undefined)) {
       const model = verifierModelOf(deps);
+      const held = preset !== undefined ? `agent:${preset} ${msg.text}` : bind.line;
       const verdict = model
-        ? await verifyOperatorBind(await authorTurnsOnce(), bind.line, model)
+        ? await verifyOperatorBind(await authorTurnsOnce(), held, model)
         : { agrees: false, reason: "no model to verify on" };
       if (!verdict.agrees) {
         await io.reply(renderVerifierHandBack(bind.line, verdict.reason));
         continue;
       }
       verified = renderVerifierLine(verdict.reason);
+    }
+    if (preset !== undefined) {
+      const identity = presets.find((p) => p.name === preset)?.identity;
+      const radius = identity === "write" ? "write" : "read";
+      await io.reply(`${renderOperatorReceipt(bind.line, radius, bind.reason)}${verified ? `\n${verified}` : ""}`);
+      // One run per message: the binds after the preset are handed back as
+      // lines rather than dropped, and the route stage starts the preset on
+      // the request itself.
+      for (const rest of binds.slice(i + 1)) await io.reply(`${HAND_BACK_PREFIX}\n\`${rest.line}\``);
+      return { kind: "route", preset, line: bind.line, reason: bind.reason };
     }
     if (!parsed || parsed.kind !== "invoke" || !def || !bound) {
       // An agreeing verifier's line rides this hand-back too (an `agent:<preset>`
@@ -733,5 +787,5 @@ export async function executeOperatorDecision(
   // Every bind handed back: nothing ran, so the decision records on a door
   // record of its own, or the shadow-vs-on ledger would have a hole.
   if (!carried) await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
-  return true;
+  return answered;
 }

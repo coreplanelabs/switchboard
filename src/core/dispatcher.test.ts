@@ -18134,23 +18134,72 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(receipt).toContain(HAND_BACK_PREFIX);
   });
 
-  it("on: an agreeing verifier on an `agent:` bind keeps its `verified:` line on the hand-back — the spent call's receipt is never dropped", async () => {
-    const { deps, registry } = operatorDeps(ON_YAML);
+  it("on: a bind naming a preset — `agent:<preset>` or the bare name — starts that preset's run on the person's own words, never the line's paraphrase; the receipt carries the verifier's line, the run carries the decision and agentSource operator", async () => {
+    for (const line of ["agent:general what changed", "general"]) {
+      const { deps, registry, provider } = operatorDeps(ON_YAML);
+      wireCommands(deps);
+      deps.operatorModel = decides({ reason: "a question for the assistant", binds: [{ line, reason: "the ask" }] });
+      const verifier = agrees("the author asked for this run");
+      deps.verifierModel = verifier;
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("what changed this week in acme/repo?", "slack:UADMIN"), io);
+      expect(deps.invoked).toEqual([]);
+      // The verifier judged the line the route runs: the preset on the request itself.
+      const verifierPrompt: RoutePrompt = verifier.mock.calls[0]![0];
+      expect(verifierPrompt.user).toContain("agent:general what changed this week in acme/repo?");
+      const receipt = replies.find((r) => r.includes(`bound: \`${line}\` — read — the ask`));
+      expect(receipt).toBeDefined();
+      expect(receipt).toContain("verified: the author asked for this run");
+      expect(replies.some((r) => r.includes(HAND_BACK_PREFIX))).toBe(false);
+      // One agent run, on the preset, fed the person's words.
+      expect(registry.getById("r1")).toMatchObject({ agent: "general" });
+      expect(provider.requests).toHaveLength(1);
+      expect(JSON.stringify(provider.requests[0])).toContain("what changed this week in acme/repo?");
+      const events = registry.snapshotById("r1")!.events;
+      expect(events.find((e) => e.type === "run_meta")).toMatchObject({ agent: "general", agentSource: "operator" });
+      expect(events.find((e) => e.type === "operator")).toMatchObject({
+        mode: "on",
+        outcome: "binds",
+        binds: [{ line, reason: "the ask" }],
+      });
+      // No door record beside it: the decision rides the run it started.
+      expect(registry.snapshotById("r2")).toBeNull();
+    }
+  });
+
+  it("on: the binds after a preset bind are handed back as lines — one run per message, nothing dropped in silence", async () => {
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
     wireCommands(deps);
     deps.operatorModel = decides({
-      reason: "the author asked for an investigation",
-      binds: [{ line: "agent:explore investigate the flaky suite", reason: "the ask" }],
+      reason: "the assistant, then a listing",
+      binds: [
+        { line: "general", reason: "the question" },
+        { line: "runs list", reason: "the listing" },
+      ],
     });
-    deps.verifierModel = agrees("the author asked for this run");
+    deps.verifierModel = agrees("asked");
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("investigate the flaky suite", "slack:UADMIN"), io);
-    expect(deps.invoked).toEqual([]); // an `agent:` line never parses as a registry command: handed back
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("verified: the author asked for this run");
-    expect(replies[0]).toContain(HAND_BACK_PREFIX);
-    expect(replies[0]).toContain("`agent:explore investigate the flaky suite`");
-    // Nothing ran: the decision records on a door record of its own.
-    expect(registry.snapshotById("r2")).toBeNull();
+    await dispatch(deps, msg("what changed, and list the runs", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual([]);
+    expect(registry.getById("r1")).toMatchObject({ agent: "general" });
+    expect(provider.requests).toHaveLength(1);
+    expect(replies.some((r) => r.includes(`${HAND_BACK_PREFIX}\n\`runs list\``))).toBe(true);
+  });
+
+  it("on: a message that opens with a directive skips the operator — the directive is the person's typed decision — and routes as under off", async () => {
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("agent:general what changed this week?", "slack:UADMIN"), io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(deps.invoked).toEqual([]);
+    expect(replies.some((r) => r.includes(HAND_BACK_PREFIX))).toBe(false);
+    expect(registry.getById("r1")).toMatchObject({ agent: "general" });
+    expect(provider.requests).toHaveLength(1);
+    const events = registry.snapshotById("r1")!.events;
+    expect(events.find((e) => e.type === "run_meta")).toMatchObject({ agentSource: "directive" });
+    expect(events.find((e) => e.type === "operator")).toBeUndefined();
   });
 
   it("on: a registry read with no free text runs without the verifier — `runs list` makes no call", async () => {
