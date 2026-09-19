@@ -127,6 +127,12 @@ export const ROUTED_RECEIPT_PREFIX = "routed:";
  *  Defined in its own pure module so the web bundle can read it (the home page
  *  fills its composer with the command). */
 export { HAND_BACK_PREFIX };
+/** The second line of a hand-back whose chat form was cut at the receipt cap:
+ *  a line ending in `…` is not the line to paste (the grammar refuses it), so
+ *  the reply says why and what to do. The first line stays exactly the capped
+ *  hand-back — the web home page recognizes it by that line and the record
+ *  keeps the same capped receipt. */
+export const HAND_BACK_CUT_NOTE = `(this line was cut at ${ROUTE_RECEIPT_CAP} characters because the bound input runs longer, so it will not run as pasted; spell the long option out by hand)`;
 
 /**
  * Whether a command the router bound runs at once or is handed back as the
@@ -1433,7 +1439,9 @@ async function answerCommand(
  * and tells no surface of the run, its `route` event's `outcome` saying which)
  * and one reply second. A channel without `offer`, or a process without the
  * confirmation store, is answered `To run this: <chat form>` exactly as before
- * the store existed. Otherwise the offer shows the FULL chat form of the bound
+ * the store existed — plus the cut note as a second line when the chat form
+ * was cut at `ROUTE_RECEIPT_CAP` — a line ending in `…` is not the line to
+ * paste; the first line and the record's receipt stay the capped form. Otherwise the offer shows the FULL chat form of the bound
  * input — uncapped, because a line the person cannot read in full is not a
  * confirmation; the record keeps the capped receipt as today — and when
  * redaction would alter that line (an argument looks like a secret) nothing
@@ -1465,7 +1473,11 @@ async function answerHandBack(
     );
     return { kind: "command", command: def.id, outcome };
   };
-  const handBack = `${HAND_BACK_PREFIX} ${receipt}`;
+  // A receipt over the cap was cut by `routeReceipt` (`redactAndCap` appends
+  // `…`, so a cut receipt is exactly one char past the cap and an uncut one
+  // never is): the hand-back gains the cut note as a second line.
+  const cut = receipt.length > ROUTE_RECEIPT_CAP;
+  const handBack = cut ? `${HAND_BACK_PREFIX} ${receipt}\n${HAND_BACK_CUT_NOTE}` : `${HAND_BACK_PREFIX} ${receipt}`;
   const store = deps.confirmations;
   if (!io.offer || !store) return answer(handBack, "hand_back", () => io.reply(handBack));
   const line = chatInvocation(def, input);
