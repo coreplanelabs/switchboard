@@ -9,6 +9,7 @@ import {
   infraMayClear,
 } from "./executor.js";
 import { RUNTIME_BUSY_WAIT_MAX_MS, runtimeBusyMessage } from "./sandboxErrors.js";
+import { WAKE_WAIT_MAX_MS } from "./residentWake.js";
 import {
   ResidentExecutor,
   ResidentLeaseSpentError,
@@ -2592,6 +2593,59 @@ describe("ResidentExecutor.attach during a fleet drain (item 69)", () => {
     const err = await p;
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toContain("is not onboarded");
+  });
+
+  it("a Durable Object reset that lands during a live drain is the drain's case, not a wake failure: the wake wait's re-attach meets the surviving drain record and hands the wait to the drain wait, so the run waits past the wake budget and binds when the fleet reopens, the binding carrying the whole wait", async () => {
+    // The release-window gap: the deploy's isolate swap lands inside its own drain, so the
+    // attach meets the platform's reset (transient) — the wake wait — while the
+    // drain record survives the swap and answers the re-attach.
+    const reset = {
+      body: {
+        error: "attach-failed: Durable Object reset because its code was updated.",
+        status: 500,
+        transient: true,
+      },
+    };
+    const polls = WAKE_WAIT_MAX_MS / DRAIN_POLL_MS + 1; // draining answers past the wake ceiling
+    const { calls } = stubFetch(
+      reset,
+      { body: { state: "warm", reason: "", inFlight: 0 } },
+      ...Array.from({ length: polls }, () => draining),
+      { raw: "\n" + JSON.stringify(ATTACH_OK) },
+    );
+    const ex = new ResidentExecutor(OPTS);
+    const p = ex.attach();
+    await vi.advanceTimersByTimeAsync(polls * DRAIN_POLL_MS);
+    const binding = await p;
+    expect(binding).toMatchObject({ ref: "master", sha: "1220b9c4", wokeAfterMs: polls * DRAIN_POLL_MS });
+    expect(polls * DRAIN_POLL_MS).toBeGreaterThan(WAKE_WAIT_MAX_MS);
+    // One /attach, the wake's probe, its re-attach (the drain's first answer),
+    // then one re-attach per drain poll until the fleet admits the run.
+    expect(calls.map(route)).toEqual(["/attach", "/status", ...Array.from({ length: polls + 1 }, () => "/attach")]);
+  });
+
+  it("a drain still in force past the lease's budget after the wake hand-off ends in the typed ResidentDrainingError naming the drain — never the wake budget's strike", async () => {
+    const reset = {
+      body: {
+        error: "attach-failed: Durable Object reset because its code was updated.",
+        status: 500,
+        transient: true,
+      },
+    };
+    const polls = (10 * 60_000) / DRAIN_POLL_MS;
+    stubFetch(
+      reset,
+      { body: { state: "warm", reason: "", inFlight: 0 } },
+      ...Array.from({ length: polls + 2 }, () => draining),
+    );
+    const ex = new ResidentExecutor({ ...OPTS, remainingMs: () => 20 * 60_000 });
+    const p = ex.attach().catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(20 * 60_000 - DRAIN_LEASE_RESERVE_MS + 1_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ResidentDrainingError);
+    expect((err as ResidentDrainingError).reason).toBe("refused");
+    expect((err as Error).message).toContain("did not reopen within the 600s this run could wait");
+    expect((err as Error).message).not.toContain("gave up");
   });
 
   it("the run's stop ends the wait at once — no re-attach follows the stop", async () => {
