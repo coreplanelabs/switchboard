@@ -127,6 +127,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       addressSeveritySource: "org",
       grant: { renewals: 0 },
       grantSource: "org",
+      verbosity: "quiet",
       caps: { maxRounds: 3, maxMinutes: 45 },
       card: { channel: "C1", ts: "1.5" },
       runId: "run-s",

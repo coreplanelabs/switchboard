@@ -200,6 +200,8 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     });
     const [unit] = await s.instances.listUnits("plan-fix-the-login-redirect-6435ec");
     expect(unit).toMatchObject({ unit: "U1", slug: "u1", dependsOn: [], rounds: [] });
+    // The request's verbosity rides the instance (routing-and-config item 28): the runner's threads speak at it.
+    expect((await s.instances.get("plan-fix-the-login-redirect-6435ec"))?.verbosity).toBe("verbose");
     expect(unit!.branch).toBe("plan/fix-the-login-redirect-6435ec/u1");
     expect("resume" in unit!).toBe(false);
     expect(s.replies).toHaveLength(1);

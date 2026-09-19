@@ -44,6 +44,7 @@
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
 import { DEFAULT_GRANT } from "../core/budgets.js";
+import { DEFAULT_VERBOSITY } from "../core/verbosity.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { AGENTS } from "../agents/registry.js";
 import { authorize } from "../core/authz/authorize.js";
@@ -1142,6 +1143,9 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
     // The grant beside it (decision 0046): absent on the record, nothing renews.
     grant: instance.grant ?? DEFAULT_GRANT,
     grantSource: instance.grantSource ?? "org",
+    // The request's verbosity (routing-and-config item 28): what the runner
+    // says in the unit threads; absent on the record, quiet.
+    verbosity: instance.verbosity ?? DEFAULT_VERBOSITY,
     // The mark (item 16): the machine's report keys its re-issue line on it.
     generated: isGenerated(instance),
     // The runs page base: the report's pointer at a child's write-up links its
@@ -1395,6 +1399,11 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     typeof ending.report !== "string"
   )
     return json(400, { ok: false, error: "ending must carry a kind and a report" });
+  // The thread's copy of the report (routing-and-config item 28): the driver
+  // renders it at the request's verbosity beside the full report the row and
+  // the board keep; absent (an older driver), the full report is the thread's.
+  // Empty means the level says nothing here — a quiet segment boundary.
+  const threadReport = typeof ending.threadReport === "string" ? ending.threadReport : ending.report;
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
@@ -1484,9 +1493,11 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     }
   }
   let told = false;
-  if (io) {
+  if (io && threadReport.length === 0)
+    told = true; // nothing owed to the thread at this level
+  else if (io) {
     try {
-      await io.reply(ending.report);
+      await io.reply(threadReport);
       told = true;
     } catch (err) {
       (deps.log ?? console.warn)(

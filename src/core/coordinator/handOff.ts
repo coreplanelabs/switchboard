@@ -17,6 +17,7 @@
 
 import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { DEFAULT_GRANT, type Grant, type GrantSource } from "../budgets.js";
+import { DEFAULT_VERBOSITY, type Verbosity } from "../verbosity.js";
 import { PLAN_MAX_CHARS, unitTitleOf } from "../ship/contract.js";
 import type { ShipEntry } from "../ship/preflight.js";
 import { shipTaskText, shipUnitText } from "../ship/preflight.js";
@@ -69,6 +70,10 @@ export interface HandOffInput {
    *  org) — written on the instance beside `merge`; absent (a caller without the
    *  config layers) is the default: zero renewals, no cap, the org's. */
   grant?: { grant: Grant; source: GrantSource };
+  /** The request's verbosity (routing-and-config item 28), written on the
+   *  instance so the runner's own thread messages speak at it; absent reads
+   *  as `quiet`. */
+  verbosity?: Verbosity;
   /** The status card in the requesting thread, when the channel has one. */
   card?: { channel: string; ts: string };
   now: number;
@@ -174,6 +179,8 @@ async function plan(
     // Absent, nothing renews: zero renewals and no cap, the org's (decision 0046).
     grant: input.grant?.grant ?? DEFAULT_GRANT,
     grantSource: input.grant?.source ?? "org",
+    // Absent, the runner speaks at the default: quiet (routing-and-config item 28).
+    verbosity: input.verbosity ?? DEFAULT_VERBOSITY,
     ...(input.card !== undefined ? { card: input.card } : {}),
     runId: input.runId,
     label: input.label,

@@ -420,6 +420,37 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "Renewals: 0 of 0 spent (granted by user).",
     );
   });
+
+  it("the ending carries two copies of the report (routing-and-config item 28): the full one for the row and the board, and the thread's at the plan answer's verbosity — quiet by default, which drops the level, grant and write-up asides", async () => {
+    const run = async (extra: Record<string, unknown>) => {
+      const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+      const b = bot({
+        plan: [planAnswer([row("U10")], T0, "runner", extra)],
+        "unit-start": [started("U10")],
+        branch: [branched("U10")],
+        spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+        "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+        "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+        round: [acked(), acked(), acked(), acked()],
+        merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+        "unit-end": [ok({ ok: true, told: true }, T0 + 21 * MIN)],
+        finish: [ok({ ok: true, runId: "run-parent" }, T0 + 21 * MIN)],
+      });
+      await runPlan(s.runner, b.client, INSTANCE);
+      const [end] = b.of("unit-end") as Array<{ ending: { report: string; threadReport: string } }>;
+      return end.ending;
+    };
+    const quiet = await run({});
+    expect(quiet.report).toContain("Renewals: 0 of 0 spent (granted by org).");
+    expect(quiet.report).toContain("Severity addressed:");
+    expect(quiet.threadReport).toContain("✅ Merged after");
+    expect(quiet.threadReport).not.toContain("Renewals:");
+    expect(quiet.threadReport).not.toContain("Severity addressed");
+    const verbose = await run({ verbosity: "verbose" });
+    expect(verbose.threadReport).toBe(verbose.report);
+    const loud = await run({ verbosity: "loud" });
+    expect(loud.threadReport).not.toContain("Renewals:"); // an unknown word reads as the default, quiet
+  });
   it("a merge door answering merged by other — the pull request was merged after the approval — completes the plan: the unit ends merged and the report reads the Already-merged sentence", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({
