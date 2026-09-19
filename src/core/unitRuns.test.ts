@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CoordinatorUnit } from "./coordinator/contract.js";
 import type { RunView } from "./runsService.js";
-import { roundBoundaries, unitFactsOf, unitRunsOf } from "./unitRuns.js";
+import { roundBoundaries, unitFactsOf, unitRunsOf, unitSessionKeys } from "./unitRuns.js";
 
 // Feature: docs/reference/specs/agent-ship.md item 17 — the unit is the
 // reading unit. The pure half: how a unit's two threads' runs are cut at the
@@ -170,5 +170,18 @@ describe("unitFactsOf — the idle on the facts", () => {
     expect(facts.idle).not.toHaveProperty("handoff");
     expect(unitFactsOf(unit).idle).toBeUndefined();
     expect(unitFactsOf(unit)).not.toHaveProperty("idle");
+  });
+});
+
+describe("unitSessionKeys — the unit page's working-session keys (session-log item 13)", () => {
+  it("derives <instance>:<unit>:coding and <instance>:<unit>:review, and a re-issue's attempt suffix is stripped so it searches the lanes it continued", () => {
+    expect(unitSessionKeys({ instanceId: "plan-p", id: "U16" })).toEqual({
+      coding: "plan-p:U16:coding",
+      review: "plan-p:U16:review",
+    });
+    expect(unitSessionKeys({ instanceId: "plan-p-2", id: "U16", instance: { attempt: 2 } })).toEqual({
+      coding: "plan-p:U16:coding",
+      review: "plan-p:U16:review",
+    });
   });
 });

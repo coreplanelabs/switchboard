@@ -1,4 +1,5 @@
 import { unitKeyOf, type CoordinatorInstance, type CoordinatorUnit } from "./coordinator/contract.js";
+import { workingSessionKey } from "./runLedger/sessionLog.js";
 import type { RunView } from "./runsService.js";
 
 // The unit is the reading unit (docs/reference/specs/agent-ship.md item 17;
@@ -66,6 +67,25 @@ export interface InstanceFacts {
 export interface UnitRunsView extends UnitFacts {
   instance: InstanceFacts;
   runs: UnitRun[];
+}
+
+/** The unit's working-session keys (session-log item 13; the one-door plan's memory unit): `<instance>:<unit>:coding` and `<instance>:<unit>:review`, the
+ *  attempt suffix stripped so a re-issue's page searches the lanes it
+ *  continued. What the unit page's session search derives when no run of a
+ *  lane names its session yet. */
+export function unitSessionKeys(view: {
+  instanceId: string;
+  id: string;
+  instance?: { attempt?: number };
+}): Record<UnitThread, string> {
+  const instance = {
+    id: view.instanceId,
+    ...(view.instance?.attempt !== undefined ? { attempt: view.instance.attempt } : {}),
+  };
+  return {
+    coding: workingSessionKey(instance, view.id, "coding"),
+    review: workingSessionKey(instance, view.id, "review"),
+  };
 }
 
 /** The row's readable facts (`UnitFacts`), each optional field present only when the row has it. */

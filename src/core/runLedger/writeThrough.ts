@@ -276,6 +276,14 @@ export interface LedgerWriteThrough {
   readSessionTail(key: string, maxBytes: number): Promise<{ from: number; transcript: AssembledTranscript }>;
   /** The rows `[from, to]` of a session log as a conversation counted from `from` (item 3) — one turn when `to` is `from`. */
   readSession(key: string, from: number, to?: number): Promise<AssembledTranscript>;
+  /** The idempotent keyed append (session-log item 13): the parts of one turn
+   *  at the log's tail under `rowId` — a fold row, a connector turn, a migrated
+   *  row. A row id the log has seen appends nothing. Throws as the ledger does. */
+  appendSession(
+    key: string,
+    rowId: string,
+    rows: readonly { part: number; json: string }[],
+  ): Promise<{ ok: boolean; appended: boolean }>;
   /** The full-text search `recall` makes (item 10): hits in relevance order, and the gap markers between them. */
   searchSession(key: string, query: string, limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }>;
   /** The session's notepad, or null when nothing wrote it (item 10). */
@@ -336,6 +344,13 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   }
   async readSession(_key: string, _from: number, _to?: number): Promise<AssembledTranscript> {
     return { complete: true, turns: 0, messages: [], compactions: [] };
+  }
+  async appendSession(
+    _key: string,
+    _rowId: string,
+    _rows: readonly { part: number; json: string }[],
+  ): Promise<{ ok: boolean; appended: boolean }> {
+    return { ok: false, appended: false };
   }
   async searchSession(_key: string, _query: string, _limit: number): Promise<{ hits: SessionHit[]; gaps: number[] }> {
     return { hits: [], gaps: [] };
@@ -1142,6 +1157,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     },
     readSessionTail: (key, maxBytes) => ledger.readSessionTail(key, maxBytes),
     readSession: (key, from, to) => ledger.readSession(key, from, to),
+    appendSession: (key, rowId, rows) => ledger.appendSession(key, rowId, rows),
     searchSession: (key, query, limit) => ledger.searchSession(key, query, limit),
     readNotepad: (key) => ledger.readNotepad(key),
     writeNotepad: (key, text) => ledger.writeNotepad(key, gen, text),

@@ -35,6 +35,134 @@ export function sessionKey(threadKey: string, agent: string | undefined): string
   return `${threadKey}:${agent ?? "-"}`;
 }
 
+/** The thread session's key (record 0057; the one-door plan's memory unit,
+ *  item 13): one log per thread, read and written by the operator — every
+ *  connector event the intake gate admits, every child's report, every
+ *  question and answer is a turn in it. The `@thread` half can never collide
+ *  with `sessionKey`'s agent half: no agent id starts with `@`. */
+export function threadSessionKey(threadKey: string): string {
+  return `${threadKey}:@thread`;
+}
+
+/** A working session's lane: a unit's coding rounds continue one log, its
+ *  review rounds another (item 13). */
+export type WorkingLane = "coding" | "review";
+
+/** A working session's key `<instance>:<unit>:<lane>` (item 13). A re-issue of the
+ *  same plan carries an attempt suffix on its instance id (`planInstanceId`:
+ *  `plan-<id>-<attempt>`, attempt ≥ 2); the key strips it, so a re-issue
+ *  continues the prior instance's lanes rather than starting cold. */
+export function workingSessionKey(instance: { id: string; attempt?: number }, unit: string, lane: WorkingLane): string {
+  const suffix = instance.attempt !== undefined ? `-${instance.attempt}` : "";
+  const base =
+    suffix !== "" && instance.id.endsWith(suffix)
+      ? instance.id.slice(0, instance.id.length - suffix.length)
+      : instance.id;
+  return `${base}:${unit}:${lane}`;
+}
+
+/** A connector turn's row id (item 13): the message id, with its edit timestamp
+ *  when the message was edited — an edited message appends a second row (the
+ *  first said what the person first said), a re-delivered unedited one
+ *  appends nothing. */
+export function connectorRowId(messageId: string, editedAt?: string | number): string {
+  return editedAt === undefined ? messageId : `${messageId}:edit-${editedAt}`;
+}
+
+/** The fold's row id for a hosted parent's `ship_unit` event (item 13): the
+ *  event's own identity — its unit, its state and the registry seq it was
+ *  published under — so the same event read twice folds one row. The seq is
+ *  required (the registry stamps every published event with one): without it,
+ *  a unit reopened at a second segment would repeat a state — two `started`
+ *  events — and the second fold would be dropped as a duplicate. */
+export function shipUnitRowId(event: { unit: string; state: string; seq: number }): string {
+  return `ship-unit:${event.unit}:${event.state}:${event.seq}`;
+}
+
+/** One thread-session row as its JSON is stored (item 13): a text turn with
+ *  its author when a person wrote it, `silent` when the intake gate withheld
+ *  the reply (the person's words are context all the same), `folded` when the
+ *  row is a child's report folded whole — what `operatorTail` keeps ahead of
+ *  older turns. */
+export function storedTurnRow(turn: {
+  role: "user" | "assistant";
+  text: string;
+  actor?: string;
+  silent?: boolean;
+  folded?: boolean;
+}): string {
+  return JSON.stringify({
+    role: turn.role,
+    part: { type: "text", text: turn.text },
+    ...(turn.actor !== undefined ? { actor: turn.actor } : {}),
+    ...(turn.silent === true ? { silent: true } : {}),
+    ...(turn.folded === true ? { folded: true } : {}),
+  });
+}
+
+/** Whether a stored row is a reply the intake gate withheld as silent (item 13). */
+export function silentOfStoredRow(json: string): boolean {
+  const stored = parseStored(json);
+  return stored !== undefined && !("compaction" in stored) && (stored as { silent?: unknown }).silent === true;
+}
+
+/** Whether a stored row is a folded report (item 13) — kept whole by the
+ *  operator's cap ahead of older turns. */
+export function foldedOfStoredRow(json: string): boolean {
+  const stored = parseStored(json);
+  return stored !== undefined && !("compaction" in stored) && (stored as { folded?: unknown }).folded === true;
+}
+
+/** A run of an old `<thread>:<agent>` log, as the cutover migration reads it
+ *  (item 13): its log's key, when it started and the row range its record closed. */
+export interface MigrationRun {
+  key: string;
+  startedAt: number;
+  range: { from: number; to?: number };
+}
+
+/** The order the cutover migration reads an old thread's per-agent logs into
+ *  the thread session (item 13): the runs by their start times, each run's rows in
+ *  its session range in index order, and rows outside any run's range after
+ *  the runs that precede them in their own log (before every run of that log
+ *  when none does). The read is once: each row lands under the row id
+ *  `migrationRowId(key, idx)`, so a replay appends nothing twice, and the old
+ *  keys stay read-only for recall. */
+export function migrationOrder(
+  runs: readonly MigrationRun[],
+  logs: readonly { key: string; rows: readonly number[] }[],
+): Array<{ key: string; idx: number }> {
+  const byStart = [...runs].sort((a, b) => a.startedAt - b.startedAt);
+  // A row's place: inside a run's range it rides at that run's start (phase 0);
+  // past a run's closed range it rides after that run's rows (phase 1); before
+  // every run of its log it comes first of all (start -Infinity).
+  const placed = logs.flatMap((log, logOrder) =>
+    log.rows.map((idx) => {
+      let at = Number.NEGATIVE_INFINITY;
+      let phase = 1;
+      for (const r of byStart) {
+        if (r.key !== log.key) continue;
+        const to = r.range.to;
+        if (idx >= r.range.from && (to === undefined || idx <= to)) {
+          at = r.startedAt;
+          phase = 0;
+          break;
+        }
+        if (to !== undefined && to < idx && r.startedAt > at) at = r.startedAt;
+      }
+      return { key: log.key, idx, at, phase, logOrder };
+    }),
+  );
+  placed.sort((a, b) => a.at - b.at || a.phase - b.phase || a.logOrder - b.logOrder || a.idx - b.idx);
+  return placed.map(({ key, idx }) => ({ key, idx }));
+}
+
+/** The row id a migrated row lands under (item 13): the old log's key and the
+ *  row's index there — stable, so the read-once migration is idempotent. */
+export function migrationRowId(key: string, idx: number): string {
+  return `migrated:${key}#${idx}`;
+}
+
 /** The request is the seed's last user turn (`splitSeed` reads the seed the
  *  same way); a seed with no user turn — or no turns — puts its first row there. */
 export function requestIndex(seed: readonly ChatMessage[]): number {

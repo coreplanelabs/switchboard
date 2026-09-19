@@ -3782,6 +3782,17 @@ export class SessionLogDO extends DurableObject<Env> {
       );
       CREATE TABLE IF NOT EXISTS notepad (k INTEGER PRIMARY KEY CHECK (k = 1), text TEXT NOT NULL, updated_at INTEGER NOT NULL);
     `);
+    // The keyed append's identity (session-log item 13): a row group's id, on
+    // its first part; a partial unique index holds the idempotency line. Added
+    // by ALTER so a log written before the column keeps its rows.
+    const columns = new Set(
+      this.sql
+        .exec<{ name: string }>(`SELECT name FROM pragma_table_info('turns')`)
+        .toArray()
+        .map((r) => r.name),
+    );
+    if (!columns.has("row_id")) this.sql.exec(`ALTER TABLE turns ADD COLUMN row_id TEXT`);
+    this.sql.exec(`CREATE UNIQUE INDEX IF NOT EXISTS turns_row_id ON turns(row_id) WHERE row_id IS NOT NULL`);
   }
 
   /** The index the next row lands at: one past the newest turn, 0 for an empty
@@ -3877,6 +3888,31 @@ export class SessionLogDO extends DurableObject<Env> {
     this.sql.exec(`INSERT INTO turns_fts (rowid, text) VALUES (?, ?)`, id, text);
   }
 
+  /** The idempotent keyed append (session-log item 13): the parts of ONE turn
+   *  land at the tail under `rowId` — a fold of a `ship_unit` event, a
+   *  connector's turn, a migrated row. A row id the log has seen appends
+   *  nothing, so a fold read twice yields one row; two appends keep their
+   *  arrival order, since each lands at the tail inside one transaction. No
+   *  owner fence: a thread session has no one owning run. */
+  async appendKeyed(
+    rowId: string,
+    rows: Array<{ part: number; json: string }>,
+  ): Promise<{ ok: true; appended: boolean }> {
+    let appended = false;
+    this.ctx.storage.transactionSync(() => {
+      const seen = this.sql.exec(`SELECT 1 FROM turns WHERE row_id = ? LIMIT 1`, rowId).toArray().length > 0;
+      if (seen) return;
+      const idx = this.next();
+      for (const [i, r] of rows.entries()) {
+        this.putRow({ idx, part: r.part, json: r.json }, r.json, false);
+        if (i === 0) this.sql.exec(`UPDATE turns SET row_id = ? WHERE idx = ? AND part = ?`, rowId, idx, r.part);
+      }
+      appended = true;
+      this.enforceBytePolicy();
+    });
+    return { ok: true, appended };
+  }
+
   async write(
     gen: string,
     rows: TranscriptRow[],
@@ -3963,7 +3999,10 @@ export class SessionLogDO extends DurableObject<Env> {
       if (ids.length === 0) break;
       for (const id of ids) {
         const row = this.sql
-          .exec<SessionTurnRow>(`SELECT id, idx, part, json, text FROM turns WHERE id = ?`, id)
+          .exec<SessionTurnRow & { row_id: string | null }>(
+            `SELECT id, idx, part, json, text, row_id FROM turns WHERE id = ?`,
+            id,
+          )
           .toArray()[0];
         if (!row) continue;
         const marker = droppedToolResultRow(row.json);
@@ -3974,6 +4013,11 @@ export class SessionLogDO extends DurableObject<Env> {
         }
         const refs = attachmentRefsOf(row.json);
         this.putRow({ idx: row.idx, part: row.part, json: marker }, marker, true);
+        // The marker keeps the row's keyed-append id (item 13): `putRow` deletes
+        // the old row, so without this the partial unique index forgets the id
+        // and a replayed migration or fold would re-append the trimmed turn.
+        if (row.row_id !== null)
+          this.sql.exec(`UPDATE turns SET row_id = ? WHERE idx = ? AND part = ?`, row.row_id, row.idx, row.part);
         // The marker references nothing, so an attachment only this row showed is now orphaned.
         for (const ref of refs) {
           if (!this.referencedElsewhere(ref, -1)) this.sql.exec(`DELETE FROM attachments WHERE ref = ?`, ref);
@@ -4165,6 +4209,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/session/tail",
   "/runs/session/owner",
   "/runs/session/write",
+  "/runs/session/append",
   "/runs/session/read",
   "/runs/session/read-tail",
   "/runs/session/clear-owner",
@@ -4234,6 +4279,7 @@ const WIDE_BODY_ROUTES = new Set([
   "/runs/append",
   "/runs/transcript/write",
   "/runs/session/write",
+  "/runs/session/append",
 ]);
 /** A delivery snapshot written whole, or a refresh's patch: every merged pull request's reviews and
  *  its branch's workflow runs — about 7 KB a pull request (measured: 291 pull requests, 2.1 MB), so
@@ -4357,6 +4403,24 @@ function parseTranscriptRows(v: unknown): Validated<TranscriptRow[]> {
   return { ok: true, value: v as TranscriptRow[] };
 }
 
+/** The keyed append's rows (session-log item 13): the parts of one turn, no index — the object assigns the tail's. */
+function parseKeyedRows(v: unknown): Validated<Array<{ part: number; json: string }>> {
+  if (!Array.isArray(v) || v.length === 0) return invalid("rows must be a non-empty array");
+  for (const r of v) {
+    const row = r as Record<string, unknown>;
+    if (typeof row?.part !== "number" || !Number.isInteger(row.part) || row.part < 0 || typeof row?.json !== "string")
+      return invalid("rows entries must be {part, json}");
+  }
+  return { ok: true, value: v as Array<{ part: number; json: string }> };
+}
+
+/** The keyed append's row id (session-log item 13): non-empty, bounded — an event id, a message id with its edit stamp, a migrated row's name. */
+function parseRowId(v: unknown): Validated<string> {
+  if (typeof v !== "string" || v.length === 0 || v.length > 512)
+    return invalid("rowId must be a string of 1..512 characters");
+  return { ok: true, value: v };
+}
+
 function parseSessionKey(v: unknown): Validated<string> {
   if (typeof v !== "string" || !SESSION_KEY_PATTERN.test(v)) return invalid("key must be a session key");
   return { ok: true, value: v };
@@ -4421,6 +4485,17 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
         `[runs/session/write] ${key.value} <- ${rows.value.length} row(s), ${attachments.value.length} attachment(s), ok=${r.ok}`,
       );
       return fenced(r);
+    }
+    if (pathname === "/runs/session/append") {
+      const rowId = parseRowId(b.rowId);
+      if (!rowId.ok) return json({ error: rowId.error }, 400);
+      const rows = parseKeyedRows(b.rows);
+      if (!rows.ok) return json({ error: rows.error }, 400);
+      const r = await stub.appendKeyed(rowId.value, rows.value);
+      console.log(
+        `[runs/session/append] ${key.value} <- ${rows.value.length} row(s) under ${rowId.value}, appended=${r.appended}`,
+      );
+      return json(r);
     }
     if (pathname === "/runs/session/read") {
       const from = parseLogIndex(b.from, "from");

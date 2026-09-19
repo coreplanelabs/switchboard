@@ -66,6 +66,8 @@ export interface SessionLog {
   trimmed: Set<string>;
   /** The session's notepad (item 10), once a run wrote it. */
   notepad?: Notepad;
+  /** The row ids the keyed append has seen (item 13), so a replay appends nothing twice. */
+  rowIds?: Set<string>;
 }
 
 /** A marker's bytes, for the trim plan's first estimate; the pass re-measures. */
@@ -322,6 +324,23 @@ export class InMemoryRunLedger implements RunLedger {
   async sessionTail(key: string): Promise<number> {
     const rows = this.sessions.get(key)?.rows ?? [];
     return rows.length === 0 ? 0 : Math.max(...rows.map((r) => r.idx)) + 1;
+  }
+
+  async appendSession(
+    key: string,
+    rowId: string,
+    rows: readonly { part: number; json: string }[],
+  ): Promise<{ ok: boolean; appended: boolean }> {
+    // One synchronous span, as the object's transaction is: the seen-check,
+    // the append and the id's record admit no interleaving — two concurrent
+    // appends of one row id land one row.
+    const log = this.session(key);
+    log.rowIds ??= new Set();
+    if (log.rowIds.has(rowId)) return { ok: true, appended: false };
+    const idx = log.rows.length === 0 ? 0 : Math.max(...log.rows.map((r) => r.idx)) + 1;
+    for (const r of rows) log.rows.push({ idx, part: r.part, json: r.json });
+    log.rowIds.add(rowId);
+    return { ok: true, appended: true };
   }
 
   async claimSession(key: string, runId: string, gen: string, maxBytes?: number): Promise<void> {

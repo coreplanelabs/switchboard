@@ -32,7 +32,7 @@ import type { IntakeVerdict } from "../intake.js";
 import type { ConfigStore } from "../../config.js";
 import type { ProviderTable } from "../harness/piAi.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
-import { sessionKey } from "../runLedger/sessionLog.js";
+import { sessionKey, threadSessionKey } from "../runLedger/sessionLog.js";
 import { chatActorOf } from "../authz/actor.js";
 import { effectiveConfirm } from "../../config/profile.js";
 import { boundBlastRadius, type BlastRadius, type CommandDef } from "../commandRegistry.js";
@@ -470,19 +470,42 @@ export interface OperatorStageDeps {
   runLedger?: { readSessionTail(key: string, maxBytes: number): Promise<{ transcript: AssembledTranscript }> };
 }
 
-/** The thread's per-agent logs as the operator's tail (the plan's turn rule,
- *  until the memory unit re-keys the log): for each agent the thread's runs
- *  name, in the order of their first run, that agent's session tail read
- *  read-only, each message one turn — then `operatorTail`'s cap. A ledger
- *  that cannot be read is an empty tail, never a failed dispatch. The folded
- *  flag waits on the re-key: today's per-agent rows do not say which user
- *  turn was a fold, so every turn rides as ordinary history. */
+/** The operator's tail (session-log item 13): the thread session
+ *  (`threadSessionKey`) when it has rows — the one log the operator reads and
+ *  writes, folds and connector turns included — read-only, each message one
+ *  turn, then `operatorTail`'s cap. A thread not yet migrated (an empty thread
+ *  session) falls back to the thread's per-agent logs, for each agent the
+ *  thread's runs name in the order of their first run, as before the re-key.
+ *  A ledger that cannot be read is an empty tail, never a failed dispatch.
+ *  The folded flag still waits on the transcript surfacing it: the assembled
+ *  rows do not say which turn was a fold, so every turn rides as ordinary
+ *  history. */
 export async function operatorThreadTail(
   ledger: OperatorStageDeps["runLedger"],
   thread: readonly { agent?: string }[] | undefined,
   threadKey: string,
 ): Promise<OperatorTailTurn[]> {
   if (!ledger || !thread || thread.length === 0) return [];
+  const turnsOf = (transcript: AssembledTranscript): OperatorTailTurn[] => {
+    const turns: OperatorTailTurn[] = [];
+    for (const [i, message] of transcript.messages.entries()) {
+      const text = message.content
+        .map((p) => ("text" in p && typeof p.text === "string" ? p.text : ""))
+        .join(" ")
+        .trim();
+      // The row's author rides beside its text (record 0057): the verifier
+      // selects the author's own turns by it.
+      const actor = transcript.actors?.[i];
+      if (text.length > 0) turns.push({ text: `${message.role}: ${text}`, ...(actor !== undefined ? { actor } : {}) });
+    }
+    return turns;
+  };
+  try {
+    const { transcript } = await ledger.readSessionTail(threadSessionKey(threadKey), OPERATOR_TAIL_BYTES);
+    if (transcript.messages.length > 0) return operatorTail(turnsOf(transcript));
+  } catch {
+    // A thread session that cannot be read falls back to the per-agent logs.
+  }
   const agents: string[] = [];
   // The page is newest-first; the tail reads run order, oldest first.
   for (let i = thread.length - 1; i >= 0; i--) {
@@ -493,17 +516,7 @@ export async function operatorThreadTail(
   for (const agent of agents) {
     try {
       const { transcript } = await ledger.readSessionTail(sessionKey(threadKey, agent), OPERATOR_TAIL_BYTES);
-      for (const [i, message] of transcript.messages.entries()) {
-        const text = message.content
-          .map((p) => ("text" in p && typeof p.text === "string" ? p.text : ""))
-          .join(" ")
-          .trim();
-        // The row's author rides beside its text (record 0057): the verifier
-        // selects the author's own turns by it.
-        const actor = transcript.actors?.[i];
-        if (text.length > 0)
-          turns.push({ text: `${message.role}: ${text}`, ...(actor !== undefined ? { actor } : {}) });
-      }
+      turns.push(...turnsOf(transcript));
     } catch {
       // A log that cannot be read costs the tail its turns, never the dispatch.
     }

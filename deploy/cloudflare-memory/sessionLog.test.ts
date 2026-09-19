@@ -512,3 +512,73 @@ describe("session log object — the search recall reads and the notepad notes w
     expect((await post("/runs/session/notepad/write", { key, gen: "g1" })).status).toBe(400);
   });
 });
+
+describe("session log object — the keyed append (session-log item 13)", () => {
+  it("appends the rows of one turn at the tail under a row id, with no owner claimed; the same id appends nothing twice and never a second copy", async () => {
+    const key = sessionKey();
+    const rows = [
+      {
+        part: 0,
+        json: JSON.stringify({
+          role: "assistant",
+          part: { type: "text", text: "the unit ended: the report" },
+          folded: true,
+        }),
+      },
+    ];
+    expect(await post("/runs/session/append", { key, rowId: "ship-unit:the-unit:ended:12", rows })).toEqual({
+      status: 200,
+      data: { ok: true, appended: true },
+    });
+    expect(await post("/runs/session/append", { key, rowId: "ship-unit:the-unit:ended:12", rows })).toEqual({
+      status: 200,
+      data: { ok: true, appended: false },
+    });
+    expect(await post("/runs/session/tail", { key })).toEqual({ status: 200, data: { next: 1 } });
+    const read = await post("/runs/session/read", { key, from: 0 });
+    expect(indices(read.data.rows)).toEqual([[0, 0]]);
+  });
+
+  it("a byte-policy trim keeps the trimmed row's id, so a replayed append of that id still appends nothing", async () => {
+    const key = sessionKey();
+    // A budget the appended tool result alone exceeds: the append's own byte
+    // pass replaces it with the marker — the id must ride the replacement.
+    await runInDurableObject(stubOf(key), (inst: SessionLogDO) => inst.setOwner("r1", "g1", 600));
+    const rowId = `migrated:${sessionKey()}#3`;
+    const rows = [
+      {
+        part: 0,
+        json: JSON.stringify({
+          role: "user",
+          part: { type: "tool_result", toolUseId: "c1", content: "X".repeat(1200) },
+        }),
+      },
+    ];
+    expect((await post("/runs/session/append", { key, rowId, rows })).data).toEqual({ ok: true, appended: true });
+    const read = await post("/runs/session/read", { key, from: 0 });
+    const part = (JSON.parse((read.data.rows as Array<{ json: string }>)[0].json) as { part: { content: unknown } })
+      .part;
+    expect(String(part.content)).toMatch(/dropped/);
+    // A replayed migration (a restart mid-cutover) re-appends nothing.
+    expect((await post("/runs/session/append", { key, rowId, rows })).data).toEqual({ ok: true, appended: false });
+    expect(await post("/runs/session/tail", { key })).toEqual({ status: 200, data: { next: 1 } });
+  });
+
+  it("two appends in one moment keep their arrival order, an edited message's id appends a second row, and a malformed row id or empty rows are 400", async () => {
+    const key = sessionKey();
+    const turn = (t: string) => [{ part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: t } }) }];
+    await post("/runs/session/append", { key, rowId: "slack:C1:2.0", rows: turn("first") });
+    await post("/runs/session/append", { key, rowId: "slack:C1:2.1", rows: turn("second") });
+    await post("/runs/session/append", { key, rowId: "slack:C1:2.0:edit-3.0", rows: turn("first, edited") });
+    const read = await post("/runs/session/read", { key, from: 0 });
+    const texts = (read.data.rows as Array<{ json: string }>).map(
+      (r) => (JSON.parse(r.json) as { part: { text: string } }).part.text,
+    );
+    expect(texts).toEqual(["first", "second", "first, edited"]);
+    expect((await post("/runs/session/append", { key, rowId: "", rows: turn("x") })).status).toBe(400);
+    expect((await post("/runs/session/append", { key, rowId: "ok", rows: [] })).status).toBe(400);
+    expect((await post("/runs/session/append", { key, rowId: "ok", rows: [{ part: -1, json: "{}" }] })).status).toBe(
+      400,
+    );
+  });
+});

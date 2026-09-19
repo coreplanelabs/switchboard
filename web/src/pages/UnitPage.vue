@@ -10,7 +10,7 @@ import { useSeed } from "../lib/seed";
 import { useWallClock } from "../lib/wallClock";
 import { githubPrUrl, githubRepoUrl, githubTreeUrl } from "../lib/githubLinks";
 import { formatDateTime, formatLocalIso } from "../lib/format";
-import type { UnitThread } from "@core/core/unitRuns.js";
+import { unitSessionKeys, type UnitThread } from "@core/core/unitRuns.js";
 
 // The unit page (agent-ship item 17; record 0034, "the unit is the reading
 // unit"): one ship unit's story on one page — the runs of its coding thread
@@ -89,17 +89,19 @@ const STANDING_CLS: Record<string, string> = {
 /** The round count the runner drew: distinct round indexes over both threads. */
 const roundCount = computed(() => new Set(view?.rounds.map((r) => r.index) ?? []).size);
 
-/** The sessions the search reads, `<thread key>:<agent>`: both agents' on the
- *  unit's thread (record 0055), the review's on its own thread when a row
- *  written before that names one. */
+/** The sessions the search reads: the working keys `<instance>:<unit>:coding`
+ *  and `<instance>:<unit>:review` (session-log item 13) — a run of the lane
+ *  that names its own session (a row written before the re-key) still wins,
+ *  so an in-flight unit keeps searching where its rows are. */
 const sessions = computed<SearchSession[]>(() => {
   if (!view) return [];
+  const keys = unitSessionKeys(view);
   const out: SearchSession[] = [];
-  const add = (thread: UnitThread, key: string | undefined) => {
-    if (key === undefined) return;
-    // A run of the thread names its session; the row's thread and agent name it the same way.
+  const add = (thread: UnitThread, opened: string | undefined) => {
+    if (opened === undefined) return;
+    // A run of the lane names its session; the working key is the lane's name otherwise.
     const known = view.runs.find((r) => r.thread === thread && r.session?.key !== undefined)?.session?.key;
-    out.push({ thread, key: known ?? `${key}:${thread}` });
+    out.push({ thread, key: known ?? keys[thread] });
   };
   add("coding", view.threads.coding);
   add("review", view.threads.review ?? view.threads.coding);
