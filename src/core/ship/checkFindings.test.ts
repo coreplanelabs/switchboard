@@ -87,6 +87,7 @@ describe("classifyRoundChecks — the merge door's reading joined with the class
       severity: "blocking",
       file: "ci / bot",
       title: "CI check failed (failure) — https://x/1",
+      check: true,
     });
     expect(checkFinding({ name: "ci / bot", conclusion: "timed_out" }).title).toBe("CI check failed (timed_out)");
   });
