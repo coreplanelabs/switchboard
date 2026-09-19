@@ -184,7 +184,7 @@ export const HOSTED_DEADLINE_MARGIN_MINUTES = 60;
 export const SHIP_WAIT = { marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes: 5, busyRetryMinutes: 2 } as const;
 
 /** The plane's table (docs/decisions/0064): how long a finished run stays on it. */
-export const PLANE = { recentMinutes: 60 } as const;
+export const PLANE = { recentMinutes: 60, reservationMinutes: 2 } as const;
 
 /** The named amounts a lease holds back, in minutes. Each stands for a step
  *  every run or round pays: `provision` is attach and restore before the

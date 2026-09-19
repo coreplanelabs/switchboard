@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { decide, emptyPlaneState, planeAskWordOf, type PlaneAskEvent, type PlaneState } from "./decide.js";
+import {
+  decide,
+  emptyPlaneState,
+  planeAskAnswerOf,
+  planeAskWordOf,
+  type PlaneAskEvent,
+  type PlaneState,
+} from "./decide.js";
 
 // Feature: docs/reference/specs/orchestration-plane.md — the plane's decider
 // (record 0064, "Where it lives"): a pure function over a closed event union.
@@ -23,12 +30,30 @@ const stateWith = (over: Partial<PlaneState> = {}): PlaneState => ({
 });
 
 describe("decide — the plane's pure decider (orchestration-plane, record 0064)", () => {
-  it("an ask on a free thread proceeds: no queue row, no writes, no effects", () => {
+  it("an ask on a free thread is admitted: no queue row, a reservation on the thread written in the same decision, no effects", () => {
     const out = decide(emptyPlaneState(), ask());
     expect(out.state.queue).toEqual([]);
-    expect(out.writes).toEqual([]);
+    expect(out.writes).toEqual([
+      {
+        table: "plane_reservations",
+        op: "put",
+        row: { kind: "thread", key: "slack:C1:1.1", runId: "run-a", at: 1_000 },
+      },
+    ]);
     expect(out.effects).toEqual([]);
     expect(planeAskWordOf(out, "run-a")).toBe("proceed");
+    expect(planeAskAnswerOf(out, "run-a")).toEqual({ kind: "admitted", reservation: "run-a" });
+  });
+
+  it("two asks a second apart on one thread: the first is admitted with a reservation, the second queues with position 1 behind it", () => {
+    const first = decide(emptyPlaneState(), ask());
+    const out = decide(first.state, ask({ runId: "run-b", at: 2_000 }));
+    expect(planeAskAnswerOf(out, "run-b")).toEqual({
+      kind: "queued",
+      id: "run-b",
+      position: 1,
+      waiting: [{ kind: "thread_free", threadKey: "slack:C1:1.1", met: false }],
+    });
   });
 
   it("an ask on a live thread queues with a thread_free condition and position 1", () => {
@@ -78,9 +103,14 @@ describe("decide — the plane's pure decider (orchestration-plane, record 0064)
     s = decide(s, ask()).state;
     s = decide(s, ask({ runId: "run-b", at: 2_000 })).state;
     const out = decide(s, { kind: "sealed", at: 3_000, threadKey: "slack:C1:1.1" });
-    // Only the oldest is admitted; its admission makes the thread live again.
+    // Only the oldest is admitted; its admission reserves the thread again.
     expect(out.effects.map((e) => e.runId)).toEqual(["run-a"]);
-    expect(out.state.liveThreads).toContain("slack:C1:1.1");
+    expect(out.state.reservations.map((r) => r.key)).toContain("slack:C1:1.1");
+    expect(out.writes).toContainEqual({
+      table: "plane_reservations",
+      op: "put",
+      row: { kind: "thread", key: "slack:C1:1.1", runId: "run-a", at: 3_000 },
+    });
     expect(out.state.queue.find((r) => r.runId === "run-b")!.state).toBe("waiting");
   });
 
@@ -125,5 +155,54 @@ describe("decide — the plane's pure decider (orchestration-plane, record 0064)
     const queued = decide(stateWith({ liveThreads: ["slack:C1:1.1"] }), ask({ runId: "run-z" }));
     const out = decide(queued.state, { kind: "sealed", at: 3_000, threadKey: "slack:C1:1.1" });
     expect(out.effects[0]!.id).toBe("admit:run-z");
+  });
+
+  it("an ask that meets an open window queues on window_open and is admitted by the window's lift", () => {
+    const opened = decide(emptyPlaneState(), { kind: "window", at: 500, window: "quiet", phase: "opened" });
+    expect(opened.writes).toEqual([{ table: "plane_windows", op: "put", window: "quiet", at: 500 }]);
+    const queued = decide(opened.state, ask());
+    expect(planeAskAnswerOf(queued, "run-a")).toEqual({
+      kind: "queued",
+      id: "run-a",
+      position: 1,
+      waiting: [{ kind: "window_open", window: "quiet", met: false }],
+    });
+    const lifted = decide(queued.state, { kind: "window", at: 2_000, window: "quiet", phase: "lifted" });
+    expect(lifted.writes).toContainEqual({ table: "plane_windows", op: "del", window: "quiet" });
+    expect(lifted.effects.map((e) => e.runId)).toEqual(["run-a"]);
+  });
+
+  it("an ask that meets a pending deploy queues on deploy_settled and deploy.landed flips it", () => {
+    const pending = decide(emptyPlaneState(), { kind: "window", at: 500, window: "deploy", phase: "opened" });
+    const queued = decide(pending.state, ask());
+    expect(planeAskAnswerOf(queued, "run-a")).toEqual({
+      kind: "queued",
+      id: "run-a",
+      position: 1,
+      waiting: [{ kind: "deploy_settled", met: false }],
+    });
+    // The deploy runner's `deploy.landed` post lifts the deploy window and the queue walks.
+    const landed = decide(queued.state, { kind: "window", at: 2_000, window: "deploy", phase: "lifted" });
+    expect(landed.effects.map((e) => e.runId)).toEqual(["run-a"]);
+    expect(landed.state.queue.find((r) => r.runId === "run-a")!.state).toBe("admitted");
+  });
+
+  it("a reserved thread queues a second ask until the seal deletes the reservation and admits it", () => {
+    const first = decide(emptyPlaneState(), ask());
+    const second = decide(first.state, ask({ runId: "run-b", at: 2_000 }));
+    expect(planeAskAnswerOf(second, "run-b")).toMatchObject({ kind: "queued" });
+    const sealed = decide(second.state, { kind: "sealed", at: 3_000, threadKey: "slack:C1:1.1" });
+    expect(sealed.writes).toContainEqual({ table: "plane_reservations", op: "del", key: "slack:C1:1.1" });
+    expect(sealed.effects.map((e) => e.runId)).toEqual(["run-b"]);
+  });
+
+  it("position counts waiting rows sharing the unmet condition, per condition", () => {
+    // Two threads live; one waiting row on each. A third ask on the first
+    // thread ranks only among that thread's waiters.
+    let s = stateWith({ liveThreads: ["slack:C1:1.1", "slack:C2:2.2"] });
+    s = decide(s, ask()).state;
+    s = decide(s, ask({ runId: "run-b", threadKey: "slack:C2:2.2", at: 2_000 })).state;
+    const third = decide(s, ask({ runId: "run-c", at: 3_000 }));
+    expect(planeAskAnswerOf(third, "run-c")).toMatchObject({ kind: "queued", position: 2 });
   });
 });
