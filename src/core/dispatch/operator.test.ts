@@ -9,6 +9,7 @@ import {
   operatorProjection,
   operatorThreadTail,
   parseOperatorDecision,
+  presetBindOf,
   renderOperatorQuestion,
   runOperator,
   verifierHolds,
@@ -244,6 +245,33 @@ describe("the verifier's hold (the one-door plan; routing-and-config item 25)", 
     expect(verifierHolds("runs list", { def: def("runs.list"), radius: "read" })).toBe(false);
     expect(verifierHolds("repo test", { def: def("repo.test"), radius: "exec" })).toBe(false);
     expect(verifierHolds("not a command at all")).toBe(false);
+  });
+
+  it("a preset bind is a run-starting bind whatever its spelling: the caller's flag holds it", () => {
+    expect(verifierHolds("ship in acme/repo: fix the drain", undefined, true)).toBe(true);
+    expect(verifierHolds("review https://github.com/acme/repo/pull/1", undefined, true)).toBe(true);
+  });
+});
+
+describe("presetBindOf — a bound line that names a preset starts a run, never a registry command", () => {
+  const presets = routablePresets().map((p) => p.name);
+
+  it("an `agent:<preset>` head or the preset's bare first word names it, with or without a tail", () => {
+    expect(presetBindOf("agent:ship in acme/repo: fix the drain order", presets)).toBe("ship");
+    expect(presetBindOf("ship", presets)).toBe("ship");
+    expect(presetBindOf("ship --repo acme/repo --issue 1931", presets)).toBe("ship");
+    expect(presetBindOf("  ship in acme/repo: fix issue 1991", presets)).toBe("ship");
+    expect(presetBindOf("review https://github.com/acme/repo/pull/128", presets)).toBe("review");
+    expect(presetBindOf("agent:general what changed this week", presets)).toBe("general");
+  });
+
+  it("a registry command, prose, a word that only starts like a preset, and a preset the table does not offer name nothing", () => {
+    expect(presetBindOf("config show", presets)).toBeUndefined();
+    expect(presetBindOf("runs list --status all", presets)).toBeUndefined();
+    expect(presetBindOf("shipping is late", presets)).toBeUndefined();
+    expect(presetBindOf("agent:coding on branch x", presets)).toBeUndefined();
+    expect(presetBindOf("not a command at all", presets)).toBeUndefined();
+    expect(presetBindOf("", presets)).toBeUndefined();
   });
 });
 

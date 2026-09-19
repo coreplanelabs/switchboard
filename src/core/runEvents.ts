@@ -362,7 +362,7 @@ void _everyKindListed;
  *  the message, the thread's sticky preset, the user or the channel scope's
  *  `agent`, `defaults.agent`, or the request router. The replay harness
  *  (`load route`) reads it to tell a requester's own choice from a fallback. */
-export type AgentSource = "directive" | "sticky" | "user" | "channel" | "default" | "route";
+export type AgentSource = "directive" | "sticky" | "user" | "channel" | "default" | "route" | "operator";
 
 /** How an operator asked a run to stop: `soft` — take no new steps and
  *  wrap up through the normal finale; `hard` — abort the in-flight call now, no

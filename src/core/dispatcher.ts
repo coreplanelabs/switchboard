@@ -41,6 +41,7 @@ import {
 } from "./dispatch/references.js";
 import { resolveChatActor } from "./authz/actor.js";
 import { operatorModeOf, referencesOn } from "../config.js";
+import { parseDirectives } from "../directives.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
 import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps, type RouteModel } from "./dispatch/route.js";
 import { executeOperatorDecision, operatorStage, type OperatorEventFields } from "./dispatch/operator.js";
@@ -582,9 +583,20 @@ export async function dispatch(
     // with record 0054's marker, a refusal (`policy` renders no Yes). A
     // resume, a restart, a spawn and a coordinator's child re-enter a decided
     // request: the operator never re-reads those.
-    const operatorMode =
+    const configuredOperator =
       !resume && !restart && !opts.parent && !opts.coordinator ? operatorModeOf(deps.config.config) : "off";
+    // Until the one-door plan's directive unit lands, a message that opens with
+    // `agent:<preset>` is the person's typed decision and stays stage A's and
+    // the route stage's under `on`: the operator's re-reading of a seed bound a
+    // line no registry parses and handed the seed back, on its first day on.
+    // Shadow still records its decision beside the directive's run.
+    const operatorMode =
+      configuredOperator === "on" && parseDirectives(msg.text).agent !== undefined ? "off" : configuredOperator;
     let operatorEvent: OperatorEventFields | undefined;
+    // The preset an `on` decision routes the request through (a preset bind,
+    // `presetBindOf`): the route stage runs it on the person's own words with
+    // the decision's event on the run.
+    let operatorPreset: string | undefined;
     // The thread page the operator reads (newest first): the tail's session
     // keys and, on the newest record, an `on` question still pending — whose
     // "yes" this event may be (routing-and-config item 29). Read here once and
@@ -624,7 +636,7 @@ export async function dispatch(
         registry.publish(live.runId, { type: "operator", ...operatorEvent, at: clock() });
         operatorEvent = undefined;
       } else if (operatorMode === "on" && operatorEvent && !operatorFellBack) {
-        await root.span("dispatch.operator_decision", () =>
+        const execution = await root.span("dispatch.operator_decision", () =>
           executeOperatorDecision(deps, {
             msg,
             io,
@@ -634,19 +646,26 @@ export async function dispatch(
             ...(operatorThread ? { thread: operatorThread } : {}),
           }),
         );
-        return ended;
+        if (execution.kind === "answered") return ended;
+        operatorPreset = execution.preset;
       }
     }
 
     // Stage A (dispatch/fastPath.ts): a message that names a registered chat
     // command is answered inline — never a model turn, and before the history
-    // fetch, so a command costs none.
+    // fetch, so a command costs none. A decision that routes a preset has
+    // already read the message as a request, not a command.
     if (
-      await answerChatCommand(deps, { msg, io, ending, trace, ...(operatorEvent ? { operator: operatorEvent } : {}) })
+      operatorPreset === undefined &&
+      (await answerChatCommand(deps, { msg, io, ending, trace, ...(operatorEvent ? { operator: operatorEvent } : {}) }))
     )
       return ended;
 
     const { directives, history } = await readRequest({ msg, io, root });
+    // The operator's preset stands where a directive would: the request is the
+    // person's words, the agent the decision's (`agentSource: "operator"`
+    // below), and the route stage is not asked.
+    if (operatorPreset !== undefined) directives.agent = operatorPreset;
 
     // The thread's runs, read once (dispatch/thread.ts) for a reply in an
     // existing thread — a message that starts a thread has none, and a spawn,
@@ -694,6 +713,7 @@ export async function dispatch(
     });
     const { sticky } = settled;
     let { resolved, agentSource } = settled;
+    if (operatorPreset !== undefined) agentSource = "operator";
 
     // The route stage (dispatch/route.ts; record 0026): a plain message — no
     // directive, no sticky preset, no user or channel agent — picks its preset
