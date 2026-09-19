@@ -280,6 +280,55 @@ describe("createCostsService", () => {
     expect(warnings).toHaveLength(1);
   });
 
+  it("costsFromConfig: the Admin key moved under the block — `providers.anthropic.invoiceKeyEnv` wins, `costs.anthropicAdminKeyEnv` keeps loading for one release; a further block's invoiceKeyEnv wires its biller's invoice API, a missing env or an unknown biller warns by name and ties out against nothing", () => {
+    const secrets = (names: Record<string, string>) => ({
+      named: (n: string) => (names[n] !== undefined ? { reveal: () => names[n] } : undefined),
+    });
+    const warnings: string[] = [];
+    const warn = (m: string) => warnings.push(m);
+    // The block names the env; the legacy default (ANTHROPIC_ADMIN_KEY) is not set and the LLM line is still on.
+    const moved = costsFromConfig(
+      cfg,
+      { providers: { anthropic: { invoiceKeyEnv: "MY_ADMIN_KEY" } } },
+      { secrets: secrets({ CF_ANALYTICS_TOKEN: "cf", MY_ADMIN_KEY: "sk-ant-admin" }), warn },
+    );
+    expect(moved?.llmOn).toBe(true);
+    // The legacy `costs.anthropicAdminKeyEnv` still loads when the block names none.
+    const legacy = costsFromConfig(
+      cfg,
+      { providers: { anthropic: {} } },
+      { secrets: secrets({ CF_ANALYTICS_TOKEN: "cf", ANTHROPIC_ADMIN_KEY: "sk-ant-admin" }), warn },
+    );
+    expect(legacy?.llmOn).toBe(true);
+    // A block whose biller has no invoice API, and one whose env is unset, warn by name; a good one wires quietly.
+    const wired = costsFromConfig(
+      cfg,
+      {
+        providers: {
+          openrouter: { invoiceKeyEnv: "OPENROUTER_MGMT_KEY" },
+          openai: { invoiceKeyEnv: "OPENAI_ADMIN_KEY" },
+          groq: { invoiceKeyEnv: "GROQ_KEY" },
+        },
+      },
+      { secrets: secrets({ CF_ANALYTICS_TOKEN: "cf", OPENROUTER_MGMT_KEY: "sk-or", GROQ_KEY: "gk" }), warn },
+    );
+    expect(wired).toBeDefined();
+    expect(warnings.some((w) => w.includes("providers.groq.invoiceKeyEnv") && w.includes("no invoice API"))).toBe(true);
+    expect(warnings.some((w) => w.includes("providers.openai.invoiceKeyEnv") && w.includes("OPENAI_ADMIN_KEY"))).toBe(
+      true,
+    );
+    // The anthropic block's own env, when unset, warns by name too (item 4d) — the LLM line turns off, said, not silent.
+    const unset = costsFromConfig(
+      cfg,
+      { providers: { anthropic: { invoiceKeyEnv: "MISSING_ADMIN_KEY" } } },
+      { secrets: secrets({ CF_ANALYTICS_TOKEN: "cf" }), warn },
+    );
+    expect(unset?.llmOn).toBe(false);
+    expect(
+      warnings.some((w) => w.includes("providers.anthropic.invoiceKeyEnv") && w.includes("MISSING_ADMIN_KEY")),
+    ).toBe(true);
+  });
+
   it("costsFromConfig: `snapshot.alertChannel` is told through the process's poster after the failures in a row the snapshotter counts; a channel with no poster is a warning at wiring time and no alert", async () => {
     const secrets = { named: (n: string) => (n === "CF_ANALYTICS_TOKEN" ? { reveal: () => "cf" } : undefined) };
     const alertCfg = { ...cfg, snapshot: { everyHours: 24, alertChannel: "slack:COPS" } };

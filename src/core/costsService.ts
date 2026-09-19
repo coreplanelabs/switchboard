@@ -2,8 +2,11 @@ import {
   AnthropicCostReportSource,
   CloudflareGraphqlUsageSource,
   NullLlmCostSource,
+  OpenAICostsSource,
+  OpenRouterActivitySource,
   type CostReport,
   type CostsConfig,
+  type InvoiceSource,
 } from "./costs.js";
 import type { CostDimension, CostsByReport } from "./costsBy.js";
 import {
@@ -154,12 +157,12 @@ export function createCostsService(
     groups: () => Object.keys(cfg.groups),
     async report(group, daysParam) {
       const g = groupOf(group);
-      return reportFromSnapshot(await snapshotOrThrow(), group, g, daysParam, meta);
+      return reportFromSnapshot(await snapshotOrThrow(), group, g, daysParam, meta, cfg.prices);
     },
     async byReport(group, daysParam, dimension, viewer) {
       const g = groupOf(group);
       const snapshot = await snapshotOrThrow();
-      const daily = reportFromSnapshot(snapshot, group, g, daysParam, meta);
+      const daily = reportFromSnapshot(snapshot, group, g, daysParam, meta, cfg.prices);
       // Only the user dimension has a "me": the email lookups are spent on it alone.
       const viewerIds =
         dimension === "user"
@@ -226,14 +229,65 @@ function alertOf(
  *  and the CLI's command binding: both sources, the snapshot store behind whichever `*.worker`
  *  block names the state Worker, the snapshotter on `costs.snapshot.everyHours`, the service over
  *  it. Both keys are revealed into their source's constructor and held nowhere else here. */
+/** The provider blocks' invoice half, as `costsFromConfig` reads it: the block's
+ *  name is the biller, `invoiceKeyEnv` names its invoice credential (item 4d). */
+export interface InvoiceBlocks {
+  providers?: Record<string, { invoiceKeyEnv?: string } | undefined>;
+}
+
+/** Which invoice API a biller's block reads: chosen by the block's name — the
+ *  three billing APIs this tree speaks. A block of any other name that names an
+ *  `invoiceKeyEnv` is a warning, never a guess at a stranger's billing API. */
+export const INVOICE_BILLERS = ["anthropic", "openrouter", "openai"] as const;
+
+/** The invoice sources the provider blocks declare (item 4d): one per block
+ *  whose name is a known biller and whose `invoiceKeyEnv` resolves — the
+ *  anthropic block feeds the LLM source below, not a source here. A missing
+ *  credential or an unknown biller warns by name and the biller ties out
+ *  against nothing. */
+function invoiceSourcesOf(blocks: InvoiceBlocks, deps: Pick<CostsFromConfigDeps, "secrets" | "warn">): InvoiceSource[] {
+  const out: InvoiceSource[] = [];
+  for (const [biller, block] of Object.entries(blocks.providers ?? {})) {
+    const env = block?.invoiceKeyEnv;
+    if (!env || biller === "anthropic") continue;
+    if (biller !== "openrouter" && biller !== "openai") {
+      deps.warn(
+        `providers.${biller}.invoiceKeyEnv is set but no invoice API is known for that biller; it ties out against nothing`,
+      );
+      continue;
+    }
+    const key = deps.secrets.named(env);
+    if (!key) {
+      deps.warn(
+        `providers.${biller}.invoiceKeyEnv names ${env} but the env var is unset; the biller ties out against nothing`,
+      );
+      continue;
+    }
+    out.push(
+      biller === "openrouter"
+        ? new OpenRouterActivitySource({ biller, key: key.reveal() })
+        : new OpenAICostsSource({ biller, key: key.reveal() }),
+    );
+  }
+  return out;
+}
+
 export function costsFromConfig(
   cfg: CostsConfig,
-  blocks: StateWorkerBlocks,
+  blocks: StateWorkerBlocks & InvoiceBlocks,
   deps: CostsFromConfigDeps,
 ): CostsWiring | undefined {
   const cloudflareToken = deps.secrets.named(cfg.cloudflareTokenEnv);
   if (!cloudflareToken) return undefined;
-  const adminKey = deps.secrets.named(cfg.anthropicAdminKeyEnv);
+  // The Admin key moved under the block (`providers.anthropic.invoiceKeyEnv`, item 4d);
+  // `costs.anthropicAdminKeyEnv` keeps loading for one release.
+  const anthropicEnv = blocks.providers?.anthropic?.invoiceKeyEnv;
+  const adminKey = deps.secrets.named(anthropicEnv ?? cfg.anthropicAdminKeyEnv);
+  // An unset env warns by name, as the further blocks' do (item 4d) — the LLM line just turning off is easy to miss.
+  if (anthropicEnv !== undefined && !adminKey)
+    deps.warn(
+      `providers.anthropic.invoiceKeyEnv names ${anthropicEnv} but the env var is unset; the LLM cost report is off`,
+    );
   const snapshots = new CostsSnapshotter(
     {
       cloudflare: new CloudflareGraphqlUsageSource({
@@ -241,6 +295,7 @@ export function costsFromConfig(
         token: cloudflareToken.reveal(),
       }),
       llm: adminKey ? new AnthropicCostReportSource({ adminKey: adminKey.reveal() }) : new NullLlmCostSource(),
+      invoices: invoiceSourcesOf(blocks, deps),
       ...(deps.runStore ? { runStore: deps.runStore } : {}),
     },
     buildCostsSnapshotStore(blocks, deps.secrets, deps.warn),

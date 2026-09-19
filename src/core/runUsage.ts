@@ -34,6 +34,11 @@ export interface ModelUsage {
   /** The distinct `priceSource` words the turns carried, sorted — what the
    *  by-model view names as the source. Absent when no turn carried one. */
   priceSources?: string[];
+  /** The aggregator's own fees summed from the turns' `feeUsd` attrs (a BYOK
+   *  turn's OpenRouter charge, model-proxy item 6) — what the per-biller
+   *  tie-out lays against the aggregator's invoiced `usage` (costs.md item
+   *  4d). Absent when no turn carried one. */
+  feeUsd?: number;
 }
 
 export interface RunUsage {
@@ -64,7 +69,10 @@ export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
   // out, so it never turns the model unpriced; a model none of whose turns
   // carried price attrs stays without the fields (a record from before the
   // meter row — the table prices it, costs.md item 4b).
-  const priced = new Map<string, { usd: number; pricedTurns: number; tokenTurns: number; sources: Set<string> }>();
+  const priced = new Map<
+    string,
+    { usd: number; pricedTurns: number; tokenTurns: number; sources: Set<string>; feeUsd?: number }
+  >();
   for (const e of events) {
     if (e.type !== "span_end" || e.name !== MODEL_TURN) continue;
     const attrs = (e.attrs ?? {}) as Record<string, unknown>;
@@ -94,13 +102,18 @@ export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
       p.pricedTurns += 1;
     }
     if (hasSource) p.sources.add(attrs.priceSource as string);
+    if (typeof attrs.feeUsd === "number" && Number.isFinite(attrs.feeUsd)) p.feeUsd = (p.feeUsd ?? 0) + attrs.feeUsd;
     priced.set(model, p);
   }
   for (const [model, p] of priced) {
-    if (p.pricedTurns === 0 && p.sources.size === 0) continue;
+    if (p.pricedTurns === 0 && p.sources.size === 0 && p.feeUsd === undefined) continue;
     const m = usage.byModel[model]!;
-    m.usd = p.pricedTurns >= p.tokenTurns ? p.usd : null;
+    // A model whose turns carried only a fee stays without `usd`: the price
+    // table still prices its tokens (costs.md item 4b); usd:null here would
+    // turn "table prices it" into "unpriced".
+    if (p.pricedTurns > 0 || p.sources.size > 0) m.usd = p.pricedTurns >= p.tokenTurns ? p.usd : null;
     if (p.sources.size > 0) m.priceSources = [...p.sources].sort();
+    if (p.feeUsd !== undefined) m.feeUsd = p.feeUsd;
   }
   return usage;
 }
@@ -130,6 +143,8 @@ export function addUsage(a: RunUsage, b: RunUsage): RunUsage {
       else acc.usd = usd;
       const sources = new Set([...(acc.priceSources ?? []), ...(m.priceSources ?? [])]);
       if (sources.size > 0) acc.priceSources = [...sources].sort();
+      // Fees sum plainly: an absent side simply contributed none.
+      if (m.feeUsd !== undefined) acc.feeUsd = (acc.feeUsd ?? 0) + m.feeUsd;
     }
   }
   return out;
@@ -145,6 +160,7 @@ const isModelUsage = (v: unknown): v is ModelUsage => {
   )
     return false;
   if (m.usd !== undefined && m.usd !== null && typeof m.usd !== "number") return false;
+  if (m.feeUsd !== undefined && typeof m.feeUsd !== "number") return false;
   return (
     m.priceSources === undefined ||
     (Array.isArray(m.priceSources) && m.priceSources.every((s) => typeof s === "string"))

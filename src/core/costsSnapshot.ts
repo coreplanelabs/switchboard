@@ -1,11 +1,15 @@
 import {
+  buildBillerTieOuts,
   buildCostReport,
+  invoiceDaysOf,
   MAX_DAYS,
   resolveRange,
+  type BillerInvoices,
   type CloudflareUsageSource,
   type CostGroupConfig,
   type CostReport,
   type CostReportMeta,
+  type InvoiceSource,
   type LlmCostSource,
 } from "./costs.js";
 import { buildCostsByReport, type CostDimension, type CostsByReport } from "./costsBy.js";
@@ -103,6 +107,11 @@ export interface CostsSnapshotStatus {
 export interface CostsSnapshotSources {
   cloudflare: CloudflareUsageSource;
   llm: LlmCostSource;
+  /** The biller the `llm` source's rows invoice (the anthropic block's name);
+   *  its invoice days are folded from the rows already fetched, never a second read. */
+  llmBiller?: string;
+  /** One invoice source per further block that names one (item 4d). */
+  invoices?: InvoiceSource[];
   runStore?: RunStore;
 }
 
@@ -113,6 +122,8 @@ export interface TakeOptions {
   now?: () => Date;
   /** The take's start, when the caller already read the clock for it. */
   startedAt?: Date;
+  /** Told when an invoice source fails: the take degrades that biller to "no invoice", never fails. */
+  warn?: (message: string) => void;
 }
 
 const stampOf = (s: CostsSnapshot): CostsSnapshotStamp => ({
@@ -144,13 +155,34 @@ export async function takeCostsSnapshot(sources: CostsSnapshotSources, opts: Tak
   const startedAt = opts.startedAt ?? now();
   const range = resolveRange(String(SNAPSHOT_DAYS), startedAt);
   const store = sources.runStore instanceof NullRunStore ? undefined : sources.runStore;
-  const [usage, llm, runUsage] = await Promise.all([
+  const [usage, llm, runUsage, fetched] = await Promise.all([
     sources.cloudflare.fetchUsage(range),
     sources.llm.fetchDailyCost(range),
     store
       ? readRunUsage(store, Date.parse(`${range.from}T00:00:00Z`), Date.parse(`${range.to}T00:00:00Z`) + 86_400_000)
       : Promise.resolve(null),
+    Promise.all(
+      // A failing invoice source degrades, never fails the take: the tie-out is
+      // a side table, and one revoked management key must not stale the
+      // Cloudflare and Anthropic figures behind the backoff (item 4d). The
+      // biller then ties out against nothing ("no invoice") until a take reads it.
+      (sources.invoices ?? []).map(async (s): Promise<BillerInvoices | null> => {
+        try {
+          return { biller: s.biller, days: await s.fetchInvoice(range) };
+        } catch (err) {
+          (opts.warn ?? (() => undefined))(
+            `${s.biller} invoice not read — it ties out against nothing this snapshot: ${message(err)}`,
+          );
+          return null;
+        }
+      }),
+    ),
   ]);
+  // The llm source's rows ARE its biller's invoice (item 4d): folded, never fetched twice.
+  const invoices: BillerInvoices[] = [
+    ...(llm !== null ? [{ biller: sources.llmBiller ?? "anthropic", days: invoiceDaysOf(llm) }] : []),
+    ...fetched.filter((i): i is BillerInvoices => i !== null),
+  ];
   return {
     takenAt: startedAt.toISOString(),
     takenBy: opts.by,
@@ -159,6 +191,7 @@ export async function takeCostsSnapshot(sources: CostsSnapshotSources, opts: Tak
     usage,
     llm,
     runUsage,
+    invoices: invoices.length > 0 ? invoices : null,
   };
 }
 
@@ -170,12 +203,20 @@ export function reportFromSnapshot(
   cfg: CostGroupConfig,
   daysParam: string | null,
   meta: Omit<CostReportMeta, "generatedAt">,
+  prices: ModelPriceTable = NO_PRICES,
 ): CostReport {
   const at = Date.parse(snapshot.takenAt);
   const range = resolveRange(daysParam, new Date(at));
+  // The per-biller tie-out (item 4d): each biller's invoice against the runs
+  // billed to it, over the same rows and the same price table as every other
+  // surface. Installation-wide, so it is the same on every group's report.
+  const invoices = snapshot.invoices ?? null;
+  const cells = snapshot.runUsage?.rows ?? null;
+  const billers = invoices !== null || cells !== null ? buildBillerTieOuts(invoices, cells, range, prices) : undefined;
   return {
     ...buildCostReport(group, cfg, snapshot.usage, snapshot.llm, range, { ...meta, generatedAt: at }),
     snapshot: stampOf(snapshot),
+    ...(billers !== undefined ? { billers } : {}),
   };
 }
 
@@ -279,7 +320,7 @@ export class CostsSnapshotter {
   refresh(by: string): Promise<CostsSnapshot> {
     if (this.taking) return this.taking.promise;
     const startedAt = this.now();
-    const promise = takeCostsSnapshot(this.sources, { by, startedAt, now: this.now })
+    const promise = takeCostsSnapshot(this.sources, { by, startedAt, now: this.now, warn: this.warn })
       .then(async (snapshot) => {
         this.memory = snapshot;
         const failed = this.lastFailure;

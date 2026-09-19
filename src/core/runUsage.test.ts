@@ -173,6 +173,29 @@ describe("usageOfEvents", () => {
     const other = usageOfEvents([turn("m2", tokens, 1)]);
     expect(addUsage(priced, other).byModel.m1.usd).toBe(0.5);
   });
+
+  it("sums the turns' feeUsd per model — the aggregator's own BYOK charge the per-biller tie-out lays against its invoice — and folds it through addUsage; absent when no turn carried one", () => {
+    const tokens = { inputTokens: 1, outputTokens: 1 };
+    const byok = usageOfEvents([
+      turn("openrouter/anthropic/claude-opus-5", { ...tokens, usd: 2.1, feeUsd: 0.1, priceSource: "provider" }, 1),
+      turn("openrouter/anthropic/claude-opus-5", { ...tokens, usd: 1.05, feeUsd: 0.05, priceSource: "provider" }, 2),
+    ]);
+    const ref = "openrouter/anthropic/claude-opus-5";
+    expect(byok.byModel[ref]!.feeUsd).toBeCloseTo(0.15, 10);
+    const direct = usageOfEvents([turn(ref, { ...tokens, usd: 0.5, priceSource: "provider" }, 1)]);
+    expect(direct.byModel[ref]!.feeUsd).toBeUndefined();
+    const sum = addUsage(byok, direct);
+    expect(sum.byModel[ref]!.feeUsd).toBeCloseTo(0.15, 10);
+    expect(sum.byModel[ref]!.usd).toBeCloseTo(3.65, 10);
+    expect(isRunUsage(sum)).toBe(true);
+    expect(isRunUsage({ turns: 1, byModel: { m: { ...direct.byModel[ref]!, feeUsd: "x" } } })).toBe(false);
+    // a turn carrying a fee but no usd keeps the model without `usd`: the price
+    // table still prices its tokens (costs.md item 4b), never "unpriced"
+    const feeOnly = usageOfEvents([turn(ref, { ...tokens, feeUsd: 0.02 }, 1)]);
+    expect(feeOnly.byModel[ref]!.feeUsd).toBeCloseTo(0.02, 10);
+    expect(feeOnly.byModel[ref]!.usd).toBeUndefined();
+    expect(feeOnly.byModel[ref]!.priceSources).toBeUndefined();
+  });
 });
 
 describe("aggregateUsage", () => {

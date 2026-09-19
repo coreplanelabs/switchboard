@@ -1,4 +1,4 @@
-import type { CloudflareUsage, DateRange, LlmCostRow } from "./costs.js";
+import type { BillerInvoices, CloudflareUsage, DateRange, LlmCostRow } from "./costs.js";
 import { isRunUsageReport, type RunUsageReport } from "./runUsage.js";
 import {
   DEFAULT_STATE_WORKER_TOKEN_ENV,
@@ -48,6 +48,9 @@ export interface CostsSnapshot {
   llm: LlmCostRow[] | null;
   /** The run history's per-user usage over the window; null with run history off. */
   runUsage: RunUsageReport | null;
+  /** Each biller's invoice days over the window (item 4d); null when no invoice
+   *  source is configured, absent on a snapshot taken before the field existed. */
+  invoices?: BillerInvoices[] | null;
 }
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -102,6 +105,27 @@ function isLlmRows(v: unknown): v is LlmCostRow[] {
   );
 }
 
+function isInvoices(v: unknown): v is BillerInvoices[] {
+  return (
+    Array.isArray(v) &&
+    v.every((entry) => {
+      if (typeof entry !== "object" || entry === null) return false;
+      const e = entry as Record<string, unknown>;
+      if (typeof e.biller !== "string" || !e.biller) return false;
+      return (
+        Array.isArray(e.days) &&
+        e.days.every((row) => {
+          if (typeof row !== "object" || row === null) return false;
+          const r = row as Record<string, unknown>;
+          if (typeof r.date !== "string" || !ISO_DAY.test(r.date) || !isFiniteNumber(r.amountUsd)) return false;
+          if (r.byokUsd !== undefined && !isFiniteNumber(r.byokUsd)) return false;
+          return r.estimated === undefined || typeof r.estimated === "boolean";
+        })
+      );
+    })
+  );
+}
+
 /** The fields the arithmetic reads, present and of the right kind; the rows are the sources'. */
 export function isCostsSnapshot(v: unknown): v is CostsSnapshot {
   if (typeof v !== "object" || v === null) return false;
@@ -113,6 +137,7 @@ export function isCostsSnapshot(v: unknown): v is CostsSnapshot {
   if (typeof usage !== "object" || usage === null) return false;
   if (!USAGE_DATASETS.every((name) => isDatedRows(usage[name]))) return false;
   if (s.llm !== null && !isLlmRows(s.llm)) return false;
+  if (s.invoices !== undefined && s.invoices !== null && !isInvoices(s.invoices)) return false;
   return s.runUsage === null || isRunUsageReport(s.runUsage);
 }
 

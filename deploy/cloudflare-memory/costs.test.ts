@@ -92,8 +92,10 @@ describe.sequential("CostsSnapshotDO routes", () => {
     expect((await SELF.fetch(`${BASE}/costs/snapshot/get`, { method: "GET" })).status).toBe(405);
   });
 
-  it("put stores the snapshot and get returns it verbatim — LLM rows and run usage included — and a later put replaces it whole", async () => {
-    const first = snapshot();
+  it("put stores the snapshot and get returns it verbatim — LLM rows, run usage and the invoices part included — and a later put replaces it whole (a snapshot without invoices stays without the key)", async () => {
+    const first = snapshot({
+      invoices: [{ biller: "openrouter", days: [{ date: SEP_16, amountUsd: 0.1, byokUsd: 2 }] }],
+    });
     expect((await post("/costs/snapshot/put", { snapshot: first })).data).toEqual({ ok: true });
     expect((await post("/costs/snapshot/get", {})).data).toEqual({ snapshot: first });
     const second = snapshot({ takenAt: `${SEP_17}T06:15:00.000Z`, takenBy: "casey", llm: null, runUsage: null });

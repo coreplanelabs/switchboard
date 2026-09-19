@@ -13,6 +13,8 @@ import { postCommand } from "../lib/settingsApi";
 import { useWallClock } from "../lib/wallClock";
 import {
   accountLabelOf,
+  billerHasByok,
+  billerTieOutLineOf,
   DO_LABEL,
   linksOf,
   LLM_LABEL,
@@ -218,6 +220,10 @@ const projectionLine = computed(() => {
 });
 /** Newest first: the open day on top, where the eye lands. */
 const daysNewestFirst = computed(() => (report.value ? [...report.value.days].reverse() : []));
+/** The per-biller tie-out (costs.md item 4d): rides the daily report, the same on every group. */
+const billers = computed(() => report.value?.billers ?? []);
+/** A biller's days newest first, like the daily table. */
+const tieOutDays = (t: (typeof billers.value)[number]) => [...t.days].reverse();
 /** The range presets. Both billing sources bucket by UTC day (the cost report
  *  offers nothing finer), so the short one is today, not a rolling 24 hours. */
 const ranges = [1, 7, 30];
@@ -538,6 +544,83 @@ function monthDay(date: string): string {
       <p class="text-xs text-muted">
         Machine-readable twin:
         <code class="rounded bg-accented px-1 py-0.5">GET /costs/{{ report.group }}.json</code> (same Access gate).
+      </p>
+    </section>
+
+    <!-- The per-biller tie-out (costs.md item 4d): each biller's own invoice laid
+         against the runs billed to it, per day. Installation-wide, so the same
+         on every group; a biller without a source says "no invoice". -->
+    <section
+      v-if="view === 'daily' && billers.length"
+      class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4"
+      data-billers
+    >
+      <div>
+        <h2 class="text-[0.9375rem] font-medium">Invoice tie-out</h2>
+        <p class="text-sm text-muted">
+          Each biller's own invoice against the runs billed to it · installation-wide, the same on every group
+        </p>
+      </div>
+      <div v-for="t in billers" :key="t.biller" class="grid gap-1.5" :data-biller="t.biller">
+        <p class="text-sm">
+          <b class="font-mono">{{ t.biller }}</b>
+          <span class="text-muted"> — {{ billerTieOutLineOf(t) }}</span>
+        </p>
+        <div class="overflow-x-auto">
+          <table class="data w-full border-collapse whitespace-nowrap font-mono text-[0.8125rem] tabular-nums">
+            <thead>
+              <tr>
+                <th
+                  class="border-b border-muted bg-(--ui-bg-muted) px-2.5 py-1.5 text-left text-xs font-medium text-muted"
+                >
+                  Date
+                </th>
+                <template v-if="billerHasByok(t)">
+                  <th
+                    v-for="h in ['Fees invoiced', 'Fees attributed', 'BYOK invoiced', 'Upstream attributed']"
+                    :key="h"
+                    class="border-b border-muted bg-(--ui-bg-muted) px-2.5 py-1.5 text-right text-xs font-medium text-muted"
+                  >
+                    {{ h }}
+                  </th>
+                </template>
+                <template v-else>
+                  <th
+                    v-for="h in ['Invoiced', 'Attributed']"
+                    :key="h"
+                    class="border-b border-muted bg-(--ui-bg-muted) px-2.5 py-1.5 text-right text-xs font-medium text-muted"
+                  >
+                    {{ h }}
+                  </th>
+                </template>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="d in tieOutDays(t)" :key="d.date">
+                <td class="border-b border-muted px-2.5 py-1.5" :title="d.date">
+                  {{ monthDay(d.date) }}
+                  <span v-if="d.estimated" class="text-xs text-dimmed">(estimate)</span>
+                </td>
+                <td class="border-b border-muted px-2.5 py-1.5 text-right">
+                  {{ t.hasInvoice ? (d.invoiceUsd !== null ? usd(d.invoiceUsd, 3) : "—") : "no invoice" }}
+                </td>
+                <template v-if="billerHasByok(t)">
+                  <td class="border-b border-muted px-2.5 py-1.5 text-right">{{ usd(d.feeUsd, 3) }}</td>
+                  <td class="border-b border-muted px-2.5 py-1.5 text-right">
+                    {{ d.byokUsd !== null ? usd(d.byokUsd, 3) : "—" }}
+                  </td>
+                  <td class="border-b border-muted px-2.5 py-1.5 text-right">{{ usd(d.upstreamUsd, 3) }}</td>
+                </template>
+                <td v-else class="border-b border-muted px-2.5 py-1.5 text-right">{{ usd(d.attributedUsd, 3) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p class="text-xs text-muted">
+        The spans' own dollars are kept, the price table prices the rest, unpriced tokens are named — never $0. An
+        aggregator's invoice is its fees; what the vendors billed upstream through your own keys ties against the
+        remainder.
       </p>
     </section>
 

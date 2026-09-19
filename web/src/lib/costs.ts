@@ -1,4 +1,4 @@
-import type { CostReport, DailyCost } from "@core/core/costs.js";
+import type { BillerTieOut, CostReport, DailyCost } from "@core/core/costs.js";
 import type { CostsSnapshotStatus } from "@core/core/costsSnapshot.js";
 import { snapshotAgeText, untilText } from "@core/core/snapshotAge.js";
 import { snapshotTime } from "./delivery";
@@ -67,6 +67,23 @@ export const PLATFORM_LABEL = "Workers · storage · R2";
 export const LLM_LABEL = "LLM (Anthropic)";
 
 export const usd = (v: number, digits = 2): string => `$${v.toFixed(digits)}`;
+
+/** A biller's tie-out header line (costs.md item 4d): its invoice totals against
+ *  the rows billed to it — an aggregator's fees and BYOK split laid out apart —
+ *  or "no invoice" for a biller without a source; unpriced tokens named, never $0. */
+export function billerTieOutLineOf(t: BillerTieOut): string {
+  const unpriced =
+    t.totals.unpricedTokens > 0 ? ` · ${t.totals.unpricedTokens.toLocaleString("en-US")} tokens unpriced` : "";
+  if (!t.hasInvoice) return `no invoice — attributed ${usd(t.totals.attributedUsd)}${unpriced}`;
+  if (t.totals.byokUsd !== null)
+    return `fees invoiced ${usd(t.totals.invoiceUsd ?? 0)} vs attributed ${usd(t.totals.feeUsd)} · BYOK invoiced ${usd(t.totals.byokUsd)} vs upstream ${usd(t.totals.upstreamUsd)}${unpriced}`;
+  return `invoiced ${usd(t.totals.invoiceUsd ?? 0)} vs attributed ${usd(t.totals.attributedUsd)}${unpriced}`;
+}
+
+/** Whether a biller's tie-out shows the aggregator columns: fees against the
+ *  invoice, BYOK against the upstream remainder (costs.md item 4d). */
+export const billerHasByok = (t: BillerTieOut): boolean =>
+  t.totals.byokUsd !== null || t.days.some((d) => d.byokUsd !== null);
 
 /** The day's Workers + SQLite rows/storage + R2 + Workflows spend. */
 export const platformUsdOf = (d: DailyCost): number =>

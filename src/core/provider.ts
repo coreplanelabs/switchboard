@@ -153,6 +153,13 @@ export interface ProviderConfig {
   passthrough?: Record<string, unknown>;
   /** Env var holding the API key (never put keys in config files). */
   apiKeyEnv?: string;
+  /** Env var holding the biller's INVOICE credential — not the completion key:
+   *  Anthropic's Admin API key (`sk-ant-admin…`, the cost report), OpenRouter's
+   *  management key (`GET /api/v1/activity`), OpenAI's admin key
+   *  (`GET /v1/organization/costs`). Named on the block because the block IS the
+   *  biller (record 0052): the costs page's per-biller tie-out reads each
+   *  block's invoice through it (docs/reference/specs/costs.md item 4d). */
+  invoiceKeyEnv?: string;
   /** Base URL for openai-compatible providers (e.g. http://localhost:11434/v1). */
   baseUrl?: string;
 }

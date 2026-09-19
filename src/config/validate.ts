@@ -530,6 +530,7 @@ const PROVIDER_KEYS: Record<keyof ProviderConfig, true> = {
   models: true,
   passthrough: true,
   apiKeyEnv: true,
+  invoiceKeyEnv: true,
   baseUrl: true,
 };
 
@@ -641,6 +642,8 @@ export function validateProviders(cfg: AppConfig, source: string): void {
       throw new Error(`${path}.passthrough must be a mapping of body fields`);
     if (b.apiKeyEnv !== undefined && typeof b.apiKeyEnv !== "string")
       throw new Error(`${path}.apiKeyEnv must be a string`);
+    if (b.invoiceKeyEnv !== undefined && typeof b.invoiceKeyEnv !== "string")
+      throw new Error(`${path}.invoiceKeyEnv must be a string`);
     if (b.baseUrl !== undefined && typeof b.baseUrl !== "string") throw new Error(`${path}.baseUrl must be a string`);
     if (b.models !== undefined) {
       if (typeof b.models !== "object" || b.models === null || Array.isArray(b.models))

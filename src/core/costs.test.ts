@@ -17,6 +17,11 @@ import {
   r2OperationClass,
   r2OperationsCostUsd,
   resolveRange,
+  buildBillerTieOuts,
+  billerOfRef,
+  invoiceDaysOf,
+  OpenAICostsSource,
+  OpenRouterActivitySource,
   storageDayCostUsd,
   workersCostUsd,
   workflowsCostUsd,
@@ -1004,5 +1009,231 @@ describe("AnthropicCostReportSource", () => {
 describe("NullLlmCostSource", () => {
   it("answers null so the report can say 'not configured' instead of $0", async () => {
     expect(await new NullLlmCostSource().fetchDailyCost(RANGE)).toBeNull();
+  });
+});
+
+// ---- invoice sources per biller and the tie-out (item 4d) ------------------------------
+
+describe("the per-biller tie-out (item 4d)", () => {
+  const model = (over: Partial<import("./runUsage.js").ModelUsage>) => ({
+    turns: 1,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ...over,
+  });
+  const cell = (day: string, byModel: Record<string, ReturnType<typeof model>>) => ({
+    day,
+    userId: "slack:UALICE",
+    threadKey: "slack:C1:1.0",
+    channelId: "slack:C1",
+    agent: "general",
+    runs: 1,
+    wallMs: 1_000,
+    usage: { turns: Object.values(byModel).reduce((s, m) => s + m.turns, 0), byModel },
+  });
+  const range = { from: AUG_28, to: AUG_29, days: 2, partialLastDay: false };
+
+  it("ties three billers out independently on one day: each biller's invoice against only the rows whose biller is that block", () => {
+    const cells = [
+      cell(AUG_28, {
+        "anthropic/claude-opus-5": model({ usd: 4, priceSources: ["provider"] }),
+        "openrouter/anthropic/claude-opus-5": model({ usd: 2, priceSources: ["provider"] }),
+        "openai/gpt-5": model({ usd: 1, priceSources: ["provider"] }),
+      }),
+    ];
+    const invoices = [
+      { biller: "anthropic", days: [{ date: AUG_28, amountUsd: 4.5 }] },
+      { biller: "openrouter", days: [{ date: AUG_28, amountUsd: 2.1, byokUsd: 0 }] },
+      { biller: "openai", days: [{ date: AUG_28, amountUsd: 1.2 }] },
+    ];
+    const out = buildBillerTieOuts(invoices, cells, range);
+    expect(out.map((b) => b.biller)).toEqual(["anthropic", "openai", "openrouter"]);
+    const of = (b: string) => out.find((t) => t.biller === b)!;
+    expect(of("anthropic").days).toEqual([
+      {
+        date: AUG_28,
+        invoiceUsd: 4.5,
+        byokUsd: null,
+        estimated: false,
+        attributedUsd: 4,
+        feeUsd: 0,
+        upstreamUsd: 4,
+        unpricedTokens: 0,
+      },
+    ]);
+    expect(of("openrouter").days[0]).toMatchObject({ invoiceUsd: 2.1, attributedUsd: 2, byokUsd: 0 });
+    expect(of("openai").days[0]).toMatchObject({ invoiceUsd: 1.2, attributedUsd: 1 });
+    expect(of("openai").totals).toMatchObject({ invoiceUsd: 1.2, attributedUsd: 1, upstreamUsd: 1 });
+    for (const t of out) expect(t.hasInvoice).toBe(true);
+  });
+
+  it("splits a BYOK day: the aggregator's usage lies against the summed feeUsd and its byok_usage_inference against the remainder", () => {
+    const cells = [
+      cell(AUG_28, {
+        "openrouter/anthropic/claude-opus-5": model({ usd: 2.1, feeUsd: 0.1, priceSources: ["provider"] }),
+      }),
+    ];
+    const invoices = [{ biller: "openrouter", days: [{ date: AUG_28, amountUsd: 0.1, byokUsd: 2 }] }];
+    const [tie] = buildBillerTieOuts(invoices, cells, range);
+    expect(tie!.days[0]).toEqual({
+      date: AUG_28,
+      invoiceUsd: 0.1,
+      byokUsd: 2,
+      estimated: false,
+      attributedUsd: 2.1,
+      feeUsd: 0.1,
+      upstreamUsd: 2,
+      unpricedTokens: 0,
+    });
+    expect(tie!.totals).toEqual({
+      invoiceUsd: 0.1,
+      byokUsd: 2,
+      attributedUsd: 2.1,
+      feeUsd: 0.1,
+      upstreamUsd: 2,
+      unpricedTokens: 0,
+    });
+  });
+
+  it("a biller with no invoice source ties out against nothing — hasInvoice false, every invoice figure null — and unpriced tokens are reported, never $0", () => {
+    const cells = [
+      cell(AUG_28, { "groq/llama-4": model({ inputTokens: 500, outputTokens: 100, usd: null }) }),
+      cell(AUG_29, { "groq/llama-4": model({ usd: 0.5, priceSources: ["operator"] }) }),
+    ];
+    const [tie] = buildBillerTieOuts([], cells, range);
+    expect(tie!.biller).toBe("groq");
+    expect(tie!.hasInvoice).toBe(false);
+    expect(tie!.days.map((d) => d.invoiceUsd)).toEqual([null, null]);
+    expect(tie!.days[0]).toMatchObject({ attributedUsd: 0, unpricedTokens: 600 });
+    expect(tie!.days[1]).toMatchObject({ attributedUsd: 0.5 });
+    expect(tie!.totals).toMatchObject({ invoiceUsd: null, byokUsd: null, attributedUsd: 0.5, unpricedTokens: 600 });
+  });
+
+  it("an unpriced row's fee stays out of the split — upstreamUsd never reads negative, the tokens reported as unpriced", () => {
+    const cells = [
+      cell(AUG_28, {
+        "openrouter/strange/unknown-model": model({ usd: null, feeUsd: 0.02, inputTokens: 400, outputTokens: 100 }),
+      }),
+    ];
+    const [tie] = buildBillerTieOuts([], cells, range);
+    expect(tie!.days[0]).toMatchObject({ attributedUsd: 0, feeUsd: 0, upstreamUsd: 0, unpricedTokens: 500 });
+    expect(tie!.totals).toMatchObject({ feeUsd: 0, upstreamUsd: 0, unpricedTokens: 500 });
+  });
+
+  it("folds the anthropic rows into invoice days: every workspace summed per day, the estimate carried, a bare model ref tied to no biller", () => {
+    const rows: LlmCostRow[] = [
+      { date: AUG_28, workspaceId: "wrkspc_a", amountUsd: 3 },
+      { date: AUG_28, workspaceId: null, amountUsd: 1 },
+      { date: AUG_29, workspaceId: "wrkspc_a", amountUsd: 2, estimated: true },
+    ];
+    expect(invoiceDaysOf(rows)).toEqual([
+      { date: AUG_28, amountUsd: 4 },
+      { date: AUG_29, amountUsd: 2, estimated: true },
+    ]);
+    expect(billerOfRef("unknown")).toBeUndefined();
+    expect(billerOfRef("openrouter/anthropic/claude-opus-5")).toBe("openrouter");
+  });
+});
+
+describe("OpenRouterActivitySource", () => {
+  it("sums the activity rows per day within the range — usage and byok_usage_inference — with the key only in Authorization", async () => {
+    const f = fakeFetch(() => ({
+      status: 200,
+      body: {
+        data: [
+          { date: AUG_28, model: "anthropic/claude-opus-5", usage: 0.05, byok_usage_inference: 1.5 },
+          { date: `${AUG_28} 00:00:00`, model: "openai/gpt-5", usage: 0.4, byok_usage_inference: 0 },
+          { date: iso(2026, 1, 1), model: "old/row", usage: 9, byok_usage_inference: 9 },
+        ],
+      },
+    }));
+    const source = new OpenRouterActivitySource({ biller: "openrouter", key: "sk-or-mgmt", fetchImpl: f.fetchImpl });
+    const days = await source.fetchInvoice({ from: AUG_28, to: AUG_29, days: 2, partialLastDay: false });
+    expect(days).toEqual([{ date: AUG_28, amountUsd: 0.45, byokUsd: 1.5 }]);
+    expect(f.calls[0]!.url).toBe("https://openrouter.ai/api/v1/activity");
+    expect((f.calls[0]!.init.headers as Record<string, string>).authorization).toBe("Bearer sk-or-mgmt");
+    expect(f.calls[0]!.url).not.toContain("sk-or-mgmt");
+  });
+
+  it("fails by status without the credential on a non-200", async () => {
+    const f = fakeFetch(() => ({ status: 401, body: { error: "bad key" } }));
+    const source = new OpenRouterActivitySource({ biller: "openrouter", key: "sk-or-mgmt", fetchImpl: f.fetchImpl });
+    await expect(source.fetchInvoice(resolveRange("2"))).rejects.toThrow(/openrouter activity 401/);
+    await expect(source.fetchInvoice(resolveRange("2"))).rejects.not.toThrow(/sk-or-mgmt/);
+  });
+});
+
+describe("OpenAICostsSource", () => {
+  const bucket = (date: string, values: number[]) => ({
+    start_time: Date.parse(`${date}T00:00:00Z`) / 1000,
+    results: values.map((value) => ({ amount: { value, currency: "usd" } })),
+  });
+
+  it("sums daily buckets to dollars, paginating via next_page with the key only in Authorization", async () => {
+    const f = fakeFetch((url) => {
+      if (url.includes("page=p2"))
+        return { status: 200, body: { data: [bucket(AUG_29, [0.5])], has_more: false, next_page: null } };
+      return { status: 200, body: { data: [bucket(AUG_28, [1, 0.25])], has_more: true, next_page: "p2" } };
+    });
+    const source = new OpenAICostsSource({ biller: "openai", key: "sk-admin", fetchImpl: f.fetchImpl });
+    const days = await source.fetchInvoice({ from: AUG_28, to: AUG_29, days: 2, partialLastDay: false });
+    expect(days).toEqual([
+      { date: AUG_28, amountUsd: 1.25 },
+      { date: AUG_29, amountUsd: 0.5 },
+    ]);
+    expect(f.calls[0]!.url).toContain("https://api.openai.com/v1/organization/costs");
+    expect((f.calls[0]!.init.headers as Record<string, string>).authorization).toBe("Bearer sk-admin");
+    expect(f.calls[0]!.url).not.toContain("sk-admin");
+  });
+
+  it("skips a bucket without a parseable start_time and drops buckets outside the range, never filing under 1970-01-01", async () => {
+    const f = fakeFetch(() => ({
+      status: 200,
+      body: {
+        data: [
+          bucket(AUG_28, [1]),
+          { results: [{ amount: { value: 9, currency: "usd" } }] }, // no start_time — skipped, not epoch 0
+          bucket(iso(2026, 1, 1), [9]), // outside the range — dropped
+        ],
+        has_more: false,
+      },
+    }));
+    const source = new OpenAICostsSource({ biller: "openai", key: "sk-admin", fetchImpl: f.fetchImpl });
+    const days = await source.fetchInvoice({ from: AUG_28, to: AUG_29, days: 2, partialLastDay: false });
+    expect(days).toEqual([{ date: AUG_28, amountUsd: 1 }]);
+  });
+
+  it("refuses an invoice row in a currency other than USD, as today", async () => {
+    const f = fakeFetch(() => ({
+      status: 200,
+      body: {
+        data: [
+          {
+            start_time: Date.parse(`${AUG_28}T00:00:00Z`) / 1000,
+            results: [{ amount: { value: 1, currency: "eur" } }],
+          },
+        ],
+        has_more: false,
+      },
+    }));
+    const source = new OpenAICostsSource({ biller: "openai", key: "sk-admin", fetchImpl: f.fetchImpl });
+    await expect(source.fetchInvoice({ from: AUG_28, to: AUG_29, days: 2, partialLastDay: false })).rejects.toThrow(
+      /unexpected currency eur/,
+    );
+  });
+
+  it("refuses a report still paginating past 20 pages rather than truncating, and fails by status without the key", async () => {
+    const paging = fakeFetch(() => ({
+      status: 200,
+      body: { data: [bucket(AUG_28, [1])], has_more: true, next_page: "again" },
+    }));
+    const source = new OpenAICostsSource({ biller: "openai", key: "sk-admin", fetchImpl: paging.fetchImpl });
+    await expect(source.fetchInvoice(resolveRange("2"))).rejects.toThrow(/more than 20 pages/);
+    const bad = fakeFetch(() => ({ status: 500, body: {} }));
+    const failing = new OpenAICostsSource({ biller: "openai", key: "sk-admin", fetchImpl: bad.fetchImpl });
+    await expect(failing.fetchInvoice(resolveRange("2"))).rejects.toThrow(/openai costs 500/);
+    await expect(failing.fetchInvoice(resolveRange("2"))).rejects.not.toThrow(/sk-admin/);
   });
 });

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildBillerTieOuts,
   buildCostReport,
   EMPTY_USAGE,
+  invoiceDaysOf,
   resolveRange,
   type CloudflareUsage,
   type CostGroupConfig,
@@ -226,6 +228,56 @@ describe("takeCostsSnapshot", () => {
     });
     expect(nullStore.runUsage).toBeNull();
   });
+
+  it("carries each biller's invoice days (item 4d): the llm source's rows folded under its biller without a second read, every further invoice source fetched over the same window; null with none configured", async () => {
+    const ranges: unknown[] = [];
+    const { sources } = sourcesOf({
+      invoices: [
+        {
+          biller: "openrouter",
+          fetchInvoice: async (range) => {
+            ranges.push(range);
+            return [{ date: SEP_15, amountUsd: 0.1, byokUsd: 2 }];
+          },
+        },
+      ],
+    });
+    const snapshot = await takeCostsSnapshot(sources, { now: clock().now, by: "x" });
+    const window = resolveRange(String(SNAPSHOT_DAYS), new Date(T0));
+    expect(ranges).toEqual([window]);
+    expect(snapshot.invoices).toEqual([
+      { biller: "anthropic", days: invoiceDaysOf(LLM) },
+      { biller: "openrouter", days: [{ date: SEP_15, amountUsd: 0.1, byokUsd: 2 }] },
+    ]);
+    const none = await takeCostsSnapshot(
+      { ...sourcesOf().sources, llm: { fetchDailyCost: async () => null }, invoices: [] },
+      { now: clock().now, by: "x" },
+    );
+    expect(none.invoices).toBeNull();
+  });
+
+  it("a failing invoice source degrades, never fails the take: warned by name, its biller absent from the invoices (tying out against nothing), the other figures fresh", async () => {
+    const warnings: string[] = [];
+    const { sources } = sourcesOf({
+      invoices: [
+        {
+          biller: "openrouter",
+          fetchInvoice: async () => {
+            throw new Error("HTTP 401");
+          },
+        },
+        { biller: "openai", fetchInvoice: async () => [{ date: SEP_15, amountUsd: 3 }] },
+      ],
+    });
+    const snapshot = await takeCostsSnapshot(sources, { now: clock().now, by: "x", warn: (m) => warnings.push(m) });
+    expect(snapshot.usage).toEqual(USAGE);
+    expect(snapshot.llm).toEqual(LLM);
+    expect(snapshot.invoices).toEqual([
+      { biller: "anthropic", days: invoiceDaysOf(LLM) },
+      { biller: "openai", days: [{ date: SEP_15, amountUsd: 3 }] },
+    ]);
+    expect(warnings).toEqual(["openrouter invoice not read — it ties out against nothing this snapshot: HTTP 401"]);
+  });
 });
 
 // ---- reports from a snapshot ---------------------------------------------------
@@ -250,10 +302,27 @@ describe("reportFromSnapshot / byReportFromSnapshot", () => {
       expect(got).toEqual({
         ...expected,
         snapshot: { takenAt: snapshot.takenAt, takenBy: "schedule", durationMs: 31_000 },
+        // The per-biller tie-out (item 4d) rides every snapshot report; the snapshot carries no invoices here.
+        billers: buildBillerTieOuts(null, RUN_USAGE.rows, range),
       });
     }
     const week = reportFromSnapshot(snapshot, "switchboard", GROUP, "7", meta);
     expect(week.range).toEqual({ from: SEP_10, to: SEP_16, days: 7, partialLastDay: true });
+    // The per-biller tie-out (item 4d): the snapshot's invoices against the runs
+    // billed to each biller over the report's own range; absent only on a
+    // snapshot with neither invoices nor run history.
+    const invoiced = reportFromSnapshot(
+      { ...snapshot, invoices: [{ biller: "anthropic", days: invoiceDaysOf(LLM) }] },
+      "switchboard",
+      GROUP,
+      "7",
+      meta,
+    );
+    expect(invoiced.billers?.map((b) => b.biller)).toEqual(["anthropic"]);
+    expect(invoiced.billers?.[0]?.hasInvoice).toBe(true);
+    expect(invoiced.billers?.[0]?.totals.invoiceUsd).toBe(52.5);
+    const bare = reportFromSnapshot({ ...snapshot, runUsage: null }, "switchboard", GROUP, "7", meta);
+    expect(bare.billers).toBeUndefined();
     expect(week.days.map((d) => d.date)).toContain(SEP_10);
     expect(week.days.map((d) => d.date)).not.toContain(AUG_1);
     expect(week.generatedAt).toBe(T0);

@@ -1208,12 +1208,16 @@ export class CostsSnapshotDO extends DurableObject<Env> {
 
   /** Replace the snapshot whole: every part rewritten in one transaction. */
   async put(snapshot: CostsSnapshot): Promise<void> {
-    const { usage, llm, runUsage, ...meta } = snapshot;
+    // Every non-meta field is its own named part: a field left in the meta
+    // rest-spread would silently grow that one row as its rows do.
+    const { usage, llm, runUsage, invoices, ...meta } = snapshot;
     const rows: Array<[string, unknown]> = [
       ["meta", meta],
       ...USAGE_PARTS.map((name): [string, unknown] => [`usage.${name}`, usage[name]]),
       ["llm", llm],
       ["runUsage", runUsage],
+      // Absent on a snapshot from before the field: no row, so `get` omits the key.
+      ...(invoices !== undefined ? ([["invoices", invoices]] as Array<[string, unknown]>) : []),
     ];
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(`DELETE FROM parts`);
@@ -1242,6 +1246,7 @@ export class CostsSnapshotDO extends DurableObject<Env> {
       usage,
       llm: read("llm"),
       runUsage: read("runUsage"),
+      ...(parts.has("invoices") ? { invoices: read("invoices") } : {}),
     };
     return isCostsSnapshot(snapshot) ? snapshot : null;
   }

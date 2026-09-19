@@ -263,6 +263,113 @@ describe("CostsPage", () => {
     expect(w.text()).toContain("usage report");
   });
 
+  // The per-biller tie-out (costs.md item 4d): rides the daily report, installation-wide.
+  // The days are the daily fixture's own (its last full day and its open day).
+  const [, TIE_D1, TIE_D2] = report().days.map((d) => d.date) as [string, string, string];
+  const billers = (): NonNullable<CostReport["billers"]> => [
+    {
+      biller: "anthropic",
+      hasInvoice: true,
+      days: [
+        {
+          date: TIE_D1,
+          invoiceUsd: 12.5,
+          byokUsd: null,
+          estimated: false,
+          attributedUsd: 11.8,
+          feeUsd: 0,
+          upstreamUsd: 11.8,
+          unpricedTokens: 0,
+        },
+        {
+          date: TIE_D2,
+          invoiceUsd: 3,
+          byokUsd: null,
+          estimated: true,
+          attributedUsd: 2.9,
+          feeUsd: 0,
+          upstreamUsd: 2.9,
+          unpricedTokens: 0,
+        },
+      ],
+      totals: { invoiceUsd: 15.5, byokUsd: null, attributedUsd: 14.7, feeUsd: 0, upstreamUsd: 14.7, unpricedTokens: 0 },
+    },
+    {
+      biller: "openrouter",
+      hasInvoice: true,
+      days: [
+        {
+          date: TIE_D1,
+          invoiceUsd: 0.1,
+          byokUsd: 2,
+          estimated: false,
+          attributedUsd: 2.1,
+          feeUsd: 0.1,
+          upstreamUsd: 2,
+          unpricedTokens: 0,
+        },
+      ],
+      totals: { invoiceUsd: 0.1, byokUsd: 2, attributedUsd: 2.1, feeUsd: 0.1, upstreamUsd: 2, unpricedTokens: 0 },
+    },
+    {
+      biller: "mistral",
+      hasInvoice: false,
+      days: [
+        {
+          date: TIE_D1,
+          invoiceUsd: null,
+          byokUsd: null,
+          estimated: false,
+          attributedUsd: 0.5,
+          feeUsd: 0,
+          upstreamUsd: 0.5,
+          unpricedTokens: 1200,
+        },
+      ],
+      totals: {
+        invoiceUsd: null,
+        byokUsd: null,
+        attributedUsd: 0.5,
+        feeUsd: 0,
+        upstreamUsd: 0.5,
+        unpricedTokens: 1200,
+      },
+    },
+  ];
+
+  it("lays each biller's own invoice against the rows billed to it, per day — an aggregator's fees and BYOK split apart, the estimated day marked; absent from a report without the tie-out", () => {
+    const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
+      seed: seed(report({ billers: billers() })),
+    });
+    const card = w.find("[data-billers]");
+    expect(card.exists()).toBe(true);
+    expect(card.text()).toContain("Invoice tie-out");
+    const anthropic = w.find('[data-biller="anthropic"]');
+    expect(anthropic.text()).toContain("invoiced $15.50 vs attributed $14.70");
+    expect(anthropic.text()).toContain("(estimate)"); // the open day's invoice figure is the estimate
+    const days = anthropic.findAll("tbody td[title]").map((td) => td.attributes("title"));
+    expect(days).toEqual([TIE_D2, TIE_D1]); // newest first, like the daily table
+    const openrouter = w.find('[data-biller="openrouter"]');
+    expect(openrouter.text()).toContain("fees invoiced $0.10 vs attributed $0.10");
+    expect(openrouter.text()).toContain("BYOK invoiced $2.00 vs upstream $2.00");
+    expect(openrouter.text()).toContain("Upstream attributed");
+    // a report without the tie-out (no invoices, no run history) draws no card
+    const bare = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
+    expect(bare.find("[data-billers]").exists()).toBe(false);
+  });
+
+  it("a biller with no source shows 'no invoice' — its attributed dollars and unpriced tokens still named, never $0 in silence", () => {
+    const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
+      seed: seed(report({ billers: billers() })),
+    });
+    const mistral = w.find('[data-biller="mistral"]');
+    expect(mistral.text()).toContain("no invoice — attributed $0.50");
+    expect(mistral.text()).toContain("1,200 tokens unpriced");
+    expect(mistral.find("tbody").text()).toContain("no invoice");
+  });
+
   it("says what share of the account's whole Cloudflare spend this group is, and what was attributed to it", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const t = w.text();
