@@ -9761,6 +9761,80 @@ workspaceDir: __WORKDIR__
     expect(refusedIO.replies[0]).toContain("The plan runner could not be started: engine down");
     expect(registry.getById("run-shipref")).toMatchObject({ finished: true, status: "completed" });
   });
+
+  // docs/reference/specs/run-history.md item 42 — the outer finally is a second
+  // net: a branch that opens its own registry row and returns without finishing
+  // it leaves no row `running` with no runner behind it (such a row can never
+  // take a stop and holds the shutdown drain to its deadline).
+  it("second net (run-history item 42): a branch double that opens a registry row and returns without finishing it → the outer finally finishes the run `failed`", async () => {
+    const { deps } = shipDeps();
+    const registry = new RunRegistry({ genId: () => "run-leak", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    deps.shipBranch = async (_deps, _msg, _io, ctx) => {
+      const run = registry.create("ship · acme/api", {
+        agent: "ship",
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        hosted: true,
+      });
+      ctx.live.runId = run.id;
+      ctx.trace.bindRun(run.id, () => {});
+      return { hostedLive: false }; // returned without finish() — the row would stay `running` forever
+    };
+    const receipts: { id: string; status: string }[] = [];
+    const { io } = fakeIO();
+    io.runFinished = (r) => void receipts.push(r);
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(registry.getById("run-leak")).toMatchObject({ finished: true, status: "failed" });
+    expect(receipts).toEqual([{ id: "run-leak", status: "failed" }]);
+  });
+
+  it("second net leaves the hosted parent live (record 0060): a branch that ends `hostedLive` keeps its registry run `running` for the plan runner's finish", async () => {
+    const { deps } = shipDeps();
+    const registry = new RunRegistry({ genId: () => "run-hostnet", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    deps.shipBranch = async (_deps, _msg, _io, ctx) => {
+      const run = registry.create("ship · acme/api", {
+        agent: "ship",
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        hosted: true,
+      });
+      ctx.live.runId = run.id;
+      ctx.trace.bindRun(run.id, () => {});
+      return { hostedLive: true }; // the completed hand-off's parent: the runner finishes it
+    };
+    const { io } = fakeIO();
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(registry.getById("run-hostnet")).toMatchObject({ finished: false });
+  });
+
+  it("second net leaves the hosted parent live when the branch THROWS after the hand-off: `onHosted` fired at the hand-off is the net's signal, the lost return value is not", async () => {
+    const { deps } = shipDeps();
+    const registry = new RunRegistry({ genId: () => "run-hostthrow", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    deps.shipBranch = async (_deps, _msg, _io, ctx) => {
+      const run = registry.create("ship · acme/api", {
+        agent: "ship",
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        hosted: true,
+      });
+      ctx.live.runId = run.id;
+      ctx.trace.bindRun(run.id, () => {});
+      ctx.onHosted?.(); // the hand-off completed: the runner owns this run now
+      throw new Error("card close failed after the hand-off"); // the return value never arrives
+    };
+    const receipts: { id: string; status: string }[] = [];
+    const { io } = fakeIO();
+    io.runFinished = (r) => void receipts.push(r);
+    await dispatch(deps, msg(TASK_MSG, "slack:UADMIN"), io);
+    expect(registry.getById("run-hostthrow")).toMatchObject({ finished: false });
+    expect(receipts).toEqual([]);
+  });
 });
 
 // Record 0060 (agent-ship item 16): the ship branch is the ONLY producer of a

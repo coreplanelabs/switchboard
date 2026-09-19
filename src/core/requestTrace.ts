@@ -28,6 +28,10 @@ export interface RequestTrace {
   readonly root: Span;
   /** Our process saw the message: the root's start, the window's opening. */
   readonly receivedAt: number;
+  /** The registry run the stream is bound to (`bindRun`); absent until then.
+   *  The dispatcher's outer finally reads it as one of the bindings its second
+   *  net checks for a run a branch left unfinished (run-history item 42). */
+  readonly runId?: string;
   /** Point the run-stream sink at a registry run: backfill, then route live. */
   bindRun(runId: string, publish: (event: RunEvent) => void): void;
   /** Point the card sink at the status card: setup labels paint from here. */
@@ -110,10 +114,15 @@ export function startRequestRoot(deps: RequestTraceDeps, opts: RequestRootOption
       ...(opts.attrs ?? {}),
     },
   });
+  let boundRunId: string | undefined;
   return {
     root,
     receivedAt: opts.receivedAt,
+    get runId() {
+      return boundRunId;
+    },
     bindRun(runId, publish) {
+      boundRunId = runId;
       root.setAttrs({ runId });
       stream.bindRun(runId, (e) => publish(e as RunEvent));
     },
