@@ -366,6 +366,22 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.mcpWriter, threadConfig("slack:C_PUB1:1.0")],
     ],
   },
+  // The author binding's one trusted write (record 0062, authorization.md item 18):
+  // an `identity:write` holder — admins through `all`, a named grants entry —
+  // and nobody else: `config:write` does not carry it, and the person's own
+  // is-self row is `config:write`'s, so a person never binds themself.
+  "identity:write config-scope/user [has-grant(identity:write)]": {
+    allow: [
+      [A.admin, userConfig("slack:UERIN")],
+      [A.identityAdmin, userConfig("slack:UERIN")],
+    ],
+    deny: [
+      [A.chatUser, userConfig("slack:UERIN")],
+      [A.member, userConfig("slack:UERIN")],
+      [A.noGrants, userConfig(A.noGrants.id)],
+      [A.browser, userConfig("slack:UERIN")],
+    ],
+  },
   "config:write config-scope/user [is-self]": {
     allow: [
       [A.member, userConfig(A.member.id)],

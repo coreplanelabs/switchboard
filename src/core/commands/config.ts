@@ -61,6 +61,12 @@ import {
  *  exactly when it first reaches for it — and a command that never does never
  *  waits. No classification of commands anywhere. */
 export interface ConfigCommandDeps {
+  /** The GitHub read behind the `user` scope's binding write (record 0062):
+   *  `GET /users/<login>` over the read credential — `resolveLogin` in
+   *  `src/execution/authorBinding.ts`; undefined is a 404 (no such login),
+   *  refused by name. Absent — a process without a GitHub credential — the
+   *  write is `unavailable` by name. */
+  identity?: { resolveLogin(login: string): Promise<{ login: string; id: number } | undefined> };
   config: {
     /** Everything `config show` reports but `channelConfigRestricted`, which is the caller's actor's to decide (`mayEditChannel`). */
     describeConfig(channelId: string, userId: string): Promise<Omit<ConfigDescription, "channelConfigRestricted">>;
@@ -70,6 +76,11 @@ export interface ConfigCommandDeps {
     setThreadOverride(threadKey: string, patch: Scope): Promise<Scope>;
     clearChannelOverride(channelId: string): Promise<void>;
     clearUserOverride(userId: string): Promise<void>;
+    /** Removes one person's author binding alone (`config clear user`, record 0062). */
+    clearUserGithub(userId: string): Promise<void>;
+    /** The load-time duplicate rule asked before the binding write (`ConfigStore.githubBindingConflict`):
+     *  the refusal when another person already binds this login or id across both layers, else undefined. */
+    githubBindingConflict(userId: string, binding: { login: string; id: number }): Promise<string | undefined>;
     clearThreadOverride(threadKey: string): Promise<void>;
     /** Every channel with a scope, names only (`ConfigStore.channelsWithScope`), before the per-channel read gate. */
     channelsWithScope(): Promise<ChannelScopeIndexRow[]>;
@@ -94,8 +105,9 @@ const defineCommand = commandDefiner<ConfigCommandDeps>();
 
 const scopeArg = {
   name: "scope",
-  schema: z.enum(["channel", "me", "thread"]),
-  describe: "`channel` (everyone here), `me` (your own runs) or `thread` (this thread's intake gate)",
+  schema: z.enum(["channel", "me", "thread", "user"]),
+  describe:
+    "`channel` (everyone here), `me` (your own runs), `thread` (this thread's intake gate) or `user` (another person's GitHub binding, identity admins only)",
 } as const;
 /** `config instructions` keeps the two scopes: a thread carries no instructions text. */
 const instructionsScopeArg = {
@@ -196,6 +208,26 @@ function assertMayEditThread(caller: Caller, threadKey: string): void {
     throw new CommandError("unauthorized", "Thread config changes are restricted.");
 }
 
+/** The one sentence `config set me --github` answers on every surface (record
+ *  0062): the binding decides whose name is on a run's commits, so the one
+ *  write that would make impersonation trivial — a person typing a login into
+ *  their own scope — is refused at the registry door, before the handler,
+ *  reason `identity` on the audit line. */
+export const ME_GITHUB_MESSAGE = "your GitHub login is set by an identity admin; it is not yours to type";
+
+/** The `user` scope target (`config set|clear user --user <id>`, record 0062):
+ *  the policy table's `identity:write` row on `config-scope { user }` — held by
+ *  `all` and by a named grants entry, never a baseline, never `config:write`.
+ *  Deliberately a HANDLER gate under the commands' declared `config:write`
+ *  action, not the declaration itself: the registry admits by the command, the
+ *  scope decides the row — so a token granted `identity:write` alone (no
+ *  `config:write`) is refused at the registry before this row is asked. An
+ *  identity admin therefore holds both actions (or `all`). */
+function assertMayWriteIdentity(caller: Caller, userId: string): void {
+  if (!authorize(caller.actor, "identity:write", { type: "config-scope", kind: "user", id: userId }).allow)
+    throw new CommandError("unauthorized", "GitHub bindings are written by an identity admin.");
+}
+
 /** Why a `me` write is refused for a service token (records 0041, 0043): no run is
  *  ever requested as one — the dashboard's chat is a browser session's, never a
  *  token's — so the scope it would write is read by nothing. */
@@ -277,7 +309,7 @@ function summarizeScope(s: Scope): JsonObject {
   ) as JsonObject;
 }
 
-const who = (scope: "channel" | "me" | "thread") => (scope === "me" ? "your" : scope);
+const who = (scope: "channel" | "me" | "thread" | "user") => (scope === "me" ? "your" : scope);
 
 // ---- config show ---------------------------------------------------------------------
 
@@ -436,11 +468,28 @@ export const configSet = defineCommand({
           ),
       })
       .optional(),
+    user: z
+      .string()
+      .optional()
+      .describe("the person whose GitHub binding to write (user scope only): a platform-namespaced id like slack:U…"),
+    github: z
+      .string()
+      .optional()
+      .describe(
+        "the GitHub login to bind (user scope only, identity admins): resolved to { login, id } via GET /users/<login> and stored in the person's scope",
+      ),
     channel: channelOption,
     thread: threadOption,
   }),
   action: "config:write",
   effect: "write",
+  // A person never types their own GitHub login (record 0062): refused at
+  // the registry door — before parse and handler — so every surface answers the
+  // one sentence, with reason `identity` on the audit line.
+  door: (input) =>
+    input.args[0] === "me" && input.options.github !== undefined
+      ? { message: ME_GITHUB_MESSAGE, reason: "identity" }
+      : undefined,
   // One `config set` or `config clear` undoes it, but a shared scope changes
   // what other people run under — destructive beyond `me` (record 0057).
   annotations: {
@@ -448,7 +497,7 @@ export const configSet = defineCommand({
     risk: () => "changes the scope's settings for everyone in it until reset",
   },
   describe:
-    "Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, or the intake gate's mode for a thread (gated like the channel); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
+    "Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, the intake gate's mode for a thread (gated like the channel), or a person's GitHub binding (`config set user --user <id> --github <login>`, identity admins — never your own: it is not yours to type); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
   // A sentence for the person who typed the command (routing-and-config item
   // 28): the scope's settings in `config show`'s words, never a JSON dump.
   render: (output) => {
@@ -457,10 +506,50 @@ export const configSet = defineCommand({
     // The instructions text is never echoed (custom-instructions item 5):
     // `summarizeScope` left its length in its place, and the sentence names it.
     const instructions = effective.instructions !== undefined ? `, instructions ${effective.instructions}` : "";
-    return `Updated ${who(o.scope as "channel" | "me" | "thread")} scope: ${fmtScope(effective)}${instructions}.`;
+    return `Updated ${who(o.scope as "channel" | "me" | "thread" | "user")} scope: ${fmtScope(effective)}${instructions}.`;
   },
   handler: async ({ args, options, caller, deps }) => {
     const agents = deps.config.agentNames();
+    // The `user` scope target carries the binding alone (record 0062): it
+    // exists for the identity admin's one write, never to set another person's
+    // models — and `--github` belongs to it alone (`me` never reaches here: the
+    // door refused it before parse).
+    if (args.scope === "user") {
+      if (options.github === undefined)
+        throw new CommandError(
+          "invalid_input",
+          "user: pass --github <login> — the user scope carries the binding alone",
+        );
+      // `--channel`/`--thread` are target selectors other scopes read (ignored
+      // here as `me` ignores them); any SETTING beside the binding is refused
+      // by name — the user scope exists for the identity write alone.
+      const selectors = new Set(["github", "user", "channel", "thread"]);
+      if (Object.keys(options).some((k) => !selectors.has(k) && options[k as keyof typeof options] !== undefined))
+        throw new CommandError("invalid_input", "user: only --github applies to a user scope target");
+      if (options.user === undefined)
+        throw new CommandError("invalid_input", "user: required — pass --user <id> naming the person");
+      assertMayWriteIdentity(caller, options.user);
+      if (!deps.identity)
+        throw new CommandError("unavailable", "no GitHub credential is configured, so a login cannot be resolved");
+      const binding = await deps.identity.resolveLogin(options.github);
+      if (!binding) throw new CommandError("not_found", `GitHub has no user "${options.github}"`);
+      // One login and one id under one person, across config.yaml and the
+      // overrides together (routing-and-config item 30): the load-time rule is
+      // asked HERE, before the write, so a duplicate is refused by the
+      // validator's own words instead of stored — a stored duplicate would
+      // refuse the whole overrides document at the next load.
+      const conflict = await deps.config.githubBindingConflict(options.user, binding);
+      if (conflict) throw new CommandError("conflict", conflict);
+      const effective = await deps.config.setUserOverride(options.user, {
+        github: { login: binding.login, id: binding.id },
+      });
+      return { scope: args.scope, effective: summarizeScope(effective) };
+    }
+    if (options.github !== undefined)
+      throw new CommandError(
+        "invalid_input",
+        "github: a GitHub binding is written on the user scope — config set user --user <id> --github <login>",
+      );
     const patch: Scope = {};
     if (options.agent !== undefined) {
       if (!agents.includes(options.agent))
@@ -546,7 +635,14 @@ export const configSet = defineCommand({
 export const configClear = defineCommand({
   id: "config.clear",
   args: [scopeArg],
-  options: z.object({ channel: channelOption, thread: threadOption }),
+  options: z.object({
+    channel: channelOption,
+    thread: threadOption,
+    user: z
+      .string()
+      .optional()
+      .describe("the person whose GitHub binding to remove (user scope only, identity admins)"),
+  }),
   action: "config:write",
   effect: "write",
   annotations: {
@@ -554,8 +650,11 @@ export const configClear = defineCommand({
     risk: () => "changes the scope's settings for everyone in it until reset",
   },
   describe:
-    "Drop every runtime override of a channel (gated), of yourself, or of a thread (gated like the channel); static config.yaml values show through again.",
-  render: (output) => `Cleared ${who((output as JsonObject).scope as "channel" | "me" | "thread")} overrides.`,
+    "Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); `config clear user --user <id>` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.",
+  render: (output) => {
+    const scope = (output as JsonObject).scope as "channel" | "me" | "thread" | "user";
+    return scope === "user" ? "Cleared the user's GitHub binding." : `Cleared ${who(scope)} overrides.`;
+  },
   handler: async ({ args, options, caller, deps }) => {
     if (args.scope === "channel") {
       const channel = targetChannel(caller, options.channel);
@@ -565,6 +664,13 @@ export const configClear = defineCommand({
       const thread = targetThread(caller, options.thread);
       assertMayEditThread(caller, thread);
       await deps.config.clearThreadOverride(thread);
+    } else if (args.scope === "user") {
+      // The identity admin's undo (record 0062): the binding alone — never the
+      // person's other settings, which stay theirs.
+      if (options.user === undefined)
+        throw new CommandError("invalid_input", "user: required — pass --user <id> naming the person");
+      assertMayWriteIdentity(caller, options.user);
+      await deps.config.clearUserGithub(options.user);
     } else {
       await deps.config.clearUserOverride(meIdOrRefuse(caller));
     }

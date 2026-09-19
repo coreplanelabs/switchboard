@@ -139,6 +139,8 @@ export const ACTORS = {
   allAgents: actor("user", "slack:UDAVE", { actions: new Set(["agent:run:*"]) }),
   /** A Slack user granted `config:write` on top of the `open` chat commands. */
   chatUser: actor("user", "slack:UFAY", { actions: new Set([...CHAT_OPEN_ACTIONS, "config:write"]) }),
+  /** An identity admin (record 0062): granted `identity:write` by name — the one right that binds a person to a GitHub login. */
+  identityAdmin: actor("user", "slack:UJAN", { actions: new Set([...CHAT_OPEN_ACTIONS, "identity:write"]) }),
   /** A plain Slack user: the `open` chat commands alone (`config:write` is never a baseline). */
   chatUserGated: actor("user", "slack:UGUS", { actions: new Set(CHAT_OPEN_ACTIONS) }),
   /** An unlisted Access browser session: every group's read and the two personal chat writes, nothing else. */

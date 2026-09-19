@@ -444,6 +444,47 @@ describe("CommandRegistry.invoke — auth before parse", () => {
     expect(audit.mock.calls.at(-1)?.[0]).not.toHaveProperty("viewingAs");
   });
 
+  it("a definition's door refusal (record 0062): a matching input is refused before parse with the definition's one sentence and its reason on the audit line, on every surface; any other input runs", async () => {
+    const { registry, audit, deps } = setup();
+    const doored = define({
+      id: "demo.door",
+      args: [{ name: "scope", schema: z.enum(["me", "user"]), describe: "scope" }],
+      options: z.object({ github: z.string().optional() }),
+      action: "help:read",
+      effect: "read",
+      describe: "a command with a door refusal",
+      door: (input) =>
+        input.args[0] === "me" && input.options.github !== undefined
+          ? { message: "not yours to type", reason: "identity" }
+          : undefined,
+      handler: async () => ({ ok: true }),
+    });
+    registry.register(doored);
+    const helpBrowser = callerWith("access", "access:sub", ["help:read"]);
+    for (const caller of [cli, chatOperator, helpBrowser]) {
+      const res = await registry.invoke("demo.door", { args: ["me"], options: { github: "x" } }, caller, deps);
+      expect(res).toMatchObject({
+        ok: false,
+        error: "unauthorized",
+        decidedBy: "registry",
+        message: "not yours to type",
+      });
+      expect(audit.mock.calls.at(-1)?.[0]).toMatchObject({
+        commandId: "demo.door",
+        outcome: "unauthorized",
+        reason: "identity",
+      });
+    }
+    // A malformed matching input is refused at the door too (never parsed), and a non-matching one runs.
+    expect(
+      await registry.invoke("demo.door", { args: ["me"], options: { github: "x", bogus: 1 } }, cli, deps),
+    ).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("demo.door", { args: ["me"], options: {} }, cli, deps)).toEqual({
+      ok: true,
+      value: { ok: true },
+    });
+  });
+
   it("an Access service token is a machine caller: no implicit reads", async () => {
     const { registry, deps } = setup();
     expect(await registry.invoke("demo.echo", opts({ status: "all" }), svcToken, deps)).toMatchObject({
