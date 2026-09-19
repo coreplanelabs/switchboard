@@ -18,7 +18,7 @@ import type { Span, TraceOptions } from "../trace/types.js";
 // state lives OFF the bot host (AGENTS.md invariant 6 — a bot restart loses
 // nothing). Route contracts (JSON in/out, bearer MEMORY_TOKEN):
 //   POST /retrieve {scopeKey, query, limit} → {records: MemoryRecord[]}
-//   POST /write    {scopeKey, records: MemoryCandidate[], cap?} → {ok, inserted, deduped, superseded, evicted}
+//   POST /write    {scopeKey, records: MemoryCandidate[], cap?} → {ok, inserted, deduped, restated, superseded, evicted}
 //   POST /list     {scopeKey, limit, query?, kind?} → {records: MemoryRecord[]}  (human controls + the repository window)
 //   POST /forget   {scopeKey, id} → {ok, forgotten: boolean}
 //   POST /sweep    {scopeKey, dryRun?} → {ok, swept, ids?}

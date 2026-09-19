@@ -80,6 +80,47 @@ describe("planWrite", () => {
     expect(none.action === "insert" && none.supersede).toBeUndefined();
   });
 
+  it("restate: an active target is bumped in place — nothing minted, confidence the higher of the two", () => {
+    const target = rec({ id: "t", confidence: 0.7 });
+    const plan = planWrite([target], cand("the same lesson in other words", { restates: "t", confidence: 0.9 }), mint);
+    expect(plan).toEqual({ action: "restate", target, confidence: 0.9 });
+    // The target's own confidence wins when it is the higher one; a side
+    // without a value defers to the other; neither → no confidence on the plan.
+    const higher = rec({ id: "t", confidence: 0.95 });
+    expect(planWrite([higher], cand("x", { restates: "t", confidence: 0.9 }), mint)).toEqual({
+      action: "restate",
+      target: higher,
+      confidence: 0.95,
+    });
+    const bare = rec({ id: "t" });
+    expect(planWrite([bare], cand("x", { restates: "t", confidence: 0.9 }), mint)).toEqual({
+      action: "restate",
+      target: bare,
+      confidence: 0.9,
+    });
+    expect(planWrite([bare], cand("x", { restates: "t" }), mint)).toEqual({ action: "restate", target: bare });
+  });
+
+  it("restate wins over dedup: a text collision with an unrelated record still bumps the named target", () => {
+    const target = rec({ id: "t", text: "the lesson" });
+    const unrelated = rec({ id: "u", text: "the deploy command is npm run ship" });
+    const plan = planWrite([target, unrelated], cand("the deploy command is npm run ship", { restates: "t" }), mint);
+    expect(plan.action).toBe("restate");
+    expect(plan.action === "restate" && plan.target).toBe(target);
+  });
+
+  it("restate of a non-active or unknown id falls through to today's dedup-or-insert", () => {
+    expect(planWrite([rec({ id: "t", status: "superseded" })], cand("brand new", { restates: "t" }), mint).action).toBe(
+      "insert",
+    );
+    const other = rec({ id: "u" });
+    expect(planWrite([other], cand(other.text, { restates: "zzz" }), mint)).toEqual({
+      action: "dedup",
+      target: other,
+    });
+    expect(planWrite([], cand("brand new", { restates: "zzz" }), mint).action).toBe("insert");
+  });
+
   it("with supersedes, dedups only against its own target — a collision with an unrelated record never swallows the correction", () => {
     const target = rec({ id: "t", text: "stale" });
     const unrelated = rec({ id: "u", text: "the deploy command is npm run ship" });

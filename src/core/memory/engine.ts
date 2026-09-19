@@ -59,15 +59,25 @@ export function planEviction(active: MemoryRecord[], cap: number): MemoryRecord[
     .slice(0, excess);
 }
 
-/** What a store must do for one candidate. `dedup`: bump `target.useCount`,
- *  insert nothing. `insert`: append `record` (already minted) and, when
- *  `supersede` is set, flip that record to `superseded`. */
+/** What a store must do for one candidate. `restate`: bump `target.useCount`,
+ *  set its `lastUsedAt` to the store's now and its confidence to `confidence`
+ *  when the plan carries one (the higher of the two sides), insert nothing.
+ *  `dedup`: bump `target.useCount`, insert nothing. `insert`: append `record`
+ *  (already minted) and, when `supersede` is set, flip that record to
+ *  `superseded`. */
 export type WritePlan =
-  { action: "dedup"; target: MemoryRecord } | { action: "insert"; record: MemoryRecord; supersede?: MemoryRecord };
+  | { action: "restate"; target: MemoryRecord; confidence?: number }
+  | { action: "dedup"; target: MemoryRecord }
+  | { action: "insert"; record: MemoryRecord; supersede?: MemoryRecord };
 
 /**
  * Decide how one candidate lands among a scope's ACTIVE records (docs/reference/specs/
  * memory.md §8):
+ * - **Restate target** = the active same-scope record whose id equals
+ *   `cand.restates`: the fact re-teaches a shown record, so that record is
+ *   refreshed — usage bumped, confidence the higher of the two — and nothing
+ *   is inserted, whatever the candidate's wording. A missing or non-active
+ *   target falls through to the rules below (today's dedup-or-insert).
  * - **Supersede target** = the active same-scope record whose id equals
  *   `cand.supersedes`; an unknown/foreign id resolves to nothing (the new
  *   record still lands, superseding nothing).
@@ -86,6 +96,17 @@ export function planWrite(
   cand: MemoryCandidate,
   mint: (cand: MemoryCandidate) => MemoryRecord,
 ): WritePlan {
+  if (cand.restates) {
+    const restated = active.find((r) => r.status === "active" && r.id === cand.restates);
+    if (restated) {
+      const confidences = [restated.confidence, cand.confidence].filter((c): c is number => c !== undefined);
+      return {
+        action: "restate",
+        target: restated,
+        ...(confidences.length > 0 ? { confidence: Math.max(...confidences) } : {}),
+      };
+    }
+  }
   const norm = normalizeText(cand.text);
   const target = cand.supersedes ? active.find((r) => r.status === "active" && r.id === cand.supersedes) : undefined;
   const dedupPool = cand.supersedes ? (target ? [target] : []) : active.filter((r) => r.status === "active");

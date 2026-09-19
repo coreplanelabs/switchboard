@@ -83,6 +83,15 @@ export class InMemoryMemoryStore implements MemoryStore {
     const counts: WriteCounts = { inserted: 0, deduped: 0, restated: 0, superseded: 0, evicted: 0 };
     for (const cand of records) {
       const plan = planWrite(list, cand, (c) => mintRecord(scopeKey, this.seq++, now, c));
+      if (plan.action === "restate") {
+        // The shown record is refreshed in place — the restatement's own
+        // wording is dropped (the stored text stands).
+        plan.target.useCount += 1;
+        plan.target.lastUsedAt = now;
+        if (plan.confidence !== undefined) plan.target.confidence = plan.confidence;
+        counts.restated += 1;
+        continue;
+      }
       if (plan.action === "dedup") {
         plan.target.useCount += 1;
         counts.deduped += 1;

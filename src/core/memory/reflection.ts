@@ -7,6 +7,7 @@ import { jsonOutput } from "../llmOutput/index.js";
 import type { HistoryItem } from "../types.js";
 import type { MemoryCandidate, MemoryRecord, MemoryScope, MemoryStore, WriteCounts } from "./types.js";
 import { rejectionMarkers } from "./engine.js";
+import { DEFAULT_REPO_WINDOW } from "./scorer.js";
 import { listScopeKeys, type RequestScopeKeys } from "./scope.js";
 
 // Cross-session memory WRITE path: the post-run reflection
@@ -46,7 +47,8 @@ const MAX_KEYWORDS = 10;
 /** Transcript budget (chars) sent to the extractor; the tail is kept because
  *  the decision usually lives at the end of a thread. */
 const MAX_TRANSCRIPT_CHARS = 24_000;
-/** Existing records shown to the extractor so it can emit `supersedes`. */
+/** Keyword hits shown to the extractor per scope, beside the repository
+ *  window — together the shown set a `supersedes` or `restates` may name. */
 const EXISTING_LIMIT = 8;
 /** Output budget for the extractor reply (≤5 short facts + 1 summary as JSON). */
 const REFLECTION_MAX_TOKENS = 1024;
@@ -88,7 +90,7 @@ export function shouldReflect(input: ReflectGateInput): boolean {
 export const REFLECTION_SYSTEM = [
   "You distill a finished assistant thread into durable, reusable memory for the resource it concerns.",
   "Return ONLY a JSON object of the form:",
-  '{"facts":[{"text":"...","keywords":["..."],"confidence":0.0-1.0,"audience":"org"|"user"|"repo"|"channel","supersedes":"<existing id, optional>"}],"summary":"..."}',
+  '{"facts":[{"text":"...","keywords":["..."],"confidence":0.0-1.0,"audience":"org"|"user"|"repo"|"channel","supersedes":"<existing id, optional>","restates":"<existing id, optional>"}],"summary":"..."}',
   `Rules: at most ${MAX_REFLECTION_FACTS} facts. Each fact is ONE self-contained lesson that will still be true and useful in a future, unrelated thread,`,
   "in the shape: what fails or surprises, why, and what to do — a cause and its remedy, a command that must run first, a convention, a decision.",
   "Ignore ephemeral or one-off details (timestamps, transient errors, chit-chat).",
@@ -98,6 +100,7 @@ export const REFLECTION_SYSTEM = [
   '"repo" when the fact is specific to the repository this thread worked in (its code, conventions, commands, layout), "channel" when it is about what this channel is for or how it works,',
   'and "org" (the default) when it is shared knowledge about the wider organization, tooling, or team. Only the requesting user will ever see "user" facts; "repo"/"channel" facts are shared with everyone who works in that repo/channel.',
   "`confidence` is how sure you are the fact is durable and correct. If a fact contradicts one of the EXISTING records you were shown, set `supersedes` to that record's id.",
+  "If a fact restates one of the EXISTING records — the same lesson, in the same or other words — set `restates` to that record's id instead of repeating it: the shown record is refreshed rather than duplicated.",
   "`summary` is one or two impersonal sentences: what was asked and what was concluded about the shared subject. Keep the requesting person's preferences, habits, and other personal details OUT of the summary — they belong in `user` facts.",
   "Output raw JSON with no code fence and no prose.",
 ].join("\n");
@@ -170,8 +173,8 @@ const REFLECTION_ENVELOPE = jsonOutput(z.object({ facts: z.array(z.unknown()), s
 /** Validate + sanitize the extractor's reply into routed MemoryCandidates.
  *  Lenient on shape inside the object (bad facts are dropped, not fatal), strict
  *  on the envelope (non-JSON / non-object → error). Every text field is
- *  redacted; `supersedes` survives only when it names a record the extractor was
- *  shown; `audience` is `user`/`repo`/`channel` only when it says exactly that,
+ *  redacted; `supersedes` and `restates` each survive only when they name a
+ *  record the extractor was shown; `audience` is `user`/`repo`/`channel` only when it says exactly that,
  *  else `org`. A fact whose text carries any rejection marker (the pure gate in
  *  engine.ts — status and change descriptions never become facts) is dropped
  *  and counted in `rejected`; a summary is never gated. The summary inherits the narrowest audience any fact carried —
@@ -222,6 +225,7 @@ function parseFact(raw: unknown, prov: ReflectionProvenance, knownIds: Set<strin
   }
   const keywords = parseKeywords(f.keywords);
   const supersedes = typeof f.supersedes === "string" && knownIds.has(f.supersedes) ? f.supersedes : undefined;
+  const restates = typeof f.restates === "string" && knownIds.has(f.restates) ? f.restates : undefined;
   return {
     kind: "fact",
     text,
@@ -229,6 +233,7 @@ function parseFact(raw: unknown, prov: ReflectionProvenance, knownIds: Set<strin
     confidence,
     audience: parseAudience(f.audience),
     ...(supersedes ? { supersedes } : {}),
+    ...(restates ? { restates } : {}),
     ...prov,
   };
 }
@@ -289,6 +294,10 @@ export interface ReflectDeps extends ReflectionProvenance {
   /** The run's stamped `channelVisibility` — the origin every write is
    *  decided under. Absent → `unknown`: an unstamped run never writes org (fail-closed). */
   originChannelVisibility?: ChannelVisibility;
+  /** The repository window's size — the same `memory.repoWindow` the block
+   *  builder reads, so the extractor is shown the records the run saw. Absent
+   *  → the default; `0` disables the window read. */
+  repoWindow?: number;
   history: HistoryItem[];
   request: string;
   answer: string;
@@ -313,17 +322,18 @@ function kindOfKey(keys: RequestScopeKeys, key: string): MemoryScope | undefined
 }
 
 /** Which scope the extractor's routing puts a candidate in — the HINT the
- *  policy then decides on (`placeCandidate`): a supersede follows the record it
- *  corrects (the id was validated against the shown records, whose scopes we
- *  know); otherwise the audience's scope when the run has it (`user` → the
- *  requester's own, `repo` → the bound repo's, `channel` → the message's), and
- *  org for everything else. An audience whose scope this run lacks falls back
- *  to org rather than being dropped. */
+ *  policy then decides on (`placeCandidate`): a supersede or a restatement
+ *  follows the record it names (the id was validated against the shown
+ *  records, whose scopes we know); otherwise the audience's scope when the
+ *  run has it (`user` → the requester's own, `repo` → the bound repo's,
+ *  `channel` → the message's), and org for everything else. An audience whose
+ *  scope this run lacks falls back to org rather than being dropped. */
 function routeCandidate(cand: RoutedCandidate, keys: RequestScopeKeys, scopeOf: Map<string, string>): ScopeTarget {
-  const superseded = cand.supersedes ? scopeOf.get(cand.supersedes) : undefined;
-  if (superseded !== undefined) {
-    const kind = kindOfKey(keys, superseded);
-    if (kind) return { kind, key: superseded };
+  const targetId = cand.supersedes ?? cand.restates;
+  const targetScope = targetId ? scopeOf.get(targetId) : undefined;
+  if (targetScope !== undefined) {
+    const kind = kindOfKey(keys, targetScope);
+    if (kind) return { kind, key: targetScope };
   }
   const own = cand.audience === "org" ? undefined : keys[cand.audience];
   return own === undefined ? { kind: "org", key: keys.org } : { kind: cand.audience, key: own };
@@ -403,13 +413,28 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
   const info = deps.onInfo ?? (() => {});
   try {
     const query = `${deps.request} ${deps.answer}`.slice(0, MAX_RETRIEVE_QUERY_CHARS);
-    const existing = (
+    // The shown set (memory.md item 12): the repository window — the same
+    // `list` read the context block leads with, no usage bump — plus the
+    // keyword hits per scope, deduped by id. What the extractor may name in a
+    // `supersedes`/`restates` is exactly what a run in this repository saw.
+    const repoWindow = deps.repoWindow ?? DEFAULT_REPO_WINDOW;
+    const windowP: Promise<MemoryRecord[]> =
+      deps.scopeKeys.repo !== undefined && repoWindow > 0
+        ? deps.store.list(deps.scopeKeys.repo, repoWindow, { kind: "fact" }).catch((err: unknown) => {
+            // Advisory like the block's own window read: the hits still show.
+            warn(`window read failed (${err instanceof Error ? err.message : String(err)}); showing hits only`);
+            return [];
+          })
+        : Promise.resolve([]);
+    const hits = (
       await Promise.all(
         listScopeKeys(deps.scopeKeys).map((scopeKey) =>
           deps.store.retrieve({ scopeKey, query, limit: EXISTING_LIMIT }),
         ),
       )
     ).flat();
+    const seen = new Set<string>();
+    const existing = [...(await windowP), ...hits].filter((r) => !seen.has(r.id) && (seen.add(r.id), true));
     const text = buildReflectionInput({ history: deps.history, request: deps.request, answer: deps.answer, existing });
     const result = await deps.provider.complete({
       model: deps.model,
@@ -451,11 +476,11 @@ export async function reflect(deps: ReflectDeps): Promise<void> {
       }
       let record: MemoryCandidate = plain;
       if (placement.narrowed) {
-        // A correction cannot follow its target into a scope the origin may
-        // not write: the superseded record stands and the narrowed record is a
-        // plain insert into the narrower scope.
-        const { supersedes: _supersedes, ...withoutSupersede } = record;
-        record = withoutSupersede;
+        // A correction or restatement cannot follow its target into a scope
+        // the origin may not write: the named record stands and the narrowed
+        // record is a plain insert into the narrower scope.
+        const { supersedes: _supersedes, restates: _restates, ...withoutPointers } = record;
+        record = withoutPointers;
         const line = `${placement.narrowed.from} → ${placement.target.kind} (${placement.narrowed.reason})`;
         narrowed.set(line, (narrowed.get(line) ?? 0) + 1);
       }

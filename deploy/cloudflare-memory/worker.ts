@@ -148,7 +148,7 @@ const traceSinks = [workerLogSink((line) => console.log(line))];
 //
 // Route surface (JSON in/out; bearer MEMORY_TOKEN on everything but /healthz):
 //   POST /retrieve {scopeKey, query, limit} → {records: MemoryRecord[]}
-//   POST /write    {scopeKey, records: MemoryCandidate[]} → {ok, inserted, deduped, superseded}
+//   POST /write    {scopeKey, records: MemoryCandidate[]} → {ok, inserted, deduped, restated, superseded, evicted}
 //   POST /sweep    {scopeKey, dryRun?} → {ok, swept} (+ ids under dryRun — the marked rows, flipped to `swept`)
 //   GET  /healthz  → {ok:true}  (deploy wake ping; touches no DO)
 // Scheduled-firing routes (the record behind the /runs Scheduled panel;
@@ -381,8 +381,8 @@ export class MemoryDO extends DurableObject<Env> {
     scopeKey: string,
     candidates: MemoryCandidate[],
     cap: number = DEFAULT_SCOPE_CAP,
-  ): Promise<{ inserted: number; deduped: number; superseded: number; evicted: number }> {
-    const counts = { inserted: 0, deduped: 0, superseded: 0, evicted: 0 };
+  ): Promise<{ inserted: number; deduped: number; restated: number; superseded: number; evicted: number }> {
+    const counts = { inserted: 0, deduped: 0, restated: 0, superseded: 0, evicted: 0 };
     if (candidates.length === 0) return counts;
     this.ctx.storage.transactionSync(() => {
       let seq = this.sql.exec<{ next: number }>(`SELECT COALESCE(MAX(seq), -1) + 1 AS next FROM records`).one().next;
@@ -400,18 +400,41 @@ export class MemoryDO extends DurableObject<Env> {
         // own TRUTHINESS test: `supersedes: ""` passes validation but means NO
         // supersede to the engine, so it must dedup against the norm pool —
         // an `!== undefined` branch here would hand it an empty pool and
-        // insert a duplicate active row.
-        const relevant = (
-          cand.supersedes
-            ? this.sql.exec<Row>(`SELECT * FROM records WHERE id = ? AND status = 'active'`, cand.supersedes)
-            : this.sql.exec<Row>(
-                `SELECT * FROM records WHERE status = 'active' AND norm = ? ORDER BY seq`,
-                normalizeText(cand.text),
+        // insert a duplicate active row. A `restates` id is looked up first
+        // (the restate target); when it misses — not active, or another
+        // scope's id, which this DO simply doesn't hold — the candidate takes
+        // today's pool, so planWrite falls through to dedup-or-insert.
+        const restatePool = cand.restates
+          ? this.sql
+              .exec<Row>(`SELECT * FROM records WHERE id = ? AND status = 'active'`, cand.restates)
+              .toArray()
+              .map(toRecord)
+          : [];
+        const relevant =
+          restatePool.length > 0
+            ? restatePool
+            : (cand.supersedes
+                ? this.sql.exec<Row>(`SELECT * FROM records WHERE id = ? AND status = 'active'`, cand.supersedes)
+                : this.sql.exec<Row>(
+                    `SELECT * FROM records WHERE status = 'active' AND norm = ? ORDER BY seq`,
+                    normalizeText(cand.text),
+                  )
               )
-        )
-          .toArray()
-          .map(toRecord);
+                .toArray()
+                .map(toRecord);
         const plan = planWrite(relevant, cand, (c) => mintRecord(scopeKey, seq++, now, c));
+        if (plan.action === "restate") {
+          // The shown record is refreshed in place; COALESCE keeps the stored
+          // confidence when the plan carries none (neither side had a value).
+          this.sql.exec(
+            `UPDATE records SET use_count = use_count + 1, last_used_at = ?, confidence = COALESCE(?, confidence) WHERE id = ?`,
+            now,
+            plan.confidence ?? null,
+            plan.target.id,
+          );
+          counts.restated++;
+          continue;
+        }
         if (plan.action === "dedup") {
           this.sql.exec(`UPDATE records SET use_count = use_count + 1 WHERE id = ?`, plan.target.id);
           counts.deduped++;
@@ -3258,6 +3281,11 @@ function parseCandidate(v: unknown, i: number): Validated<MemoryCandidate> {
     if (typeof c.supersedes !== "string" || c.supersedes.length > MAX_KEY_CHARS)
       return invalid(`${at}.supersedes must be a string`);
     out.supersedes = c.supersedes;
+  }
+  if (c.restates !== undefined) {
+    if (typeof c.restates !== "string" || c.restates.length > MAX_KEY_CHARS)
+      return invalid(`${at}.restates must be a string`);
+    out.restates = c.restates;
   }
   return { ok: true, value: out };
 }
