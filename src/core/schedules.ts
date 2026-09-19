@@ -379,6 +379,9 @@ export interface WatchdogSummary {
     action?: unknown;
     error?: string;
     disk?: unknown;
+    /** The resident's last memory reading (`{usedBytes, capBytes, percent, …}`,
+     *  resident-repos.md item 70) when it has one. */
+    memory?: unknown;
     /** What the pass did about the resident's refresh Workflow instance: `{id, action, why}`. */
     instance?: unknown;
   }>;

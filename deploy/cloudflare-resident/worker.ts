@@ -335,6 +335,14 @@ import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
 import { drainRefusal, liveDrain, parseDrainRequest, type DrainRecord } from "./drain";
 import {
+  CGROUP_READ_ARGV,
+  MEMORY_PRESSURE_REASON,
+  MemoryGuard,
+  MemorySampleUnavailable,
+  type MemoryGateRoute,
+  type MemoryReading,
+} from "./memoryGuard";
+import {
   ControlResetError,
   RuntimeReplacedError,
   controlResetErr,
@@ -623,6 +631,11 @@ const DISK_FULL_RECYCLE_KEY = "resident:diskFullRecycleAt";
  *  admission projects a new tree's cost from its parts (its free-space term
  *  is a live `df` of its own). */
 const DISK_KEY = "resident:disk";
+/** The last memory reading (docs/reference/specs/resident-repos.md item 70; `memoryGuard.ts`):
+ *  one cgroup v2 read at every /exec and /attach start and on the measure
+ *  tick, persisted so the gauges (`/status`, `/residents`, the watchdog line)
+ *  read storage only — the watchdog never touches the container. */
+const MEMORY_KEY = "resident:memory";
 /** The lifecycle row (docs/reference/specs/resident-repos.md item 7): `workflow`,
  *  the one scheduler. Kept from the flagged rollout so `/status` and `/debug
  *  info` can say so; an `alarm` value a flip left behind reads `workflow`
@@ -1908,6 +1921,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  a DO restart drops the held RPCs with the ledger and the bot's own
    *  deadline names the fallback. */
   private restoreWaiters = new RestoreWaiters();
+
+  /** Item 70: the memory guard — one cgroup reading per /exec and /attach
+   *  start (and per measure tick), the two-threshold gate over the last one.
+   *  In-memory like the waiter ledger: a fresh isolate re-samples at the next
+   *  route start, and the persisted copy (MEMORY_KEY) serves the gauges. */
+  private memoryGuard = new MemoryGuard({ read: () => this.readCgroup() }, (line) => console.log(line));
 
   private nextHolder(): string {
     return `${this.incarnation}:${++this.leaseSeq}`;
@@ -4332,7 +4351,13 @@ export class ResidentDO extends Sandbox<Env> {
       cycle.count();
       // Same gate as the sweep: a silent control port cannot answer a `df`.
       if (await this.runtimeUnreachableRow()) return { status: "stopped", why: "runtime-unreachable" };
-      return this.housekeeping("measure", async () => ({ measured: (await this.measureDisk()) !== null }));
+      return this.housekeeping("measure", async () => {
+        // Item 70: the tick's memory line rides the measure step's cadence —
+        // the instance the watchdog cron creates, never the watchdog's own
+        // pass (which must not touch the container). No polling loop.
+        await this.sampleMemory();
+        return { measured: (await this.measureDisk()) !== null };
+      });
     });
   }
 
@@ -4520,6 +4545,76 @@ export class ResidentDO extends Sandbox<Env> {
         `homes ${formatGiB(Object.values(p.homes).reduce((a, n) => a + n, 0))}, other ${formatGiB(p.other)}`,
     );
     return sample;
+  }
+
+  // -- memory guard (docs/reference/specs/resident-repos.md item 70) ------------
+
+  /** The one real `CgroupReader`: `CGROUP_READ_ARGV` through the exec choke
+   *  point (`run()`), one exec per sample. A throw there (busy, replaced,
+   *  reset — the container's moment, not the cgroup) is the transient
+   *  `MemorySampleUnavailable`, which never disables the gate — and a typed
+   *  runtime replacement `invalidates` the last reading: the container it
+   *  measured is gone, and gating on its numbers would answer
+   *  `memory-pressure` where the route's own gate owes `runtime-replaced`.
+   *  A non-zero exit is the unreadable cgroup that logs once and disables it. */
+  private async readCgroup(): Promise<string> {
+    let r: { stdout: string; stderr: string; exitCode: number };
+    try {
+      r = await this.run([...CGROUP_READ_ARGV]);
+    } catch (err) {
+      throw new MemorySampleUnavailable(errMsg(err), err instanceof RuntimeReplacedError);
+    }
+    if (r.exitCode !== 0) throw new Error(`cgroup read exit ${r.exitCode}: ${(r.stderr || r.stdout).trim()}`);
+    return r.stdout;
+  }
+
+  /** One sample, one structured log line (the guard's). Never on an inactive
+   *  runtime — a sleeping container is not woken to be measured (item 55's
+   *  rule) — and persisted for the gauges when taken. */
+  private async sampleMemory(): Promise<MemoryReading | null> {
+    if (!(await this.isRuntimeActive().catch(() => false))) {
+      // An inactive container holds no memory: whatever the guard last read
+      // came from a container that no longer runs, and a route hitting the
+      // gate before anything wakes the runtime (a fresh hydration memo skips
+      // the restore) must not be refused on a dead container's percent.
+      this.memoryGuard.invalidate();
+      return null;
+    }
+    const reading = await this.memoryGuard.sample(new Date(systemClock()).toISOString());
+    if (reading) await this.ctx.storage.put(MEMORY_KEY, reading);
+    return reading;
+  }
+
+  /** The last reading, for `/status`, `/residents` and the watchdog line —
+   *  this incarnation's when it has one, else the persisted one (storage
+   *  only: the watchdog never touches the container). */
+  async memoryGauge(): Promise<MemoryReading | null> {
+    return this.memoryGuard.lastReading ?? (await this.ctx.storage.get<MemoryReading>(MEMORY_KEY)) ?? null;
+  }
+
+  /** The route gate (item 70): one fresh sample, then the pure verdict over
+   *  the last reading. A refusal is the same 503 shape as `mirror-busy`, so
+   *  the bot falls back or waits legibly — and a command already running is
+   *  never touched: the gate sits at the route's start and kills nothing. */
+  private async memoryGate(route: MemoryGateRoute, exemptRegisteredRun = false): Promise<ThreadErr | null> {
+    await this.sampleMemory();
+    // A run already in flight — registered from attach to release (item 44) —
+    // is what the gate holds the resident open FOR: its re-attach (a rolled
+    // container, an evicted worktree, a resume) passes as it passes the drain,
+    // sampled but never refused — refusing it would strand the warm worktree
+    // and lose the very work the gate protects.
+    if (exemptRegisteredRun) return null;
+    const refusal = this.memoryGuard.gate(route);
+    if (!refusal) return null;
+    const s = await this.getStatus();
+    return {
+      error: refusal.message,
+      status: 503,
+      state: s.state,
+      stateReason: s.reason,
+      reason: MEMORY_PRESSURE_REASON,
+      cause: "system",
+    };
   }
 
   /** `{usedKiB, totalKiB, at}` of the last sample for the watchdog line (storage
@@ -4781,11 +4876,17 @@ export class ResidentDO extends Sandbox<Env> {
     action: "none" | "provision-timed-out" | "auto-rebuilt";
     /** Item 55: the last disk sample's gauge, for the watchdog's status line. */
     disk: { usedKiB: number; totalKiB: number; freeKiB: number; at: string } | null;
+    /** Item 70: the last memory reading, storage only — the tick's gauge. */
+    memory: MemoryReading | null;
     /** Item 7: what the cron's instance-creation decision reads, after the check above settled the state. */
     refresh: RefreshRow;
   }> {
-    const [check, disk] = await Promise.all([this.watchdogCheckLifecycle(), this.diskGauge()]);
-    return { ...check, disk, refresh: await this.refreshRow() };
+    const [check, disk, memory] = await Promise.all([
+      this.watchdogCheckLifecycle(),
+      this.diskGauge(),
+      this.memoryGauge(),
+    ]);
+    return { ...check, disk, memory, refresh: await this.refreshRow() };
   }
 
   private async watchdogCheckLifecycle(): Promise<{
@@ -5079,10 +5180,18 @@ export class ResidentDO extends Sandbox<Env> {
       // closed on the run it is closed for. Read before the image reconcile so
       // a refused attach never restarts a container.
       const drain = await this.fleetDrain();
-      if (drain && !(await this.ctx.storage.get(runRegKey(threadKey)))) {
+      const registered = (await this.ctx.storage.get(runRegKey(threadKey))) !== undefined;
+      if (drain && !registered) {
         const refusal: ThreadErr & { draining: DrainRecord } = drainRefusal(drain);
         return refusal;
       }
+      // Item 70: above the soft memory threshold a NEW attach is refused like
+      // `mirror-busy` (the bot falls back or waits, the card says why) — after
+      // the drain (storage only, cheaper) and before the image reconcile, so a
+      // refused attach never restarts a container. A registered run's
+      // re-attach passes for the same reason it passes the drain above.
+      const memory = await this.memoryGate("attach", registered);
+      if (memory) return memory;
       const resourceId = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "";
       if (await this.reconcileImage("attach")) {
         return {
@@ -6692,6 +6801,10 @@ export class ResidentDO extends Sandbox<Env> {
     timeoutMs: number,
     env?: Record<string, string>,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
+    // Item 70: a new command is refused by name above the hard memory
+    // threshold — before the preflight, so nothing of it starts.
+    const memory = await this.memoryGate("exec");
+    if (memory) return memory;
     const pre = await this.threadPreflight(threadKey);
     if ("error" in pre) return pre;
     const { binding } = pre;
@@ -7707,6 +7820,7 @@ export class ResidentDO extends Sandbox<Env> {
       RUNTIME_UNREACHABLE_KEY,
       AUTO_REBUILDS_KEY,
       INFRA_STREAK_KEY,
+      MEMORY_KEY,
     ]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const snap = map.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
@@ -7809,6 +7923,9 @@ export class ResidentDO extends Sandbox<Env> {
       // Item 55: the last disk sample (`residentDiskBudget.ts` DiskSample), or
       // null before the first measurement of this incarnation.
       disk,
+      // Item 70: the last memory reading (used/cap bytes, percent), or null
+      // before the first sample of this incarnation reaches storage.
+      memory: (map.get(MEMORY_KEY) as MemoryReading | undefined) ?? null,
       // Item 64: consecutive connects the control port did not answer, with
       // the rung that count is on; null while the port answers.
       runtimeUnreachable: unreachable ? { ...unreachable, rung: runtimeUnreachableRung(unreachable.count) } : null,
@@ -8943,12 +9060,13 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   // deploy gate reads /residents. The registry check rides in the same flight
   // (its 404 is judged first, the probes' results discarded then).
   const stub = residentStub(env, resource.resource);
-  const [record, status, inFlight, refresh, snapshot] = await Promise.all([
+  const [record, status, inFlight, refresh, snapshot, memory] = await Promise.all([
     registryStub(env).getRecord(resource.resource),
     stub.getStatus(),
     stub.getInFlightCount(),
     stub.getRefreshView(),
     stub.snapshotHandle(),
+    stub.memoryGauge(),
   ]);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
   // Item 7: which scheduler drives the refresh cycle and, on the Workflow
@@ -8961,6 +9079,9 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
     lifecycle: refresh.lifecycle,
     refresh: { instance: refresh.instance, skipped: refresh.skipped },
     snapshot,
+    // Item 70: the last memory reading, so the bot and the residents page can
+    // show what the resident's own gate is reading.
+    memory,
   });
 }
 
@@ -9451,6 +9572,7 @@ async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummar
           reason: s.value.reason,
           action: s.value.action,
           disk: s.value.disk,
+          memory: s.value.memory,
           instance: s.value.instance,
         }
       : { resource: record.resource, error: errMsg(s.reason) };

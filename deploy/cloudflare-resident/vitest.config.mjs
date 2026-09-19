@@ -25,7 +25,10 @@ import { defineConfig } from "vitest/config";
 // threadErr.ts imports nothing workerd-only), and for `/op`'s streamed failure
 // document carrying its status (streamOp.test.ts: the wiring by scan, the
 // document by those builders), and for the fleet drain's record, refusal and
-// wiring (drain.test.ts); testing/sourceScan.ts is their helper. Every
+// wiring (drain.test.ts), and for the memory guard's pure gate
+// (memoryGuard.test.ts — loads the pure module, like drain) with its Worker
+// wiring read as text (memoryGate.test.ts); testing/sourceScan.ts is their
+// helper. Every
 // test file of this directory is listed here — src/vitestWorkspace.test.ts
 // holds that.
 // worker.ts itself is covered by typecheck + the [agent] receipts in
@@ -60,6 +63,8 @@ export default defineConfig({
       "threadErr.test.ts",
       "streamOp.test.ts",
       "drain.test.ts",
+      "memoryGuard.test.ts",
+      "memoryGate.test.ts",
     ],
   },
 });

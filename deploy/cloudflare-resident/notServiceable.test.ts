@@ -5,7 +5,7 @@ import { readSource } from "./testing/sourceScan";
 // types an answer by the fields the resident puts on it, never by its words:
 // a 5xx carrying the lifecycle pair (`state`, `stateReason`) waits exactly
 // when that pair says the resident is coming back, `reason` stays the answer's
-// OWN word (mirror-busy, disk-pressure, image-stale, the not-serviceable
+// OWN word (mirror-busy, disk-pressure, memory-pressure, image-stale, the not-serviceable
 // detail), a resource with no registry record or repo facts says `reason:
 // "unregistered"`, and the 500 for a throw no route named — at whichever catch
 // met it, the /exec stream's rejection included — says whether the throw was
@@ -27,15 +27,18 @@ describe("the resident's not-serviceable answers name what the client cannot wai
     for (const site of sites) expect(site).toMatch(/reason: "unregistered"/);
   });
 
-  it("every 503 that carries the lifecycle `state` carries the lifecycle `stateReason` beside it — the hydrate path's not-serviceable answers, mirror-busy, disk-pressure and image-stale alike — and `reason` stays the answer's own word, so the client reads the pair and never mistakes a busy mirror on a degraded-but-serviceable resident for a repo failure", () => {
+  it("every 503 that carries the lifecycle `state` carries the lifecycle `stateReason` beside it — the hydrate path's not-serviceable answers, mirror-busy, disk-pressure, memory-pressure and image-stale alike — and `reason` stays the answer's own word, so the client reads the pair and never mistakes a busy mirror on a degraded-but-serviceable resident for a repo failure", () => {
     const withState = answers503().filter((literal) => /\bstate: /.test(literal));
     expect(withState.length).toBeGreaterThanOrEqual(9);
     for (const literal of withState) {
       expect(literal, literal).toMatch(/\bstateReason: (s\.reason|"")/);
-      expect(literal, literal).toMatch(/\breason: ("mirror-busy"|DISK_PRESSURE_REASON|"image-stale"|s\.reason)/);
+      expect(literal, literal).toMatch(
+        /\breason: ("mirror-busy"|DISK_PRESSURE_REASON|MEMORY_PRESSURE_REASON|"image-stale"|s\.reason)/,
+      );
     }
     expect(withState.filter((l) => /reason: "mirror-busy"/.test(l))).toHaveLength(4);
     expect(withState.filter((l) => /reason: DISK_PRESSURE_REASON/.test(l))).toHaveLength(1);
+    expect(withState.filter((l) => /reason: MEMORY_PRESSURE_REASON/.test(l))).toHaveLength(1);
     expect(withState.filter((l) => /reason: "image-stale"/.test(l))).toHaveLength(1);
     expect(withState.filter((l) => /error: `not-serviceable: \$\{errMsg\(err\)\}`/.test(l))).toHaveLength(3);
   });

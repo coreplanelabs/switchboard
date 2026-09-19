@@ -7,6 +7,7 @@ const KNOWN_REASONS = [
   "mirror-busy",
   "user-pool-exhausted",
   "disk-pressure",
+  "memory-pressure",
   "fleet-busy",
   "runtime-replaced",
   "not-onboarded",

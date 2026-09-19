@@ -134,7 +134,11 @@ describe("the Worker's wiring (by scan)", () => {
     expect(hydrate).toBeGreaterThan(-1);
     expect(gate).toBeGreaterThan(hydrate);
     expect(reconcile).toBeGreaterThan(gate);
-    expect(attach).toMatch(/if \(drain && !\(await this\.ctx\.storage\.get\(runRegKey\(threadKey\)\)\)\) \{/);
+    // One registration read serves the drain gate and the memory gate (item 70).
+    expect(attach).toMatch(
+      /const registered = \(await this\.ctx\.storage\.get\(runRegKey\(threadKey\)\)\) !== undefined;/,
+    );
+    expect(attach).toMatch(/if \(drain && !registered\) \{/);
     expect(attach).toMatch(/drainRefusal\(drain\)/);
     const handler = source.slice(
       source.indexOf("async function handleAttach("),
