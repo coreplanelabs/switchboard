@@ -55,7 +55,7 @@
   "src/core/statusBudget.ts": 3,
   "src/deploy/imagesHost.ts": 2,
   "src/deploy/liveGate.ts": 3,
-  "src/deploy/plan.ts": 4,
+  "src/deploy/plan.ts": 3,
   "src/deploy/registryTransferHost.ts": 2,
   "src/deploy/restart.ts": 3,
   "src/deploy/run.ts": 14,

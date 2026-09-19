@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AffectedReport } from "./affected.js";
 import {
-  BOT_WAIT_MAX_MS,
   capabilityProblem,
   classifyDeployOutput,
   CONFIG_DOCUMENT_KEY,
@@ -317,18 +316,17 @@ describe("planDeploy", () => {
     expect(plan({ force: true }).steps.every((s) => !s.retryOnPreflightRefusal)).toBe(true); // forced → nothing to wait for
   });
 
-  it("the bot and resident steps carry their own wait budgets (BOT_WAIT_MAX_MS 90 min — the longest coding lease; RESIDENT_WAIT_MAX_MS 30 min): their refusals are runs in flight, which outlast a rollout; memory keeps the plan's", () => {
+  it("the resident step carries its own wait budget (RESIDENT_WAIT_MAX_MS, 30 min): its refusals are runs in flight and a provisioning, which last minutes, not a rollout; the bot keeps the plan's", () => {
     const p = plan({ waitMaxMinutes: 7 });
     const byName = Object.fromEntries(p.steps.map((s) => [s.name, s]));
     expect(byName.resident.waitMaxMs).toBe(RESIDENT_WAIT_MAX_MS);
     expect(RESIDENT_WAIT_MAX_MS).toBe(30 * 60_000);
-    expect(byName.bot.waitMaxMs).toBe(BOT_WAIT_MAX_MS);
-    expect(BOT_WAIT_MAX_MS).toBe(90 * 60_000);
+    expect(byName.bot.waitMaxMs).toBeUndefined();
     expect(byName.memory.waitMaxMs).toBeUndefined();
     const text = formatPlan(p);
     expect(text).toContain("resident");
     expect(text).toMatch(/resident.*up to 30 min/);
-    expect(text).toMatch(/bot.*up to 90 min/);
+    expect(text).toMatch(/bot.*up to 7 min/);
   });
 
   it("--dry-run marks the plan and formatPlan renders it in order with the checks it would run", () => {
@@ -337,7 +335,7 @@ describe("planDeploy", () => {
     const text = formatPlan(p);
     expect(text.indexOf("1. memory")).toBeLessThan(text.indexOf("2. bot"));
     expect(text).toContain("deploy/cloudflare-memory");
-    expect(text).toContain("preflight (retry every 60s up to 90 min)");
+    expect(text).toContain("preflight (retry every 60s up to 30 min)");
     expect(text).toContain(TEST_PROFILE.account);
     expect(text).toContain("origin/main");
     expect(text).not.toContain("resident");
