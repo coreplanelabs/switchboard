@@ -29,6 +29,8 @@ import { ResidentOperations } from "../execution/resident.js";
 import { RestGithubApi } from "../execution/githubApi.js";
 import { parseCostsConfig } from "./costs.js";
 import { costsFromConfig, NullCostsService, type CostsService } from "./costsService.js";
+import { createPlaneService, type PlaneService } from "./planeService.js";
+import { fetchCommitChecks, fetchPullRequestFacts, fetchPullRequestReviews } from "../execution/githubPulls.js";
 import { createDeliveryService, NullDeliveryService, parseDeliveryConfig, type DeliveryService } from "./delivery.js";
 import { SnapshottingDeliverySource } from "./deliverySnapshot.js";
 import {
@@ -138,6 +140,10 @@ export interface CoreCommandWiring {
    *  page reads); default: both billing sources with the `costs:` config over the
    *  snapshot store the state Worker holds, or the Null Object when cost reporting is off. */
   costs?: () => CostsService;
+  /** The plane service behind `plane show` (index.ts shares the one the `/plane`
+   *  panel reads); default: the runs service and the instance store above with
+   *  the merge door's GitHub reads. */
+  plane?: () => PlaneService;
   /** The channel directory behind `config show --channel` (authorization.md item
    *  4, the channelConfig read half): the target channel's visibility, read
    *  through the run stamp's bound (`channelVisibilityOf`). A getter, because the
@@ -293,6 +299,18 @@ export function buildCoreCommands(
       });
     return wired?.service ?? new NullCostsService();
   });
+  // ONE plane service per binding: `plane show` and the `/plane` panel read the
+  // same table over the same runs service and instance store.
+  const plane = once(async (): Promise<PlaneService> => {
+    if (wiring.plane) return wiring.plane();
+    const history = (await cfg()).config.runHistory;
+    return createPlaneService({
+      runs: await runs(),
+      instances: buildCoordinatorInstanceStore(history, wiring.secrets),
+      github: { facts: fetchPullRequestFacts, checks: fetchCommitChecks, reviews: fetchPullRequestReviews },
+      ...(wiring.now ? { clock: wiring.now } : {}),
+    });
+  });
   const deps: CoreCommandDeps = {
     help: {
       agents: () =>
@@ -382,6 +400,7 @@ export function buildCoreCommands(
     contract: { readFile: readOptionalFile },
     delivery: { service: delivery },
     costs: { service: costs },
+    plane: { service: plane },
     // `providers check`: the loaded blocks and refs, the installed pi registry
     // (the very catalog the dispatcher resolves cards against), the real fetch.
     providers: {

@@ -21,6 +21,7 @@ import { makePageSender } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createWebChatHandler } from "./channels/web.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
+import { createPlaneViewHandler } from "./channels/planeView.js";
 import { createDeliveryViewHandler } from "./channels/deliveryView.js";
 import { createSettingsViewHandler } from "./channels/settingsView.js";
 import { installationSettings } from "./core/installationSettings.js";
@@ -54,6 +55,7 @@ import { startProcessMetrics } from "./channels/processMetrics.js";
 import { selectFrictionLedger } from "./core/frictionLedger.js";
 import { buildRunStore, FileRunStore, NullRunStore, retentionPolicyOf } from "./core/runStore.js";
 import { createRunsService } from "./core/runsService.js";
+import { createPlaneService } from "./core/planeService.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./core/runHistoryWriter.js";
 import { autoAbridgeOnPersist, reviewAbridgerFromConfig } from "./core/reviewAbridge.js";
 import { meatOnPath } from "./core/meatProcess.js";
@@ -513,6 +515,14 @@ export async function runBot(): Promise<void> {
     prices: costsCfg?.prices,
   });
   deps.runs = runsService;
+  // One plane service for `plane show` and the /plane panel (record 0064, the table):
+  // the same runs service and instance store, the merge door's GitHub reads for the
+  // tracked pull requests.
+  const planeService = createPlaneService({
+    runs: runsService,
+    instances: coordinatorInstances,
+    github: { facts: fetchPullRequestFacts, checks: fetchCommitChecks, reviews: fetchPullRequestReviews },
+  });
   // Scheduled firings are recorded on the state Worker's ScheduleDO;
   // `schedule list` and the /runs "Scheduled" panel read the same store.
   const scheduleStore =
@@ -573,6 +583,7 @@ export async function runBot(): Promise<void> {
     runs: runsService,
     delivery: () => deliveryService,
     costs: () => costsService,
+    plane: () => planeService,
     abridger: () => abridger,
     frictionLedger,
     tracker: deps.issueTracker,
@@ -911,6 +922,11 @@ export async function runBot(): Promise<void> {
     // served from the snapshot built above. Access-gated below alongside /runs
     // and /residents.
     const costsView = createCostsViewHandler(costsService, page, { names });
+    // The plane panel: GET /plane (+ .json twin) over the plane service; the live
+    // rows' tokens come from the registry's index face, as the runs index reads them.
+    const planeView = createPlaneViewHandler(planeService, page, {
+      liveTokens: () => new Map(defaultRunRegistry.listActive().map((s) => [s.id, s.token])),
+    });
     const costsState = costs
       ? `GET /costs (${costsService.groups().join(",")}; LLM ${costs.llmOn ? "on" : "off"}; snapshot every ${costsCfg?.snapshot.everyHours ?? "?"} h)`
       : costsCfg
@@ -1173,6 +1189,8 @@ export async function runBot(): Promise<void> {
         path === "/costs" ||
         path === "/costs.json" ||
         path.startsWith("/costs/") ||
+        path === "/plane" ||
+        path === "/plane.json" ||
         path === "/delivery" ||
         path === "/delivery.json" ||
         path.startsWith("/delivery/") ||
@@ -1222,6 +1240,7 @@ export async function runBot(): Promise<void> {
             if (mcpConnectView(req, res, gate.identity)) return;
             if (residentsView(req, res, { actor })) return;
             if (costsView(req, res, { identity, actor })) return;
+            if (planeView(req, res, { actor })) return;
             if (deliveryView(req, res, { actor })) return;
             if (settingsView(req, res, { identity })) return;
             res.writeHead(200, { "content-type": "text/plain" });

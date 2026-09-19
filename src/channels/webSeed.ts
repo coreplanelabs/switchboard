@@ -4,6 +4,7 @@ import type { UnitFacts, UnitRun, UnitRunsView } from "../core/unitRuns.js";
 import type { CostReport } from "../core/costs.js";
 import type { CostsByReport } from "../core/costsBy.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
+import type { PlaneTable } from "../core/plane/table.js";
 import type { CostsView } from "./costsView.js";
 import type { RunCost } from "../core/modelPricing.js";
 import type { DeliveryReport } from "../core/delivery.js";
@@ -347,6 +348,18 @@ export interface CostsSeed {
   canSnapshot: boolean;
 }
 
+/** The plane's table (docs/reference/specs/orchestration-plane.md item 5;
+ *  docs/decisions/0064): every live and recently ended run, every unit and
+ *  every tracked pull request with its owner and health, as `plane show`
+ *  answers it, plus the live rows' tokens for their hrefs — this process's live
+ *  rows only, as the runs index carries them. */
+export interface PlaneSeed {
+  page: "plane";
+  table: PlaneTable;
+  /** Capability tokens by run id for the live rows this process holds (a finished or foreign row has none). */
+  tokens: Record<string, string>;
+}
+
 export interface DeliverySeed {
   page: "delivery";
   report: DeliveryReport;
@@ -447,6 +460,7 @@ export type PageSeed =
   | ResidentsIndexSeed
   | ResidentDetailSeed
   | CostsSeed
+  | PlaneSeed
   | DeliverySeed
   | SettingsSeed
   | HomeSeed;

@@ -142,6 +142,12 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 |---|---|---|
 | `providers check` | Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each. | admins |
 
+### `plane`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `plane show` | What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written. | admins |
+
 <!-- /generated:chat-commands -->
 
 ## Where each group is explained

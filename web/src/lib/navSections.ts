@@ -10,7 +10,7 @@ import type { Capabilities } from "@core/core/capabilities.js";
 
 // `home` is the threads page at `/threads` (docs/reference/specs/web-chat.md): the first
 // section, always on — the dashboard's front door — and the brand mark's target.
-export type NavSection = "home" | "runs" | "residents" | "costs" | "delivery" | "settings";
+export type NavSection = "home" | "runs" | "plane" | "residents" | "costs" | "delivery" | "settings";
 
 export interface NavItem {
   id: NavSection;
@@ -24,6 +24,8 @@ export interface NavItem {
 const SECTIONS: ReadonlyArray<NavItem> = [
   { id: "home", label: "Threads", href: "/threads", icon: "i-lucide-message-square" },
   { id: "runs", label: "Runs", href: "/runs", icon: "i-lucide-list" },
+  // The plane's table (record 0064) grows out of the run ledger: the section exists where the ledger does.
+  { id: "plane", label: "Plane", href: "/plane", icon: "i-lucide-radar", on: (c) => c.runLedger },
   { id: "residents", label: "Residents", href: "/residents", icon: "i-lucide-server", on: (c) => c.residents },
   { id: "costs", label: "Costs", href: "/costs", icon: "i-lucide-circle-dollar-sign", on: (c) => c.costs },
   // The delivery indicators read GitHub with the App's token: the page exists where a credential does.

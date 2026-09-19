@@ -1057,6 +1057,20 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "runs:read",
+    "args": [],
+    "effect": "read",
+    "id": "plane.show",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "providers:read",
     "args": [],
     "effect": "read",

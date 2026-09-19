@@ -26,6 +26,8 @@ export const routes: RouteRecordRaw[] = [
     component: () => import("./pages/ResidentDetailPage.vue"),
   },
   { path: "/costs/:group?", component: () => import("./pages/CostsPage.vue") },
+  // The plane's table (docs/reference/specs/orchestration-plane.md, record 0064).
+  { path: "/plane", component: () => import("./pages/PlanePage.vue") },
   { path: "/delivery/:owner?/:name?", component: () => import("./pages/DeliveryPage.vue") },
   // The settings page and its tabs; `/settings/channels/<id>` carries the channel id (the seed decides the tab).
   { path: "/settings/:tab?/:channel?", component: () => import("./pages/SettingsPage.vue") },

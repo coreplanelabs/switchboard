@@ -58,6 +58,13 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
   f("c05p", "paraphrase", "list the channels that have their own settings", "config.overrides"),
   f("c36h", "happy", "which channels can I pick settings for", "config.channels"),
   f("c36p", "paraphrase", "list the channels you are in, by name", "config.channels"),
+  f("c39h", "happy", "what is happening right now", "plane.show"),
+  f(
+    "c39p",
+    "paraphrase",
+    "give me the table: every live run, unit and pull request with its owner and health",
+    "plane.show",
+  ),
   f("c06h", "happy", "use anthropic/claude-opus-5 for coding in this channel", "config.set", {
     args: ["channel"],
     options: { models: { coding: "anthropic/claude-opus-5" } },
@@ -214,6 +221,7 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c04d", "is the config for this channel sensible?", "config.show"),
   d("c05d", "why does this channel behave differently from the others?", "config.overrides"),
   d("c36d", "which channel would be the best home for the review bot?", "config.channels"),
+  d("c39d", "what happened to the release last night and who dropped the ball?", "plane.show"),
   d("c06d", "what would be a good model for coding work here?", "config.set"),
   d("c07d", "did anyone change the settings here recently?", "config.clear"),
   d("c08d", "are my instructions actually being followed?", "config.instructions", ["config.instructions"]),

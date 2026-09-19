@@ -71,6 +71,12 @@ export const SURFACES = [
   },
   { name: "costs", path: "/costs", page: "web/src/pages/CostsPage.vue", what: "the spend page" },
   {
+    name: "plane",
+    path: "/plane",
+    page: "web/src/pages/PlanePage.vue",
+    what: "the plane's table: every live and recent run, every unit and every tracked pull request with its owner and health",
+  },
+  {
     name: "costs-users",
     path: "/costs?view=users",
     page: "web/src/pages/CostsPage.vue",

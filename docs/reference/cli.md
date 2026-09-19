@@ -177,6 +177,12 @@ One table per group, in registration order. "Surfaces" is where that command can
 | `artifacts lifecycle [--dry-run]` | Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after `artifacts.retentionDays` (default 30), incomplete multipart uploads abort after one day — and read them back; `--dry-run` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token. | CLI only |
 | `artifacts check` | Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token. | CLI only |
 
+### `plane`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `plane show` | What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written. | every surface |
+
 <!-- /generated:cli-commands -->
 
 ## Which commands need bot config
