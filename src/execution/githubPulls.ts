@@ -313,6 +313,30 @@ export async function fetchRepoShipInfo(repo: string): Promise<RepoShipInfo | un
   };
 }
 
+/** GET /repos/{repo}/git/ref/heads/{ref} → whether the branch exists: `true`
+ *  on a 2xx, `false` on a 404 (GitHub has no such ref), `undefined` when it
+ *  could not be asked (missing credential, network failure, any other status).
+ *  The ship preflight's base check (agent-ship item 10, issue 1827): the same
+ *  lookup `createBranchRef` starts with, spent BEFORE the pipeline branch is
+ *  cut so a misbound base is a decision, not a 404 abort after the instance
+ *  exists. Never throws. */
+export async function fetchRefExists(repo: string, ref: string): Promise<boolean | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  if (!token) return undefined;
+  const path = ref.split("/").map(encodeURIComponent).join("/");
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/git/ref/heads/${path}`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (res.ok) return true;
+  return res.status === 404 ? false : undefined;
+}
+
 /** One PR's entry-check facts for ship (spec item 10): open/closed, the author
  *  identity (login AND immutable numeric id — the same pair the org
  *  auto-approve workflow pins), whether the head lives on the base repo, and

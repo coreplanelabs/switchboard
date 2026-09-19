@@ -21,7 +21,12 @@ import type { RunOwner } from "../trace/streamSpans.js";
 import type { RequestTrace } from "../requestTrace.js";
 import type { RepoContext, ResidentSlugs } from "../repoContext.js";
 import { residentSlugsLister } from "../../execution/factory.js";
-import { fetchPullRequestFacts, fetchRepoShipInfo, type PullRequestFacts } from "../../execution/githubPulls.js";
+import {
+  fetchPullRequestFacts,
+  fetchRefExists,
+  fetchRepoShipInfo,
+  type PullRequestFacts,
+} from "../../execution/githubPulls.js";
 import { handOffToCoordinator, type HandOffOutcome } from "../coordinator/handOff.js";
 import { ALLOWANCES, ASKS, fit, HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "../budgets.js";
 import {
@@ -64,6 +69,12 @@ export interface ShipDeps extends RunDeps, Pick<FastPathDeps, "clock" | "runRegi
    * Default: githubPulls' `fetchPullRequestFacts`. Injectable for tests.
    */
   fetchPrFacts?: (pr: { repo: string; number: number }) => Promise<PullRequestFacts | undefined>;
+  /**
+   * Whether a branch exists on a repository — the preflight's base check
+   * (item 10, issue 1827), one GET refs call before the pipeline branch is
+   * cut. Default: githubPulls' `fetchRefExists`. Injectable for tests.
+   */
+  fetchRefExists?: (repo: string, ref: string) => Promise<boolean | undefined>;
   /**
    * The coordinator's instance records and unit rows on the state Worker
    * (run-history items 49 and 50) — what the hand-off writes before it asks
@@ -184,6 +195,7 @@ export async function runShipBranch(
       },
       repoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
       prFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
+      refExists: deps.fetchRefExists ?? fetchRefExists,
       runsBase: process.env.PUBLIC_BASE_URL,
     }),
   );

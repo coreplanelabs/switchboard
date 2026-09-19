@@ -87,6 +87,7 @@ const CAUSE_OF = {
   ship_preflight_head_unknown: "system",
   ship_preflight_closed_resume: "request",
   ship_preflight_no_task: "request",
+  ship_preflight_base_missing: "request",
   // the plan hand-off's fifteen sentences (two share `plan_history_unavailable`)
   plan_base_unknown: "request",
   plan_routed_seed: "request",

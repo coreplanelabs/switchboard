@@ -6,6 +6,7 @@ import {
   fetchCommitChecks,
   fixupCommitSubjects,
   fetchPullRequestReviews,
+  fetchRefExists,
   fetchRepoShipInfo,
   findMergedPrByHead,
   findOpenPrByHead,
@@ -412,6 +413,37 @@ describe("githubPulls", () => {
       const calls = stubFetch(() => new Response("{}", { status: 200 }));
       expect(await fetchRepoShipInfo("acme/api")).toBeUndefined();
       expect(calls).toHaveLength(0); // no unauthenticated repo-settings probe
+    });
+  });
+
+  describe("fetchRefExists (the ship preflight's base check, issue 1827)", () => {
+    it("2xx → true, 404 → false — the ref segment-encoded like createBranchRef's lookup", async () => {
+      stubToken();
+      const calls = stubFetch(() => new Response(JSON.stringify({ object: { sha: "a".repeat(40) } }), { status: 200 }));
+      expect(await fetchRefExists("acme/api", "release/1.x")).toBe(true);
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/release/1.x");
+      expect(await fetchRefExists("acme/api", "feat#1")).toBe(true);
+      expect(calls[1].url).toBe("https://api.github.com/repos/acme/api/git/ref/heads/feat%231");
+      stubFetch(() => new Response("{}", { status: 404 }));
+      expect(await fetchRefExists("acme/api", "web/src/pages/runPage.test.ts")).toBe(false);
+    });
+
+    it("any other status, a network failure or a missing credential → undefined (could not ask), never a throw", async () => {
+      stubToken();
+      stubFetch(() => new Response("slow down", { status: 503 }));
+      expect(await fetchRefExists("acme/api", "main")).toBeUndefined();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new Error("ECONNRESET");
+        }),
+      );
+      expect(await fetchRefExists("acme/api", "main")).toBeUndefined();
+      vi.stubEnv("GH_TOKEN", "");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const calls = stubFetch(() => new Response("{}", { status: 200 }));
+      expect(await fetchRefExists("acme/api", "main")).toBeUndefined();
+      expect(calls).toHaveLength(0); // no unauthenticated probe
     });
   });
 
