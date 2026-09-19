@@ -159,6 +159,10 @@ export interface RunHistorySeed {
    *  recorded" rather than `interrupted` (run-history item 27). Absent on
    *  every final record. */
   provisional?: true;
+  /** A queued ask's page (record 0064, "The queue"): the plane holds the
+   *  request under this id between the queue answer and its admission — the
+   *  chip shows the position and the waiting words instead of an outcome. */
+  queued?: RunView["queued"];
   eventCount: number;
   /** The record's stamps (docs/reference/specs/tracing.md). */
   startedAt: number;

@@ -29,6 +29,7 @@ import { activityOfEvents } from "./runRegistry/activity.js";
 import { pipelineOfEvents, type PipelineSummary } from "./pipelineStanding.js";
 import { parseUnitKey, unitKeyOf, type CoordinatorUnit } from "./coordinator/contract.js";
 import { assembleRunRecord } from "./dispatch/record.js";
+import { waitingWords } from "./plane/decide.js";
 import { NO_PRICES, runCostOf, type ModelPriceTable, type RunCost } from "./modelPricing.js";
 import type { RunUsage } from "./runUsage.js";
 import type { CoordinatorInstanceStore } from "./coordinator/instanceStore.js";
@@ -116,6 +117,11 @@ export interface RunView {
   stop?: RunStopStatus;
   /** The run's latest one-line activity (`RunSummary.activity` live; `RunRecord.activity` persisted). */
   activity?: string;
+  /** Present on a queued ask's view alone (record 0064, "The queue"): the
+   *  plane holds the request under this id between the queue answer and its
+   *  admission, so the id a person was told has a page. `waiting` is the
+   *  queued reply's own words (`waitingWords`), so the two surfaces agree. */
+  queued?: { state: "waiting" | "admitted" | "withdrawn"; position: number; waiting: string };
   /** The stall signal's pace facts (`RunSummary.eventsLast5m` / `lastToolCallAt` /
    *  `inFlight`, live-view item 32): this process's LIVE rows only — absent on a
    *  persisted row and on a ledger row live under another generation, so a
@@ -313,7 +319,9 @@ export interface RunFrictionView {
 export interface StopRunView {
   id: string;
   mode: StopMode;
-  state: "stopping";
+  /** `withdrawn` is a queued ask's stop (record 0064, "The queue"): the plane's
+   *  waiting row is closed — nothing was running, so nothing is "stopping". */
+  state: "stopping" | "withdrawn";
 }
 
 /** One hit of a session search (session-log item 11): the log turn, whose it
@@ -457,7 +465,10 @@ export interface RunsServiceDeps {
    *  `finish`, the one-transaction seal a hard stop gives a hosted parent this
    *  process hosts (record 0060), which releases the host key with the row.
    *  Null or absent when the ledger is off. */
-  ledger?: Pick<RunLedger, "listLive" | "readEvents" | "requestStop" | "finish"> | null;
+  ledger?: Pick<
+    RunLedger,
+    "listLive" | "readEvents" | "requestStop" | "finish" | "planeWithdraw" | "planeQueued"
+  > | null;
   /** The session logs' search (session-log item 8) — the same ledger object in
    *  the bot. A process that reads history without driving runs (the CLI)
    *  hands the ledger here alone, so its run listing stays the store's. Null
@@ -713,6 +724,41 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       return { row, events: await ledger!.readEvents(id) };
     } catch (err) {
       warn(`[runs] run ledger read failed for ${id}: ${describe(err)}`);
+      return null;
+    }
+  };
+
+  /** A queued ask's view (record 0064, "The queue"): the plane stores the
+   *  request under the id the queued reply named, so that id has a page between
+   *  the queue answer and its admission. The view carries the requester and the
+   *  thread's channel, so the caller authorizes it like any run; null when the
+   *  ledger is off, the id is malformed or unknown to the queue, or the plane
+   *  cannot be read (a warning). */
+  const queuedRun = async (id: string): Promise<RunView | null> => {
+    if (!ledger || !RUN_ID_PATTERN.test(id)) return null;
+    try {
+      const row = await ledger.planeQueued(id);
+      if (!row) return null;
+      const channelAt = row.threadKey.lastIndexOf(":");
+      const waiting = waitingWords(row.conditions);
+      return {
+        id: row.runId,
+        ...(channelAt > 0 ? { channelId: row.threadKey.slice(0, channelAt) } : {}),
+        userId: row.requester,
+        threadKey: row.threadKey,
+        startedAt: row.queuedAt,
+        finished: false,
+        eventCount: 0,
+        queued: { state: row.state, position: row.position, waiting },
+        activity:
+          row.state === "waiting"
+            ? `queued at position ${row.position} — waiting on ${waiting}`
+            : row.state === "admitted"
+              ? "admitted — starting"
+              : "withdrawn",
+      };
+    } catch (err) {
+      warn(`[runs] plane queued read failed for ${id}: ${describe(err)}`);
       return null;
     }
   };
@@ -988,10 +1034,17 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // read whole to answer "what is this run".
       if (opts.include !== "messages") {
         const summary = await storeSummary(id);
-        return summary ? { ok: true, value: persistedView(summary, prices) } : notFound;
+        if (summary) return { ok: true, value: persistedView(summary, prices) };
+        // Not live, not stored: a queued ask's id still has a page (record
+        // 0064, "The queue") — the stored request the plane holds under it.
+        const queued = await queuedRun(id);
+        return queued ? { ok: true, value: queued } : notFound;
       }
       const record = await storeGet(id);
-      if (!record) return notFound;
+      if (!record) {
+        const queued = await queuedRun(id);
+        return queued ? { ok: true, value: queued } : notFound;
+      }
       const { events, ...rest } = record;
       const view: RunRecordView = persistedView(rest, prices);
       view.events = events;
@@ -1090,8 +1143,24 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
           warn(`[runs] run ledger stop failed for ${id}: ${describe(err)}`);
         }
       }
-      // Not in the registry: a persisted run is over (409), anything else is unknown.
-      return (await storeSummary(id)) ? conflict : notFound;
+      // Not in the registry: a persisted run is over (409).
+      if (await storeSummary(id)) return conflict;
+      // A queued id (record 0064, "The queue"): nothing runs yet, so either
+      // mode withdraws the waiting row — the queued reply's `runs stop <id>`
+      // lever is this fall-through. An id the queue holds admitted or
+      // withdrawn answers false and stays unknown here.
+      if (ledger && RUN_ID_PATTERN.test(id)) {
+        try {
+          const r = await ledger.planeWithdraw(id);
+          if (r.withdrawn) return { ok: true, value: { id, mode, state: "withdrawn" } };
+          // The queue knows the id but not as waiting (admitted, or already
+          // withdrawn): over, like a persisted run — a 409, never a 404.
+          if ((await ledger.planeQueued(id)) !== null) return conflict;
+        } catch (err) {
+          warn(`[runs] plane withdraw failed for ${id}: ${describe(err)}`);
+        }
+      }
+      return notFound;
     },
 
     authorizeLive(id, token) {

@@ -110,6 +110,17 @@ const liveStamps = ref<{ finishedAt?: number; sealedAt?: number; replyOk?: boole
  *  be a guess). */
 const endChip = computed(() => {
   if (isHistory && seed?.mode === "history") {
+    // A queued ask (record 0064, "The queue"): no outcome yet — the chip says
+    // the position and what the row waits on, in the queued reply's own words.
+    if (seed.queued)
+      return {
+        ok: false,
+        cls: "amber",
+        word:
+          seed.queued.state === "waiting"
+            ? `queued at position ${seed.queued.position} — waiting on ${seed.queued.waiting}`
+            : seed.queued.state,
+      };
     if (seed.status === "completed") return { ok: true, cls: "", word: "succeeded" };
     // A provisional record: the tombstone-first start marker still in its window —
     // rendered as "unfinished — no finish recorded", amber (not red), because the
