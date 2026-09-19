@@ -649,11 +649,11 @@ describe("the checked-in imperative set (src/load/routeImperativeFixtures.ts)", 
   const names = table.map((p) => p.name);
   const writers = table.filter((p) => p.identity === "write").map((p) => p.name);
 
-  it("is twenty-five imperatives expecting a write preset — twenty terse, three spec-shaped on a named repository, two whose task is in a linked conversation — eight read-only decoys, six review-shaped asks expecting review; every preset a row of the table, every id unique", () => {
+  it("is twenty-seven imperatives expecting a write preset — twenty terse, three spec-shaped on a named repository, two whose task is in a linked conversation, two post-approval follow-ups on an open pull request — eight read-only decoys, six review-shaped asks expecting review; every preset a row of the table, every id unique", () => {
     const imperatives = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "imperative");
     const decoys = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "decoy");
     const reviews = ROUTE_IMPERATIVE_FIXTURES.filter((f) => f.kind === "review");
-    expect(imperatives).toHaveLength(25);
+    expect(imperatives).toHaveLength(27);
     expect(decoys).toHaveLength(8);
     expect(reviews).toHaveLength(6);
     for (const f of imperatives) expect(f.presets, f.id).toEqual(writers);
@@ -671,12 +671,21 @@ describe("the checked-in imperative set (src/load/routeImperativeFixtures.ts)", 
       const links = (f.text.match(/https:\/\/acme\.slack\.com\//g) ?? []).length;
       expect(f.references, f.id).toBe(links === 0 ? undefined : links);
     }
+    // Post-approval follow-ups: the production thread after an approved unit
+    // whose pull request stayed open (record 0057's two failure classes; the
+    // grounding case of record 0060's ownership amendment) — a correction and
+    // a follow-on order, no repository named, each an ask for work.
+    const followUps = imperatives.filter((f) => f.id.startsWith("p"));
+    expect(followUps.map((f) => f.id)).toEqual(["p01", "p02"]);
+    expect(followUps[0]!.text).toContain("sorry, maybe i have this wrong");
+    expect(followUps[1]!.text).toBe("add bottom-left sidebar update stack component with dismiss behavior");
+    const orders = imperatives.filter((f) => !f.id.startsWith("p"));
     // Terse: twenty imperatives with no detail to route on, one short line each.
-    const terse = imperatives.filter((f) => f.references === undefined && f.text.length <= 80);
+    const terse = orders.filter((f) => f.references === undefined && f.text.length <= 80);
     expect(terse.map((f) => f.id)).toEqual(Array.from({ length: 20 }, (_, i) => `i${String(i + 1).padStart(2, "0")}`));
     // Spec-shaped: longer, on a named repository, saying how something should
     // behave — and naming no "fix" or "implement".
-    const spec = imperatives.filter((f) => f.references === undefined && f.text.length > 80);
+    const spec = orders.filter((f) => f.references === undefined && f.text.length > 80);
     expect(spec.map((f) => f.id)).toEqual(["s01", "s02", "s03"]);
     for (const f of spec) {
       expect(f.text, f.id).toMatch(/\bacme\b/);
@@ -684,7 +693,7 @@ describe("the checked-in imperative set (src/load/routeImperativeFixtures.ts)", 
       expect(f.text, f.id).not.toMatch(/\b(fix|implement)\b/i);
     }
     // Referenced: the order's verb in the sentence, the task in the linked thread.
-    const referenced = imperatives.filter((f) => f.references !== undefined);
+    const referenced = orders.filter((f) => f.references !== undefined);
     expect(referenced.map((f) => f.id)).toEqual(["t01", "t02"]);
     // The read-only decoy about a linked thread: the link alone never makes an order.
     expect(decoys.filter((f) => f.references !== undefined).map((f) => f.id)).toEqual(["d08"]);
@@ -777,8 +786,8 @@ describe("the imperative set through route() over a scripted model", () => {
     const results = await replayImperative(ROUTE_IMPERATIVE_FIXTURES, decideWith(knowing), { now: () => 0 });
     const score = imperativeScore(results);
     expect(score).toMatchObject({
-      imperatives: 25,
-      imperativesHit: 25,
+      imperatives: 27,
+      imperativesHit: 27,
       hitRate: 1,
       lookalikes: 14,
       lookalikesToWrite: 0,
@@ -789,7 +798,7 @@ describe("the imperative set through route() over a scripted model", () => {
       misses: [],
     });
     expect(renderImperative(score, { writePreset: "ship" })).toEqual([
-      "imperatives: 25/25 to ship (100%); look-alikes to a write preset 0/14 (decoys 8/8 read-only as expected, review-shaped 6/6 to review)",
+      "imperatives: 27/27 to ship (100%); look-alikes to a write preset 0/14 (decoys 8/8 read-only as expected, review-shaped 6/6 to review)",
       "",
       "misses: none",
     ]);
@@ -804,7 +813,7 @@ describe("the imperative set through route() over a scripted model", () => {
       writePreset: "coding",
     }).filter((c) => /imperative|look-alike/.test(c.name));
     expect(rows.map((c) => [c.pass, c.actual, c.limit])).toEqual([
-      [true, "25/25 (100%)", "≥ 90%"],
+      [true, "27/27 (100%)", "≥ 90%"],
       [true, "0/14", "0"],
     ]);
   });

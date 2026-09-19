@@ -11,7 +11,12 @@
 // it named no verb like "fix" — and two that point at a conversation whose
 // quoted thread carries the task ("in <repo> ship <thread link>", the
 // production ask that routed to `general` because the link read as something
-// to read first). Eight decoys: five read-only asks about the same failures,
+// to read first) — and two follow-ups typed into a thread after its unit was
+// approved while the pull request stayed open: a correction ("sorry, maybe i
+// have this wrong …") and a follow-on order, the production thread that
+// grounds record 0057's two failure classes (stickiness outranking the
+// router; router blindness) and record 0060's ownership amendment — each must
+// bind work, never `general`. Eight decoys: five read-only asks about the same failures,
 // a question about the repository in the spec-shaped voice, an ask that only a
 // sandbox answers (a timing) and a read-only ask about a linked thread. Six
 // review-shaped asks that name a pull request, one with a note about the
@@ -113,6 +118,22 @@ export const ROUTE_IMPERATIVE_FIXTURES: readonly RouteImperativeFixture[] = [
     text: `do the above ${THREAD}?thread_ts=1700000000.000000 — the thread has the spec, option B`,
     presets: SHIP,
     references: 1,
+  },
+  // Follow-ups after an approved unit whose pull request stayed open: the
+  // grounding case of record 0057's operator plan — a correction and a
+  // follow-on order, both an ask for the work on that pull request, never a
+  // clarification ticket for `general`.
+  {
+    id: "p01",
+    kind: "imperative",
+    text: "sorry, maybe i have this wrong. i want the picture thing to be in the bottom left sidebar and it should be square",
+    presets: SHIP,
+  },
+  {
+    id: "p02",
+    kind: "imperative",
+    text: "add bottom-left sidebar update stack component with dismiss behavior",
+    presets: SHIP,
   },
   // Decoys: read-only asks about the same failures — a question, a check, a list.
   { id: "d01", kind: "decoy", text: "check whether ci is red", presets: READ_ONLY },

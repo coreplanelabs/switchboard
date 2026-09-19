@@ -13,6 +13,7 @@ import {
   stickyAgentOf,
   THREAD_READ_LIMIT,
   threadPrOf,
+  unitPrRef,
   threadRouteOf,
 } from "./thread.js";
 
@@ -197,6 +198,25 @@ describe("refusedRequestsOf — the requests the provider refused under its usag
   });
 });
 
+describe("unitPrRef — a unit row's pull request as a REST address (record 0060's amendment)", () => {
+  const base: CoordinatorUnit = {
+    instanceId: "i1",
+    unit: "U12",
+    slug: "u12",
+    branch: "plan/p/u12",
+    dependsOn: [],
+    rounds: [],
+  };
+  it("parses repo and number from the row's URL; a row without one or with a foreign URL yields nothing", () => {
+    expect(unitPrRef({ ...base, pr: { number: 7, url: "https://github.com/acme/api/pull/7" } })).toEqual({
+      repo: "acme/api",
+      number: 7,
+    });
+    expect(unitPrRef(base)).toBeUndefined();
+    expect(unitPrRef({ ...base, pr: { number: 7, url: "https://example.com/acme/api/pull/7" } })).toBeUndefined();
+  });
+});
+
 describe("threadPrOf — the pull request the thread's work lives on (docs/reference/specs/resident-repos.md item 29)", () => {
   const pr = (number: number) => ({ number, url: `https://github.com/acme/api/pull/${number}` });
 
@@ -310,6 +330,69 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
     // The person's addressed session is the owner; the child alone owns nothing.
     expect(await ownerOf([child, person], async () => [ended], THREAD)).toEqual({ kind: "session", agent: "review" });
     expect(await ownerOf([child], async () => [ended], THREAD)).toEqual({ kind: "none" });
+  });
+
+  it("a merge-ready unit with an open pull request keeps the thread (record 0060's amendment) — and an unfinished unit outranks it", async () => {
+    const ship = run({ id: "r-ship", agent: "ship", instanceId: "ship_acme_api_1", session: closed });
+    const ready = unit({
+      ending: { kind: "merge_ready", report: "approved", at: 2_000 },
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    });
+    const prOpen = vi.fn(async () => true);
+    expect(await ownerOf([ship], async () => [ready], THREAD, prOpen)).toEqual({
+      kind: "unit",
+      instanceId: "ship_acme_api_1",
+      unit: ready,
+    });
+    expect(prOpen).toHaveBeenCalledExactlyOnceWith(ready);
+    // An unfinished unit on the same thread owns first; the pull request is never read for it.
+    prOpen.mockClear();
+    const unfinished = unit({ unit: "U13", slug: "u13" });
+    expect(await ownerOf([ship], async () => [ready, unfinished], THREAD, prOpen)).toEqual({
+      kind: "unit",
+      instanceId: "ship_acme_api_1",
+      unit: unfinished,
+    });
+    expect(prOpen).not.toHaveBeenCalled();
+  });
+
+  it("a merge-ready unit does not own once the pull request is merged or closed, when the read fails, without a reader, or with no pull request on the row — the warm window (record 0051) starts at the merge or close, today at zero", async () => {
+    const ship = run({ id: "r-ship", agent: "ship", instanceId: "ship_acme_api_1", session: closed });
+    const ready = unit({
+      ending: { kind: "merge_ready", report: "approved", at: 2_000 },
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    });
+    const session = { kind: "session", agent: "ship" };
+    expect(
+      await ownerOf(
+        [ship],
+        async () => [ready],
+        THREAD,
+        async () => false,
+      ),
+    ).toEqual(session);
+    expect(
+      await ownerOf(
+        [ship],
+        async () => [ready],
+        THREAD,
+        async () => {
+          throw new Error("github unreachable");
+        },
+      ),
+    ).toEqual(session);
+    expect(await ownerOf([ship], async () => [ready], THREAD)).toEqual(session);
+    const noPr = unit({ ending: { kind: "merge_ready", report: "approved", at: 2_000 } });
+    const prOpen = vi.fn(async () => true);
+    expect(await ownerOf([ship], async () => [noPr], THREAD, prOpen)).toEqual(session);
+    expect(prOpen).not.toHaveBeenCalled();
+    // Any other ending never asks: merged, blocked and the rest route fresh as before.
+    const merged = unit({
+      ending: { kind: "merged", report: "merged", at: 2_000 },
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+    });
+    expect(await ownerOf([ship], async () => [merged], THREAD, prOpen)).toEqual(session);
+    expect(prOpen).not.toHaveBeenCalled();
   });
 
   it("a unit row for another thread is not the owner, and an empty page owns nothing", async () => {

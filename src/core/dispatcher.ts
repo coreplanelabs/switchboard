@@ -98,7 +98,8 @@ import { workspaceBindingFor } from "../execution/factory.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
-import { ownerOf, readThread, stickyAgentOf, threadPrOf, threadRouteOf } from "./dispatch/thread.js";
+import { ownerOf, readThread, stickyAgentOf, threadPrOf, threadRouteOf, unitPrRef } from "./dispatch/thread.js";
+import { fetchPullRequestFacts } from "../execution/githubPulls.js";
 import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
@@ -232,6 +233,22 @@ async function answerUnitOwnedThread(
     const gone =
       status.kind === "absent" ||
       (status.kind === "status" && ["complete", "errored", "terminated"].includes(status.status));
+    if (gone && owner.unit.ending?.kind === "merge_ready") {
+      // A merge-ready unit's instance ends at the approval today, and its row's
+      // ending is the record's truth (record 0060's amendment): the thread stays
+      // the unit's while the pull request is open, so the row is never ended
+      // `terminated` here and the message never routes fresh — it stays on the
+      // row, and the sender is told the round that runs it.
+      console.log(
+        `[dispatch] ${msg.threadKey}: unit ${unitKey} is merge-ready with its pull request open — event ${appended.seq} stays queued (instance gone)`,
+      );
+      await replyAck(
+        io,
+        ctx.verbosity,
+        `📌 Noted for unit ${owner.unit.unit} (\`${unitKey}\`): its pull request is still open (${owner.unit.pr?.url ?? "unknown"}), so this thread stays the unit's. The message is recorded on its row — re-issue \`agent:ship\` with the pull request URL to run it as the next round.`,
+      );
+      return "acked";
+    }
     if (gone) {
       const why = status.kind === "absent" ? "no such instance" : status.status;
       await store.putUnits([
@@ -627,7 +644,17 @@ export async function dispatch(
     // the live run's (admission steers below); a session or no owner is the
     // sticky path and the router, exactly as before.
     if (thread && !threadLive && directives.agent === undefined && deps.coordinatorInstances !== undefined) {
-      const owner = await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey);
+      // A merge-ready unit keeps its thread while its pull request is open
+      // (record 0060's amendment): the owner read asks GitHub for the pull
+      // request's state only for such a row — one bounded read, and a failed
+      // one leaves the row out, so the thread routes fresh as today.
+      const prOpen = async (unit: CoordinatorUnit): Promise<boolean> => {
+        const ref = unitPrRef(unit);
+        if (ref === undefined) return false;
+        const facts = await (deps.fetchPrFacts ?? fetchPullRequestFacts)(ref);
+        return facts?.state === "open";
+      };
+      const owner = await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey, prOpen);
       if (owner.kind === "unit") {
         // The same gate a live steer passes (admission's allowlist check): the
         // event is read by the unit's next coding child — a write-identity run

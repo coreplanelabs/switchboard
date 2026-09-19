@@ -17172,6 +17172,56 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.provider.requests[0]!.model).toBe("general-model");
   });
 
+  const MERGE_READY = {
+    ending: { kind: "merge_ready", report: "approved — a person's merge is the gate", at: 1_000 },
+    pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+  };
+
+  it("a merge-ready unit with an open pull request keeps the thread (record 0060's amendment): the reply is one steer event on the row, never the router, and the gone instance leaves the ending standing", async () => {
+    const s = await unitOwnedSetup(MERGE_READY);
+    s.deps.fetchPrFacts = vi.fn(async () => ({ state: "open" as const, sameRepoHead: true }));
+    // The instance ended at the approval (merge: person): the nudge finds nobody.
+    s.deps.workflow = {
+      get: async () => ({
+        sendEvent: async () => {
+          throw new Error("no such instance");
+        },
+      }),
+    };
+    s.deps.fetchCoordinatorInstanceStatus = vi.fn(async () => ({ kind: "status" as const, status: "complete" }));
+    const { io, replies } = fakeIO([{ role: "user", text: "agent:ship fix the login" }]);
+    await dispatch(
+      s.deps,
+      msg("sorry, maybe i have this wrong. i want it in the bottom left, square", "slack:UADMIN"),
+      io,
+    );
+    expect(s.deps.fetchPrFacts).toHaveBeenCalledExactlyOnceWith({ repo: "acme/api", number: 7 });
+    const events = await s.instances.listEvents(s.key);
+    expect(events).toEqual([expect.objectContaining({ seq: 1, mode: "steer", sender: "slack:UADMIN" })]);
+    // The row's ending is the record's truth: merge_ready stands, never terminated.
+    const [row] = await s.instances.listUnits(INSTANCE);
+    expect(row!.ending).toMatchObject({ kind: "merge_ready" });
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("pull request is still open");
+    expect(s.provider.requests).toHaveLength(0); // no router, no run
+  });
+
+  it("a merge-ready unit whose pull request has merged or closed routes fresh — the warm window (record 0051) starts at that point, today at zero — and so does one whose pull request cannot be read", async () => {
+    const s = await unitOwnedSetup(MERGE_READY);
+    s.deps.fetchPrFacts = vi.fn(async () => ({ state: "closed" as const, sameRepoHead: true }));
+    const { io } = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    expect(await s.instances.listEvents(s.key)).toEqual([]);
+    expect(s.sends).toEqual([]);
+    expect(s.provider.requests[0]!.model).toBe("general-model");
+    const t = await unitOwnedSetup(MERGE_READY);
+    t.deps.fetchPrFacts = vi.fn(async () => undefined); // GitHub unreadable — the row is left out, never guessed
+    const second = fakeIO([{ role: "user", text: "hi" }]);
+    await dispatch(t.deps, msg("what about the tests", "slack:UADMIN"), second.io);
+    expect(await t.instances.listEvents(t.key)).toEqual([]);
+    expect(t.provider.requests[0]!.model).toBe("general-model");
+  });
+
   it("the relay's no-instance ends the row terminated and routes fresh with the line saying so", async () => {
     const s = await unitOwnedSetup();
     s.deps.workflow = {

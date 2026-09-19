@@ -149,11 +149,18 @@ export function instanceOf(runs: readonly RunView[]): string | undefined {
  *  run while one is in flight; the unfinished unit of the page's instance
  *  whose row names this thread (however the page names the instance — the
  *  ship run's own `ship_handoff`, or a child's `parentInstanceId`); the
- *  newest continuable session a person addressed (`stickyAgentOf` — a
- *  coordinator's child is never the owner); none. A unit with an ending never
- *  owns: the thread is the router's again. `unitsOf` is the caller's one
- *  extra read, asked only when the page names an instance; a read that fails
- *  leaves the unit out rather than guessing. */
+ *  merge-ready unit whose pull request is still open (record 0060's
+ *  amendment: a `merge: person` unit's approval ends the walk, not the
+ *  thread — the pull request is what the person is iterating on, so the unit
+ *  keeps the thread until it merges or closes, and record 0051's warm window
+ *  starts at that point, not at the approval); the newest continuable session
+ *  a person addressed (`stickyAgentOf` — a coordinator's child is never the
+ *  owner); none. A unit with any other ending never owns: the thread is the
+ *  router's again. `unitsOf` is the caller's one extra read, asked only when
+ *  the page names an instance; `prOpen` is the caller's read of the pull
+ *  request's state, asked only for a merge-ready row that carries one —
+ *  absent, or failing, or answering false (merged or closed), the row does
+ *  not own; a read that fails leaves the unit out rather than guessing. */
 export type ThreadOwner =
   | { kind: "live"; run: RunView }
   | { kind: "unit"; instanceId: string; unit: CoordinatorUnit }
@@ -164,6 +171,7 @@ export async function ownerOf(
   runs: readonly RunView[],
   unitsOf: (instanceId: string) => Promise<CoordinatorUnit[]>,
   threadKey: string,
+  prOpen?: (unit: CoordinatorUnit) => Promise<boolean>,
 ): Promise<ThreadOwner> {
   const live = runs.find((r) => !r.finished);
   if (live !== undefined) return { kind: "live", run: live };
@@ -172,10 +180,30 @@ export async function ownerOf(
     const units = await unitsOf(instanceId).catch(() => [] as CoordinatorUnit[]);
     const unit = units.find((u) => u.threadKey === threadKey && u.ending === undefined);
     if (unit !== undefined) return { kind: "unit", instanceId, unit };
+    // A merge: person unit ends at the approval while its pull request is
+    // still what the thread is iterating on (record 0060's amendment): the
+    // unit keeps the thread until the pull request merges or closes, so a
+    // plain reply lands on the unit's row instead of the router.
+    const ready = units.find(
+      (u) => u.threadKey === threadKey && u.ending?.kind === "merge_ready" && u.pr !== undefined,
+    );
+    if (ready !== undefined && prOpen !== undefined && (await prOpen(ready).catch(() => false)))
+      return { kind: "unit", instanceId, unit: ready };
   }
   const agent = stickyAgentOf(runs);
   if (agent !== undefined) return { kind: "session", agent };
   return { kind: "none" };
+}
+
+/** The pull request a unit's row names, as a REST address (record 0060's
+ *  amendment): the repo parsed from the row's own URL — the row carries only
+ *  the number and the URL — or undefined for a row without one or with a URL
+ *  that is not a GitHub pull request's. */
+export function unitPrRef(unit: CoordinatorUnit): { repo: string; number: number } | undefined {
+  if (unit.pr === undefined) return undefined;
+  const m = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(unit.pr.url);
+  if (m === null) return undefined;
+  return { repo: m[1]!, number: Number(m[2]) };
 }
 
 /** The pull request the thread's work lives on (docs/reference/specs/
