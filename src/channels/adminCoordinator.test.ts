@@ -10,6 +10,7 @@ import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import { hostKeyOf } from "../core/runLedger/hostKey.js";
 import { createRunsService } from "../core/runsService.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
@@ -440,6 +441,57 @@ describe("POST /admin/coordinator/spawn — the child as the parent record's req
       body: { ok: false, error: "busy", runId: "run-far", agent: "coding", at: NOW },
     });
     expect(far.dispatched).toEqual([]);
+  });
+
+  // Record 0060 (thread-admission item 1): a hosted ship parent occupies no
+  // thread — a one-unit task's child spawns into the requesting thread beside it.
+  it("a hosted parent live in the requesting thread — unfinished on the registry and on the ledger under the host key — does not make the spawn busy: the one-unit task's coding child is dispatched, and the child's own ledger claim on the thread is accepted", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    h.registry.create("ship · acme/api", {
+      agent: "ship",
+      hosted: true,
+      channelId: INSTANCE.channelId,
+      userId: INSTANCE.userId,
+      threadKey: INSTANCE.threadKey,
+    });
+    await h.ledger.claim({
+      runId: "run-parent",
+      threadKey: hostKeyOf(INSTANCE.threadKey),
+      gen: "gen-OTHER",
+      leaseMs: 30_000,
+      startedAt: NOW - 5_000,
+      meta: {
+        agent: "ship",
+        hosted: true,
+        channelId: INSTANCE.channelId,
+        userId: INSTANCE.userId,
+        threadKey: INSTANCE.threadKey,
+      },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
+    expect(res).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-child", threadKey: INSTANCE.threadKey, at: NOW },
+    });
+    expect(h.dispatched).toHaveLength(1);
+    // The child's ledger claim on the thread key itself is accepted (tracked):
+    // the parent's row sits under the host key, so the thread column is free.
+    const claim = await h.ledger.claim({
+      runId: "run-child",
+      threadKey: INSTANCE.threadKey,
+      gen: "gen-A",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta: { agent: "coding", channelId: INSTANCE.channelId, userId: INSTANCE.userId, threadKey: INSTANCE.threadKey },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    expect(claim.ok).toBe(true);
   });
 
   it("a finished run in the instance's thread carrying the key answers its id with alreadySpawned and starts nothing — a retry that lands after the child ended never spawns a second one", async () => {

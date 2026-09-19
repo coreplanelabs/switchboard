@@ -1,4 +1,4 @@
-import { ASKS, bearerExpiresAt } from "./budgets.js";
+import { ASKS, bearerExpiresAt, HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "./budgets.js";
 import { contractFromPlan, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./ship/contract.js";
 import { NO_VERDICT_LINE } from "./reviewVerdict.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
@@ -9529,7 +9529,7 @@ workspaceDir: __WORKDIR__
     expect(fetchGuard).not.toHaveBeenCalled(); // the shim is never addressed without its URL
   });
 
-  it("the ship request is claimed on the run ledger without a seed (item 35) and finishes through it: the live row goes, the record lands in the ledger, the plain store is never the fallback", async () => {
+  it("the ship request is claimed on the run ledger without a seed (item 35) and the hand-off keeps the run live (record 0060): the row stays `live` with `state.hosting`, nothing finished on the ledger, the plain store holds only the start tombstone", async () => {
     const registry = new RunRegistry({ genId: () => "rship-l", genToken: () => "tship-l" });
     const store = new InMemoryRunStore();
     const ledger = new InMemoryRunLedger();
@@ -9540,7 +9540,9 @@ workspaceDir: __WORKDIR__
       onPersisted: (id) => registry.markPersisted(id),
       sleep: async () => {},
     });
-    const { deps } = shipDeps();
+    const { deps, created } = shipDeps();
+    const T0 = 1_000_000;
+    deps.clock = () => T0;
     deps.runRegistry = registry;
     deps.runHistoryWriter = writer;
     deps.runLedger = createLedgerWriteThrough({
@@ -9571,11 +9573,19 @@ workspaceDir: __WORKDIR__
       tools: [],
       meta: { agent: "ship", channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:1.0", hosted: true },
     });
-    expect(phaseAtReply).toBe("finishing"); // the CAS was taken before the final reply
-    expect(ledger.live.has("rship-l")).toBe(false);
-    expect(ledger.finished.get("rship-l")?.status).toBe("completed");
+    // The hand-off keeps the run live (record 0060): no `finishing`, no finish
+    // through the ledger — the row stays `live`, hosting the runner instance
+    // with the deadline of the caps plus the hosted margin.
+    expect(phaseAtReply).toBe("live");
+    expect(ledger.live.get("rship-l")).toMatchObject({
+      phase: "live",
+      state: {
+        hosting: { instanceId: created[0], until: T0 + minutesToMs(ASKS.ship + HOSTED_DEADLINE_MARGIN_MINUTES) },
+      },
+    });
+    expect(ledger.finished.has("rship-l")).toBe(false);
     expect(fallbackPuts).toEqual([]);
-    expect((await store.get("rship-l"))?.status).toBe("interrupted"); // only the start tombstone went to the plain store
+    expect(await store.get("rship-l")).toMatchObject({ status: "interrupted" }); // only the start tombstone went to the plain store
   });
 
   it("a final reply that throws writes the run record as `failed`, never `completed` (the thread never saw where the plan runs)", async () => {
@@ -9623,6 +9633,34 @@ workspaceDir: __WORKDIR__
     expect(refusedIO.statuses[refusedIO.statuses.length - 1]!.title).toContain("⚠️");
     expect(refusedIO.replies[0]).toContain("The plan runner could not be started: engine down");
     expect(registry.getById("run-shipref")).toMatchObject({ finished: true, status: "completed" });
+  });
+});
+
+// Record 0060 (agent-ship item 16): the ship branch is the ONLY producer of a
+// hosted run. Every other agent's dispatch goes through the main path's one
+// `registry.create`, which never sets the marker — so one non-ship run through
+// `dispatch()` beside one ship run pins the producer.
+describe("the hosted marker's only producer (record 0060)", () => {
+  it("no dispatch of any agent but the ship branch creates a run with meta.hosted: the main path's registry row carries no marker, the ship branch's carries it", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const registry = new RunRegistry();
+    deps.runRegistry = registry;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("hello there"), io); // the main path: every non-ship preset's create
+    const plain = registry.listActive();
+    expect(plain).toHaveLength(1);
+    expect(plain[0]).not.toHaveProperty("hosted");
+
+    deps.resolveRepoContext = () => ({ repo: "acme/api" });
+    deps.fetchRepoShipInfo = async () => ({ defaultBranch: "main" });
+    deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore();
+    deps.createCoordinatorInstance = async (id) => ({ kind: "created" as const, id });
+    deps.fetchCoordinatorInstanceStatus = async () => ({ kind: "absent" as const });
+    await dispatch(deps, msg("agent:ship in acme/api: fix the login redirect", "slack:UADMIN"), io);
+    const hosted = registry.listActive().filter((r) => r.hosted);
+    expect(hosted).toHaveLength(1);
+    expect(hosted[0]).toMatchObject({ agent: "ship", hosted: true });
   });
 });
 

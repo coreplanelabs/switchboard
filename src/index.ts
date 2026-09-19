@@ -1428,11 +1428,13 @@ export async function runBot(): Promise<void> {
     await app.stop().catch(() => {});
     // The handoff (plan D8, run-history item 39): every run a resume can
     // continue is marked `handoff` on the ledger, so the next generation takes
-    // it at once — whatever its lease — and carries on from its last step. Those
-    // runs are not waited for: they keep running here until the exit, and their
-    // writes are fenced the moment the next generation reclaims them. Only the
-    // runs a resume cannot continue (a ship pipeline, an untracked run) hold the
-    // drain, up to the old deadline.
+    // it at once — whatever its lease — and carries on from its last step. A
+    // hosted ship pipeline is among them (record 0060): its row has no process
+    // to wait for, and the next generation re-hosts it. Those runs are not
+    // waited for: they keep running here until the exit, and their writes are
+    // fenced the moment the next generation reclaims them. Only the runs a
+    // resume cannot continue (an untracked run) hold the drain, up to the old
+    // deadline.
     const handoff = await runLedger.handoff();
     const handed = new Set(handoff.marked);
     if (handoff.failed) console.warn(`[drain] handoff failed (${handoff.failed}) — waiting for the runs instead`);

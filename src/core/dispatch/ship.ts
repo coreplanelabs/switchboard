@@ -14,6 +14,7 @@ import { chatActorOf } from "../authz/actor.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import type { LedgerRun, OpenOutcome } from "../runLedger/writeThrough.js";
+import type { HostingState } from "../runLedger/types.js";
 import { hostKeyOf } from "../runLedger/hostKey.js";
 import { systemClock } from "../trace/index.js";
 import type { RunOwner } from "../trace/streamSpans.js";
@@ -22,7 +23,7 @@ import type { RepoContext, ResidentSlugs } from "../repoContext.js";
 import { residentSlugsLister } from "../../execution/factory.js";
 import { fetchPullRequestFacts, fetchRepoShipInfo, type PullRequestFacts } from "../../execution/githubPulls.js";
 import { handOffToCoordinator, type HandOffOutcome } from "../coordinator/handOff.js";
-import { ALLOWANCES, ASKS, fit } from "../budgets.js";
+import { ALLOWANCES, ASKS, fit, HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "../budgets.js";
 import {
   createInstanceViaShim,
   fetchInstanceStatusViaShim,
@@ -259,12 +260,22 @@ export async function runShipBranch(
   let ledgerRun: LedgerRun | undefined;
   let outcome: HandOffOutcome | undefined;
   let shipDiagnosis: FrictionDiagnosis | undefined;
+  // The parent stays live after a tracked, taken hand-off (record 0060): set
+  // once the instance exists and the ledger still mirrors this run, and from
+  // then on the branch skips the finish, `finishing` and the seal — the
+  // runner's `finish` ends the run, and a reclaim re-hosts or closes the row.
+  // Every other exit after the host-key claim — a refused hand-off, a throw —
+  // finishes as today, so no host-keyed row outlives a request that handed
+  // nothing off.
+  let hostedLive = false;
   // From the registry row on, everything runs inside the try whose finally
   // finishes the run: a throw before the hand-off — the ledger claim with the
   // state Worker down — ends like a throw inside it, a finished `failed` run
-  // with its record and a closed card. A registry row left `running` with no
-  // runner behind it cannot be stopped (a stop is a request to the runner) and
-  // holds the process's drain to its deadline, so no path leaves one.
+  // with its record and a closed card. On every exit but the hosted one a
+  // registry row left `running` would have no runner behind it — it cannot be
+  // stopped (a stop is a request to the runner) and holds the process's drain
+  // to its deadline — so no such exit leaves one; the hosted row stays
+  // `running` deliberately, with the plan runner behind it (record 0060).
   try {
     const publishText = (
       type: "input" | "context" | "answer",
@@ -470,71 +481,113 @@ export async function runShipBranch(
     // The instance the hand-off created enters the stream first (record 0051
     // R2): projected onto `RunRecord.instanceId`, it is how the thread's owner
     // rule finds the plan runner from the page's ship run. None after a refusal.
-    if (outcome.instanceId !== undefined)
+    if (outcome.instanceId !== undefined) {
       registry.publish(run.id, { type: "ship_handoff", instanceId: outcome.instanceId, at: clock() });
+      if (outcome.status === "completed" && ledgerRun?.tracked() === true) {
+        // The runner took it and the ledger mirrors this run: the parent stays
+        // live, hosting the instance. The row's state carries the instance and
+        // the deadline a reclaim judges it by — the pipeline's wall clock plus
+        // an hour of the runner's own scheduling slack — and the stream gets a
+        // second `run_meta` naming the instance, the fact every reader of a
+        // run's instance id resolves from the last `run_meta` carrying one.
+        hostedLive = true;
+        const hosting: HostingState = {
+          instanceId: outcome.instanceId,
+          until: clock() + minutesToMs(caps.maxMinutes + HOSTED_DEADLINE_MARGIN_MINUTES),
+        };
+        ledgerRun.setState({ hosting });
+        registry.publish(run.id, {
+          type: "run_meta",
+          agent: agent.name,
+          agentSource: ctx.agentSource,
+          model: ctx.modelRef,
+          traceId: root.traceId,
+          instanceId: outcome.instanceId,
+          at: clock(),
+        });
+      }
+    }
     // The run record is the source of truth: the answer enters the stream
     // BEFORE finish() below (a publish on a finished run is a no-op).
     publishText("answer", outcome.reply);
   } finally {
     // A throw passes through to dispatch()'s outer catch (the error reply, the
     // drain); this block still finishes the run, registers its `failed` record
-    // and closes the card.
+    // and closes the card. A hosted hand-off skips it whole: the run is live
+    // for the pipeline's life, and the runner's `finish` writes its record.
     // RunStatus is the run-store contract (shared with the memory worker): a
     // refused hand-off still answered the request, so record and registry say
     // `completed` — the refusal lives in the reply and the card close below.
-    const status: RunStatus = outcome === undefined ? "failed" : "completed";
-    registry.finish(run.id, status);
-    const snap = registry.snapshot(run.id, run.token);
-    const finishedAt = snap?.finishedAt ?? clock();
-    const diagnosis = analyzeRunFriction(snap?.events ?? [], {
-      finished: true,
-      truncated: snap?.truncated ?? false,
-      window: { start: trace.receivedAt, end: finishedAt },
-    });
-    shipDiagnosis = diagnosis;
-    io.runFinished?.({ id: run.id, status });
-    ending.finished(run.id);
-    shell.freeze(finishedAt);
-    // Mirrors the main path: a completed hand-off whose final reply throws is
-    // recorded `failed` — the thread never saw where the plan runs. Written by
-    // the drain after the seal; a throw reaches dispatch()'s outer catch, which
-    // drains. A tracked run finishes through the ledger sink, which also
-    // closes its row.
-    ending.register({
-      runId: run.id,
-      flipOnPostFinishFailure: true,
-      write: (seal, failedAfterFinish) =>
-        deps.runHistoryWriter.write(
-          assembleRunRecord({
-            run,
-            snap,
-            agent: agent.name,
-            model: ctx.modelRef,
-            msg,
-            channelVisibility,
-            repo: repoCtx.repo,
-            finishedAt,
-            status: failedAfterFinish && status === "completed" ? "failed" : status,
-            diagnosis,
-            seal,
-            profile: profileRecordOf(agent, profile),
-          }),
-          { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
-        ),
-    });
-    // A hand-off that threw closes its card here, after the finish, so the
-    // card's total is the run's.
-    if (outcome === undefined)
-      await root
-        .span("post.card_close", () => card.done(shell.close({ kind: "done", icon: "❌", ...doneLines(diagnosis) })))
-        .catch(() => {});
+    if (!hostedLive) {
+      const status: RunStatus = outcome === undefined ? "failed" : "completed";
+      registry.finish(run.id, status);
+      const snap = registry.snapshot(run.id, run.token);
+      const finishedAt = snap?.finishedAt ?? clock();
+      const diagnosis = analyzeRunFriction(snap?.events ?? [], {
+        finished: true,
+        truncated: snap?.truncated ?? false,
+        window: { start: trace.receivedAt, end: finishedAt },
+      });
+      shipDiagnosis = diagnosis;
+      io.runFinished?.({ id: run.id, status });
+      ending.finished(run.id);
+      shell.freeze(finishedAt);
+      // Mirrors the main path: a completed hand-off whose final reply throws is
+      // recorded `failed` — the thread never saw where the plan runs. Written by
+      // the drain after the seal; a throw reaches dispatch()'s outer catch, which
+      // drains. A tracked run finishes through the ledger sink, which also
+      // closes its row.
+      ending.register({
+        runId: run.id,
+        flipOnPostFinishFailure: true,
+        write: (seal, failedAfterFinish) =>
+          deps.runHistoryWriter.write(
+            assembleRunRecord({
+              run,
+              snap,
+              agent: agent.name,
+              model: ctx.modelRef,
+              msg,
+              channelVisibility,
+              repo: repoCtx.repo,
+              finishedAt,
+              status: failedAfterFinish && status === "completed" ? "failed" : status,
+              diagnosis,
+              seal,
+              profile: profileRecordOf(agent, profile),
+            }),
+            { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
+          ),
+      });
+      // A hand-off that threw closes its card here, after the finish, so the
+      // card's total is the run's.
+      if (outcome === undefined)
+        await root
+          .span("post.card_close", () => card.done(shell.close({ kind: "done", icon: "❌", ...doneLines(diagnosis) })))
+          .catch(() => {});
+    }
   }
   if (!outcome) return; // unreachable: the finally above rethrew
-  console.log(`[done] ${msg.threadKey} ship ${outcome.reply.length} chars (${outcome.status})`);
+  console.log(
+    `[${hostedLive ? "hosted" : "done"}] ${msg.threadKey} ship ${outcome.reply.length} chars (${outcome.status})`,
+  );
   // The close tells the truth about HOW the request ended: ✅ when the runner
   // took it (the runner's `round` route redraws this card from there), ⚠️
   // when the hand-off refused it by name.
   const icon = outcome.status === "completed" ? "✅" : "⚠️";
+  if (hostedLive) {
+    // The hosted parent (record 0060): no `finishing`, no seal — the run and
+    // its ledger row stay live until the runner's `finish` — but the ack card
+    // still closes ✅ (the runner's `round` route redraws it from there) and
+    // the thread still hears where the plan runs. The drain inside
+    // `sealAfterReply` has nothing registered for this run, so it seals nothing.
+    await ending.sealAfterReply(
+      () =>
+        root.span("post.card_close", () => card.done(shell.close({ kind: "done", icon, ...doneLines(shipDiagnosis) }))),
+      () => root.span("post.reply", () => replyAck(io, ctx.verbosity, handOffAck(outcome, ctx.verbosity))),
+    );
+    return;
+  }
   ledgerRun?.setState({ finalStatus: "completed" });
   if ((await root.span("post.ledger_finishing", () => ledgerRun?.finishing())) === "fenced") {
     console.log(`[ship] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);

@@ -461,7 +461,11 @@ function authorizeStep(
  *  person's read: the requester was authorized at the child's dispatch. */
 const EVERY_RUN = { kind: "all" } as const;
 
-/** The run holding the unit's thread right now: here, or on another generation's ledger row. */
+/** The run holding the unit's thread right now: here, or on another generation's
+ *  ledger row. A hosted ship parent occupies no thread (record 0060;
+ *  thread-admission item 1): its view carries the thread from the metadata
+ *  while its ledger row sits under the host key, so it is skipped — a one-unit
+ *  task's child spawns into the requesting thread beside it. */
 async function liveOnThread(
   runs: RunsService,
   instance: CoordinatorInstance,
@@ -473,7 +477,7 @@ async function liveOnThread(
     channel: instance.channelId,
     limit: RUN_LIST_MAX_LIMIT,
   });
-  return active.runs.find((r) => r.threadKey === threadKey && !r.finished);
+  return active.runs.find((r) => r.threadKey === threadKey && !r.finished && !r.hosted);
 }
 
 /** A finished run in the unit's thread carrying the key, since the instance was created. */

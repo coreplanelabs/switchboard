@@ -1259,14 +1259,28 @@ describe("finishing and finish", () => {
     expect(told).toEqual(["hard"]);
   });
 
-  it("liveRuns names the runs this generation drives; handoff marks the resumable ones on the ledger and remembers it — a ship claim (no seed) and a detached run are left out; a handed run that finishes first still replies; a ledger failure is reported, not thrown", async () => {
+  it("liveRuns names the runs this generation drives; handoff marks the resumable ones on the ledger and remembers it — a hosted ship parent (no seed, `meta.hosted`) is marked too (record 0060), a seedless claim without the marker and a detached run are left out; a handed run that finishes first still replies; a ledger failure is reported, not thrown", async () => {
     const { ledger, wt } = harness();
     const a = (await openRun(wt, openReq()))!;
-    const ship = (await openRun(
+    const seedless = (await openRun(
       wt,
       openReq({ runId: "r2", threadKey: "t2", seed: undefined, system: "", tools: [] }),
     ))!;
     const c = (await openRun(wt, openReq({ runId: "r3", threadKey: "t3" })))!;
+    // The hosted ship parent: claimed under the host key with no seed, the
+    // marker on the metadata — SIGTERM hands it to the next generation, which
+    // re-hosts the row instead of closing it.
+    const hosted = (await openRun(
+      wt,
+      openReq({
+        runId: "r4",
+        threadKey: "t4#host",
+        seed: undefined,
+        system: "",
+        tools: [],
+        meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "t4", agent: "ship", hosted: true },
+      }),
+    ))!;
     ledger.live.get("r3")!.ownerGen = "gen-B";
     await c.step(step()); // detached
     expect(
@@ -1274,18 +1288,25 @@ describe("finishing and finish", () => {
         .liveRuns()
         .map((r) => r.runId)
         .sort(),
-    ).toEqual(["r1", "r2"]);
-    expect([a.resumable, ship.resumable, c.resumable]).toEqual([true, false, false]);
-    expect(await wt.handoff()).toEqual({ marked: ["r1"] });
+    ).toEqual(["r1", "r2", "r4"]);
+    expect([a.resumable, seedless.resumable, c.resumable, hosted.resumable]).toEqual([true, false, false, true]);
+    expect((await wt.handoff()).marked.sort()).toEqual(["r1", "r4"]);
     expect(ledger.live.get("r1")!.phase).toBe("handoff");
+    expect(ledger.live.get("r4")!.phase).toBe("handoff");
     expect(ledger.live.get("r2")!.phase).toBe("live");
     expect(a.handedOff).toBe(true);
+    expect(hosted.handedOff).toBe(true);
     expect(await wt.handoff()).toEqual({ marked: [] }); // already handed off
     // Finished inside its own handoff window, before any reclaim: the owner
     // replies itself — finishing from `handoff` is allowed for the owner.
     expect(await a.finishing()).toBe("ok");
     await a.sink.put(record("r1"));
-    expect(wt.liveRuns().map((r) => r.runId)).toEqual(["r2"]);
+    expect(
+      wt
+        .liveRuns()
+        .map((r) => r.runId)
+        .sort(),
+    ).toEqual(["r2", "r4"]);
     const inner = new InMemoryRunLedger(() => 10_000);
     const down = harness({
       ledger: overriding(inner, {

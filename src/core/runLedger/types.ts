@@ -121,6 +121,17 @@ export interface LiveRunMeta {
  *  the checklist, the pushed branch, the review head, the infra counters). */
 export type RunState = Record<string, unknown>;
 
+/** A hosted ship parent's hosting fact on the row's state (record 0060): the
+ *  runner instance the run hosts and the deadline past which a reclaim closes
+ *  the row `interrupted` instead of re-hosting it. Set by the ship branch once
+ *  the instance exists; read by the boot reclaim. */
+export interface HostingState {
+  instanceId: string;
+  /** Epoch ms: the hand-off time plus the instance's `caps.maxMinutes` plus
+   *  `HOSTED_DEADLINE_MARGIN_MINUTES`. */
+  until: number;
+}
+
 export interface LiveRunRow {
   runId: string;
   threadKey: string;
