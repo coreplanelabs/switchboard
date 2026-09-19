@@ -350,7 +350,7 @@ describe("prepareRestartTurn: the request runs again as its own dispatch", () =>
       { clock: () => NOW },
       { request: { ...REQUEST, images: [{ data: "bb", mediaType: "image/png" }] }, pending, clock: () => NOW },
     );
-    expect(turn.msg.text).toBe("agent:coding fix the resolver\n\nalso bump the version");
+    expect(turn.msg.text).toBe("agent:coding fix the resolver\n\nslack:UY: also bump the version");
     expect(turn.msg.images?.map((i) => i.data)).toEqual(["bb", "aa"]);
     expect(turn.msg.userId).toBe("slack:UX"); // the request's own sender, not the follow-up's
   });

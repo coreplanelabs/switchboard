@@ -176,32 +176,32 @@ describe("replies", () => {
 });
 
 describe("followUpPrompt / followUpSnippet", () => {
-  it("one input: header + the text verbatim; several: a bulleted list in arrival order", () => {
+  it("one input: header + the text attributed to its sender; several: a bulleted list in arrival order, each attributed", () => {
     const one = followUpPrompt([input("also remove the anon maps flow")]);
     expect(one).toMatch(/^↪ Follow-up from the thread/);
-    expect(one.endsWith("also remove the anon maps flow")).toBe(true);
-    expect(one).not.toContain("- also");
-    const many = followUpPrompt([input("first"), input("second")]);
-    expect(many).toContain("- first\n- second");
+    expect(one.endsWith("slack:UALICE: also remove the anon maps flow")).toBe(true);
+    expect(one).not.toContain("- slack");
+    const many = followUpPrompt([input("one", { userName: "A" }), input("two", { userName: "B" })]);
+    expect(many).toContain("- A: one\n- B: two");
   });
 
   it("superseded: the header says the just-written answer was not delivered and demands one complete answer", () => {
     const p = followUpPrompt([input("also X")], { superseded: true });
     expect(p).toContain("That answer was NOT delivered");
     expect(p).toContain("covers the original request AND this follow-up");
-    expect(p.endsWith("also X")).toBe(true);
+    expect(p.endsWith("slack:UALICE: also X")).toBe(true);
     expect(followUpPrompt([input("also X")])).not.toContain("NOT delivered");
   });
 
-  it("five follow-ups drain as one bulleted list in arrival order, and both headers count them", () => {
-    const five = ["a", "b", "c", "d", "e"].map((t, i) => input(t, { at: i }));
+  it("five follow-ups drain as one bulleted list in arrival order, each naming its sender, and both headers count them", () => {
+    const five = ["a", "b", "c", "d", "e"].map((t, i) => input(t, { at: i, userName: `u${i}` }));
     const plain = followUpPrompt(five);
     expect(plain).toMatch(/^↪ 5 follow-ups from the thread, sent while you were working\. Take them into account/);
-    expect(plain.endsWith("- a\n- b\n- c\n- d\n- e")).toBe(true);
+    expect(plain.endsWith("- u0: a\n- u1: b\n- u2: c\n- u3: d\n- u4: e")).toBe(true);
     const superseded = followUpPrompt(five, { superseded: true });
     expect(superseded).toMatch(/^↪ 5 follow-ups from the thread, sent while you were writing your answer\./);
     expect(superseded).toContain("covers the original request AND all of these follow-ups");
-    expect(superseded.endsWith("- a\n- b\n- c\n- d\n- e")).toBe(true);
+    expect(superseded.endsWith("- u0: a\n- u1: b\n- u2: c\n- u3: d\n- u4: e")).toBe(true);
   });
 
   it("the snippet is one line, capped with an ellipsis", () => {
@@ -215,7 +215,7 @@ describe("mergeFollowUps — unconsumed inputs become ONE fresh request", () => 
     expect(mergeFollowUps([])).toBeUndefined();
   });
 
-  it("texts join in order; attachments and staged references concatenate; identity comes from the most recent input", () => {
+  it("texts join in order; attachments and staged references concatenate; each text names its sender and the identity — the fresh turn's requester — comes from the FIRST input, credential included", () => {
     const img = { mediaType: "image/png", data: "AAA" };
     const doc = { mediaType: "application/pdf", data: "BBB", name: "spec.pdf" };
     // A staged reference (record 0033) rides the fresh turn like an attachment: the new run stages it.
@@ -227,28 +227,37 @@ describe("mergeFollowUps — unconsumed inputs become ONE fresh request", () => 
       messageId: "1.0",
     };
     const merged = mergeFollowUps([
-      input("first", {
-        userId: "slack:UALICE",
-        userName: "ann",
+      input("one", {
+        userId: "slack:UA",
+        userName: "A",
+        authenticatedAs: "http:t1",
+        postedBy: "slack:bot:B1",
         sourceUrl: "https://s/1",
         images: [img],
         staged: [clip],
       }),
-      input("second", { userId: "slack:UBOB", userName: "bob", sourceUrl: "https://s/2", documents: [doc] }),
+      input("two", { userId: "slack:UB", userName: "B", sourceUrl: "https://s/2", documents: [doc] }),
     ]);
     expect(merged).toEqual({
-      text: "first\n\nsecond",
-      userId: "slack:UBOB",
-      userName: "bob",
-      sourceUrl: "https://s/2",
+      text: "A: one\n\nB: two",
+      userId: "slack:UA",
+      userName: "A",
+      authenticatedAs: "http:t1",
+      postedBy: "slack:bot:B1",
+      sourceUrl: "https://s/1",
       images: [img],
       documents: [doc],
       staged: [clip],
     });
   });
 
-  it("no attachments and no names → those keys are absent, not undefined", () => {
+  it("one follow-up: the text still names its sender, the identity is that sender's; absent keys stay absent, not undefined", () => {
     const merged = mergeFollowUps([input("only")]);
-    expect(merged).toEqual({ text: "only", userId: "slack:UALICE" });
+    expect(merged).toEqual({ text: "slack:UALICE: only", userId: "slack:UALICE" });
+    expect(mergeFollowUps([input("one", { userName: "A" })])).toEqual({
+      text: "A: one",
+      userId: "slack:UALICE",
+      userName: "A",
+    });
   });
 });

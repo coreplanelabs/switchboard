@@ -53,9 +53,9 @@ export type Settlement =
 /**
  * Thread admission item 4: free the thread, and settle what the run never
  * consumed. A run that ended by itself (an answer, a budget, a failure, a dead
- * sandbox) hands its unconsumed follow-ups on as ONE fresh turn — on the most
- * recent sender's channel handle, so the reply lands where they asked — never
- * a silent drop. A run an operator stopped does not: the stop meant "no more
+ * sandbox) hands its unconsumed follow-ups on as ONE fresh turn — on the FIRST
+ * sender's channel handle and identity, the fresh turn's requester (record
+ * 0062) — never a silent drop. A run an operator stopped does not: the stop meant "no more
  * work here", and each sender is told their follow-up was not run. A steer a
  * run sent (thread-admission item 7) is neither: a program's message has no
  * one to answer and is never run fresh — the parent reads the child's end
@@ -115,8 +115,11 @@ export interface FreshTurn {
  * agent the follow-ups were addressed to: they were admitted as input FOR that
  * run's agent (a different one would have been refused), so the fresh turn must
  * not fall back to whatever the thread's history or the channel default
- * resolves to. Built after the first request's root has ended; `dispatch()`
- * runs it.
+ * resolves to. Its requester is the FIRST unconsumed sender (record 0062):
+ * their message, channel handle and credential carry the turn — they asked for
+ * what runs next, and a later sender's wider grants lend nothing — with every
+ * text attributed to its sender by the merge. Built after the first request's
+ * root has ended; `dispatch()` runs it.
  */
 export function prepareFreshTurn(
   deps: RequestTraceDeps,
@@ -124,12 +127,12 @@ export function prepareFreshTurn(
 ): FreshTurn {
   const { agent, pending, clock } = ctx;
   const merged = mergeFollowUps(pending)!;
-  const last = pending[pending.length - 1];
+  const first = pending[0];
   const freshAt = clock();
   const earliestAt = Math.min(...pending.map((p) => p.at));
   const queuedBehindMs = Math.max(0, freshAt - earliestAt);
   const fresh = startRequestRoot(deps, {
-    channel: channelOf(last.msg.channelId),
+    channel: channelOf(first.msg.channelId),
     receivedAt: freshAt,
     queuedBehindMs,
   });
@@ -137,13 +140,13 @@ export function prepareFreshTurn(
     // The follow-up's own platform stamp stays behind: the fresh turn's
     // wait is `queuedBehindMs`, not a `queued … before we saw it`.
     msg: {
-      ...last.msg,
+      ...first.msg,
       ...merged,
       text: `agent:${agent} ${merged.text}`,
       receivedAt: freshAt,
       originAt: undefined,
     },
-    io: last.io,
+    io: first.io,
     opts: { trace: fresh, queuedBehindMs },
   };
 }
