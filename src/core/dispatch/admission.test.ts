@@ -19,7 +19,8 @@ import {
 import { NullRunStore } from "../runStore.js";
 import { TransientStoreError } from "../runStoreWorker.js";
 import type { RunRecord } from "../runRecord.js";
-import type { PlaneOutcomePost } from "../plane/decide.js";
+import type { PlaneAskAnswer, PlaneOutcomePost } from "../plane/decide.js";
+import type { PlaneAdmitPost } from "../runLedger/ledger.js";
 import type { InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import {
@@ -139,6 +140,13 @@ class RecordingLedger extends NullLedgerWriteThrough {
   }
   override planeOutcome(post: PlaneOutcomePost): void {
     this.planeOutcomes.push(post);
+  }
+  /** The admission asks under `plane.admission: on` and the settable answer. */
+  readonly planeAdmits: PlaneAdmitPost[] = [];
+  planeAdmitAnswer: PlaneAskAnswer | undefined;
+  override async planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer> {
+    this.planeAdmits.push(post);
+    return this.planeAdmitAnswer ?? { kind: "admitted", reservation: "resv-1" };
   }
 }
 
@@ -627,6 +635,50 @@ describe("admit — the plane's shadow outcome post (orchestration-plane item 8)
     second.ctx.directives = { ...second.ctx.directives, agent: "coding" };
     await admit(second.deps, second.ctx);
     expect(first.ledger.planeOutcomes).toEqual([]);
+  });
+});
+
+describe('admit — the plane\'s admission ask under plane.admission: on (record 0064, "The queue")', () => {
+  const ON = "plane:\n  admission: on\n";
+
+  it("an ask the plane queues holds nothing: the slot is released, no row is reserved or adopted — no heartbeat, nothing in the drain's held set — and the thread hears the position", async () => {
+    const { deps, ctx, ledger, admission, replies } = setup("write the report", { yaml: ON });
+    ledger.planeAdmitAnswer = {
+      kind: "queued",
+      id: "q-1",
+      position: 1,
+      waiting: [{ kind: "thread_free", threadKey: THREAD, met: false }],
+    };
+    const outcome = await admit(deps, ctx);
+    expect(outcome).toEqual({ kind: "queued", id: "q-1", position: 1 });
+    // The queued run holds nothing here: the admission slot is free again and
+    // the ledger saw no reserve, no adopt — no heartbeat starts, so the drain's
+    // held set never lists it.
+    expect(admission.get(THREAD)).toBeUndefined();
+    expect(ledger.reserved).toEqual([]);
+    expect(ledger.adopted).toEqual([]);
+    // The ask carried the request in the durable inbox's shape.
+    expect(ledger.planeAdmits).toHaveLength(1);
+    expect(ledger.planeAdmits[0]).toMatchObject({ requester: "slack:UX", threadKey: THREAD });
+    expect(ledger.planeAdmits[0]!.request.text).toBe("write the report");
+    expect(replies.join("\n")).toContain("queued at position 1");
+    expect(replies.join("\n")).toContain("runs stop q-1");
+  });
+
+  it("an admitted ask proceeds — asked once, the reservation is the object's to promote", async () => {
+    const { deps, ctx, ledger } = setup("write the report", { yaml: ON });
+    const outcome = await admit(deps, ctx);
+    expect(outcome.kind).toBe("proceed");
+    expect(ledger.planeAdmits).toHaveLength(1);
+  });
+
+  it("off — the default — never asks; a resume and a restart re-enter decided work and never ask either", async () => {
+    const plain = setup("write the report");
+    await admit(plain.deps, plain.ctx);
+    expect(plain.ledger.planeAdmits).toEqual([]);
+    const resumed = setup("resume", { yaml: ON, resume: await resumeOf("run-R") });
+    await admit(resumed.deps, resumed.ctx);
+    expect(resumed.ledger.planeAdmits).toEqual([]);
   });
 });
 

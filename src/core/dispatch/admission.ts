@@ -41,7 +41,8 @@ import type { ChannelIO, IncomingMessage } from "../types.js";
 import { reclaimedRunRecord } from "./record.js";
 import type { RunStatus } from "../runRecord.js";
 import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
-import { replyAck, REFUSAL_SENTENCES } from "./reply.js";
+import { waitingWords, type PlaneAskAnswer } from "../plane/decide.js";
+import { replyAck, replyOutcome, REFUSAL_SENTENCES } from "./reply.js";
 
 /** What thread admission reads off the dispatcher's dependencies. `CoreDeps`
  *  extends this; a caller's shape is unchanged. */
@@ -280,6 +281,12 @@ export type AdmissionOutcome =
   | { kind: "redispatch" }
   /** Folded into the run in flight — here, or on another generation through its durable inbox — and acked. */
   | { kind: "steered"; where: "here" | "elsewhere" }
+  /** Queued by the plane (record 0064, "The queue"): the ask met a live
+   *  thread, a window or a pending deploy on the object — the request is
+   *  stored there under the minted id, the thread was answered with the
+   *  position, and this dispatch holds nothing: the plane's `admit` effect
+   *  restarts it from the stored request under that id. */
+  | { kind: "queued"; id: string; position: number }
   /** Not run, and told why: the sender may not run the live agent, or asked for
    *  a different one — or a coordinator's spawn met a run in flight on the
    *  unit's thread (item 8), which it never steers into. */
@@ -333,8 +340,9 @@ function planeWordOf(outcome: AdmissionOutcome): string | undefined {
  */
 export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise<AdmissionOutcome> {
   const outcome = await claimThread(deps, ctx);
+  const mode = planeAdmissionOf(deps.config.config);
   const word = planeWordOf(outcome);
-  if (word !== undefined && planeAdmissionOf(deps.config.config) === "shadow") {
+  if (word !== undefined && mode === "shadow") {
     deps.runLedger.planeOutcome({
       requester: ctx.msg.userId,
       threadKey: ctx.msg.threadKey,
@@ -342,7 +350,47 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
       outcome: word,
     });
   }
+  // Under `plane.admission: on` (record 0064, "The queue") a fresh ask that
+  // passed the local claim asks the object before anything slow: `admitted`
+  // writes a reservation the ledger claim promotes; `queued` stores the
+  // request under the plane's id — the thread hears the position, this
+  // dispatch holds nothing, and the plane's `admit` effect restarts the
+  // request under that id. A resume, a restart and a coordinator's spawn
+  // re-enter decided work: they are not new asks and never queue here.
+  if (
+    mode === "on" &&
+    outcome.kind === "proceed" &&
+    !ctx.resume &&
+    !ctx.restart &&
+    !ctx.coordinator &&
+    ctx.restartOf === undefined
+  ) {
+    const at = ctx.clock();
+    const answer = await deps.runLedger.planeAdmit({
+      requester: ctx.msg.userId,
+      threadKey: ctx.msg.threadKey,
+      request: durableInboxMessage(ctx.msg, ctx.directives.text, at),
+    });
+    if (answer.kind === "queued") {
+      ctx.admission.release(ctx.msg.threadKey, outcome.admitted);
+      console.log(
+        `[dispatch] ${ctx.msg.threadKey} queued by the plane at position ${answer.position} (run ${answer.id}): ${waitingWords(answer.waiting)}`,
+      );
+      // The queued card is the request's outcome, not an ack: it is said at
+      // every verbosity — at quiet the person still hears where their ask went.
+      await ctx.root.span("dispatch.admission", () => replyOutcome(ctx.io, queuedReply(answer)), {
+        attrs: { outcome: "queued" },
+      });
+      return { kind: "queued", id: answer.id, position: answer.position };
+    }
+  }
   return outcome;
+}
+
+/** The queued card's line (record 0064, "The queue"): the position, what it
+ *  waits on, and the withdraw lever — the one thing said in the thread. */
+export function queuedReply(answer: Extract<PlaneAskAnswer, { kind: "queued" }>): string {
+  return `⏸ queued at position ${answer.position} — waiting on ${waitingWords(answer.waiting)}; it starts on that event. \`runs stop ${answer.id}\` withdraws it.`;
 }
 
 async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<AdmissionOutcome> {
