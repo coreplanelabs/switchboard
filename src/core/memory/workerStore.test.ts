@@ -106,6 +106,22 @@ describe("WorkerMemoryStore.write", () => {
     expect(JSON.parse(calls[0].init.body as string)).toEqual({ scopeKey: "org:acme", records: [cand] });
   });
 
+  it("an older Worker that ignores unknown fields turns a restatement into today's dedup-or-insert without error", async () => {
+    // The double: yesterday's Worker — `restates` on the wire is an unknown
+    // field it never validates or acts on, and its answer carries no `restated`.
+    const { fetch, calls } = fakeFetch(() => jsonRes({ ok: true, inserted: 1, deduped: 0, superseded: 0 }));
+    const restatement: MemoryCandidate = { ...cand, restates: "mem:org:acme:0" };
+    await expect(store(fetch).write("org:acme", [restatement])).resolves.toEqual({
+      inserted: 1,
+      deduped: 0,
+      restated: 0, // the older answer has no counter → reads 0, never NaN
+      superseded: 0,
+      evicted: 0,
+    });
+    // The field still rides the wire — a current Worker acts on it.
+    expect(JSON.parse(calls[0].init.body as string).records[0].restates).toBe("mem:org:acme:0");
+  });
+
   it("an answer without counters reads as zeros, never NaN", async () => {
     const { fetch } = fakeFetch(() => jsonRes({ ok: true }));
     await expect(store(fetch).write("org:acme", [cand])).resolves.toEqual({

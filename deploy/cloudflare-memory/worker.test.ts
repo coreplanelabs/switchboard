@@ -508,6 +508,61 @@ describe("dedup / supersede (shared engine rules)", () => {
     expect(r.some((x) => x.text === "stale deploy fact")).toBe(false);
   });
 
+  // Feature: docs/reference/specs/memory.md item 8 — restatement, applied
+  // inside the same write transaction as every other plan action.
+  it("restate: bumps useCount and lastUsedAt, keeps the higher confidence and the stored text, inserts nothing — restated 1", async () => {
+    const s = scope();
+    await post("/write", {
+      scopeKey: s,
+      records: [cand("the licence gate needs a clean npm ci", { confidence: 0.7 })],
+    });
+    const w = await post("/write", {
+      scopeKey: s,
+      records: [cand("licences only pass after a clean npm ci", { restates: `mem:${s}:0`, confidence: 0.9 })],
+    });
+    expect(w.data).toMatchObject({ ok: true, inserted: 0, deduped: 0, restated: 1, superseded: 0 });
+    const r = (await post("/list", { scopeKey: s, limit: 8 })).data.records as Array<Record<string, unknown>>;
+    expect(r).toHaveLength(1);
+    expect(r[0].text).toBe("the licence gate needs a clean npm ci"); // the stored wording stands
+    expect(r[0].useCount).toBe(1);
+    expect(typeof r[0].lastUsedAt).toBe("number");
+    expect(r[0].confidence).toBe(0.9); // the higher of the two
+  });
+
+  it("restate keeps the target's higher confidence and works without a candidate confidence", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("keep the higher value", { confidence: 0.95 })] });
+    await post("/write", {
+      scopeKey: s,
+      records: [cand("same lesson again", { restates: `mem:${s}:0`, confidence: 0.6 })],
+    });
+    await post("/write", { scopeKey: s, records: [cand("and once more", { restates: `mem:${s}:0` })] });
+    const r = (await post("/list", { scopeKey: s, limit: 8 })).data.records as Array<Record<string, unknown>>;
+    expect(r).toHaveLength(1);
+    expect(r[0].confidence).toBe(0.95);
+    expect(r[0].useCount).toBe(2);
+  });
+
+  it("restating a non-active row or a foreign id inserts as today (dedup-or-insert)", async () => {
+    const s = scope();
+    await post("/write", { scopeKey: s, records: [cand("deploy v1")] });
+    await post("/write", { scopeKey: s, records: [cand("deploy v2", { supersedes: `mem:${s}:0` })] });
+    // Restating the superseded row: inserts (its id no longer resolves active).
+    const sup = await post("/write", { scopeKey: s, records: [cand("deploy v3", { restates: `mem:${s}:0` })] });
+    expect(sup.data).toMatchObject({ inserted: 1, restated: 0 });
+    // A foreign id (another scope's DO knows nothing of it): falls back to
+    // dedup against the identical active text instead of inserting a twin.
+    const foreign = await post("/write", {
+      scopeKey: s,
+      records: [cand("deploy v3", { restates: "mem:org:elsewhere:0" })],
+    });
+    expect(foreign.data).toMatchObject({ inserted: 0, deduped: 1, restated: 0 });
+  });
+
+  it("a non-string `restates` is a 400 from the candidate validator", async () => {
+    expect((await post("/write", { scopeKey: scope(), records: [cand("x", { restates: 7 })] })).status).toBe(400);
+  });
+
   it("restating a superseded record's text creates a fresh active record (superseded rows are not dedup targets)", async () => {
     const s = scope();
     await post("/write", { scopeKey: s, records: [cand("deploy v1")] });

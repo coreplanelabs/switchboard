@@ -54,12 +54,16 @@ export interface MemoryCandidate {
   sourceRunId?: string;
   confidence?: number;
   supersedes?: string;
+  /** id of a shown record this fact restates: the store bumps that record
+   *  (`useCount`, `lastUsedAt`, the higher `confidence`) instead of inserting
+   *  a twin; a target that is missing or not active falls through to the
+   *  plain dedup-or-insert path. */
+  restates?: string;
 }
 
 /** What one `write` batch actually did, per candidate action — the seam's
  *  receipt (the counters on the `[memory]` outcome line are these plus the
- *  parse gate's own). `restated` stays 0 until the restate action lands on the
- *  write plan; it is on the shape now so every store answers the same fields. */
+ *  parse gate's own). */
 export interface WriteCounts {
   /** Candidates minted as new active records. */
   inserted: number;

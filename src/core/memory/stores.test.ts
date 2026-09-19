@@ -369,6 +369,46 @@ describe("InMemoryMemoryStore.write", () => {
     expect(out.some((r) => r.text === "the on-call rotation is biweekly")).toBe(true);
   });
 
+  // Feature: docs/reference/specs/memory.md item 8 — restatement: a candidate
+  // that restates a shown record refreshes it instead of inserting a twin.
+  it("restate: bumps the target's useCount and lastUsedAt, keeps the higher confidence and the text, inserts nothing — restated 1", async () => {
+    const store = new InMemoryMemoryStore([], { now: () => NOW });
+    await store.write("org:acme", [{ ...cand, confidence: 0.7 }]);
+    const [old] = await store.list("org:acme", 8);
+    const counts = await store.write("org:acme", [
+      { ...cand, text: "deploys run through npm run deploy, nothing else", confidence: 0.9, restates: old.id },
+    ]);
+    expect(counts).toEqual({ inserted: 0, deduped: 0, restated: 1, superseded: 0, evicted: 0 });
+    const [only] = await store.list("org:acme", 8);
+    expect(only.id).toBe(old.id);
+    expect(only.text).toBe(cand.text); // the stored wording stands
+    expect(only.useCount).toBe(1);
+    expect(only.lastUsedAt).toBe(NOW);
+    expect(only.confidence).toBe(0.9); // the higher of the two
+  });
+
+  it("restating a superseded, forgotten, swept or evicted row, or a foreign-scope id, inserts as today", async () => {
+    const store = new InMemoryMemoryStore(
+      [
+        rec({ id: "sup", text: "superseded lesson", status: "superseded" }),
+        rec({ id: "forg", text: "forgotten lesson", status: "forgotten" }),
+        rec({ id: "swep", text: "swept lesson", status: "swept" }),
+        rec({ id: "evic", text: "evicted lesson", status: "evicted" }),
+        rec({ id: "foreign", scopeKey: "org:other", text: "another scope's lesson" }),
+      ],
+      { now: () => NOW },
+    );
+    const counts = await store.write("org:acme", [
+      { ...cand, text: "lesson one", restates: "sup" },
+      { ...cand, text: "lesson two", restates: "forg" },
+      { ...cand, text: "lesson three", restates: "swep" },
+      { ...cand, text: "lesson four", restates: "evic" },
+      { ...cand, text: "lesson five", restates: "foreign" },
+    ]);
+    expect(counts).toEqual({ inserted: 5, deduped: 0, restated: 0, superseded: 0, evicted: 0 });
+    expect((await store.list("org:acme", 10)).map((r) => r.useCount)).toEqual([0, 0, 0, 0, 0]);
+  });
+
   // Feature: docs/reference/specs/memory.md item 8 — the seam speaks: `write`
   // answers what the batch actually did, so the reflection outcome line can
   // carry real counters instead of guessing from the candidates.

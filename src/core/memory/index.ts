@@ -140,6 +140,7 @@ export function scheduleReflection(input: {
       scopeKeys: requestScopeKeys(input.organization, input.userId, { channelId: input.channelId, repo: input.repo }),
       actor: reflectionActor(input.actor, { channelId: input.channelId, repo: input.repo }),
       originChannelVisibility: input.originChannelVisibility,
+      repoWindow: input.cfg.repoWindow,
       history: input.history,
       request: input.request,
       answer: input.answer,

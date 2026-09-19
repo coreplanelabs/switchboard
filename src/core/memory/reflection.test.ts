@@ -5,7 +5,7 @@ import type { ChannelVisibility } from "../authz/types.js";
 import type { HistoryItem } from "../types.js";
 import { InMemoryMemoryStore } from "./stores.js";
 import { narrowestVisibility } from "./reflection.js";
-import type { MemoryQuery, MemoryRecord, MemoryStore, WriteCounts } from "./types.js";
+import type { MemoryCandidate, MemoryQuery, MemoryRecord, MemoryStore, WriteCounts } from "./types.js";
 import {
   buildReflectionInput,
   MAX_REFLECTION_FACTS,
@@ -104,6 +104,13 @@ describe("REFLECTION_SYSTEM — ephemera", () => {
     expect(REFLECTION_SYSTEM).toMatch(/PR[^\n]*ephemeral|ephemeral[^\n]*PR/i);
     expect(REFLECTION_SYSTEM).toMatch(/SHA/);
     expect(REFLECTION_SYSTEM).toMatch(/test counts?/i);
+  });
+
+  // Feature: docs/reference/specs/memory.md item 13 — restatement: the field
+  // rides the same JSON envelope as `supersedes`.
+  it("asks for `restates` when a fact restates a shown record, beside `supersedes` for contradictions", () => {
+    expect(REFLECTION_SYSTEM).toContain('"restates"');
+    expect(REFLECTION_SYSTEM).toMatch(/restates/);
   });
 
   // Feature: docs/reference/specs/memory.md item 13 — the lesson shape: the
@@ -306,6 +313,26 @@ describe("parseReflection", () => {
     const facts = out.candidates.filter((c) => c.kind === "fact");
     expect(facts[0].supersedes).toBe("mem:org:acme:0");
     expect(facts[1].supersedes).toBeUndefined();
+  });
+
+  it("keeps `restates` only when it names a record the extractor was shown; an unknown id is dropped and the fact kept", () => {
+    const out = parseReflection(
+      JSON.stringify({
+        facts: [
+          { text: "the deploy command must run from the repo root", confidence: 1, restates: "mem:org:acme:0" },
+          { text: "something else worth keeping", confidence: 1, restates: "mem:org:acme:999" },
+        ],
+        summary: "s",
+      }),
+      PROVENANCE,
+      knownIds,
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const facts = out.candidates.filter((c) => c.kind === "fact");
+    expect(facts).toHaveLength(2);
+    expect(facts[0].restates).toBe("mem:org:acme:0");
+    expect(facts[1].restates).toBeUndefined();
   });
 
   it("normalizes keywords: strings only, lowercased, trimmed, deduped, capped; invalid → omitted", () => {
@@ -707,6 +734,37 @@ describe("reflect — repo / channel routing", () => {
     expect(await store.list(CHAN, 10)).toEqual([]);
   });
 
+  it("a `user`-audience candidate restating a shown repository record is written to the repository scope and bumps it", async () => {
+    const shown = existing({
+      id: "mem:repo:acme/api:0",
+      scopeKey: REPO,
+      text: "the licence gate needs a clean npm ci first",
+      keywords: ["licence"],
+    });
+    const provider = fakeProvider(
+      JSON.stringify({
+        facts: [
+          {
+            text: "licences only pass after a clean npm ci",
+            confidence: 0.9,
+            audience: "user",
+            restates: "mem:repo:acme/api:0",
+          },
+        ],
+        summary: "",
+      }),
+    );
+    const store = new InMemoryMemoryStore([shown]);
+    const infos: string[] = [];
+    await reflect({ ...base, provider, store, onInfo: (m) => infos.push(m) });
+    expect((await store.list(REPO, 10)).map((r) => [r.id, r.text, r.useCount])).toEqual([
+      ["mem:repo:acme/api:0", "the licence gate needs a clean npm ci first", 1],
+    ]);
+    expect(await store.list(USER, 10)).toEqual([]);
+    expect(infos[0]).toContain("restated 1");
+    expect(infos[0]).toContain("inserted 0");
+  });
+
   it("shows the extractor existing records from every scope the run has, and a supersede follows the record's scope", async () => {
     const stale = existing({ id: "mem:repo:acme/api:0", scopeKey: REPO, text: "acme/api deploys with make ship" });
     const provider = fakeProvider(
@@ -973,6 +1031,35 @@ describe("reflect — write gate (authorization item 8)", () => {
     expect(user[0].supersedes).toBeUndefined();
   });
 
+  it("a write narrowed by policy loses its `restates` and lands as a plain candidate in the narrowed scope", async () => {
+    const stale = existing({ id: "mem:org:acme:0", scopeKey: SCOPE, text: "the org standup is at 10am" });
+    const restatement = JSON.stringify({
+      facts: [
+        { text: "standup happens at ten in the morning", confidence: 0.9, audience: "org", restates: "mem:org:acme:0" },
+      ],
+      summary: "",
+    });
+    const writes: Array<[string, MemoryCandidate[]]> = [];
+    const store = new (class extends InMemoryMemoryStore {
+      override async write(scopeKey: string, records: MemoryCandidate[]): Promise<WriteCounts> {
+        writes.push([scopeKey, records]);
+        return super.write(scopeKey, records);
+      }
+    })([stale]);
+    await reflect({ ...base, originChannelVisibility: "dm", provider: fakeProvider(restatement), store });
+    // The org record stands — bumped once by the shown-set retrieve, never by
+    // the write (a restate would have made it 2), and still active.
+    expect(stale.useCount).toBe(1);
+    expect(stale.status).toBe("active");
+    // The narrowed candidate reaches the user scope WITHOUT the pointer.
+    expect(writes).toHaveLength(1);
+    const [scopeKey, records] = writes[0];
+    expect(scopeKey).toBe(USER);
+    expect(records).toHaveLength(1);
+    expect(records[0].restates).toBeUndefined();
+    expect(await texts(store, USER)).toEqual(["standup happens at ten in the morning"]);
+  });
+
   it("a write the table denies for any other reason is dropped with the reason — never rerouted wider, never logged with the fact text", async () => {
     // The run's own channel scope, but an actor that is NOT a member of it (the dispatcher's `reflectionActor` makes this impossible; the gate still holds).
     const channelFact = JSON.stringify({
@@ -1031,6 +1118,78 @@ describe("reflect — write gate (authorization item 8)", () => {
     const admin = actor("user", "slack:UADMIN", { actions: "all", channels: "all", repos: "all" });
     expect(reflectionActor(admin, { channelId: "slack:C1", repo: "acme/api" }).grants).toEqual(admin.grants);
     expect(reflectionActor(plain, {}).grants).toEqual(plain.grants);
+  });
+});
+
+// Feature: docs/reference/specs/memory.md item 12 — the shown set: the
+// repository window (the block's own `list` read, unbumped) plus the
+// reflection-time keyword hits, so a restatement can name any record a run
+// actually saw.
+describe("reflect — the shown set (repository window + hits)", () => {
+  const REPO = "repo:acme/api";
+  const base = {
+    scopeKeys: { org: SCOPE, repo: REPO },
+    model: "cheap-model",
+    history: [] as HistoryItem[],
+    request: "how do we deploy?",
+    answer: "npm run deploy",
+    ...PROVENANCE,
+    ...PUBLIC_ORIGIN,
+    actor: reflectionActor(PRINCIPAL, { repo: "acme/api" }),
+  };
+
+  it("shows the window's 24 newest repository facts without bumping them, plus at most eight hits per scope", async () => {
+    // 30 repository facts no query token hits — only the window can show them.
+    const repoFacts = Array.from({ length: 30 }, (_, i) =>
+      existing({
+        id: `mem:${REPO}:${i}`,
+        scopeKey: REPO,
+        text: `repository lesson number ${i} about licences`,
+        keywords: ["licences"],
+        createdAt: 1_000 + i,
+      }),
+    );
+    // 10 org facts the query hits — retrieve caps the hits at 8 per scope.
+    const orgFacts = Array.from({ length: 10 }, (_, i) =>
+      existing({ id: `mem:${SCOPE}:${i}`, text: `deploy lesson ${i}`, keywords: ["deploy"], createdAt: 2_000 + i }),
+    );
+    const store = new InMemoryMemoryStore([...repoFacts, ...orgFacts]);
+    const provider = fakeProvider(JSON.stringify({ facts: [], summary: "" }));
+    await reflect({ ...base, provider, store });
+    const shown = (provider.requests[0].messages[0].content[0] as { text: string }).text;
+    // The 24 newest repository facts are shown; the 6 oldest are not.
+    expect(shown.match(new RegExp(`- mem:${REPO.replace("/", "\\/")}:\\d+ \\[`, "g"))).toHaveLength(24);
+    for (let i = 6; i < 30; i++) expect(shown).toContain(`- mem:${REPO}:${i} [`);
+    // Eight org hits, not ten.
+    expect(shown.match(/- mem:org:acme:\d+ \[/g)).toHaveLength(8);
+    // The window read bumped nothing: only retrieve moves usage.
+    expect(repoFacts.every((r) => r.useCount === 0 && r.lastUsedAt === undefined)).toBe(true);
+  });
+
+  it("a window record appears once even when the repository retrieve also hits it, and a throwing window read leaves the hits", async () => {
+    const both = existing({
+      id: `mem:${REPO}:0`,
+      scopeKey: REPO,
+      text: "deploy lessons live here",
+      keywords: ["deploy"],
+    });
+    const store = new InMemoryMemoryStore([both]);
+    const provider = fakeProvider(JSON.stringify({ facts: [], summary: "" }));
+    await reflect({ ...base, provider, store });
+    const shown = (provider.requests[0].messages[0].content[0] as { text: string }).text;
+    expect(shown.match(new RegExp(`- mem:${REPO.replace("/", "\\/")}:0 \\[`, "g"))).toHaveLength(1);
+
+    const throwing = new (class extends InMemoryMemoryStore {
+      override async list(): Promise<MemoryRecord[]> {
+        throw new Error("list is for humans");
+      }
+    })([existing({ id: "mem:org:acme:hit", text: "deploy lesson", keywords: ["deploy"] })]);
+    const provider2 = fakeProvider(JSON.stringify({ facts: [], summary: "" }));
+    const warnings: string[] = [];
+    await reflect({ ...base, provider: provider2, store: throwing, onWarn: (m) => warnings.push(m) });
+    const shown2 = (provider2.requests[0].messages[0].content[0] as { text: string }).text;
+    expect(shown2).toContain("- mem:org:acme:hit [");
+    expect(warnings.join("\n")).toContain("window");
   });
 });
 
