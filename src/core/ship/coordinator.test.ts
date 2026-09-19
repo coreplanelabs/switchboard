@@ -172,6 +172,13 @@ function fresh(inp: UnitPipelineInput, at = T0): Driver {
   return d;
 }
 
+/** The round's checks step answered green (record 0055): the machine is then
+ *  at the approve's old tail — merge_ready, or the merge door. */
+function greenChecks(d: Driver, at: number, total = 2): CoordinatorAction {
+  expect(d.action.type).toBe("checks");
+  return d.answer({ type: "checks", checks: { total, pending: [], failed: [] }, at });
+}
+
 /** Round 0 through its open pull request: the machine is then about to spawn review round 1. */
 function throughRoundZero(d: Driver, at = T0 + 10 * MIN): CoordinatorAction {
   expect(d.action.type).toBe("branch");
@@ -366,6 +373,10 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       }),
       T0 + 20 * MIN,
     );
+    // The round verdict (record 0055): the approve is joined with the checks
+    // at the reviewed head before the merge door is asked; green adds no wait.
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/1", prNumber: 7, headSha: HEAD_A });
+    greenChecks(d, T0 + 20 * MIN);
     expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/1", prNumber: 7, headSha: HEAD_A });
     d.answer({ type: "merge", outcome: "merged", sha: HEAD_B, at: T0 + 21 * MIN });
     expect(d.action).toMatchObject({
@@ -398,6 +409,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       }),
       T0 + 20 * MIN,
     );
+    greenChecks(d, T0 + 20 * MIN);
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready", pr: { number: 7 } } });
     const report = renderUnitReport(d.state);
     expect(report).toContain("✅ Merge-ready after 1 review round");
@@ -466,6 +478,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       }),
       T0 + 20 * MIN,
     );
+    greenChecks(d, T0 + 20 * MIN);
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
     // A conflicting head is never called merge-ready, whatever the checks say
     // — even green ones — and the line names the base to rebase onto.
@@ -581,6 +594,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       }),
       T0 + 50 * MIN,
     );
+    greenChecks(d, T0 + 50 * MIN);
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
     expect(d.rounds()).toEqual([
       "0 coding started",
@@ -950,6 +964,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       }),
       T0 + 20 * MIN,
     );
+    greenChecks(approved, T0 + 20 * MIN);
     expect(approved.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
 
     const changes = fresh(input({ merge: "person" }));
@@ -1756,6 +1771,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
       }),
       T0 + 20 * MIN,
     );
+    greenChecks(d, T0 + 20 * MIN);
     expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/1" });
     d.answer({ type: "merge", outcome: "pending", reason: "checks running", at: T0 + 20 * MIN });
     // The wait is on the intake's typed event at the approved head, with the
@@ -1798,6 +1814,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
       }),
       T0 + 20 * MIN,
     );
+    greenChecks(refused, T0 + 20 * MIN);
     refused.answer({ type: "merge", outcome: "refused", reason: "head moved", at: T0 + 21 * MIN });
     expect(refused.action).toMatchObject({ type: "end", ending: { kind: "merge_refused", reason: "head moved" } });
     const refusedReport = renderUnitReport(refused.state);
@@ -1824,6 +1841,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
       }),
       T0 + 20 * MIN,
     );
+    greenChecks(d, T0 + 20 * MIN);
     expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/1" });
     d.answer({
       type: "merge",
@@ -2104,6 +2122,283 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
   });
 });
 
+// Feature: docs/reference/specs/agent-ship.md item 9; docs/decisions/0055-….md,
+// "The round verdict": after read-record on a review round, one bot step named
+// `checks` reads the check runs at the reviewed head with the merge door's own
+// reading, and its answer is folded into the round — a failed check becomes a
+// check finding under a round note of its own and the findings step runs as
+// for any changes-requested round; a pending check waits on the intake's
+// checks-settled event at the head; a suspected flake (a timeout/stall on a
+// shard whose test files the changed paths never touch) is re-run once before
+// it becomes a finding; a green head ends merge-ready with no wait added.
+describe("the round verdict — the checks step at the reviewed head (record 0055)", () => {
+  /** A posted approve at HEAD_A: the machine is then at the round's checks step. */
+  const approved = (over: Partial<UnitPipelineInput> = {}): Driver => {
+    const d = fresh(input(over));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    return d;
+  };
+
+  it("a red check at the approved head yields a check finding and a findings round — never merge_ready and never the merge step — and the finding rides the briefs and the dispositions exactly as a reviewer's", () => {
+    const d = approved(); // merge: runner — the door is never asked over a red head
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/1", prNumber: 7, headSha: HEAD_A });
+    d.answer({
+      type: "checks",
+      checks: {
+        total: 3,
+        pending: [],
+        failed: [{ name: "ci / bot", conclusion: "failure", url: "https://github.com/acme/api/runs/1" }],
+      },
+      at: T0 + 21 * MIN,
+    });
+    // The failed check is a finding of the round — id check:<name>, severity
+    // blocking, the conclusion and URL in the row — under a round note of its own.
+    expect(d.rounds()).toContain("1 review checks_failed");
+    expect(d.state.findingsByRound[1]).toEqual([
+      {
+        id: "check:ci / bot",
+        severity: "blocking",
+        file: "ci / bot",
+        title: "CI check failed (failure) — https://github.com/acme/api/runs/1",
+        check: true,
+      },
+    ]);
+    // The findings step runs as for any changes-requested round, the check
+    // findings riding the brief by value — they sit on no run's record.
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      step: "U10/1/findings",
+      round: { index: 1, kind: "findings" },
+      brief: {
+        kind: "findings",
+        pr: 7,
+        reviewRunId: "run-r1",
+        checks: [{ id: "check:ci / bot", severity: "blocking" }],
+      },
+    });
+    // The coding session's dispositions match the check finding by id exactly
+    // as a reviewer's (record 0055's invariant 2).
+    runChild(
+      d,
+      "run-f1",
+      finished({
+        status: "completed",
+        headSha: HEAD_B,
+        dispositions: [{ findingId: "check:ci / bot", disposition: "fixed", note: "fixed the start path" }],
+      }),
+      T0 + 40 * MIN,
+    );
+    expect(d.state.dispositionsByRound[1]).toEqual([
+      { findingId: "check:ci / bot", disposition: "fixed", note: "fixed the start path" },
+    ]);
+    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B }, at: T0 + 40 * MIN });
+    // The re-review brief carries the prior round's check findings beside the
+    // prior run ids, so the reviewer verifies them like any finding.
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      step: "U10/2/review",
+      brief: {
+        kind: "review",
+        round: 2,
+        prior: { reviewRunId: "run-r1", codingRunId: "run-f1" },
+        checks: [{ id: "check:ci / bot" }],
+      },
+    });
+    runChild(
+      d,
+      "run-r2",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "green now", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_B,
+      }),
+      T0 + 50 * MIN,
+    );
+    // The re-review's own checks read at the NEW head; green → the merge door.
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/2/review/checks/1", headSha: HEAD_B });
+    greenChecks(d, T0 + 51 * MIN);
+    expect(d.action).toMatchObject({ type: "merge", headSha: HEAD_B });
+  });
+
+  it("a pending check registers at the head and waits on checks-settled in the merge wait's chunks, then reads again — and an unreadable GitHub reads as pending", () => {
+    const d = approved({ merge: "person", generated: true });
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/1" });
+    d.answer({ type: "checks", checks: { total: 3, pending: ["ci / bot"], failed: [] }, at: T0 + 20 * MIN });
+    expect(d.action).toMatchObject({
+      type: "wait-checks",
+      step: "U10/1/review/checks/wait/1",
+      headSha: HEAD_A,
+      timeoutMs: MERGE_WAIT_CHUNK_MS,
+    });
+    d.answer({ type: "wait-checks", outcome: "event" });
+    // GitHub unreadable on the re-read: treated as pending, waited again.
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/2" });
+    d.answer({ type: "checks", at: T0 + 22 * MIN });
+    expect(d.action).toMatchObject({ type: "wait-checks", step: "U10/1/review/checks/wait/2" });
+    d.answer({ type: "wait-checks", outcome: "timeout" });
+    greenChecks(d, T0 + 27 * MIN, 3);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+  });
+
+  it("an untouched-shard timeout re-runs once through the CI retry before it becomes a finding — a second failure is the finding, and a real failure beside a suspect never spends the re-run", () => {
+    const d = approved({ merge: "person", generated: true });
+    const flaky = { name: "test 2 of 4", conclusion: "timed_out", flakeSuspect: true };
+    d.answer({ type: "checks", checks: { total: 4, pending: [], failed: [flaky] }, at: T0 + 21 * MIN });
+    // The one re-run: the next checks ask names the failed checks to re-run.
+    expect(d.action).toMatchObject({
+      type: "checks",
+      step: "U10/1/review/checks/2",
+      headSha: HEAD_A,
+      retry: ["test 2 of 4"],
+    });
+    d.answer({ type: "checks", at: T0 + 21 * MIN });
+    // Then the wait for the re-run to settle, and a plain re-read.
+    expect(d.action).toMatchObject({ type: "wait-checks", step: "U10/1/review/checks/wait/2" });
+    d.answer({ type: "wait-checks", outcome: "event" });
+    const read = d.action;
+    expect(read).toMatchObject({ type: "checks", step: "U10/1/review/checks/3" });
+    expect(read).not.toHaveProperty("retry");
+    // The second failure is the finding, still a suspect or not.
+    d.answer({ type: "checks", checks: { total: 4, pending: [], failed: [flaky] }, at: T0 + 30 * MIN });
+    expect(d.rounds()).toContain("1 review checks_failed");
+    expect(d.state.findingsByRound[1]).toMatchObject([{ id: "check:test 2 of 4", severity: "blocking" }]);
+    expect(d.action).toMatchObject({ type: "spawn", round: { index: 1, kind: "findings" } });
+
+    // A real failure beside the suspect: the round's answer is already known,
+    // so both become findings at once and the re-run is never spent.
+    const mixed = approved({ merge: "person", generated: true });
+    mixed.answer({
+      type: "checks",
+      checks: {
+        total: 4,
+        pending: [],
+        failed: [flaky, { name: "ci / bot", conclusion: "failure" }],
+      },
+      at: T0 + 21 * MIN,
+    });
+    expect(mixed.rounds()).toContain("1 review checks_failed");
+    expect(mixed.state.findingsByRound[1]).toMatchObject([{ id: "check:test 2 of 4" }, { id: "check:ci / bot" }]);
+  });
+
+  it("a flake re-run the bot could not dispatch spends the retry without a wait — the checks are read again at once at the unchanged head and the failure becomes the finding", () => {
+    const d = approved({ merge: "person", generated: true });
+    const flaky = { name: "test 2 of 4", conclusion: "timed_out", flakeSuspect: true };
+    d.answer({ type: "checks", checks: { total: 4, pending: [], failed: [flaky] }, at: T0 + 21 * MIN });
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/2", retry: ["test 2 of 4"] });
+    // The bot answers that no re-run was dispatched (no re-runnable run behind
+    // the check, or GitHub refused): nothing settles at the unchanged head, so
+    // the machine reads again at once — no checks-wait — with the retry spent.
+    d.answer({ type: "checks", retried: false, at: T0 + 21 * MIN });
+    const read = d.action;
+    expect(read).toMatchObject({ type: "checks", step: "U10/1/review/checks/3" });
+    expect(read).not.toHaveProperty("retry");
+    d.answer({ type: "checks", checks: { total: 4, pending: [], failed: [flaky] }, at: T0 + 22 * MIN });
+    expect(d.rounds()).toContain("1 review checks_failed");
+    expect(d.state.findingsByRound[1]).toMatchObject([{ id: "check:test 2 of 4", severity: "blocking" }]);
+    expect(d.action).toMatchObject({ type: "spawn", round: { index: 1, kind: "findings" } });
+  });
+
+  it("a reviewer's finding whose id starts with check: is a reviewer's row, never a check finding — provenance, not the id, routes the briefs' checks rows", () => {
+    // A re-review brief names the prior check findings by id, so a reviewer
+    // plausibly reuses `check:…` in its own verdict; such a row must ride the
+    // review run's record like any finding, never brief.checks — a non-blocking
+    // one there would be refused as a malformed brief, killing the unit.
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    const echoed: Finding = { id: "check:ci / bot", severity: "minor", file: "ci / bot", title: "still red locally" };
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "one", findings: [echoed] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    // The findings brief carries no checks rows — the reviewer's finding sits
+    // on the review run's record and rides `reviewRunId` like any other.
+    const spawn = d.action;
+    expect(spawn).toMatchObject({ type: "spawn", round: { index: 1, kind: "findings" }, brief: { kind: "findings" } });
+    expect((spawn as Extract<CoordinatorAction, { type: "spawn" }>).brief).not.toHaveProperty("checks");
+    runChild(
+      d,
+      "run-f1",
+      finished({
+        status: "completed",
+        headSha: HEAD_B,
+        dispositions: [{ findingId: "check:ci / bot", disposition: "fixed", note: "fixed" }],
+      }),
+      T0 + 30 * MIN,
+    );
+    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_B }, at: T0 + 30 * MIN });
+    // The re-review brief likewise: prior run ids only, no checks rows.
+    const review = d.action;
+    expect(review).toMatchObject({ type: "spawn", step: "U10/2/review", brief: { kind: "review", round: 2 } });
+    expect((review as Extract<CoordinatorAction, { type: "spawn" }>).brief).not.toHaveProperty("checks");
+  });
+
+  it("a green head ends merge-ready with no wait added, and a head with no check reported waits one chunk of grace and never more", () => {
+    const d = approved({ merge: "person", generated: true });
+    greenChecks(d, T0 + 20 * MIN, 3);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+
+    const none = approved({ merge: "person", generated: true });
+    none.answer({ type: "checks", checks: { total: 0, pending: [], failed: [] }, at: T0 + 20 * MIN });
+    expect(none.action).toMatchObject({ type: "wait-checks", step: "U10/1/review/checks/wait/1" });
+    none.answer({ type: "wait-checks", outcome: "timeout" });
+    expect(none.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/2" });
+    none.answer({ type: "checks", checks: { total: 0, pending: [], failed: [] }, at: T0 + 25 * MIN });
+    expect(none.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+  });
+
+  it("a head still pending at the ask's end proceeds — the ending's facts read names what is pending — and a reviewed head the machine never learned skips the step as the merge step's guard does", () => {
+    const d = approved({ merge: "person", generated: true });
+    d.answer({ type: "checks", checks: { total: 3, pending: ["ci / bot"], failed: [] }, at: T0 + 20 * MIN });
+    d.answer({ type: "wait-checks", outcome: "timeout" });
+    // Still pending 61 minutes after the step opened: past the sixty-minute ask.
+    d.answer({ type: "checks", checks: { total: 3, pending: ["ci / bot"], failed: [] }, at: T0 + 81 * MIN });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+
+    // No reviewed head was ever learned — the pr-check answered no head and
+    // the review posted none — so there is nothing to read the checks at.
+    const headless = fresh(input({ merge: "person", generated: true }));
+    expect(headless.action.type).toBe("branch");
+    headless.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      headless,
+      "run-c0",
+      finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }),
+      T0 + 10 * MIN,
+    );
+    headless.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL }, at: T0 + 10 * MIN });
+    runChild(
+      headless,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewPosted: true,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(headless.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+  });
+});
+
 describe("the severity gate — an approve's findings held to the level in force", () => {
   const F = (id: string, severity: "blocking" | "major" | "minor" | "nit", title = "t") => ({
     id,
@@ -2163,6 +2458,7 @@ describe("the severity gate — an approve's findings held to the level in force
       }),
       T0 + 20 * MIN,
     );
+    greenChecks(d, T0 + 20 * MIN);
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
     const report = renderUnitReport(d.state);
     // Below the level nothing fired: the approve's round note carries no gate.
@@ -2205,6 +2501,7 @@ describe("the severity gate — an approve's findings held to the level in force
       }),
       T0 + 20 * MIN,
     );
+    greenChecks(d, T0 + 20 * MIN);
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
     expect(renderUnitReport(d.state)).toContain("Renewals: 0 of 6 spent, cost cap $50 (granted by channel).");
   });

@@ -52,6 +52,7 @@ import {
   carve,
   DEFAULT_GRANT,
   loopPosition,
+  MERGE_WAIT_ASK_MINUTES,
   MINUTE_MS,
   SHIP_WAIT,
   type Carve,
@@ -431,8 +432,19 @@ export type Brief =
       round: number;
       /** The previous review round's run and the coding run that answered its findings, for a re-review. */
       prior?: { reviewRunId: string; codingRunId?: string };
+      /** The previous round's check findings (record 0055): they sit on no
+       *  run's record, so the brief carries them beside `prior` by value. */
+      checks?: Finding[];
     }
-  | { kind: "findings"; unit: string; pr: number; reviewRunId: string };
+  | {
+      kind: "findings";
+      unit: string;
+      pr: number;
+      reviewRunId: string;
+      /** The round's check findings (record 0055), carried by value — the
+       *  review run's record holds only the reviewer's own findings. */
+      checks?: Finding[];
+    };
 
 export interface PrRef {
   number: number;
@@ -463,6 +475,12 @@ export type CoordinatorAction =
       pr?: number;
     }
   | { type: "merge"; step: string; prNumber: number; headSha: string }
+  /** Read the check runs at the reviewed head (record 0055, the round verdict):
+   *  the merge door's own reading, folded into the round. `retry` names the
+   *  failed checks whose one flake re-run the machine is spending: the bot
+   *  re-runs their failed jobs (the CI retry the deploy already uses) instead
+   *  of reading. */
+  | { type: "checks"; step: string; prNumber: number; headSha: string; retry?: string[] }
   /** Wait for the intake's checks-settled event at the approved head, bounded as the fallback. */
   | { type: "wait-checks"; step: string; headSha: string; timeoutMs: number }
   | { type: "sleep"; step: string; ms: number }
@@ -555,8 +573,55 @@ export type StepReturn =
   // fired, or a person merged — so the runner merged nothing (`by: other`).
   | { type: "merge"; step: string; outcome: "merged"; by: "other"; sha: string; mergedAt: string; at: number }
   | { type: "merge"; step: string; outcome: "pending" | "refused"; reason: string; at: number }
+  /** The checks read at the reviewed head; `checks` absent means GitHub could
+   *  not be read, which the machine treats as pending (record 0055). A retry
+   *  ask answers `retried` instead: whether the bot dispatched the re-run —
+   *  false means there is nothing to wait for at the unchanged head. */
+  | { type: "checks"; step: string; checks?: RoundChecks; retried?: boolean; at: number }
   | { type: "wait-checks"; step: string; outcome: "event" | "timeout" }
   | { type: "sleep"; step: string };
+
+/** One failed check run at the reviewed head, as the round's checks step reads
+ *  it (record 0055): the name, GitHub's conclusion, the run's URL, and whether
+ *  the bot's classifier suspects a flake — a test timeout or runner stall on a
+ *  shard whose test files the pull request's changed paths never touch. */
+export interface CheckFailure {
+  name: string;
+  conclusion: string;
+  url?: string;
+  flakeSuspect?: boolean;
+}
+
+/** The check runs at the reviewed head as the round's checks step reads them. */
+export interface RoundChecks {
+  total: number;
+  pending: string[];
+  failed: CheckFailure[];
+}
+
+/** A failed check as a finding of the round (record 0055): a finding row like
+ *  a reviewer's — id `check:<name>`, the check's name as the file, severity
+ *  `blocking` so the level in force always counts it, the conclusion and URL
+ *  as the title — so the ledger, the findings brief and the dispositions
+ *  carry it exactly as a reviewer's. */
+export function checkFinding(f: CheckFailure): Finding {
+  return {
+    id: `check:${f.name}`,
+    severity: "blocking",
+    file: f.name,
+    title: `CI check failed (${f.conclusion})${f.url !== undefined ? ` — ${f.url}` : ""}`,
+    check: true,
+  };
+}
+
+/** The check findings of a review round: the rows the checks step appended to
+ *  the round's findings, told apart by provenance — the `check` flag only
+ *  `checkFinding` sets, never the id: a reviewer's id is a free string, and a
+ *  re-review brief names the prior check findings by id, so a reviewer
+ *  plausibly reuses `check:…` in its own verdict — a check finding sits on no
+ *  run's record, so a brief carries them by value. */
+export const checkFindingsOf = (findings: readonly Finding[] | undefined): Finding[] =>
+  (findings ?? []).filter((f) => f.check === true);
 
 /** How one unit's pipeline ended — the truthful vocabulary the ship pipeline
  *  has, plus the merge's own: `merged` by the runner, or found merged (`by:
@@ -757,6 +822,36 @@ type Phase =
     }
   | { at: "merge"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number }
   | { at: "merge-wait"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number }
+  /** The round's checks step (record 0055): the check runs at the reviewed head
+   *  are read after an approve settles, before merge_ready or the merge door.
+   *  `graced`: a head with no check reported has had its one-chunk grace;
+   *  `retried`: the one flake re-run is spent; `retry` names the failed checks
+   *  the next ask re-runs instead of reading. */
+  | {
+      at: "checks";
+      round: RoundRef;
+      prNumber: number;
+      headSha: string;
+      n: number;
+      since: number;
+      waitMs: number;
+      graced: boolean;
+      retried: boolean;
+      retry?: string[];
+    }
+  /** Waiting on `checks-settled-<head>` between two checks reads, in the merge
+   *  wait's own chunks — the intake wakes the machine when the head settles. */
+  | {
+      at: "checks-wait";
+      round: RoundRef;
+      prNumber: number;
+      headSha: string;
+      n: number;
+      since: number;
+      waitMs: number;
+      graced: boolean;
+      retried: boolean;
+    }
   | { at: "ended" };
 
 export interface UnitPipelineState {
@@ -889,9 +984,19 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
     };
   }
   const pr = s.pr!.number;
-  if (round.kind === "findings") return { kind: "findings", unit, pr, reviewRunId: s.reviewRunByRound[round.index]! };
+  if (round.kind === "findings") {
+    const checks = checkFindingsOf(s.findingsByRound[round.index]);
+    return {
+      kind: "findings",
+      unit,
+      pr,
+      reviewRunId: s.reviewRunByRound[round.index]!,
+      ...(checks.length > 0 ? { checks } : {}),
+    };
+  }
   const priorReview = s.reviewRunByRound[round.index - 1];
   const priorCoding = s.findingsRunByRound[round.index - 1];
+  const priorChecks = checkFindingsOf(s.findingsByRound[round.index - 1]);
   return {
     kind: "review",
     unit,
@@ -901,6 +1006,7 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
     ...(priorReview !== undefined
       ? { prior: { reviewRunId: priorReview, ...(priorCoding !== undefined ? { codingRunId: priorCoding } : {}) } }
       : {}),
+    ...(priorChecks.length > 0 ? { checks: priorChecks } : {}),
   };
 }
 
@@ -963,6 +1069,21 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         // The adopted pull request rides the check so the bot can follow it
         // when nothing heads the unit's branch (issue 1799).
         ...(s.pr !== undefined ? { pr: s.pr.number } : {}),
+      };
+    case "checks":
+      return {
+        type: "checks",
+        step: `${roundStep(s, p.round)}/checks/${p.n}`,
+        prNumber: p.prNumber,
+        headSha: p.headSha,
+        ...(p.retry !== undefined ? { retry: p.retry } : {}),
+      };
+    case "checks-wait":
+      return {
+        type: "wait-checks",
+        step: `${roundStep(s, p.round)}/checks/wait/${p.n}`,
+        headSha: p.headSha,
+        timeoutMs: Math.max(MIN, Math.min(MERGE_WAIT_CHUNK_MS, p.waitMs - (s.clock - p.since))),
       };
     case "merge":
       return { type: "merge", step: `${unit}/merge/${p.n}`, prNumber: p.pr.number, headSha: p.headSha };
@@ -1202,6 +1323,163 @@ function settleReview(
         );
       return enterRound(next, { index: round.index, kind: "findings" }, notes);
     }
+    // The round verdict (record 0055): the approve is joined with the check
+    // runs at the reviewed head before merge_ready or the merge door — the
+    // checks step reads them and a failed one becomes a finding of the round.
+    return enterChecks(next, round, notes);
+  }
+  // request_changes: the verdict settled (and posted) — now a stop
+  // short-circuits the findings step, naming the review standing on the pull request.
+  if (mode !== undefined)
+    return end(
+      next,
+      {
+        kind: "stopped",
+        mode,
+        round,
+        reviewRounds: next.reviewRounds,
+        ...(facts.finalReply !== undefined ? { finalReply: facts.finalReply } : {}),
+        ...(facts.reviewPosted === true ? { postedReview: true } : {}),
+      },
+      notes,
+    );
+  if (next.reviewRounds >= next.input.caps.maxRounds)
+    return end(
+      next,
+      { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
+      notes,
+    );
+  // The findings step (agent-ship item 7): the review's findings dispatched into
+  // the unit thread as a coding run, under the review round's index. A run live
+  // there is a person's (this machine awaited its own child's end), so the
+  // spawn answers busy and the step waits under the unit's clock like any round.
+  return enterRound(next, { index: round.index, kind: "findings" }, notes);
+}
+
+/** The round's checks step (record 0055): after an approve settles, the check
+ *  runs at the reviewed head are read with the merge door's own reading and
+ *  folded into the round verdict. With no reviewed head known the step is
+ *  skipped as the merge step's guard is, and the unit ends as today. The wait
+ *  on a pending head is bounded by the merge wait's own ask, clipped to the
+ *  pipeline's remainder. */
+function enterChecks(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNote[]): Transition {
+  const headSha = normalizeHead(s.lastReviewHead);
+  const pr = s.pr;
+  if (headSha === undefined || pr === undefined) return approveOutcome(s, notes);
+  const waitMs = Math.max(MIN, Math.min(MERGE_WAIT_ASK_MINUTES * MIN, remainingMs(s)));
+  return {
+    state: {
+      ...s,
+      phase: {
+        at: "checks",
+        round,
+        prNumber: pr.number,
+        headSha,
+        n: 1,
+        since: s.clock,
+        waitMs,
+        graced: false,
+        retried: false,
+      },
+    },
+    notes,
+  };
+}
+
+/** What the checks step answered, folded into the round (record 0055). Pure
+ *  over the phase: a retry ask waits for the head to settle and reads again;
+ *  an unreadable or pending head waits a chunk inside the step's ask and then
+ *  proceeds — the ending's facts read names what is still pending; a head with
+ *  no check reported waits one chunk of grace and never more; a failed check
+ *  becomes a check finding under a round note of its own and the findings step
+ *  runs as for any changes-requested round — never merge_ready, never the
+ *  merge door; a green head proceeds with no wait added. */
+function settleChecks(
+  s: UnitPipelineState,
+  p: Extract<Phase, { at: "checks" }>,
+  checks: RoundChecks | undefined,
+  retried?: boolean,
+): Transition {
+  const { round } = p;
+  const wait = (over: Partial<Extract<Phase, { at: "checks-wait" }>>): Transition => ({
+    state: {
+      ...s,
+      phase: {
+        at: "checks-wait",
+        round,
+        prNumber: p.prNumber,
+        headSha: p.headSha,
+        n: p.n,
+        since: p.since,
+        waitMs: p.waitMs,
+        graced: p.graced,
+        retried: p.retried,
+        ...over,
+      },
+    },
+    notes: [],
+  });
+  // The retry ask. Dispatched: wait for the head to settle, then read again;
+  // a second failure is the finding. NOT dispatched (`retried: false` — no
+  // re-runnable run behind the checks, or GitHub refused): the one re-run is
+  // spent all the same — the machine never asks twice — but nothing changes
+  // at the head, so the checks are read again at once instead of waiting on a
+  // settle event that never comes, and the failure becomes the finding.
+  if (p.retry !== undefined) {
+    if (retried === false) {
+      const { retry: _retry, ...read } = p;
+      return { state: { ...s, phase: { ...read, n: p.n + 1, retried: true } }, notes: [] };
+    }
+    return wait({ retried: true });
+  }
+  // GitHub unreadable answers as pending and is re-read at the chunk's end
+  // (record 0055); a head still pending or unreadable at the ask's end
+  // proceeds — the ending's facts read names what is still pending, and the
+  // merge door (under `merge: runner`) is the guard that never merges over it.
+  if (checks === undefined || checks.pending.length > 0) {
+    if (s.clock - p.since >= p.waitMs) return approveOutcome(s, []);
+    return wait({});
+  }
+  if (checks.failed.length > 0) {
+    // The flake rule (record 0055): a suspected flake — a test timeout or
+    // runner stall on a shard whose test files the pull request's changed
+    // paths never touch — is re-run once before it becomes a finding. One
+    // real failure among them makes the round's answer already known, so the
+    // re-run is spent only when every failure is a suspect.
+    if (!p.retried && checks.failed.every((f) => f.flakeSuspect === true))
+      return {
+        state: { ...s, phase: { ...p, n: p.n + 1, retry: checks.failed.map((f) => f.name) } },
+        notes: [],
+      };
+    const findings = [...(s.findingsByRound[round.index] ?? []), ...checks.failed.map(checkFinding)];
+    const next: UnitPipelineState = {
+      ...s,
+      findingsByRound: { ...s.findingsByRound, [round.index]: findings },
+    };
+    // The failed checks get a round note of their own (record 0055) — never
+    // the parser-mismatch gate — and the findings step runs as for any
+    // changes-requested round: dispositions, a fix round, a re-review.
+    const notes: CoordinatorNote[] = [roundNote(round, "checks_failed")];
+    if (next.reviewRounds >= next.input.caps.maxRounds)
+      return end(
+        next,
+        { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
+        notes,
+      );
+    return enterRound(next, { index: round.index, kind: "findings" }, notes);
+  }
+  // No check reported at the head: one chunk of grace — the first check starts
+  // within minutes where CI exists — then the round proceeds, so a repository
+  // without CI costs one chunk per round and never idles (record 0055).
+  if (checks.total === 0 && !p.graced) return wait({ graced: true });
+  // Green (or none reported after the grace): today's path, no wait added.
+  return approveOutcome(s, []);
+}
+
+/** An approve past the checks read: merge_ready for a person, the merge door
+ *  under `merge: runner` — the tail the round verdict guards (record 0055). */
+function approveOutcome(next: UnitPipelineState, notes: CoordinatorNote[]): Transition {
+  {
     const pr = next.pr!;
     if (next.input.merge !== "runner")
       return end(next, { kind: "merge_ready", pr, reviewRounds: next.reviewRounds }, notes);
@@ -1235,32 +1513,6 @@ function settleReview(
       notes,
     };
   }
-  // request_changes: the verdict settled (and posted) — now a stop
-  // short-circuits the findings step, naming the review standing on the pull request.
-  if (mode !== undefined)
-    return end(
-      next,
-      {
-        kind: "stopped",
-        mode,
-        round,
-        reviewRounds: next.reviewRounds,
-        ...(facts.finalReply !== undefined ? { finalReply: facts.finalReply } : {}),
-        ...(facts.reviewPosted === true ? { postedReview: true } : {}),
-      },
-      notes,
-    );
-  if (next.reviewRounds >= next.input.caps.maxRounds)
-    return end(
-      next,
-      { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
-      notes,
-    );
-  // The findings step (agent-ship item 7): the review's findings dispatched into
-  // the unit thread as a coding run, under the review round's index. A run live
-  // there is a person's (this machine awaited its own child's end), so the
-  // spawn answers busy and the step waits under the unit's clock like any round.
-  return enterRound(next, { index: round.index, kind: "findings" }, notes);
 }
 
 /** The unit's ending when its pull request is found merged — by a person, or
@@ -1637,6 +1889,29 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
     }
     case "pr-check":
       return settlePrCheck(clocked, p, (ret as Extract<StepReturn, { type: "pr-check" }>).pr);
+    case "checks": {
+      const r = ret as Extract<StepReturn, { type: "checks" }>;
+      return settleChecks(clocked, p, r.checks, r.retried);
+    }
+    case "checks-wait":
+      // The event fired or the chunk elapsed either way the head is read again.
+      return {
+        state: {
+          ...s,
+          phase: {
+            at: "checks",
+            round: p.round,
+            prNumber: p.prNumber,
+            headSha: p.headSha,
+            n: p.n + 1,
+            since: p.since,
+            waitMs: p.waitMs,
+            graced: p.graced,
+            retried: p.retried,
+          },
+        },
+        notes: [],
+      };
     case "merge": {
       const r = ret as Extract<StepReturn, { type: "merge" }>;
       if (r.outcome === "merged")

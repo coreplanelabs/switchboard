@@ -161,6 +161,12 @@ function bot(script: Partial<Record<CoordinatorStepRoute, Scripted[]>>) {
     async step(route, body) {
       calls.push({ route, body });
       const next = queues[route]?.shift();
+      // The round's checks step (record 0055) answers green unless a test
+      // scripts it: most scripts here are about the loop around it, and a
+      // green head adds no wait — the red, pending and flake paths are the
+      // machine's own (src/core/ship/coordinator.test.ts).
+      if (next === undefined && route === "checks" && queues.checks === undefined)
+        return ok({ ok: true, checks: { total: 2, pending: [], failed: [] } }, T0 + 20 * MIN);
       if (next === undefined) throw new Error(`the test scripted no ${route} answer for ${JSON.stringify(body)}`);
       const answer = typeof next === "function" ? next(body) : next;
       if (answer instanceof Error) throw answer;
@@ -209,6 +215,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "U10/1/review/wait/1",
       "U10/1/review/read/1",
       "U10/note/4",
+      "U10/1/review/checks/1",
       "U10/merge/1",
       "U10/end",
       "finish",
@@ -372,6 +379,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "U10/s2/1/review/wait/1",
       "U10/s2/1/review/read/1",
       "U10/s2/note/4",
+      "U10/s2/1/review/checks/1",
       "U10/s2/end/pr-facts",
       "U10/s2/end",
       "finish",
@@ -1101,6 +1109,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "U10/2/review/wait/1",
       "U10/2/review/read/1",
       "U10/note/8",
+      "U10/2/review/checks/1",
       "U10/merge/1",
       "U10/end",
       "finish",
@@ -1487,6 +1496,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
       "task/1/review/wait/1",
       "task/1/review/read/1",
       "task/note/2",
+      "task/1/review/checks/1",
       "task/end/pr-facts",
       "task/end",
       "finish",

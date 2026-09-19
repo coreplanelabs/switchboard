@@ -6,6 +6,7 @@ import { NO_GRANTS, type Grants } from "../core/authz/types.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { CoordinatorInstance, CoordinatorTag, CoordinatorUnit } from "../core/coordinator/contract.js";
 import type { ChildContract } from "../core/ship/contract.js";
+import type { RoundChecks } from "../core/ship/coordinator.js";
 import type { DispatchOutcome } from "../core/dispatch/outcome.js";
 import { REPLAY_EVERYTHING, RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
@@ -141,6 +142,10 @@ function harness(
     /** The operator's model prices: the runs service prices each child, and `read-record` answers the dollars. */
     prices?: ModelPriceTable;
     checks?: CommitChecks | Error;
+    /** The round's classified checks read (record 0055); absent, the route falls back to `checks`. */
+    roundChecks?: RoundChecks | Error;
+    /** What the flake rule's re-run answers (record 0055); absent, the dep is absent too. */
+    rerunOk?: boolean;
     /** The head's self-declared fix-up commit subjects (the ending's facts read). */
     fixups?: string[] | Error;
     merge?: MergeResult | Error;
@@ -187,6 +192,9 @@ function harness(
   const opens: Array<{ repo: string; headBranch: string; base: string; title: string; body: string }> = [];
   const compares: Array<[string, string, string]> = [];
   const sleeps: number[] = [];
+  const roundChecksAsked: number[] = [];
+  const reruns: Array<{ sha: string; names: string[] }> = [];
+  const mergeWaitNotes: Array<{ headSha: string; instanceId: string; at: number }> = [];
   let reviewFetches = 0;
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
   const deps: AdminCoordinatorDeps = {
@@ -248,6 +256,24 @@ function harness(
       if (over.fixups instanceof Error) throw over.fixups;
       return over.fixups;
     },
+    ...(over.roundChecks !== undefined
+      ? {
+          fetchRoundChecks: async (_repo: string, _sha: string, prNumber: number) => {
+            roundChecksAsked.push(prNumber);
+            if (over.roundChecks instanceof Error) throw over.roundChecks;
+            return over.roundChecks;
+          },
+        }
+      : {}),
+    ...(over.rerunOk !== undefined
+      ? {
+          rerunFailedChecks: async (_repo: string, sha: string, names: string[]) => {
+            reruns.push({ sha, names });
+            return over.rerunOk === true;
+          },
+        }
+      : {}),
+    noteMergeWait: (headSha, instanceId, at) => void mergeWaitNotes.push({ headSha, instanceId, at }),
     mergePullRequest: async (pr, opts) => {
       merges.push({ pr, opts });
       if (over.merge instanceof Error) throw over.merge;
@@ -291,6 +317,9 @@ function harness(
     written,
     merges,
     github,
+    roundChecksAsked,
+    reruns,
+    mergeWaitNotes,
   };
 }
 
@@ -2698,6 +2727,95 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
 // (record 0031's merge grant): a plan branch's pull request, squashed by the
 // bot at exactly the approved head once the bot's own review approves there
 // and every check is green; refused by reason otherwise, so a person decides.
+describe("POST /admin/coordinator/checks — the round's checks read at the reviewed head (record 0055, item 9)", () => {
+  const HEAD = "a".repeat(40);
+  const body = { parentInstanceId: INSTANCE.id, unit: "U10", prNumber: 7, headSha: HEAD };
+  const rowU10: Partial<CoordinatorUnit> = {};
+  async function checksHarness(over: Parameters<typeof harness>[0] = {}) {
+    const h = harness(over);
+    await h.instances.put(INSTANCE);
+    await h.instances.putUnits([
+      {
+        instanceId: INSTANCE.id,
+        unit: "U10",
+        slug: "u10-warm",
+        branch: "ship/warm-abc123",
+        dependsOn: [],
+        rounds: [],
+        threadKey: "slack:C1:2.0",
+        ...rowU10,
+      },
+    ]);
+    return h;
+  }
+  const checks = (h: ReturnType<typeof harness>, b: Record<string, unknown> = body) =>
+    handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}checks`, b), h.deps);
+
+  it("reads the classified checks at the head through the round reader, naming the pull request whose changed paths the flake rule judges against", async () => {
+    const red: RoundChecks = {
+      total: 3,
+      pending: [],
+      failed: [{ name: "test 2 of 4", conclusion: "timed_out", url: "https://x/1", flakeSuspect: true }],
+    };
+    const h = await checksHarness({ roundChecks: red });
+    expect(await checks(h)).toEqual({ status: 200, body: { ok: true, checks: red, at: NOW } });
+    expect(h.roundChecksAsked).toEqual([7]);
+    // Nothing pending and checks reported: no merge-wait registration.
+    expect(h.mergeWaitNotes).toEqual([]);
+  });
+
+  it("falls back to the merge door's plain reading when no round reader is wired — every failure a real one — and an unreadable GitHub leaves checks out", async () => {
+    const h = await checksHarness({ checks: { total: 2, pending: [], failed: ["ci / bot"] } });
+    expect((await checks(h)).body).toMatchObject({
+      ok: true,
+      checks: { total: 2, pending: [], failed: [{ name: "ci / bot", conclusion: "failure" }] },
+    });
+    const down = await checksHarness({ checks: new Error("github down") });
+    const answer = await checks(down);
+    expect(answer.status).toBe(200);
+    expect(answer.body).not.toHaveProperty("checks");
+    // Unreadable reads as pending: the instance is registered at the head so
+    // the intake's settled event wakes the machine's bounded wait.
+    expect(down.mergeWaitNotes).toEqual([{ headSha: HEAD, instanceId: INSTANCE.id, at: NOW }]);
+  });
+
+  it("a pending or unreported head registers the instance in the merge-wait book, exactly as the merge step's pending answer does", async () => {
+    const pending = await checksHarness({ roundChecks: { total: 3, pending: ["ci / web"], failed: [] } });
+    await checks(pending);
+    expect(pending.mergeWaitNotes).toEqual([{ headSha: HEAD, instanceId: INSTANCE.id, at: NOW }]);
+    const none = await checksHarness({ roundChecks: { total: 0, pending: [], failed: [] } });
+    await checks(none);
+    expect(none.mergeWaitNotes).toEqual([{ headSha: HEAD, instanceId: INSTANCE.id, at: NOW }]);
+  });
+
+  it("a retry ask re-runs the named failed checks' jobs — the flake rule's one re-run — and answers whether it was dispatched; without the dep it answers false", async () => {
+    const h = await checksHarness({ rerunOk: true });
+    expect(await checks(h, { ...body, retry: ["test 2 of 4"] })).toEqual({
+      status: 200,
+      body: { ok: true, retried: true, at: NOW },
+    });
+    expect(h.reruns).toEqual([{ sha: HEAD, names: ["test 2 of 4"] }]);
+    const bare = await checksHarness();
+    expect((await checks(bare, { ...body, retry: ["test 2 of 4"] })).body).toEqual({
+      ok: true,
+      retried: false,
+      at: NOW,
+    });
+    // A malformed retry is a 400, never a silent read.
+    expect((await checks(bare, { ...body, retry: [] })).status).toBe(400);
+    expect((await checks(bare, { ...body, retry: [7] })).status).toBe(400);
+  });
+
+  it("holds its body to shape: a bad instance, unit, prNumber or head is a 400/404 by name", async () => {
+    const h = await checksHarness({ roundChecks: { total: 1, pending: [], failed: [] } });
+    expect((await checks(h, { ...body, parentInstanceId: "nope !" })).status).toBe(400);
+    expect((await checks(h, { ...body, unit: "not a unit id!" })).status).toBe(400);
+    expect((await checks(h, { ...body, prNumber: 0 })).status).toBe(400);
+    expect((await checks(h, { ...body, headSha: "xyz" })).status).toBe(400);
+    expect((await checks(h, { ...body, parentInstanceId: "ship-unknown" })).status).toBe(404);
+  });
+});
+
 describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull request (item 9)", () => {
   const HEAD = "a".repeat(40);
   const MERGED = "9".repeat(40);
