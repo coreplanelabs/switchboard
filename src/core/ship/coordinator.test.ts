@@ -29,6 +29,7 @@ import {
   type ChildFacts,
   type CoordinatorAction,
   type CoordinatorNote,
+  type PrCheck,
   type StepReturn,
   type UnitPipelineInput,
   type UnitPipelineState,
@@ -167,7 +168,7 @@ function runChild(d: Driver, runId: string, facts: ChildFacts, at: number): Coor
 /** A unit at its branch step: the pipeline opened and the pre-check answered `none` — no pull request heads the branch yet. */
 function fresh(inp: UnitPipelineInput, at = T0): Driver {
   const d = new Driver(openUnitPipeline(inp, at));
-  expect(d.action).toEqual({ type: "pr-check", step: `${inp.unit.id}/pr-check` });
+  expect(d.action).toEqual({ type: "pr-check", step: `${inp.unit.id}/pr-check`, entry: true });
   d.answer({ type: "pr-check", pr: { state: "none" }, at });
   return d;
 }
@@ -1054,7 +1055,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         T0,
       ),
     );
-    expect(d.action).toEqual({ type: "pr-check", step: "U10/s2/pr-check" });
+    expect(d.action).toEqual({ type: "pr-check", step: "U10/s2/pr-check", entry: true });
     d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 });
     expect(d.action).toMatchObject({ type: "branch", step: "U10/s2/branch" });
     d.answer({ type: "branch", ok: true, at: T0 });
@@ -2011,7 +2012,7 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
 
   it("a unit whose pull request merged before the attempt — a person's merge, or an earlier attempt's — ends merged at the pre-check under `<unit>/pr-check`: no branch, no child, no round; the report says it was already merged and when, never that the runner merged it; the cursor marks it done and its dependents become ready; the same return applied twice changes nothing", () => {
     const d = new Driver(openUnitPipeline(input(), T0));
-    expect(d.action).toEqual({ type: "pr-check", step: "U10/pr-check" });
+    expect(d.action).toEqual({ type: "pr-check", step: "U10/pr-check", entry: true });
     d.answer({ type: "pr-check", pr: merged(HEAD_B, MERGED_AT), at: T0 + MIN });
     expect(d.action).toEqual({
       type: "end",
@@ -2051,18 +2052,123 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
     expect(readyUnits(graph, cursor)).toEqual(["U11"]);
   });
 
-  it("the pre-check answering none or open proceeds to the branch and round 0 as before: an open pull request is round 0's to rebase and re-describe, and is adopted at the round's own pr-check, not here", () => {
+  it("the pre-check answering none, or open without the branch's tip beside it, proceeds to the branch and round 0 as before: an open pull request whose standing at the branch head is unknown is round 0's to rebase and re-describe, and is adopted at the round's own pr-check, not here", () => {
     const none = new Driver(openUnitPipeline(input(), T0));
-    expect(none.action).toEqual({ type: "pr-check", step: "U10/pr-check" });
+    expect(none.action).toEqual({ type: "pr-check", step: "U10/pr-check", entry: true });
     none.answer({ type: "pr-check", pr: { state: "none" }, at: T0 });
     expect(none.action).toMatchObject({ type: "branch", step: "U10/branch" });
     expect(none.rounds()).toEqual([]);
     const open = new Driver(openUnitPipeline(input(), T0));
-    expect(open.action).toEqual({ type: "pr-check", step: "U10/pr-check" });
+    expect(open.action).toEqual({ type: "pr-check", step: "U10/pr-check", entry: true });
     open.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 });
     expect(open.action).toMatchObject({ type: "branch", step: "U10/branch" });
     expect(open.state.pr).toBeUndefined();
     expect(open.state.lastReviewHead).toBeUndefined();
+  });
+
+  // Feature: docs/reference/specs/agent-ship.md item 10 (issue 1689) — a
+  // re-issued plan whose unit already has an open pull request resumes that
+  // unit at the review round, never at coding: the pre-check's entry facts
+  // carry the branch's own tip, the bot's approval at the head and the checks
+  // there, and the machine adopts the pull request instead of re-coding it.
+  it("an open pull request at the branch's own head resumes the attempt at the review round (issue 1689): the pre-check asks for the entry facts, the pull request is adopted with its head as the review's pin, and no branch step or coding child runs", () => {
+    const d = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    expect(d.action).toEqual({ type: "pr-check", step: "U10/pr-check", entry: true });
+    d.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, branchHead: HEAD_A },
+      at: T0 + MIN,
+    });
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      step: "U10/1/review",
+      preset: "review",
+      brief: { kind: "review", unit: "U10", pr: 7, headSha: HEAD_A, round: 1 },
+    });
+    expect(d.state.pr).toEqual({ number: 7, url: PR_URL });
+    expect(d.state.lastReviewHead).toBe(HEAD_A);
+    expect(d.rounds()).toEqual([]);
+  });
+
+  it("an approved pull request with green checks at the branch head resumes straight at the merge-ready check (issue 1689): under merge: person the unit ends merge_ready with no child at all, and under merge: runner the merge door is asked at exactly that head", () => {
+    const openApproved: PrCheck = {
+      state: "open",
+      prNumber: 7,
+      url: PR_URL,
+      headSha: HEAD_A,
+      branchHead: HEAD_A,
+      approved: true,
+      checks: { total: 2, pending: [], failed: [] },
+    };
+    const person = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+    person.answer({ type: "pr-check", pr: openApproved, at: T0 + MIN });
+    expect(person.action).toEqual({
+      type: "end",
+      step: "U10/end",
+      ending: { kind: "merge_ready", pr: { number: 7, url: PR_URL }, reviewRounds: 0 },
+    });
+    const runner = new Driver(openUnitPipeline(input(), T0));
+    runner.answer({ type: "pr-check", pr: openApproved, at: T0 + MIN });
+    expect(runner.action).toEqual({ type: "merge", step: "U10/merge/1", prNumber: 7, headSha: HEAD_A });
+  });
+
+  it("a stale open-PR listing behind the branch's own tip resumes at the head the entry facts were read at: the branch tip is the review's pin, and the approved+green shortcut asks the merge door at that tip, never at the stale listing sha", () => {
+    // The listing still shows the previous attempt's push (`lastPush`) while
+    // the facts read names a later tip; the approval and the checks were read
+    // at that tip, so the resume adopts it — not the listing's sha.
+    const stale: PrCheck = {
+      state: "open",
+      prNumber: 7,
+      url: PR_URL,
+      headSha: HEAD_A,
+      branchHead: HEAD_B,
+      approved: true,
+      checks: { total: 2, pending: [], failed: [] },
+    };
+    const runner = new Driver(openUnitPipeline(input({ lastPush: HEAD_A }), T0));
+    runner.answer({ type: "pr-check", pr: stale, at: T0 + MIN });
+    expect(runner.action).toEqual({ type: "merge", step: "U10/merge/1", prNumber: 7, headSha: HEAD_B });
+    const review = new Driver(openUnitPipeline(input({ lastPush: HEAD_A, merge: "person" }), T0));
+    review.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, branchHead: HEAD_B },
+      at: T0 + MIN,
+    });
+    expect(review.action).toMatchObject({ type: "spawn", step: "U10/1/review", brief: { headSha: HEAD_B } });
+    expect(review.state.lastReviewHead).toBe(HEAD_B);
+  });
+
+  it("an approved pull request whose checks are red, pending or unknown resumes at the review round, not at merge-ready (issue 1689); and an open pull request whose head is behind the branch's tip is round 0's as before", () => {
+    const openAt = (over: Partial<Extract<PrCheck, { state: "open" }>>): PrCheck => ({
+      state: "open",
+      prNumber: 7,
+      url: PR_URL,
+      headSha: HEAD_A,
+      branchHead: HEAD_A,
+      ...over,
+    });
+    for (const checks of [
+      { total: 2, pending: [], failed: ["ci / bot"] },
+      { total: 2, pending: ["ci / bot"], failed: [] },
+      { total: 0, pending: [], failed: [] },
+      undefined,
+    ]) {
+      const d = new Driver(openUnitPipeline(input({ merge: "person" }), T0));
+      d.answer({
+        type: "pr-check",
+        pr: openAt({ approved: true, ...(checks !== undefined ? { checks } : {}) }),
+        at: T0,
+      });
+      expect(d.action, JSON.stringify(checks)).toMatchObject({ type: "spawn", step: "U10/1/review" });
+    }
+    const behind = new Driver(openUnitPipeline(input(), T0));
+    behind.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, branchHead: HEAD_B },
+      at: T0,
+    });
+    expect(behind.action).toMatchObject({ type: "branch", step: "U10/branch" });
+    expect(behind.state.pr).toBeUndefined();
   });
 
   it("a merge that lands during a round — the pr-check after the coding child answers merged — ends the unit merged the same way, the round noted completed and no review spawned; after a findings step the same, with the review rounds counted", () => {

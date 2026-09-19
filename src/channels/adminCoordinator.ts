@@ -1072,6 +1072,11 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   if (body.pr !== undefined && (typeof body.pr !== "number" || !Number.isInteger(body.pr) || body.pr <= 0))
     return json(400, { ok: false, error: "pr must be a pull request number" });
   const follow = typeof body.pr === "number" ? body.pr : undefined;
+  // The unit-start's pre-check (issue 1689): read the entry facts beside the
+  // listing — the branch's own tip, whether the bot's approval stands at it,
+  // and the checks there — so a re-issued plan's unit resumes at review, or
+  // at the merge decision, instead of a coding round over a shipped head.
+  const entry = body.entry === true;
   const at = (deps.clock ?? systemClock)();
   const instance = await deps.instances.get(id.value);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
@@ -1087,6 +1092,23 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     const open = await deps.findOpenPrByHead(instance.repo, branch);
     if (open) {
       await remember({ number: open.number, url: open.htmlUrl });
+      // The entry facts (issue 1689). The branch's tip comes from the pull
+      // request's own facts read, which prefers the head ref's tip over the
+      // possibly-stale listing sha; the approval and the checks are read at
+      // that tip. Each fact GitHub would not answer is left out, never guessed.
+      const entryFacts = entry
+        ? await deps.fetchPrFacts({ repo: instance.repo, number: open.number }).catch(() => undefined)
+        : undefined;
+      const branchHead = entryFacts?.headSha;
+      const entryHead = branchHead ?? open.headSha;
+      const approved =
+        entry && entryHead !== undefined
+          ? await reviewPostedAt(deps, { repo: instance.repo, number: open.number }, "approve", entryHead)
+          : undefined;
+      const entryChecks =
+        entry && entryHead !== undefined
+          ? await deps.fetchCommitChecks(instance.repo, entryHead).catch(() => undefined)
+          : undefined;
       // The check runs at the head, as the merge door reads them, only when
       // the caller asks (`checks: true`: the ending's facts read, agent-ship
       // item 9; record 0055): a merge-ready report is a claim about the head,
@@ -1094,7 +1116,7 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       const checks =
         body.checks === true && open.headSha !== undefined
           ? await deps.fetchCommitChecks(instance.repo, open.headSha).catch(() => undefined)
-          : undefined;
+          : entryChecks;
       // The ready state beside the checks (agent-ship item 9): the pull
       // request's own mergeable state — the open-PR listing does not carry it,
       // so the facts are read whole — and the head's self-declared fix-up
@@ -1109,6 +1131,8 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         prNumber: open.number,
         url: open.htmlUrl,
         ...(open.headSha !== undefined ? { headSha: open.headSha } : {}),
+        ...(branchHead !== undefined ? { branchHead } : {}),
+        ...(approved !== undefined ? { approved } : {}),
         // The pull request's own auto-merge fact (agent-ship item 9), so a
         // merge_ready ending can name it at the approved head.
         ...(open.autoMergeEnabled !== undefined ? { autoMergeEnabled: open.autoMergeEnabled } : {}),

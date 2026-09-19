@@ -292,7 +292,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     // coding child — the second carrying the pull request the child's record
     // named, for the bot to follow when nothing heads the branch (issue 1799).
     expect(b.of("pr-check")).toEqual([
-      { parentInstanceId: INSTANCE, unit: "U10" },
+      { parentInstanceId: INSTANCE, unit: "U10", entry: true },
       { parentInstanceId: INSTANCE, unit: "U10", pr: 7 },
     ]);
     expect(b.of("round")).toEqual([
@@ -583,7 +583,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       "U10/1/review/wait/1/resumed",
     ]);
     expect(b.of("pr-check")).toEqual([
-      { parentInstanceId: INSTANCE, unit: "U10" },
+      { parentInstanceId: INSTANCE, unit: "U10", entry: true },
       { parentInstanceId: INSTANCE, unit: "U10", recover: { runId: "run-c0" } },
     ]);
   });
@@ -702,7 +702,7 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(summary.units).toEqual({ U10: "aborted" });
     // The check carried the record's pull request for the bot to follow.
     expect(b.of("pr-check")).toEqual([
-      { parentInstanceId: INSTANCE, unit: "U10" },
+      { parentInstanceId: INSTANCE, unit: "U10", entry: true },
       { parentInstanceId: INSTANCE, unit: "U10", pr: 7 },
     ]);
     expect(s.names()).not.toContain("U10/1/review");
@@ -1691,6 +1691,62 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
   });
 });
 
+describe("the plan runner's driver — the entry checks resume a re-issued plan's unit (agent-ship item 10, issue 1689)", () => {
+  it("a pre-check that finds the unit's open pull request at the branch's own head resumes the attempt at the review round: the call carries entry: true, no branch and no coding child run, and the review is briefed with the pull request at that head", async () => {
+    const s = steps({ "U10/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "person")],
+      "unit-start": [started("U10")],
+      spawn: [spawned("run-r1")],
+      "read-record": [reviewApproved("run-r1", T0 + 5 * MIN)],
+      // The entry answer carries the branch's own tip beside the listing's
+      // head; the second check is the merge_ready ending's facts read.
+      "pr-check": [prOpen(T0, { branchHead: HEAD }), prOpen(T0 + 5 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merge_ready" });
+    expect(b.of("branch")).toEqual([]);
+    expect(b.of("pr-check")[0]).toEqual({ parentInstanceId: INSTANCE, unit: "U10", entry: true });
+    expect(b.of("spawn")).toEqual([
+      {
+        parentInstanceId: INSTANCE,
+        unit: "U10",
+        step: "U10/1/review",
+        preset: "review",
+        budget: 25,
+        brief: { kind: "review", unit: "U10", pr: 7, headSha: HEAD, round: 1 },
+      },
+    ]);
+  });
+
+  it("a pre-check that finds the pull request approved with green checks at the branch head resumes straight at the merge-ready check: no child at all, the unit ends merge_ready and the ending's facts are still read fresh at the head", async () => {
+    const s = steps();
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "person")],
+      "unit-start": [started("U10")],
+      "pr-check": [
+        prOpen(T0, { branchHead: HEAD, approved: true, checks: { total: 2, pending: [], failed: [] } }),
+        prOpen(T0 + MIN),
+      ],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merge_ready" });
+    expect(b.of("branch")).toEqual([]);
+    expect(b.of("spawn")).toEqual([]);
+    expect(b.of("pr-check")).toEqual([
+      { parentInstanceId: INSTANCE, unit: "U10", entry: true },
+      { parentInstanceId: INSTANCE, unit: "U10", checks: true },
+    ]);
+    const [end] = b.of("unit-end") as Array<{ ending: { kind: string } }>;
+    expect(end.ending.kind).toBe("merge_ready");
+  });
+});
+
 describe("the plan runner's driver — a resume at review (agent-ship item 10)", () => {
   it("a task row carrying a resume opens the unit at its first review round: no pr-check, no branch, no coding child; the review child is briefed with the pull request and the head, the approve on a ship branch ends merge-ready for a person, and the ending names no coding run", async () => {
     const s = steps({ "task/1/review/wait/1": "event" });
@@ -1894,8 +1950,8 @@ describe("the plan runner's driver — a unit whose pull request already merged 
     expect(b.of("branch")).toEqual([{ parentInstanceId: INSTANCE, unit: "U11" }]);
     expect(b.of("spawn").map((c) => c.unit)).toEqual(["U11", "U11"]);
     expect(b.of("pr-check")).toEqual([
-      { parentInstanceId: INSTANCE, unit: "U10" },
-      { parentInstanceId: INSTANCE, unit: "U11" },
+      { parentInstanceId: INSTANCE, unit: "U10", entry: true },
+      { parentInstanceId: INSTANCE, unit: "U11", entry: true },
       // The round-0 check carries the pull request the child's record named.
       { parentInstanceId: INSTANCE, unit: "U11", pr: 7 },
     ]);
