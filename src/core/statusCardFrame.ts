@@ -10,11 +10,11 @@ import { DEFAULT_VERBOSITY, shows, type Verbosity } from "./verbosity.js";
 // lands on every paint at once. Pure: the clock is injected, nothing is sent.
 //
 // The card speaks at the request's verbosity (routing-and-config item 28):
-// its label is `*<agent>* on `<model>`` plus the notes the stages add, each
-// at the level it belongs to — a note above the request's level is kept but
-// never painted — and the shape and queued lines of a close are `verbose`
-// material. What every level sees: the glyph, the label, the elapsed time,
-// the checklist, the activity, the run link.
+// its label is `*<agent>*` — the model (`` on `<model>` ``) joins at `verbose`
+// — plus the notes the stages add, each at the level it belongs to; a note
+// above the request's level is kept but never painted, and the shape and
+// queued lines of a close are `debug` material. What every level sees: the
+// glyph, the label, the elapsed time, the checklist, the activity, the run link.
 
 /** The live card's rotating glyph (one step per heartbeat/event frame). */
 export const SPINNER_GLYPHS = ["◐", "◓", "◑", "◒"];
@@ -46,9 +46,9 @@ export type CardClose = (
   | { kind: "refused"; icon: string; reason: string }
   | { kind: "setup_failed"; reason: string }
 ) & {
-  /** The request's shape line (docs/reference/specs/tracing.md item 5), when informative: the first detail line at `verbose`. */
+  /** The request's shape line (docs/reference/specs/tracing.md item 5), when informative: the first detail line at `debug`. */
   shape?: string;
-  /** The queued caption, when a minute or more: the second detail line at `verbose`. */
+  /** The queued caption, when a minute or more: the second detail line at `debug`. */
   queued?: string;
 };
 
@@ -73,16 +73,17 @@ export interface LiveFrameParts {
 }
 
 export interface CardShell {
-  /** The card's label as painted: `*agent* on \`model\``, then every note at
-   *  or below the request's verbosity, ` · ` between — what the ship branch
-   *  records on its instance and every frame's title opens with. */
+  /** The card's label as painted: `*agent*` (plus `` on `model` `` at
+   *  `verbose` and above), then every note at or below the request's
+   *  verbosity, ` · ` between — what the ship branch records on its instance
+   *  and every frame's title opens with. */
   readonly label: string;
   /** Add a fact about the run to the label at the level it belongs to
    *  (routing-and-config item 28): `quiet` for what the person needs (work
-   *  left behind), `verbose` for what the run is doing for them (the
-   *  workspace, a clipped budget, a moved head), `debug` for the operator's
-   *  words (the route's reason, the ledger). Painted on every later frame
-   *  when the request's level shows it; kept, unpainted, otherwise. */
+   *  left behind), `debug` for what the run is doing under the hood (the
+   *  workspace, a clipped budget, a moved head, the route's reason, the
+   *  ledger). Painted on every later frame when the request's level shows
+   *  it; kept, unpainted, otherwise. */
   note(level: Verbosity, text: string): void;
   /** The run's live page link, once the run exists; carried by every later live and done frame. */
   setLink(link: StatusUpdate["link"]): void;
@@ -102,8 +103,12 @@ export interface CardShell {
 }
 
 export interface CardShellOptions {
-  /** The card's base label — `*agent* on \`model\``; notes are added with `note`. */
+  /** The card's base label — `*agent*`; notes are added with `note`. */
   label: string;
+  /** The run's model ref, painted after the base label as `` on `<model>` ``
+   *  at `verbose` and above (routing-and-config item 28) — instrumentation,
+   *  not what the person waits on, so a quiet card never carries it. */
+  model?: string;
   /** When the card's clock started (the ack). */
   startedAt: number;
   now: () => number;
@@ -127,16 +132,18 @@ export function createCardShell(opts: CardShellOptions): CardShell {
   let finishedAt: number | undefined;
   let setupLabel: string | undefined;
   const lead = opts.lead ?? [];
-  const label = () => [opts.label, ...notes.filter((n) => shows(verbosity, n.level)).map((n) => n.text)].join(" · ");
+  const base = () =>
+    opts.model !== undefined && shows(verbosity, "verbose") ? `${opts.label} on \`${opts.model}\`` : opts.label;
+  const label = () => [base(), ...notes.filter((n) => shows(verbosity, n.level)).map((n) => n.text)].join(" · ");
   // The one duration formatter, clock style: floored like every other surface
   // (docs/reference/specs/tracing.md item 5), so the card never reads a second more than
   // the run page and the index for the same window.
   const elapsed = () => formatDuration((finishedAt ?? opts.now()) - opts.startedAt, "clock");
   const headline = (icon: string) => `${icon} ${label()} · ${elapsed()}`;
-  // Detail order on a close: shape, queued (both `verbose` material — how the
+  // Detail order on a close: shape, queued (both `debug` material — how the
   // request's time went, not what it produced), then the caller's own lines.
   const closeDetail = (close: CardClose, own?: string) =>
-    [...(shows(verbosity, "verbose") ? [close.shape, close.queued] : []), own].filter(Boolean).join("\n") || undefined;
+    [...(shows(verbosity, "debug") ? [close.shape, close.queued] : []), own].filter(Boolean).join("\n") || undefined;
   return {
     get label() {
       return label();

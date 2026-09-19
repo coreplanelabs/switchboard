@@ -201,15 +201,16 @@ const realSleep = (ms: number) => new Promise<void>((r) => realSetTimeout(r, ms)
 function makeDeps(fixtureYaml: string, provider: Provider): TestDeps {
   const dir = mkdtempSync(join(tmpdir(), "swb-dispatch-"));
   const cfgPath = join(dir, "config.yaml");
-  // Every fixture runs at `verbose` (routing-and-config item 28): this suite
-  // proves the words the system says — acks, receipts, the workspace on the
-  // card — and the quiet default, which shows none of them, has its own tests
-  // (`the verbosity ladder through dispatch()`) and the unit suites.
+  // Every fixture runs at `debug` (routing-and-config item 28): this suite
+  // proves the words the system says — acks, receipts, the workspace and the
+  // budget on the card — and the quiet default, which shows none of them, has
+  // its own tests (`the verbosity ladder through dispatch()`) and the unit
+  // suites.
   writeFileSync(
     cfgPath,
     fixtureYaml
       .replaceAll("__WORKDIR__", join(dir, "workspaces"))
-      .replace("defaults:\n", "defaults:\n  verbosity: verbose\n"),
+      .replace("defaults:\n", "defaults:\n  verbosity: debug\n"),
   );
   const config = new ConfigStore(cfgPath, join(dir, "overrides.json"));
   // The Null Objects a process without the subsystem is wired with (routing-and-
@@ -5848,8 +5849,12 @@ describe("closed-card checklist and review verdict run link", () => {
     expect(painted!.activity).toEqual({ kind: "command", tool: "bash", command });
     expect(painted!.detail).toBe("✱ Read the diff");
     for (const s of statuses) expect(s.detail ?? "").not.toContain("→ $");
+    // At debug the update_status round trip shows as activity like any tool's.
+    expect(statuses.some((s) => s.activity?.kind === "line" && s.activity.text.includes("update_status"))).toBe(true);
     // At quiet — the default — the same run paints the caption alone: the
-    // shell line is verbose material (routing-and-config item 28).
+    // shell line is debug material (routing-and-config item 28), and the
+    // update_status round trip is bookkeeping — the checklist repaints the
+    // card, so no meta line restates that it was updated.
     n = 0;
     const quiet = fakeIO();
     await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
@@ -5857,6 +5862,8 @@ describe("closed-card checklist and review verdict run link", () => {
     expect(quiet.statuses.some((s) => s.activity?.kind === "command")).toBe(false);
     expect(quiet.statuses.some((s) => s.activity?.kind === "line" && s.activity.text === "→ bash")).toBe(true);
     for (const s of quiet.statuses) expect(s.title).not.toMatch(/thinking \(|running bash/);
+    for (const s of quiet.statuses)
+      expect(s.activity?.kind === "line" ? s.activity.text : "").not.toContain("update_status");
     const last = statuses[statuses.length - 1];
     expect(last.title).toContain("✅");
     expect(last.activity).toBeUndefined();
@@ -9265,7 +9272,8 @@ workspaceDir: __WORKDIR__
     expect(replies).toHaveLength(1);
     expect(replies[0]).toBe(
       `🧭 Handed to the plan runner.\n• plan \`${SHIP_PLAN_ID}\`\n` +
-        `• the unit runs on \`${SHIP_BRANCH}\` in this thread under your grants; this card follows it and the report lands here`,
+        `• the unit runs on \`${SHIP_BRANCH}\` in this thread under your grants; this card follows it and the report lands here\n` +
+        `• runner instance \`plan-${SHIP_PLAN_ID}\``,
     );
     // The instance is marked as a generated plan — an id, no path — and no
     // `ship/…` branch appears anywhere in the hand-off.
@@ -15217,7 +15225,7 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     expect(closed.title).toContain("✅");
   });
 
-  it("at quiet — the default — the same routed run's card is `*review* on `<model>`` and nothing more: no route note on any frame, the route still on the record (routing-and-config item 28)", async () => {
+  it("at quiet — the default — the same routed run's card is `*review*` and nothing more: no model, no route note on any frame, the route still on the record (routing-and-config item 28)", async () => {
     let ids = 0;
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
     const provider = capturingProvider();
@@ -15225,13 +15233,14 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     deps.runRegistry = registry;
     deps.routeModel = router();
     const { io, statuses, replies } = fakeIO();
-    // The fixture speaks at verbose; a person on the default hears less.
+    // The fixture speaks at debug; a person on the default hears less.
     await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
     await dispatch(deps, msg("review it for me"), io);
     expect(replies).toContain("answer");
-    expect(statuses[0].title).toBe("👀 *review* on `anthropic/review-model` · preparing workspace…");
+    expect(statuses[0].title).toBe("👀 *review* · preparing workspace…");
     expect(statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
-    expect(statuses.at(-1)!.title).toBe("✅ *review* on `anthropic/review-model` · 0s");
+    expect(statuses.every((s) => !s.title.includes("anthropic/review-model"))).toBe(true);
+    expect(statuses.at(-1)!.title).toBe("✅ *review* · 0s");
     expect(metaOf(registry, "r1")?.agentSource).toBe("route");
     expect(routeEvents(registry, "r1")).toHaveLength(1);
   });
