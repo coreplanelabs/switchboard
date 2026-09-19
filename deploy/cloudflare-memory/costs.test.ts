@@ -51,6 +51,10 @@ const snapshot = (over: Record<string, unknown> = {}) => ({
     workflows: [],
   },
   llm: [{ date: SEP_16, workspaceId: "ws_1", amountUsd: 12.5, estimated: true }],
+  invoices: {
+    anthropic: [{ date: SEP_16, usd: 12.5 }],
+    openrouter: [{ date: SEP_16, usd: 0.55, feeUsd: 0.05, byokUsd: 0.5 }],
+  },
   runUsage: {
     rows: [
       {
@@ -92,7 +96,7 @@ describe.sequential("CostsSnapshotDO routes", () => {
     expect((await SELF.fetch(`${BASE}/costs/snapshot/get`, { method: "GET" })).status).toBe(405);
   });
 
-  it("put stores the snapshot and get returns it verbatim — LLM rows and run usage included — and a later put replaces it whole", async () => {
+  it("put stores the snapshot and get returns it verbatim — LLM rows, per-biller invoices and run usage included — and a later put replaces it whole", async () => {
     const first = snapshot();
     expect((await post("/costs/snapshot/put", { snapshot: first })).data).toEqual({ ok: true });
     expect((await post("/costs/snapshot/get", {})).data).toEqual({ snapshot: first });
@@ -108,6 +112,7 @@ describe.sequential("CostsSnapshotDO routes", () => {
       { snapshot: { takenAt: `${SEP_17}T06:15:00.000Z` } },
       { snapshot: snapshot({ usage: { containers: [] } }) },
       { snapshot: snapshot({ llm: [{ date: SEP_16, workspaceId: "ws" }] }) },
+      { snapshot: snapshot({ invoices: { anthropic: [{ date: SEP_16 }] } }) },
     ]) {
       const res = await post("/costs/snapshot/put", bad);
       expect(res.status).toBe(400);

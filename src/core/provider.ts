@@ -155,7 +155,18 @@ export interface ProviderConfig {
   apiKeyEnv?: string;
   /** Base URL for openai-compatible providers (e.g. http://localhost:11434/v1). */
   baseUrl?: string;
+  /** The invoice API the biller's daily tie-out reads (docs/reference/specs/costs.md
+   *  item 4d): Anthropic's cost report, OpenRouter's activity endpoint, or
+   *  OpenAI's organization costs. Requires `invoiceKeyEnv`. */
+  invoiceApi?: InvoiceApi;
+  /** Env var holding that API's key — an admin or management key, never the
+   *  block's inference key (`apiKeyEnv`). Requires `invoiceApi`. */
+  invoiceKeyEnv?: string;
 }
+
+/** The invoice APIs a provider block may name (`invoiceApi`). */
+export const INVOICE_APIS = ["anthropic-cost-report", "openrouter-activity", "openai-costs"] as const;
+export type InvoiceApi = (typeof INVOICE_APIS)[number];
 
 /** The wire a block speaks: its `wire` when declared, else its legacy `type`. */
 export function wireOf(block: Pick<ProviderConfig, "type" | "wire">): Wire {

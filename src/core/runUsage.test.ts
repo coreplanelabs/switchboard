@@ -147,6 +147,15 @@ describe("usageOfEvents", () => {
     expect(errored.byModel.m1.usd).toBe(0.75);
     expect(errored.byModel.m1.priceSources).toEqual(["none", "provider"]);
 
+    // the contrived masking case (issue 1904): a usd-carrying zero-token turn must not
+    // stand in for the token-counting turn that carried no figure — the unpriced
+    // token-counting turns are counted directly, never matched by count
+    const masked = usageOfEvents([
+      turn("m1", { usd: 0.01, priceSource: "provider" }, 1), // zero tokens, yet priced
+      turn("m1", { ...tokens, priceSource: "none" }, 2), // counted tokens, no figure
+    ]);
+    expect(masked.byModel.m1.usd).toBeNull();
+
     // a record from before the meter row: no fields, the table prices it (costs.md item 4b)
     const legacy = usageOfEvents([turn("m1", tokens, 1)]);
     expect(legacy.byModel.m1.usd).toBeUndefined();
@@ -172,6 +181,21 @@ describe("usageOfEvents", () => {
     // one side only: the figure carries through untouched
     const other = usageOfEvents([turn("m2", tokens, 1)]);
     expect(addUsage(priced, other).byModel.m1.usd).toBe(0.5);
+  });
+
+  it("a BYOK turn's feeUsd sums per model, folds through addUsage and validates; absent when no turn carried one", () => {
+    const tokens = { inputTokens: 1, outputTokens: 1 };
+    const byok = usageOfEvents([
+      turn("or/m1", { ...tokens, usd: 0.5, feeUsd: 0.03, priceSource: "provider" }, 1),
+      turn("or/m1", { ...tokens, usd: 0.25, feeUsd: 0.02, priceSource: "provider" }, 2),
+    ]);
+    expect(byok.byModel["or/m1"].feeUsd).toBeCloseTo(0.05, 10);
+    const plain = usageOfEvents([turn("or/m1", { ...tokens, usd: 0.1, priceSource: "provider" }, 1)]);
+    expect(plain.byModel["or/m1"].feeUsd).toBeUndefined();
+    // one side without a fee is a fee of nothing, not an unknown: the sum keeps the other's
+    expect(addUsage(byok, plain).byModel["or/m1"].feeUsd).toBeCloseTo(0.05, 10);
+    expect(isRunUsage(byok)).toBe(true);
+    expect(isRunUsage({ turns: 1, byModel: { m: { ...byok.byModel["or/m1"], feeUsd: "x" } } })).toBe(false);
   });
 });
 

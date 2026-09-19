@@ -5,7 +5,7 @@
 import { TRACING_LOG_LEVELS } from "../core/trace/sinks.js";
 import { EFFORT_LEVELS_HINT, isEffort } from "../effort.js";
 import { isVerbosity, VERBOSITY_LEVELS_HINT } from "../core/verbosity.js";
-import { WIRES, WIRE_ALIASES, parseModelRef, type ProviderConfig } from "../core/provider.js";
+import { INVOICE_APIS, WIRES, WIRE_ALIASES, parseModelRef, type ProviderConfig } from "../core/provider.js";
 import { catalogExists } from "../core/installedModelRegistry.js";
 import type { SelfImprovementConfig } from "../core/selfImprovement.js";
 import type { RunHistoryConfig } from "../core/runStore.js";
@@ -535,6 +535,8 @@ const PROVIDER_KEYS: Record<keyof ProviderConfig, true> = {
   passthrough: true,
   apiKeyEnv: true,
   baseUrl: true,
+  invoiceApi: true,
+  invoiceKeyEnv: true,
 };
 
 /** A `models.<id>` override's keys, and the shapes they are held to. */
@@ -646,6 +648,12 @@ export function validateProviders(cfg: AppConfig, source: string): void {
     if (b.apiKeyEnv !== undefined && typeof b.apiKeyEnv !== "string")
       throw new Error(`${path}.apiKeyEnv must be a string`);
     if (b.baseUrl !== undefined && typeof b.baseUrl !== "string") throw new Error(`${path}.baseUrl must be a string`);
+    if (b.invoiceApi !== undefined && !(INVOICE_APIS as readonly unknown[]).includes(b.invoiceApi))
+      throw new Error(`${path}.invoiceApi must be ${INVOICE_APIS.join(", ")}`);
+    if (b.invoiceKeyEnv !== undefined && (typeof b.invoiceKeyEnv !== "string" || b.invoiceKeyEnv === ""))
+      throw new Error(`${path}.invoiceKeyEnv must be an env var name`);
+    if ((b.invoiceApi === undefined) !== (b.invoiceKeyEnv === undefined))
+      throw new Error(`${path} must declare invoiceApi and invoiceKeyEnv together (costs.md item 4d)`);
     if (b.models !== undefined) {
       if (typeof b.models !== "object" || b.models === null || Array.isArray(b.models))
         throw new Error(`${path}.models must be a mapping of model id → overrides`);

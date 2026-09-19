@@ -2,8 +2,11 @@ import {
   AnthropicCostReportSource,
   CloudflareGraphqlUsageSource,
   NullLlmCostSource,
+  OpenAICostsSource,
+  OpenRouterActivitySource,
   type CostReport,
   type CostsConfig,
+  type LlmInvoiceSource,
 } from "./costs.js";
 import type { CostDimension, CostsByReport } from "./costsBy.js";
 import {
@@ -15,6 +18,7 @@ import {
   type SnapshotterOptions,
 } from "./costsSnapshot.js";
 import { buildCostsSnapshotStore, type CostsSnapshot } from "./costsSnapshotStore.js";
+import type { ProviderConfig } from "./provider.js";
 import type { RunStore } from "./runStore.js";
 import type { SecretReader, StateWorkerBlocks } from "./stateWorkerRef.js";
 
@@ -53,6 +57,9 @@ export interface CostsService {
 export interface CostsServiceDeps {
   /** The Slack email lookup (`resolveUserEmail`) the **me** toggle matches the viewer with; absent = nobody matches. */
   emailOfSlackUser?: (userId: string) => Promise<string | undefined>;
+  /** The provider blocks and whether each names an invoice source — the billers of the
+   *  daily tie-out (costs.md item 4d); absent leaves reports without one. */
+  billers?: ReadonlyArray<{ name: string; invoice: boolean }>;
 }
 
 export const COSTS_OFF_MESSAGE =
@@ -154,7 +161,7 @@ export function createCostsService(
     groups: () => Object.keys(cfg.groups),
     async report(group, daysParam) {
       const g = groupOf(group);
-      return reportFromSnapshot(await snapshotOrThrow(), group, g, daysParam, meta);
+      return reportFromSnapshot(await snapshotOrThrow(), group, g, daysParam, meta, deps.billers);
     },
     async byReport(group, daysParam, dimension, viewer) {
       const g = groupOf(group);
@@ -228,19 +235,54 @@ function alertOf(
  *  it. Both keys are revealed into their source's constructor and held nowhere else here. */
 export function costsFromConfig(
   cfg: CostsConfig,
-  blocks: StateWorkerBlocks,
+  blocks: StateWorkerBlocks & { providers?: Record<string, ProviderConfig> },
   deps: CostsFromConfigDeps,
 ): CostsWiring | undefined {
   const cloudflareToken = deps.secrets.named(cfg.cloudflareTokenEnv);
   if (!cloudflareToken) return undefined;
-  const adminKey = deps.secrets.named(cfg.anthropicAdminKeyEnv);
+  // One invoice source per provider block that names one (costs.md item 4d). A block
+  // whose key env is unset is warned by name and ties out against nothing.
+  const providers = blocks.providers ?? {};
+  const invoiceSources: LlmInvoiceSource[] = [];
+  let anthropic: AnthropicCostReportSource | undefined;
+  for (const [name, block] of Object.entries(providers)) {
+    if (!block.invoiceApi || !block.invoiceKeyEnv) continue;
+    const key = deps.secrets.named(block.invoiceKeyEnv);
+    if (!key) {
+      deps.warn(`providers.${name}.invoiceKeyEnv ${block.invoiceKeyEnv} is unset — its tie-out reads "no invoice"`);
+      continue;
+    }
+    if (block.invoiceApi === "anthropic-cost-report") {
+      anthropic = new AnthropicCostReportSource({ adminKey: key.reveal(), biller: name });
+      invoiceSources.push(anthropic);
+    } else if (block.invoiceApi === "openrouter-activity") {
+      invoiceSources.push(new OpenRouterActivitySource({ biller: name, managementKey: key.reveal() }));
+    } else {
+      invoiceSources.push(new OpenAICostsSource({ biller: name, adminKey: key.reveal() }));
+    }
+  }
+  // The legacy `costs.anthropicAdminKeyEnv` still carries the cost report (the group's
+  // LLM line, and the `anthropic` block's invoice) for one release after the key moved
+  // under the block as `invoiceKeyEnv`.
+  if (!anthropic) {
+    const legacyKey = deps.secrets.named(cfg.anthropicAdminKeyEnv);
+    if (legacyKey) {
+      anthropic = new AnthropicCostReportSource({ adminKey: legacyKey.reveal() });
+      if ("anthropic" in providers) invoiceSources.push(anthropic);
+    }
+  }
+  const billers = Object.keys(providers).map((name) => ({
+    name,
+    invoice: invoiceSources.some((s) => s.biller === name),
+  }));
   const snapshots = new CostsSnapshotter(
     {
       cloudflare: new CloudflareGraphqlUsageSource({
         accountId: cfg.cloudflareAccountId,
         token: cloudflareToken.reveal(),
       }),
-      llm: adminKey ? new AnthropicCostReportSource({ adminKey: adminKey.reveal() }) : new NullLlmCostSource(),
+      llm: anthropic ?? new NullLlmCostSource(),
+      invoices: invoiceSources,
       ...(deps.runStore ? { runStore: deps.runStore } : {}),
     },
     buildCostsSnapshotStore(blocks, deps.secrets, deps.warn),
@@ -254,8 +296,9 @@ export function costsFromConfig(
   return {
     service: createCostsService(cfg, snapshots, {
       ...(deps.emailOfSlackUser ? { emailOfSlackUser: deps.emailOfSlackUser } : {}),
+      billers,
     }),
     snapshots,
-    llmOn: adminKey !== undefined,
+    llmOn: anthropic !== undefined,
   };
 }

@@ -1,4 +1,4 @@
-import type { CloudflareUsage, DateRange, LlmCostRow } from "./costs.js";
+import type { CloudflareUsage, DateRange, InvoiceDay, LlmCostRow } from "./costs.js";
 import { isRunUsageReport, type RunUsageReport } from "./runUsage.js";
 import {
   DEFAULT_STATE_WORKER_TOKEN_ENV,
@@ -46,6 +46,9 @@ export interface CostsSnapshot {
   usage: CloudflareUsage;
   /** Anthropic's daily cost rows (the open days estimated); null when no LLM source is configured. */
   llm: LlmCostRow[] | null;
+  /** Each configured biller's invoice days (costs.md item 4d); a biller whose source failed
+   *  is omitted (warned by name), and the field is absent on a snapshot from before it. */
+  invoices?: Record<string, InvoiceDay[]>;
   /** The run history's per-user usage over the window; null with run history off. */
   runUsage: RunUsageReport | null;
 }
@@ -102,6 +105,20 @@ function isLlmRows(v: unknown): v is LlmCostRow[] {
   );
 }
 
+function isInvoiceDays(v: unknown): v is InvoiceDay[] {
+  return (
+    Array.isArray(v) &&
+    v.every((row) => {
+      if (typeof row !== "object" || row === null) return false;
+      const r = row as Record<string, unknown>;
+      if (typeof r.date !== "string" || !ISO_DAY.test(r.date) || !isFiniteNumber(r.usd)) return false;
+      return (
+        (r.feeUsd === undefined || isFiniteNumber(r.feeUsd)) && (r.byokUsd === undefined || isFiniteNumber(r.byokUsd))
+      );
+    })
+  );
+}
+
 /** The fields the arithmetic reads, present and of the right kind; the rows are the sources'. */
 export function isCostsSnapshot(v: unknown): v is CostsSnapshot {
   if (typeof v !== "object" || v === null) return false;
@@ -113,6 +130,10 @@ export function isCostsSnapshot(v: unknown): v is CostsSnapshot {
   if (typeof usage !== "object" || usage === null) return false;
   if (!USAGE_DATASETS.every((name) => isDatedRows(usage[name]))) return false;
   if (s.llm !== null && !isLlmRows(s.llm)) return false;
+  if (s.invoices !== undefined) {
+    if (typeof s.invoices !== "object" || s.invoices === null || Array.isArray(s.invoices)) return false;
+    if (!Object.values(s.invoices).every(isInvoiceDays)) return false;
+  }
   return s.runUsage === null || isRunUsageReport(s.runUsage);
 }
 

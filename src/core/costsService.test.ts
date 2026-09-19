@@ -354,3 +354,121 @@ describe("createCostsService", () => {
     expect(reads).toBe(0);
   });
 });
+
+// costs.md item 4d — one invoice source per provider block, wired from `providers.<block>`.
+describe("invoice sources per biller through the wiring", () => {
+  const secretsOf = (names: Record<string, string>) => ({
+    named: (n: string) => (names[n] !== undefined ? { reveal: () => names[n] } : undefined),
+  });
+  const providers = {
+    anthropic: { type: "anthropic", invoiceApi: "anthropic-cost-report", invoiceKeyEnv: "ANTHROPIC_ADMIN_KEY" },
+    openrouter: { type: "openai-compatible", invoiceApi: "openrouter-activity", invoiceKeyEnv: "OPENROUTER_MGMT_KEY" },
+    groq: { type: "openai-compatible" },
+  } as const;
+  const runStore = { usage: async () => usageReport } as unknown as RunStore;
+  const stubNetwork = (openrouterStatus = 200) =>
+    vi.stubGlobal("fetch", async (input: string | URL | Request) => {
+      const url = String(input);
+      const json = (body: unknown, status = 200) =>
+        new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+      if (url.includes("cloudflare")) return json({ data: { viewer: { accounts: [{}] } } });
+      if (url.includes("cost_report"))
+        return json({
+          data: [{ starting_at: midnight(AUG_28), results: [{ amount: "4000", currency: "USD", workspace_id: null }] }],
+          has_more: false,
+        });
+      if (url.includes("usage_report")) return json({ data: [], has_more: false });
+      if (url.includes("openrouter.ai/api/v1/activity"))
+        return openrouterStatus === 200
+          ? json({ data: [{ date: AUG_28, usage: 0.05, byok_usage_inference: 0.5 }] })
+          : json({ error: "revoked" }, openrouterStatus);
+      throw new Error(`unexpected url ${url}`);
+    });
+
+  it("wires one source per block naming an invoiceApi + invoiceKeyEnv; the report carries each biller's tie-out and a block without a source ties out against nothing", async () => {
+    stubNetwork();
+    try {
+      const wired = costsFromConfig(cfg, { providers } as never, {
+        secrets: secretsOf({
+          CF_ANALYTICS_TOKEN: "cf",
+          ANTHROPIC_ADMIN_KEY: "sk-ant-admin",
+          OPENROUTER_MGMT_KEY: "orm",
+        }),
+        runStore,
+        warn: () => undefined,
+        now: () => new Date(T0),
+      });
+      expect(wired?.llmOn).toBe(true);
+      await wired!.snapshots.refresh("test");
+      const report = await wired!.service.report("switchboard", "3");
+      const byBiller = Object.fromEntries((report.billers ?? []).map((t) => [t.biller, t]));
+      expect(byBiller.anthropic.invoice).toBe(true);
+      expect(byBiller.anthropic.days).toContainEqual({ date: AUG_28, invoiceUsd: 40, attributedUsd: 0 });
+      expect(byBiller.openrouter.days).toContainEqual({
+        date: AUG_28,
+        invoiceUsd: 0.55,
+        invoiceFeeUsd: 0.05,
+        invoiceByokUsd: 0.5,
+        attributedUsd: 0,
+      });
+      // a biller without a source: it ties out against nothing and the page says "no invoice"
+      expect(byBiller.groq).toEqual({
+        biller: "groq",
+        invoice: false,
+        days: [],
+        totals: { invoiceUsd: 0, attributedUsd: 0 },
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("a failing invoice source is warned by name and only that biller's invoice is omitted; an unset invoiceKeyEnv is warned at wiring time; the legacy costs.anthropicAdminKeyEnv still carries the anthropic invoice for one release", async () => {
+    stubNetwork(401);
+    const warnings: string[] = [];
+    try {
+      const wired = costsFromConfig(cfg, { providers } as never, {
+        secrets: secretsOf({
+          CF_ANALYTICS_TOKEN: "cf",
+          ANTHROPIC_ADMIN_KEY: "sk-ant-admin",
+          OPENROUTER_MGMT_KEY: "orm",
+        }),
+        runStore,
+        warn: (m) => warnings.push(m),
+        now: () => new Date(T0),
+      });
+      await wired!.snapshots.refresh("test");
+      expect(
+        warnings.some((w) => w.includes("invoice source openrouter failed") && w.includes("401") && !w.includes("orm")),
+      ).toBe(true);
+      const report = await wired!.service.report("switchboard", "3");
+      const byBiller = Object.fromEntries((report.billers ?? []).map((t) => [t.biller, t]));
+      expect(byBiller.anthropic.totals.invoiceUsd).toBe(40); // the other billers stay fresh
+      expect(byBiller.openrouter.days).toEqual([]); // no invoice this snapshot
+
+      // legacy key: no block names the cost report, the old costs key still feeds it
+      const legacy = costsFromConfig(cfg, { providers: { anthropic: { type: "anthropic" } } } as never, {
+        secrets: secretsOf({ CF_ANALYTICS_TOKEN: "cf", ANTHROPIC_ADMIN_KEY: "sk-ant-admin" }),
+        runStore,
+        warn: () => undefined,
+        now: () => new Date(T0),
+      });
+      expect(legacy?.llmOn).toBe(true);
+      await legacy!.snapshots.refresh("test");
+      const legacyReport = await legacy!.service.report("switchboard", "3");
+      expect(legacyReport.billers?.find((t) => t.biller === "anthropic")?.totals.invoiceUsd).toBe(40);
+
+      // an unset key env: warned by name, the block ties out against nothing
+      const unset = costsFromConfig(cfg, { providers } as never, {
+        secrets: secretsOf({ CF_ANALYTICS_TOKEN: "cf" }),
+        warn: (m) => warnings.push(m),
+      });
+      expect(unset?.llmOn).toBe(false);
+      expect(warnings.some((w) => w.includes("providers.openrouter.invoiceKeyEnv OPENROUTER_MGMT_KEY is unset"))).toBe(
+        true,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});

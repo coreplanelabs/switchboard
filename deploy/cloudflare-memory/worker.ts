@@ -1206,13 +1206,16 @@ export class CostsSnapshotDO extends DurableObject<Env> {
     `);
   }
 
-  /** Replace the snapshot whole: every part rewritten in one transaction. */
+  /** Replace the snapshot whole: every part rewritten in one transaction. Each
+   *  logical part is its own named row — `invoices` included, never a rest-spread
+   *  into the meta row that would silently absorb future fields. */
   async put(snapshot: CostsSnapshot): Promise<void> {
-    const { usage, llm, runUsage, ...meta } = snapshot;
+    const { usage, llm, invoices, runUsage, ...meta } = snapshot;
     const rows: Array<[string, unknown]> = [
       ["meta", meta],
       ...USAGE_PARTS.map((name): [string, unknown] => [`usage.${name}`, usage[name]]),
       ["llm", llm],
+      ...(invoices !== undefined ? [["invoices", invoices] as [string, unknown]] : []),
       ["runUsage", runUsage],
     ];
     this.ctx.storage.transactionSync(() => {
@@ -1237,10 +1240,12 @@ export class CostsSnapshotDO extends DurableObject<Env> {
       return body === undefined ? undefined : (JSON.parse(body) as unknown);
     };
     const usage = Object.fromEntries(USAGE_PARTS.map((name) => [name, read(`usage.${name}`)]));
+    const invoices = read("invoices");
     const snapshot = {
       ...(JSON.parse(meta) as Record<string, unknown>),
       usage,
       llm: read("llm"),
+      ...(invoices !== undefined ? { invoices } : {}),
       runUsage: read("runUsage"),
     };
     return isCostsSnapshot(snapshot) ? snapshot : null;

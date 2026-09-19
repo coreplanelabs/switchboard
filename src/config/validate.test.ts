@@ -52,6 +52,33 @@ describe("validateProviders — the block's declaration", () => {
     ).toThrow(/providers\.a\.models\.gpt-5: a vendor: model block names its models <vendor>\/<id>/);
   });
 
+  it("accepts invoiceApi + invoiceKeyEnv together and refuses a malformed or lone one by name (costs.md item 4d)", () => {
+    validateProviders(
+      providers({
+        a: { wire: "anthropic-messages", invoiceApi: "anthropic-cost-report", invoiceKeyEnv: "ANTHROPIC_ADMIN_KEY" },
+      }),
+      "config.yaml",
+    );
+    expect(() =>
+      validateProviders(
+        providers({ a: { wire: "openai-chat", invoiceApi: "stripe", invoiceKeyEnv: "K" } }),
+        "config.yaml",
+      ),
+    ).toThrow(/providers\.a\.invoiceApi must be anthropic-cost-report, openrouter-activity, openai-costs/);
+    expect(() =>
+      validateProviders(
+        providers({ a: { wire: "openai-chat", invoiceApi: "openai-costs", invoiceKeyEnv: "" } }),
+        "config.yaml",
+      ),
+    ).toThrow(/providers\.a\.invoiceKeyEnv must be an env var name/);
+    expect(() =>
+      validateProviders(providers({ a: { wire: "openai-chat", invoiceApi: "openai-costs" } }), "config.yaml"),
+    ).toThrow(/providers\.a must declare invoiceApi and invoiceKeyEnv together/);
+    expect(() =>
+      validateProviders(providers({ a: { wire: "openai-chat", invoiceKeyEnv: "K" } }), "config.yaml"),
+    ).toThrow(/providers\.a must declare invoiceApi and invoiceKeyEnv together/);
+  });
+
   it("refuses a malformed models.<id>.levels by name", () => {
     expect(() =>
       validateProviders(

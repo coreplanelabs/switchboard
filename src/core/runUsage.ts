@@ -31,6 +31,11 @@ export interface ModelUsage {
    *  a record whose turns predate the meter row (the price table then prices
    *  the tokens, costs.md item 4b). */
   usd?: number | null;
+  /** The model's BYOK aggregator fees summed from its turns' `feeUsd` attrs —
+   *  the share of `usd` that is the aggregator's own charge, what the biller's
+   *  invoice tie-out compares against its `usage` column (costs.md item 4d).
+   *  Absent when no turn carried one. */
+  feeUsd?: number;
   /** The distinct `priceSource` words the turns carried, sorted — what the
    *  by-model view names as the source. Absent when no turn carried one. */
   priceSources?: string[];
@@ -59,12 +64,24 @@ export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
   const usage = emptyUsage();
   // The meter row per model (model-proxy item 6): the turns' own dollars and
   // sources. `usd` sums only when every turn that counted tokens carried one —
-  // a turn that counted none (an upstream error, a retry the harness's SDK
-  // spent, a stream broken before its usage) has nothing a sum could leave
-  // out, so it never turns the model unpriced; a model none of whose turns
-  // carried price attrs stays without the fields (a record from before the
-  // meter row — the table prices it, costs.md item 4b).
-  const priced = new Map<string, { usd: number; pricedTurns: number; tokenTurns: number; sources: Set<string> }>();
+  // the token-counting turns that lack a figure are counted directly
+  // (`unpricedTokenTurns`), so a priced zero-token turn can never stand in for
+  // an unpriced one; a turn that counted none (an upstream error, a retry the
+  // harness's SDK spent, a stream broken before its usage) has nothing a sum
+  // could leave out, so it never turns the model unpriced; a model none of
+  // whose turns carried price attrs stays without the fields (a record from
+  // before the meter row — the table prices it, costs.md item 4b).
+  const priced = new Map<
+    string,
+    {
+      usd: number;
+      feeUsd: number;
+      feeTurns: number;
+      pricedTurns: number;
+      unpricedTokenTurns: number;
+      sources: Set<string>;
+    }
+  >();
   for (const e of events) {
     if (e.type !== "span_end" || e.name !== MODEL_TURN) continue;
     const attrs = (e.attrs ?? {}) as Record<string, unknown>;
@@ -87,11 +104,22 @@ export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
     usage.turns += 1;
     const hasUsd = typeof attrs.usd === "number" && Number.isFinite(attrs.usd);
     const hasSource = typeof attrs.priceSource === "string" && attrs.priceSource !== "";
-    const p = priced.get(model) ?? { usd: 0, pricedTurns: 0, tokenTurns: 0, sources: new Set<string>() };
-    if (counted > 0) p.tokenTurns += 1;
+    const p = priced.get(model) ?? {
+      usd: 0,
+      feeUsd: 0,
+      feeTurns: 0,
+      pricedTurns: 0,
+      unpricedTokenTurns: 0,
+      sources: new Set<string>(),
+    };
+    if (counted > 0 && !hasUsd) p.unpricedTokenTurns += 1;
     if (hasUsd) {
       p.usd += attrs.usd as number;
       p.pricedTurns += 1;
+    }
+    if (typeof attrs.feeUsd === "number" && Number.isFinite(attrs.feeUsd)) {
+      p.feeUsd += attrs.feeUsd;
+      p.feeTurns += 1;
     }
     if (hasSource) p.sources.add(attrs.priceSource as string);
     priced.set(model, p);
@@ -99,7 +127,8 @@ export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
   for (const [model, p] of priced) {
     if (p.pricedTurns === 0 && p.sources.size === 0) continue;
     const m = usage.byModel[model]!;
-    m.usd = p.pricedTurns >= p.tokenTurns ? p.usd : null;
+    m.usd = p.unpricedTokenTurns > 0 ? null : p.usd;
+    if (p.feeTurns > 0) m.feeUsd = p.feeUsd;
     if (p.sources.size > 0) m.priceSources = [...p.sources].sort();
   }
   return usage;
@@ -128,6 +157,8 @@ export function addUsage(a: RunUsage, b: RunUsage): RunUsage {
       const usd = foldUsd(acc.usd, m.usd);
       if (usd === undefined) delete acc.usd;
       else acc.usd = usd;
+      // A side without a fee spent none — a fee of nothing, never an unknown.
+      if (acc.feeUsd !== undefined || m.feeUsd !== undefined) acc.feeUsd = (acc.feeUsd ?? 0) + (m.feeUsd ?? 0);
       const sources = new Set([...(acc.priceSources ?? []), ...(m.priceSources ?? [])]);
       if (sources.size > 0) acc.priceSources = [...sources].sort();
     }
@@ -145,6 +176,7 @@ const isModelUsage = (v: unknown): v is ModelUsage => {
   )
     return false;
   if (m.usd !== undefined && m.usd !== null && typeof m.usd !== "number") return false;
+  if (m.feeUsd !== undefined && typeof m.feeUsd !== "number") return false;
   return (
     m.priceSources === undefined ||
     (Array.isArray(m.priceSources) && m.priceSources.every((s) => typeof s === "string"))
