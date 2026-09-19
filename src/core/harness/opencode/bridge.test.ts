@@ -1986,7 +1986,7 @@ describe("readStoreSince — the newest rows, page by page, down to what was the
       paths.push(path);
       const query = new URLSearchParams(path.split("?")[1] ?? "");
       const limit = Number(query.get("limit"));
-      const from = Number((/^c:asc:(\d+)$/.exec(query.get("cursor") ?? "") ?? [, "0"])[1]);
+      const from = Number((/^c:asc:(\d+)$/.exec(query.get("cursor") ?? "") ?? ["", "0"])[1]);
       const next = from + limit < store.length ? `c:asc:${from + limit}` : undefined;
       const body = JSON.stringify({ data: store.slice(from, from + limit), cursor: next ? { next } : {} });
       return { status: 200, body: body.length > CAP ? body.slice(0, CAP) : body };
