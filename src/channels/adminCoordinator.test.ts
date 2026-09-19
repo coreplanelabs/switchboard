@@ -1047,6 +1047,53 @@ describe("pr-check recover — the answer says why nothing was recovered, and Gi
     expect(h.opens).toHaveLength(0);
   });
 
+  // Feature: docs/reference/specs/agent-ship.md items 10 and 15 (record 0062)
+  // — the recover path rewrites before it opens the same way the coding
+  // post-step does: over an empty start state (every earlier round's commits
+  // were rewritten before their own pull request opened), and an unreadable
+  // answer never opens — it is github_unavailable, asked again.
+  it("the recover path runs the identity rewrite before it opens — the instance's repo, base, branch and requester, over an empty start state — and an unreadable rewrite opens nothing", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    const rewrites: Array<Record<string, unknown>> = [];
+    const order: string[] = [];
+    const openPullRequest = async (target: Parameters<typeof h.deps.openPullRequest>[0]) => {
+      order.push("open");
+      return h.deps.openPullRequest(target);
+    };
+    const clean = {
+      ...h.deps,
+      openPullRequest,
+      rewriteIdentities: async (args: Record<string, unknown>) => {
+        rewrites.push(args);
+        order.push("rewrite");
+        return { kind: "clean" as const };
+      },
+    };
+    const res = await recoverCheck(clean);
+    expect(res.status).toBe(200);
+    expect(rewrites).toEqual([
+      {
+        repo: "acme/api",
+        base: "main",
+        branch: "plan/orchestration/u12",
+        startState: { kind: "known", commits: [] },
+        requester: "slack:UALICE",
+      },
+    ]);
+    expect(order).toEqual(["rewrite", "open"]);
+
+    const blocked = harness();
+    await blocked.instances.put(INSTANCE);
+    const unreadable = await recoverCheck({
+      ...blocked.deps,
+      rewriteIdentities: async () => ({ kind: "unreadable" as const, reason: "HTTP 422 force pushes blocked" }),
+    });
+    expect(unreadable.status).toBe(502);
+    expect(unreadable.body).toMatchObject({ ok: false, error: "github_unavailable" });
+    expect(blocked.opens).toHaveLength(0);
+  });
+
   it("a create GitHub refuses for any reason other than an empty branch is github_unavailable — the step is asked again, and the report never claims nothing was pushed", async () => {
     const down = harness({ openPr: new Error("PR create failed: HTTP 502 bad gateway") });
     await down.instances.put(INSTANCE);

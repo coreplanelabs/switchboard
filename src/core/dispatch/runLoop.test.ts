@@ -73,6 +73,7 @@ import { judgeToolCall, type ToolRuleContext } from "../harness/pi/toolRules.js"
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { RepoContext } from "../repoContext.js";
+import type { BranchStartState } from "../../execution/identityRewrite.js";
 import type { ResidentBinding } from "../../execution/resident.js";
 import { InMemoryArtifactStore, type ArtifactStore } from "../../artifacts/store.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
@@ -3600,6 +3601,94 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(rec.events.filter((e) => e.type === "run_note" && (e as { kind: string }).kind === "pr_not_opened")).toEqual(
       [expect.objectContaining({ summary: "no PR opened: the plan's base was lost across a roll" })],
     );
+  });
+
+  // record 0062 — a resumed run's pre-restart pushes must never fold into the
+  // start state: the ledger row's `pushedBranch` says the run itself pushed
+  // the branch before the restart, so a re-read now would list the run's own
+  // commits as "start state" and pass the rewrite unjudged.
+  const startStateFixture = () => {
+    const BRANCH = "plan/p/u1";
+    const description: PrDescription = {
+      title: "Fix the login redirect",
+      tldr: "Restores the session cookie on login. Users can sign in again.",
+      why: "The handler dropped the cookie; this restores it.",
+      pointers: [{ label: "The fix", text: "The cookie is set again.", anchor: { path: "src/a", from: 1, to: 2 } }],
+      feedbackWanted: "Nothing in particular.",
+      verified: "See validation.",
+      decisions: [{ title: "Keep it small", rationale: "One-line fix." }],
+      risk: "none",
+      validation: { criteria: [{ criterion: "tests", proof: "green" }] },
+    };
+    const executor = {
+      exec: async (cmd: string) => {
+        if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+        if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+        if (/rev-parse 'refs\/heads\//.test(cmd)) return `${HEAD}\n`;
+        if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+        return "";
+      },
+    };
+    const s = setup("", {
+      agent: "coding",
+      provider: neverCalled(),
+      repoCtx: { repo: "o/r", ref: BRANCH, baseRef: "main" } as RepoContext,
+      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+      executor,
+      coding: true,
+    });
+    const reads: string[] = [];
+    const startStates: BranchStartState[] = [];
+    s.deps.identityRewrite = {
+      readStartState: async (_repo, _base, branch): Promise<BranchStartState> => {
+        reads.push(branch);
+        return { kind: "known", commits: [] };
+      },
+      rewrite: async ({ startState }) => {
+        startStates.push(startState);
+        return startState.kind === "unknown"
+          ? { kind: "unreadable", reason: `the branch's start state is unknown (${startState.reason ?? ""})` }
+          : { kind: "clean" };
+      },
+      pullRequestHead: async () => undefined,
+      isAssignable: async () => undefined,
+      addAssignee: async () => undefined,
+      requestedLogin: async () => undefined,
+    };
+    const opened: unknown[] = [];
+    s.deps.openPullRequest = async (target) => {
+      opened.push({ ...target });
+      return { number: 9, htmlUrl: "https://github.com/o/r/pull/9", created: true };
+    };
+    return { BRANCH, description, s, reads, startStates, opened };
+  };
+
+  it("a resumed run whose ledger row records a pre-restart push of its own branch fires no start-state re-read: the rewrite is asked over an UNKNOWN start state naming the restart and fails closed, so nothing opens over the pre-restart commits", async () => {
+    const { BRANCH, description, s, reads, startStates, opened } = startStateFixture();
+    const resume = finishing("Done: pushed the fix.", {
+      agent: "coding",
+      state: { prDescription: description, pushedBranch: BRANCH },
+    });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect(reads).toEqual([]);
+    expect(startStates).toEqual([
+      { kind: "unknown", reason: expect.stringContaining(`pushed ${BRANCH} before a restart`) },
+    ]);
+    expect(opened).toEqual([]);
+    expect(out.prNote).toContain("could not be verified");
+  });
+
+  it("a resumed run whose ledger row records NO push of the binding branch still reads the start state at attach: the rewrite judges over the read state and a clean branch opens", async () => {
+    const { BRANCH, description, s, reads, startStates, opened } = startStateFixture();
+    const resume = finishing("Done: pushed the fix.", {
+      agent: "coding",
+      state: { prDescription: description },
+    });
+    const out = answered(await runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages }));
+    expect(reads).toEqual([BRANCH]);
+    expect(startStates).toEqual([{ kind: "known", commits: [] }]);
+    expect(opened).toHaveLength(1);
+    expect(out.prNote).toContain("PR opened");
   });
 
   it("on the pi harness no pi is started and the one the previous generation left is ended at its recorded pid and root (harness-pi item 8)", async () => {

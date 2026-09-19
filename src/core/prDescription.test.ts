@@ -14,6 +14,7 @@ import {
   parsePrDescriptionMarkdown,
   recordedJson,
   renderPrDescriptionMarkdown,
+  requestedByLine,
   titleGateApplies,
   visibleLength,
   type PrDescription,
@@ -543,6 +544,28 @@ describe("renderPrDescriptionMarkdown", () => {
     expect(anchorUrl(CTX, { path: "docs/a b#c.md", from: 1, to: 2 })).toBe(
       `https://github.com/acme/api/blob/${CTX.headSha}/docs/a%20b%23c.md#L1-L2`,
     );
+  });
+
+  // Feature: docs/reference/specs/pr-description.md item 5 (record 0062)
+  // — one BOT-written requested-by line in the agents block, present only when
+  // a binding names the requester's login; the object is unchanged.
+  it("the requested-by line rides the agents block only when the context carries a binding; steerers join when named", () => {
+    const plain = renderPrDescriptionMarkdown(desc(), CTX);
+    expect(plain).not.toContain("Requested by");
+    const withBinding = renderPrDescriptionMarkdown(desc(), {
+      ...CTX,
+      requestedBy: { login: "ivy-dev", surface: "slack:C1" },
+    });
+    expect(withBinding).toContain("Requested by @ivy-dev in slack:C1");
+    // The line lives in the For agents fold, beside the agent's own notes.
+    const withNotes = renderPrDescriptionMarkdown(desc({ agentNotes: "Skip the lockfile churn." }), {
+      ...CTX,
+      requestedBy: { login: "ivy-dev", surface: "slack:C1", steeredBy: ["Raj", "Mona"] },
+    });
+    const fold = withNotes.slice(withNotes.indexOf("For agents"));
+    expect(fold).toContain("Skip the lockfile churn.");
+    expect(fold).toContain("Requested by @ivy-dev in slack:C1; steered by Raj, Mona");
+    expect(requestedByLine({ login: "ivy-dev", surface: "slack:C1" })).toBe("Requested by @ivy-dev in slack:C1");
   });
 
   it("refuses a short sha or a non owner/name repo", () => {

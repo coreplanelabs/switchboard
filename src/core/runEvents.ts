@@ -207,6 +207,13 @@ export type RunNoteKind =
    *  the summary names the branch. Published by the post-step, so a unit
    *  that ends without a pull request says why on the record and the card. */
   | "pr_not_opened"
+  /** A coding run's pull request was opened or edited, but its head moved
+   *  before the post-step's head pin and the second identity rewrite answered
+   *  `unreadable` (docs/reference/specs/agent-coding.md item 2, record 0062):
+   *  the open cannot be undone, so the summary names the reason the new tip's
+   *  identities could not be verified and the reply carries the same warning.
+   *  Published by the post-step. */
+  | "pr_head_unverified"
   /** A review run's post-step posted nothing to the pull request — a guard's
    *  refusal, an opt-out, no pull request resolved, GitHub's own error — and
    *  the summary names the pull request (when one was resolved) and the
@@ -331,6 +338,7 @@ export const RUN_NOTE_KINDS = [
   "work_left_behind",
   "workspace_torn_down",
   "pr_not_opened",
+  "pr_head_unverified",
   "review_not_posted",
   "compacted",
   "harness_error",
@@ -857,6 +865,10 @@ export type RunEvent =
        *  its own branches past the tree (docs/reference/specs/resident-repos.md
        *  item 16). Absent from an event a build before it recorded. */
       head?: string;
+      /** How many of the run's commits the identity rewrite re-authored before
+       *  the open (record 0062; docs/reference/specs/agent-coding.md item 2).
+       *  Absent when none were, and from an event a build before it recorded. */
+      rewritten?: number;
       seq?: number;
       at?: number;
     }

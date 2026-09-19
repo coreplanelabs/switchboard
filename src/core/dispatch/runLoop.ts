@@ -32,6 +32,7 @@ import { prepareRelaunch } from "./relaunch.js";
 import { harnessNamed } from "../harness/roster.js";
 import { harnessContainerFor } from "../harness/botHostContainer.js";
 import { workspaceBindingFor } from "../../execution/factory.js";
+import type { BranchStartState } from "../../execution/identityRewrite.js";
 import { isContainerGone } from "../harness/container.js";
 import { ModelPolicyRefusedError } from "../harness/pi/harness.js";
 import {
@@ -326,6 +327,47 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       return undefined;
     }
   })();
+  // The start state of the run's branch (record 0062; identityRewrite.ts):
+  // fired HERE, at the attach, so the identity rewrite in the post-step
+  // judges only the run's own commits. The read runs concurrently with the
+  // model loop and is awaited only when the PR target is built — one HTTP
+  // compare ordinarily settles long before the model's first push, but a push
+  // that landed faster would fold into the start state and pass unjudged; the
+  // guarantee is the head start, not a barrier. A RESUMED run whose ledger
+  // row records a pre-restart push of this very branch is that fold made
+  // systematic, not a race: the re-read would list the run's own pre-restart
+  // commits as "start state" and pass them unjudged — so no read is fired and
+  // the start state is `unknown`, on which the rewrite fails closed. The
+  // branch the dispatch knows at attach is the binding's ref (a coordinator's
+  // unit branch, a fix round's PR head); a run that later pushes a branch of
+  // its own cut it in this workspace, so that branch's start state is empty —
+  // the post-step tells the two apart by `startBranch`. Fired once, joined at
+  // the PR target below; a failed read records `unknown`, on which the
+  // rewrite fails closed.
+  const identitySeam = deps.identityRewrite;
+  const startStateRead: Promise<{ branch: string; state: BranchStartState } | undefined> | undefined =
+    identitySeam !== undefined && isCodingPrRun && repoCtx.repo !== undefined
+      ? (async () => {
+          const repo = repoCtx.repo;
+          if (repo === undefined) return undefined;
+          const branch = binding?.ref ?? repoCtx.ref;
+          if (branch === undefined) return undefined;
+          const preRestartPush = resume?.row.state.pushedBranch;
+          if (typeof preRestartPush === "string" && preRestartPush === branch)
+            return {
+              branch,
+              state: {
+                kind: "unknown" as const,
+                reason: `the run pushed ${branch} before a restart, so a start state read now would fold the run's own commits in`,
+              },
+            };
+          const base = repoCtx.baseRef ?? (await coordinatorBase) ?? branch;
+          const state = await identitySeam
+            .readStartState(repo, base, branch)
+            .catch((): BranchStartState => ({ kind: "unknown" }));
+          return { branch, state };
+        })()
+      : undefined;
   let reviewHead = ctx.reviewHead;
   let lastActivityAt = ctx.loopStartedAt;
   // The card body is the agent's own checklist (via the update_status tool)
@@ -1376,6 +1418,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     const planBase = await coordinatorBase;
     const planBaseLost =
       isCodingPrRun && coordinator !== undefined && repoCtx.baseRef === undefined && planBase === undefined;
+    // The branch's start state as recorded at attach (record 0062): what
+    // the identity rewrite subtracts before judging the run's commits. For a
+    // branch other than the recorded one, the run's own first push says where
+    // it found the branch (`pushedStart`: created, or moved from a pre-push
+    // head the rewrite never rewrites below); without either the rewrite
+    // fails closed rather than judging a pre-existing branch as empty.
+    const recordedStart = startStateRead !== undefined ? await startStateRead : undefined;
+    const pushedStart = pushes.startPoint();
     const prTarget = {
       repo: repoCtx.repo,
       baseRef: repoCtx.baseRef ?? planBase,
@@ -1383,6 +1433,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       resolvedRef: repoCtx.ref,
       ...(planBaseLost ? { planBaseLost: true } : {}),
       ...(ownPr !== undefined ? { ownPr } : {}),
+      ...(recordedStart !== undefined ? { startState: recordedStart.state, startBranch: recordedStart.branch } : {}),
+      ...(pushedStart !== undefined ? { pushedStart } : {}),
     };
     if (isCodingPrRun && !tailSkipped()) await observeWorkspaceNow();
     // Push-before-abort (agent-ship.md item 8): a ship coding child (a
@@ -1558,6 +1610,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // the final reply below. A hard stop observed nothing above and posts
     // nothing; a relaunch that ended the run likewise (`tailSkipped`).
     if (isCodingPrRun && !tailSkipped()) {
+      // The requester's bound login (record 0062): the assignee and the
+      // requested-by line — present only when an identity admin bound one.
+      const requestedLogin =
+        identitySeam !== undefined ? await identitySeam.requestedLogin(msg.userId).catch(() => undefined) : undefined;
       prNote = await root.span("run.pr_post_step", () =>
         runCodingPrPostStep({
           verbosity: resolved.verbosity,
@@ -1575,6 +1631,19 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           updatePullRequest: deps.updatePullRequest ?? updatePullRequest,
           fetchRepoInfo: deps.fetchRepoShipInfo ?? fetchRepoShipInfo,
           commitsOverBase: deps.commitsOverBase ?? commitsOverBase,
+          ...(identitySeam !== undefined
+            ? {
+                identity: {
+                  rewrite: (args) => identitySeam.rewrite({ ...args, requester: msg.userId }),
+                  pullRequestHead: identitySeam.pullRequestHead,
+                  isAssignable: identitySeam.isAssignable,
+                  addAssignee: identitySeam.addAssignee,
+                  ...(requestedLogin !== undefined
+                    ? { requestedBy: { login: requestedLogin, surface: msg.channelId } }
+                    : {}),
+                },
+              }
+            : {}),
           descriptionTurnRan,
           publish: (e) => registry.publish(run.id, e),
           logKey: msg.threadKey,
