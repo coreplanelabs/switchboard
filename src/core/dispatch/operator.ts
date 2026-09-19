@@ -20,9 +20,12 @@
 // mixing binds and a question, an unknown tool, prose that is not the one
 // JSON object — each is a refusal that says what came back, and under
 // `shadow` that is one more disagreement on the agreement row, never a run.
-// A refusal the seam itself produced carries `fallback: true` (never the
-// model's decision): under `on` the dispatcher falls back to the readers'
-// route for that event, the decision recorded on the run that then runs.
+// A shape the parse refuses is the structured seam's to repair (record 0067,
+// `askStructured`): the violation is re-asked of the same model with the
+// violation named, at most the bounded retries, every attempt on the event;
+// after them the floor is `non_decision` — under `on` the dispatcher falls
+// back to the readers' route for that event, the decision recorded on the run
+// that then runs, never a refusal shown to the person.
 import { parseModelRef, type ToolDef } from "../provider.js";
 import { oneLine, redactAndCap } from "../redact.js";
 import type { IntakeVerdict } from "../intake.js";
@@ -38,6 +41,7 @@ import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RequestTrace } from "../requestTrace.js";
 import { HAND_BACK_PREFIX } from "./handBack.js";
+import { askStructured, attemptsOfThrow, type StructuredAttempt } from "./structured.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { recordOperatorDecision, runChatCommand, type OperatorEventFields } from "./commandRun.js";
 import { renderOperatorReceipt, renderVerifierHandBack, renderVerifierLine } from "./reply.js";
@@ -45,6 +49,8 @@ import { OPERATOR_TAIL_BYTES, operatorTail, type OperatorTailTurn } from "./seed
 import {
   parseVerifierAnswer,
   providerRouteModel,
+  verifierViolationOf,
+  VERIFY_TOOL_NAME,
   quoteRequest,
   renderPresetTable,
   routableCommands,
@@ -79,17 +85,19 @@ export const OPERATOR_MAX_BINDS = 5;
 export const OPERATOR_QUESTION_MARKER = "Did you mean:";
 
 /** What the operator decided for one admitted chat event. Exactly one of
- *  three shapes — binds, a question, a refusal — never a mix (`parseOperatorDecision`). */
+ *  three shapes — binds, a question, a refusal — never a mix
+ *  (`parseOperatorDecision`); `non_decision` is the structured seam's floor
+ *  (record 0067), never the model's decision — an answer that was no decision
+ *  after the bounded re-asks, or a model call that threw or timed out: under
+ *  `on` the dispatcher falls back to the readers' route for that event, the
+ *  event recorded (reason included) on the run that then runs, and nothing of
+ *  it is rendered to the person. A model-authored refusal (a real decision
+ *  with cause `policy` or `request`) renders as the answer. */
 export type OperatorDecision =
   | { kind: "binds"; binds: OperatorBind[]; reason: string }
   | { kind: "question"; text: string; proposal?: string; reason: string }
-  /** `fallback: true` marks a refusal the seam itself produced — a non-decision
-   *  answer, a wrong tool, a transport failure — never the model's decision:
-   *  under `on` the dispatcher falls back to the readers' route for that event,
-   *  the event recorded (reason included) on the run that then runs. A
-   *  model-authored refusal (a real decision with cause `policy` or `request`)
-   *  carries no mark and renders as the answer. */
-  | { kind: "refusal"; cause: "policy" | "request"; text: string; reason: string; fallback?: true };
+  | { kind: "refusal"; cause: "policy" | "request"; text: string; reason: string }
+  | { kind: "non_decision"; reason: string };
 
 /** One bind: the typed line the operator bound (a chat command line, a
  *  `steer <run> <words>`, an `agent:<preset> <request>` route), redacted and
@@ -256,19 +264,14 @@ export function quoteTurn(text: string): string {
 
 /**
  * The seam's answer as a decision. Fail closed: a decision that mixes binds
- * with a question or a refusal is refused by the parse — nothing runs from a
+ * with a question or a refusal is a `non_decision` — nothing runs from a
  * shape the schema forbade — and so is another tool, prose that is not one
- * JSON object, or an empty decision; each refusal says what came back, so a
- * broken operator is legible on the shadow log as disagreements.
+ * JSON object, or an empty decision; each names what came back, so the
+ * structured seam can quote the violation back (record 0067) and a broken
+ * operator is legible on the record as re-asks.
  */
 export function parseOperatorDecision(answer: RouteToolCall | string): OperatorDecision {
-  const refused = (why: string): OperatorDecision => ({
-    kind: "refusal",
-    cause: "request",
-    text: `the operator's answer was not a decision: ${tidy(why)}`,
-    reason: tidy(why),
-    fallback: true,
-  });
+  const refused = (why: string): OperatorDecision => ({ kind: "non_decision", reason: tidy(why) });
   let input: unknown;
   if (typeof answer === "string") {
     try {
@@ -341,6 +344,10 @@ export interface OperatorAnswer {
   decision: OperatorDecision;
   latencyMs: number;
   outputTokens: number;
+  /** The structured seam's attempts (record 0067), for the `operator` event;
+   *  absent when the model call failed before any answer came back — a throw
+   *  mid-loop keeps the attempts already collected. */
+  attempts?: StructuredAttempt[];
 }
 
 /** The output cap for one decision: the largest answer the parse accepts, at
@@ -351,11 +358,14 @@ export function operatorMaxOutputTokens(): number {
 }
 
 /**
- * One operator turn: the prompt, one model call under the timeout through the
- * route stage's own seam (`RouteModel`), the strict parse. A model that
- * throws or times out is a `request` refusal naming the failure — never a
- * thrown error, so under `shadow` the event is one more row on the log and
- * under `on` the person reads the refusal.
+ * One operator turn through the structured seam (record 0067): the prompt,
+ * the forced call under ONE timeout covering the whole loop, the strict
+ * parse; an answer that is no decision is re-asked with the violation named,
+ * at most the bounded retries, and after them the floor is `non_decision` —
+ * under `on` the dispatcher falls back to the readers' route. A model that
+ * throws or times out is a `non_decision` naming the failure without a
+ * re-ask — never a thrown error and never a refusal a person reads — with the
+ * attempts collected before the throw kept on the answer.
  */
 export async function runOperator(
   input: OperatorInput,
@@ -365,23 +375,42 @@ export async function runOperator(
   const now = opts.now ?? Date.now;
   const started = now();
   const prompt = buildOperatorPrompt(input);
+  // The answers' size, summed over the attempts: the replay's token rows read
+  // the whole turn's estimate (three characters a token, as ever).
+  let chars = 0;
+  const parse = (
+    answer: RouteToolCall | string,
+  ): { ok: true; value: OperatorDecision } | { ok: false; violation: string } => {
+    chars += (typeof answer === "string" ? answer : JSON.stringify(answer.input)).length;
+    const decision = parseOperatorDecision(answer);
+    return decision.kind === "non_decision" ? { ok: false, violation: decision.reason } : { ok: true, value: decision };
+  };
   try {
-    const answer = await model(prompt, {
-      maxTokens: operatorMaxOutputTokens(),
-      signal: AbortSignal.timeout(opts.timeoutMs ?? OPERATOR_TIMEOUT_MS),
-    });
-    const raw = typeof answer === "string" ? answer : JSON.stringify(answer.input);
+    const seam = await askStructured(
+      {
+        prompt,
+        parse,
+        noun: "a decision",
+        tool: OPERATOR_TOOL_NAME,
+        floor: (violation): OperatorDecision => ({ kind: "non_decision", reason: violation }),
+      },
+      model,
+      { maxTokens: operatorMaxOutputTokens(), signal: AbortSignal.timeout(opts.timeoutMs ?? OPERATOR_TIMEOUT_MS) },
+    );
     return {
-      decision: parseOperatorDecision(answer),
+      decision: seam.value,
       latencyMs: now() - started,
-      outputTokens: Math.ceil(raw.length / 3),
+      outputTokens: Math.ceil(chars / 3),
+      attempts: seam.attempts,
     };
   } catch (err) {
     const why = tidy(err instanceof Error ? err.message : String(err));
+    const attempts = attemptsOfThrow(err);
     return {
-      decision: { kind: "refusal", cause: "request", text: `the operator failed: ${why}`, reason: why, fallback: true },
+      decision: { kind: "non_decision", reason: `the operator failed: ${why}` },
       latencyMs: now() - started,
-      outputTokens: 0,
+      outputTokens: Math.ceil(chars / 3),
+      ...(attempts ? { attempts } : {}),
     };
   }
 }
@@ -395,14 +424,14 @@ export function operatorEventOf(
   intake?: { verdict: IntakeVerdict; reason: string },
 ): {
   mode: "shadow" | "on";
-  outcome: "binds" | "question" | "refusal";
+  outcome: "binds" | "question" | "refusal" | "non_decision";
   reason: string;
   binds?: { line: string; reason: string }[];
   question?: string;
   proposal?: string;
   refusalCause?: string;
   refusalText?: string;
-  fallback?: true;
+  attempts?: StructuredAttempt[];
   intake?: { verdict: string; reason: string };
   latencyMs: number;
   outputTokens: number;
@@ -416,7 +445,7 @@ export function operatorEventOf(
     ...(d.kind === "question" ? { question: renderOperatorQuestion(d) } : {}),
     ...(d.kind === "question" && d.proposal !== undefined ? { proposal: d.proposal } : {}),
     ...(d.kind === "refusal" ? { refusalCause: d.cause, refusalText: d.text } : {}),
-    ...(d.kind === "refusal" && d.fallback === true ? { fallback: true as const } : {}),
+    ...(answer.attempts ? { attempts: answer.attempts } : {}),
     ...(intake ? { intake: { verdict: intake.verdict, reason: intake.reason } } : {}),
     latencyMs: answer.latencyMs,
     outputTokens: answer.outputTokens,
@@ -608,14 +637,34 @@ export async function verifyOperatorBind(
   opts: { timeoutMs?: number } = {},
 ): Promise<VerifierAnswer> {
   try {
-    const answer = await model(verifierPrompt({ turns, line }), {
-      maxTokens: ROUTE_MIN_OUTPUT_TOKENS,
-      signal: AbortSignal.timeout(opts.timeoutMs ?? ROUTE_TIMEOUT_MS),
-    });
-    return parseVerifierAnswer(answer);
+    // The structured seam (record 0067): a shape refusal — prose, a wrong
+    // tool, `agrees` not a boolean — is re-asked with the violation named; the
+    // floor after the retries is a disagreement naming the last violation,
+    // fail closed as ever. A model-authored verdict is never re-asked.
+    const seam = await askStructured(
+      {
+        prompt: verifierPrompt({ turns, line }),
+        parse: (answer) => {
+          const verdict = parseVerifierAnswer(answer);
+          const violation = verifierViolationOf(verdict);
+          return violation !== undefined ? { ok: false, violation } : { ok: true, value: verdict };
+        },
+        noun: "a verdict",
+        tool: VERIFY_TOOL_NAME,
+        floor: (violation): VerifierAnswer => ({ agrees: false, reason: violation }),
+      },
+      model,
+      { maxTokens: ROUTE_MIN_OUTPUT_TOKENS, signal: AbortSignal.timeout(opts.timeoutMs ?? ROUTE_TIMEOUT_MS) },
+    );
+    return { ...seam.value, attempts: seam.attempts };
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err);
-    return { agrees: false, reason: oneLine(redactAndCap(`verifier failed: ${why}`, ROUTE_REASON_CAP)) };
+    const attempts = attemptsOfThrow(err);
+    return {
+      agrees: false,
+      reason: oneLine(redactAndCap(`verifier failed: ${why}`, ROUTE_REASON_CAP)),
+      ...(attempts ? { attempts } : {}),
+    };
   }
 }
 

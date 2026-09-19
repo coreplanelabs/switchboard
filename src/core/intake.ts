@@ -22,6 +22,7 @@
 // gate arrives in a later unit.
 import type { ToolDef } from "./provider.js";
 import { oneLine, redactAndCap } from "./redact.js";
+import { askStructured, attemptsOfThrow, type StructuredAttempt } from "./dispatch/structured.js";
 import { wrapUntrusted } from "./untrusted.js";
 import type { IntakeReceipt } from "./runLedger/types.js";
 import {
@@ -122,6 +123,10 @@ export interface IntakeDecision {
   reason: string;
   source: IntakeSource;
   receipt: IntakeReceiptOutcome;
+  /** The structured seam's attempts (record 0067), when the model was asked:
+   *  what each answer violated, or that it was accepted, kept on the receipt
+   *  row so a flaky model is legible as re-asks, not as silent floors. */
+  attempts?: StructuredAttempt[];
 }
 
 /**
@@ -165,28 +170,47 @@ export async function decideIntake(input: IntakeInput, deps: IntakeDeps): Promis
   }
 }
 
-/** The one model call, failed closed: a timeout is `silent`/`timeout`, any
- *  other throw `silent`/`error`, and a malformed answer `silent`/`error` with
- *  the reason saying what came back. */
+/** The one model turn through the structured seam (record 0067), failed
+ *  closed: a malformed answer — another tool, prose, an answer outside the
+ *  enum — is re-asked with the violation named, at most the bounded retries,
+ *  and after them the floor is `silent`/`error` with the last violation as
+ *  the reason; a timeout is `silent`/`timeout` and any other throw
+ *  `silent`/`error`, neither re-asked. */
 async function askModel(
   input: IntakeInput,
   deps: IntakeDeps,
-): Promise<{ verdict: IntakeVerdict; reason: string; source: IntakeSource }> {
-  let answer: RouteToolCall | string;
+): Promise<{ verdict: IntakeVerdict; reason: string; source: IntakeSource; attempts?: StructuredAttempt[] }> {
+  type Parsed = { verdict: IntakeVerdict; reason: string; source: IntakeSource };
   try {
-    answer = await deps.model(buildIntakePrompt(input), {
-      maxTokens: ROUTE_MIN_OUTPUT_TOKENS,
-      signal: AbortSignal.timeout(deps.timeoutMs ?? ROUTE_TIMEOUT_MS),
-    });
+    const seam = await askStructured(
+      {
+        prompt: buildIntakePrompt(input),
+        parse: (answer) => {
+          const parsed = parseIntakeAnswer(answer);
+          // The parse's `error` source is exactly its shape refusals (a model's
+          // own answer — addressed, silent, unsure — is `model`): the violation.
+          return parsed.source === "error"
+            ? { ok: false as const, violation: parsed.reason }
+            : { ok: true as const, value: parsed };
+        },
+        noun: "a verdict",
+        tool: INTAKE_TOOL_NAME,
+        floor: (violation): Parsed => ({ verdict: "silent", reason: violation, source: "error" }),
+      },
+      deps.model,
+      { maxTokens: ROUTE_MIN_OUTPUT_TOKENS, signal: AbortSignal.timeout(deps.timeoutMs ?? ROUTE_TIMEOUT_MS) },
+    );
+    return { ...seam.value, attempts: seam.attempts };
   } catch (err) {
     const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    const attempts = attemptsOfThrow(err);
     return {
       verdict: "silent",
       reason: tidyReason(timedOut ? "the intake call timed out" : `intake model failed: ${messageOf(err)}`),
       source: timedOut ? "timeout" : "error",
+      ...(attempts ? { attempts } : {}),
     };
   }
-  return parseIntakeAnswer(answer);
 }
 
 /** The seam's answer as a verdict: the forced call's input, or a text answer

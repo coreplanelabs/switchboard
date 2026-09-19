@@ -473,6 +473,15 @@ export const DEFAULT_GRANT: Grant = { renewals: 0 };
  *  in one message before a plan should carry it. */
 export const GRANT_RENEWALS_MAX = 12;
 
+// ---- the structured-answer seam (record 0067: a violation is re-asked) ----
+
+/** The most re-asks one structured ask may make (`askStructured`,
+ *  src/core/dispatch/structured.ts): a named violation is quoted back to the
+ *  same model at most this many times; the next violation is the caller's
+ *  declared floor. A count, not a duration — the caller's one timeout covers
+ *  the whole loop. */
+export const STRUCTURED_RETRIES_MAX = 2;
+
 // ---- the idle unit (record 0051: a pipeline idles instead of ending) ----
 
 /** `ship.idleDays`' default: zero — today's endings byte for byte. It moves to

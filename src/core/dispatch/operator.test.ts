@@ -22,6 +22,7 @@ import {
   type RoutableCommand,
   type RouteModel,
   type RoutePrompt,
+  type RouteToolCall,
 } from "./route.js";
 import type { ToolDef } from "../provider.js";
 import type { CommandDef } from "../commandRegistry.js";
@@ -66,7 +67,7 @@ describe("parseOperatorDecision", () => {
     expect(d.binds[1].line.length).toBeLessThanOrEqual(ROUTE_RECEIPT_CAP + 1); // the cap plus the cut's ellipsis
   });
 
-  it("a decision mixing binds and a question is refused by the parser — nothing runs from a shape the schema forbade", () => {
+  it("a decision mixing binds and a question is a non_decision — nothing runs from a shape the schema forbade", () => {
     const d = parseOperatorDecision({
       tool: OPERATOR_TOOL_NAME,
       input: {
@@ -75,8 +76,8 @@ describe("parseOperatorDecision", () => {
         question: { text: "did you mean the runs?" },
       },
     });
-    expect(d.kind).toBe("refusal");
-    if (d.kind !== "refusal") throw new Error("not a refusal");
+    expect(d.kind).toBe("non_decision");
+    if (d.kind !== "non_decision") throw new Error("not a non_decision");
     expect(d.reason).toContain("mixing binds");
   });
 
@@ -103,25 +104,24 @@ describe("parseOperatorDecision", () => {
     expect(d.binds[0].line).not.toContain("ghp_" + "a".repeat(36));
   });
 
-  it("another tool, prose, or an empty decision each refuse with what came back", () => {
-    expect(parseOperatorDecision({ tool: "route", input: {} }).kind).toBe("refusal");
-    expect(parseOperatorDecision("sure, I will run that for you").kind).toBe("refusal");
-    expect(parseOperatorDecision({ tool: OPERATOR_TOOL_NAME, input: { reason: "hm" } }).kind).toBe("refusal");
+  it("another tool, prose, or an empty decision is a non_decision naming what came back", () => {
+    expect(parseOperatorDecision({ tool: "route", input: {} }).kind).toBe("non_decision");
+    expect(parseOperatorDecision("sure, I will run that for you").kind).toBe("non_decision");
+    expect(parseOperatorDecision({ tool: OPERATOR_TOOL_NAME, input: { reason: "hm" } }).kind).toBe("non_decision");
   });
 
-  it("a refusal the parse produced is marked fallback — never the model's decision — and a model-authored refusal is not", () => {
+  it("a shape the parse refused is a non_decision — never the model's decision — and a model-authored refusal is a refusal", () => {
     const parsed = parseOperatorDecision("sure, I will run that for you");
-    expect(parsed).toMatchObject({ kind: "refusal", fallback: true });
+    expect(parsed).toMatchObject({ kind: "non_decision" });
     const authored = parseOperatorDecision({
       tool: OPERATOR_TOOL_NAME,
       input: { reason: "forbidden", refusal: { cause: "policy", text: "guests may not steer runs" } },
     });
     if (authored.kind !== "refusal") throw new Error("not a refusal");
-    expect(authored.fallback).toBeUndefined();
-    // The event carries the mark: the dispatcher's `on` branch reads it to fall
-    // back to the readers' route instead of rendering the seam's own refusal.
-    expect(operatorEventOf("on", { decision: parsed, latencyMs: 1, outputTokens: 1 }).fallback).toBe(true);
-    expect(operatorEventOf("on", { decision: authored, latencyMs: 1, outputTokens: 1 }).fallback).toBeUndefined();
+    // The event carries the outcome: the dispatcher's `on` branch reads
+    // `non_decision` to fall back to the readers' route, never a rendered line.
+    expect(operatorEventOf("on", { decision: parsed, latencyMs: 1, outputTokens: 1 }).outcome).toBe("non_decision");
+    expect(operatorEventOf("on", { decision: authored, latencyMs: 1, outputTokens: 1 }).outcome).toBe("refusal");
   });
 });
 
@@ -217,14 +217,119 @@ describe("runOperator", () => {
     expect(answer.outputTokens).toBeGreaterThan(0);
   });
 
-  it("a model that throws is a request refusal naming the failure, never a thrown error", async () => {
+  it("a model that throws is a non_decision naming the failure — never a thrown error, and never a re-ask", async () => {
+    let calls = 0;
     const answer = await runOperator(input(), async () => {
+      calls++;
       throw new Error("provider down");
     });
-    // The seam failed, so the refusal is marked fallback: under `on` the
-    // dispatcher falls back to the readers' route instead of rendering it.
-    expect(answer.decision).toMatchObject({ kind: "refusal", cause: "request", fallback: true });
-    if (answer.decision.kind === "refusal") expect(answer.decision.text).toContain("provider down");
+    // The call failed, so under `on` the dispatcher falls back to the readers'
+    // route instead of rendering anything; there was no answer to quote back.
+    expect(answer.decision).toMatchObject({ kind: "non_decision" });
+    expect(answer.decision.reason).toContain("provider down");
+    expect(answer.attempts).toBeUndefined();
+    expect(calls).toBe(1);
+  });
+
+  it("a violation whose re-ask then throws: a non_decision naming the failure, the collected attempt kept on the answer", async () => {
+    let calls = 0;
+    const answer = await runOperator(input(), async () => {
+      calls++;
+      if (calls === 1) return "prose, not a call";
+      throw new Error("the re-ask timed out");
+    });
+    expect(calls).toBe(2);
+    expect(answer.decision).toMatchObject({ kind: "non_decision" });
+    expect(answer.decision.reason).toContain("the re-ask timed out");
+    // The violation already collected — the re-ask the record exists to show —
+    // rides the event instead of being discarded with the throw.
+    expect(answer.attempts).toEqual([
+      { outcome: "violation", violation: "not a single JSON object: prose, not a call" },
+    ]);
+  });
+
+  it("the right call first: one attempt on the event, no re-ask", async () => {
+    const prompts: RoutePrompt[] = [];
+    const answer = await runOperator(input(), async (prompt) => {
+      prompts.push(prompt);
+      return { tool: OPERATOR_TOOL_NAME, input: { reason: "one ask", binds: [{ line: "runs list", reason: "it" }] } };
+    });
+    expect(answer.decision.kind).toBe("binds");
+    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]!.retries).toBeUndefined();
+  });
+
+  it("the wrong tool, then the right call: one re-ask naming both tools, the decision as a first-ask decision would run, two attempts on the event", async () => {
+    const prompts: RoutePrompt[] = [];
+    const answers: (RouteToolCall | string)[] = [
+      { tool: "route", input: { preset: "general" } },
+      { tool: OPERATOR_TOOL_NAME, input: { reason: "one ask", binds: [{ line: "runs list", reason: "it" }] } },
+    ];
+    const answer = await runOperator(input(), async (prompt) => {
+      prompts.push(prompt);
+      return answers.shift()!;
+    });
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ line: "runs list", reason: "it" }] });
+    expect(answer.attempts).toEqual([
+      { outcome: "violation", violation: 'the operator called tool "route", not decide' },
+      { outcome: "accepted" },
+    ]);
+    // The re-ask's user turn carries the parser's violation line verbatim,
+    // with the operator's noun and tool name interpolated (record 0067).
+    expect(prompts[1]!.retries).toEqual([
+      {
+        answer: JSON.stringify({ tool: "route", input: { preset: "general" } }),
+        violation:
+          'your answer was not a decision: the operator called tool "route", not decide; answer with the decide tool only',
+      },
+    ]);
+  });
+
+  it("prose three times: the floor is a non_decision — the readers' route, never a rendered refusal — with three attempts on the event", async () => {
+    let calls = 0;
+    const answer = await runOperator(input(), async () => {
+      calls++;
+      return "sure, I will run that for you";
+    });
+    expect(calls).toBe(3);
+    expect(answer.decision).toMatchObject({ kind: "non_decision" });
+    expect(answer.attempts).toHaveLength(3);
+    expect(answer.attempts!.every((a) => a.outcome === "violation")).toBe(true);
+    const event = operatorEventOf("on", answer);
+    expect(event.outcome).toBe("non_decision");
+    expect(event.attempts).toHaveLength(3);
+    // Nothing of the floor is a person's sentence: no refusal text rides it.
+    expect(event.refusalText).toBeUndefined();
+  });
+
+  it("a missing field: the re-ask's user turn carries the parser's violation line verbatim", async () => {
+    const prompts: RoutePrompt[] = [];
+    const answers: (RouteToolCall | string)[] = [
+      { tool: OPERATOR_TOOL_NAME, input: { reason: "hm" } },
+      { tool: OPERATOR_TOOL_NAME, input: { reason: "one ask", binds: [{ line: "runs list", reason: "it" }] } },
+    ];
+    await runOperator(input(), async (prompt) => {
+      prompts.push(prompt);
+      return answers.shift()!;
+    });
+    expect(prompts[1]!.retries?.[0]?.violation).toBe(
+      "your answer was not a decision: neither binds, a question nor a refusal; answer with the decide tool only",
+    );
+  });
+
+  it("a model-authored refusal (a real decision) is never re-asked and never floored", async () => {
+    let calls = 0;
+    const answer = await runOperator(input(), async () => {
+      calls++;
+      return {
+        tool: OPERATOR_TOOL_NAME,
+        input: { reason: "forbidden", refusal: { cause: "policy", text: "guests may not steer runs" } },
+      };
+    });
+    expect(calls).toBe(1);
+    expect(answer.decision).toMatchObject({ kind: "refusal", cause: "policy", text: "guests may not steer runs" });
+    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
   });
 });
 
@@ -301,7 +406,7 @@ describe("verifyOperatorBind — one fast-tier call over the author's turns and 
       return { tool: "verify", input: { agrees: true, reason: "the turns ask for it" } };
     };
     const verdict = await verifyOperatorBind(["user: set my agent to review"], "config set me --agent review", model);
-    expect(verdict).toEqual({ agrees: true, reason: "the turns ask for it" });
+    expect(verdict).toEqual({ agrees: true, reason: "the turns ask for it", attempts: [{ outcome: "accepted" }] });
     expect(calls[0]!.user).toContain("<request>\nuser: set my agent to review\n</request>");
     expect(calls[0]!.user).toContain("The line bound to them: config set me --agent review");
   });
@@ -312,6 +417,31 @@ describe("verifyOperatorBind — one fast-tier call over the author's turns and 
     });
     expect(verdict.agrees).toBe(false);
     expect(verdict.reason).toContain("provider down");
+  });
+
+  it("prose three times: the floor is a disagreement naming the last violation, three attempts, never an agreement", async () => {
+    let calls = 0;
+    const verdict = await verifyOperatorBind(["hi"], "config set me --agent review", async () => {
+      calls++;
+      return "looks fine to me";
+    });
+    expect(calls).toBe(3);
+    expect(verdict.agrees).toBe(false);
+    expect(verdict.reason).toContain("not a single JSON object");
+    expect(verdict.attempts).toHaveLength(3);
+  });
+
+  it("a wrong tool, then the right call: one re-ask, the verdict accepted, two attempts", async () => {
+    const answers: (RouteToolCall | string)[] = [
+      { tool: "decide", input: {} },
+      { tool: "verify", input: { agrees: false, reason: "the line drops the value" } },
+    ];
+    const verdict = await verifyOperatorBind(["hi"], "config set me --agent review", async () => answers.shift()!);
+    expect(verdict).toMatchObject({ agrees: false, reason: "the line drops the value" });
+    expect(verdict.attempts).toEqual([
+      { outcome: "violation", violation: 'verifier called tool "decide", not verify' },
+      { outcome: "accepted" },
+    ]);
   });
 });
 

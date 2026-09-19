@@ -287,6 +287,9 @@ export interface IntakeReceipt {
   verdict: "addressed" | "silent";
   reason: string;
   source: "model" | "mode" | "error" | "timeout";
+  /** The structured seam's attempts (docs/decisions/0067): what each answer
+   *  violated, or that it was accepted; absent when no model was asked. */
+  attempts?: ReadonlyArray<{ outcome: "accepted" | "violation"; violation?: string }>;
   mode: "mention" | "classify";
   /** The `<provider>/<model>` ref the verdict ran on. */
   model: string;

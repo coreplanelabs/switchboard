@@ -392,9 +392,10 @@ export function callsInFlight(events: readonly RunEvent[], status: RunStatus): C
   return [...calls.values()].filter((c) => c.state === "cut" || (c.state === "open" && !orderly)).map((c) => c.call);
 }
 
-/** The router's decision as a record carries it — the same fields the
- *  `route` event and the ledger row's `meta.route` carry (routing-and-config
- *  item 21). */
+/** The router's decision as a record carries it — the fields the `route`
+ *  event and the ledger row's `meta.route` carry (routing-and-config item 21),
+ *  minus the event's `attempts` (record 0067): the record keeps the decision,
+ *  the re-asks stay on the event. */
 export interface RunRouteDecision {
   preset: string;
   reason: string;
@@ -425,7 +426,7 @@ export function routeOfEvents(events: readonly RunEvent[]): RunRouteDecision | u
  *  fields less the stream bookkeeping (record 0057; run-history item 60). */
 export interface RunOperatorDecision {
   mode: "shadow" | "on";
-  outcome: "binds" | "question" | "refusal";
+  outcome: "binds" | "question" | "refusal" | "non_decision";
   reason: string;
   binds?: { line: string; reason: string }[];
   question?: string;
@@ -433,6 +434,9 @@ export interface RunOperatorDecision {
   proposal?: string;
   refusalCause?: string;
   refusalText?: string;
+  /** The structured seam's attempts (record 0067): what each answer violated,
+   *  or that it was accepted. */
+  attempts?: { outcome: "accepted" | "violation"; violation?: string }[];
   intake?: { verdict: string; reason: string };
   latencyMs?: number;
   outputTokens?: number;
@@ -454,6 +458,14 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
     ...(e.proposal !== undefined ? { proposal: e.proposal } : {}),
     ...(e.refusalCause !== undefined ? { refusalCause: e.refusalCause } : {}),
     ...(e.refusalText !== undefined ? { refusalText: e.refusalText } : {}),
+    ...(e.attempts
+      ? {
+          attempts: e.attempts.map((a) => ({
+            outcome: a.outcome,
+            ...(a.violation !== undefined ? { violation: a.violation } : {}),
+          })),
+        }
+      : {}),
     ...(e.intake ? { intake: { verdict: e.intake.verdict, reason: e.intake.reason } } : {}),
     ...(e.latencyMs !== undefined ? { latencyMs: e.latencyMs } : {}),
     ...(e.outputTokens !== undefined ? { outputTokens: e.outputTokens } : {}),

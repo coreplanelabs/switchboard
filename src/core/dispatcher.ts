@@ -625,13 +625,14 @@ export async function dispatch(
       // the live run. Thread occupancy itself is untouched: one live run per
       // thread, and nothing here starts a rival in an occupied one.
       const live = operatorEvent ? admission.get(msg.threadKey) : undefined;
-      // A refusal the seam itself produced (`fallback: true` — a non-decision
-      // answer, a wrong tool, a transport failure) was never the model's
-      // decision: under `on` the event falls back to the readers' route — the
-      // route stage runs as under `off` — and the decision is recorded, its
-      // parse reason included, beside what then runs, exactly as a shadow row
-      // is. A model-authored refusal (a real decision) still renders here.
-      const operatorFellBack = operatorEvent?.outcome === "refusal" && operatorEvent.fallback === true;
+      // A `non_decision` is the structured seam's floor (record 0067) — an
+      // answer that was no decision after the bounded re-asks, or a transport
+      // failure — never the model's decision: under `on` the event falls back
+      // to the readers' route — the route stage runs as under `off` — and the
+      // decision is recorded, its attempts and last violation included, beside
+      // what then runs, exactly as a shadow row is. A model-authored refusal
+      // (a real decision) still renders here.
+      const operatorFellBack = operatorEvent?.outcome === "non_decision";
       if ((operatorMode === "shadow" || operatorFellBack) && operatorEvent && live?.runId !== undefined) {
         registry.publish(live.runId, { type: "operator", ...operatorEvent, at: clock() });
         operatorEvent = undefined;

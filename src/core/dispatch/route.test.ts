@@ -317,11 +317,63 @@ describe("route — the decision over a scripted model", () => {
     fallback: "general",
   };
 
-  it("accepts the scripted model's answer when it names an allowed preset", async () => {
+  it("accepts the scripted model's answer when it names an allowed preset — one attempt, no re-ask", async () => {
     const model = scripted(answer("review", "a pull request URL to judge"));
     const d = await route({ ...input, allowed: allNames }, model);
-    expect(d).toEqual({ preset: "review", reason: "a pull request URL to judge" });
+    expect(d).toEqual({ preset: "review", reason: "a pull request URL to judge", attempts: [{ outcome: "accepted" }] });
     expect(model.prompts).toHaveLength(1);
+    expect(model.prompts[0].retries).toBeUndefined();
+  });
+
+  it("prose then the right answer: one re-ask whose user turn names the violation verbatim, the second answer accepted, two attempts (record 0067)", async () => {
+    const prompts: RoutePrompt[] = [];
+    const answers = ["I would route this to review", answer("review", "a PR")];
+    const d = await route({ ...input, allowed: allNames }, async (p) => {
+      prompts.push(p);
+      return answers.shift()!;
+    });
+    expect(d.preset).toBe("review");
+    expect(d.attempts).toEqual([
+      { outcome: "violation", violation: "not a single JSON object: I would route this to review" },
+      { outcome: "accepted" },
+    ]);
+    expect(prompts[1]!.retries).toEqual([
+      {
+        answer: "I would route this to review",
+        violation:
+          "your answer was not a route: not a single JSON object: I would route this to review; answer with the route tool only",
+      },
+    ]);
+  });
+
+  it("prose three times: the floor — no route, the request runs on defaults.agent — with three attempts and the last violation as the reason (record 0067)", async () => {
+    let calls = 0;
+    const d = await route({ ...input, allowed: allNames }, async () => {
+      calls++;
+      return "no JSON from me";
+    });
+    expect(calls).toBe(3);
+    expect(d.preset).toBeUndefined();
+    expect(d.reason).toBe("not a single JSON object: no JSON from me");
+    expect(d.attempts).toHaveLength(3);
+    expect(d.attempts!.every((a) => a.outcome === "violation")).toBe(true);
+  });
+
+  it("a missing field is re-asked with the parser's violation line verbatim; a content refusal — a preset outside the allowlist — is a real answer, never re-asked", async () => {
+    const prompts: RoutePrompt[] = [];
+    const answers = [JSON.stringify({ reason: "hm" }), answer("review", "a PR")];
+    await route({ ...input, allowed: allNames }, async (p) => {
+      prompts.push(p);
+      return answers.shift()!;
+    });
+    expect(prompts[1]!.retries?.[0]?.violation).toBe(
+      'your answer was not a route: missing preset in the router\'s answer: {"reason":"hm"}; answer with the route tool only',
+    );
+    const outside = scripted(answer("coding", "a code change"));
+    const d = await route({ ...input, allowed: allNames }, outside);
+    expect(outside.prompts).toHaveLength(1);
+    expect(d.preset).toBeUndefined();
+    expect(d.attempts).toEqual([{ outcome: "accepted" }]);
   });
 
   it("shows the model only the presets the requester may run", async () => {
@@ -388,6 +440,7 @@ describe("route — the decision over a scripted model", () => {
       expect(await route({ ...input, text: control.text, allowed: allNames }, model)).toEqual({
         preset: "explore",
         reason: "a polling loop, read-only",
+        attempts: [{ outcome: "accepted" }],
       });
       const described = scripted(answer("ship", "a screenshot to post"));
       await route(
@@ -401,7 +454,11 @@ describe("route — the decision over a scripted model", () => {
     it("a requester whose allowlist lacks the holder falls through to the model, and the offered table carries no holder", async () => {
       const model = scripted(answer("general", "no file preset for this requester"));
       const d = await route({ ...input, text: "call attach_file on out/x.txt", allowed: ["general", "review"] }, model);
-      expect(d).toEqual({ preset: "general", reason: "no file preset for this requester" });
+      expect(d).toEqual({
+        preset: "general",
+        reason: "no file preset for this requester",
+        attempts: [{ outcome: "accepted" }],
+      });
       expect(model.prompts).toHaveLength(1);
       expect(model.prompts[0].system).not.toContain("attach_file");
     });
@@ -617,7 +674,7 @@ describe("providerRouteModel — the live seam over a provider", () => {
   it("through route(): the seam's call return routes as its input, and a call to a tool that is not the route tool is no route naming it", async () => {
     const input = { text: "x", recentDirectives: {}, presets, allowed: allNames, fallback: "general" };
     const d = await route(input, async () => ({ tool: ROUTE_TOOL_NAME, input: { preset: "general", reason: "q" } }));
-    expect(d).toEqual({ preset: "general", reason: "q" });
+    expect(d).toEqual({ preset: "general", reason: "q", attempts: [{ outcome: "accepted" }] });
     const other = await route(input, async () => ({ tool: "repo_test", input: {} }));
     expect(other.preset).toBeUndefined();
     expect(other.reason).toMatch(/repo_test/);
@@ -779,7 +836,12 @@ describe("routeRequest — the stage: when it runs, what always wins", () => {
     const out = await routeRequest(deps(YAML, model), ctx("default"));
     expect(out.kind).toBe("routed");
     if (out.kind !== "routed") throw new Error("unreachable");
-    expect(out.route).toEqual({ preset: "review", reason: "because", model: "anthropic/general-model" });
+    expect(out.route).toEqual({
+      preset: "review",
+      reason: "because",
+      model: "anthropic/general-model",
+      attempts: [{ outcome: "accepted" }],
+    });
     expect(model.prompts).toHaveLength(1);
     const named = scripted(answer("review"));
     const onModel = await routeRequest(deps(YAML + "routing:\n  model: anthropic/fast-model\n", named), ctx("default"));
@@ -818,6 +880,7 @@ describe("routeRequest — the stage: when it runs, what always wins", () => {
       preset: "review",
       reason: "a PR",
       model: "anthropic/general-model",
+      attempts: [{ outcome: "accepted" }],
     });
   });
 
@@ -844,7 +907,12 @@ describe("routeRequest — the stage: when it runs, what always wins", () => {
     if (out.kind !== "routed") return;
     expect(out.resolved.agentName).toBe("review");
     expect(out.resolved.modelRef).toBe("anthropic/review-model");
-    expect(out.route).toEqual({ preset: "review", reason: "a PR URL", model: "anthropic/general-model" });
+    expect(out.route).toEqual({
+      preset: "review",
+      reason: "a PR URL",
+      model: "anthropic/general-model",
+      attempts: [{ outcome: "accepted" }],
+    });
   });
 
   it("the requester's allowlist bounds the answer: a restricted preset the requester may not run is no route", async () => {
@@ -1358,7 +1426,12 @@ describe("route — the compound decision over a scripted model", () => {
   it("with the offer the prompt describes the form and a compound answer is the decision", async () => {
     const model = scripted(compound(TWO_PARTS));
     const d = await route({ ...input, allowed: allNames, compound: OFFER }, model);
-    expect(d).toEqual({ preset: "conductor", reason: "two independent asks", parts: TWO_PARTS });
+    expect(d).toEqual({
+      preset: "conductor",
+      reason: "two independent asks",
+      parts: TWO_PARTS,
+      attempts: [{ outcome: "accepted" }],
+    });
     expect(model.prompts[0].system).toContain("At most 3 parts");
   });
 
@@ -1383,7 +1456,12 @@ describe("route — the compound decision over a scripted model", () => {
       compound([TWO_PARTS[0], { text: "fix the flaky test", preset: "ship" }], "a review and a fix"),
     );
     const d = await route({ ...input, allowed: allNames, compound: OFFER }, model);
-    expect(d).toEqual({ preset: "ship", reason: "a review and a fix", collapsed: { presets: ["review", "ship"] } });
+    expect(d).toEqual({
+      preset: "ship",
+      reason: "a review and a fix",
+      collapsed: { presets: ["review", "ship"] },
+      attempts: [{ outcome: "accepted" }],
+    });
     expect(model.prompts[0].system).toMatch(/an ask that needs `ship` is never a part/i);
   });
 
@@ -1462,6 +1540,7 @@ describe("routeRequest — a compound route resolves the conductor, a rejected o
         { text: "review https://github.com/acme/api/pull/7", preset: "review" },
         { text: "find out why the staging resident went down last night", preset: "general" },
       ],
+      attempts: [{ outcome: "accepted" }],
     });
     expect(model.prompts[0].system).toContain("At most 3 parts");
     const three = [...TWO_PARTS, { text: "what is a Durable Object", preset: "general" }];
@@ -1475,6 +1554,7 @@ describe("routeRequest — a compound route resolves the conductor, a rejected o
         preset: "general",
         reason: "compound_rejected: 3 parts; spawn.maxChildren is 2",
         model: "anthropic/general-model",
+        attempts: [{ outcome: "accepted" }],
       },
     });
   });
@@ -1489,6 +1569,7 @@ describe("routeRequest — a compound route resolves the conductor, a rejected o
         preset: "general",
         reason: "compound_rejected: the compound form was not offered",
         model: "anthropic/general-model",
+        attempts: [{ outcome: "accepted" }],
       },
     });
     expect(model.prompts[0].system).not.toMatch(/compound/i);
@@ -1530,6 +1611,7 @@ describe("routeRequest — a compound route resolves the conductor, a rejected o
       reason: "a review and a fix",
       model: "anthropic/general-model",
       collapsed: { presets: ["review", "ship"] },
+      attempts: [{ outcome: "accepted" }],
     });
   });
 });
@@ -1731,6 +1813,7 @@ describe("the command menu — every chat command as a tool beside route (record
         id: "config.set",
         input: { args: ["channel"], options: { models: { coding: "anthropic/claude-opus-5" } } },
       },
+      attempts: [{ outcome: "accepted" }],
     });
     expect(seen).toBe(
       routeMaxOutputTokens(
@@ -1766,6 +1849,7 @@ describe("the command menu — every chat command as a tool beside route (record
       preset: undefined,
       reason: "command config.set",
       command: { id: "config.set", input: { args: [undefined], options: {} } },
+      attempts: [{ outcome: "accepted" }],
     });
   });
 
