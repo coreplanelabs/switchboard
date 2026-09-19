@@ -880,8 +880,13 @@ export function createLiveViewHandler(
         // the instance's units. Both under the viewer's predicate; a live
         // child keeps its token as an index row does.
         const visibleTo = readableRuns(actor);
-        const meta = events.find((e) => e.type === "run_meta");
-        const instanceId = meta?.type === "run_meta" ? meta.instanceId : undefined;
+        // A hosted parent's stream carries a second `run_meta` naming its
+        // instance at the hand-off (record 0060): the LAST one carrying an
+        // id is the fact every reader resolves.
+        const instanceId = events.reduce<string | undefined>(
+          (found, e) => (e.type === "run_meta" && e.instanceId !== undefined ? e.instanceId : found),
+          undefined,
+        );
         // The pull request this record names (`pullRequestNumberOf`, run-history
         // item 58): its findings ledger's unit page is linked when the viewer
         // may read the ledger and a unit row names the pull request (agent-ship item 18).

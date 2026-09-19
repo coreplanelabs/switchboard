@@ -820,6 +820,10 @@ export async function runBot(): Promise<void> {
         ? { runPageBase: `${process.env.PUBLIC_BASE_URL.trim().replace(/\/+$/, "")}/runs` }
         : {}),
       runs: runsService,
+      // The hosted parent's write door (record 0060): the runner's routes
+      // publish to the parent's registry row and renew its ledger deadline.
+      registry: defaultRunRegistry,
+      ledgerRuns: () => runLedger.liveRuns(),
       dispatch: (msg, io, opts) => dispatch(deps, msg, io, opts),
       ioFor: (thread) => threadIoFor(thread),
       findOpenPrByHead,

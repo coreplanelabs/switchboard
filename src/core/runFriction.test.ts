@@ -707,6 +707,24 @@ describe("analyzeRunFriction — ship_round is a side fact, invisible to frictio
     expect(b.findings).toEqual(a.findings);
     expect(b.runMs).toBe(a.runMs);
   });
+
+  // Record 0060 — the hosted parent's `ship_unit` facts are written by the
+  // runner's routes, not the model: side facts like ship_round, never activity.
+  it("the diagnosis is identical with or without ship_unit facts — the analyzer ignores them as activity", () => {
+    const withUnits: RunEvent[] = [
+      base[0],
+      { type: "ship_unit", unit: "U16", state: "started", threadKey: "slack:C1:2.0", lead: "↳ unit U16", at: T0 + 400 },
+      ...base.slice(1, 3),
+      { type: "ship_unit", unit: "U16", state: "merge_ready", report: "✅ ready", pr: 7, at: T0 + 3600 },
+      base[3],
+    ];
+    const a = analyzeRunFriction(base, { finished: true });
+    const b = analyzeRunFriction(withUnits, { finished: true });
+    expect(b.eventCount).toBe(a.eventCount);
+    expect(b.toolCalls).toBe(a.toolCalls);
+    expect(b.findings).toEqual(a.findings);
+    expect(b.runMs).toBe(a.runMs);
+  });
 });
 
 // Feature: docs/reference/specs/tracing.md — reader tolerance: span records on the stream

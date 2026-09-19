@@ -1217,3 +1217,44 @@ describe("span set and losses (the timeline's inputs)", () => {
     expect(m.state.traceVersion).toBe(5);
   });
 });
+
+// Feature: docs/reference/specs/live-view.md item 28; record 0060 — the
+// hosted ship parent's `ship_unit` facts draw as steps on its run page: the
+// unit and its state head the row, the ending's report (else the thread's
+// lead) is the step's prose detail.
+describe("ship_unit — the hosted parent's unit facts draw as steps (record 0060)", () => {
+  it("draws a ship_unit step whose detail is the report", () => {
+    const m = model();
+    m.handle({ type: "run_meta", agent: "ship", model: "anthropic/m", at: 1000, seq: 1 });
+    m.handle({
+      type: "ship_unit",
+      unit: "U16",
+      state: "started",
+      threadKey: "web:s:c9",
+      lead: "↳ ship unit U16 — hostPublish",
+      at: 2000,
+      seq: 2,
+    });
+    m.handle({ type: "ship_unit", unit: "U16", state: "pr_opened", threadKey: "web:s:c9", pr: 7, at: 3000, seq: 3 });
+    m.handle({
+      type: "ship_unit",
+      unit: "U16",
+      state: "merge_ready",
+      report: "✅ Merge-ready after 1 review round",
+      pr: 7,
+      at: 4000,
+      seq: 4,
+    });
+    const steps = m.state.log.filter((l): l is StepVm => l.kind === "step");
+    expect(steps).toHaveLength(3);
+    expect(steps[0].narration).toContain("U16 · started");
+    expect(steps[0].narration).toContain("↳ ship unit U16 — hostPublish"); // the lead details the start
+    expect(steps[0].at).toBe(2000);
+    expect(steps[1].narration).toContain("U16 · pr_opened");
+    expect(steps[2].narration).toContain("U16 · merge_ready");
+    expect(steps[2].narration).toContain("✅ Merge-ready after 1 review round"); // the report is the detail
+    // A malformed fact (no unit or state) draws nothing.
+    m.handle({ type: "ship_unit", unit: "U16", at: 5000, seq: 5 });
+    expect(m.state.log.filter((l) => l.kind === "step")).toHaveLength(3);
+  });
+});
