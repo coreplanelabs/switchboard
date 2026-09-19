@@ -56,8 +56,9 @@ export interface RunSummary {
    *  a glance answers "what step is it on" without opening the run. */
   activity?: string;
   /** The stall signal's pace facts (live-view item 32), LIVE rows only — all
-   *  absent once the run finishes, and on a row an older writer built, so no
-   *  reader mistakes a missing signal for a stall. `eventsLast5m`: content
+   *  absent once the run finishes, on a hosted ship parent (a coordinator
+   *  makes no tool calls, so its quiet is not a stall), and on a row an older
+   *  writer built, so no reader mistakes a missing signal for a stall. `eventsLast5m`: content
    *  events published in the last five minutes, counted when this summary was
    *  built; `lastToolCallAt`: the newest `tool_call`'s clock stamp;
    *  `inFlight`: the call without a result yet, with the bound it declared. */
@@ -173,8 +174,10 @@ export function summaryOf(run: RunState, now: number): RunSummary {
     schema: SPAN_SCHEMA, // a registry run is this runner's: spans carry its timing
     ...(run.activity !== undefined ? { activity: run.activity } : {}),
     // The stall signal's pace facts (item 32): live rows only — a finished row
-    // has no pace to misread.
-    ...(run.finished
+    // has no pace to misread — and never a hosted ship parent (record 0060):
+    // it is a coordinator, not a model loop, so it makes no tool calls and its
+    // quiet must not read as a stall.
+    ...(run.finished || m?.hosted
       ? {}
       : {
           eventsLast5m: eventsInWindow(run.paceEventAts, now),
