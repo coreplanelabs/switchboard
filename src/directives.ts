@@ -1,14 +1,24 @@
-import { refusalOf, RefusalError } from "./core/refusal.js";
 import { AGENTS } from "./agents/registry.js";
 import { MIN_BOUNDARY_MINUTES } from "./config/validate.js";
 import { GRANT_RENEWALS_MAX } from "./core/budgets.js";
-import { EFFORT_LEVELS_HINT, isEffort, type Effort } from "./effort.js";
-import { ADDRESS_SEVERITIES, isAddressSeverity, type AddressSeverity } from "./core/shipPipeline.js";
-import { isVerbosity, VERBOSITY_LEVELS_HINT, type Verbosity } from "./core/verbosity.js";
+import { isEffort, type Effort } from "./effort.js";
+import { isAddressSeverity, type AddressSeverity } from "./core/shipPipeline.js";
+import { isVerbosity, type Verbosity } from "./core/verbosity.js";
 
-// Per-request directives are inline tokens at the start (or anywhere) in the
-// message:  "@switchboard agent:review model:openai/gpt-5 effort:low budget:30 look at the failing test"
+// Per-request directives are inline tokens in the message:
+//   "@switchboard agent:review model:openai/gpt-5 effort:low budget:30 look at the failing test"
 // Recognized keys: agent, model, effort, budget, severity, renewals, verbosity. Unknown keys are left in the text untouched.
+//
+// The interim grammar until record 0057 removes directive syntax from the chat
+// surfaces: `agent:` is a directive only where a command would
+// be — the head of the message, its first token once the mention is stripped —
+// because prose ABOUT the system quotes it mid-sentence ("…the next agent:ship
+// in the thread claims the host key") and a steer refused for that read is
+// silent to the run it addressed. Every other key keeps the anywhere rule,
+// since review asks carry `severity:` at the tail. And a token whose value is
+// not in its key's vocabulary is text, never a refusal of the whole message: a
+// quoted `severity:major"` (stray quote included) must not sink the ask that
+// carries it.
 
 export interface RequestDirectives {
   agent?: string;
@@ -50,7 +60,10 @@ export interface ThreadDirectives {
   verbosity?: Verbosity;
 }
 
-const DIRECTIVE_RE = /(?:^|\s)(agent|model|effort|budget|severity|renewals|verbosity)[:=](\S+)/g;
+/** Every directive key but `agent`, anywhere in the text. */
+const DIRECTIVE_RE = /(?:^|\s)(model|effort|budget|severity|renewals|verbosity)[:=](\S+)/g;
+/** `agent:` binds only at the head: the first token of the text. */
+const HEAD_AGENT_RE = /^\s*agent[:=](\S+)/;
 
 /** `budget:<minutes>` takes a whole number of minutes, at least the boundary
  *  minimum (the bash tool keeps a 60-second reserve, so a shorter run could
@@ -68,10 +81,10 @@ function parseBudgetMinutes(value: string): number | undefined {
  * default. The agent is not read here: a thread's agent is the one whose
  * transcript it holds (`stickyAgentOf`), so an `agent:` token in the history
  * is skipped — it named the run it rode on, and that run's session is what
- * carries the agent forward. Lenient where parseDirectives is strict: history
- * is data being scanned, not a command being executed, so malformed or
- * unknown values are skipped, never thrown. A `budget:` in the history is
- * skipped on purpose: it bounded the run it rode on and nothing after it.
+ * carries the agent forward. Malformed or unknown values are skipped, never
+ * thrown — the same fall-back-to-text rule `parseDirectives` applies. A
+ * `budget:` in the history is skipped on purpose: it bounded the run it rode
+ * on and nothing after it.
  */
 export function lastThreadDirectives(history: Array<{ role: string; text: string }>): ThreadDirectives {
   const out: ThreadDirectives = {};
@@ -87,86 +100,60 @@ export function lastThreadDirectives(history: Array<{ role: string; text: string
 }
 
 /**
- * The text with every directive token removed and nothing else judged —
- * lenient like `lastThreadDirectives`, for text that is data rather than a
- * command: the replay harness hides the `agent:` a requester typed before it
- * asks the router, whatever else the token said. Whitespace collapses as in
- * `parseDirectives`, so the two agree on a message with no directives.
+ * The text with every directive token removed and nothing else judged — for
+ * text that is data rather than a command: the replay harness hides the
+ * `agent:` a requester typed before it asks the router, whatever else the
+ * token said. One scanner with `parseDirectives`, so the two agree on the
+ * boundary: a head `agent:`, an anywhere token with a value in its
+ * vocabulary, and nothing else.
  */
 export function stripDirectiveTokens(input: string): string {
-  return input.replace(DIRECTIVE_RE, " ").replace(/\s+/g, " ").trim();
+  return parseDirectives(input).text;
+}
+
+/** `renewals:<count>` takes a whole number from 0 to the module's ceiling.
+ *  Undefined for anything else. */
+function parseRenewals(value: string): number | undefined {
+  if (!/^\d+$/.test(value)) return undefined;
+  const count = Number(value);
+  return count <= GRANT_RENEWALS_MAX ? count : undefined;
 }
 
 export function parseDirectives(input: string): RequestDirectives {
   const out: RequestDirectives = { text: input };
-  const found: Array<{ key: string; value: string; match: string }> = [];
+  let text = input;
 
-  for (const m of input.matchAll(DIRECTIVE_RE)) {
-    found.push({ key: m[1], value: m[2], match: m[0] });
+  // `agent:` binds only at the head, and only a registered agent binds: an
+  // unknown name is someone's prose, not a command to refuse.
+  const head = HEAD_AGENT_RE.exec(input);
+  if (head !== null && AGENTS[head[1]] !== undefined) {
+    out.agent = head[1];
+    text = text.replace(head[0], " ");
   }
 
-  let text = input;
-  for (const f of found) {
-    if (f.key === "agent") {
-      if (!AGENTS[f.value]) {
-        throw new RefusalError(
-          refusalOf("directive_agent", `Unknown agent "${f.value}". Available: ${Object.keys(AGENTS).join(", ")}`),
-        );
-      }
-      out.agent = f.value;
-    } else if (f.key === "model") {
-      out.model = f.value;
-    } else if (f.key === "effort") {
-      if (!isEffort(f.value)) {
-        throw new RefusalError(
-          refusalOf("directive_effort", `Unknown effort "${f.value}". Valid: ${EFFORT_LEVELS_HINT}`),
-        );
-      }
-      out.effort = f.value;
-    } else if (f.key === "budget") {
-      const minutes = parseBudgetMinutes(f.value);
-      if (minutes === undefined) {
-        throw new RefusalError(
-          refusalOf(
-            "directive_budget",
-            `Invalid budget "${f.value}": budget:<minutes> takes a whole number of minutes, at least ${MIN_BOUNDARY_MINUTES} (e.g. budget:30). It narrows this run's wall clock and never widens it.`,
-          ),
-        );
-      }
+  for (const m of input.matchAll(DIRECTIVE_RE)) {
+    const [token, key, value] = m;
+    if (key === "model") {
+      out.model = value; // no vocabulary: unknown models pass through and the provider errors
+    } else if (key === "effort") {
+      if (!isEffort(value)) continue;
+      out.effort = value;
+    } else if (key === "budget") {
+      const minutes = parseBudgetMinutes(value);
+      if (minutes === undefined) continue;
       out.budget = minutes;
-    } else if (f.key === "severity") {
-      if (!isAddressSeverity(f.value)) {
-        throw new RefusalError(
-          refusalOf(
-            "directive_severity",
-            `Unknown severity "${f.value}". severity:<level> takes one of ${ADDRESS_SEVERITIES.join(", ")} — the severity to address: a review's approve carrying a finding at or above it is a request_changes.`,
-          ),
-        );
-      }
-      out.severity = f.value;
-    } else if (f.key === "renewals") {
-      const count = /^\d+$/.test(f.value) ? Number(f.value) : undefined;
-      if (count === undefined || count > GRANT_RENEWALS_MAX) {
-        throw new RefusalError(
-          refusalOf(
-            "directive_renewals",
-            `Invalid renewals "${f.value}": renewals:<count> takes a whole number from 0 to ${GRANT_RENEWALS_MAX} — the segments agent:ship may add after its first lease.`,
-          ),
-        );
-      }
+    } else if (key === "severity") {
+      if (!isAddressSeverity(value)) continue;
+      out.severity = value;
+    } else if (key === "renewals") {
+      const count = parseRenewals(value);
+      if (count === undefined) continue;
       out.renewals = count;
-    } else if (f.key === "verbosity") {
-      if (!isVerbosity(f.value)) {
-        throw new RefusalError(
-          refusalOf(
-            "directive_verbosity",
-            `Unknown verbosity "${f.value}". verbosity:<level> takes one of ${VERBOSITY_LEVELS_HINT} — how much of itself the bot says in this thread.`,
-          ),
-        );
-      }
-      out.verbosity = f.value;
+    } else {
+      if (!isVerbosity(value)) continue;
+      out.verbosity = value;
     }
-    text = text.replace(f.match, " ");
+    text = text.replace(token, " ");
   }
   out.text = text.replace(/\s+/g, " ").trim();
   return out;

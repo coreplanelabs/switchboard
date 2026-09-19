@@ -6828,7 +6828,7 @@ channels:
     expect(provider.requests[0].system).toContain("A `effort:low` directive earlier in this thread");
   });
 
-  it("an unset effort leaves the provider request without one (the agent/provider default), and bad values are refused inline", async () => {
+  it("an unset effort leaves the provider request without one (the agent/provider default), and an unknown effort token is text, not a refusal", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     await dispatch(deps, msg("hello"), fakeIO().io);
@@ -6838,9 +6838,12 @@ channels:
     expect(replies[0]).toBe('⚠️ `config set`: effort: expected one of "low", "medium", "high", "xhigh", "max"');
     await dispatch(deps, msg("config set me --efforts.nope low"), io);
     expect(replies[1]).toMatch(/^⚠️ `config set`: efforts\.nope: expected an agent name \(one of /);
+    // A token whose value is outside its vocabulary is text (the interim
+    // directive grammar, src/directives.ts) — the
+    // run proceeds with no effort and the token kept in what the model reads.
     await dispatch(deps, msg("effort:turbo hi"), io);
-    expect(replies[2]).toMatch(/Unknown effort "turbo"/);
-    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests[1].effort).toBeUndefined();
   });
 
   it("a channel-forced agent is reported as a channel override with the agent that actually ran", async () => {
@@ -13854,18 +13857,19 @@ workspaceDir: __WORKDIR__
     });
   });
 
-  it("`budget:1` is refused inline naming the rule — no card, no model call, no executor", async () => {
+  it("`budget:1` is text, not a refusal (the interim directive grammar): the run proceeds on the preset's own budget with the token in the task", async () => {
     recordingFetch();
     const provider = capturingProvider();
-    const { deps } = exploreDeps("run-bad", provider);
-    const { io, replies, statuses } = fakeIO();
+    const { deps, writer } = exploreDeps("run-bad", provider);
+    const { io } = fakeIO();
     await dispatch(deps, inChannel("CX", "agent:explore budget:1 in acme/api: time the suite"), io);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toMatch(/Invalid budget "1"/);
-    expect(replies[0]).toMatch(/budget:<minutes> takes a whole number of minutes, at least 2/);
-    expect(statuses).toEqual([]);
-    expect(provider.requests).toHaveLength(0);
-    expect(makeExecutor).not.toHaveBeenCalled();
+    await writer.settled();
+    expect(provider.requests).toHaveLength(1);
+    expect(vi.mocked(makeExecutor).mock.calls[0][1].profile).toEqual({
+      machine: "repo-cold",
+      identity: "read",
+      minutes: 120,
+    });
   });
 });
 

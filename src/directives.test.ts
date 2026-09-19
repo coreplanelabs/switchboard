@@ -11,16 +11,30 @@ describe("parseDirectives", () => {
     expect(d.text).toBe("look at the failing test");
   });
 
-  it("accepts directives anywhere in the message", () => {
-    const d = parseDirectives("please agent:coding fix the bug model:anthropic/claude-opus-5 now");
-    expect(d.agent).toBe("coding");
+  it("accepts every directive but agent anywhere in the message", () => {
+    const d = parseDirectives("please fix the bug model:anthropic/claude-opus-5 now effort:low");
     expect(d.model).toBe("anthropic/claude-opus-5");
+    expect(d.effort).toBe("low");
     expect(d.text).toBe("please fix the bug now");
   });
 
-  it("throws on an unknown agent, naming the available ones", () => {
-    expect(() => parseDirectives("agent:nonsense hi")).toThrow(/Unknown agent "nonsense"/);
-    expect(() => parseDirectives("agent:nonsense hi")).toThrow(/general/);
+  // The interim grammar until record 0057 deletes the syntax:
+  // `agent:` is a directive only at the head of the message — prose ABOUT the
+  // system quotes the token mid-sentence, and that prose is text.
+  it("reads agent: only at the head of the message; inside prose the token is text", () => {
+    const head = parseDirectives("agent:ship fix the flaky suite");
+    expect(head.agent).toBe("ship");
+    expect(head.text).toBe("fix the flaky suite");
+    expect(parseDirectives("  agent=review look at this").agent).toBe("review");
+    const prose = parseDirectives("and the next agent:ship in the thread claims the host key");
+    expect(prose.agent).toBeUndefined();
+    expect(prose.text).toBe("and the next agent:ship in the thread claims the host key");
+  });
+
+  it("an unknown agent at the head is text, never a refusal", () => {
+    const d = parseDirectives("agent:nonsense hi");
+    expect(d.agent).toBeUndefined();
+    expect(d.text).toBe("agent:nonsense hi");
   });
 
   it("leaves messages without directives untouched", () => {
@@ -39,10 +53,10 @@ describe("parseDirectives — effort", () => {
     expect(d.text).toBe("fix the flaky test");
   });
 
-  it("rejects an unknown effort level, naming the valid ones", () => {
-    expect(() => parseDirectives("effort:turbo do it")).toThrow(
-      /Unknown effort "turbo".*low, medium, high, xhigh, max/,
-    );
+  it("an unknown effort level is text, never a refusal", () => {
+    const d = parseDirectives("effort:turbo do it");
+    expect(d.effort).toBeUndefined();
+    expect(d.text).toBe("effort:turbo do it");
   });
 
   it("is sticky in a thread like agent/model (user turns only, last wins, lenient)", () => {
@@ -67,8 +81,10 @@ describe("parseDirectives — verbosity", () => {
     expect(parseDirectives("plain ask").verbosity).toBeUndefined();
   });
 
-  it("rejects an unknown level, naming the three", () => {
-    expect(() => parseDirectives("verbosity:loud do it")).toThrow(/Unknown verbosity "loud".*quiet, verbose, debug/);
+  it("an unknown level is text, never a refusal", () => {
+    const d = parseDirectives("verbosity:loud do it");
+    expect(d.verbosity).toBeUndefined();
+    expect(d.text).toBe("verbosity:loud do it");
   });
 
   it("is sticky in a thread like effort (user turns only, last wins, lenient)", () => {
@@ -99,12 +115,11 @@ describe("parseDirectives — budget", () => {
     expect(parseDirectives("just a question").budget).toBeUndefined();
   });
 
-  it("refuses anything but a whole number of minutes of at least 2, naming the rule", () => {
+  it("anything but a whole number of minutes of at least 2 is text, never a refusal", () => {
     for (const bad of ["budget:1", "budget:0", "budget:abc", "budget:2.5", "budget:-5", "budget:30m"]) {
-      expect(() => parseDirectives(`${bad} do it`), bad).toThrow(
-        /budget:<minutes> takes a whole number of minutes, at least 2/,
-      );
-      expect(() => parseDirectives(`${bad} do it`), bad).toThrow(/Invalid budget "/);
+      const d = parseDirectives(`${bad} do it`);
+      expect(d.budget, bad).toBeUndefined();
+      expect(d.text, bad).toBe(`${bad} do it`);
     }
     expect(parseDirectives("budget:2 ok").budget).toBe(2);
   });
@@ -159,12 +174,15 @@ describe("lastThreadDirectives (thread stickiness)", () => {
 
 // routing-and-config item 21: the replay harness hides the directive a
 // requester typed before it asks the router what they meant.
-describe("stripDirectiveTokens (lenient: text as data)", () => {
-  it("removes every directive token — an unknown agent and a bad budget included — and collapses the whitespace", () => {
+describe("stripDirectiveTokens (text as data)", () => {
+  it("removes exactly what parseDirectives reads as a directive and collapses the whitespace", () => {
     expect(stripDirectiveTokens("agent:coding fix the  bug model:x/y")).toBe("fix the bug");
-    expect(stripDirectiveTokens("agent:nonesuch budget:0 effort=max hi")).toBe("hi");
     expect(stripDirectiveTokens("hello there")).toBe("hello there");
     expect(stripDirectiveTokens("agent:review")).toBe("");
+    // The same boundary as parseDirectives (the interim grammar): a mid-sentence
+    // agent token and a value outside its vocabulary are text, kept.
+    expect(stripDirectiveTokens("agent:nonesuch budget:0 effort=max hi")).toBe("agent:nonesuch budget:0 hi");
+    expect(stripDirectiveTokens("the next agent:ship claims the key")).toBe("the next agent:ship claims the key");
   });
 
   it("agrees with parseDirectives on a message that parses", () => {
@@ -174,11 +192,22 @@ describe("stripDirectiveTokens (lenient: text as data)", () => {
 });
 
 describe("severity:<level>", () => {
-  it("parses one of the ladder, strips the token, and refuses anything else by name", () => {
+  it("parses one of the ladder — at the tail too, where review asks carry it — and strips the token", () => {
     const d = parseDirectives("severity:major fix the flake");
     expect(d.severity).toBe("major");
     expect(d.text).toBe("fix the flake");
-    expect(() => parseDirectives("severity:huge fix it")).toThrow(/blocking, major, minor, nit/);
+    const tail = parseDirectives("please review the PR severity:major");
+    expect(tail.severity).toBe("major");
+    expect(tail.text).toBe("please review the PR");
+  });
+
+  // The refusal-at-parse defect, second occurrence: an ask whose prose quoted
+  // `severity:major"` (stray quote riding the token) was refused whole.
+  it("a value outside the ladder — a stray quote included — is text, never a refusal", () => {
+    const d = parseDirectives('the ask quoted "please review severity:major" and was refused');
+    expect(d.severity).toBeUndefined();
+    expect(d.text).toBe('the ask quoted "please review severity:major" and was refused');
+    expect(parseDirectives("severity:huge fix it").severity).toBeUndefined();
   });
 });
 
@@ -195,10 +224,11 @@ describe("parseDirectives — renewals", () => {
     expect(parseDirectives("just a question").renewals).toBeUndefined();
   });
 
-  it("refuses by name anything but a whole number within the ceiling", () => {
+  it("anything but a whole number within the ceiling is text, never a refusal", () => {
     for (const bad of ["renewals:13", "renewals:abc", "renewals:2.5", "renewals:-1", "renewals:3x"]) {
-      expect(() => parseDirectives(`${bad} do it`), bad).toThrow(/Invalid renewals "/);
-      expect(() => parseDirectives(`${bad} do it`), bad).toThrow(/renewals:<count> takes a whole number from 0 to 12/);
+      const d = parseDirectives(`${bad} do it`);
+      expect(d.renewals, bad).toBeUndefined();
+      expect(d.text, bad).toBe(`${bad} do it`);
     }
   });
 
