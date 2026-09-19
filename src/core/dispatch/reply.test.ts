@@ -372,7 +372,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       {
         code: "confirmation_expired",
         built: OFFER_EXPIRED_LINE,
-        quoted: "this offer expired; type the line to run it",
+        quoted: "this offer expired; its ten minutes passed — type the line to run it",
       },
       { code: "confirmation_foreign", built: OFFER_FOREIGN_LINE, quoted: "only the requester can confirm this" },
       { code: "confirmation_used", built: OFFER_USED_LINE, quoted: "this offer was already used" },
