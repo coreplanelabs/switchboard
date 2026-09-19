@@ -649,6 +649,9 @@ export async function dispatch(
         );
         if (execution.kind === "answered") return ended;
         operatorPreset = execution.preset;
+        // A command bind that ran before the preset already carries the
+        // decision's event on its record: the agent run does not repeat it.
+        if (execution.carried) operatorEvent = undefined;
       }
     }
 
@@ -1067,6 +1070,7 @@ export async function dispatch(
           shipHostedLive = true;
         },
         ...(route ? { route } : {}),
+        ...(operatorEvent ? { operator: operatorEvent } : {}),
       });
       shipHostedLive ||= branchEnd.hostedLive;
       return ended;
