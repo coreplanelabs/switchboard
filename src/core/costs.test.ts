@@ -1083,6 +1083,27 @@ describe("invoice sources per biller", () => {
     ).rejects.toThrow(/unexpected currency eur/);
   });
 
+  it("OpenAICostsSource skips a bucket whose start_time is missing, non-finite or out of range — never a 1970-01-01 day", async () => {
+    const results = [{ amount: { value: 9, currency: "usd" } }];
+    const f = fakeFetch(() => ({
+      status: 200,
+      body: {
+        data: [
+          {
+            start_time: Date.parse(`${SEP_17}T00:00:00Z`) / 1000,
+            results: [{ amount: { value: 1.5, currency: "usd" } }],
+          },
+          { results }, // no start_time — would otherwise date to epoch 0
+          { start_time: null, results }, // non-finite (what NaN serializes to)
+          { start_time: Date.parse(`${AUG_1}T00:00:00Z`) / 1000, results }, // out of range
+        ],
+        has_more: false,
+      },
+    }));
+    const src = new OpenAICostsSource({ biller: "openai", adminKey: "k", fetchImpl: f.fetchImpl });
+    expect(await src.fetchInvoice(RANGE_SEPT)).toEqual([{ date: SEP_17, usd: 1.5 }]);
+  });
+
   it("AnthropicCostReportSource.fetchInvoice sums the cost report's closed days across workspaces — the invoice, never the estimate", async () => {
     const f = fakeFetch((url) =>
       url.startsWith("https://api.anthropic.com/v1/organizations/cost_report")
@@ -1199,6 +1220,25 @@ describe("buildBillerTieOuts", () => {
     const cells = [cell(SEP_18, { "anthropic/claude-fable-5": model(null) })];
     const out = buildBillerTieOuts([{ name: "anthropic", invoice: true }], {}, cells, range);
     expect(out[0].days).toEqual([]);
+  });
+
+  it("an unpriced model's feeUsd is skipped with its usd — attributedUpstreamUsd never goes negative on an unpriced+fee row", () => {
+    const cells = [cell(SEP_18, { "openrouter/unpriced": model(null, 0.05), "openrouter/priced": model(0.55, 0.05) })];
+    const out = buildBillerTieOuts([{ name: "openrouter", invoice: true }], {}, cells, range);
+    expect(out[0].days[0]).toEqual({
+      date: SEP_18,
+      attributedUsd: 0.55,
+      attributedFeeUsd: 0.05,
+      attributedUpstreamUsd: 0.5,
+    });
+    // a day that is only unpriced+fee rows carries no figures at all and is dropped
+    const only = buildBillerTieOuts(
+      [{ name: "openrouter", invoice: true }],
+      {},
+      [cell(SEP_18, { "openrouter/unpriced": model(null, 0.05) })],
+      range,
+    );
+    expect(only[0].days).toEqual([]);
   });
 
   it("a biller without a source ties out against nothing (invoice: false, no invoice figures); a model whose usd is null or absent contributes nothing; days outside the range and refs without a block are dropped", () => {

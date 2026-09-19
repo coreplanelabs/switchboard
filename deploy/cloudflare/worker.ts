@@ -94,6 +94,8 @@ export interface Env {
   GITHUB_WEBHOOK_SECRET?: string; // check-run intake: signs POST /webhooks/github; absent, the intake answers 503 disabled
   CF_ANALYTICS_TOKEN?: string; // costs dash: Cloudflare API token, Account Analytics:Read only
   ANTHROPIC_ADMIN_KEY?: string; // costs dash (optional): Anthropic Admin API key for the LLM cost report
+  OPENROUTER_MANAGEMENT_KEY?: string; // costs dash (optional): OpenRouter management key for the openrouter biller's invoice tie-out
+  OPENAI_ADMIN_KEY?: string; // costs dash (optional): OpenAI admin key for the openai biller's invoice tie-out
   MEMORY_TOKEN?: string; // durable memory + friction ledger + schedule firings + MCP registry: bearer for the state Worker
   MCP_CREDENTIAL_KEY?: string; // MCP registry: the bot-only key that seals server credentials before they reach the McpDO
   MCP_ACCESS_CLIENT_ID?: string; // MCP servers behind Cloudflare Access: the service token's client id, named by a server's `headersEnv`
@@ -129,6 +131,8 @@ const FORWARDED_OPTIONAL = [
   "DASHBOARD_TOKEN",
   "CF_ANALYTICS_TOKEN",
   "ANTHROPIC_ADMIN_KEY",
+  "OPENROUTER_MANAGEMENT_KEY",
+  "OPENAI_ADMIN_KEY",
   "SWITCHBOARD_INGRESS_TOKENS",
   "BRAVE_SEARCH_API_KEY",
   "GITHUB_WEBHOOK_SECRET",
