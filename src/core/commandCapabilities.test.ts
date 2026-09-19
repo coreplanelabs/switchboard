@@ -65,6 +65,7 @@ const ids = (cmds: ReadonlyArray<{ id: string }>) => cmds.map((c) => c.id).sort(
 const GATES: Record<string, (c: Capabilities) => boolean> = {
   "memory.list": (c) => c.memory,
   "memory.forget": (c) => c.memory,
+  "memory.sweep": (c) => c.memory,
   "friction.report": (c) => c.runHistory,
   "friction.propose": (c) => c.runHistory,
   "runs.findings": (c) => c.runHistory,

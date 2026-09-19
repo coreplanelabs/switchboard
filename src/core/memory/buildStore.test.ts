@@ -41,7 +41,7 @@ describe("buildMemoryStore", () => {
     expect(store).toBeInstanceOf(WorkerMemoryStore);
   });
 
-  // Feature: docs/reference/specs/memory.md §29 — the cap is threaded into the store built here.
+  // Feature: docs/reference/specs/memory.md §31 — the cap is threaded into the store built here.
   it("threads memory.maxRecordsPerScope into the in-process store (a write past it evicts)", async () => {
     const store = buildMemoryStore({ enabled: true, maxRecordsPerScope: 1 }, secretsFrom({}), () => {})!;
     await store.write("org:acme", [{ kind: "fact", text: "first", sourceThreadKey: "slack:C1:1.0" }]);

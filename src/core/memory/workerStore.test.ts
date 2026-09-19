@@ -197,6 +197,38 @@ describe("WorkerMemoryStore.list / forget", () => {
   });
 });
 
+// Feature: docs/reference/specs/memory.md item 27 — the sweep over the wire.
+describe("WorkerMemoryStore.sweep", () => {
+  it("POSTs /sweep {scopeKey} with the bearer and answers the Worker's count; dryRun rides the body and the ids ride back", async () => {
+    const { fetch, calls } = fakeFetch(() => jsonRes({ ok: true, swept: 4 }));
+    expect(await store(fetch).sweep("org:acme")).toEqual({ ok: true, swept: 4, ids: [] });
+    expect(calls[0].url).toBe("https://memory.example/sweep");
+    expect((calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer secret-token");
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ scopeKey: "org:acme" });
+    const dry = fakeFetch(() => jsonRes({ ok: true, swept: 2, ids: ["mem:org:acme:0", "mem:org:acme:3"] }));
+    expect(await store(dry.fetch).sweep("org:acme", { dryRun: true })).toEqual({
+      ok: true,
+      swept: 2,
+      ids: ["mem:org:acme:0", "mem:org:acme:3"],
+    });
+    expect(JSON.parse(String(dry.calls[0].init.body))).toEqual({ scopeKey: "org:acme", dryRun: true });
+  });
+
+  it("a 404 (an older Worker without the route), any non-2xx, or a transport failure is a REPORTED failure — `{ok: false}`, never a throw", async () => {
+    const notFound = await store(fakeFetch(() => jsonRes({ error: "not found" }, 404)).fetch).sweep("org:acme");
+    expect(notFound).toEqual({ ok: false, error: "memory worker /sweep HTTP 404: not found" });
+    const boom = await store(fakeFetch(() => Promise.reject(new Error("ECONNRESET"))).fetch).sweep("org:acme");
+    expect(boom).toEqual({ ok: false, error: "memory worker /sweep failed: ECONNRESET" });
+    const server = await store(fakeFetch(() => new Response("<html>edge</html>", { status: 500 })).fetch).sweep("s");
+    expect(server).toEqual({ ok: false, error: "memory worker /sweep HTTP 500" });
+  });
+
+  it("a malformed 2xx answer reads as zero and no ids, never NaN or garbage ids", async () => {
+    const { fetch } = fakeFetch(() => jsonRes({ ok: true, swept: "four", ids: [1, "mem:org:acme:0", null] }));
+    expect(await store(fetch).sweep("org:acme")).toEqual({ ok: true, swept: 0, ids: ["mem:org:acme:0"] });
+  });
+});
+
 describe("WorkerMemoryStore construction", () => {
   it("has a bounded request timeout so a hung Worker can never stall a dispatch", () => {
     expect(MEMORY_WORKER_TIMEOUT_MS).toBeGreaterThan(0);

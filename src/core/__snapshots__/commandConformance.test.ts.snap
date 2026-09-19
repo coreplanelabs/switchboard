@@ -1020,6 +1020,43 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "memory:write",
+    "args": [],
+    "effect": "write",
+    "id": "memory.sweep",
+    "options": [
+      {
+        "name": "scope",
+        "required": true,
+        "type": "enum",
+        "values": [
+          "me",
+          "org",
+          "repo",
+          "channel",
+          "all",
+        ],
+      },
+      {
+        "name": "repo",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "dryRun",
+        "required": false,
+        "type": "boolean",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "providers:read",
     "args": [],
     "effect": "read",

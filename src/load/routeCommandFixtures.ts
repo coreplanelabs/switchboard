@@ -126,6 +126,14 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
     args: ["mem:org:8"],
     options: {},
   }),
+  f("c38h", "happy", "sweep the stale status records out of my memory scope", "memory.sweep", {
+    args: [],
+    options: { scope: "me" },
+  }),
+  f("c38p", "paraphrase", "retire the org memory records that are just old status lines", "memory.sweep", {
+    args: [],
+    options: { scope: "org" },
+  }),
   f("c25h", "happy", "list the mcp servers", "mcp.list"),
   f("c25p", "paraphrase", "which external MCP servers can my runs use here?", "mcp.list"),
   f("c26h", "happy", "add an mcp server named crm at https://crm.example/mcp", "mcp.add", {
@@ -225,6 +233,7 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c22d", "why is the acme/api build so slow?", "repo.build"),
   d("c23d", "do you remember our conversation from yesterday?", "memory.list", ["memory.list"]),
   d("c24d", "forget it, never mind", "memory.forget"),
+  d("c38d", "is memory mostly stale status lines by now?", "memory.sweep", ["memory.list"]),
   d("c25d", "is the mcp integration any good?", "mcp.list"),
   d("c26d", "would connecting our crm over mcp be worth it?", "mcp.add"),
   d("c27d", "why does the crm server keep disconnecting?", "mcp.connect"),

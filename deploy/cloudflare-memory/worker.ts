@@ -7,6 +7,7 @@ import {
   planEviction,
   planWrite,
   rankRecords,
+  rejectionMarkers,
 } from "../../src/core/memory/engine.ts";
 import { tokenize } from "../../src/core/memory/scorer.ts";
 import { FIRING_DETAIL_MAX, isScheduleFiring, type ScheduleFiring } from "../../src/core/schedules.ts";
@@ -148,6 +149,7 @@ const traceSinks = [workerLogSink((line) => console.log(line))];
 // Route surface (JSON in/out; bearer MEMORY_TOKEN on everything but /healthz):
 //   POST /retrieve {scopeKey, query, limit} → {records: MemoryRecord[]}
 //   POST /write    {scopeKey, records: MemoryCandidate[]} → {ok, inserted, deduped, superseded}
+//   POST /sweep    {scopeKey, dryRun?} → {ok, swept} (+ ids under dryRun — the marked rows, flipped to `swept`)
 //   GET  /healthz  → {ok:true}  (deploy wake ping; touches no DO)
 // Scheduled-firing routes (the record behind the /runs Scheduled panel;
 // written by the bot's Worker shim after every cron firing, read by the bot's
@@ -508,6 +510,33 @@ export class MemoryDO extends DurableObject<Env> {
       // start-time reconciliation would heal it anyway).
       if (flipped) this.sql.exec(`DELETE FROM records_fts WHERE id = ?`, id);
       return flipped;
+    });
+  }
+
+  /** Human control (docs/reference/specs/memory.md item 27): retire every
+   *  ACTIVE fact whose text the write gate would reject today — the same
+   *  `rejectionMarkers` the bot's write path runs, imported from the shared
+   *  engine, so the sweep and the gate can never disagree. Summaries are never
+   *  gated, so never swept. The scan, the flips and the FTS deletes run in ONE
+   *  sync transaction (the per-scope cap's atomicity rule): the sweep commits
+   *  whole or not at all. Idempotent — swept rows are no longer active, so a
+   *  second call answers 0. Under `dryRun` nothing flips. */
+  async sweep(_scopeKey: string, dryRun: boolean): Promise<{ swept: number; ids: string[] }> {
+    return this.ctx.storage.transactionSync(() => {
+      const ids = this.sql
+        .exec<Row>(`SELECT * FROM records WHERE status = 'active' AND kind = 'fact'`)
+        .toArray()
+        .filter((row) => rejectionMarkers(row.text).length > 0)
+        .map((row) => row.id);
+      if (!dryRun) {
+        for (const id of ids) {
+          // Soft delete for the record row, hard delete for its FTS entry —
+          // the forget/supersede/evict hygiene rule (§15).
+          this.sql.exec(`UPDATE records SET status = 'swept' WHERE id = ? AND status = 'active'`, id);
+          this.sql.exec(`DELETE FROM records_fts WHERE id = ?`, id);
+        }
+      }
+      return { swept: ids.length, ids };
     });
   }
 }
@@ -3154,6 +3183,16 @@ function parseList(
   };
 }
 
+/** `POST /sweep {scopeKey, dryRun?}`. */
+function parseSweep(body: unknown): Validated<{ scopeKey: string; dryRun: boolean }> {
+  if (!isJsonObject(body)) return invalid("body must be a JSON object");
+  const b = body;
+  const scope = parseScopeKey(b.scopeKey);
+  if (!scope.ok) return scope;
+  if (b.dryRun !== undefined && typeof b.dryRun !== "boolean") return invalid("dryRun must be a boolean");
+  return { ok: true, value: { scopeKey: scope.value, dryRun: b.dryRun === true } };
+}
+
 /** `POST /forget {scopeKey, id}`: the id is an opaque key, same caps as scopeKey. */
 function parseForget(body: unknown): Validated<{ scopeKey: string; id: string }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
@@ -4344,6 +4383,7 @@ const ROUTES = new Set([
   "/write",
   "/list",
   "/forget",
+  "/sweep",
   "/schedules/record",
   "/schedules/latest",
   "/runs/put",
@@ -4450,6 +4490,16 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
     // Observability: scope + id only (ids carry no record text).
     console.log(`[forget] ${scopeKey} ${id} -> ${forgotten}`);
     return json({ ok: true, forgotten });
+  }
+  if (url.pathname === "/sweep") {
+    const parsed = parseSweep(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    const { scopeKey, dryRun } = parsed.value;
+    const out = await env.MEMORY.get(env.MEMORY.idFromName(scopeKey)).sweep(scopeKey, dryRun);
+    // Observability: scope + count only (ids carry no record text; they ride
+    // the dryRun answer, not the log).
+    console.log(`[sweep] ${scopeKey} -> ${out.swept}${dryRun ? " (dry run)" : ""}`);
+    return json({ ok: true, swept: out.swept, ...(dryRun ? { ids: out.ids } : {}) });
   }
 
   const parsed = parseWrite(body);

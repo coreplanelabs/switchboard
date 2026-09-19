@@ -76,6 +76,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/repo.build` | `POST` | `repo:exec` | Run the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch). |
 | `/api/memory.list` | `GET`, `POST` | `memory:read` | Your own memory records and the shared org / repo / channel records, with ids — what influences your runs. |
 | `/api/memory.forget` | `POST` | `memory:write` | Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights). |
+| `/api/memory.sweep` | `POST` | `memory:write` | Retire the stored status records the write gate rejects today (soft delete, per scope; yours freely, shared org/repo/channel scopes need repo-management rights); `--dry-run` lists the marked ids and changes nothing. |
 | `/api/mcp.list` | `GET`, `POST` | `mcp:read` | External MCP servers your runs in this channel can use — org-wide, this channel's, and your own — with state and agents; never a credential. `--all` (admins): every tier. |
 | `/api/mcp.add` | `POST` | `mcp:write` | Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat. |
 | `/api/mcp.connect` | `POST` | `mcp:write` | A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes. |

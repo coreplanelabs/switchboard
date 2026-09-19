@@ -36,9 +36,11 @@ export interface MemoryRecord {
   supersedes?: string;
   /** `evicted`: dropped by the per-scope cap (least recently used);
    *  `superseded`: replaced by a newer record; `forgotten`: removed by a human
-   *  via `memory forget`. Both are soft deletes — the row stays for
-   *  provenance but is invisible to retrieval, list, and dedup. */
-  status: "active" | "superseded" | "forgotten" | "evicted";
+   *  via `memory forget`; `swept`: retired by `memory sweep` because the text
+   *  carries a status/change-description marker (`rejectionMarkers`). All are
+   *  soft deletes — the row stays for provenance but is invisible to
+   *  retrieval, list, and dedup. */
+  status: "active" | "superseded" | "forgotten" | "evicted" | "swept";
 }
 
 /** What the reflection extractor emits. The store assigns id/timestamps/useCount/
@@ -79,6 +81,20 @@ export interface MemoryListOptions {
   kind?: MemoryRecord["kind"];
 }
 
+/** What one sweep did — or, on the durable path, why it could not. The
+ *  failure is a VALUE, never a throw: the one expected failure is an older
+ *  Memory Worker generation without the `/sweep` route (a 404), which the
+ *  command must report as a ⚠️ line, not crash on. */
+export type SweepOutcome =
+  | {
+      ok: true;
+      /** Active facts the gate marked (flipped to `swept`, or merely counted under `dryRun`). */
+      swept: number;
+      /** The marked record ids — always safe to show (ids carry no record text). */
+      ids: string[];
+    }
+  | { ok: false; error: string };
+
 /** A retrieval request: which resource, what to match, how many at most. */
 export interface MemoryQuery {
   scopeKey: string;
@@ -112,6 +128,13 @@ export interface MemoryStore {
    *  record was forgotten, false when the id names nothing active in this
    *  scope — a foreign-scope id can never be forgotten through another scope. */
   forget(scopeKey: string, id: string): Promise<boolean>;
+  /** Human control: retire this scope's ACTIVE facts whose text the write
+   *  gate would reject today (`rejectionMarkers`, engine.ts) — `status:
+   *  "swept"`, rows kept for provenance, summaries never touched. Under
+   *  `dryRun` nothing flips and the marked ids are answered. Idempotent: a
+   *  second sweep answers 0. Failures come back as `{ok: false}`, never a
+   *  throw (an older Worker without the route is a reported failure). */
+  sweep(scopeKey: string, opts?: { dryRun?: boolean }): Promise<SweepOutcome>;
 }
 
 /** The resources memory is scoped to. `org` is the shared resource every

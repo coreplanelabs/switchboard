@@ -3,6 +3,9 @@ import { authorize } from "../authz/authorize.js";
 import {
   CommandError,
   commandDefiner,
+  dryRunRequested,
+  flag,
+  PLAN_ONLY_RISK,
   wrapUntrusted,
   type Caller,
   type CommandDef,
@@ -17,18 +20,19 @@ import type { MemoryConfig, MemoryRecord, MemoryStore } from "../memory/types.js
 // over cross-session memory, on the typed model.
 //   memory list [query…] [--scope <me|org|repo|channel|all>] [--limit <n>] [--repo owner/name]
 //   memory forget <id>
+//   memory sweep --scope <me|org|repo|channel|all> [--repo owner/name] [--dry-run]
 // Caller-scoped on EVERY surface: the only user scope a caller can list or
 // forget is its own (`requestScopeKeys(organization, caller.id)` — `user:slack:U…` for a
 // Slack person, `user:cli:local` for the CLI, `user:mcp:<subject>` for a
 // machine caller); the channel scope is the channel the caller speaks from
 // (`caller.origin`), the repo scope the repo the thread is bound to (resolved
 // lazily through `caller.origin.repo`, or named with `--repo`); the shared
-// scopes (org, repo, channel) are listed by everyone and forgotten only by an
-// org admin (chat: the fail-closed repo-management set; `cli:local` holds every
-// scope); another user's scope is unreachable for anyone (isolation by
-// construction, invariant 4). Never a model turn, never a run started here
+// scopes (org, repo, channel) are listed by everyone and forgotten or swept
+// only by an org admin (chat: the fail-closed repo-management set; `cli:local`
+// holds every scope); another user's scope is unreachable for anyone (isolation
+// by construction, invariant 4). Never a model turn, never a run started here
 // (only the dispatcher starts agent runs, docs/decisions/0002-dispatcher-is-the-only-orchestrator.md);
-// the dispatcher records `memory forget` as an inline run.
+// the dispatcher records `memory forget` and `memory sweep` as inline runs.
 
 export interface MemoryCommandDeps {
   memory: {
@@ -81,11 +85,12 @@ async function viaStore<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Whether this caller may forget SHARED records (org, repo, channel): the
- *  repo-management right — the policy table's `repo:write` row, fail-closed
- *  (admins, its grantees, a token minted with it, the local CLI). */
-function isOrgAdmin(caller: Caller): boolean {
-  return authorize(caller.actor, "repo:write", { type: "command", id: "memory.forget" }).allow;
+/** Whether this caller may forget or sweep SHARED records (org, repo,
+ *  channel): the repo-management right — the policy table's `repo:write` row,
+ *  fail-closed (admins, its grantees, a token minted with it, the local CLI).
+ *  One gate for both mutations (memory.md items 25 and 28). */
+function isOrgAdmin(caller: Caller, commandId: string): boolean {
+  return authorize(caller.actor, "repo:write", { type: "command", id: commandId }).allow;
 }
 
 /** The shared scope keys — the same derivers the read/write paths use. */
@@ -251,7 +256,7 @@ export const memoryForget = defineCommand({
     if (target === keys.user) {
       // own scope: always allowed
     } else if (isSharedScope(target, keys)) {
-      if (!isOrgAdmin(caller))
+      if (!isOrgAdmin(caller, "memory.forget"))
         throw new CommandError(
           "unauthorized",
           "Forgetting shared memory (org, repo, channel) needs repo-management rights — you can always forget records in your own scope (`memory list --scope me`).",
@@ -259,7 +264,7 @@ export const memoryForget = defineCommand({
     } else {
       throw new CommandError(
         "unauthorized",
-        `You can only forget records in your own scope${isOrgAdmin(caller) ? " or the org scope" : ""} — \`${args.id}\` belongs to another user's scope, which no one can reach from here.`,
+        `You can only forget records in your own scope${isOrgAdmin(caller, "memory.forget") ? " or the org scope" : ""} — \`${args.id}\` belongs to another user's scope, which no one can reach from here.`,
       );
     }
     const forgotten = await viaStore(() => store.forget(target, args.id));
@@ -269,9 +274,113 @@ export const memoryForget = defineCommand({
   },
 });
 
+interface SweptScope extends JsonObject {
+  key: string;
+  label: string;
+  swept: number;
+  ids?: string[];
+}
+
+export const memorySweep = defineCommand({
+  id: "memory.sweep",
+  enabledWhen: (caps) => caps.memory,
+  options: z.object({
+    scope: z
+      .enum(LIST_SCOPES)
+      .describe("which scopes to sweep (all: yours, this repo's, this channel's, and the shared org scope)"),
+    repo: z
+      .string()
+      .refine((s) => /^[\w.-]+\/[\w.-]+$/.test(s), "expected an owner/name slug")
+      .optional()
+      .describe("the repo whose scope to sweep (default: the repo this thread is bound to)"),
+    dryRun: flag.optional().describe("report the records the gate would sweep and change nothing"),
+  }),
+  action: "memory:write",
+  effect: "write",
+  // Retires records that influence every run; no command here restores them.
+  annotations: {
+    destructive: true,
+    risk: (input) =>
+      dryRunRequested(input) ? PLAN_ONLY_RISK : "retires the marked status records from every future run",
+  },
+  describe:
+    "Retire the stored status records the write gate rejects today (soft delete, per scope; yours freely, shared org/repo/channel scopes need repo-management rights); `--dry-run` lists the marked ids and changes nothing.",
+  render: (output) => {
+    const o = output as JsonObject;
+    const scopes = (Array.isArray(o.scopes) ? o.scopes : []).map((s) => s as JsonObject);
+    const missing = Array.isArray(o.missing) ? o.missing : [];
+    const total = scopes.reduce((n, s) => n + (typeof s.swept === "number" ? s.swept : 0), 0);
+    const lines = scopes.map((s) => {
+      const ids =
+        Array.isArray(s.ids) && s.ids.length > 0 ? ` — ${s.ids.map((id) => `\`${String(id)}\``).join(", ")}` : "";
+      return `• *${String(s.label)}* (\`${String(s.key)}\`): ${String(s.swept)}${ids}`;
+    });
+    if (missing.includes("repo"))
+      lines.push(
+        "• *this repo's records*: no repo is bound here — name one (`--repo owner/name`, or ask in a repo thread).",
+      );
+    if (missing.includes("channel"))
+      lines.push("• *this channel's records*: this request carries no channel identity.");
+    if (missing.includes("me")) lines.push("• *your records*: this request carries no user identity.");
+    const head =
+      o.dryRun === true
+        ? `🧹 Dry run — ${total} status record(s) would be swept; nothing changed.`
+        : `🧹 Swept ${total} status record(s); the rows are kept for provenance.`;
+    return [head, ...lines].join("\n");
+  },
+  handler: async ({ options, caller, deps }) => {
+    const store = await storeOf(deps);
+    const keys = requestScopeKeys(await deps.memory.organization(), caller.id);
+    const dryRun = options.dryRun === true;
+    const scope = options.scope;
+    const want = (s: (typeof LIST_SCOPES)[number]) => scope === "all" || scope === s;
+    const wanted: Array<{ key: string; label: string }> = [];
+    const missing: string[] = [];
+    if (want("me")) {
+      if (keys.user) wanted.push({ key: keys.user, label: "your records" });
+      else missing.push("me");
+    }
+    if (want("repo")) {
+      // The repo scope costs a resolution (history + GitHub) — paid only when asked for.
+      const repo = options.repo ?? (await caller.origin?.repo?.());
+      if (repo) wanted.push({ key: repoScopeKey(repo), label: "this repo's records" });
+      else if (scope === "repo") missing.push("repo");
+    }
+    if (want("channel")) {
+      if (caller.origin)
+        wanted.push({ key: channelScopeKey(caller.origin.channelId), label: "this channel's records" });
+      else if (scope === "channel") missing.push("channel");
+    }
+    if (want("org")) wanted.push({ key: keys.org, label: "shared org records" });
+    // The same gate as `memory forget` (memory.md item 25): shared scopes are
+    // behind the fail-closed repo-management right; the caller's own scope is
+    // always allowed. Refused BEFORE any scope is touched, so a mixed `all`
+    // sweeps nothing when the caller may not sweep its shared scopes.
+    if (wanted.some((w) => isSharedScope(w.key, keys)) && !isOrgAdmin(caller, "memory.sweep"))
+      throw new CommandError(
+        "unauthorized",
+        "Sweeping shared memory (org, repo, channel) needs repo-management rights — you can always sweep your own scope (`memory sweep --scope me`).",
+      );
+    const scopes: SweptScope[] = [];
+    for (const w of wanted) {
+      const outcome = await viaStore(() => store.sweep(w.key, { dryRun }));
+      // The one expected failure is an older Worker without the route (a 404):
+      // reported as the ⚠️ `unavailable` line, never a throw from the store.
+      if (!outcome.ok) throw new CommandError("unavailable", outcome.error);
+      scopes.push({ ...w, swept: outcome.swept, ...(dryRun ? { ids: outcome.ids } : {}) });
+    }
+    return {
+      dryRun,
+      ...(missing.length > 0 ? { missing } : {}),
+      scopes: scopes as unknown as JsonValue,
+    };
+  },
+});
+
 export const memoryCommands: readonly CommandDef<MemoryCommandDeps>[] = [
   memoryList,
   memoryForget,
+  memorySweep,
 ] as unknown as CommandDef<MemoryCommandDeps>[];
 
 export function registerMemoryCommands<D extends MemoryCommandDeps>(registry: CommandRegistry<D>): void {

@@ -315,6 +315,7 @@ describe("memoryContextBlock — the repository window", () => {
       retrieve: (q) => inner.retrieve(q),
       write: (s, r) => inner.write(s, r),
       forget: (s, id) => inner.forget(s, id),
+      sweep: (s, o) => inner.sweep(s, o),
       list: async () => {
         throw new Error("worker /list HTTP 500");
       },

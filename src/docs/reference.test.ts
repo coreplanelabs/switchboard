@@ -268,6 +268,7 @@ describe("the real catalogue", () => {
       "mcp.promote",
       "mcp.remove",
       "memory.forget",
+      "memory.sweep",
       "repo.offboard",
       "repo.rebuild",
       "runs.stop",

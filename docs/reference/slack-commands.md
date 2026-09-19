@@ -98,6 +98,7 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 |---|---|---|
 | `memory list [query…] [--scope <me\|org\|repo\|channel\|all>] [--limit <integer>] [--repo <string>]` | Your own memory records and the shared org / repo / channel records, with ids — what influences your runs. | anyone |
 | `memory forget <id>` | Soft-delete one memory record so it no longer influences any run (yours freely; shared org/repo/channel records need repo-management rights). | anyone |
+| `memory sweep --scope <me\|org\|repo\|channel\|all> [--repo <string>] [--dry-run]` | Retire the stored status records the write gate rejects today (soft delete, per scope; yours freely, shared org/repo/channel scopes need repo-management rights); `--dry-run` lists the marked ids and changes nothing. | anyone |
 
 ### `mcp`
 

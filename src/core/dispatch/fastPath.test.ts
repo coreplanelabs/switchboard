@@ -131,6 +131,7 @@ describe("isInlineRunCommand — which commands are recorded as runs", () => {
       "friction.report",
       "friction.propose",
       "memory.forget",
+      "memory.sweep",
       "repo.onboard",
       "repo.offboard",
       "repo.rebuild",

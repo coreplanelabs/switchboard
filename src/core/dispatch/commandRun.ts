@@ -60,7 +60,8 @@ export interface InlineRunOptions extends CommandRunOptions {
 
 /** Registry commands the dispatcher records as inline runs: the ones
  *  that DO work beyond answering from local state — ledger reads and GitHub
- *  writes (`friction.*`), a durable memory mutation (`memory.forget`), a repo
+ *  writes (`friction.*`), a durable memory mutation (`memory.forget`,
+ *  `memory.sweep`), a repo
  *  provisioned/torn down/reprovisioned (`repo.onboard|offboard|rebuild|
  *  reconfigure`), a deterministic op executed (`repo.test|build`). Config
  *  replies, `help`, listings, and usage/help replies are not runs. */
@@ -68,6 +69,7 @@ export function isInlineRunCommand(id: string): boolean {
   return (
     id.startsWith("friction.") ||
     id === "memory.forget" ||
+    id === "memory.sweep" ||
     /^repo\.(onboard|offboard|rebuild|reconfigure|test|build)$/.test(id) ||
     /^mcp\.(add|connect|remove|promote)$/.test(id)
   );

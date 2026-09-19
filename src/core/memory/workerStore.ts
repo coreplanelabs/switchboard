@@ -4,6 +4,7 @@ import type {
   MemoryQuery,
   MemoryRecord,
   MemoryStore,
+  SweepOutcome,
   WriteCounts,
 } from "./types.js";
 import { tracedFetch } from "../trace/tracedFetch.js";
@@ -20,6 +21,7 @@ import type { Span, TraceOptions } from "../trace/types.js";
 //   POST /write    {scopeKey, records: MemoryCandidate[], cap?} → {ok, inserted, deduped, superseded, evicted}
 //   POST /list     {scopeKey, limit, query?, kind?} → {records: MemoryRecord[]}  (human controls + the repository window)
 //   POST /forget   {scopeKey, id} → {ok, forgotten: boolean}
+//   POST /sweep    {scopeKey, dryRun?} → {ok, swept, ids?}
 
 /** Per-request ceiling. Retrieval sits on the critical path of every model
  *  turn, so a hung Worker must degrade to "no memory" quickly, never stall the
@@ -48,7 +50,7 @@ export interface WorkerMemoryStoreOptions {
 }
 
 /** The Worker's routes, as a span names them. */
-type MemoryRoute = "/retrieve" | "/write" | "/list" | "/forget";
+type MemoryRoute = "/retrieve" | "/write" | "/list" | "/forget" | "/sweep";
 
 export class WorkerMemoryStore implements MemoryStore {
   private readonly baseUrl: string;
@@ -142,6 +144,31 @@ export class WorkerMemoryStore implements MemoryStore {
     return data.forgotten === true;
   }
 
+  /** Human command, but the failure is a VALUE (memory.md item 27): an older
+   *  Worker generation has no `/sweep` route and answers 404 — a live,
+   *  expected condition the command must report as a ⚠️ line, so a non-2xx
+   *  or a transport error maps to `{ok: false, error}` and never a throw. */
+  async sweep(scopeKey: string, opts: { dryRun?: boolean } = {}): Promise<SweepOutcome> {
+    let res: Response;
+    try {
+      res = await this.post("/sweep", { scopeKey, ...(opts.dryRun === true ? { dryRun: true } : {}) });
+    } catch (err) {
+      return { ok: false, error: `memory worker /sweep failed: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    const data = await parseBody(res);
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: `memory worker /sweep HTTP ${res.status}${data.error ? `: ${String(data.error)}` : ""}`,
+      };
+    }
+    return {
+      ok: true,
+      swept: asCount(data.swept),
+      ids: Array.isArray(data.ids) ? data.ids.filter((id): id is string => typeof id === "string") : [],
+    };
+  }
+
   /** One `http.client` span under `span` when the caller has one (the
    *  dispatcher's `dispatch.memory_read`; docs/reference/specs/tracing.md item 24), the
    *  route being the path literal; the plain fetch otherwise. */
@@ -193,6 +220,10 @@ function isMemoryRecord(v: unknown): v is MemoryRecord {
     typeof r.sourceThreadKey === "string" &&
     typeof r.createdAt === "number" &&
     typeof r.useCount === "number" &&
-    (r.status === "active" || r.status === "superseded" || r.status === "forgotten" || r.status === "evicted")
+    (r.status === "active" ||
+      r.status === "superseded" ||
+      r.status === "forgotten" ||
+      r.status === "evicted" ||
+      r.status === "swept")
   );
 }

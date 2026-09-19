@@ -1175,7 +1175,7 @@ describe("the checked-in command set through route() over a scripted model", () 
     expect(score.inputRate).toBe(1);
     expect(score.misses).toEqual([]);
     expect(invoke).not.toHaveBeenCalled();
-    expect(renderCommands(score)[0]).toContain("bound right 76/76");
+    expect(renderCommands(score)[0]).toContain("bound right 78/78");
   });
 
   it("one wrong command fails the command row (bar 1.0); the miss carries the bound and the expected input", async () => {
