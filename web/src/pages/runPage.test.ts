@@ -1375,6 +1375,26 @@ describe("RunPage — live mode", () => {
     expect(card.text()).not.toMatch(/running/);
   });
 
+  it("a reload's replayed open call is timed by its true age: the seed's server clock anchors the runner clock, so a refresh never restarts the count", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_000);
+      const { created, factory } = fakeEventSourceFactory();
+      // The call began at 4_000 on the runner clock and the seed says the server is at 604_000:
+      // the call is ten minutes old when the page opens, whatever the browser's clock reads.
+      const wrapper = mountApp(RunPage, { seed: { ...liveSeed, serverNow: 604_000 }, eventSource: factory });
+      const es = created[0];
+      es.emitOpen();
+      es.emitMessage(input, "1");
+      es.emitMessage(call("c1", "$ npm test", 4000), "2");
+      vi.advanceTimersByTime(1_000);
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find("details.call .facts .elapsed").text()).toBe("10m 01s"); // never 1s
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("the model badge is worn once, by the run's first head (a record from before per-turn stamps names its run_meta model there), and again only where the model switches — the ⇄ chip; the heads between stay quiet; nothing known → no badge", () => {
     const w = mountApp(RunPage, {
       seed: historySeed([

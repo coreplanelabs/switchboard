@@ -1081,8 +1081,42 @@ describe("header stopwatch (item 22)", () => {
     m.handle({ type: "assistant", text: "x", at: 10_000 });
     vi.setSystemTime(1_600_000); // ten minutes later the stream reconnects and replays
     m.handle({ type: "replay_note", summary: "replaying last 200 of 300 events" });
-    expect(m.state.lastAtWall).toBe(1_000_000);
+    expect(m.state.clockWall).toBe(1_000_000);
     expect(runnerNow(m.state, 1_600_000)).toBe(610_000);
+  });
+
+  it("a page load seeds the runner clock from the seed's server clock: a replayed open call is timed by its true age, never by its arrival", () => {
+    const m = model();
+    vi.setSystemTime(5_000);
+    m.seedClock(1_000_000); // the live seed's serverNow, learned at wall 5_000
+    m.handle(input); // the replayed record: the run began long ago…
+    m.handle(call("c1", "$ npm test 2>&1 | tail -15", 400_000)); // …and this call ten minutes ago
+    // Replayed stamps sit behind the projection: the anchor stays the seed's.
+    expect(runnerNow(m.state, 5_000)).toBe(1_000_000);
+    const tail = liveWait(m.state, m.pendingCall(), 65_000); // a minute after load
+    expect(tail.kind).toBe("call");
+    if (tail.kind !== "call") return;
+    expect(tail.elapsedMs).toBe(660_000); // 1_060_000 − 400_000: the call's real age, not the minute since load
+  });
+
+  it("before any stamped event a seeded clock projects, but the wait is still `starting`", () => {
+    const m = model();
+    vi.setSystemTime(5_000);
+    m.seedClock(1_000_000);
+    expect(runnerNow(m.state, 8_000)).toBe(1_003_000);
+    expect(liveWait(m.state, m.pendingCall(), 8_000)).toEqual({ kind: "starting" });
+  });
+
+  it("a reconnect's replay of a stamped event never drags the clock backwards — only a stamp ahead of the projection advances the anchor", () => {
+    const m = model();
+    vi.setSystemTime(1_000_000);
+    m.handle(assistant("x", 10_000));
+    vi.setSystemTime(1_600_000); // ten minutes later the stream reconnects and replays the same event
+    m.handle(assistant("x", 10_000));
+    expect(runnerNow(m.state, 1_600_000)).toBe(610_000); // not 10_000: the replay moved nothing
+    // A genuinely new stamp ahead of the projection re-anchors to the runner's own clock.
+    m.handle(assistant("y", 650_000));
+    expect(runnerNow(m.state, 1_600_000)).toBe(650_000);
   });
 
   it("span records never move the runner clock or the stream's first/last stamps; no stamped events yet → no clock", () => {

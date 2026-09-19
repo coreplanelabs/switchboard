@@ -83,6 +83,9 @@ const model = createRunPageModel({
         .filter(Boolean)
     : undefined,
 });
+// The runner clock's anchor (live-view item 18): the seed's server clock, so
+// the replay's open spans are timed by their real start, not the page load.
+if (seed?.mode === "live") model.seedClock(seed.serverNow);
 const state = model.state;
 
 // ---- header state ----------------------------------------------------------

@@ -317,11 +317,16 @@ export interface RunPageModel {
     /** Runner-clock span of the run so far (first event's `at` → last). */
     firstAt: number | null;
     lastAt: number | null;
-    /** Wall-clock receipt time of the event stamped `lastAt` — the anchor
-     *  `runnerNow` projects from. Only a stamped event moves it: a replay
-     *  notice or any other unstamped frame leaves both untouched, so a
-     *  reconnect can never restart a stopwatch. */
-    lastAtWall: number | null;
+    /** The runner-clock anchor `runnerNow` projects from: the farthest-forward
+     *  point the page knows on the runner clock (`clockAt`) and the wall moment
+     *  it learned it (`clockWall`). Seeded from the live seed's server clock
+     *  (`seedClock`), so a page load times an open call by its true age, and
+     *  advanced by a stamped event only when the stamp is AHEAD of the
+     *  projection — a replayed stamp, a replay notice or any unstamped frame
+     *  moves nothing, so neither a reload nor a reconnect can restart a
+     *  stopwatch. */
+    clockAt: number | null;
+    clockWall: number | null;
     /** Retained `seq` ranges the live replay did not send (`replay_elided`
      *  frames, docs/reference/specs/live-view.md item 5): the record still has them. Kept
      *  for the partition's `not loaded` term (docs/reference/specs/tracing.md). */
@@ -330,6 +335,10 @@ export interface RunPageModel {
     traceVersion: number;
   };
   handle(event: unknown): void;
+  /** Anchor the runner clock at the server clock the live seed carried (its
+   *  `serverNow`), before the replay: the stored events that follow all carry
+   *  stamps behind it, so every open span is timed by its real start. */
+  seedClock(serverNow: number): void;
   /** The span set so far (docs/reference/specs/tracing.md), folded per frame from the same
    *  stream the log reads — the timeline's input. */
   spanSet(): SpanRecord[];
@@ -517,7 +526,8 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     model: null,
     firstAt: null,
     lastAt: null,
-    lastAtWall: null,
+    clockAt: null,
+    clockWall: null,
     elided: [],
     traceVersion: 0,
   });
@@ -839,6 +849,19 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     }
   }
 
+  /** Advance the runner-clock anchor to `at` — a "now" on the runner clock —
+   *  only when that moves the projection forward: a replayed stamp sits behind
+   *  the projection and moves nothing. */
+  function advanceClock(at: number): void {
+    const wall = wallNow();
+    const projected =
+      state.clockAt === null || state.clockWall === null ? null : state.clockAt + (wall - state.clockWall);
+    if (projected === null || at >= projected) {
+      state.clockAt = at;
+      state.clockWall = wall;
+    }
+  }
+
   /** A phase's head closes on its own only while the reader has left it alone. */
   function closePhase(phase: Phase): void {
     const entry = phaseGroups.get(phase);
@@ -858,10 +881,8 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     }
     if (e && !isSpan && typeof e.at === "number") {
       if (state.firstAt === null || e.at < state.firstAt) state.firstAt = e.at;
-      if (state.lastAt === null || e.at >= state.lastAt) {
-        state.lastAt = e.at;
-        state.lastAtWall = wallNow();
-      }
+      if (state.lastAt === null || e.at >= state.lastAt) state.lastAt = e.at;
+      advanceClock(e.at);
     }
     for (const change of timeline.push(event)) apply(change);
     // A tool event stamped with its session-log row names the step that row
@@ -986,6 +1007,7 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
     },
     markStopping,
     opensByDefault,
+    seedClock: advanceClock,
   };
 }
 
@@ -993,13 +1015,14 @@ export function createRunPageModel(options: { openTags?: string[] } = {}): RunPa
  *  stream ended); exposed as a helper so the wording lives in one place. */
 export const TURN_END_NOTE = "the run ended here";
 
-/** The runner's clock as the page best knows it: the newest stamped event's
- *  `at` plus the wall time since that event arrived. Every live stopwatch on
- *  the page subtracts a runner stamp from THIS — never browser-minus-runner
- *  math, so clock skew cannot show in a tick. Null until a stamped event. */
+/** The runner's clock as the page best knows it: the clock anchor (the seed's
+ *  server clock, advanced by any stamped event ahead of it) plus the wall time
+ *  since that anchor was learned. Every live stopwatch on the page subtracts a
+ *  runner stamp from THIS — never browser-minus-runner math, so clock skew
+ *  cannot show in a tick. Null until the seed or a stamped event. */
 export function runnerNow(state: RunPageModel["state"], nowWall: number): number | null {
-  if (state.lastAt === null || state.lastAtWall === null) return null;
-  return state.lastAt + (nowWall - state.lastAtWall);
+  if (state.clockAt === null || state.clockWall === null) return null;
+  return state.clockAt + (nowWall - state.clockWall);
 }
 
 /** The header's one duration (live-view item 22; docs/reference/specs/tracing.md): the
