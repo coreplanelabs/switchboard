@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../chatMessage.js";
-import { openCodeImportBody, openCodeSeedAndRequest, openCodeSessionId, openCodeStoreMessages } from "./session.js";
+import {
+  openCodeImportBody,
+  openCodeSeedAndRequest,
+  openCodeSessionId,
+  openCodeSessionToolName,
+  openCodeStoreMessages,
+} from "./session.js";
 
 // Feature: docs/reference/specs/harness.md item 5 — seed and rebuild are an
 // import. The runner's `ChatMessage[]` (plus compactions and settlements)
@@ -12,6 +18,16 @@ import { openCodeImportBody, openCodeSeedAndRequest, openCodeSessionId, openCode
 const AT = 1_700_000_000_000;
 const LOC = { directory: "/tmp/switchboard-oc-run-c" };
 const opts = { sessionID: "ses_run-c", location: LOC, agent: "switchboard", at: AT };
+
+describe("openCodeSessionToolName", () => {
+  it("maps the record's words to the session's own names (bash→shell, find→glob), keeps every other name, and keeps a relayed tool's name even when it is a record word", () => {
+    expect(openCodeSessionToolName("bash")).toBe("shell");
+    expect(openCodeSessionToolName("find")).toBe("glob");
+    expect(openCodeSessionToolName("read")).toBe("read");
+    expect(openCodeSessionToolName("github_file")).toBe("github_file");
+    expect(openCodeSessionToolName("bash", new Set(["bash"]))).toBe("bash");
+  });
+});
 
 describe("openCodeSessionId", () => {
   it("prefixes the run id with `ses_` and folds any character the id allows but the session id does not", () => {
@@ -37,7 +53,7 @@ describe("openCodeStoreMessages — the seed as store messages", () => {
     expect((messages[1].time as Record<string, unknown>).completed).toBeTypeOf("number");
   });
 
-  it("an assistant turn's tool call becomes a completed tool content carrying the following user turn's result, and that user turn writes no message of its own", () => {
+  it("an assistant turn's tool call becomes a completed tool content carrying the following user turn's result under the session's own tool name (the record's `bash` written as OpenCode's `shell`), and that user turn writes no message of its own", () => {
     const transcript: ChatMessage[] = [
       { role: "user", content: [{ type: "text", text: "do it" }] },
       { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "bash", input: { command: "echo hi" } }] },
@@ -50,10 +66,34 @@ describe("openCodeStoreMessages — the seed as store messages", () => {
     const toolContent = (messages[1].content as Array<Record<string, unknown>>)[0];
     expect(toolContent.type).toBe("tool");
     expect(toolContent.id).toBe("call_1");
-    expect(toolContent.name).toBe("bash");
+    // The record's word back in the session's own name: a rebuilt model reads a
+    // history whose tools its own table holds, so its first call runs.
+    expect(toolContent.name).toBe("shell");
     const state = toolContent.state as Record<string, unknown>;
     expect(state.status).toBe("completed");
     expect((state.content as Array<Record<string, unknown>>)[0]).toEqual({ type: "text", text: "hi" });
+  });
+
+  it("a relayed tool keeps its own name in the import, and a name that is neither a record word nor relayed passes through", () => {
+    const transcript: ChatMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "t_find", name: "find", input: { pattern: "*" } },
+          { type: "tool_use", id: "t_relay", name: "github_file", input: {} },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", toolUseId: "t_find", content: "ok" },
+          { type: "tool_result", toolUseId: "t_relay", content: "ok" },
+        ],
+      },
+    ];
+    const messages = openCodeStoreMessages(transcript, { ...opts, relayedTools: new Set(["github_file"]) });
+    const names = (messages[0].content as Array<Record<string, unknown>>).map((c) => c.name);
+    expect(names).toEqual(["glob", "github_file"]);
   });
 
   it("a call in flight at a death (no following result) carries the settlement note in its tool content", () => {

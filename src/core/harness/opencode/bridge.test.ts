@@ -442,6 +442,21 @@ describe("a pre-execution settlement is narrated by what the facts prove (F2), a
     expect(notes(errored.events).some((n) => n.kind === "tool_refused")).toBe(false);
   });
 
+  it("a call under the record's word for a tool the identity holds (bash for OpenCode's shell) settled with no ask is a tool_refused note naming the transient — the session's own name for the tool — never the deny rules, which did not remove it", () => {
+    // Under identity write the run holds `shell`; the store names the call
+    // `bash` — the record's word, which a rebuilt transcript can carry — so
+    // OpenCode failed it with no ask because no tool of that NAME exists.
+    const aliased = harness({ identity: "write" });
+    aliased.bridge.observe(inputStarted("c3", "bash"));
+    aliased.bridge.observe(called("c3"));
+    aliased.bridge.observe(settled("session.tool.failed", "c3"));
+    const refusedNote = notes(aliased.events).find((n) => n.kind === "tool_refused");
+    expect(refusedNote?.summary).toMatch(/this session has no tool named bash/);
+    expect(refusedNote?.summary).toMatch(/holds it as OpenCode's `shell`/);
+    expect(refusedNote?.summary).not.toMatch(/deny rules/);
+    expect(notes(aliased.events).some((n) => n.kind === "harness_error")).toBe(false);
+  });
+
   it("closeOpenSpans settles every call still open with the replaced note: each is a failed tool_result on the record carrying the note, and none is left open", () => {
     const { bridge, events } = harness();
     bridge.observe(inputStarted("c1", "shell"));

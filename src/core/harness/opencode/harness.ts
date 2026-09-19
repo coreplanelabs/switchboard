@@ -469,6 +469,10 @@ export async function openOpenCodeRun(
           model: modelRef(run, variant),
           agent: OPENCODE_AGENT,
           at,
+          // The rebuilt history names the session's own tools (the record's
+          // `bash`/`find` back to `shell`/`glob`), so the first tool call after
+          // the rebuild reaches for a tool the session's table holds.
+          relayedTools: new Set(spec.relayTools),
           ...(run.resume.compactions ? { compactions: run.resume.compactions.map((c) => c.entry) } : {}),
           settlements,
         });
@@ -481,6 +485,7 @@ export async function openOpenCodeRun(
             model: modelRef(run, variant),
             agent: OPENCODE_AGENT,
             at,
+            relayedTools: new Set(spec.relayTools),
           });
         } else {
           const res = await request(deps.container, started, auth, OPENCODE_ROUTES["session.create"], {

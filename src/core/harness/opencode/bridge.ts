@@ -1386,8 +1386,20 @@ export class OpenCodeBridge {
       // any other failure before execution — a tool erroring before it runs —
       // is said as that, never dressed as a refusal the gate made.
       const name = this.toolNames.get(callId);
-      const absent = name !== undefined && !openCodeBuiltinToolsFor(this.deps.rules.identity).includes(name);
-      if (absent)
+      const own = openCodeBuiltinToolsFor(this.deps.rules.identity);
+      const absent = name !== undefined && !own.includes(name);
+      // The record's word for a tool the identity holds under another name
+      // (`bash` for OpenCode's `shell`, `find` for `glob`): the session's tool
+      // table never carried the word, so the server refused the call before it
+      // ran — a transient a rebuilt transcript can carry — named as what it is,
+      // never as the deny rules' doing, which would read as identity none.
+      const aliased = name !== undefined ? own.find((o) => o !== name && openCodeToolNameWord(o) === name) : undefined;
+      if (aliased !== undefined)
+        this.note(
+          "tool_refused",
+          `${tool} refused: this session has no tool named ${name} — the run's identity holds it as OpenCode's \`${aliased}\` (${name} is the record's word for it), so the call ran nothing`,
+        );
+      else if (absent)
         this.note(
           "tool_refused",
           `${tool} refused: the run's identity has no ${tool} tool (the deny rules removed it), so the call ran nothing`,
