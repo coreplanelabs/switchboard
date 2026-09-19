@@ -229,11 +229,14 @@ async function silentReceiptsOf(
 }
 
 /** The thread's runs the viewer may read, oldest first, with their messages — one read per run, in
- *  parallel — and its silent receipts interleaved by decidedAt (item 12). */
+ *  parallel — and its silent receipts interleaved by decidedAt (item 12). The history path passes
+ *  `receipts: false`: `historyOf` skips receipt turns anyway, so reading the intake ledger there
+ *  would only fetch rows to discard. */
 export async function turnsOf(
   deps: ConversationDeps,
   threadKey: string,
   actor: Actor,
+  opts?: { receipts?: boolean },
 ): Promise<{ turns: (HomeTurnSeed | HomeReceiptTurnSeed)[]; runs: RunView[] }> {
   const listed = await deps.service.listRuns({
     status: "all",
@@ -252,7 +255,7 @@ export async function turnsOf(
         return turnOf(read.ok ? read.value : { ...run }, liveToken(run));
       }),
     ),
-    silentReceiptsOf(deps, threadKey, runs.length > 0),
+    opts?.receipts === false ? [] : silentReceiptsOf(deps, threadKey, runs.length > 0),
   ]);
   return { turns: interleaveReceipts(turns, receipts), runs };
 }
@@ -278,7 +281,7 @@ export function webThreadIO(deps: WebHandleDeps, thread: { threadKey: string; ac
   return new WebIO(
     async (exceptRunId) =>
       historyOf(
-        (await turnsOf(deps, thread.threadKey, thread.actor)).turns.filter(
+        (await turnsOf(deps, thread.threadKey, thread.actor, { receipts: false })).turns.filter(
           (t) => isReceiptTurn(t) || t.id !== exceptRunId,
         ),
       ),
@@ -515,7 +518,8 @@ export function createWebChatHandler(
   const subOf = (actor: Actor): string => actor.id.replace(/^access:/, "");
   /** The conversation reader, shared with the rebuilt handles (record 0060). */
   const conv: ConversationDeps = { service: deps.service, registry: deps.registry, intake: deps.intake, warn };
-  const readTurns = (threadKey: string, actor: Actor) => turnsOf(conv, threadKey, actor);
+  const readTurns = (threadKey: string, actor: Actor, opts?: { receipts?: boolean }) =>
+    turnsOf(conv, threadKey, actor, opts);
 
   /** The rail: the viewer's own threads across every channel, titled by each first request. */
   async function railOf(actor: Actor, sub: string): Promise<{ rows: HomeConversationRowSeed[]; runs: RunView[] }> {
@@ -672,7 +676,9 @@ export function createWebChatHandler(
     const io = new WebIO(
       async (exceptRunId) =>
         historyOf(
-          (await readTurns(threadKey, ctx.actor)).turns.filter((t) => isReceiptTurn(t) || t.id !== exceptRunId),
+          (await readTurns(threadKey, ctx.actor, { receipts: false })).turns.filter(
+            (t) => isReceiptTurn(t) || t.id !== exceptRunId,
+          ),
         ),
       // The lane: this handle can open a thread of its own — a conversation in
       // the session's lane — which is what admits the web to `agent:ship`

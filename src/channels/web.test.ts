@@ -447,6 +447,18 @@ describe("the web handle rebuilt from a bare thread key — threadIoFor's web: a
     ]);
     expect(io.undeliverable).toBeTruthy();
   });
+
+  it("history() never asks the intake ledger: `historyOf` discards receipt turns, so the history path reads the runs alone", async () => {
+    const { registry, store, service } = resumeSetup();
+    await store.put(record("r4", NOW - 4_000, { threadKey: "web:a1:c9" }));
+    const listIntake = vi.fn(async () => []);
+    const io = webThreadIO({ service, registry, intake: { listIntake } }, { threadKey: "web:a1:c9", actor: alice });
+    expect(await io.history()).toEqual([
+      { role: "user", text: "request of r4", at: NOW - 14_000 },
+      { role: "assistant", text: "answer of r4", at: NOW - 4_000 },
+    ]);
+    expect(listIntake).not.toHaveBeenCalled();
+  });
 });
 
 // ---- POST /threads/<id>/send ---------------------------------------------------------
@@ -647,6 +659,30 @@ describe("POST /threads/<id>/send — the body into dispatch() as this session (
       { role: "user", text: "request of r-2", at: NOW - 40_000 },
       { role: "assistant", text: "answer of r-2", at: NOW - 30_000 },
     ]);
+  });
+
+  it("a run's history read on a send never asks the intake ledger — the receipts it would fetch are discarded by historyOf anyway", async () => {
+    let resolveSeen!: (h: unknown) => void;
+    const seen = new Promise<unknown>((r) => (resolveSeen = r));
+    const listIntake = vi.fn(async () => []);
+    const { handler, store } = setup({
+      intake: { listIntake },
+      dispatch: async (_deps, _msg, io) => {
+        resolveSeen(await io.history());
+      },
+    });
+    await store.put(record("r-1", NOW - 60_000));
+    const res = await request(handler, {
+      url: "/threads/conv-1/send",
+      method: "POST",
+      body: JSON.stringify({ text: "and the tests?" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await seen).toEqual([
+      { role: "user", text: "request of r-1", at: NOW - 70_000 },
+      { role: "assistant", text: "answer of r-1", at: NOW - 60_000 },
+    ]);
+    expect(listIntake).not.toHaveBeenCalled();
   });
 
   it("refusals before dispatch: GET 405, a foreign origin 403, a non-JSON body 415, an empty text 400, another channel's thread 403, an oversized body 413", async () => {
