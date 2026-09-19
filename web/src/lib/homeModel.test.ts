@@ -40,6 +40,19 @@ describe("classifyReply — what a run-less reply means", () => {
       command: "config set me --models.coding anthropic/claude-opus-5",
     });
   });
+  it("a one-line hand-back carries no note", () => {
+    const reply = classifyReply("To run this: mcp remove linear");
+    expect(reply).toEqual({ kind: "handBack", command: "mcp remove linear" });
+    expect("note" in reply).toBe(false);
+  });
+  it("a two-line hand-back keeps only the first line as the command; the rest is a note", () => {
+    const note = "(the confirmation store could not be reached, so there is no button to press)";
+    expect(classifyReply(`To run this: config set me --agent review\n${note}`)).toEqual({
+      kind: "handBack",
+      command: "config set me --agent review",
+      note,
+    });
+  });
   it("a steer acknowledgement paints nothing", () => {
     const text =
       "↪ Folded into the *review* run already in flight in this thread (40s in) — it picks this up at its next step.";

@@ -24,14 +24,25 @@ export function composerMode(live: boolean, text: string): ComposerMode {
  *  confirms the turn already drawn); anything else is an inline turn, shown
  *  once and never stored. */
 export type InlineReply =
-  { kind: "handBack"; command: string } | { kind: "steerAck"; text: string } | { kind: "inline"; text: string };
+  | { kind: "handBack"; command: string; note?: string }
+  | { kind: "steerAck"; text: string }
+  | { kind: "inline"; text: string };
 
 const STEER_ACK_MARK = "↪ Folded into";
 
 export function classifyReply(reply: string): InlineReply {
   const text = reply.trim();
   if (text.startsWith(HAND_BACK_PREFIX)) {
-    return { kind: "handBack", command: text.slice(HAND_BACK_PREFIX.length).trim() };
+    // Only the first line is the command: a hand-back may carry a second line
+    // (the cut note, the store-unreachable note), which must never ride into
+    // the composer as part of the command — it is shown beside the box instead.
+    const body = text.slice(HAND_BACK_PREFIX.length).trim();
+    const nl = body.indexOf("\n");
+    if (nl === -1) return { kind: "handBack", command: body };
+    const note = body.slice(nl + 1).trim();
+    return note === ""
+      ? { kind: "handBack", command: body.slice(0, nl).trim() }
+      : { kind: "handBack", command: body.slice(0, nl).trim(), note };
   }
   if (text.startsWith(STEER_ACK_MARK)) return { kind: "steerAck", text };
   return { kind: "inline", text };

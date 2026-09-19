@@ -173,7 +173,9 @@ async function submit(): Promise<void> {
       const reply = classifyReply(payload.reply);
       if (reply.kind === "handBack") {
         text.value = reply.command;
-        hint.value = "Enter runs it";
+        // A second line (the cut note, the store-unreachable note) is shown as
+        // the hint beside the box, never as part of the command to run.
+        hint.value = reply.note ?? "Enter runs it";
       } else if (reply.kind === "inline") {
         items.push({ key: key("i"), kind: "inline", text: reply.text });
       }
