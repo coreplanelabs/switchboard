@@ -28,6 +28,7 @@ import { repoResourceId } from "../core/residentAdmin.js";
 import { EXEC_CALL_MARGIN_MS, attachBoundWithinRun, clampBashTimeout } from "./bashTimeout.js";
 import { DISK_PRESSURE_REASON } from "./residentDiskBudget.js";
 import {
+  MEMORY_PRESSURE_REASON,
   RUNTIME_BUSY_BACKOFF_MS,
   RUNTIME_BUSY_REASON,
   RUNTIME_BUSY_WAIT_MAX_MS,
@@ -267,6 +268,7 @@ const ANSWER_OWN_WORDS: ReadonlySet<string> = new Set([
   DISK_PRESSURE_REASON,
   "image-stale",
   RUNTIME_BUSY_REASON,
+  MEMORY_PRESSURE_REASON,
 ]);
 
 /** The lifecycle reason on a resident answer: `stateReason` where the Worker

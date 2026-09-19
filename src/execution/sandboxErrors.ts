@@ -344,6 +344,14 @@ export function runtimeUnreachableExecAnswer(message: string): {
 /** The named reason the Worker answers with, beside `fleet-busy` and `sandbox-starting`. */
 export const RUNTIME_BUSY_REASON = "runtime-busy" as const;
 
+/** The resident's own word for a container near its cgroup memory cap
+ *  (resident-repos.md item 70): a new attach above the soft threshold and a
+ *  new exec above the hard one are refused with this token — the same 503
+ *  shape as `mirror-busy`, so the bot falls back or waits legibly while the
+ *  commands already running finish. Defined here, beside the other machine
+ *  tokens both sides read, so the Worker and the bot cannot drift. */
+export const MEMORY_PRESSURE_REASON = "memory-pressure" as const;
+
 /** What the token means, in the words the model and the operator see. */
 export const RUNTIME_BUSY_EXPLANATION =
   "the thread's sandbox container is running but did not accept the connection inside the platform's allowance — nothing ran, the request is re-sent once it accepts";
