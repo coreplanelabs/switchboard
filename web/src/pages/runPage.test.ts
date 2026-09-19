@@ -652,6 +652,20 @@ describe("RunPage — history mode", () => {
     expect(interrupted.find(".conn .chip").classes().join(" ")).toContain("bad");
   });
 
+  // record 0064, "The queue": a queued ask's id has a page — the chip says the
+  // position and the waiting words instead of an outcome, amber, never `ended`.
+  it("a queued ask's page heads with the position and the waiting words, amber", () => {
+    const queued = mountApp(RunPage, {
+      seed: historySeed([], { queued: { state: "waiting", position: 2, waiting: "the pending deploy" } }),
+    });
+    expect(queued.find(".conn .chip").text()).toBe("queued at position 2 — waiting on the pending deploy");
+    expect(queued.find(".conn .chip").classes().join(" ")).toContain("warn");
+    const withdrawn = mountApp(RunPage, {
+      seed: historySeed([], { queued: { state: "withdrawn", position: 2, waiting: "the pending deploy" } }),
+    });
+    expect(withdrawn.find(".conn .chip").text()).toBe("withdrawn");
+  });
+
   // session-log.md item 10: the notepad is a document the agent keeps for the
   // next run in the thread — it reads as one on the page (a Notes block with
   // its Markdown rendered), never as the ⏱ warning line a lifecycle notice

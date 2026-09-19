@@ -13,7 +13,8 @@ import {
   selectReclaim,
 } from "./decisions.js";
 import type { FinishResult, HeartbeatResult, RunLedger } from "./ledger.js";
-import type { PlaneAckOutcome, PlaneOutcomePost } from "../plane/decide.js";
+import type { PlaneAckOutcome, PlaneAskAnswer, PlaneOutcomePost, PlaneQueueRow } from "../plane/decide.js";
+import type { PlaneAdmitPost } from "./ledger.js";
 import {
   attachmentRefsOf,
   DEFAULT_SESSION_LOG_MAX_BYTES,
@@ -235,6 +236,30 @@ export class InMemoryRunLedger implements RunLedger {
 
   async planeAck(id: string, outcome: PlaneAckOutcome): Promise<void> {
     this.planeAcks.push({ id, outcome });
+  }
+
+  /** The admission asks, kept for assertions; the answer is settable per test
+   *  (default: admitted — an empty plane holds nothing). */
+  readonly planeAdmits: PlaneAdmitPost[] = [];
+  planeAdmitAnswer: PlaneAskAnswer | undefined;
+  readonly planeWithdraws: string[] = [];
+  planeWithdrawAnswer = false;
+
+  async planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer> {
+    this.planeAdmits.push(post);
+    return this.planeAdmitAnswer ?? { kind: "admitted", reservation: `resv-${this.planeAdmits.length}` };
+  }
+
+  async planeWithdraw(runId: string): Promise<{ withdrawn: boolean }> {
+    this.planeWithdraws.push(runId);
+    return { withdrawn: this.planeWithdrawAnswer };
+  }
+
+  /** Settable per test: the queued row `planeQueued` answers (default none). */
+  planeQueuedRows = new Map<string, PlaneQueueRow>();
+
+  async planeQueued(runId: string): Promise<PlaneQueueRow | null> {
+    return this.planeQueuedRows.get(runId) ?? null;
   }
 
   async append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult> {

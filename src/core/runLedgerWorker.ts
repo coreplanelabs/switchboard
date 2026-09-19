@@ -50,7 +50,8 @@ import {
   TransientStoreError,
 } from "./runStoreWorker.js";
 import type { FinishResult, HeartbeatResult, RunLedger } from "./runLedger/ledger.js";
-import type { PlaneAckOutcome, PlaneEffect, PlaneOutcomePost } from "./plane/decide.js";
+import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost, PlaneQueueRow } from "./plane/decide.js";
+import type { PlaneAdmitPost } from "./runLedger/ledger.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./runLedger/sessionLog.js";
 import { assembleTranscript, chunkRows, turnRows, type AssembledTranscript } from "./runLedger/transcript.js";
 import {
@@ -359,6 +360,21 @@ export class WorkerRunLedger implements RunLedger {
 
   async planeAck(id: string, outcome: PlaneAckOutcome): Promise<void> {
     await this.post("/plane/ack", { storeKey: this.opts.storeKey, id, outcome });
+  }
+
+  async planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer> {
+    const r = await this.post("/plane/admit", { storeKey: this.opts.storeKey, ...post });
+    return r.data as unknown as PlaneAskAnswer;
+  }
+
+  async planeWithdraw(runId: string): Promise<{ withdrawn: boolean }> {
+    const r = await this.post("/plane/withdraw", { storeKey: this.opts.storeKey, runId });
+    return r.data as unknown as { withdrawn: boolean };
+  }
+
+  async planeQueued(runId: string): Promise<PlaneQueueRow | null> {
+    const r = await this.post("/plane/queued", { storeKey: this.opts.storeKey, runId });
+    return (r.data as { row?: PlaneQueueRow | null }).row ?? null;
   }
 
   async append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult> {

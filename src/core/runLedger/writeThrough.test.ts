@@ -15,6 +15,7 @@ import {
   NullLedgerWriteThrough,
   type LedgerRun,
   type LedgerWriteThrough,
+  type LedgerWriteThroughOptions,
   type OpenOutcome,
   type OpenRunRequest,
   type ReserveOutcome,
@@ -86,7 +87,9 @@ function timers() {
   };
 }
 
-function harness(over: { ledger?: RunLedger; now?: () => number } = {}) {
+function harness(
+  over: { ledger?: RunLedger; now?: () => number; planeEffects?: LedgerWriteThroughOptions["planeEffects"] } = {},
+) {
   const ledger = over.ledger ?? new InMemoryRunLedger(over.now ?? (() => 10_000));
   const warnings: string[] = [];
   const fallbackPuts: RunRecord[] = [];
@@ -98,6 +101,7 @@ function harness(over: { ledger?: RunLedger; now?: () => number } = {}) {
     fallback: { put: async (r) => void fallbackPuts.push(r), abandoned: () => {} },
     warn: (m) => warnings.push(m),
     sleep: async (ms) => void sleeps.push(ms),
+    ...(over.planeEffects ? { planeEffects: over.planeEffects } : {}),
     ...t,
   });
   return { ledger: ledger as InMemoryRunLedger, wt, warnings, fallbackPuts, sleeps, t };
@@ -1131,6 +1135,38 @@ describe("events, state, heartbeat", () => {
     // runLedgerWorker.test.ts's to prove).
     await t.beat();
     expect(inner.planeAcks).toHaveLength(2);
+  });
+
+  it("an admit effect runs through the wired executor and its word is the ack; a draining generation defers it instead (record 0064)", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const effect = { id: "admit:q2", kind: "admit" as const, runId: "q2", threadKey: "slack:C1:9.0", request: {} };
+    const ledger = overriding(inner, {
+      heartbeat: async (runId, gen, leaseMs) => {
+        const r = await inner.heartbeat(runId, gen, leaseMs);
+        return r.ok ? { ...r, effects: [effect] } : r;
+      },
+    });
+    let draining = false;
+    const admitted: string[] = [];
+    const { wt, t } = harness({
+      ledger,
+      planeEffects: {
+        draining: () => draining,
+        admit: async (e) => {
+          admitted.push(e.runId);
+          return "done";
+        },
+      },
+    });
+    await openRun(wt, openReq());
+    await t.beat();
+    expect(admitted).toEqual(["q2"]);
+    expect(inner.planeAcks).toEqual([{ id: "admit:q2", outcome: "done" }]);
+    // A draining generation defers admit: it starts nothing it cannot finish.
+    draining = true;
+    await t.beat();
+    expect(admitted).toEqual(["q2"]);
+    expect(inner.planeAcks[1]).toEqual({ id: "admit:q2", outcome: "deferred" });
   });
 
   it("planeOutcome fires the post and swallows a failure with one warning — the dispatch never waits on the plane (orchestration-plane item 8)", async () => {

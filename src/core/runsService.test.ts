@@ -2431,3 +2431,66 @@ describe("the registry summary, the ledger view and the record carry one standin
     expect(old.ok && old.value).not.toHaveProperty("hosted");
   });
 });
+
+// A queued ask on the plane (record 0064, "The queue"): the id the queued
+// reply names has a page between the queue answer and its admission, and the
+// reply's `runs stop <id>` lever withdraws it through the same service.
+describe("RunsService — a queued ask on the plane (record 0064)", () => {
+  const queuedRow = (id: string, over: Partial<import("./plane/decide.js").PlaneQueueRow> = {}) => ({
+    runId: id,
+    requester: "slack:UIVY",
+    threadKey: "slack:C9:19.1",
+    stage: "admission" as const,
+    request: { text: "queued ask" },
+    conditions: [{ kind: "thread_free" as const, threadKey: "slack:C9:19.1", met: false }],
+    position: 1,
+    queuedAt: NOW - 1_000,
+    state: "waiting" as const,
+    ...over,
+  });
+  function planeSetup() {
+    const base = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const svc = createRunsService({ registry: base.reg, store: base.store, ledger, warn: () => {} });
+    return { ...base, svc, ledger };
+  }
+
+  it("getRun answers a queued id's view: the requester, the thread's channel, the position and the waiting words — so the id a person was told has a page", async () => {
+    const { svc, ledger } = planeSetup();
+    ledger.planeQueuedRows.set("q-run-11", queuedRow("q-run-11"));
+    const found = await svc.getRun("q-run-11");
+    expect(found.ok && found.value).toMatchObject({
+      id: "q-run-11",
+      channelId: "slack:C9",
+      userId: "slack:UIVY",
+      threadKey: "slack:C9:19.1",
+      startedAt: NOW - 1_000,
+      finished: false,
+      eventCount: 0,
+      queued: { state: "waiting", position: 1, waiting: "the thread's live run" },
+      activity: "queued at position 1 — waiting on the thread's live run",
+    });
+    // The messages read answers the same view (there are no events yet).
+    const whole = await svc.getRun("q-run-11", { include: "messages" });
+    expect(whole.ok && whole.value.queued?.position).toBe(1);
+    // An id neither live, stored nor queued stays not_found.
+    expect(await svc.getRun("q-run-99")).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it("stopRun withdraws a queued id — the reply's runs stop lever — for either mode; the queue knows the id but not as waiting is a conflict", async () => {
+    const { svc, ledger } = planeSetup();
+    ledger.planeWithdrawAnswer = true;
+    expect(await svc.stopRun("q-run-11", "soft", actor)).toEqual({
+      ok: true,
+      value: { id: "q-run-11", mode: "soft", state: "withdrawn" },
+    });
+    expect(ledger.planeWithdraws).toEqual(["q-run-11"]);
+    // Already withdrawn (or admitted): the withdraw answers false while the
+    // queue still holds the row — over, like a persisted run, never unknown.
+    ledger.planeWithdrawAnswer = false;
+    ledger.planeQueuedRows.set("q-run-11", queuedRow("q-run-11", { state: "withdrawn" }));
+    expect(await svc.stopRun("q-run-11", "hard", actor)).toEqual({ ok: false, error: "conflict" });
+    // An id the queue never held stays not_found.
+    expect(await svc.stopRun("q-run-99", "hard", actor)).toEqual({ ok: false, error: "not_found" });
+  });
+});

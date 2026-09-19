@@ -1235,3 +1235,156 @@ describe("run ledger — intake receipts (item 59)", () => {
     ).toBe(401);
   });
 });
+
+describe("the plane's admission stage — /plane/admit, reservations, the seal's walk (orchestration-plane; record 0064)", () => {
+  const requester = "slack:UALICE";
+  const admit = (key: string, threadKey: string, text: string) =>
+    post("/plane/admit", { storeKey: key, threadKey, requester, request: { text } });
+
+  it("two asks a second apart on one thread: the first is admitted with a reservation, the second queued at position 1; the first's claim promotes the reservation; the seal admits the queued run with its attaching row", async () => {
+    const key = storeKey();
+    const t = "slack:C1:1.0";
+    const one = await admit(key, t, "one");
+    expect(one.status).toBe(200);
+    expect(one.data.kind).toBe("admitted");
+    expect(typeof one.data.reservation).toBe("string");
+    const two = await admit(key, t, "two");
+    expect(two.data).toMatchObject({
+      kind: "queued",
+      position: 1,
+      waiting: [{ kind: "thread_free", threadKey: t, met: false }],
+    });
+    const queuedId = two.data.id as string;
+    // The ledger claim promotes the reservation: the row retires in the claim's
+    // transaction and the live row holds the thread from there.
+    expect((await post("/runs/claim", claimBody(key, "r1", t))).status).toBe(200);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const sql = (inst as unknown as { sql: SqlStorage }).sql;
+      expect(sql.exec(`SELECT * FROM plane_reservations`).toArray()).toEqual([]);
+    });
+    // A third ask still queues — the thread is live, position ranks it behind the second.
+    expect((await admit(key, t, "three")).data).toMatchObject({ kind: "queued", position: 2 });
+    // The seal flips thread_free: the queued run is admitted, its admit effect
+    // is offered carrying the stored request, and its attaching row exists
+    // under the plane's id (the restart-from-request path's shape).
+    expect(
+      (await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", t) })).status,
+    ).toBe(200);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const effects = inst.openPlaneEffects();
+      expect(effects.map((e) => e.id)).toEqual([`admit:${queuedId}`]);
+      expect(effects[0]).toMatchObject({ kind: "admit", runId: queuedId, threadKey: t, request: { text: "two" } });
+      const live = await inst.listLive();
+      const row = live.find((r) => r.runId === queuedId)!;
+      expect(row).toMatchObject({ threadKey: t, ownerGen: "plane", phase: "attaching" });
+      expect(row.meta.request).toEqual({ text: "two" });
+    });
+  });
+
+  it("a duplicate admit decision after a roll keeps the effect's first offer and the attaching row (INSERT OR IGNORE)", async () => {
+    const key = storeKey();
+    const t = "slack:C2:2.0";
+    await admit(key, t, "one");
+    await post("/runs/claim", claimBody(key, "r1", t));
+    const q = (await admit(key, t, "two")).data.id as string;
+    await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", t) });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      expect(inst.openPlaneEffects().map((e) => e.id)).toEqual([`admit:${q}`]);
+    });
+  });
+
+  it("runs stop on a queued id withdraws it: the row goes withdrawn, a second withdraw answers false, and the seal admits nothing", async () => {
+    const key = storeKey();
+    const t = "slack:C3:3.0";
+    await admit(key, t, "one");
+    await post("/runs/claim", claimBody(key, "r1", t));
+    const q = (await admit(key, t, "two")).data.id as string;
+    expect((await post("/plane/withdraw", { storeKey: key, runId: q })).data).toEqual({ withdrawn: true });
+    expect((await post("/plane/withdraw", { storeKey: key, runId: q })).data).toEqual({ withdrawn: false });
+    expect((await post("/plane/queued", { storeKey: key, runId: q })).data.row).toMatchObject({ state: "withdrawn" });
+    await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", t) });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      expect(inst.openPlaneEffects()).toEqual([]);
+    });
+  });
+
+  it("a pending deploy queues an ask on deploy_settled and deploy.landed flips it, admitting the queued run", async () => {
+    const key = storeKey();
+    const t = "slack:C4:4.0";
+    expect((await post("/plane/deploy", { storeKey: key, phase: "pending" })).status).toBe(200);
+    const asked = await admit(key, t, "hi");
+    expect(asked.data).toMatchObject({
+      kind: "queued",
+      position: 1,
+      waiting: [{ kind: "deploy_settled", met: false }],
+    });
+    const landed = await post("/plane/deploy", { storeKey: key, phase: "landed", version: "1.0.0" });
+    expect(landed.data).toEqual({ ok: true, admitted: 1 });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      expect(inst.openPlaneEffects().map((e) => e.kind)).toEqual(["admit"]);
+    });
+  });
+
+  it("effects for a sealed run are dropped at the seal: an admitted-then-finished run's open admit goes with its finish", async () => {
+    const key = storeKey();
+    const t = "slack:C5:5.0";
+    await admit(key, t, "one");
+    await post("/runs/claim", claimBody(key, "r1", t));
+    const q = (await admit(key, t, "two")).data.id as string;
+    await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", t) });
+    // The plane's attaching row is another generation's with an expired lease:
+    // the reclaim takes it (the restart-from-request path) and its finish seals it.
+    const reclaimed = await post("/runs/reclaim", { storeKey: key, gen: "g2", now: Date.now(), leaseMs: LEASE_MS });
+    expect((reclaimed.data.runs as Array<{ row: { runId: string } }>).map((r) => r.row.runId)).toContain(q);
+    expect((await post("/runs/finish", { storeKey: key, runId: q, gen: "g2", record: record(q, t) })).status).toBe(200);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      expect(inst.openPlaneEffects()).toEqual([]);
+    });
+  });
+
+  it("a push that fails leaves the effect on the next heartbeat answer: the bot answered 404, nothing was acked, and the offer rides the heartbeat", async () => {
+    const key = storeKey();
+    const t = "slack:C6:6.0";
+    await admit(key, t, "one");
+    await post("/runs/claim", claimBody(key, "r1", t));
+    const q = (await admit(key, t, "two")).data.id as string;
+    const pushes: { url: string; auth: string | null }[] = [];
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      // A BOT binding whose push dead-ends (the container down, an older bot
+      // without the route): the fetch answers 404 and delivers nothing.
+      const withBot = inst as unknown as { env: Record<string, unknown> };
+      withBot.env = {
+        ...withBot.env,
+        BOT: {
+          fetch: async (url: string, init: { headers: Record<string, string> }) => {
+            pushes.push({ url: String(url), auth: init.headers.authorization ?? null });
+            return new Response("not found", { status: 404 });
+          },
+        },
+      };
+    });
+    // The seal walks the queue and pushes the admit; the push fails.
+    await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", t) });
+    await new Promise((r) => setTimeout(r, 10)); // the push is fire-and-forget
+    expect(pushes).toEqual([{ url: "https://bot/plane/effects", auth: "Bearer test-token" }]);
+    // Nothing was acked: the offer stands and rides the next heartbeat answer.
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      expect(inst.openPlaneEffects().map((e) => e.id)).toEqual([`admit:${q}`]);
+    });
+    const t2 = "slack:C6:6.1";
+    await post("/runs/claim", claimBody(key, "r2", t2));
+    const beat = await post("/runs/heartbeat", { storeKey: key, runId: "r2", gen: "g1", leaseMs: LEASE_MS });
+    expect((beat.data.effects as Array<{ id: string }>).map((e) => e.id)).toEqual([`admit:${q}`]);
+  });
+
+  it("validates: a missing threadKey, requester or request is 400; a malformed withdraw run id is 400", async () => {
+    const key = storeKey();
+    expect((await post("/plane/admit", { storeKey: key, requester, request: {} })).status).toBe(400);
+    expect((await post("/plane/admit", { storeKey: key, threadKey: "slack:C1:1.0", request: {} })).status).toBe(400);
+    expect(
+      (await post("/plane/admit", { storeKey: key, threadKey: "slack:C1:1.0", requester, request: [] })).status,
+    ).toBe(400);
+    expect((await post("/plane/withdraw", { storeKey: key, runId: "" })).status).toBe(400);
+    expect((await post("/plane/deploy", { storeKey: key, phase: "later" })).status).toBe(400);
+  });
+});

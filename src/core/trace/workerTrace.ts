@@ -54,6 +54,9 @@ export function shimRoute(pathname: string): string | undefined {
   if (pathname.startsWith("/admin/")) return "admin";
   // The artifact copy (deploy/cloudflare/artifactsCopy.ts): the shim's own route, a 1 GB stream.
   if (pathname === "/artifacts/copy") return "artifacts";
+  // The plane's effect push (record 0064): the state Worker's service-binding
+  // call, bearer-gated by the shim and forwarded to the container.
+  if (pathname === "/plane/effects") return "plane";
   // The model proxy's three routes (docs/reference/specs/model-proxy.md): a bounded
   // request per model call, forwarded to the container like everything else.
   if (pathname === "/v1/messages" || pathname === "/v1/chat/completions" || pathname === "/v1/responses")

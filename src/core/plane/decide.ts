@@ -13,9 +13,26 @@
 export type PlaneStage = "admission" | "runner" | "resident";
 
 /** A queue condition: what must become true before the row may run. Each is
- *  flipped by an event the plane already sees, never polled. The union grows
- *  one member per stage as the later units land. */
-export type PlaneCondition = { kind: "thread_free"; threadKey: string; met: boolean };
+ *  flipped by an event the plane already sees, never polled. The admission
+ *  stage's full set (record 0064, "The queue"): `thread_free` — flipped by the
+ *  seal or closing reclaim of the thread's run; `window_open` — flipped by the
+ *  window's lift; `deploy_settled` — flipped by the deploy runner's
+ *  `deploy.landed` post. The union grows one member per stage as the later
+ *  units land. */
+export type PlaneCondition =
+  | { kind: "thread_free"; threadKey: string; met: boolean }
+  | { kind: "window_open"; window: string; met: boolean }
+  | { kind: "deploy_settled"; met: boolean };
+
+/** A reservation: an admitted ask's hold on its thread between the answer and
+ *  the ledger claim that promotes it (the `plane_reservations` row). A second
+ *  ask meanwhile sees the thread taken and queues. The seal deletes it. */
+export interface PlaneReservation {
+  kind: "thread";
+  key: string;
+  runId: string;
+  at: number;
+}
 
 /** One queued ask: the `plane_queue` row. `position` counts the waiting rows
  *  ahead of it on the same conditions when it queued — the number a person is
@@ -39,11 +56,19 @@ export interface PlaneQueueRow {
 export interface PlaneState {
   queue: PlaneQueueRow[];
   liveThreads: string[];
+  /** Threads an admitted ask holds before its claim lands (or after, until the seal). */
+  reservations: PlaneReservation[];
+  /** Open window kinds; `deploy` is the pending-deploy window (`deploy_settled` is its absence). */
+  openWindows: string[];
 }
 
 export function emptyPlaneState(): PlaneState {
-  return { queue: [], liveThreads: [] };
+  return { queue: [], liveThreads: [], reservations: [], openWindows: [] };
 }
+
+/** The window kind behind `deploy_settled`: opened while a deploy is pending,
+ *  lifted by the deploy runner's `deploy.landed` post (record 0064). */
+export const DEPLOY_WINDOW = "deploy";
 
 /** The closed event union. `ask`: may this run start now; `sealed`: a thread's
  *  live run ended (the ledger's seal, the event that flips `thread_free`);
@@ -58,7 +83,11 @@ export interface PlaneAskEvent {
   request: Record<string, unknown>;
 }
 export type PlaneEvent =
-  PlaneAskEvent | { kind: "sealed"; at: number; threadKey: string } | { kind: "withdraw"; at: number; runId: string };
+  | PlaneAskEvent
+  | { kind: "sealed"; at: number; threadKey: string }
+  | { kind: "withdraw"; at: number; runId: string }
+  /** A window's open or lift (`window_open`); kind `deploy` is the pending deploy (`deploy_settled`). */
+  | { kind: "window"; at: number; window: string; phase: "opened" | "lifted" };
 
 /** The closed effect union: what the bot is asked to do, offered on its
  *  heartbeat and reclaim answers and acknowledged by id (`/plane/ack`). The
@@ -77,7 +106,11 @@ export type PlaneEffect = {
 export type PlaneWrite =
   | { table: "plane_queue"; op: "put"; row: PlaneQueueRow }
   | { table: "plane_queue"; op: "state"; runId: string; state: PlaneQueueRow["state"] }
-  | { table: "plane_effects"; op: "offer"; effect: PlaneEffect; at: number };
+  | { table: "plane_effects"; op: "offer"; effect: PlaneEffect; at: number }
+  | { table: "plane_reservations"; op: "put"; row: PlaneReservation }
+  | { table: "plane_reservations"; op: "del"; key: string }
+  | { table: "plane_windows"; op: "put"; window: string; at: number }
+  | { table: "plane_windows"; op: "del"; window: string };
 
 /** The bot's own outcome for one dispatch, posted to `POST /plane/outcome`
  *  under `plane.admission: shadow` (orchestration-plane item 8): `proceeded`, `refused:<code>` or
@@ -94,6 +127,21 @@ export interface PlaneOutcomePost {
 /** How the bot answers an offered effect (orchestration-plane item 7): `done` and `skipped` close it,
  *  `deferred` leaves it on the next heartbeat or reclaim answer. */
 export type PlaneAckOutcome = "done" | "skipped" | "deferred";
+
+/** The effect bounds (record 0064, "Where it lives"): a run holds at most this
+ *  many open effects, the object at most the total — an offer past either is
+ *  refused by the cap's name, never queued silently. */
+export const PLANE_EFFECTS_PER_RUN_CAP = 4;
+export const PLANE_EFFECTS_TOTAL_CAP = 256;
+
+/** The named refusal an over-cap offer gets (the object counts, this judges). */
+export function effectCapRefusal(counts: { total: number; forRun: number }, effect: PlaneEffect): string | undefined {
+  if (counts.total >= PLANE_EFFECTS_TOTAL_CAP)
+    return `plane_effects total cap (${PLANE_EFFECTS_TOTAL_CAP}): effect ${effect.id} refused`;
+  if (counts.forRun >= PLANE_EFFECTS_PER_RUN_CAP)
+    return `plane_effects per-run cap (${PLANE_EFFECTS_PER_RUN_CAP}): effect ${effect.id} refused`;
+  return undefined;
+}
 
 export interface PlaneDecision {
   state: PlaneState;
@@ -114,7 +162,23 @@ export function decide(state: PlaneState, event: PlaneEvent): PlaneDecision {
       return onSealed(state, event);
     case "withdraw":
       return onWithdraw(state, event);
+    case "window":
+      return onWindow(state, event);
   }
+}
+
+/** The `/plane/admit` answer (record 0064, "The queue"): `admitted` with the
+ *  reservation the decision wrote, or `queued` with the row's id, its position
+ *  and the conditions it waits on. */
+export type PlaneAskAnswer =
+  | { kind: "admitted"; reservation: string }
+  | { kind: "queued"; id: string; position: number; waiting: PlaneCondition[] };
+
+export function planeAskAnswerOf(decision: PlaneDecision, runId: string): PlaneAskAnswer {
+  const row = decision.state.queue.find((r) => r.runId === runId);
+  return row && row.state === "waiting"
+    ? { kind: "queued", id: runId, position: row.position, waiting: row.conditions }
+    : { kind: "admitted", reservation: runId };
 }
 
 /** The shadow word for an ask the decider just judged (orchestration-plane item 8): `queued` when the
@@ -125,17 +189,67 @@ export function planeAskWordOf(decision: PlaneDecision, runId: string): "proceed
   return row && row.state === "waiting" ? "queued" : "proceed";
 }
 
+/** The queue's waiting words (record 0064, "The queue"): what a person is
+ *  told the row waits on — the queued reply in the thread and the queued id's
+ *  page say the same thing, so the two surfaces cannot drift. */
+export function waitingWords(waiting: PlaneCondition[]): string {
+  if (waiting.length === 0) return "its turn";
+  return waiting
+    .map((c) =>
+      c.kind === "thread_free"
+        ? "the thread's live run"
+        : c.kind === "deploy_settled"
+          ? "the pending deploy"
+          : `the ${c.window} window`,
+    )
+    .join(", then ");
+}
+
+/** The unmet conditions an ask meets right now: a live or reserved thread,
+ *  every open window, a pending deploy. Empty means admitted. */
+function unmetConditionsOf(state: PlaneState, threadKey: string): PlaneCondition[] {
+  const out: PlaneCondition[] = [];
+  if (state.liveThreads.includes(threadKey) || state.reservations.some((r) => r.key === threadKey))
+    out.push({ kind: "thread_free", threadKey, met: false });
+  for (const w of state.openWindows)
+    out.push(
+      w === DEPLOY_WINDOW ? { kind: "deploy_settled", met: false } : { kind: "window_open", window: w, met: false },
+    );
+  return out;
+}
+
+/** Whether two conditions are the same wait: same kind, same subject. */
+function sameCondition(a: PlaneCondition, b: PlaneCondition): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "thread_free" && b.kind === "thread_free") return a.threadKey === b.threadKey;
+  if (a.kind === "window_open" && b.kind === "window_open") return a.window === b.window;
+  return true; // deploy_settled has one subject
+}
+
 function onAsk(state: PlaneState, event: PlaneAskEvent): PlaneDecision {
-  const threadLive = state.liveThreads.includes(event.threadKey);
-  if (!threadLive) return { state, effects: [], writes: [] };
-  const waitingAhead = state.queue.filter((r) => r.state === "waiting" && r.threadKey === event.threadKey).length;
+  const conditions = unmetConditionsOf(state, event.threadKey);
+  if (conditions.length === 0) {
+    // Admitted: the thread is reserved in the same transaction (record 0064,
+    // "The queue") so a second ask a moment later queues; the ledger claim
+    // promotes the reservation and the seal deletes it.
+    const reservation: PlaneReservation = { kind: "thread", key: event.threadKey, runId: event.runId, at: event.at };
+    return {
+      state: { ...state, reservations: [...state.reservations, reservation] },
+      effects: [],
+      writes: [{ table: "plane_reservations", op: "put", row: reservation }],
+    };
+  }
+  // Position (record 0064): the rank among queued runs sharing an unmet condition.
+  const waitingAhead = state.queue.filter(
+    (r) => r.state === "waiting" && r.conditions.some((c) => conditions.some((n) => sameCondition(c, n))),
+  ).length;
   const row: PlaneQueueRow = {
     runId: event.runId,
     requester: event.requester,
     threadKey: event.threadKey,
     stage: event.stage,
     request: event.request,
-    conditions: [{ kind: "thread_free", threadKey: event.threadKey, met: false }],
+    conditions,
     position: waitingAhead + 1,
     queuedAt: event.at,
     state: "waiting",
@@ -149,9 +263,33 @@ function onAsk(state: PlaneState, event: PlaneAskEvent): PlaneDecision {
 
 function onSealed(state: PlaneState, event: { kind: "sealed"; at: number; threadKey: string }): PlaneDecision {
   const liveThreads = state.liveThreads.filter((t) => t !== event.threadKey);
-  if (liveThreads.length === state.liveThreads.length && !hasWaiting(state, event.threadKey))
-    return { state, effects: [], writes: [] };
-  return walk({ ...state, liveThreads }, event.at);
+  const reservations = state.reservations.filter((r) => r.key !== event.threadKey);
+  const freed = liveThreads.length !== state.liveThreads.length || reservations.length !== state.reservations.length;
+  if (!freed && !hasWaiting(state, event.threadKey)) return { state, effects: [], writes: [] };
+  const writes: PlaneWrite[] =
+    reservations.length !== state.reservations.length
+      ? [{ table: "plane_reservations", op: "del", key: event.threadKey }]
+      : [];
+  const walked = walk({ ...state, liveThreads, reservations }, event.at);
+  return { ...walked, writes: [...writes, ...walked.writes] };
+}
+
+function onWindow(
+  state: PlaneState,
+  event: { kind: "window"; at: number; window: string; phase: string },
+): PlaneDecision {
+  if (event.phase === "opened") {
+    if (state.openWindows.includes(event.window)) return { state, effects: [], writes: [] };
+    return {
+      state: { ...state, openWindows: [...state.openWindows, event.window] },
+      effects: [],
+      writes: [{ table: "plane_windows", op: "put", window: event.window, at: event.at }],
+    };
+  }
+  if (!state.openWindows.includes(event.window)) return { state, effects: [], writes: [] };
+  const next = { ...state, openWindows: state.openWindows.filter((w) => w !== event.window) };
+  const walked = walk(next, event.at);
+  return { ...walked, writes: [{ table: "plane_windows", op: "del", window: event.window }, ...walked.writes] };
 }
 
 function onWithdraw(state: PlaneState, event: { kind: "withdraw"; at: number; runId: string }): PlaneDecision {
@@ -187,17 +325,31 @@ function walk(state: PlaneState, at: number): PlaneDecision {
       threadKey: row.threadKey,
       request: row.request,
     };
+    // The admitted run reserves its thread like a fresh admission does, so the
+    // ledger claim under its id promotes the same row and a rival ask queues.
+    const reservation: PlaneReservation = { kind: "thread", key: row.threadKey, runId: row.runId, at };
     next = {
+      ...next,
       queue: next.queue.map((r) => (r === row ? admitted : r)),
-      liveThreads: [...next.liveThreads, row.threadKey],
+      reservations: [...next.reservations, reservation],
     };
     effects.push(effect);
     writes.push({ table: "plane_queue", op: "state", runId: row.runId, state: "admitted" });
     writes.push({ table: "plane_effects", op: "offer", effect, at });
+    writes.push({ table: "plane_reservations", op: "put", row: reservation });
   }
   return { state: next, effects, writes };
 }
 
 function conditionsMet(state: PlaneState, row: PlaneQueueRow): boolean {
-  return row.conditions.every((c) => !state.liveThreads.includes(c.threadKey));
+  return row.conditions.every((c) => {
+    switch (c.kind) {
+      case "thread_free":
+        return !state.liveThreads.includes(c.threadKey) && !state.reservations.some((r) => r.key === c.threadKey);
+      case "window_open":
+        return !state.openWindows.includes(c.window);
+      case "deploy_settled":
+        return !state.openWindows.includes(DEPLOY_WINDOW);
+    }
+  });
 }

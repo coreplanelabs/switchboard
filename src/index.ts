@@ -87,6 +87,9 @@ import {
   setForeignLiveCardsSource,
 } from "./channels/slack/statusCard.js";
 import { handleAdminCrash } from "./channels/adminCrash.js";
+import { handlePlaneEffects } from "./channels/planeEffects.js";
+import { DEFAULT_RUN_STORE_TOKEN_ENV } from "./core/runStoreWorker.js";
+import type { PlaneAckOutcome, PlaneEffect } from "./core/plane/decide.js";
 import { handleAdminModelProxyBearer, MODEL_PROXY_BEARER_PATH } from "./channels/adminModelProxy.js";
 import {
   ANTHROPIC_MESSAGES_PATH,
@@ -386,12 +389,33 @@ export async function runBot(): Promise<void> {
   // ledger on the state Worker; without one, the null store knows no instance
   // and the coordinator routes refuse every step by name.
   const coordinatorInstances = buildCoordinatorInstanceStore(runHistoryCfg, processSecrets);
+  // The plane's `admit` execution (record 0064, "The queue"): the object wrote
+  // the admitted run's attaching row under an expired lease, so one reclaim
+  // pass takes it and restarts it from the stored request under the plane's id
+  // — the restart-from-request path (run-history item 42). Wired once the boot
+  // reclaim exists (below); until then every effect defers and stays offered.
+  let planeAdmitPass: (() => Promise<void>) | undefined;
+  // ONE executor for both transports (orchestration-plane item 44): the
+  // heartbeat/reclaim answers (writeThrough) and the state Worker's push
+  // (`POST /plane/effects` below) run an effect through this same object, so
+  // the two paths cannot disagree on what an admit does.
+  const planeEffectExecutor = {
+    draining: () => draining,
+    admit: async (effect: PlaneEffect): Promise<PlaneAckOutcome> => {
+      // A duplicate admit after a roll: the run is already live here.
+      if (defaultRunRegistry.getById(effect.runId)) return "skipped";
+      if (!planeAdmitPass) return "deferred";
+      await planeAdmitPass();
+      return "done";
+    },
+  };
   const runLedger = ledgerClient
     ? createLedgerWriteThrough({
         ledger: ledgerClient,
         gen: generation,
         fallback: runStore,
         warn: (m) => console.warn(m),
+        planeEffects: planeEffectExecutor,
       })
     : new NullLedgerWriteThrough(generation, runStore);
   console.log(
@@ -1245,6 +1269,22 @@ export async function runBot(): Promise<void> {
         coordinatorAdmin(req, res);
         return;
       }
+      // The plane's effect push (record 0064, "Where it lives"): the state
+      // Worker POSTed committed effects to the bot shim, which checked the
+      // bearer and forwarded here; each effect runs through the SAME executor
+      // the heartbeat answers use, and is acked on the object. Without a
+      // ledger there is nothing to ack against — everything defers.
+      if (path === "/plane/effects") {
+        handlePlaneEffects(req, res, {
+          token: processSecrets.named(runHistoryCfg?.worker?.tokenEnv ?? DEFAULT_RUN_STORE_TOKEN_ENV),
+          execute: ledgerClient ? planeEffectExecutor : undefined,
+          ack: async (id, outcome) => {
+            if (ledgerClient) await ledgerClient.planeAck(id, outcome);
+          },
+          warn: (w) => console.warn(w),
+        });
+        return;
+      }
       if (path === "/admin/crash") {
         handleAdminCrash(req, res, {
           tokens: processSecrets.get("SWITCHBOARD_INGRESS_TOKENS"),
@@ -1547,6 +1587,21 @@ export async function runBot(): Promise<void> {
   // row whose lease was still current at boot is taken once it expires.
   if (ledgerReclaim && bootReclaim) {
     await launch(bootReclaim);
+    // The plane's `admit` runs as one reclaim pass (record 0064): the object's
+    // attaching row is taken and restarted from its request under the plane's id.
+    const reclaimClient = ledgerReclaim.client;
+    planeAdmitPass = async () => {
+      const outcome = await reclaimRuns({
+        ledger: reclaimClient,
+        gen: generation,
+        storedStatus,
+        log: (l) => console.log(l),
+        warn: (w) => console.warn(w),
+      });
+      takeover.take(outcome);
+      await guardCards(outcome);
+      await launch(outcome);
+    };
     startReclaimSweep({
       ledger: ledgerReclaim.client,
       gen: generation,

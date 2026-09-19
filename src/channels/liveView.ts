@@ -820,7 +820,13 @@ export function createLiveViewHandler(
     // stream to follow, no stop controls on the page; the tokenless stop route
     // stops it through the ledger.
     const actor = ctx.actor;
-    const servable = (view: RunView): boolean => view.finished || view.ownerGen !== undefined;
+    // A QUEUED ask (record 0064, "The queue") is servable here too: the plane
+    // holds the request under the id the queued reply named, there is no
+    // process to hold a token for it, and the attribute decision is its only
+    // gate — the page shows the position and the waiting words, the stop
+    // route withdraws it.
+    const servable = (view: RunView): boolean =>
+      view.finished || view.ownerGen !== undefined || view.queued !== undefined;
     // The one tokenless reach into a live run of THIS process: the hosted
     // parent's stop (record 0060) — soft is refused below, hard is the
     // operator's escape. Every read route keeps requiring the token on it.
@@ -981,6 +987,8 @@ export function createLiveViewHandler(
           // "unfinished — no finish recorded" state instead of `interrupted`
           // (run-history item 27).
           ...(view.provisional === true ? { provisional: true as const } : {}),
+          // A queued ask's facts (record 0064): the chip reads them instead of an outcome.
+          ...(view.queued !== undefined ? { queued: view.queued } : {}),
           eventCount: view.eventCount,
           startedAt: view.startedAt,
           ...(view.receivedAt !== undefined ? { receivedAt: view.receivedAt } : {}),

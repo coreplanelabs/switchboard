@@ -505,6 +505,16 @@ export async function replyAck(io: ChannelIO, verbosity: Verbosity, text: string
   if (!shows(verbosity, "verbose")) return;
   return io.reply(text);
 }
+
+/**
+ * A request's outcome that is neither a refusal nor an ack (record 0064: the
+ * queued card — "a refusal becomes a queue position"): said at every
+ * verbosity, because it is the answer to the ask, not material before it. The
+ * renderer owns the reply so the producing modules stay behind the fence.
+ */
+export async function replyOutcome(io: ChannelIO, text: string): Promise<void> {
+  return io.reply(text);
+}
 /**
  * The one caller of a channel's `offer` (record 0054): the Block Kit an
  * offered confirmation shows goes out through the reply stage, so the unit
