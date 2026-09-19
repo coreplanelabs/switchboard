@@ -1895,6 +1895,43 @@ describe("routedRunsAtOnce — a read or an exec-class write runs when routed; a
     expect(routedRunsAtOnce(write, "destructive")).toBe(true);
   });
 
+  // Record 0057: the door parses the bound input
+  // before it classes, so a command whose class is a predicate over its
+  // parsed input is decided on what the schema accepted — and an input the
+  // schema refuses classes as destructive, fail closed, never write.
+  it("with the bound input, a predicate write classes per input: `config set me` runs under `destructive`, `config set channel` is handed back under it, and both are handed back under the built-in `write`", () => {
+    const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+    registerCoreCommands(registry);
+    const configSet = registry.get("config.set") as CommandDef<unknown>;
+    const me = { args: ["me"], options: { verbosity: "quiet" } };
+    const channel = { args: ["channel"], options: { verbosity: "quiet" } };
+    expect(routedRunsAtOnce(configSet, "destructive", me)).toBe(true);
+    expect(routedRunsAtOnce(configSet, "destructive", channel)).toBe(false);
+    expect(routedRunsAtOnce(configSet, BUILT_IN_CONFIRM, me)).toBe(false);
+    expect(routedRunsAtOnce(configSet, BUILT_IN_CONFIRM, channel)).toBe(false);
+  });
+
+  it("a bound input the schema refuses classes as destructive at the door: a look-alike scope or an array is handed back even under `destructive`", () => {
+    const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+    registerCoreCommands(registry);
+    const configSet = registry.get("config.set") as CommandDef<unknown>;
+    for (const scope of ["CHANNEL", " channel", "сhannel", ["channel"]]) {
+      expect(
+        routedRunsAtOnce(configSet, "destructive", { args: [scope], options: { verbosity: "quiet" } }),
+        `scope ${JSON.stringify(scope)}`,
+      ).toBe(false);
+    }
+  });
+
+  it("without an input the rule reads the definition alone, exactly as before — the resting class of a predicate write is `write`", () => {
+    const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
+    registerCoreCommands(registry);
+    const configSet = registry.get("config.set") as CommandDef<unknown>;
+    expect(blastRadius(configSet)).toBe("write");
+    expect(routedRunsAtOnce(configSet, "destructive")).toBe(true);
+    expect(routedRunsAtOnce(configSet, BUILT_IN_CONFIRM)).toBe(false);
+  });
+
   it("restated on blastRadius, the rule under the built-in confirm agrees with the two-field reading on every command the router is offered: a read or an exec runs, a write or a destructive write is handed back", () => {
     const registry = new CommandRegistry<CoreCommandDeps>({ audit: () => {} });
     registerCoreCommands(registry);

@@ -70,12 +70,31 @@ export type CommandSurfaces = Partial<Record<SurfaceName, false>>;
  *  changes; a `--dry-run` input answers `PLAN_ONLY_RISK`. The MCP listing
  *  renders these in MCP's own hint names (`src/channels/mcp.ts`), and the
  *  conformance suite refuses a chat-exposed write that declares none, so the
- *  fence is presence: the label itself is a judgement made in the record. */
+ *  fence is presence: the label itself is a judgement made in the record.
+ *
+ *  `destructive` may be a PREDICATE over the parsed input (record 0057): one
+ *  declaration classes `config set channel` destructive and `config set me`
+ *  write. It sees only what `parseInput` accepted — never a raw string a
+ *  look-alike, a case change or an array can fool — the conformance suite
+ *  proves it total over the schema's enum grid, and the class fails closed:
+ *  a parse failure or a thrown predicate reads as `destructive`
+ *  (`boundBlastRadius`). */
 export interface CommandAnnotations {
-  destructive: boolean;
+  destructive: boolean | ((input: ParsedCommandInput) => boolean);
   idempotent?: boolean;
   openWorld?: boolean;
   risk?: (input: CommandInput) => string;
+}
+
+/** The shape a destructive predicate classes over: `parseInput`'s accepted
+ *  half — arguments and options keyed by declared name, each value the zod
+ *  output. Untyped records because `CommandAnnotations` is not generic over a
+ *  command's schemas; a predicate narrows what it reads and answers false for
+ *  anything else (an unexpected shape is the helper's fail-closed, not the
+ *  predicate's). */
+export interface ParsedCommandInput {
+  args: Record<string, unknown>;
+  options: Record<string, unknown>;
 }
 
 /** The class a routed command is decided on — derived by `blastRadius` from
@@ -240,11 +259,48 @@ export const flag = z.union([z.boolean(), z.enum(["true", "false"]).transform((v
  *  — one declaring nothing included, which the conformance suite refuses for a
  *  chat-exposed command so the silence never reaches production. Pure over the
  *  definition: the catalogue column, the MCP hints and the door's decision all
- *  call it, so one definition change moves every surface. */
-export function blastRadius(def: Pick<CommandDef<unknown>, "effect" | "action" | "annotations">): BlastRadius {
+ *  call it, so one definition change moves every surface.
+ *
+ *  A write declaring a PREDICATE (record 0057) is classed over `parsed` — the
+ *  input after `parseInput`, never raw — and fails closed: a thrown predicate
+ *  is `destructive`. Without a parsed input in hand (the catalogue column, the
+ *  MCP hints — the static views, where no input exists) the predicate reads as
+ *  the base `write`: every path that decides on an input passes it
+ *  (`boundBlastRadius` is the door's parse-then-class helper). */
+export function blastRadius(
+  def: Pick<CommandDef<unknown>, "effect" | "action" | "annotations">,
+  parsed?: ParsedCommandInput,
+): BlastRadius {
   if (def.effect === "read") return "read";
   if (def.action.endsWith(":exec")) return "exec";
-  return def.annotations?.destructive === true ? "destructive" : "write";
+  const decl = def.annotations?.destructive;
+  if (typeof decl !== "function") return decl === true ? "destructive" : "write";
+  if (parsed === undefined) return "write";
+  try {
+    return decl(parsed) ? "destructive" : "write";
+  } catch {
+    return "destructive";
+  }
+}
+
+/** Parse, then class (record 0057): the helper for every path that holds an
+ *  input nobody typed — the door classes a routed bind with it. The input is
+ *  validated with the command's own schemas first, so a predicate sees only
+ *  accepted values — a look-alike scope, a wrong case or an array where a
+ *  string was expected fails the parse — and an input the schema refuses
+ *  classes as `destructive`: fail closed, the widest word, because an input
+ *  nobody vetted never gets the narrow one. A read and an exec-class write
+ *  keep their class: running either changes nothing of the bot's own, and a
+ *  malformed one is refused by the registry's own parse at invoke. */
+export function boundBlastRadius(
+  def: Pick<CommandDef<unknown>, "effect" | "action" | "annotations" | "args" | "options">,
+  input: CommandInput,
+): BlastRadius {
+  if (def.effect === "read") return "read";
+  if (def.action.endsWith(":exec")) return "exec";
+  const parsed = parseInput(def, input);
+  if (!parsed.ok) return "destructive";
+  return blastRadius(def, { args: parsed.args, options: parsed.options });
 }
 
 /** The risk line of a `--dry-run` invocation: the class stays, the line says nothing changes. */

@@ -10,6 +10,7 @@ import { dependsOn, type CapabilityKey } from "../capabilityGating.js";
 import {
   acceptsUndefined,
   blastRadius,
+  parseInput,
   resourceOf,
   type Caller,
   type CommandDef,
@@ -1036,11 +1037,16 @@ export function fixturesFor(cmd: Pick<CommandDef<unknown>, "id">): {
 
 /** One line per chat-exposed write of class `write` or `destructive` that
  *  declares no blast radius — the loud failure a new write hits until its
- *  definition says `destructive` true or false and names its risk line
+ *  definition says `destructive` true or false (or declares a predicate over
+ *  its parsed input, record 0057) and names its risk line
  *  (docs/reference/specs/command-registry.md item 29). A read and an
  *  exec-class write are exempt, and so is a write chat never offers. The fence
  *  is presence, not truth: the risk line is checked against the required-only
- *  input for being non-empty, never for being right. */
+ *  input for being non-empty, never for being right — and a predicate is
+ *  checked for TOTALITY over the schema's enum grid (every accepted variant
+ *  parses and classes to a boolean without a throw), never for judging right:
+ *  the runtime fails closed on a throw, but a predicate with a hole is a bug
+ *  the suite names rather than a class quietly widened. */
 export function blastRadiusGaps(catalogue: readonly CommandDef<unknown>[]): string[] {
   const where = "docs/reference/specs/command-registry.md item 29";
   const gaps: string[] = [];
@@ -1048,20 +1054,65 @@ export function blastRadiusGaps(catalogue: readonly CommandDef<unknown>[]): stri
     if (cmd.surfaces?.chat === false) continue;
     const radius = blastRadius(cmd);
     if (radius === "read" || radius === "exec") continue;
-    if (typeof cmd.annotations?.destructive !== "boolean") {
+    const decl = cmd.annotations?.destructive;
+    if (typeof decl !== "boolean" && typeof decl !== "function") {
       gaps.push(
-        `${cmd.id}: annotations.destructive is not declared — a chat-exposed write says true or false (${where})`,
+        `${cmd.id}: annotations.destructive is not declared — a chat-exposed write says true or false, or a predicate over its parsed input (${where})`,
       );
       continue;
     }
-    if (typeof cmd.annotations.risk !== "function") {
+    if (typeof cmd.annotations?.risk !== "function") {
       gaps.push(`${cmd.id}: annotations.risk is missing — a chat-exposed write names what a run changes (${where})`);
       continue;
+    }
+    if (typeof decl === "function") {
+      for (const variant of variantsOf(cmd).variants) {
+        if (!variant.expect.ok) continue;
+        const input = namedToInput(cmd, variant.named, "camel");
+        if ("error" in input) continue;
+        const parsed = parseInput(cmd, input);
+        if (!parsed.ok) continue; // an unparseable variant is the helper's fail-closed, not the predicate's ground
+        try {
+          const answer = decl({ args: parsed.args, options: parsed.options });
+          if (typeof answer !== "boolean")
+            gaps.push(
+              `${cmd.id}: annotations.destructive answered ${typeof answer} for ${variant.name} — a class predicate is total over its schema (${where})`,
+            );
+        } catch (err) {
+          gaps.push(
+            `${cmd.id}: annotations.destructive threw for ${variant.name} (${err instanceof Error ? err.message : String(err)}) — a class predicate is total over its schema (${where})`,
+          );
+        }
+      }
     }
     const named = variantsOf(cmd).variants.find((v) => v.name === "required-only")?.named ?? {};
     const input = namedToInput(cmd, named, "camel");
     if (cmd.annotations.risk("error" in input ? {} : input).trim() === "")
       gaps.push(`${cmd.id}: annotations.risk answered an empty line for the required-only input (${where})`);
+  }
+  return gaps;
+}
+
+/** One line per chat-exposed write whose scope-like argument or option (a
+ *  field named `scope`, however cased) carries a WIDENING default — a schema
+ *  that turns an absent value into anything but the caller's own `me`
+ *  (docs/reference/specs/command-registry.md item 29, record 0057: an argument
+ *  that widens scope never defaults to the wider value). An optional field
+ *  with no default passes: the handler's own default is `me`, the narrowest,
+ *  and the class predicate reads the absence the same way. */
+export function scopeDefaultGaps(catalogue: readonly CommandDef<unknown>[]): string[] {
+  const where = "docs/reference/specs/command-registry.md item 29";
+  const gaps: string[] = [];
+  for (const cmd of catalogue) {
+    if (cmd.surfaces?.chat === false || cmd.effect !== "write" || cmd.action.endsWith(":exec")) continue;
+    for (const f of fieldsOf(cmd)) {
+      if (f.name.toLowerCase() !== "scope") continue;
+      const absent = f.schema.safeParse(undefined);
+      if (absent.success && absent.data !== undefined && absent.data !== "me")
+        gaps.push(
+          `${cmd.id}: ${f.name} defaults to ${JSON.stringify(absent.data)} — a scope-like ${f.kind} never defaults to a wider value than \`me\` (${where})`,
+        );
+    }
   }
   return gaps;
 }

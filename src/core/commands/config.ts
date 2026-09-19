@@ -26,6 +26,7 @@ import {
   type CommandRegistry,
   type JsonObject,
   type JsonValue,
+  type ParsedCommandInput,
 } from "../commandRegistry.js";
 
 // The `config.*` registrations (phase 4b): runtime config on the typed model.
@@ -103,6 +104,12 @@ const instructionsScopeArg = {
 } as const;
 const channelOption = z.string().optional().describe("target channel (default: the channel you are speaking in)");
 const threadOption = z.string().optional().describe("target thread key (default: the thread you are speaking in)");
+
+/** Record 0057's audit rule over the parsed scope: a `me` write is the
+ *  caller's own and one command undoes it — write; a `channel` or `thread`
+ *  write changes what other people run under — destructive. Anything the
+ *  enum did not accept never reaches here (`boundBlastRadius` fails closed). */
+const destructiveBeyondMe = (input: ParsedCommandInput): boolean => input.args.scope !== "me";
 
 const effort = z.enum(EFFORT_LEVELS);
 /** The ladder as the option descriptions print it (`<low|medium|high|xhigh|max>`):
@@ -433,8 +440,12 @@ export const configSet = defineCommand({
   }),
   action: "config:write",
   effect: "write",
-  // Reversible: one `config set` or `config clear` undoes it; the receipt names the scope.
-  annotations: { destructive: false, risk: () => "changes the scope's settings for everyone in it until reset" },
+  // One `config set` or `config clear` undoes it, but a shared scope changes
+  // what other people run under — destructive beyond `me` (record 0057).
+  annotations: {
+    destructive: destructiveBeyondMe,
+    risk: () => "changes the scope's settings for everyone in it until reset",
+  },
   describe:
     "Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, or the intake gate's mode for a thread (gated like the channel); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
   // A sentence for the person who typed the command (routing-and-config item
@@ -537,7 +548,10 @@ export const configClear = defineCommand({
   options: z.object({ channel: channelOption, thread: threadOption }),
   action: "config:write",
   effect: "write",
-  annotations: { destructive: false, risk: () => "changes the scope's settings for everyone in it until reset" },
+  annotations: {
+    destructive: destructiveBeyondMe,
+    risk: () => "changes the scope's settings for everyone in it until reset",
+  },
   describe:
     "Drop every runtime override of a channel (gated), of yourself, or of a thread (gated like the channel); static config.yaml values show through again.",
   render: (output) => `Cleared ${who((output as JsonObject).scope as "channel" | "me" | "thread")} overrides.`,
@@ -575,7 +589,10 @@ export const configInstructions = defineCommand({
   options: z.object({ channel: channelOption }),
   action: "config:write",
   effect: "write",
-  annotations: { destructive: false, risk: () => "changes the scope's settings for everyone in it until reset" },
+  annotations: {
+    destructive: destructiveBeyondMe,
+    risk: () => "changes the scope's settings for everyone in it until reset",
+  },
   describe:
     "Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.",
   render: (output) => {

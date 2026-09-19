@@ -16550,7 +16550,6 @@ describe("the door's counts through dispatch(): a hand-back and its paste are ru
 // that sets `destructive` is the one setting that lets a routed write run.
 describe("the confirm axis through dispatch(): the door hands back at or after the effective confirm class (record 0044)", () => {
   const HAND_BACK_LINE = "To run this: config set channel --models.coding anthropic/claude-opus-5";
-  const RECEIPT_LINE = "routed: config set channel --models.coding anthropic/claude-opus-5";
   const call = (tool: string, input: unknown) => vi.fn<RouteModel>(async () => ({ tool, input }));
   /** The routed fixture with a confirm on the layers named: the defaults' block, the request's channel, the requesting user. */
   const confirmYaml = (layers: { defaults?: string; channel?: string; user?: string }) =>
@@ -16584,26 +16583,34 @@ describe("the confirm axis through dispatch(): the door hands back at or after t
     expect(codingModelIn(deps)).toBe("anthropic/coding-model");
   });
 
-  it("a channel `destructive` is the one setting that lets a routed write run: the bound `config set` runs at once as the requester, the receipt first and the command's own text under it, and the channel's config changes", async () => {
+  it("a channel `destructive` is the one setting that lets a routed write run — and the class reads the bound input (record 0057): `config set me` runs at once as the requester with the receipt first, while the same command bound at `channel` scope is destructive and handed back", async () => {
     const { deps, provider, registry } = wired(confirmYaml({ channel: "destructive" }));
-    deps.routeModel = bindsConfigSet();
+    deps.routeModel = call("config_set", { scope: "me", models: { coding: "anthropic/claude-opus-5" } });
     const { io, replies, statuses } = fakeIO();
-    await dispatch(deps, msg("use opus for coding in this channel", "slack:UADMIN"), io);
+    await dispatch(deps, msg("use opus for my coding runs", "slack:UADMIN"), io);
     expect(deps.routeModel).toHaveBeenCalledTimes(1);
     expect(deps.invoked).toEqual(["config.set"]);
     expect(replies).toHaveLength(1);
     const [first, ...rest] = replies[0]!.split("\n");
-    expect(first).toBe(RECEIPT_LINE);
-    // The command's own reply: the channel's effective scope, its static confirm beside the new model.
-    expect(rest.join("\n")).toBe(
-      "Updated channel scope: models `coding=anthropic/claude-opus-5`, boundary confirm=destructive.",
-    );
+    expect(first).toBe("routed: config set me --models.coding anthropic/claude-opus-5");
+    // The command's own reply: the caller's effective scope with the new model.
+    expect(rest.join("\n")).toBe("Updated your scope: models `coding=anthropic/claude-opus-5`.");
     expect(replies[0]).not.toMatch(/^To run this: /);
     expect(statuses).toEqual([]);
     expect(provider.requests).toEqual([]);
     // No card, no agent run: the command is a log-only one, so no run either.
     expect(registry.snapshotById("r1")).toBeNull();
     expect(codingModelIn(deps)).toBe("anthropic/claude-opus-5");
+
+    // The same declaration classes `channel` scope destructive over the parsed
+    // input, so under the channel's `destructive` confirm it is handed back.
+    const shared = wired(confirmYaml({ channel: "destructive" }));
+    shared.deps.routeModel = bindsConfigSet();
+    const second = fakeIO();
+    await dispatch(shared.deps, msg("use opus for coding in this channel", "slack:UADMIN"), second.io);
+    expect(second.replies).toEqual([HAND_BACK_LINE]);
+    expect(shared.deps.invoked).toEqual([]);
+    expect(codingModelIn(shared.deps)).toBe("anthropic/coding-model");
   });
 
   it("a destructive command is handed back under every settable class — `destructive` on the channel included — with today's line", async () => {
