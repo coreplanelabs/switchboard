@@ -455,6 +455,17 @@ export interface HarnessRun {
    *  10), read when the process compacts so the steer that follows carries it;
    *  absent for a run without a session, and the steer says the notes are empty. */
   notepad?: () => Promise<Notepad | null>;
+  /** A compaction that failed for good is a checkpoint signal
+   *  (docs/reference/specs/harness-pi.md item 7): the process's window may
+   *  overflow before the run's own wind-down can salvage anything, so the run
+   *  loop commits the tracked changes and pushes them to the run's own branch
+   *  now — a `pushed_head` event (`by: "salvage"`) and a `compaction_salvage`
+   *  note naming the failure — and the loop goes on. Wired only for a coding
+   *  run bound at a branch of its own; the harness awaits it before reading
+   *  further events (a context that no longer fits then ends the round with
+   *  the push already made) and never lets it fail the run. `why` is the
+   *  failure's words as the process reported them. */
+  onCompactionFailed?: (why: string) => Promise<void>;
   /** The run's conversation as its session log holds it (session-log item 3),
    *  read at the call: what the relayed `spawn_run` hands `spawnChild` as the
    *  child's seed (agent-conductor item 3), since the harness keeps the

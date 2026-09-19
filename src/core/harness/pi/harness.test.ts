@@ -232,6 +232,8 @@ function world(
     withSpans?: boolean;
     /** The session's notepad the compaction steer reads (session-log item 10). */
     notepad?: () => Promise<{ text: string; updatedAt: number } | null>;
+    /** The run loop's checkpoint hook for a compaction that failed for good (harness-pi item 7). */
+    onCompactionFailed?: (why: string) => Promise<void>;
     /** The container to drive; a fresh fake unless a test brings one of its own shape. */
     container?: FakeHarnessContainer;
     /** The seam the harness is handed when it is not the fake itself: an
@@ -286,6 +288,7 @@ function world(
     toolContext: { executor },
     rules: { checkout: "/workspace/threads/t/main", protectedBranches: ["main"] },
     ...(opts.notepad ? { notepad: opts.notepad } : {}),
+    ...(opts.onCompactionFailed ? { onCompactionFailed: opts.onCompactionFailed } : {}),
     backend: "resident",
     span: root,
     control,
@@ -755,6 +758,43 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     const steers = w.container.commands().filter((c) => c.type === "steer");
     expect(steers).toHaveLength(1);
     expect(String(steers[0]!.message)).toContain("decided: keep the helper");
+  });
+
+  // docs/reference/specs/harness-pi.md item 7: a failed compaction is a checkpoint signal.
+  it("a compaction that failed for good is a checkpoint signal: the run's onCompactionFailed hook is awaited with the failure's words; a transient failure or an aborted compaction signals nothing; a hook that throws is a harness_error note and the run answers", async () => {
+    const checkpoints: string[] = [];
+    const refusal =
+      "Auto-compaction failed: Turn prefix summarization failed: refused under the provider's usage policy";
+    const w = world({
+      onCompactionFailed: async (why) => {
+        checkpoints.push(why);
+        if (checkpoints.length > 1) throw new Error("push refused");
+      },
+    });
+    scriptedPi(w.container, (n, c) => {
+      bashTurn(w, "c1", "npm test", "1 failed");
+      // For good: the checkpoint fires with the failure's words.
+      c.emit({ type: "compaction_end", reason: "threshold", result: undefined, aborted: false, errorMessage: refusal });
+      // Transient and aborted: pi's next try is the retry — no checkpoint.
+      c.emit({
+        type: "compaction_end",
+        reason: "threshold",
+        result: undefined,
+        aborted: false,
+        errorMessage: "Auto-compaction failed: 529 overloaded",
+      });
+      c.emit({ type: "compaction_end", reason: "threshold", result: undefined, aborted: true, errorMessage: refusal });
+      // A second for-good failure whose hook throws: a note, never the run's end.
+      c.emit({ type: "compaction_end", reason: "overflow", result: undefined, aborted: false, errorMessage: refusal });
+      finalTurn(c, "done");
+    });
+    expect(await w.start()).toBe("done");
+    expect(checkpoints).toEqual([refusal, refusal]);
+    expect(
+      w.events
+        .filter((e) => e.type === "run_note" && e.kind === "harness_error")
+        .map((e) => (e as { summary: string }).summary),
+    ).toContain("the compaction checkpoint failed (push refused); the run continues");
   });
 
   it("a notepad read that fails at compaction time costs the steer its notes, never the run: the steer says the notes could not be read, a harness_error note says why, and the run answers", async () => {

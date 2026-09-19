@@ -1060,6 +1060,32 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             ...(session
               ? { notepad: () => session.readNotepad(), conversation: () => session.readConversation() }
               : {}),
+            // A failed compaction is a checkpoint signal (harness-pi.md item
+            // 7): the provider can refuse the process's summary for good, and
+            // the window may overflow before the budget salvage below can run
+            // — so a coding run bound at a branch of its own pushes the tree's
+            // tracked work the moment the harness reports the failure, in the
+            // push-before-abort's own shape (`pushed_head`, `by: "salvage"`),
+            // and the loop goes on. Best-effort like the budget salvage: a
+            // failed push is the note's to report, never the run's.
+            ...(isCodingPrRun && ownBranch !== undefined && !protectedBranches.includes(ownBranch)
+              ? {
+                  onCompactionFailed: async (why: string) => {
+                    const branch = ownBranch;
+                    const salvaged = await root.span("run.compaction_salvage", (span) =>
+                      salvageBudgetPush(executor, { branch, cue: "compaction" }, span),
+                    );
+                    onEvent({
+                      type: "run_note",
+                      kind: "compaction_salvage",
+                      summary: `the compaction failed (${redactAndCap(why, 200)}); ${salvaged.summary}`,
+                    });
+                    // The salvaged head is a fact of the run (run-history item 2): what renewal reads.
+                    if (salvaged.pushed && salvaged.head !== undefined)
+                      onEvent({ type: "pushed_head", ref: branch, sha: salvaged.head, by: "salvage" });
+                  },
+                }
+              : {}),
             rules: {
               checkout: binding?.workspace ?? "/workspace",
               ...(ownBranch !== undefined ? { branch: ownBranch } : {}),
