@@ -117,7 +117,7 @@ describe("config show", () => {
     expect(res.ok).toBe(true);
     expect(text).toBe(config.describe("slack:CX", "slack:UX"));
     expect(text).toContain("*Effective for you in this channel:* agent `general`, model `anthropic/general-model`");
-    expect(text).toContain("*Not available to you:* `coding` (ask <@slack:UADMIN>)");
+    expect(text).toContain("*Not available to you:* `coding` (ask slack:UADMIN)");
     expect(res.ok && res.value).toMatchObject({
       effective: { agent: "general" },
       restrictedAgents: ["coding"],

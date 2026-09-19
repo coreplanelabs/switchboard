@@ -407,7 +407,7 @@ describe("handleChatCommand", () => {
   it("a non-admin gets the restricted wording other commands use; the handler never runs", async () => {
     const { commands, deps, config } = setup();
     const reply = await run(commands, config, "demo echo --status all", "slack:UX");
-    expect(reply).toBe("🚫 `demo echo` is restricted. Ask <@slack:UADMIN>.");
+    expect(reply).toBe("🚫 `demo echo` is restricted. Ask slack:UADMIN.");
     expect(deps.hits).toEqual([]);
   });
 
@@ -441,10 +441,10 @@ describe("handleChatCommand", () => {
     const commands = bindCommands(registry, { hits: [] });
     const config = configStore(ADMIN_YAML);
     expect(await run(commands, config, "demo mine", "slack:UX")).toBe(
-      "🚫 `demo mine`: You're not on the allowlist for the `acme/api` repo environment. Ask <@slack:UADMIN>.",
+      "🚫 `demo mine`: You're not on the allowlist for the `acme/api` repo environment. Ask slack:UADMIN.",
     );
     expect(await run(commands, config, "demo echo --status all", "slack:UX")).toBe(
-      "🚫 `demo echo` is restricted. Ask <@slack:UADMIN>.",
+      "🚫 `demo echo` is restricted. Ask slack:UADMIN.",
     );
   });
 
@@ -568,7 +568,7 @@ describe("runs list on chat", () => {
     const { commands, config } = await setup();
     const parsed = parseChatCommand("runs list --status all", commands)!;
     expect(await handleChatCommand({ commands, parsed, msg: msg("runs list --status all", "slack:UX"), config })).toBe(
-      "🚫 `runs list` is restricted. Ask <@slack:UADMIN>.",
+      "🚫 `runs list` is restricted. Ask slack:UADMIN.",
     );
   });
 
