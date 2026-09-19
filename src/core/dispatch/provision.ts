@@ -67,6 +67,7 @@ import {
 import { refusalOf } from "../refusal.js";
 import { contextMessageTexts, type TextTurn } from "./messages.js";
 import { routeReasonLabel, routedPartLines, type RouteDecided } from "./route.js";
+import type { OperatorEventFields } from "./commandRun.js";
 import type { HarnessProcessDeps } from "./run.js";
 import { harnessNamed } from "../harness/roster.js";
 import type { ReferencedConversation } from "../references/types.js";
@@ -342,6 +343,9 @@ export interface RegisterRunContext {
    *  preset it chose (with a compound's parts), or the default the run fell
    *  to after a rejected compound with the `compound_rejected` reason. */
   route?: RouteDecided;
+  /** The operator's shadow decision for the same event (record 0057): the
+   *  record's `operator` event, beside the `route` event, never acted on. */
+  operator?: OperatorEventFields;
 }
 
 /**
@@ -584,6 +588,9 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // it explains: the preset, the reason the card carries, the model that
   // decided, a compound's parts — or the rejection that left the run on the default.
   if (!resume && route) registry.publish(run.id, { type: "route", ...route, at: clock() });
+  // The operator's shadow decision (record 0057; run-history item 60), beside
+  // the route event it disagrees or agrees with.
+  if (!resume && ctx.operator) registry.publish(run.id, { type: "operator", ...ctx.operator, at: clock() });
   // The thread context fed to the model follows the request as `context`
   // events — text only, attachments as metadata lines, bounded to
   // the newest CONTEXT_MAX_ITEMS turns within CONTEXT_MAX_BYTES. A spawned

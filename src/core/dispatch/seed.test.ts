@@ -4,11 +4,14 @@ import type { AssembledTranscript } from "../runLedger/transcript.js";
 import type { HistoryItem } from "../types.js";
 import type { RunView } from "../runsService.js";
 import {
+  OPERATOR_TAIL_BYTES,
+  operatorTail,
   REFUSED_REQUEST_STAND_IN,
   SEED_BUDGET_BYTES,
   SEED_BUDGET_TOKENS,
   sessionSeed,
   sessionSeedFor,
+  type OperatorTailTurn,
 } from "./seed.js";
 
 // docs/reference/specs/session-log.md item 9: a follow-up on the pi harness
@@ -433,5 +436,47 @@ describe("sessionSeed — referenced conversations on the request turn", () => {
     const a = sessionSeed({ tail: complete(tail4, 0), previous, history, request: { ...request, references: [] } });
     const b = sessionSeed({ tail: complete(tail4, 0), previous, history, request });
     expect(a).toEqual(b);
+  });
+});
+
+describe("operatorTail — the operator's 12,000-token cap", () => {
+  const turn = (text: string, folded?: boolean): OperatorTailTurn => (folded ? { text, folded } : { text });
+
+  it("a 30,000-token log yields a tail within 12,000 tokens, newest turns kept, oldest first", () => {
+    // 30 turns of 4,000 bytes ≈ 30,000 tokens at four bytes a token.
+    const turns = Array.from({ length: 30 }, (_, i) => turn(`turn ${i} ${"x".repeat(4_000)}`));
+    const tail = operatorTail(turns);
+    const bytes = tail.reduce((n, t) => n + t.text.length, 0);
+    expect(bytes).toBeLessThanOrEqual(OPERATOR_TAIL_BYTES);
+    expect(tail.length).toBeLessThan(turns.length);
+    // The newest turns survive, in their original order.
+    expect(tail[tail.length - 1].text.startsWith("turn 29 ")).toBe(true);
+    expect(tail.map((t) => t.text)).toEqual(turns.slice(turns.length - tail.length).map((t) => t.text));
+  });
+
+  it("folded reports ride whole ahead of older turns: an old report survives a cut that drops its neighbours", () => {
+    const report = turn(`report ${"r".repeat(3_000)}`, true);
+    const turns = [
+      turn(`old ${"x".repeat(4_000)}`),
+      report,
+      ...Array.from({ length: 15 }, (_, i) => turn(`new ${i} ${"x".repeat(3_000)}`)),
+    ];
+    const tail = operatorTail(turns, 24_000);
+    // The folded report is kept whole; the plain turn beside it is cut.
+    expect(tail.some((t) => t.folded)).toBe(true);
+    expect(tail.find((t) => t.folded)?.text).toBe(report.text);
+    expect(tail.some((t) => t.text.startsWith("old "))).toBe(false);
+    expect(tail.reduce((n, t) => n + t.text.length, 0)).toBeLessThanOrEqual(24_000);
+  });
+
+  it("a folded report too big for what remains is dropped whole, never truncated", () => {
+    const turns = [turn(`report ${"r".repeat(30_000)}`, true), turn("small")];
+    const tail = operatorTail(turns, 10_000);
+    expect(tail).toEqual([{ text: "small" }]);
+  });
+
+  it("a short log rides whole", () => {
+    const turns = [turn("a"), turn("b", true), turn("c")];
+    expect(operatorTail(turns)).toEqual(turns);
   });
 });

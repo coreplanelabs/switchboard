@@ -142,6 +142,13 @@ function isRunEvent(v: unknown): v is RunEvent {
       return typeof o.parentInstanceId === "string" && typeof o.summary === "string";
     case "route":
       return typeof o.preset === "string" && typeof o.reason === "string" && typeof o.model === "string";
+    case "operator":
+      // The operator's shadow decision (record 0057; run-history item 60).
+      return (
+        (o.mode === "shadow" || o.mode === "on") &&
+        (o.outcome === "binds" || o.outcome === "question" || o.outcome === "refusal") &&
+        typeof o.reason === "string"
+      );
     case "refusal":
       // A refusal the door recorded (record 0054, as amended): the code, its
       // cause and the capped sentence — a captured door record replays whole.

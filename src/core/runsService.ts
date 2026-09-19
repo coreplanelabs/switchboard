@@ -143,6 +143,10 @@ export interface RunView {
    *  carries as its `routed:` receipt. Absent on an unrouted run and on a live
    *  registry row (the thread read wants finished runs alone). */
   route?: RunRecord["route"];
+  /** The operator's decision the run's record carries (`RunRecord.operator`,
+   *  run-history item 60) — how the next turn's operator sees a pending
+   *  question (routing-and-config item 29). Persisted rows only. */
+  operator?: RunRecord["operator"];
   /** The coordinator instance a child belongs to and the key its spawn carried
    *  (`RunMeta` / `LiveRunMeta` / `RunRecord`, run-history item 48) — live here,
    *  live on another generation, or persisted; absent on every other run. */

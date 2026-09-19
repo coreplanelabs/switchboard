@@ -28,7 +28,7 @@ import { commandRefusalCode, refusalOf, type Guess } from "../refusal.js";
 // The command-run machinery the fast path and the router's command branch
 // share (commandRun.ts): invoked through the registry as the message's user,
 // recorded as an inline run when the command does work.
-import { postSettledOutcome, runChatCommand, type RouteEventFields } from "./commandRun.js";
+import { postSettledOutcome, runChatCommand, type OperatorEventFields, type RouteEventFields } from "./commandRun.js";
 import { redactedInput, routeReceipt } from "./route.js";
 
 export { isInlineRunCommand } from "./commandRun.js";
@@ -88,6 +88,9 @@ export interface RequestContext {
   io: ChannelIO;
   ending: RunEnding;
   trace: RequestTrace;
+  /** The operator's shadow decision for this event (record 0057): written
+   *  beside stage A's result on the inline run's record, never acted on. */
+  operator?: OperatorEventFields;
 }
 
 /** The reason a paste's `route` event gives: the typed line followed a hand-back of the same command. */
@@ -173,7 +176,10 @@ export async function answerChatCommand(deps: FastPathDeps, ctx: RequestContext)
     const chatCmd = parseChatCommand(msg.text, deps.commands);
     if (chatCmd) {
       const route = await pastedRoute(deps, msg, chatCmd);
-      const res = await runChatCommand(deps, msg, io, chatCmd, ending, trace, route ? { route } : {});
+      const res = await runChatCommand(deps, msg, io, chatCmd, ending, trace, {
+        ...(route ? { route } : {}),
+        ...(ctx.operator ? { operator: ctx.operator } : {}),
+      });
       // A failed command that carries a guess is one question (record 0054):
       // `renderRefusal` offers Yes and No on channels with `offer`, or replies
       // the line to type on channels without one. The typed path has no receipt —

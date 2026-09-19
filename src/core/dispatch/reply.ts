@@ -300,6 +300,8 @@ export function activityLine(e: RunEvent): string {
       return `unit ${e.unit}: ${e.state}`; // published straight to the registry — never arrives here
     case "route":
       return `routed to ${e.preset}`; // published straight to the registry — never arrives here
+    case "operator":
+      return `operator ${e.outcome}`; // published straight to the registry — never arrives here (a shadow decision has no card line)
     case "refusal":
       return `refused: ${e.code}`; // published straight to the registry — never arrives here (a door record has no card)
     case "span_start":
@@ -384,6 +386,15 @@ export const STATUS_PREFIXES = ["⏳", "✅", "◐", "◓", "◑", "◒"];
  *  and a failed inline run's `answer` are built from it, so they cannot drift. */
 export function errorReply(err: unknown): string {
   return `⚠️ ${err instanceof Error ? err.message : String(err)}`;
+}
+
+/** The receipt of an operator bind (record 0057; the one-door plan's receipt
+ *  rule): every bind's receipt carries the line as bound, the class verdict
+ *  over its PARSED input and the operator's one-line reason — so the person
+ *  reads what ran, how dangerous the door judged it and why the operator
+ *  chose it, from one line. */
+export function renderOperatorReceipt(line: string, radius: string, reason: string): string {
+  return `bound: \`${line}\` — ${radius} — ${reason}`;
 }
 /**
  * The one place a `Refusal` becomes what the person reads (record 0054):

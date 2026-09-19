@@ -40,9 +40,11 @@ import {
   type ReferenceDeps,
 } from "./dispatch/references.js";
 import { resolveChatActor } from "./authz/actor.js";
-import { referencesOn } from "../config.js";
+import { operatorModeOf, referencesOn } from "../config.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
-import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps } from "./dispatch/route.js";
+import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps, type RouteModel } from "./dispatch/route.js";
+import { executeOperatorDecision, operatorStage, type OperatorEventFields } from "./dispatch/operator.js";
+import type { IntakeVerdict } from "./intake.js";
 import type { McpToolSource } from "../mcp/source.js";
 import {
   authorizeAgent,
@@ -131,6 +133,10 @@ export interface CoreDeps
   /** The MCP tool source: required for provisioning (every run asks it for its tools), and the same instance the
    *  route stage reads the caller's catalog off (record 0040) — declared here so the two bases agree. */
   mcp: McpToolSource;
+  /** The operator's model call (record 0057; routing-and-config item 29).
+   *  Default: the provider behind `defaults.models.general` — the strong
+   *  tier, never `routing.model`'s fast one. Tests script one. */
+  operatorModel?: RouteModel;
   /** The one runs service (`RunDeps.runs`): the run tools, the thread read and stage A's paste check
    *  (record 0044) all read it — declared here so the two bases that name it agree. */
   runs?: RunsService;
@@ -286,6 +292,10 @@ export interface DispatchOptions {
    *  used in place of `readThread`, so the page is read once per reply.
    *  Absent for every other request. */
   thread?: RunView[];
+  /** The intake gate's verdict for this reply (record 0058), when the channel
+   *  adapter ran the gate: the operator's shadow row carries it (record 0057),
+   *  so the shadow log says what the gate said beside what the operator bound. */
+  intake?: { verdict: IntakeVerdict; reason: string };
   /** The request's root, started by the channel adapter at receipt
    *  (docs/reference/specs/tracing.md). Absent (tests, a caller without one) → the
    *  dispatcher starts its own at entry. Ended in the outermost finally. */
@@ -554,10 +564,60 @@ export async function dispatch(
     },
   };
   try {
+    // The operator (record 0057; routing-and-config item 29): under
+    // `routing.operator: shadow` or `on`, ONE operator turn per admitted chat
+    // event — here, ahead of stage A and outside the route stage's live-thread
+    // and directive short-circuits, or the shadow week would never see the
+    // replies and typed lines the readers answer. Under `shadow` the decision
+    // only rides the record, beside the routed request: onto the live run a
+    // reply is folded into (below, beside admission's fold), onto stage A's
+    // inline run for a typed line, onto the agent run's events otherwise —
+    // nothing a person reads changes. Under `on` the decision is what runs:
+    // binds in order with receipts naming line, class and reason, a question
+    // with record 0054's marker, a refusal (`policy` renders no Yes). A
+    // resume, a restart, a spawn and a coordinator's child re-enter a decided
+    // request: the operator never re-reads those.
+    const operatorMode =
+      !resume && !restart && !opts.parent && !opts.coordinator ? operatorModeOf(deps.config.config) : "off";
+    let operatorEvent: OperatorEventFields | undefined;
+    // The thread page the operator reads (newest first): the tail's session
+    // keys and, on the newest record, an `on` question still pending — whose
+    // "yes" this event may be (routing-and-config item 29). Read here once and
+    // reused below, so the operator costs the dispatch no second page.
+    let operatorThread: RunView[] | undefined;
+    if (operatorMode !== "off") {
+      const runsService = deps.runs ?? createRunsService({ registry, store: deps.runStore });
+      operatorThread = opts.thread ?? (await readThread(runsService, msg.threadKey));
+      operatorEvent = await root.span("dispatch.operator", () =>
+        operatorStage(deps, {
+          msg,
+          mode: operatorMode,
+          ...(operatorThread ? { thread: operatorThread } : {}),
+          ...(opts.intake ? { intake: opts.intake } : {}),
+        }),
+      );
+      // A reply into a thread a run holds is a follow-up admission steers, not
+      // a request of its own: the decision is written beside the fold, onto
+      // the live run's record, and the reply goes on to admission unchanged.
+      const live = operatorEvent ? admission.get(msg.threadKey) : undefined;
+      if (operatorEvent && live?.runId !== undefined) {
+        registry.publish(live.runId, { type: "operator", ...operatorEvent, at: clock() });
+        operatorEvent = undefined;
+      } else if (operatorMode === "on" && operatorEvent) {
+        await root.span("dispatch.operator_decision", () =>
+          executeOperatorDecision(deps, { msg, io, ending, trace, event: operatorEvent! }),
+        );
+        return ended;
+      }
+    }
+
     // Stage A (dispatch/fastPath.ts): a message that names a registered chat
     // command is answered inline — never a model turn, and before the history
     // fetch, so a command costs none.
-    if (await answerChatCommand(deps, { msg, io, ending, trace })) return ended;
+    if (
+      await answerChatCommand(deps, { msg, io, ending, trace, ...(operatorEvent ? { operator: operatorEvent } : {}) })
+    )
+      return ended;
 
     const { directives, history } = await readRequest({ msg, io, root });
 
@@ -576,7 +636,7 @@ export async function dispatch(
       opts.thread ??
       (opts.parent || opts.coordinator || resume || restart || history.length === 0
         ? undefined
-        : await readThread(runsService, msg.threadKey));
+        : (operatorThread ?? (await readThread(runsService, msg.threadKey))));
     const lineage = lineageOf(thread?.[0]);
     const parent: ParentRun | undefined = opts.parent ?? (lineage ? lineageParent(lineage) : undefined);
     const tellLineage = async (heard: LineageHeard) => {
@@ -1087,6 +1147,7 @@ export async function dispatch(
       modelCard,
       cardDecisions,
       ...(routeEvent ? { route: routeEvent } : {}),
+      ...(operatorEvent ? { operator: operatorEvent } : {}),
       ...(references.conversations.length > 0 ? { references } : {}),
     });
     const { run, runId, channelVisibility, liveUrl, publishText, publishMeta } = registration;

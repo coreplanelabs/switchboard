@@ -1711,5 +1711,28 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
       "mcp",
     ],
   },
+  {
+    "action": "runs:write",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "words",
+        "required": true,
+        "rest": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "steer.run",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+    ],
+  },
 ]
 `;
