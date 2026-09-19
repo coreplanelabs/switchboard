@@ -209,12 +209,12 @@ export interface RoutingConfig {
    *  `text`: the one-JSON-object text contract alone — the escape hatch for a
    *  provider or model that cannot take a forced tool call. */
   answer?: RouteAnswerMode;
-  /** The operator (record 0057; routing-and-config item 29): `off` (default)
-   *  — never runs; `shadow` — called once per admitted chat event ahead of
-   *  stage A, its decision written beside the routed request in the run
-   *  store, nothing a person reads changes; `on` — its decision is what
-   *  runs. The one place the default lives: `operatorModeOf`, never the
-   *  field. */
+  /** The operator (record 0057; routing-and-config item 29): `on` (default)
+   *  — its decision is what runs; `shadow` — called once per admitted chat
+   *  event ahead of stage A, its decision written beside the routed request
+   *  in the run store, nothing a person reads changes; `off` — never runs,
+   *  the rollback lever. The one place the default lives: `operatorModeOf`,
+   *  never the field. */
   operator?: OperatorMode;
 }
 
@@ -257,12 +257,13 @@ export function routingOn(config: AppConfig): boolean {
 }
 
 /** The operator's mode (record 0057; routing-and-config item 29):
- *  `routing.operator` where the block sets it, else `off` — a deployment that
- *  never heard of the operator runs exactly as before, and `shadow` runs even
- *  where `routing.auto` is off (the flag is independent of the route stage's
- *  own switch: the shadow week must see what the readers see). */
+ *  `routing.operator` where the block sets it, else `on` — a deployment whose
+ *  config never names the flag runs the operator as the one door, and `off`
+ *  is the rollback lever, never a setting to offer; `shadow` and `on` run
+ *  even where `routing.auto` is off (the flag is independent of the route
+ *  stage's own switch). */
 export function operatorModeOf(config: AppConfig): OperatorMode {
-  return config.routing?.operator ?? "off";
+  return config.routing?.operator ?? "on";
 }
 
 /** The `plane` block (`AppConfig.plane`; record 0064): the orchestration

@@ -20,6 +20,9 @@
 // mixing binds and a question, an unknown tool, prose that is not the one
 // JSON object — each is a refusal that says what came back, and under
 // `shadow` that is one more disagreement on the agreement row, never a run.
+// A refusal the seam itself produced carries `fallback: true` (never the
+// model's decision): under `on` the dispatcher falls back to the readers'
+// route for that event, the decision recorded on the run that then runs.
 import { parseModelRef, type ToolDef } from "../provider.js";
 import { oneLine, redactAndCap } from "../redact.js";
 import type { IntakeVerdict } from "../intake.js";
@@ -80,7 +83,13 @@ export const OPERATOR_QUESTION_MARKER = "Did you mean:";
 export type OperatorDecision =
   | { kind: "binds"; binds: OperatorBind[]; reason: string }
   | { kind: "question"; text: string; proposal?: string; reason: string }
-  | { kind: "refusal"; cause: "policy" | "request"; text: string; reason: string };
+  /** `fallback: true` marks a refusal the seam itself produced — a non-decision
+   *  answer, a wrong tool, a transport failure — never the model's decision:
+   *  under `on` the dispatcher falls back to the readers' route for that event,
+   *  the event recorded (reason included) on the run that then runs. A
+   *  model-authored refusal (a real decision with cause `policy` or `request`)
+   *  carries no mark and renders as the answer. */
+  | { kind: "refusal"; cause: "policy" | "request"; text: string; reason: string; fallback?: true };
 
 /** One bind: the typed line the operator bound (a chat command line, a
  *  `steer <run> <words>`, an `agent:<preset> <request>` route), redacted and
@@ -258,6 +267,7 @@ export function parseOperatorDecision(answer: RouteToolCall | string): OperatorD
     cause: "request",
     text: `the operator's answer was not a decision: ${tidy(why)}`,
     reason: tidy(why),
+    fallback: true,
   });
   let input: unknown;
   if (typeof answer === "string") {
@@ -369,7 +379,7 @@ export async function runOperator(
   } catch (err) {
     const why = tidy(err instanceof Error ? err.message : String(err));
     return {
-      decision: { kind: "refusal", cause: "request", text: `the operator failed: ${why}`, reason: why },
+      decision: { kind: "refusal", cause: "request", text: `the operator failed: ${why}`, reason: why, fallback: true },
       latencyMs: now() - started,
       outputTokens: 0,
     };
@@ -392,6 +402,7 @@ export function operatorEventOf(
   proposal?: string;
   refusalCause?: string;
   refusalText?: string;
+  fallback?: true;
   intake?: { verdict: string; reason: string };
   latencyMs: number;
   outputTokens: number;
@@ -405,6 +416,7 @@ export function operatorEventOf(
     ...(d.kind === "question" ? { question: renderOperatorQuestion(d) } : {}),
     ...(d.kind === "question" && d.proposal !== undefined ? { proposal: d.proposal } : {}),
     ...(d.kind === "refusal" ? { refusalCause: d.cause, refusalText: d.text } : {}),
+    ...(d.kind === "refusal" && d.fallback === true ? { fallback: true as const } : {}),
     ...(intake ? { intake: { verdict: intake.verdict, reason: intake.reason } } : {}),
     latencyMs: answer.latencyMs,
     outputTokens: answer.outputTokens,

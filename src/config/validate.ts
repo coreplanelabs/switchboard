@@ -505,10 +505,11 @@ export const ROUTE_ANSWER_MODES = ["tool", "text"] as const;
 export type RouteAnswerMode = (typeof ROUTE_ANSWER_MODES)[number];
 
 /** The operator's three modes (`routing.operator`; record 0057, plan
- *  the one-door plan's operator unit; routing-and-config item 29): `off` (the default) —
- *  the operator never runs; `shadow` — it runs once per admitted chat event
+ *  the one-door plan's operator unit; routing-and-config item 29): `on` (the
+ *  default — `operatorModeOf` in src/config.ts is the one place it lives) —
+ *  its decision is what runs; `shadow` — it runs once per admitted chat event
  *  ahead of stage A, its decision is written beside the routed request and
- *  nothing runs from it; `on` — its decision is what runs. */
+ *  nothing runs from it; `off` — the operator never runs, the rollback lever. */
 export const OPERATOR_MODES = ["off", "shadow", "on"] as const;
 export type OperatorMode = (typeof OPERATOR_MODES)[number];
 

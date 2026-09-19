@@ -1048,6 +1048,11 @@ export type RunEvent =
       proposal?: string;
       refusalCause?: string;
       refusalText?: string;
+      /** A refusal the seam itself produced (a non-decision answer, a wrong
+       *  tool, a transport failure) — never the model's decision: under `on`
+       *  the dispatcher falls back to the readers' route for that event, this
+       *  event recorded on the run that then runs. */
+      fallback?: true;
       intake?: { verdict: string; reason: string };
       latencyMs?: number;
       outputTokens?: number;
