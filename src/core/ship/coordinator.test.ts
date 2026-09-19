@@ -1072,7 +1072,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect((d.action as { ending: { from?: string } }).ending.from).toBeUndefined();
   });
 
-  it("a refusal names its clause on the abort: no progress under a grant with renewals says how to spend one by hand; spend at the cap stops even with progress; a grant of zero with nothing pushed keeps the plain abort", () => {
+  it("a refusal names its clause on the abort: no progress under a grant with renewals says what actually spends one; spend at the cap stops even with progress; a grant of zero with nothing pushed keeps the plain abort", () => {
     const branch = input().unit.branch;
     // No progress: the child pushed nothing and there is no previous handoff.
     const stuck = fresh(input({ merge: "person", generated: true, grant: { renewals: 6 } }));
@@ -1090,13 +1090,13 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         kind: "aborted",
         renewal: {
           decision: { renew: false, why: "no_progress", renewalsLeft: 6 },
-          line: "no progress in the last lease; grant holds 6 renewals; reply continue to spend one",
+          line: "no progress in the last lease; grant holds 6 renewals unspent — a renewal is spent only by a segment that pushed to the unit's branch or moved its handoff; re-issue the request to try again",
         },
       },
     });
     expect(stuck.rounds()).toEqual(["0 coding started", "0 coding aborted"]);
     expect(renderUnitReport(stuck.state)).toContain(
-      "🔁 Not renewed: no progress in the last lease; grant holds 6 renewals; reply continue to spend one.",
+      "🔁 Not renewed: no progress in the last lease; grant holds 6 renewals unspent — a renewal is spent only by a segment that pushed to the unit's branch or moved its handoff; re-issue the request to try again.",
     );
 
     // The cap: progress, but the session's spend reached it.

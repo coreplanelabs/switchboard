@@ -240,13 +240,18 @@ describe("renderRenewal — the card's words, as the record's trace has them", (
     );
   });
 
-  it("a stop names the clause and, when renewals remain, the reply that spends one by hand", () => {
+  it("a stop names the clause and, when renewals remain, what actually spends one — no keyword the router does not have", () => {
     expect(renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 5 }, { renewals: 6 })).toBe(
-      "no progress in the last lease; grant holds 5 renewals; reply continue to spend one",
+      "no progress in the last lease; grant holds 5 renewals unspent — a renewal is spent only by a segment that pushed to the unit's branch or moved its handoff; re-issue the request to try again",
     );
     expect(renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 1 }, { renewals: 6 })).toBe(
-      "no progress in the last lease; grant holds 1 renewal; reply continue to spend one",
+      "no progress in the last lease; grant holds 1 renewal unspent — a renewal is spent only by a segment that pushed to the unit's branch or moved its handoff; re-issue the request to try again",
     );
+    // The line teaches no keyword: follow-ups route by thread context
+    // (routing-and-config item 3), so no rendered stop may say "reply continue".
+    expect(
+      renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 5 }, { renewals: 6 }),
+    ).not.toContain("reply continue");
     expect(renderRenewal({ renew: false, why: "no_progress", detail: "x", renewalsLeft: 0 }, { renewals: 0 })).toBe(
       "no progress in the last lease; the grant holds no renewals",
     );
