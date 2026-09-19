@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "./chatMessage.js";
-import { closureNote, reclaimRuns, startReclaimSweep } from "./boot.js";
+import { closureNote, reclaimRuns, startReclaimSweep, threadsElsewhereOf } from "./boot.js";
+import type { RunStatus } from "./runRecord.js";
 import { shipInterruptedNote } from "./shipPipeline.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import type { RunLedger } from "./runLedger/ledger.js";
+import { ThreadsElsewhere } from "./runLedger/threadsElsewhere.js";
 import { LEASE_MS, type ClaimRequest } from "./runLedger/types.js";
 import { RouteMissingError, TransientStoreError } from "./runStoreWorker.js";
 
@@ -62,7 +64,10 @@ function overriding(inner: InMemoryRunLedger, over: Partial<RunLedger>): RunLedg
 
 /** The previous generation's writes happen at t = 1 000; the boot reclaims at
  *  t = 100 000, past every default lease (1 000 + LEASE_MS). */
-function harness(wrap?: (inner: InMemoryRunLedger) => RunLedger) {
+function harness(
+  wrap?: (inner: InMemoryRunLedger) => RunLedger,
+  over: { storedStatus?: (runId: string) => Promise<RunStatus | undefined>; gen?: string } = {},
+) {
   let clock = 1_000;
   const inner = new InMemoryRunLedger(() => clock);
   const ledger = wrap ? wrap(inner) : inner;
@@ -72,7 +77,8 @@ function harness(wrap?: (inner: InMemoryRunLedger) => RunLedger) {
     clock = 100_000;
     return reclaimRuns({
       ledger,
-      gen: "g2",
+      gen: over.gen ?? "g2",
+      ...(over.storedStatus ? { storedStatus: over.storedStatus } : {}),
       now: () => clock,
       log: (l) => logs.push(l),
       warn: (w) => warnings.push(w),
@@ -80,6 +86,22 @@ function harness(wrap?: (inner: InMemoryRunLedger) => RunLedger) {
   };
   return { ledger: inner, run, logs, warnings };
 }
+
+/** A hosted ship parent's claim (record 0060): the ledger key carries `#host`,
+ *  the metadata names the thread itself. */
+const hostedClaim = (runId: string, thread: string, gen = "g1"): ClaimRequest => ({
+  ...claim(runId, `${thread}#host`, gen),
+  meta: {
+    channelId: "web:s",
+    userId: "access:u1",
+    threadKey: thread,
+    agent: "ship",
+    model: "p/m",
+    hosted: true,
+    label: "ship · acme/api",
+  },
+  card: null,
+});
 
 describe("reclaimRuns", () => {
   it("a run whose transcript and last step record the completeness rule accepts is handed to the launcher untouched — row, steps, transcript and events all still there", async () => {
@@ -104,7 +126,7 @@ describe("reclaimRuns", () => {
     expect(outcome.closed).toEqual([]);
     expect(outcome.resumable).toHaveLength(1);
     const r = outcome.resumable[0];
-    if (r.kind === "restart") throw new Error("a run with a transcript resumes, never restarts");
+    if (r.kind === "restart" || r.kind === "rehost") throw new Error("a run with a transcript resumes");
     expect(r.row).toMatchObject({ runId: "r1", ownerGen: "g2", phase: "live" }); // ours now
     expect(r.reclaimedFrom).toBe("live");
     expect(r.lastStep).toMatchObject({ step: 1, inFlight: [{ callId: "c1", tool: "bash" }] });
@@ -259,7 +281,7 @@ describe("reclaimRuns", () => {
     const outcome = await run();
     expect(outcome.resumable).toHaveLength(1);
     const restart = outcome.resumable[0];
-    expect(restart.kind).toBe("restart");
+    if (restart.kind !== "restart") throw new Error("a reserved row restarts");
     expect(restart.reclaimedFrom).toBe("attaching");
     expect(restart.row).toMatchObject({ runId: "reserved", ownerGen: "g2", phase: "attaching" });
     expect(restart.row.meta.request).toEqual(request);
@@ -418,5 +440,143 @@ describe("reclaimRuns", () => {
     sweep.stop();
     failing.stop();
     expect(cleared).toBe(1);
+  });
+});
+
+// The hosted parent at reclaim (record 0060; run-history items 36 and 38): a
+// row whose state carries `hosting` is classified before the transcript rule —
+// past its deadline it closes `interrupted`, with a pipeline outcome already in
+// the plain store it is abandoned, otherwise it is `rehost` for the launcher —
+// and a `rehost` row puts nothing in the elsewhere map.
+describe("reclaimRuns — the hosted parent's classification (record 0060)", () => {
+  const hosting = (until: number) => ({ instanceId: "i7", until });
+
+  it("a handoff row with state.hosting, a future deadline and the ship branch's provisional interrupted store record is rehost, not abandoned: the row stays live (ours now) with its events in hand, nothing closed, no record written", async () => {
+    const asked: string[] = [];
+    const { ledger, run, logs } = harness(undefined, {
+      storedStatus: async (runId) => {
+        asked.push(runId);
+        return "interrupted"; // the tombstone the ship branch writes at start
+      },
+    });
+    await ledger.claim(hostedClaim("r-ship", "web:s:c9"));
+    await ledger.setState("r-ship", "g1", { hosting: hosting(900_000) });
+    await ledger.append("r-ship", "g1", [
+      { type: "input", messageId: "m1", text: "agent:ship plan", at: 1_000, seq: 1 },
+      { type: "run_meta", agent: "ship", model: "p/m", instanceId: "i7", at: 1_001, seq: 2 },
+    ]);
+    await ledger.handoff("g1", ["r-ship"]); // SIGTERM marked it; the next generation takes it at once
+    const outcome = await run();
+    expect(asked).toEqual(["r-ship"]);
+    expect(outcome.closed).toEqual([]);
+    expect(outcome.resumable).toHaveLength(1);
+    const r = outcome.resumable[0];
+    if (r.kind !== "rehost") throw new Error("a hosted row within its deadline re-hosts");
+    expect(r.row).toMatchObject({ runId: "r-ship", ownerGen: "g2", threadKey: "web:s:c9#host" });
+    expect(r.reclaimedFrom).toBe("handoff");
+    expect(r.hosting).toEqual({ instanceId: "i7", until: 900_000 });
+    expect(r.events.map((e) => e.type)).toEqual(["input", "run_meta"]);
+    expect(ledger.live.has("r-ship")).toBe(true);
+    expect(ledger.finished.has("r-ship")).toBe(false);
+    expect(logs.some((l) => l.includes("r-ship web:s:c9#host rehost (from handoff; instance i7; 2 event(s))"))).toBe(
+      true,
+    );
+  });
+
+  it("the same row whose store record has a pipeline outcome (completed or failed: the finish landed in the plain store) is abandoned — the live row gone, no record written; a store that cannot be asked is one warning and the row re-hosts", async () => {
+    for (const stored of ["completed", "failed"] as const) {
+      const { ledger, run, logs } = harness(undefined, { storedStatus: async () => stored });
+      await ledger.claim(hostedClaim("r-ship", "web:s:c9"));
+      await ledger.setState("r-ship", "g1", { hosting: hosting(900_000) });
+      const outcome = await run();
+      expect(outcome.resumable).toEqual([]);
+      expect(outcome.closed).toEqual([]);
+      expect(ledger.live.has("r-ship")).toBe(false);
+      expect(ledger.finished.has("r-ship")).toBe(false); // abandoned: no record
+      expect(
+        logs.some((l) =>
+          l.includes(`r-ship web:s:c9#host abandoned (hosted; the store already holds its ${stored} record`),
+        ),
+      ).toBe(true);
+    }
+    const down = harness(undefined, {
+      storedStatus: async () => {
+        throw new TransientStoreError("HTTP 503");
+      },
+    });
+    await down.ledger.claim(hostedClaim("r-ship", "web:s:c9"));
+    await down.ledger.setState("r-ship", "g1", { hosting: hosting(900_000) });
+    const outcome = await down.run();
+    expect(outcome.resumable.map((r) => r.kind)).toEqual(["rehost"]);
+    expect(down.warnings.some((w) => w.includes("store read failed (HTTP 503) — re-hosting"))).toBe(true);
+  });
+
+  it("the same row past its deadline closes interrupted under the metadata's thread, the live row goes, and a later agent:ship in the thread claims the host key", async () => {
+    const { ledger, run } = harness(undefined, { storedStatus: async () => "interrupted" });
+    await ledger.claim(hostedClaim("r-ship", "web:s:c9"));
+    await ledger.setState("r-ship", "g1", { hosting: hosting(50_000) }); // the reclaim runs at 100 000
+    const outcome = await run();
+    expect(outcome.resumable).toEqual([]);
+    expect(outcome.closed).toHaveLength(1);
+    expect(outcome.closed[0]).toMatchObject({
+      runId: "r-ship",
+      threadKey: "web:s:c9", // the metadata's thread, never the `#host` key
+      status: "interrupted",
+      agent: "ship",
+      why: expect.stringMatching(/hosted past its deadline/),
+      note: expect.stringContaining("agent:ship"),
+    });
+    expect(ledger.finished.get("r-ship")).toMatchObject({ id: "r-ship", threadKey: "web:s:c9", status: "interrupted" });
+    expect(ledger.live.has("r-ship")).toBe(false);
+    expect((await ledger.claim(hostedClaim("r-next", "web:s:c9", "g2"))).ok).toBe(true); // the host key is free again
+  });
+
+  it("a rehost row puts nothing in the elsewhere map; a foreign hosted row's entry is keyed `…#host`, which no message's thread can match", async () => {
+    const { ledger, run } = harness(undefined, { storedStatus: async () => "interrupted" });
+    await ledger.claim(hostedClaim("r-mine", "web:s:c9"));
+    await ledger.setState("r-mine", "g1", { hosting: hosting(900_000) });
+    await ledger.claim({ ...hostedClaim("r-foreign", "web:s:c8"), leaseMs: 3_600_000 }); // g1's lease outlives the sweep
+    const outcome = await run();
+    expect(outcome.resumable.map((r) => [r.kind, r.row.runId])).toEqual([["rehost", "r-mine"]]);
+    expect(outcome.liveElsewhere.map((r) => r.runId)).toEqual(["r-foreign"]);
+    const rows = threadsElsewhereOf(outcome);
+    expect(rows.map((r) => r.runId)).toEqual(["r-foreign"]); // the rehost row is excluded
+    const map = new ThreadsElsewhere();
+    map.replace(rows);
+    expect(map.get("web:s:c9")).toBeUndefined();
+    expect(map.get("web:s:c8")).toBeUndefined(); // the foreign entry sits under the host key…
+    expect(map.get("web:s:c8#host")).toMatchObject({ runId: "r-foreign" }); // …which no platform thread key carries
+  });
+
+  it("a host-keyed row with no state.hosting (a crash between claim and hand-off) falls to the transcript rule and closes under the metadata's thread saying no step record was stored", async () => {
+    const { ledger, run } = harness(undefined, { storedStatus: async () => "interrupted" });
+    await ledger.claim(hostedClaim("r-ship", "web:s:c9"));
+    const outcome = await run();
+    expect(outcome.resumable).toEqual([]);
+    expect(outcome.closed[0]).toMatchObject({
+      runId: "r-ship",
+      threadKey: "web:s:c9",
+      status: "interrupted",
+      why: expect.stringMatching(/no step record/),
+    });
+    expect(ledger.live.has("r-ship")).toBe(false);
+  });
+
+  it("two generations reclaiming the same sweep: the loser sees the row under the winner's generation and lists it live elsewhere", async () => {
+    let clock = 1_000;
+    const inner = new InMemoryRunLedger(() => clock);
+    await inner.claim(hostedClaim("r-ship", "web:s:c9"));
+    await inner.setState("r-ship", "g1", { hosting: hosting(900_000) });
+    clock = 100_000;
+    const reclaim = (gen: string) =>
+      reclaimRuns({ ledger: inner, gen, now: () => clock, storedStatus: async () => "interrupted" });
+    const winner = await reclaim("g2");
+    expect(winner.resumable.map((r) => [r.kind, r.row.ownerGen])).toEqual([["rehost", "g2"]]);
+    const loser = await reclaim("g3");
+    expect(loser.resumable).toEqual([]);
+    expect(loser.closed).toEqual([]);
+    expect(loser.liveElsewhere).toEqual([
+      expect.objectContaining({ runId: "r-ship", ownerGen: "g2", threadKey: "web:s:c9#host" }),
+    ]);
   });
 });

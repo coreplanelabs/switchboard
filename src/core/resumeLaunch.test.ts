@@ -7,11 +7,15 @@ import {
   inputTextOf,
   knownToolsFor,
   launchResumes,
+  rehostMeta,
   repoContextOf,
   resumeIoTarget,
   resumeMessage,
 } from "./resumeLaunch.js";
-import type { LiveRunRow, StepRecord } from "./runLedger/types.js";
+import type { RunEvent } from "./runEvents.js";
+import type { AdoptRunRequest } from "./runLedger/writeThrough.js";
+import type { AppendableEvent, LiveRunRow, StepRecord } from "./runLedger/types.js";
+import { RunRegistry } from "./runRegistry.js";
 import type { ChannelIO, IncomingMessage } from "./types.js";
 
 // The resume launcher (docs/reference/specs/run-history.md item 38): plans each reclaimed
@@ -376,5 +380,101 @@ describe("launchResumes", () => {
     expect(outcome.launched).toEqual(["r1", "r2"]);
     expect(dispatched).toEqual(["slack:C1:1.0", "slack:C1:2.0"]);
     expect(warnings).toEqual(["[resume] r1 slack:C1:1.0: dispatch failed: boom"]);
+  });
+});
+
+// The rehost branch (record 0060; run-history item 38): a hosted parent has no
+// process of its own to dispatch — the launcher recreates the registry row
+// under the run's id, adopts the ledger row and subscribes the write-through
+// past the replayed seqs, so the runner's later publishes mirror on.
+describe("launchResumes — the rehost branch (record 0060)", () => {
+  const hosting = { instanceId: "i7", until: 900_000 };
+  const hostedRow = (): LiveRunRow =>
+    row({
+      runId: "r-ship",
+      threadKey: "web:s:c9#host",
+      startedAt: 5_000,
+      phase: "handoff",
+      state: { hosting },
+      card: null,
+      meta: {
+        channelId: "web:s",
+        userId: "access:u1",
+        threadKey: "web:s:c9",
+        agent: "ship",
+        model: "p/m",
+        hosted: true,
+        label: "ship · acme/api",
+        repo: "acme/api",
+      },
+    });
+  const events: AppendableEvent[] = [
+    { type: "input", messageId: "m1", text: "agent:ship plan", at: 1, seq: 1 },
+    { type: "run_meta", agent: "ship", model: "p/m", instanceId: "i7", at: 2, seq: 2 },
+  ];
+
+  it("rehostMeta keeps the ship branch's identity — hosted, the METADATA's thread, never the ledger's `#host` key — and drops what the row lacks", () => {
+    expect(rehostMeta(hostedRow())).toEqual({
+      hosted: true,
+      channelId: "web:s",
+      userId: "access:u1",
+      threadKey: "web:s:c9",
+      agent: "ship",
+      model: "p/m",
+      repo: "acme/api",
+    });
+  });
+
+  it("recreates the registry row under the run's id — the original start, the label, a fresh live token, the events replayed — adopts the ledger row with the row's state and the highest replayed seq, mirrors only this generation's publishes, dispatches nothing, and onDone fires at once", async () => {
+    const registry = new RunRegistry();
+    const adopts: AdoptRunRequest[] = [];
+    const mirrored: { type: string; seq: number }[] = [];
+    const adopted = { event: (e: RunEvent, seq: number) => void mirrored.push({ type: e.type, seq }) };
+    const runLedger = { adopt: (req: AdoptRunRequest) => (adopts.push(req), adopted) };
+    const deps = { runRegistry: registry, runLedger } as unknown as CoreDeps;
+    const dispatched: unknown[] = [];
+    const done: string[] = [];
+    const logs: string[] = [];
+    const rehost: ResumableRun = { kind: "rehost", row: hostedRow(), reclaimedFrom: "handoff", hosting, events };
+    const outcome = await launchResumes(deps, [rehost], {
+      ioFor: () => undefined, // the rehost needs no channel handle…
+      close: async () => {
+        throw new Error("a rehost is never closed here");
+      },
+      agentFor: () => undefined, // …and no agent of this build
+      dispatchFn: async () => void dispatched.push(1),
+      onDone: (id) => done.push(id),
+      log: (l) => logs.push(l),
+    });
+    expect(outcome).toEqual({ launched: ["r-ship"], closed: [] });
+    expect(dispatched).toEqual([]);
+    expect(done).toEqual(["r-ship"]);
+    const summary = registry.getById("r-ship");
+    expect(summary).toMatchObject({
+      id: "r-ship",
+      label: "ship · acme/api",
+      startedAt: 5_000, // the row's original start, not the rehost's clock
+      threadKey: "web:s:c9",
+      agent: "ship",
+      finished: false,
+      eventCount: 2, // the replayed events, under their seqs
+    });
+    expect(registry.has("r-ship", summary!.token)).toBe(true); // a fresh live token
+    expect(adopts).toHaveLength(1);
+    expect(adopts[0]).toMatchObject({
+      runId: "r-ship",
+      threadKey: "web:s:c9#host",
+      lastStep: 0,
+      lastSeq: 2,
+      state: { hosting },
+    });
+    expect(typeof adopts[0].onStop).toBe("function");
+    expect(typeof adopts[0].onFenced).toBe("function");
+    // The replayed events never reach the write-through (they are on the ledger
+    // already); a later publish mirrors on, past the replayed seqs.
+    expect(mirrored).toEqual([]);
+    registry.publish("r-ship", { type: "ship_handoff", instanceId: "i7", at: 3 });
+    expect(mirrored).toEqual([{ type: "ship_handoff", seq: 3 }]);
+    expect(logs[0]).toMatch(/r-ship web:s:c9: re-hosted \(instance i7; 2 event\(s\) replayed\)/);
   });
 });

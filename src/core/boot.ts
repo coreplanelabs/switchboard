@@ -25,6 +25,7 @@ import {
   LEASE_MS,
   type AppendableEvent,
   type CardHandle,
+  type HostingState,
   type InboxItem,
   type LivePhase,
   type LiveRunRow,
@@ -104,7 +105,44 @@ export interface RestartRun {
   inbox: InboxItem[];
 }
 
-export type ResumableRun = ResumeRun | RestartRun;
+/** A hosted ship parent's row (record 0060) taken within its deadline with no
+ *  pipeline outcome in the store: no process of its own to resume — the plan
+ *  runner drives the pipeline — so the launcher re-hosts it: the registry row
+ *  recreated under the run's id with the events replayed, the ledger row
+ *  adopted, the write-through subscribed for the runner's later publishes. */
+export interface RehostRun {
+  kind: "rehost";
+  row: LiveRunRow;
+  reclaimedFrom: LivePhase;
+  hosting: HostingState;
+  events: AppendableEvent[];
+}
+
+export type ResumableRun = ResumeRun | RestartRun | RehostRun;
+
+/** The hosting fact on a row's state, when the ship branch set one (record
+ *  0060) and this build can read it; a malformed value reads as none, so the
+ *  row falls to the transcript rule and closes like any host-keyed crash. */
+export function hostingOf(state: LiveRunRow["state"]): HostingState | undefined {
+  const h = state.hosting;
+  if (typeof h !== "object" || h === null) return undefined;
+  const { instanceId, until } = h as Record<string, unknown>;
+  if (typeof instanceId !== "string" || instanceId.length === 0) return undefined;
+  if (typeof until !== "number" || !Number.isFinite(until)) return undefined;
+  return { instanceId, until };
+}
+
+/** The threads a follow-up must be steered into rather than run afresh
+ *  (thread-admission item 5): rows other generations hold, plus the reclaimed
+ *  rows not yet launched. A `rehost` row contributes nothing (record 0060):
+ *  the hosted parent occupies no thread — its children run in its conversation
+ *  — and a foreign hosted row's entry is keyed by the ledger's key column,
+ *  whose `#host` suffix no message's thread can ever match. */
+export function threadsElsewhereOf(
+  outcome: ReclaimOutcome,
+): { threadKey: string; runId: string; startedAt: number; meta: { agent?: string } }[] {
+  return [...outcome.liveElsewhere, ...outcome.resumable.filter((r) => r.kind !== "rehost").map((r) => r.row)];
+}
 
 export interface ReclaimOutcome {
   closed: ReclaimedClosure[];
@@ -121,6 +159,15 @@ export interface ReclaimOutcome {
 export interface ReclaimOptions {
   ledger: RunLedger;
   gen: string;
+  /** The plain run store's status for a run id — the hosted-row guard (record
+   *  0060): `completed` or `failed` means the pipeline's `finish` landed
+   *  in the plain store because the ledger refused its write, so the row is
+   *  abandoned instead of re-hosted; the provisional `interrupted` record the
+   *  ship branch writes at start is the normal state of a hosted run and never
+   *  abandons it. Absent (or failing — one warning), a hosted row within its
+   *  deadline is re-hosted: re-hosting a finished row is bounded by its
+   *  deadline, where abandoning a live one would kill the pipeline's parent. */
+  storedStatus?: (runId: string) => Promise<RunStatus | undefined>;
   now?: () => number;
   log?: (line: string) => void;
   warn?: (line: string) => void;
@@ -183,6 +230,47 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         }
         status = "interrupted";
         why = "reserved at admission without its request: nothing to restart from";
+      } else if (hostingOf(row.state) !== undefined && hostingOf(row.state)!.until > now()) {
+        // A hosted parent within its deadline (record 0060): the plan runner
+        // drives the pipeline, so there is no transcript to judge. The store's
+        // record decides: a pipeline outcome (`completed` or `failed`)
+        // means `finish` landed in the plain store because the ledger refused
+        // its write — the row is stale and is abandoned, no record written;
+        // anything else — the ship branch's provisional `interrupted`
+        // tombstone, no record, or a store that cannot be asked (one warning;
+        // re-hosting a finished row is bounded by the deadline, abandoning a
+        // live one would kill the pipeline's parent) — re-hosts.
+        const hosting = hostingOf(row.state)!;
+        let stored: RunStatus | undefined;
+        try {
+          stored = await opts.storedStatus?.(row.runId);
+        } catch (err) {
+          warn(`[reclaim] ${row.runId} ${row.threadKey}: store read failed (${describe(err)}) — re-hosting`);
+        }
+        if (stored === "completed" || stored === "failed") {
+          const gone = await ledger.abandon(row.runId, gen);
+          if (!gone.ok) {
+            outcome.failed.push({ runId: row.runId, error: `abandon refused (${gone.reason})` });
+            warn(`[reclaim] ${row.runId} ${row.threadKey}: abandon refused (${gone.reason})`);
+            continue;
+          }
+          log(
+            `[reclaim] ${row.runId} ${row.threadKey} abandoned (hosted; the store already holds its ${stored} record — the pipeline's finish landed there)`,
+          );
+          continue;
+        }
+        const events = await ledger.readEvents(row.runId);
+        outcome.resumable.push({ kind: "rehost", row, reclaimedFrom: run.reclaimedFrom, hosting, events });
+        log(
+          `[reclaim] ${row.runId} ${row.threadKey} rehost (from ${run.reclaimedFrom}; instance ${hosting.instanceId}; ${events.length} event(s)) — handed to the launcher`,
+        );
+        continue;
+      } else if (hostingOf(row.state) !== undefined) {
+        // Past its deadline: the runner died without `finish`, and re-hosting
+        // it again would hold the thread's host key forever (record 0060).
+        const hosting = hostingOf(row.state)!;
+        status = "interrupted";
+        why = `hosted past its deadline (${new Date(hosting.until).toISOString()}): the pipeline's runner never finished it`;
       } else {
         // Resumable (item 38) when the transcript is whole and the completeness
         // rule accepts it against the last step record; the launcher plans the

@@ -59,7 +59,13 @@ import { autoAbridgeOnPersist, reviewAbridgerFromConfig } from "./core/reviewAbr
 import { meatOnPath } from "./core/meatProcess.js";
 import { buildRunLedger } from "./core/runLedgerWorker.js";
 import { createLedgerWriteThrough, mintGeneration, NullLedgerWriteThrough } from "./core/runLedger/writeThrough.js";
-import { reclaimRuns, startReclaimSweep, closeReclaimed, type ReclaimOutcome } from "./core/boot.js";
+import {
+  reclaimRuns,
+  startReclaimSweep,
+  closeReclaimed,
+  threadsElsewhereOf,
+  type ReclaimOutcome,
+} from "./core/boot.js";
 import { launchResumes, resumeIoTarget } from "./core/resumeLaunch.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { LedgerTakeover } from "./core/runLedger/takeover.js";
@@ -1302,7 +1308,7 @@ export async function runBot(): Promise<void> {
     // rows other generations hold, plus the ones just reclaimed and not yet
     // launched (the launcher runs after this, and in-process admission takes
     // over the moment a resume is dispatched).
-    threadsElsewhere.replace([...outcome.liveElsewhere, ...outcome.resumable.map((r) => r.row)]);
+    threadsElsewhere.replace(threadsElsewhereOf(outcome));
     const closedCards = await closeReclaimedCards(
       app.client,
       outcome.closed.map((c) => ({
@@ -1359,11 +1365,17 @@ export async function runBot(): Promise<void> {
       warn: (w) => console.warn(w),
     });
   };
+  // The hosted-row guard's store read (record 0060): the reclaim
+  // abandons a hosted row only when the plain store already holds the
+  // pipeline's outcome — its `finish` landed there because the ledger refused
+  // the write — and re-hosts every other one within its deadline.
+  const storedStatus = async (runId: string) => (await runStore.get(runId))?.status;
   let bootReclaim: ReclaimOutcome | undefined;
   if (ledgerReclaim) {
     bootReclaim = await reclaimRuns({
       ledger: ledgerReclaim.client,
       gen: generation,
+      storedStatus,
       log: (l) => console.log(l),
       warn: (w) => console.warn(w),
     });
@@ -1396,6 +1408,7 @@ export async function runBot(): Promise<void> {
     startReclaimSweep({
       ledger: ledgerReclaim.client,
       gen: generation,
+      storedStatus,
       log: (l) => console.log(l),
       warn: (w) => console.warn(w),
       onOutcome: async (outcome) => {

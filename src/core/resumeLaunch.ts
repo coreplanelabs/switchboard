@@ -15,6 +15,8 @@ import type { ResumableRun } from "./boot.js";
 import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { planResume, type KnownTool } from "./runLedger/resume.js";
 import type { LiveRunRow } from "./runLedger/types.js";
+import { defaultRunRegistry, REPLAY_EVERYTHING } from "./runRegistry.js";
+import type { RunMeta } from "./runRegistry/state.js";
 import { TOOLSETS } from "../tools/toolsets.js";
 import { piBuiltinToolsFor } from "./harness/pi/process.js";
 
@@ -70,6 +72,28 @@ export function resumeMessage(row: LiveRunRow, inputText: string): IncomingMessa
     ...(row.meta.authenticatedAs !== undefined ? { authenticatedAs: row.meta.authenticatedAs } : {}),
     ...(row.meta.postedBy !== undefined ? { postedBy: row.meta.postedBy } : {}),
     ...(row.meta.sourceUrl !== undefined ? { sourceUrl: row.meta.sourceUrl } : {}),
+  };
+}
+
+/** The registry identity a re-hosted parent's row is recreated with (record
+ *  0060): the fields the ship branch stamped at the claim, `hosted` kept so
+ *  the occupancy readers and the drain skip it as they did before the roll. */
+export function rehostMeta(row: LiveRunRow): RunMeta {
+  const m = row.meta;
+  return {
+    hosted: true,
+    channelId: m.channelId,
+    userId: m.userId,
+    // The metadata's thread, never the ledger's key column (record 0060): the
+    // registry row lists under its conversation, not under the `#host` key.
+    threadKey: m.threadKey,
+    ...(m.agent !== undefined ? { agent: m.agent } : {}),
+    ...(m.model !== undefined ? { model: m.model } : {}),
+    ...(m.channelVisibility !== undefined ? { channelVisibility: m.channelVisibility } : {}),
+    ...(m.repo !== undefined ? { repo: m.repo } : {}),
+    ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
+    ...(m.userName !== undefined ? { userName: m.userName } : {}),
+    ...(m.authenticatedAs !== undefined ? { authenticatedAs: m.authenticatedAs } : {}),
   };
 }
 
@@ -140,6 +164,41 @@ export async function launchResumes(
   };
   for (const run of resumable) {
     const { row } = run;
+    if (run.kind === "rehost") {
+      // A hosted parent (record 0060): no dispatch — no process of its own
+      // runs it — the registry row is recreated under the run's id with its
+      // original start, a fresh token and the ledger's events replayed under
+      // their seqs, the ledger row is adopted (the heartbeat keeps the host
+      // key), and the write-through mirrors only what this generation
+      // publishes (the subscription starts after the highest replayed seq).
+      const registry = deps.runRegistry ?? defaultRunRegistry;
+      const lastSeq = run.events.reduce((max, e) => Math.max(max, e.seq), 0);
+      const handle = registry.create(row.meta.label, rehostMeta(row), {
+        id: row.runId,
+        startedAt: row.startedAt,
+        replay: run.events,
+      });
+      const adopted = deps.runLedger.adopt({
+        runId: row.runId,
+        threadKey: row.threadKey,
+        state: row.state,
+        lastStep: 0,
+        lastSeq,
+        onStop: (mode) => void handle.control.requestStop(mode),
+        onFenced: () => void handle.control.requestStop("hard"),
+      });
+      registry.subscribe(row.runId, handle.token, {
+        onEvent: (event, seq) => adopted.event(event, seq),
+        afterSeq: lastSeq,
+        ...REPLAY_EVERYTHING,
+      });
+      log(
+        `[resume] ${row.runId} ${row.meta.threadKey}: re-hosted (instance ${run.hosting.instanceId}; ${run.events.length} event(s) replayed)`,
+      );
+      outcome.launched.push(row.runId);
+      opts.onDone?.(row.runId);
+      continue;
+    }
     const agent = opts.agentFor(row.meta.agent);
     if (!agent) {
       await closeWith(run, `agent ${row.meta.agent ?? "(none)"} is unknown to this build`);
