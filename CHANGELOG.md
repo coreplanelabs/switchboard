@@ -1,5 +1,40 @@
 # Changelog
 
+## [1.254.0](https://github.com/coreplanelabs/switchboard/compare/v1.253.0...v1.254.0) (2026-09-19)
+
+
+### Features
+
+* **coding:** the identity rewrite guards the PR open and edit paths ([#1989](https://github.com/coreplanelabs/switchboard/issues/1989)) ([58a24e8](https://github.com/coreplanelabs/switchboard/commit/58a24e8ba42757c891bfed536396b297e162d448))
+* **config:** the operator is on by default; operator: off rolls it back ([#1988](https://github.com/coreplanelabs/switchboard/issues/1988)) ([a49e572](https://github.com/coreplanelabs/switchboard/commit/a49e572e4771c14fed06eb5ccf4c3845d5775da2))
+* **costs:** per-biller invoice sources and the daily tie-out ([#1979](https://github.com/coreplanelabs/switchboard/issues/1979)) ([dd45f6f](https://github.com/coreplanelabs/switchboard/commit/dd45f6f95db3141760d51bf8c7efa7b5b607f8aa))
+* **dispatcher:** admission runs after the operator; steer.run wired ([#1976](https://github.com/coreplanelabs/switchboard/issues/1976)) ([a5220f3](https://github.com/coreplanelabs/switchboard/commit/a5220f37fab203244009aaaf30b8a72214736494))
+* **dispatcher:** the verifier holds run-starting, steer and write binds ([#1983](https://github.com/coreplanelabs/switchboard/issues/1983)) ([9a12da1](https://github.com/coreplanelabs/switchboard/commit/9a12da131b9168f20028aff16a87a6607fb266ea))
+* **runs:** /metrics serves the run trend report with its JSON twin ([#1981](https://github.com/coreplanelabs/switchboard/issues/1981)) ([915f087](https://github.com/coreplanelabs/switchboard/commit/915f087d98824d18ccfb36861f14457a745c3e97))
+* **runs:** a hosted pipeline's standing rides every row source ([#1987](https://github.com/coreplanelabs/switchboard/issues/1987)) ([23ccafc](https://github.com/coreplanelabs/switchboard/commit/23ccafcee58caa97c09d00d8ed143843f9520c85))
+* **runs:** metrics trend answers the run trend on every surface ([#1969](https://github.com/coreplanelabs/switchboard/issues/1969)) ([d93bd82](https://github.com/coreplanelabs/switchboard/commit/d93bd826c4a90d7cf418ba2aa3f68db489907341))
+* **runs:** the plane's decider and tables land beside the ledger object ([#1980](https://github.com/coreplanelabs/switchboard/issues/1980)) ([dfc88d3](https://github.com/coreplanelabs/switchboard/commit/dfc88d3d9c3bf3f9f797128fcf5700340b2698e0))
+* **web:** the hosted row's pace cell borrows its live child's pace ([#1977](https://github.com/coreplanelabs/switchboard/issues/1977)) ([949827c](https://github.com/coreplanelabs/switchboard/commit/949827c177c76c2404fdaabcc4c232e1b3a2217f))
+
+
+### Bug fixes
+
+* **commands:** a door refusal prints its own sentence in chat ([#1972](https://github.com/coreplanelabs/switchboard/issues/1972)) ([a8b2043](https://github.com/coreplanelabs/switchboard/commit/a8b20438983242c1694a473092c20bd0e9f324bc))
+* **commands:** a question's Yes lives a day, not the write's ten minutes ([#1978](https://github.com/coreplanelabs/switchboard/issues/1978)) ([dfebb95](https://github.com/coreplanelabs/switchboard/commit/dfebb9540cde7d4f010d24ba4674be528c1984ad))
+* **harness:** a failed compaction checkpoints the coding child's tree ([#1971](https://github.com/coreplanelabs/switchboard/issues/1971)) ([8adae44](https://github.com/coreplanelabs/switchboard/commit/8adae445f3877a496425f363b03e21b6ed1ca54c))
+* **ship:** resume a re-issued plan's unit over its open pull request ([#1974](https://github.com/coreplanelabs/switchboard/issues/1974)) ([4f959d2](https://github.com/coreplanelabs/switchboard/commit/4f959d2afdb6e3f048d4071b658bc226defada46))
+* **slack:** a rehosted ship parent's card survives the restart ([#1962](https://github.com/coreplanelabs/switchboard/issues/1962)) ([0699344](https://github.com/coreplanelabs/switchboard/commit/069934462ea84bf5d5b3e8bb01c9a8fc7e80f322))
+* **slack:** render a person's actor id as a mention Slack resolves ([#1975](https://github.com/coreplanelabs/switchboard/issues/1975)) ([0ea751e](https://github.com/coreplanelabs/switchboard/commit/0ea751e5ea30a90a24b2f7e28a1751e9f80da27b))
+
+
+### Documentation
+
+* **docs:** record 0060 is implemented, all nine units live ([#1965](https://github.com/coreplanelabs/switchboard/issues/1965)) ([a89adf0](https://github.com/coreplanelabs/switchboard/commit/a89adf0c17de2168e1c6e0d0ffffa96fc7adf1dd))
+* **docs:** record 0066 answers round two and its plan gains nine units ([#1992](https://github.com/coreplanelabs/switchboard/issues/1992)) ([e5dd8d8](https://github.com/coreplanelabs/switchboard/commit/e5dd8d8472a59651127b6a53c7763fe61fdfd363))
+* **docs:** record 0066 fixes twelve user nouns with a bound vocabulary ([#1986](https://github.com/coreplanelabs/switchboard/issues/1986)) ([5b00c72](https://github.com/coreplanelabs/switchboard/commit/5b00c72e36cc5a35fae15226d8a1ab64ac7caf33))
+* **docs:** the operator ships on by amendment, and images reach it ([#1963](https://github.com/coreplanelabs/switchboard/issues/1963)) ([cd108d4](https://github.com/coreplanelabs/switchboard/commit/cd108d49034c725c1d5f04373d8bb9ff49be6357))
+* **web:** record 0065, a hosted pipeline run is an orchestrator ([#1973](https://github.com/coreplanelabs/switchboard/issues/1973)) ([aad85d1](https://github.com/coreplanelabs/switchboard/commit/aad85d1b6e389ee6c2b4011693fced20f3e26480))
+
 ## [1.253.0](https://github.com/coreplanelabs/switchboard/compare/v1.252.0...v1.253.0) (2026-09-19)
 
 
