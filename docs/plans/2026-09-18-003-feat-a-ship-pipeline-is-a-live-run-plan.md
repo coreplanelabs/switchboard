@@ -2,7 +2,7 @@
 title: A ship pipeline is a live run for its whole life - the host key, the hosted parent, the web handle - Plan
 type: feat
 date: 2026-09-18
-status: proposed
+status: implemented
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap

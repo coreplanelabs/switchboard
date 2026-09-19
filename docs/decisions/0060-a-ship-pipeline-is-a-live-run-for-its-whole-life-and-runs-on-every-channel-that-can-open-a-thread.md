@@ -1,6 +1,6 @@
 ---
 title: A ship pipeline is a live run for its whole life, so every channel that can open a thread runs it and every surface is a projection of one record
-status: proposed
+status: implemented
 date: 2026-09-18
 pattern: One store, many projections (the run record is the truth; Slack's card and the web's turn render it); a hosted run with no process, kept alive by the heartbeat every run has and claimed under a key of its own so it occupies no thread; capability over name at the channel seam
 ---
@@ -195,3 +195,7 @@ Validation criteria bind in the plan; every row would be `[gap]` here.
 ## Sources
 
 Records [0043](0043-the-home-page-is-a-chat-the-browser-is-a-channel-and-a-turn-is-a-run.md), [0055](0055-a-unit-has-one-thread-and-a-round-reads-the-checks-at-its-head.md), [0057](0057-the-operator-is-the-one-door-a-model-binds-every-chat-input-and-deterministic-code-authorizes-fences-and-executes.md), [0019](0019-durable-run-ledger-resume-after-kill.md), [0031](0031-the-coordinator-runs-a-plan-not-a-pull-request.md), [0034](0034-one-agent-per-unit-a-run-continues-a-transcript.md); specs [agent-ship](../reference/specs/agent-ship.md), [thread-admission](../reference/specs/thread-admission.md), [run-history](../reference/specs/run-history.md), [live-view](../reference/specs/live-view.md), [web-chat](../reference/specs/web-chat.md), [http-ingress](../reference/specs/http-ingress.md).
+
+## Amended 2026-09-19: built and live; two web rows stay open on the tracker
+
+All nine units of [the plan](../plans/2026-09-18-003-feat-a-ship-pipeline-is-a-live-run-plan.md) are merged and running in production (the host key, the hosted parent and the stop rules since 1.252.0; the web handle, the count-keyed thread choice and the conversation seed since 1.253.0), so the status flips to implemented. The record was written so that a pipeline typed into a web conversation runs exactly as one typed into Slack, with one run record projected by every surface. The re-evaluation against that reasoning: the Slack surface is unchanged through a parent that lived from hand-off to `finish` across three unit threads and a bot generation; a pipeline typed into the web chat is admitted by capability and its runner's events land inside the hosted parent after its card closes; the runs index lists hosted parents beside their children without the stalled label a parent that makes no tool calls used to earn. Two validation rows are open on the tracker rather than done: the unit report rendered in a web unit conversation, and the parent's word linking to the live parent with its token, both waiting for a web-started unit that runs a child. One selection defect surfaced by the web receipt run is filed on the tracker: a re-issued plan drops a unit the runner itself merged earlier from its units panel and summary, while a unit a person merged is reported as already landed.
