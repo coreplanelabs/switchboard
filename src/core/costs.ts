@@ -807,10 +807,14 @@ export function buildBillerTieOuts(
       for (const [ref, m] of Object.entries(cell.usage.byModel)) {
         if (billerOfRef(ref) !== name) continue;
         const day = attributed.get(cell.day) ?? { usd: 0, fee: 0, hasFee: false };
-        if (typeof m.usd === "number") day.usd += m.usd;
-        if (m.feeUsd !== undefined) {
-          day.fee += m.feeUsd;
-          day.hasFee = true;
+        // An unpriced model's feeUsd is skipped with its usd: adding the fee
+        // alone would drive attributedUpstreamUsd (usd − fee) negative.
+        if (typeof m.usd === "number") {
+          day.usd += m.usd;
+          if (m.feeUsd !== undefined) {
+            day.fee += m.feeUsd;
+            day.hasFee = true;
+          }
         }
         attributed.set(cell.day, day);
       }
@@ -922,7 +926,11 @@ export class OpenAICostsSource implements LlmInvoiceSource {
         next_page?: string | null;
       };
       for (const bucket of body.data ?? []) {
-        const date = new Date(num(bucket.start_time) * 1000).toISOString().slice(0, 10);
+        // A bucket without a finite start_time is skipped, never dated to epoch 0;
+        // out-of-range buckets are dropped like the OpenRouter source's rows.
+        if (typeof bucket.start_time !== "number" || !Number.isFinite(bucket.start_time)) continue;
+        const date = new Date(bucket.start_time * 1000).toISOString().slice(0, 10);
+        if (date < range.from || date > range.to) continue;
         for (const r of bucket.results ?? []) {
           const currency = str(r.amount?.currency).toLowerCase();
           if (currency !== "usd") throw new Error(`openai organization costs: unexpected currency ${currency || "?"}`);
