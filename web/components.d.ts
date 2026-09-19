@@ -60,6 +60,7 @@ declare module 'vue' {
     ThemeToggle: typeof import('./src/components/ThemeToggle.vue')['default']
     ThreadTip: typeof import('./src/components/home/ThreadTip.vue')['default']
     TimelineSection: typeof import('./src/components/run/TimelineSection.vue')['default']
+    TrendLineChart: typeof import('./src/components/metrics/TrendLineChart.vue')['default']
     UApp: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/App.vue')['default']
     UButton: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/Button.vue')['default']
     UDropdownMenu: typeof import('./../node_modules/@nuxt/ui/dist/runtime/components/DropdownMenu.vue')['default']

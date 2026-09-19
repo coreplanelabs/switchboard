@@ -26,6 +26,8 @@ export const routes: RouteRecordRaw[] = [
     component: () => import("./pages/ResidentDetailPage.vue"),
   },
   { path: "/costs/:group?", component: () => import("./pages/CostsPage.vue") },
+  // The run trend (docs/reference/specs/run-metrics.md item 10).
+  { path: "/metrics", component: () => import("./pages/MetricsPage.vue") },
   // The plane's table (docs/reference/specs/orchestration-plane.md, record 0064).
   { path: "/plane", component: () => import("./pages/PlanePage.vue") },
   { path: "/delivery/:owner?/:name?", component: () => import("./pages/DeliveryPage.vue") },

@@ -27,6 +27,8 @@ import type { CostReport, DailyCost } from "../src/core/costs.js";
 import { buildCostsByReport, type CostDimension, type CostsByReport } from "../src/core/costsBy.js";
 import { DIMENSION_OF_VIEW, type CostsByView, type CostsView } from "../src/channels/costsView.js";
 import type { CostsSnapshotStatus } from "../src/core/costsSnapshot.js";
+import { buildMetricsReport, type MetricsReport, type MetricsRow } from "../src/core/metrics.js";
+import { DAY_MS } from "../src/core/budgets.js";
 import type { RunUsage, UsageRow } from "../src/core/runUsage.js";
 import { buildDeliveryReport, resolveDeliveryRange, type PullRequestFacts } from "../src/core/delivery.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
@@ -1187,6 +1189,69 @@ const COSTS_SNAPSHOT: CostsSnapshotStatus = {
   nextAt: new Date(NOW + 21 * 3_600_000).toISOString(),
   lastFailure: null,
 };
+
+// Run metrics (run-metrics.md item 10): thirty whole UTC days ending on the
+// preview's clock, built through the real report builder over deterministic
+// waves — a visible weekly rhythm, a few failed and interrupted runs, four
+// agents — so the page's charts have shape without any real workspace's data.
+const METRICS_DAYS = 30;
+const METRICS_UNTIL = NOW - (NOW % DAY_MS) + DAY_MS;
+const METRICS_SINCE = METRICS_UNTIL - METRICS_DAYS * DAY_MS;
+const metricsDay = (i: number): string => `${new Date(METRICS_SINCE + i * DAY_MS).toISOString().slice(0, 10)} 00:00:00`;
+const METRICS: MetricsReport = (() => {
+  const byDayStatus: MetricsRow[] = [];
+  let runs = 0;
+  let failed = 0;
+  for (let i = 0; i < METRICS_DAYS; i++) {
+    const completed = 14 + Math.round(9 * Math.abs(Math.sin(i / 2.6)));
+    const failedToday = i % 5 === 0 ? 4 : 1;
+    byDayStatus.push({ day: metricsDay(i), status: "completed", runs: completed });
+    byDayStatus.push({ day: metricsDay(i), status: "failed", runs: failedToday });
+    if (i % 9 === 4) byDayStatus.push({ day: metricsDay(i), status: "interrupted", runs: 2 });
+    runs += completed + failedToday + (i % 9 === 4 ? 2 : 0);
+    failed += failedToday;
+  }
+  const agentRow = (agent: string, share: number, failedShare: number, p50: number, p95: number, usdPerRun: number) => {
+    const r = Math.round(runs * share);
+    return {
+      agent,
+      runs: r,
+      failed: Math.round(failed * failedShare),
+      p50WallMs: p50,
+      p95WallMs: p95,
+      usd: Number((r * usdPerRun).toFixed(2)),
+      unpricedTokens: agent === "general" ? 12_400 : 0,
+      turns: r * (agent === "coding" ? 34 : 9),
+    };
+  };
+  const byAgent: MetricsRow[] = [
+    agentRow("coding", 0.46, 0.55, 310_000, 1_260_000, 0.92),
+    agentRow("review", 0.27, 0.2, 150_000, 480_000, 0.38),
+    agentRow("general", 0.19, 0.05, 21_000, 95_000, 0.06),
+    agentRow("ship", 0.08, 0.2, 840_000, 2_450_000, 2.1),
+  ];
+  const byDayAgentP50: MetricsRow[] = [];
+  for (let i = 0; i < METRICS_DAYS; i++) {
+    byDayAgentP50.push({
+      day: metricsDay(i),
+      agent: "coding",
+      p50WallMs: 240_000 + Math.round(118_000 * Math.abs(Math.sin(i / 3.4))),
+    });
+    byDayAgentP50.push({
+      day: metricsDay(i),
+      agent: "review",
+      p50WallMs: 125_000 + Math.round(58_000 * Math.abs(Math.cos(i / 2.9))),
+    });
+    if (i % 2 === 0) byDayAgentP50.push({ day: metricsDay(i), agent: "general", p50WallMs: 15_000 + 1_000 * (i % 9) });
+  }
+  return {
+    dataset: "switchboard_runs",
+    ...buildMetricsReport(
+      { byDayStatus, byAgent, byDayAgentP50 },
+      { sinceMs: METRICS_SINCE, untilMs: METRICS_UNTIL, days: METRICS_DAYS },
+    ),
+  };
+})();
 
 // Cost by user (costs.md item 10), built through the real builder over the same
 // thirty days: three made-up Slack users starting runs on most days, `alice` the
@@ -2570,6 +2635,9 @@ function page(
       INDEX_ROWS.filter((r) => !r.finished && r.token).map((r) => [r.id, r.token as string]),
     );
     return { title: "Plane", seed: { page: "plane", table, tokens } };
+  }
+  if (pathname === "/metrics" || pathname === "/metrics.json") {
+    return { title: "Run metrics", seed: { page: "metrics", report: METRICS } };
   }
   if (pathname.startsWith("/costs")) {
     const asked = new URLSearchParams(search).get("view");
