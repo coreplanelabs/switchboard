@@ -339,8 +339,13 @@ function planWhere(
   if (p.path !== undefined) {
     lines.push(`${count}${left} in dependency order: ${units.map((u) => u.unit).join(", ")}`);
     if (mergedBefore.length > 0) lines.push(`merged before: ${mergedBefore.join(", ")}`);
+    // The thread choice keys on the unit count (agent-ship item 16): a one-unit
+    // plan's unit runs in the requesting thread and `finish` posts no summary
+    // there, so its reply takes the task path's "in this thread" wording.
     lines.push(
-      "each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread",
+      units.length === 1
+        ? `the unit runs on \`${units[0]?.branch ?? ""}\` in this thread under your grants; this card follows the plan and its report lands here`
+        : "each unit runs in a thread of its own in this channel under your grants; this card follows the plan and its summary lands in this thread",
     );
     return lines;
   }

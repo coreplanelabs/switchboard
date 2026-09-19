@@ -191,6 +191,20 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(await missing.instances.get("plan-fixture")).toBeNull();
   });
 
+  it("a seeded plan selecting exactly one unit takes the task path's wording: the reply says the unit runs on its branch in this thread and the report lands here — never a thread per unit or a summary here (agent-ship item 16)", async () => {
+    const h = harness();
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({ requestText: "in acme/api: plan docs/plans/fixture.md units U12" }),
+    );
+    expect(out.status).toBe("completed");
+    expect(out.reply).toBe(
+      "🧭 Handed to the plan runner.\n• plan `fixture` (`docs/plans/fixture.md` at `main`)\n• 1 unit in dependency order: U12\n" +
+        "• the unit runs on `plan/fixture/u12-trim-the-log` in this thread under your grants; this card follows the plan and its report lands here",
+    );
+    expect((await h.instances.listUnits("plan-fixture")).map((u) => u.unit)).toEqual(["U12"]);
+  });
+
   it("a task request is a generated plan of one unit: the instance under `plan-<slug>-<hash>` carries `plan: { id }` with no `path` and `merge: person`, its one `U1` row is on `plan/<id>/u1`, and the reply says the unit runs in this thread — a task whose text contains the word runner included", async () => {
     const h = harness();
     const id = "plan-warm-the-cache-on-wake-dfa06c";
@@ -544,6 +558,10 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(third.created).toEqual(["plan-fixture-3"]);
     expect(out.reply).toContain("attempt 3 of plan `fixture`");
     expect(out.reply).toContain("• 1 unit left in dependency order: U12\n• merged before: U10, U11");
+    // One unit left is a one-unit plan: the attempt's reply takes the "in this thread" wording too.
+    expect(out.reply).toContain(
+      "• the unit runs on `plan/fixture/u12-trim-the-log` in this thread under your grants; this card follows the plan and its report lands here",
+    );
     expect((await store.get("plan-fixture-3"))?.attempt).toBe(3);
     // Every unit the request names merged already: nothing to run, nothing written.
     const done = harness({ store, status: { "plan-fixture-3": { kind: "status", status: "complete" } } });

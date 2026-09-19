@@ -3,7 +3,7 @@
     "planIds": 4
   },
   "src/channels/adminCoordinator.test.ts": {
-    "planIds": 6
+    "planIds": 5
   },
   "src/core/coordinator/briefs.test.ts": {
     "planIds": 7

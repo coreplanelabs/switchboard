@@ -2834,6 +2834,107 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     // No summary reply: the unit ran in the requesting thread, its report is there.
     expect(replies).toEqual([]);
   });
+
+  it("the thread choice keys on the unit count (record 0055 item 3): a checked-in plan selecting one unit runs it in the requesting thread — unit-start opens nothing, the board issue is still found — and finish posts no summary there; two units open a thread per unit and finish posts the summary; a generated one-unit plan is unchanged", async () => {
+    // A checked-in plan narrowed to one unit: the rows carry only the selection.
+    const opened: string[] = [];
+    const replies: Array<{ threadKey: string; text: string }> = [];
+    const closes: StatusUpdate[] = [];
+    const capturing =
+      (record: { opened: string[]; replies: Array<{ threadKey: string; text: string }> }) =>
+      (thread: { threadKey: string }): ChannelIO => ({
+        reply: async (text) => void record.replies.push({ threadKey: thread.threadKey, text }),
+        status: async () => ({ update: () => {}, done: async (frame) => void closes.push(frame) }),
+        history: async () => [],
+        openThread: async (lead) => {
+          record.opened.push(lead);
+          return {
+            thread: { threadKey: `slack:C1:${record.opened.length + 1}.0` },
+            io: {
+              reply: async () => {},
+              status: async () => ({ update: () => {}, done: async () => {} }),
+              history: async () => [],
+            },
+          };
+        },
+      });
+    const h = harness({
+      ioFor: capturing({ opened, replies }),
+      issues: [issue(834, "U10: Warm the cache on wake (unit)")],
+    });
+    const solo: CoordinatorInstance = { ...PLAN_INSTANCE, id: "plan-fixture-solo" };
+    await h.instances.put(solo);
+    await h.instances.putUnits([{ ...unitRow("U10"), instanceId: solo.id }]);
+    expect(await call(h, "unit-start", { parentInstanceId: solo.id, unit: "U10" })).toEqual({
+      status: 200,
+      body: { ok: true, threadKey: INSTANCE.threadKey, branch: "plan/fixture/u10", base: "main", issue: 834, at: NOW },
+    });
+    // No thread is opened: the one unit runs where the request was made — and
+    // the checked-in plan's board issue is still looked up (only a generated
+    // plan, the task wording, skips it).
+    expect(opened).toHaveLength(0);
+    expect((await h.instances.listUnits(solo.id))[0]).toMatchObject({
+      threadKey: INSTANCE.threadKey,
+      sourceUrl: INSTANCE.sourceUrl,
+      issue: 834,
+      startedAt: NOW,
+    });
+    await h.instances.putUnits([
+      {
+        ...unitRow("U10"),
+        instanceId: solo.id,
+        threadKey: INSTANCE.threadKey,
+        ending: { kind: "merge_ready", report: "ready", at: NOW },
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      },
+    ]);
+    expect(await call(h, "finish", { parentInstanceId: solo.id, outcome: "completed" })).toEqual({
+      status: 200,
+      body: { ok: true, runId: "run-parent", at: NOW },
+    });
+    // No summary reply: the unit's report already landed in the requesting
+    // thread. The card still closes with the plan wording — the unit id on its
+    // line — since `isGenerated` still means the task wording, not the thread.
+    expect(replies).toEqual([]);
+    expect(closes).toHaveLength(1);
+    expect(JSON.stringify(closes[0])).toContain("U10 ·");
+
+    // Two units: a thread per unit and the summary posted back, as today.
+    const opened2: string[] = [];
+    const replies2: Array<{ threadKey: string; text: string }> = [];
+    const two = await planHarness({ ioFor: capturing({ opened: opened2, replies: replies2 }) });
+    await call(two, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U10" });
+    await call(two, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: "U11" });
+    expect(opened2).toHaveLength(2);
+    await call(two, "finish", { parentInstanceId: PLAN_INSTANCE.id, outcome: "completed" });
+    expect(replies2.at(-1)).toMatchObject({ threadKey: INSTANCE.threadKey });
+    expect(replies2.at(-1)?.text).toContain("Plan fixture ended (completed):");
+
+    // A generated one-unit plan is unchanged: the requesting thread, nothing
+    // opened, no board issue even when one is titled by the unit id.
+    const opened3: string[] = [];
+    const replies3: Array<{ threadKey: string; text: string }> = [];
+    const gen = harness({
+      ioFor: capturing({ opened: opened3, replies: replies3 }),
+      issues: [issue(9, "U1: anything (unit)")],
+    });
+    const generated: CoordinatorInstance = {
+      ...INSTANCE,
+      plan: { id: "warm-the-cache-abc123" },
+      branch: "plan/warm-the-cache-abc123/u1",
+    };
+    await gen.instances.put(generated);
+    await gen.instances.putUnits([
+      { instanceId: INSTANCE.id, unit: "U1", slug: "u1", branch: generated.branch, dependsOn: [], rounds: [] },
+    ]);
+    expect(await call(gen, "unit-start", { parentInstanceId: INSTANCE.id, unit: "U1" })).toEqual({
+      status: 200,
+      body: { ok: true, threadKey: INSTANCE.threadKey, branch: generated.branch, base: "main", at: NOW },
+    });
+    expect(opened3).toHaveLength(0);
+    await call(gen, "finish", { parentInstanceId: INSTANCE.id, outcome: "completed" });
+    expect(replies3).toEqual([]);
+  });
 });
 
 // Feature: docs/reference/specs/http-ingress.md item 9 — the runner's merge

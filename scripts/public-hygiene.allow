@@ -214,3 +214,8 @@ src/channels/modelProxy.ts	export const DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 
 # The amendment note cites the receipt comment by its full URL; the repository name is the URL, not an imprint.
 docs/decisions/0062-the-requester-authors-the-commits-the-bot-commits-and-opens-them-and-a-run-keeps-the-requester-who-started-it.md	> **Amended 2026-09-19.** The record proposed a second trusted write, an **email match**: the bot would read an unbound requester's Slack profile email and bind the one login GitHub links to commits authored with it. Its trust rested on one guessed fact — that GitHub links a commit only to an email the account has **confirmed** — and the test the record scheduled failed: GitHub links a commit to an account through an unconfirmed email address ([receipt](https://github.com/coreplanelabs/switchboard/pull/1870#issuecomment-5737975598)), so anyone who learns a person's email can author commits GitHub attributes to them and the match's trust chain is broken. The email match is dropped. The grant binding above is the one trusted write, and a GitHub OAuth link ("connect your GitHub" on the dashboard) becomes the third path, in a record of its own.
+
+# The unit-count thread-choice test's generated fixture names the one unit a generated plan always has (U1); the id is the fixture's vocabulary, not plan provenance.
+src/channels/adminCoordinator.test.ts	issues: [issue(9, "U1: anything (unit)")],
+src/channels/adminCoordinator.test.ts	{ instanceId: INSTANCE.id, unit: "U1", slug: "u1", branch: generated.branch, dependsOn: [], rounds: [] },
+src/channels/adminCoordinator.test.ts	expect(await call(gen, "unit-start", { parentInstanceId: INSTANCE.id, unit: "U1" })).toEqual({
