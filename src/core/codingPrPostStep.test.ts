@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } from "../execution/githubPulls.js";
+import type { BranchStartState, RewriteResult } from "../execution/identityRewrite.js";
 import { parsePrDescription, renderPrDescriptionMarkdown } from "./prDescription.js";
 import type { RunEvent } from "./runEvents.js";
 import {
@@ -1819,6 +1820,54 @@ describe("pushedBranchOf (the branch a run's own git push named)", () => {
       expect(track(call("c1", "git push -u origin feat/x"), bash(PUSH_NEW, { callId: "c2" }))).toBeUndefined();
     });
 
+    it("startPoint(): the FIRST push's status says where the branch started — `[new branch]` created, `old..new` the pre-push head; an up-to-date first push and a restored initial branch stay unknown; a later push never overwrites the first", () => {
+      const started = (...events: RunEvent[]) => {
+        const t = trackPushedBranch();
+        for (const e of events) t.observe(e);
+        return t.startPoint();
+      };
+      expect(started(call("c1", "git push -u origin feat/x"), bash(PUSH_NEW, { callId: "c1" }))).toEqual({
+        kind: "created",
+      });
+      expect(
+        started(
+          call("c1", "git push origin feat/x"),
+          bash("To https://github.com/acme/api.git\n   a1b2c3d..e5f6a7b  feat/x -> feat/x", { callId: "c1" }),
+        ),
+      ).toEqual({ kind: "before", sha: "a1b2c3d" });
+      // A forced first push names the pre-push head too (`old...new`).
+      expect(
+        started(
+          call("c1", "git push -f origin feat/x"),
+          bash("To https://github.com/acme/api.git\n + a1b2c3d...e5f6a7b feat/x -> feat/x (forced update)", {
+            callId: "c1",
+          }),
+        ),
+      ).toEqual({ kind: "before", sha: "a1b2c3d" });
+      // An up-to-date first push moved nothing and says nothing about who put
+      // the tip there — and a second push's `old..new` never masquerades as
+      // the first: the branch's start stays unknown.
+      expect(
+        started(
+          call("c1", "git push origin feat/x"),
+          bash("To https://github.com/acme/api.git\n = [up to date]      feat/x -> feat/x", { callId: "c1" }),
+          call("c2", "git push origin feat/x"),
+          bash("To https://github.com/acme/api.git\n   a1b2c3d..e5f6a7b  feat/x -> feat/x", { callId: "c2" }),
+        ),
+      ).toBeUndefined();
+      // A branch restored across a restart carries no push output at all.
+      expect(trackPushedBranch("feat/x").startPoint()).toBeUndefined();
+      // The point follows the branch the LAST push named.
+      expect(
+        started(
+          call("c1", "git push -u origin feat/x"),
+          bash(PUSH_NEW, { callId: "c1" }),
+          call("c2", "git push origin feat/y"),
+          bash("To https://github.com/acme/api.git\n   9f8e7d6..e5f6a7b  feat/y -> feat/y", { callId: "c2" }),
+        ),
+      ).toEqual({ kind: "before", sha: "9f8e7d6" });
+    });
+
     it("the latest push wins, and a later non-push result never erases it", () => {
       expect(
         track(
@@ -2000,5 +2049,408 @@ describe("salvageTargetOf — where the budget-end salvage may push, and when it
       skipped:
         "the budget-end salvage was skipped: the workspace's branch could not be read, so there is nowhere to push",
     });
+  });
+});
+
+// Feature: docs/reference/specs/agent-coding.md item 2 (record 0062) — the
+// identity rewrite runs before the post-step opens or edits: on `unreadable`
+// nothing is opened and the note says why; on `rewritten` the pull request is
+// opened at the rebuilt tip with the count on the note and the `pr_opened`
+// event; the head is pinned after the open; the requester's bound login is
+// assigned after a 204 and skipped after a 404; the body carries the
+// requested-by line only with a binding (pr-description.md item 5).
+describe("runCodingPrPostStep — the identity rewrite before the open (record 0062)", () => {
+  const REBUILT = "f0e1d2c3b4a5968778695a4b3c2d1e0f12345678";
+  const emptyStart = { kind: "known" as const, commits: [] };
+
+  function identityOf(over: {
+    rewrite?: RewriteResult;
+    prHead?: string;
+    assignable?: boolean | undefined;
+    requestedBy?: { login: string; surface: string };
+  }) {
+    const rewrite = vi.fn(async () => over.rewrite ?? ({ kind: "clean" } as RewriteResult));
+    const addAssignee = vi.fn(async () => undefined);
+    const isAssignable = vi.fn(async () => over.assignable);
+    const pullRequestHead = vi.fn(async () => over.prHead);
+    return {
+      identity: {
+        rewrite,
+        pullRequestHead,
+        isAssignable,
+        addAssignee,
+        ...(over.requestedBy !== undefined ? { requestedBy: over.requestedBy } : {}),
+      },
+      rewrite,
+      addAssignee,
+      isAssignable,
+      pullRequestHead,
+    };
+  }
+
+  const common = (events: RunEvent[], spy: ReturnType<typeof openSpy>) => ({
+    observed: observation(),
+    description: DESCRIPTION,
+    target: {
+      repo: "acme/api",
+      baseRef: undefined,
+      bindingRef: "main",
+      resolvedRef: "main",
+      startState: emptyStart,
+      startBranch: "feat/x",
+    },
+    openPullRequest: spy.fn,
+    fetchRepoInfo: unreachable,
+    findOpenPr: noOpenPr,
+    updatePullRequest: noUpdate,
+    publish: (e: RunEvent) => events.push(e),
+    logKey: "t",
+    verbosity: "verbose" as const,
+  });
+
+  it("on `unreadable` nothing is opened or edited: the note says why and a pr_not_opened run note is published", async () => {
+    const spy = openSpy();
+    const events: RunEvent[] = [];
+    const seam = identityOf({ rewrite: { kind: "unreadable", reason: "the range carries 301 commits (over 300)" } });
+    const note = await runCodingPrPostStep({ ...common(events, spy), identity: seam.identity });
+    expect(spy.calls).toHaveLength(0);
+    expect(note).toContain("could not be verified");
+    expect(note).toContain("301 commits");
+    expect(events.filter((e) => e.type === "pr_opened")).toHaveLength(0);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "run_note", kind: "pr_not_opened", summary: expect.stringContaining("301") }),
+    );
+    // The rewrite was asked over the recorded start state for the pushed branch.
+    expect(seam.rewrite).toHaveBeenCalledWith({
+      repo: "acme/api",
+      base: "main",
+      branch: "feat/x",
+      startState: emptyStart,
+    });
+  });
+
+  it("on `rewritten` the pull request opens at the rebuilt tip: the body renders there, `head.sha` is pinned, and the note and `pr_opened` carry the count", async () => {
+    const spy = openSpy();
+    const events: RunEvent[] = [];
+    const seam = identityOf({
+      rewrite: { kind: "rewritten", count: 1, replaced: ["author Raj <raj@example.com>"], tip: REBUILT },
+      prHead: REBUILT,
+    });
+    const note = await runCodingPrPostStep({ ...common(events, spy), identity: seam.identity });
+    expect(spy.calls).toHaveLength(1);
+    // Every anchor is rendered at the rebuilt tip, not the observed head.
+    expect(spy.calls[0].body).toContain(REBUILT);
+    expect(spy.calls[0].body).not.toContain(HEAD);
+    expect(seam.pullRequestHead).toHaveBeenCalledWith("acme/api", 7);
+    expect(seam.rewrite).toHaveBeenCalledTimes(1);
+    expect(note).toContain("1 commit(s) re-authored");
+    expect(events).toContainEqual(expect.objectContaining({ type: "pr_opened", number: 7, rewritten: 1 }));
+  });
+
+  it("a head mismatch after the open runs the rewrite once more and re-renders at the tip it settles", async () => {
+    const spy = openSpy();
+    const events: RunEvent[] = [];
+    const moved = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    const update = vi.fn(async () => undefined);
+    const seam = identityOf({ rewrite: { kind: "rewritten", count: 1, replaced: ["x"], tip: REBUILT }, prHead: moved });
+    await runCodingPrPostStep({ ...common(events, spy), updatePullRequest: update, identity: seam.identity });
+    expect(seam.rewrite).toHaveBeenCalledTimes(2);
+    expect(update).toHaveBeenCalledTimes(1);
+    // The two rewrites both counted: the event carries the sum.
+    expect(events).toContainEqual(expect.objectContaining({ type: "pr_opened", rewritten: 2 }));
+  });
+
+  it("the assignee is added after a 204 and skipped after a 404; a clean rewrite opens with no count on the note or the event", async () => {
+    for (const [assignable, added] of [
+      [true, true],
+      [false, false],
+    ] as const) {
+      const spy = openSpy();
+      const events: RunEvent[] = [];
+      const seam = identityOf({
+        prHead: HEAD,
+        assignable,
+        requestedBy: { login: "ivy-dev", surface: "slack:C1" },
+      });
+      const note = await runCodingPrPostStep({ ...common(events, spy), identity: seam.identity });
+      expect(seam.isAssignable).toHaveBeenCalledWith("acme/api", "ivy-dev");
+      expect(seam.addAssignee).toHaveBeenCalledTimes(added ? 1 : 0);
+      expect(note).not.toContain("re-authored");
+      const opened = events.find((e) => e.type === "pr_opened");
+      expect(opened).not.toHaveProperty("rewritten");
+    }
+  });
+
+  it("the body carries the requested-by line only with a binding (pr-description.md item 5)", async () => {
+    const withBinding = openSpy();
+    const seamBound = identityOf({
+      prHead: HEAD,
+      assignable: true,
+      requestedBy: { login: "ivy-dev", surface: "slack:C1" },
+    });
+    await runCodingPrPostStep({ ...common([], withBinding), identity: seamBound.identity });
+    expect(withBinding.calls[0].body).toContain("Requested by @ivy-dev in slack:C1");
+
+    const noBinding = openSpy();
+    const seamUnbound = identityOf({ prHead: HEAD });
+    await runCodingPrPostStep({ ...common([], noBinding), identity: seamUnbound.identity });
+    expect(noBinding.calls[0].body).not.toContain("Requested by");
+  });
+
+  it("the requested-by line survives a re-render: the ownPr edit (nothing pushed) and the unproven-push edit carry it like the open, so an edit never drops the attribution", async () => {
+    const requestedBy = { login: "ivy-dev", surface: "slack:C1" };
+    // The thread's own pull request, edited with nothing pushed (no rewrite runs).
+    const ownSeam = identityOf({ prHead: HEAD, requestedBy });
+    const ownEdits: Array<{ body: string }> = [];
+    const base = common([], openSpy());
+    await runCodingPrPostStep({
+      ...base,
+      observed: observation({ branch: "main", checkedOut: "main" }),
+      target: { ...base.target, ownPr: { number: 9, headSha: "c".repeat(40), state: "open" as const } },
+      updatePullRequest: async (_repo: string, _number: number, patch: { body: string }) => void ownEdits.push(patch),
+      identity: ownSeam.identity,
+    });
+    expect(ownEdits).toHaveLength(1);
+    expect(ownEdits[0].body).toContain("Requested by @ivy-dev in slack:C1");
+
+    // The wind-down edit of an open pull request the run's unproven push heads.
+    const editSeam = identityOf({ requestedBy });
+    const edits: Array<{ body: string }> = [];
+    await runCodingPrPostStep({
+      ...common([], openSpy()),
+      observed: observation({ remoteHead: "b".repeat(40) }),
+      findOpenPr: async (): Promise<OpenPrRef | null> => ({
+        number: 700,
+        htmlUrl: "https://github.com/acme/api/pull/700",
+        headSha: "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432",
+      }),
+      updatePullRequest: async (_repo: string, _number: number, patch: { body: string }) => void edits.push(patch),
+      identity: editSeam.identity,
+    });
+    expect(edits).toHaveLength(1);
+    expect(edits[0].body).toContain("Requested by @ivy-dev in slack:C1");
+  });
+
+  it("a pushed branch other than the one the start state was read for is judged over an EMPTY start state only when the run's own first push CREATED it (`[new branch]`)", async () => {
+    const spy = openSpy();
+    const seam = identityOf({ prHead: HEAD });
+    const base = common([], spy);
+    await runCodingPrPostStep({
+      ...base,
+      target: {
+        ...base.target,
+        startBranch: "plan/p/u1",
+        startState: {
+          kind: "known",
+          commits: [{ sha: "c0c0", author: { name: "x", email: "y" }, date: "d", message: "m" }],
+        },
+        pushedStart: { kind: "created" },
+      },
+      identity: seam.identity,
+    });
+    expect(seam.rewrite).toHaveBeenCalledWith(
+      expect.objectContaining({ branch: "feat/x", startState: { kind: "known", commits: [] } }),
+    );
+  });
+
+  it("a pushed branch the run's first push moved from an existing head is judged over a BOUNDARY start state at that head — never an assumed-empty one over history the run did not create", async () => {
+    const spy = openSpy();
+    const seam = identityOf({ prHead: HEAD });
+    const base = common([], spy);
+    await runCodingPrPostStep({
+      ...base,
+      target: { ...base.target, startBranch: "plan/p/u1", pushedStart: { kind: "before", sha: "9f8e7d6" } },
+      identity: seam.identity,
+    });
+    expect(seam.rewrite).toHaveBeenCalledWith(
+      expect.objectContaining({ branch: "feat/x", startState: { kind: "boundary", sha: "9f8e7d6" } }),
+    );
+  });
+
+  it("a pushed branch other than the recorded one with NO record of where the push found it fails closed: the rewrite is asked over an unknown start state and nothing is opened", async () => {
+    const spy = openSpy();
+    const events: RunEvent[] = [];
+    const rewrite = vi.fn(async (args: { startState: BranchStartState }): Promise<RewriteResult> =>
+      args.startState.kind === "unknown"
+        ? { kind: "unreadable", reason: `the branch's start state is unknown (${args.startState.reason ?? ""})` }
+        : { kind: "clean" },
+    );
+    const base = common(events, spy);
+    const note = await runCodingPrPostStep({
+      ...base,
+      target: { ...base.target, startBranch: "plan/p/u1" },
+      identity: {
+        rewrite,
+        pullRequestHead: async () => undefined,
+        isAssignable: async () => undefined,
+        addAssignee: async () => undefined,
+      },
+    });
+    expect(rewrite).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startState: {
+          kind: "unknown",
+          reason: expect.stringContaining("no push of the run's names the head it moved that branch from"),
+        },
+      }),
+    );
+    expect(spy.calls).toHaveLength(0);
+    expect(note).toContain("no PR was opened or edited");
+  });
+
+  it("no recorded start state is judged as unknown with a reason saying no read was attempted, on which the rewrite fails closed (nothing opened)", async () => {
+    const spy = openSpy();
+    const events: RunEvent[] = [];
+    // Mirrors rewriteRunCommits: an unknown start state is unreadable, its
+    // own reason carried when it names one.
+    const rewrite = vi.fn(async (args: { startState: BranchStartState }): Promise<RewriteResult> =>
+      args.startState.kind === "unknown"
+        ? {
+            kind: "unreadable",
+            reason: `the branch's start state is unknown (${args.startState.reason ?? "the read at attach failed"})`,
+          }
+        : { kind: "clean" },
+    );
+    const base = common(events, spy);
+    const note = await runCodingPrPostStep({
+      ...base,
+      target: { ...base.target, startState: undefined, startBranch: undefined },
+      identity: {
+        rewrite,
+        pullRequestHead: async () => undefined,
+        isAssignable: async () => undefined,
+        addAssignee: async () => undefined,
+      },
+    });
+    // The dispatch fired no read (it resolved no repository or branch at
+    // attach), so the refusal says no read was attempted — never that one failed.
+    expect(rewrite).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startState: { kind: "unknown", reason: expect.stringContaining("no read was attempted") },
+      }),
+    );
+    expect(spy.calls).toHaveLength(0);
+    expect(note).toContain("start state is unknown");
+    expect(note).toContain("no read was attempted");
+    expect(note).not.toContain("read at attach failed");
+  });
+
+  it("the identity rewrite runs before the EDIT of an open pull request the run's unproven push heads (both wind-down paths): unreadable refuses the edit with a pr_not_opened note; a rewritten tip is where the body renders, the count on the note", async () => {
+    const PR_HEAD = "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432";
+    const prNumber = 700;
+    const findOpenPr = async (): Promise<OpenPrRef | null> => ({
+      number: prNumber,
+      htmlUrl: "https://github.com/acme/api/pull/700",
+      headSha: PR_HEAD,
+    });
+    for (const observed of [
+      // Unpushed commits over a remote branch that exists, and an
+      // unobservable pushed head — the two endings that edit by lookup.
+      observation({ remoteHead: "b".repeat(40) }),
+      observation({ head: undefined, remoteHead: undefined }),
+    ]) {
+      const events: RunEvent[] = [];
+      const updates: unknown[] = [];
+      const seam = identityOf({ rewrite: { kind: "unreadable", reason: "the compare could not be read" } });
+      const note = await runCodingPrPostStep({
+        ...common(events, openSpy()),
+        observed,
+        findOpenPr,
+        updatePullRequest: async (...args: unknown[]) => void updates.push(args),
+        identity: seam.identity,
+      });
+      expect(seam.rewrite).toHaveBeenCalledWith({
+        repo: "acme/api",
+        base: "main",
+        branch: "feat/x",
+        startState: emptyStart,
+      });
+      expect(updates).toEqual([]);
+      expect(note).toContain("https://github.com/acme/api/pull/700");
+      expect(note).toContain("could not be verified or rewritten");
+      expect(note).toContain("so it was not edited");
+      expect(events.filter((e) => e.type === "pr_opened")).toHaveLength(0);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "run_note",
+          kind: "pr_not_opened",
+          summary: expect.stringContaining(
+            `pull request #${prNumber} not edited: the commits' identities could not be verified`,
+          ),
+        }),
+      );
+
+      const edited: Array<{ title: string; body: string }> = [];
+      const okEvents: RunEvent[] = [];
+      const okSeam = identityOf({ rewrite: { kind: "rewritten", count: 2, replaced: ["x"], tip: REBUILT } });
+      const okNote = await runCodingPrPostStep({
+        ...common(okEvents, openSpy()),
+        observed,
+        findOpenPr,
+        updatePullRequest: async (_repo: string, _number: number, patch: { title: string; body: string }) =>
+          void edited.push(patch),
+        identity: okSeam.identity,
+      });
+      expect(edited).toHaveLength(1);
+      // The body renders at the tip the rewrite settled, never the head the
+      // rewrite just moved.
+      expect(edited[0].body).toContain(REBUILT);
+      expect(edited[0].body).not.toContain(PR_HEAD);
+      expect(okNote).toContain("🔀 PR updated: https://github.com/acme/api/pull/700");
+      expect(okNote).toContain("2 commit(s) re-authored");
+      expect(okEvents).toContainEqual(expect.objectContaining({ type: "pr_opened", number: 700, created: false }));
+    }
+  });
+
+  it("the edit of the thread's own pull request (nothing pushed) runs NO rewrite — the run pushed no commits, so there is nothing to judge and nothing of the run's to re-author", async () => {
+    const seam = identityOf({ prHead: HEAD });
+    const updates: Array<{ body: string }> = [];
+    const base = common([], openSpy());
+    const note = await runCodingPrPostStep({
+      ...base,
+      observed: observation({ branch: "main", checkedOut: "main" }),
+      target: { ...base.target, ownPr: { number: 9, headSha: "c".repeat(40), state: "open" as const } },
+      updatePullRequest: async (_repo: string, _number: number, patch: { body: string }) => void updates.push(patch),
+      identity: seam.identity,
+    });
+    expect(seam.rewrite).not.toHaveBeenCalled();
+    expect(updates).toHaveLength(1);
+    expect(note).toContain("🔀 PR updated");
+  });
+
+  it("a second rewrite that answers `unreadable` at the head pin leaves the open pull request with a warning on the reply and a `pr_head_unverified` note", async () => {
+    const spy = openSpy();
+    const events: RunEvent[] = [];
+    const moved = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    const update = vi.fn(async () => undefined);
+    const answers: RewriteResult[] = [
+      { kind: "rewritten", count: 1, replaced: ["x"], tip: REBUILT },
+      { kind: "unreadable", reason: "the branch tip moved twice while the rewrite ran; giving up" },
+    ];
+    const rewrite = vi.fn(async (): Promise<RewriteResult> => answers.shift() ?? { kind: "clean" });
+    const note = await runCodingPrPostStep({
+      ...common(events, spy),
+      updatePullRequest: update,
+      identity: {
+        rewrite,
+        pullRequestHead: async () => moved,
+        isAssignable: async () => undefined,
+        addAssignee: async () => undefined,
+      },
+    });
+    expect(rewrite).toHaveBeenCalledTimes(2);
+    // The open cannot be undone: the reply still names the PR, but warns that
+    // the pin could not be verified, and the record carries the same reason.
+    expect(note).toContain("PR opened");
+    expect(note).toContain("could not be verified");
+    expect(note).toContain("moved twice");
+    expect(update).not.toHaveBeenCalled();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "run_note",
+        kind: "pr_head_unverified",
+        summary: expect.stringContaining("moved twice"),
+      }),
+    );
   });
 });

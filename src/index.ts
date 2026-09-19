@@ -142,6 +142,7 @@ import {
 } from "./execution/githubPulls.js";
 import { RestGithubApi } from "./execution/githubApi.js";
 import { resolveGithubIdentity } from "./execution/githubApp.js";
+import { dispatchIdentityRewrite } from "./execution/identityRewrite.js";
 import { DEPLOY_RESTART_NOTICE, setShutdownNotice } from "./core/dispatch/run.js";
 import { channelVisibilityOf, writeAbandonedRunRecords } from "./core/dispatch/record.js";
 import { createSteerSender, defaultAdmission } from "./core/dispatch/admission.js";
@@ -519,6 +520,9 @@ export async function runBot(): Promise<void> {
     threadsElsewhere,
     runLedger,
     confirmations,
+    // The identity rewrite (record 0062): the run's commits carry only the
+    // allowed identities before the bot opens or edits a pull request.
+    identityRewrite: dispatchIdentityRewrite(config),
   };
   // --- command registry (docs/decisions/0008-one-command-definition-every-surface.md):
   // the ONE core catalogue (`buildCoreCommands`,
@@ -918,8 +922,10 @@ export async function runBot(): Promise<void> {
       findOpenPrByHead,
       findMergedPrByHead,
       // The recover path (agent-ship item 15): a coding child that pushed and
-      // then died has its pull request opened from the branch itself.
+      // then died has its pull request opened from the branch itself — after
+      // the identity rewrite verified or rewrote its commits (record 0062).
       openPullRequest,
+      rewriteIdentities: (args) => dispatchIdentityRewrite(config).rewrite(args),
       // The round-0 fact (agent-ship item 12): a branch with no commits over
       // the base, beside a handoff naming where the scope landed, ends the
       // unit already_landed instead of aborting it.

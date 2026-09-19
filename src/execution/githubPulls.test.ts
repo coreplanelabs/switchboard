@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  addAssignee,
   commitsOverBase,
+  compareRange,
   createBranchRef,
+  createCommit,
+  forceMoveRef,
+  isAssignable,
+  pullRequestHead,
   fetchPullRequestFacts,
   fetchCommitChecks,
   fixupCommitSubjects,
@@ -839,5 +845,120 @@ describe("githubPulls", () => {
       });
       expect(await rerunFailedJobs("acme/api", "c".repeat(40), ["ci / depot"])).toBe(false);
     });
+  });
+});
+
+// Feature: docs/reference/specs/agent-coding.md item 2 (record 0062) — the
+// identity rewrite's Git Data reads and writes: the paginated compare, the
+// commit rebuild with an explicit committer, the forced ref move, the head
+// pin's read, and the assignee pre-check and write.
+describe("githubPulls — the identity rewrite's Git Data calls (record 0062)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  function stubToken() {
+    vi.stubEnv("GH_TOKEN", "ghtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+  }
+
+  function stubFetch(handler: (url: string, init: RequestInit) => Response) {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit = {}) => {
+        calls.push({ url, init });
+        return handler(url, init);
+      }),
+    );
+    return calls;
+  }
+
+  const compareCommit = (sha: string) => ({
+    sha,
+    parents: [{ sha: "p0" }],
+    commit: {
+      message: `msg ${sha}`,
+      tree: { sha: `tree-${sha}` },
+      author: { name: "ivy-dev", email: "4242+ivy-dev@users.noreply.github.com", date: "2026-09-18T10:00:00Z" },
+      committer: { name: "bot", email: "bot@example.invalid" },
+    },
+  });
+
+  it("compareRange pages the compare and reads the exact pairs, the tree, the parents and the date; a 404 is `missing`; another failure is undefined", async () => {
+    stubToken();
+    const pageOne = { total_commits: 1, commits: [compareCommit("a1b2")] };
+    const calls = stubFetch(() => new Response(JSON.stringify(pageOne), { status: 200 }));
+    const result = await compareRange("acme/api", "main", "feat/x");
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/compare/main...feat%2Fx?per_page=100&page=1");
+    expect(result).toEqual({
+      totalCommits: 1,
+      commits: [
+        {
+          sha: "a1b2",
+          treeSha: "tree-a1b2",
+          parents: ["p0"],
+          author: { name: "ivy-dev", email: "4242+ivy-dev@users.noreply.github.com", date: "2026-09-18T10:00:00Z" },
+          committer: { name: "bot", email: "bot@example.invalid" },
+          message: "msg a1b2",
+        },
+      ],
+    });
+    stubFetch(() => new Response("{}", { status: 404 }));
+    expect(await compareRange("acme/api", "main", "feat/x")).toBe("missing");
+    stubFetch(() => new Response("{}", { status: 500 }));
+    expect(await compareRange("acme/api", "main", "feat/x")).toBeUndefined();
+  });
+
+  it("createCommit POSTs the rebuild with the explicit committer and answers the new sha; a failure throws with the status", async () => {
+    stubToken();
+    const calls = stubFetch(() => new Response('{"sha":"r1"}', { status: 201 }));
+    const commit = {
+      message: "msg",
+      tree: "tree-a1b2",
+      parents: ["p0"],
+      author: { name: "ivy-dev", email: "4242+ivy-dev@users.noreply.github.com", date: "2026-09-18T10:00:00Z" },
+      committer: { name: "bot", email: "bot@example.invalid" },
+    };
+    expect(await createCommit("acme/api", commit)).toBe("r1");
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/commits");
+    expect(calls[0].init.method).toBe("POST");
+    expect(JSON.parse(String(calls[0].init.body))).toEqual(commit);
+    stubFetch(() => new Response("signed commits required", { status: 422 }));
+    await expect(createCommit("acme/api", commit)).rejects.toThrow(/HTTP 422/);
+  });
+
+  it("forceMoveRef PATCHes the branch ref with force: true; a ruleset refusal throws with the status", async () => {
+    stubToken();
+    const calls = stubFetch(() => new Response("{}", { status: 200 }));
+    await forceMoveRef("acme/api", "feat/x", "r1");
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/git/refs/heads/feat/x");
+    expect(calls[0].init.method).toBe("PATCH");
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ sha: "r1", force: true });
+    stubFetch(() => new Response("force pushes blocked", { status: 422 }));
+    await expect(forceMoveRef("acme/api", "feat/x", "r1")).rejects.toThrow(/HTTP 422/);
+  });
+
+  it("pullRequestHead reads the pull request's head.sha and answers undefined on any failure", async () => {
+    stubToken();
+    stubFetch(() => new Response('{"head":{"sha":"abc123"}}', { status: 200 }));
+    expect(await pullRequestHead("acme/api", 7)).toBe("abc123");
+    stubFetch(() => new Response("{}", { status: 500 }));
+    expect(await pullRequestHead("acme/api", 7)).toBeUndefined();
+  });
+
+  it("isAssignable answers true on 204, false on 404 and undefined otherwise; addAssignee POSTs the login", async () => {
+    stubToken();
+    stubFetch(() => new Response(null, { status: 204 }));
+    expect(await isAssignable("acme/api", "ivy-dev")).toBe(true);
+    stubFetch(() => new Response("{}", { status: 404 }));
+    expect(await isAssignable("acme/api", "ivy-dev")).toBe(false);
+    stubFetch(() => new Response("{}", { status: 500 }));
+    expect(await isAssignable("acme/api", "ivy-dev")).toBeUndefined();
+    const calls = stubFetch(() => new Response("{}", { status: 201 }));
+    await addAssignee("acme/api", 7, "ivy-dev");
+    expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/issues/7/assignees");
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ assignees: ["ivy-dev"] });
   });
 });

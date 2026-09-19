@@ -113,6 +113,7 @@ import type {
   PullRequestReview,
   PullRequestTarget,
 } from "../execution/githubPulls.js";
+import { EMPTY_START_STATE, type BranchStartState, type RewriteResult } from "../execution/identityRewrite.js";
 import type { Secret } from "../secrets.js";
 import { readBody, type IngressResponse } from "./http.js";
 
@@ -173,6 +174,19 @@ export interface AdminCoordinatorDeps {
    *  the branch — the pr-check opens the pull request from the branch itself
    *  instead of answering `none` over stranded work (agent-ship item 15). */
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /** The identity rewrite before the recover path's open (record 0062;
+   *  agent-ship items 10 and 15): the same rewrite the coding post-step runs,
+   *  over an EMPTY start state — every earlier round's commits were rewritten
+   *  before their own pull request opened, so they pass. Unreadable throws,
+   *  which the pr-check reports as `github_unavailable`, never an open over
+   *  unverified identities. Absent (a test of the other paths): no rewrite. */
+  rewriteIdentities?: (args: {
+    repo: string;
+    base: string;
+    branch: string;
+    startState: BranchStartState;
+    requester: string;
+  }) => Promise<RewriteResult>;
   /** The branch's commits over the base (githubPulls.commitsOverBase): read on a
    *  plain pr-check that found no pull request, so the machine can end a unit
    *  whose scope already landed `already_landed` instead of aborting it
@@ -1036,6 +1050,21 @@ async function recoverPushedBranch(
     }
   } catch {
     // the minimal body stands
+  }
+  // The identity rewrite before the open (record 0062): the recover path
+  // opens over the same guarantee the coding post-step gives — the commits
+  // carry only the allowed identities. Unreadable is thrown for the caller's
+  // `github_unavailable`, never an open over unverified identities.
+  if (deps.rewriteIdentities !== undefined) {
+    const rewritten = await deps.rewriteIdentities({
+      repo: instance.repo,
+      base: instance.base,
+      branch,
+      startState: EMPTY_START_STATE,
+      requester: instance.userId,
+    });
+    if (rewritten.kind === "unreadable")
+      throw new Error(`the identity rewrite could not verify ${branch}: ${rewritten.reason}`);
   }
   try {
     const pr = await deps.openPullRequest({

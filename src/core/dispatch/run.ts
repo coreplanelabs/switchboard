@@ -23,6 +23,7 @@ import { RestGithubApi, type GithubApi } from "../../execution/githubApi.js";
 import type { GithubCapability } from "../../tools/github.js";
 import type { ArtifactStore } from "../../artifacts/store.js";
 import type { OpenedPullRequest, OpenPrRef, PullRequestTarget, RepoShipInfo } from "../../execution/githubPulls.js";
+import type { DispatchIdentityRewrite } from "../../execution/identityRewrite.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import { workspaceBindingFor, type ExecutorSelection } from "../../execution/factory.js";
 import type { ChatMessage } from "../chatMessage.js";
@@ -111,6 +112,15 @@ export interface RunDeps
    * item 16: a Null Object, never a branch), so the lookup simply finds nothing.
    */
   runStore: RunStore;
+  /**
+   * The identity rewrite's seam (record 0062; identityRewrite.ts): the start
+   * state read at attach, the rewrite before the PR post-step opens or edits,
+   * the head pin, the assignee pre-check and write, and the requester's bound
+   * login. `dispatchIdentityRewrite(config)` in production; absent (a test of
+   * the other paths, a build predating the rewrite) the post-step opens as
+   * before.
+   */
+  identityRewrite?: DispatchIdentityRewrite;
   /**
    * The coordinator's instance records (run-history item 49) — the PR
    * post-step's second guard: a coordinator child whose tag lost the plan's
