@@ -101,6 +101,27 @@ describe("RunsService.getRun", () => {
     expectNoToken(withMessages);
   });
 
+  // Feature: docs/reference/specs/live-view.md item 32 — the live
+  // view carries the registry's pace facts, so the index row can tell a hung
+  // bash from a slow suite; a persisted row never carries them.
+  it("a live view carries the stall signal's pace facts — eventsLast5m, lastToolCallAt, inFlight with its bound; a persisted row none", async () => {
+    const { reg, svc, store } = setup();
+    const { id } = reg.create("coding · acme/x");
+    reg.publish(id, { type: "tool_call", tool: "bash", summary: "$ npm test", boundMs: 600_000 });
+    const res = await svc.getRun(id);
+    expect(res.ok && res.value).toMatchObject({
+      eventsLast5m: 1,
+      lastToolCallAt: NOW,
+      inFlight: { tool: "bash", since: NOW, boundMs: 600_000 },
+    });
+    await store!.put(record("r-done", NOW - 10_000));
+    const done = await svc.getRun("r-done");
+    expect(done.ok).toBe(true);
+    if (!done.ok) return;
+    expect(done.value).not.toHaveProperty("eventsLast5m");
+    expect(done.value).not.toHaveProperty("inFlight");
+  });
+
   // docs/reference/specs/costs.md item 4c: a finished run's tokens are priced onto its view.
   it("prices a finished run from its record — a persisted row and a finished registry row alike — through the configured table; a live run carries no cost", async () => {
     const usage = {

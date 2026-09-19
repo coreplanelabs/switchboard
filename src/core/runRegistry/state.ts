@@ -1,5 +1,6 @@
 import type { ChannelVisibility } from "../authz/types.js";
 import type { RunEvent } from "../runEvents.js";
+import type { InFlightCall } from "../runPace.js";
 import type { RunSeed, RunStatus } from "../runRecord.js";
 import type { RunControl } from "./runControl.js";
 
@@ -125,6 +126,13 @@ export interface RunState {
   seq: number;
   /** The latest one-line activity (see `RunSummary.activity`); set by `publish()`. */
   activity?: string;
+  /** The stall signal's raw facts (docs/reference/specs/live-view.md item 32),
+   *  set by `publish()`: the clock stamps of the content events still inside
+   *  the pace window (ascending; pruned on publish), the newest `tool_call`'s
+   *  stamp, and the call in flight with the bound it declared. */
+  paceEventAts: number[];
+  lastToolCallAt?: number;
+  inFlight?: InFlightCall;
   /** Total events published (monotonic; unlike backlog, never trimmed). */
   eventCount: number;
   /** Content events published (span records excluded); monotonic like `eventCount`. */

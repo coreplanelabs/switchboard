@@ -1,5 +1,6 @@
 import type { RunIndexRowSeed } from "@core/channels/webSeed.js";
 import { runDurationMs } from "@core/core/runDuration.js";
+import { boundText, paceText, stalledFor } from "@core/core/runPace.js";
 import { formatDuration, formatLocalIso } from "./format";
 
 // The runs-index row model, ported from the old isomorphic `indexRowRenderer`:
@@ -98,6 +99,36 @@ export function countTip(run: Pick<IndexRow, "stepCount">): string {
   return run.stepCount !== undefined
     ? "content events; span records excluded"
     : "events published, span records included";
+}
+
+// The stall signal (live-view item 32): the pace cell, the stall
+// predicate the sort and the badge share, and the bound-exceeded mark — the
+// core's one rule (`runPace.ts`, the words the status card uses), gated here
+// on LIVE rows that carry the fact: a persisted row, and a live row an older
+// writer built (no `eventsLast5m`), shows no signal rather than a false stall.
+
+/** The pace cell: `2.8/min`, or `no tool call for N min` once stalled; empty
+ *  for a finished row and for one without the fact. */
+export function rowPace(run: IndexRow, now: number): string {
+  return run.finished ? "" : paceText(run, now);
+}
+
+/** A live row with no tool call for the whole window — what sorts and badges first. */
+export function rowStalled(run: IndexRow, now: number): boolean {
+  return !run.finished && stalledFor(run, now) !== undefined;
+}
+
+/** The bound-exceeded mark — `bash 2083s, bound 600s` — for a live row whose
+ *  in-flight call outran the bound it declared; undefined otherwise. */
+export function rowBound(run: IndexRow, now: number): string | undefined {
+  return !run.finished && run.inFlight ? boundText(run.inFlight, now) : undefined;
+}
+
+/** The pace cell's tooltip: what the number (or the mark) means. */
+export function paceTip(run: IndexRow, now: number): string {
+  if (rowBound(run, now)) return "this call ran past the bound it declared — it should have been cut";
+  if (rowStalled(run, now)) return "time since the run's last tool call";
+  return "events per minute over the last five minutes";
 }
 
 /** A live row links with its capability token; a finished row never does. */

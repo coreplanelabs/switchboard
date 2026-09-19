@@ -787,6 +787,23 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.body()).toContain("<title>(1) Live runs</title>"); // item 21: the tab carries the live count
   });
 
+  // Feature: docs/reference/specs/live-view.md item 32 — the index
+  // row seed carries the stall signal's pace facts, so the row can tell a hung
+  // bash from a slow suite without opening the run.
+  it("a live index row's seed carries the pace facts — eventsLast5m, lastToolCallAt, and the in-flight call with its bound", async () => {
+    const reg = fixedRegistry();
+    const { id } = reg.create("coding · owner/repo");
+    reg.publish(id, { type: "tool_call", tool: "bash", summary: "$ npm test", boundMs: 600_000 });
+    const handler = liveOnlyHandler(reg);
+    const t = fakeReqRes("GET", "/runs");
+    expect(handler(t.req, t.res)).toBe(true);
+    await t.finished;
+    const [row] = indexSeedOf(t.body()).rows;
+    expect(row.eventsLast5m).toBe(1);
+    expect(typeof row.lastToolCallAt).toBe("number");
+    expect(row.inFlight).toMatchObject({ tool: "bash", boundMs: 600_000 });
+  });
+
   // Feature: live-view.md item 31 — the same URL answers the seed alone to the web app's own request.
   it("answers the index seed as JSON, tokens and title included, to a request that accepts application/json — and the run 404 as a 404 seed", async () => {
     const reg = fixedRegistry();
