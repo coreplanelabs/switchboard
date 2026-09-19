@@ -92,10 +92,22 @@ import {
   renderCounters,
   renderImperative,
   renderVerifier,
+  directiveScore,
+  missScore,
+  plantedScore,
+  renderDirectives,
+  renderMisses,
+  renderPlanted,
+  renderVolume,
+  renderWrite,
   replayCommands,
   replayCompound,
+  replayDirectives,
   replayImperative,
+  replayMisses,
+  replayPlanted,
   replayRoutes,
+  replayWrites,
   routeChecks,
   type RouteFacts,
   tableWritePreset,
@@ -103,10 +115,17 @@ import {
   typedLabels,
   verifierScore,
   verifyCommands,
+  verifyPlanted,
+  volumeByDay,
+  writeScore,
 } from "../src/load/routeReplay.js";
 import { ROUTE_COMPOUND_FIXTURES } from "../src/load/routeCompoundFixtures.js";
 import { ROUTE_IMPERATIVE_FIXTURES } from "../src/load/routeImperativeFixtures.js";
 import { ROUTE_COMMAND_EXAMPLES } from "../src/load/routeCommandFixtures.js";
+import { ROUTE_WRITE_FIXTURES } from "../src/load/routeWriteFixtures.js";
+import { ROUTE_MISS_FIXTURES } from "../src/load/routeMissFixtures.js";
+import { ROUTE_DIRECTIVE_FIXTURES } from "../src/load/routeDirectiveFixtures.js";
+import { ROUTE_PLANTED_FIXTURES } from "../src/load/routePlantedFixtures.js";
 import { COMPOUND_PRESET } from "../src/agents/registry.js";
 import { CommandRegistry } from "../src/core/commandRegistry.js";
 import { registerCoreCommands, type CoreCommandDeps } from "../src/core/commands/all.js";
@@ -1210,11 +1229,15 @@ async function routeReplay(f: Flags): Promise<boolean> {
   let scanned = 0;
   const skipped: Record<string, number> = {};
   const requests = [];
+  // The volume line's run-store half: every scanned run per UTC day, the
+  // routed ones (a `route` event: the router chose) counted apart.
+  const volumeRuns: { startedAt: number; routed: boolean }[] = [];
   for (const row of rows) {
     if (requests.length >= limit) break;
     const record = await store.get(row.id);
     scanned++;
     if (!record) continue;
+    volumeRuns.push({ startedAt: record.startedAt, routed: record.events.some((e) => e.type === "route") });
     const labelled = labelledRequests([record], { defaultPreset });
     for (const [reason, n] of Object.entries(labelled.skipped)) if (n > 0) skipped[reason] = (skipped[reason] ?? 0) + n;
     requests.push(...labelled.requests);
@@ -1317,6 +1340,42 @@ async function routeReplay(f: Flags): Promise<boolean> {
       )
     : undefined;
   const verifier = verified === undefined ? undefined : verifierScore(verified);
+  // The write, misses and directive rows (load-harness item 17): the write
+  // set's misbinds, the filed misses bound as the person meant, and the six
+  // directive words read as words — each with its bar a named constant.
+  const writeResults = await replayWrites(
+    ROUTE_WRITE_FIXTURES,
+    decideCommand,
+    { concurrency, now: systemClock },
+    menu.map((c) => c.def),
+  );
+  const write = writeScore(writeResults);
+  const missResults = await replayMisses(
+    ROUTE_MISS_FIXTURES,
+    decideCommand,
+    { concurrency, now: systemClock },
+    menu.map((c) => c.def),
+  );
+  const miss = missScore(missResults);
+  const directiveResults = await replayDirectives(ROUTE_DIRECTIVE_FIXTURES, decide, { concurrency, now: systemClock });
+  const directive = directiveScore(directiveResults);
+  // The planted row, under --verify alone: every bind no author turn asked
+  // for gets one verifier call whatever its class; the row counts the binds
+  // the verifier let pass, bar zero.
+  const plantedResults = await replayPlanted(ROUTE_PLANTED_FIXTURES, decideCommand, { concurrency, now: systemClock });
+  const plantedVerified = verify
+    ? await verifyPlanted(
+        plantedResults,
+        model,
+        menu.map((c) => c.def),
+        { concurrency, now: systemClock, timeoutMs: ROUTE_TIMEOUT_MS },
+      )
+    : undefined;
+  const planted = plantedVerified === undefined ? undefined : plantedScore(plantedVerified);
+  // The volume line: routed requests per day from the scanned window; shadow
+  // events per day once the operator's shadow log exists — the placeholder
+  // until then.
+  const volume = volumeByDay(volumeRuns);
   const samples: Sample[] = [
     ...[...results, ...stickyResults, ...unstampedResults].map((r): Sample => ({
       op: "route",
@@ -1350,6 +1409,30 @@ async function routeReplay(f: Flags): Promise<boolean> {
       status: r.bound?.id ?? r.routed ?? "none",
       ...(r.bound === undefined && r.routed === undefined ? { reason: "no-route" } : {}),
     })),
+    ...(
+      [
+        ["route-write", writeResults],
+        ["route-miss", missResults],
+        ["route-planted", plantedResults],
+      ] as const
+    ).flatMap(([op, rs]) =>
+      rs.map((r): Sample => ({
+        op,
+        startedAt: systemClock(),
+        ms: r.ms,
+        ok: r.bound !== undefined || r.routed !== undefined,
+        status: r.bound?.id ?? r.routed ?? "none",
+        ...(r.bound === undefined && r.routed === undefined ? { reason: "no-route" } : {}),
+      })),
+    ),
+    ...directiveResults.map((r): Sample => ({
+      op: "route-directive",
+      startedAt: systemClock(),
+      ms: r.ms,
+      ok: r.routed !== undefined,
+      status: r.routed ?? "none",
+      ...(r.routed === undefined ? { reason: "no-route" } : {}),
+    })),
     ...(verified ?? []).flatMap((r): Sample[] =>
       r.verdict === undefined
         ? []
@@ -1377,7 +1460,16 @@ async function routeReplay(f: Flags): Promise<boolean> {
     imperativeBar: { hit: 0.9 },
     writePreset,
     command: { score: command, bars: { command: 1.0, input: 0.9 } },
+    write,
+    miss,
+    directive,
+    ...(planted === undefined ? {} : { planted }),
   });
+  process.stdout.write(`${renderWrite(write)[0]}\n`);
+  process.stdout.write(`${renderMisses(miss)[0]}\n`);
+  process.stdout.write(`${renderDirectives(directive)[0]}\n`);
+  if (planted !== undefined) process.stdout.write(`${renderPlanted(planted)[0]}\n`);
+  process.stdout.write(`${renderVolume(volume)}\n`);
   if (verifier !== undefined) process.stdout.write(`${renderVerifier(verifier)[0]}\n`);
   process.stdout.write(`${renderCounters(counters)}\n`);
   const bySource: Record<string, number> = {};
@@ -1414,6 +1506,27 @@ async function routeReplay(f: Flags): Promise<boolean> {
     "",
     `checked-in command set (${command.fixtures} fixtures over ${menu.length} offered commands, ${command.decoys} decoys; bound and parsed, never invoked):`,
     ...renderCommands(command),
+    "",
+    `checked-in write set (${write.fixtures} write binds; an optional the fixture left unset must stay unset):`,
+    ...renderWrite(write),
+    "",
+    `the filed misses (${miss.fixtures} fixtures, each with the bind the person meant):`,
+    ...renderMisses(miss),
+    "",
+    `the directive words (${directive.fixtures} fixtures: each word in first position and mid-sentence):`,
+    ...renderDirectives(directive),
+    ...(planted === undefined
+      ? [
+          "",
+          `the planted set (${ROUTE_PLANTED_FIXTURES.length} fixtures) replays under --verify alone: the row counts binds the verifier lets pass that no author turn asked for`,
+        ]
+      : [
+          "",
+          `the planted set (${planted.fixtures} fixtures whose fenced block carries an instruction no author turn asked for; one verifier call per unasked bind, whatever its class):`,
+          ...renderPlanted(planted),
+        ]),
+    "",
+    renderVolume(volume),
     ...(verifier === undefined
       ? []
       : [
@@ -1460,6 +1573,13 @@ async function routeReplay(f: Flags): Promise<boolean> {
       imperative: { ...imperative, misses: imperative.misses.map(redacted), results: imperativeResults.map(redacted) },
       command: { ...command, misses: command.misses.map(redacted), results: commandResults.map(redacted) },
       ...(verifier === undefined ? {} : { verifier: { ...verifier, rejected: verifier.rejected.map(redacted) } }),
+      write: { ...write, misses: write.misses.map(redacted), results: writeResults.map(redacted) },
+      miss: { ...miss, misses: miss.misses.map(redacted), results: missResults.map(redacted) },
+      directive: { ...directive, misses: directive.misses.map(redacted), results: directiveResults.map(redacted) },
+      ...(planted === undefined
+        ? {}
+        : { planted: { ...planted, misses: planted.misses.map(redacted), results: plantedVerified!.map(redacted) } }),
+      volume,
       counters,
       skipped,
     },
