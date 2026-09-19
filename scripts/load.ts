@@ -116,8 +116,12 @@ import {
   verifierScore,
   verifyCommands,
   verifyPlanted,
+  agreementScore,
+  renderAgreement,
   volumeByDay,
+  doorRefusalAt,
   writeScore,
+  type ShadowRow,
 } from "../src/load/routeReplay.js";
 import { ROUTE_COMPOUND_FIXTURES } from "../src/load/routeCompoundFixtures.js";
 import { ROUTE_IMPERATIVE_FIXTURES } from "../src/load/routeImperativeFixtures.js";
@@ -1232,12 +1236,41 @@ async function routeReplay(f: Flags): Promise<boolean> {
   // The volume line's run-store half: every scanned run per UTC day, the
   // routed ones (a `route` event: the router chose) counted apart.
   const volumeRuns: { startedAt: number; routed: boolean }[] = [];
+  // The shadow log's half (record 0057): every `operator` event's timestamp
+  // for the volume line, and the decision beside the readers' line — the
+  // route receipt, else the typed input line — for the agreement row.
+  const shadowEventsAt: number[] = [];
+  const shadowRows: ShadowRow[] = [];
+  // Refusals per day, counted from the door run records (agent `door`, the
+  // rows the door report already reads; `doorRefusalAt` — a record of another
+  // agent counts none): one refusal per door record.
+  const refusalsAt: number[] = [];
   for (const row of rows) {
     if (requests.length >= limit) break;
     const record = await store.get(row.id);
     scanned++;
     if (!record) continue;
     volumeRuns.push({ startedAt: record.startedAt, routed: record.events.some((e) => e.type === "route") });
+    const refusalAt = doorRefusalAt(record);
+    if (refusalAt !== undefined) refusalsAt.push(refusalAt);
+    const operatorEvent = record.events.find((e) => e.type === "operator");
+    if (operatorEvent?.type === "operator") {
+      shadowEventsAt.push(operatorEvent.at ?? record.startedAt);
+      const routeEvent = record.events.find((e) => e.type === "route");
+      const inputEvent = record.events.find((e) => e.type === "input");
+      const readers =
+        (routeEvent?.type === "route" ? routeEvent.receipt : undefined) ??
+        (inputEvent?.type === "input" ? inputEvent.text : undefined);
+      shadowRows.push({
+        ...(readers !== undefined ? { readers } : {}),
+        operator: {
+          outcome: operatorEvent.outcome,
+          ...(operatorEvent.binds ? { binds: operatorEvent.binds } : {}),
+          ...(operatorEvent.latencyMs !== undefined ? { latencyMs: operatorEvent.latencyMs } : {}),
+          ...(operatorEvent.outputTokens !== undefined ? { outputTokens: operatorEvent.outputTokens } : {}),
+        },
+      });
+    }
     const labelled = labelledRequests([record], { defaultPreset });
     for (const [reason, n] of Object.entries(labelled.skipped)) if (n > 0) skipped[reason] = (skipped[reason] ?? 0) + n;
     requests.push(...labelled.requests);
@@ -1375,7 +1408,11 @@ async function routeReplay(f: Flags): Promise<boolean> {
   // The volume line: routed requests per day from the scanned window; shadow
   // events per day once the operator's shadow log exists — the placeholder
   // until then.
-  const volume = volumeByDay(volumeRuns);
+  const volume = volumeByDay(volumeRuns, shadowEventsAt.length > 0 ? shadowEventsAt : undefined, refusalsAt);
+  // The agreement row (load-harness item 17): the shadow log's single-bind
+  // decisions against the readers' lines, with the median bind latency and
+  // output-token counts the flip gate and the cost watch read.
+  const agreement = agreementScore(shadowRows);
   const samples: Sample[] = [
     ...[...results, ...stickyResults, ...unstampedResults].map((r): Sample => ({
       op: "route",
@@ -1470,6 +1507,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
   process.stdout.write(`${renderDirectives(directive)[0]}\n`);
   if (planted !== undefined) process.stdout.write(`${renderPlanted(planted)[0]}\n`);
   process.stdout.write(`${renderVolume(volume)}\n`);
+  process.stdout.write(`${renderAgreement(agreement)}\n`);
   if (verifier !== undefined) process.stdout.write(`${renderVerifier(verifier)[0]}\n`);
   process.stdout.write(`${renderCounters(counters)}\n`);
   const bySource: Record<string, number> = {};
@@ -1527,6 +1565,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
         ]),
     "",
     renderVolume(volume),
+    renderAgreement(agreement),
     ...(verifier === undefined
       ? []
       : [

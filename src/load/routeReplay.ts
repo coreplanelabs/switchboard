@@ -1368,6 +1368,10 @@ export interface VolumePoint {
   day: string;
   routed: number;
   shadowEvents: number | undefined;
+  /** Refusals the door made that day, counted from the door run records
+   *  (agent `door` — the rows the door report already reads); `undefined`
+   *  when the caller did not scan them. */
+  refusals: number | undefined;
 }
 
 /** What the volume line prints for the shadow half until the shadow log
@@ -1376,6 +1380,19 @@ export const VOLUME_PLACEHOLDER = "n/a before shadow";
 
 const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
+/** The refusal a run record contributes to the volume line: the record's
+ *  start, only when the record is the door's own (agent `door` — the rows the
+ *  door report already reads) and carries a `refusal` event. A run record of
+ *  another agent counts none, whatever events it holds. */
+export function doorRefusalAt(record: {
+  agent?: string;
+  startedAt: number;
+  events: readonly { type: string }[];
+}): number | undefined {
+  if (record.agent !== "door") return undefined;
+  return record.events.some((e) => e.type === "refusal") ? record.startedAt : undefined;
+}
+
 /** The volume per UTC day over the scanned window: every run counted, the
  *  routed ones (a `route` event: the router chose) apart; the shadow log's
  *  event timestamps counted per day when there is one, `undefined` per day
@@ -1383,36 +1400,42 @@ const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 export function volumeByDay(
   runs: readonly { startedAt: number; routed: boolean }[],
   shadowEventsAt?: readonly number[],
+  refusalsAt?: readonly number[],
 ): VolumePoint[] {
   const routed = new Map<string, number>();
   for (const run of runs) {
     const day = dayOf(run.startedAt);
     routed.set(day, (routed.get(day) ?? 0) + (run.routed ? 1 : 0));
   }
-  const shadow = shadowEventsAt === undefined ? undefined : new Map<string, number>();
-  for (const at of shadowEventsAt ?? []) {
-    const day = dayOf(at);
-    shadow!.set(day, (shadow!.get(day) ?? 0) + 1);
-  }
-  const days = [...new Set([...routed.keys(), ...(shadow?.keys() ?? [])])].sort();
+  const perDay = (at: readonly number[] | undefined): Map<string, number> | undefined => {
+    if (at === undefined) return undefined;
+    const counts = new Map<string, number>();
+    for (const ms of at) counts.set(dayOf(ms), (counts.get(dayOf(ms)) ?? 0) + 1);
+    return counts;
+  };
+  const shadow = perDay(shadowEventsAt);
+  const refusals = perDay(refusalsAt);
+  const days = [...new Set([...routed.keys(), ...(shadow?.keys() ?? []), ...(refusals?.keys() ?? [])])].sort();
   return days.map((day) => ({
     day,
     routed: routed.get(day) ?? 0,
     shadowEvents: shadow === undefined ? undefined : (shadow.get(day) ?? 0),
+    refusals: refusals === undefined ? undefined : (refusals.get(day) ?? 0),
   }));
 }
 
-/** The volume line: two numbers per day — routed requests and shadow events
- *  — or the placeholder for the shadow half until the shadow log exists. */
+/** The volume line: three numbers per day — routed requests, shadow events
+ *  (or the placeholder until the shadow log exists) and refusals from the
+ *  door run records (agent `door`), when the caller scanned them. */
 export function renderVolume(points: readonly VolumePoint[]): string {
   if (points.length === 0) return `volume: no routed request in the window; shadow ${VOLUME_PLACEHOLDER}`;
   const perDay = points
     .map(
       (p) =>
-        `${p.day} ${p.routed} routed, ${p.shadowEvents === undefined ? `shadow ${VOLUME_PLACEHOLDER}` : `${p.shadowEvents} shadow event(s)`}`,
+        `${p.day} ${p.routed} routed, ${p.shadowEvents === undefined ? `shadow ${VOLUME_PLACEHOLDER}` : `${p.shadowEvents} shadow event(s)`}${p.refusals === undefined ? "" : `, ${p.refusals} refusal(s)`}`,
     )
     .join(" · ");
-  return `volume (routed requests / shadow events per day): ${perDay}`;
+  return `volume (routed requests / shadow events / refusals per day): ${perDay}`;
 }
 
 /** Token accounting over every router call of one replay: the three usage
@@ -1616,4 +1639,73 @@ function commandRows(score: CommandScore, bars: { command: number; input: number
       limit: `≥ ${Math.round(bars.input * 100)}%`,
     },
   ];
+}
+
+/** One run's two doors, as the agreement row reads them off the run store
+ *  (record 0057; load-harness item 17): what the readers did — the route
+ *  event's receipt for a routed command, the typed line for stage A's inline
+ *  run — and the operator's shadow decision beside it. */
+export interface ShadowRow {
+  readers?: string;
+  operator: {
+    outcome: "binds" | "question" | "refusal";
+    binds?: readonly { line: string }[];
+    latencyMs?: number;
+    outputTokens?: number;
+  };
+}
+
+/** The agreement row's score: defined over single-bind decisions (a question,
+ *  a refusal and a multi-bind have no one line to compare), plus the median
+ *  bind latency and output-token counts over every decision that carried
+ *  them — the two numbers the plan's flip gate and cost watch read. */
+export interface AgreementScore {
+  decisions: number;
+  singleBinds: number;
+  agreements: number;
+  medianLatencyMs: number | undefined;
+  medianOutputTokens: number | undefined;
+}
+
+/** The median of some numbers; undefined of none. */
+export function median(ns: readonly number[]): number | undefined {
+  if (ns.length === 0) return undefined;
+  const sorted = [...ns].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+const lineOf = (s: string) => s.replace(/\s+/g, " ").trim();
+
+/** The agreement row over the shadow log: a single-bind decision beside a
+ *  readers' line agrees when the two lines are the same words (whitespace
+ *  collapsed — the receipt and the typed line differ only there). */
+export function agreementScore(rows: readonly ShadowRow[]): AgreementScore {
+  let singleBinds = 0;
+  let agreements = 0;
+  const latencies: number[] = [];
+  const tokens: number[] = [];
+  for (const row of rows) {
+    if (row.operator.latencyMs !== undefined) latencies.push(row.operator.latencyMs);
+    if (row.operator.outputTokens !== undefined) tokens.push(row.operator.outputTokens);
+    if (row.operator.outcome !== "binds" || row.operator.binds?.length !== 1 || row.readers === undefined) continue;
+    singleBinds++;
+    if (lineOf(row.operator.binds[0].line) === lineOf(row.readers)) agreements++;
+  }
+  return {
+    decisions: rows.length,
+    singleBinds,
+    agreements,
+    medianLatencyMs: median(latencies),
+    medianOutputTokens: median(tokens),
+  };
+}
+
+/** The agreement row as the replay prints it (load-harness item 17). */
+export function renderAgreement(score: AgreementScore): string {
+  if (score.decisions === 0) return "agreement: no shadow decision in the window";
+  const rate = score.singleBinds === 0 ? "no single-bind decision" : `${score.agreements}/${score.singleBinds} agree`;
+  const latency = score.medianLatencyMs === undefined ? "n/a" : `${score.medianLatencyMs} ms`;
+  const tokens = score.medianOutputTokens === undefined ? "n/a" : `${score.medianOutputTokens} token(s)`;
+  return `agreement (shadow, single-bind decisions): ${rate} over ${score.decisions} decision(s); median bind latency ${latency}, median output ${tokens}`;
 }
