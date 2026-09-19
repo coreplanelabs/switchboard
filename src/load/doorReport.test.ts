@@ -15,7 +15,10 @@ import { doorReport, renderDoor } from "./doorReport.js";
 // Refusals count off the same store (record 0054, as amended: every refusal is
 // a run record): the dispatcher's `door` records and the refused route
 // outcomes together, per day, cause and code — no footer pointing at a
-// telemetry query remains, because no refusal is recordless.
+// telemetry query remains, because no refusal is recordless. A command's OWN
+// refusal — the command ran and answered with its refusal, a `failed` command
+// record — is not the door's decision: it counts as a failed command run and
+// never enters the refusal buckets.
 
 const DAY = 24 * 60 * 60 * 1000;
 /** Two days a while back: the store keeps rows by age against the clock it is given. */
@@ -150,6 +153,7 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
       pastes: 1,
       unmatchedPastes: 1,
       commandRuns: 7,
+      failedCommandRuns: 0,
       doorRuns: 0,
       storeUnavailable: false,
       refusals: [],
@@ -164,7 +168,7 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
   it("renders the totals with the rate, then each day with its commands — a rate over zero hand-backs prints as a dash, never a division error", async () => {
     const lines = renderDoor(await doorReport(await serviceOver(FIXTURE)));
     expect(lines).toEqual([
-      "door: 3 hand-back(s), 1 paste(s) joined (33.3% pasted), 1 paste(s) whose hand-back is outside the window; 7 command run(s) and 0 door record(s) read",
+      "door: 3 hand-back(s), 1 paste(s) joined (33.3% pasted), 1 paste(s) whose hand-back is outside the window; 7 command run(s) (0 failed) and 0 door record(s) read",
       "- 1999-01-03: hand-backs 2, pastes 1 (50%)",
       "  - config.set: hand-backs 1, pastes 1 (100%)",
       "  - mcp.add: hand-backs 1, pastes 0 (0%)",
@@ -173,7 +177,7 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
     ]);
     const nothing = renderDoor(await doorReport(await serviceOver([])));
     expect(nothing).toEqual([
-      "door: 0 hand-back(s), 0 paste(s) joined (— pasted), 0 paste(s) whose hand-back is outside the window; 0 command run(s) and 0 door record(s) read",
+      "door: 0 hand-back(s), 0 paste(s) joined (— pasted), 0 paste(s) whose hand-back is outside the window; 0 command run(s) (0 failed) and 0 door record(s) read",
     ]);
     expect(nothing.join("\n")).not.toMatch(/NaN|Infinity/);
   });
@@ -211,6 +215,27 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
     expect(lines).toContain("  - unknown/code_from_a_newer_bot: 1");
     expect(lines.at(-1)).not.toContain("telemetry");
     expect(lines.join("\n")).not.toContain("gate refusals (no record)");
+  });
+
+  it("a command's own refusal is a failed command run beside a refused ask — the command ran and answered with its refusal, so it counts as failed and never under the door's refusal causes", async () => {
+    // The command ran and answered with its own refusal (a `failed` record):
+    // one routed (`route` with no outcome) and one typed (no `route` at all).
+    const refusedRouted = commandRecord("cmd-refused-1", DAY_ONE, decision("repo.test"), { status: "failed" });
+    const refusedTyped = commandRecord("cmd-refused-2", DAY_ONE + 30_000, undefined, { status: "failed" });
+    // The refused ask beside them: a prose request the door itself refused,
+    // recorded as a `door` record with its cause.
+    const refusedAsk = doorRecord("ask-refused", DAY_ONE + 60_000, "agent_allowlist");
+    const report = await doorReport(await serviceOver([refusedRouted, refusedTyped, refusedAsk]));
+    expect(report.commandRuns).toBe(2);
+    expect(report.failedCommandRuns).toBe(2);
+    expect(report.doorRuns).toBe(1);
+    // Only the ask's refusal is bucketed — the commands' own refusals are not
+    // the door's decisions and appear under no cause.
+    expect(report.refusals).toEqual([{ day: "1999-01-03", cause: "policy", code: "agent_allowlist", count: 1 }]);
+    const lines = renderDoor(report);
+    expect(lines[0]).toContain("2 command run(s) (2 failed) and 1 door record(s) read");
+    expect(lines).toContain("refusals recorded: 1");
+    expect(lines.join("\n")).not.toContain("command_");
   });
 
   it("`sinceMs` bounds the window: a hand-back before it is not read, so its later paste is the unmatched kind", async () => {
