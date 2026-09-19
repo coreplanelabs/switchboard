@@ -12,7 +12,7 @@ import { HarnessContainerReplacedError } from "../contract.js";
 import { piDriver } from "../pi/testing/driver.js";
 import { TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import type { DrivenRun, RunScript } from "../testing/scenarios.js";
-import { readStoreSince, type OpenCodeFeedRecord } from "./client.js";
+import { readSessionStore, readStoreSince, type OpenCodeFeedRecord } from "./client.js";
 import {
   InboxFate,
   judgeOpenCodeAsk,
@@ -1955,9 +1955,11 @@ describe("readStoreSince — the newest rows, page by page, down to what was the
       return path.includes("cursor=") ? page(second) : page(first, "c:desc:200");
     };
     const read = await readStoreSince(get, "ses_c", new Set(["m199"]));
+    // The cursor page carries the cursor and the limit alone — the cursor
+    // itself holds the order, and the binary refuses the combination 400.
     expect(paths).toEqual([
       "/api/session/ses_c/message?order=desc&limit=200",
-      "/api/session/ses_c/message?cursor=c%3Adesc%3A200&order=desc&limit=200",
+      "/api/session/ses_c/message?cursor=c%3Adesc%3A200&limit=200",
     ]);
     expect(read.ok && read.messages.slice(0, 3).map((m) => m.id)).toEqual(["m400", "m399", "m398"]);
     expect(read.ok && read.messages.length).toBe(201);
@@ -1977,12 +1979,52 @@ describe("readStoreSince — the newest rows, page by page, down to what was the
   it("a page the server refuses or a page of another shape leaves the read refused by name, never partial", async () => {
     expect(await readStoreSince(async () => ({ status: 500, body: "" }), "ses_c", new Set())).toEqual({
       ok: false,
-      why: "the server refused the session (500)",
+      why: 'the server refused the session (500): ""',
     });
     expect(await readStoreSince(async () => ({ status: 200, body: "nope" }), "ses_c", new Set())).toEqual({
       ok: false,
-      why: "the session's messages answered something that is not the page shape",
+      why: 'the session\'s messages answered something that is not the page shape (expected { data: [{ id, type, … }], cursor: { next? } }, down to limit=1); the answer began: "nope"',
     });
+  });
+
+  // Feature: docs/reference/specs/harness.md item 6 (survival) — the store read
+  // decodes what the transport actually delivers: a page the exec's per-stream
+  // cap cut mid-JSON is re-asked smaller instead of read as a shape mismatch,
+  // and only a one-row page that still does not parse refuses — quoting the
+  // answer's first bytes beside the shape expected.
+  it("a page the transport cut mid-JSON is re-asked smaller — the same cursor, half the rows — until it fits, and the read completes whole", async () => {
+    const CAP = 800;
+    const fat = (i: number) => ({ id: `m${i}`, type: "user", text: "x".repeat(300), time: { created: NOW } });
+    const store = Array.from({ length: 10 }, (_, i) => fat(i));
+    const paths: string[] = [];
+    const get = async (path: string) => {
+      paths.push(path);
+      const query = new URLSearchParams(path.split("?")[1] ?? "");
+      const limit = Number(query.get("limit"));
+      const from = Number((/^c:asc:(\d+)$/.exec(query.get("cursor") ?? "") ?? ["", "0"])[1]);
+      const next = from + limit < store.length ? `c:asc:${from + limit}` : undefined;
+      const body = JSON.stringify({ data: store.slice(from, from + limit), cursor: next ? { next } : {} });
+      return { status: 200, body: body.length > CAP ? body.slice(0, CAP) : body };
+    };
+    const read = await readSessionStore(get, "ses_c");
+    expect(read.ok && read.messages.map((m) => m.id)).toEqual(store.map((m) => m.id));
+    // The first page was re-asked at half the rows each time until it fit, the
+    // same (absent) cursor throughout; the pages after ride the reduced limit.
+    const limits = paths.map((p) => Number(new URLSearchParams(p.split("?")[1]).get("limit")));
+    expect(limits.slice(0, 8)).toEqual([200, 100, 50, 25, 13, 7, 4, 2]);
+    expect(paths.slice(0, 8).every((p) => !p.includes("cursor="))).toBe(true);
+    expect(paths.slice(8).every((p) => p.includes("cursor=") && p.includes("limit=2"))).toBe(true);
+  });
+
+  it("a one-row page that still does not parse is the shape mismatch, refused with the answer's first bytes beside the shape expected", async () => {
+    const body = JSON.stringify({ data: [{ id: "m1", type: "user", text: "y".repeat(300), time: { created: NOW } }] });
+    const read = await readSessionStore(async () => ({ status: 200, body: body.slice(0, 60) }), "ses_c");
+    expect(read.ok).toBe(false);
+    if (read.ok) return;
+    expect(read.why).toContain(
+      "not the page shape (expected { data: [{ id, type, … }], cursor: { next? } }, down to limit=1)",
+    );
+    expect(read.why).toContain(`the answer began: ${JSON.stringify(body.slice(0, 60))}`);
   });
 });
 
