@@ -214,7 +214,9 @@ export interface ChatCommandResult {
 
 /** One line per error code; the shared wording every chat command uses. A
  *  refusal the registry decided (the policy table denied the caller the
- *  command's action) is the fixed "is restricted" line; one the command
+ *  command's action) is the fixed "is restricted" line; one the definition's
+ *  own door decided (record 0062) is the definition's one sentence alone — no
+ *  admins hint, because no admin can grant the write; one the command
  *  decided about the request (the channel scope, another user's memory, a repo
  *  allowlist) carries its reason. The deny reason itself never reaches a reply:
  *  it is on the audit line. */
@@ -223,12 +225,13 @@ export function chatErrorLine(
   error: InvokeErrorCode,
   message: string,
   config: Pick<ConfigStore, "adminsHint">,
-  decidedBy: "registry" | "handler" = "registry",
+  decidedBy: "registry" | "door" | "handler" = "registry",
 ): string {
   const name = chatForm(id);
   const text = (() => {
     switch (error) {
       case "unauthorized":
+        if (decidedBy === "door") return `🚫 \`${name}\`: ${message}`;
         return decidedBy === "handler"
           ? `🚫 \`${name}\`: ${message} Ask ${config.adminsHint()}.`
           : `🚫 \`${name}\` is restricted. Ask ${config.adminsHint()}.`;

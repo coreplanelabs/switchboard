@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { MAX_INSTRUCTIONS_LENGTH } from "../../config/validate.js";
-import { chatCallerFor } from "../commandChat.js";
+import { chatCallerFor, handleChatCommand, parseChatCommand } from "../commandChat.js";
 import {
   CommandRegistry,
   bindCommands,
@@ -1146,7 +1146,7 @@ describe("config set user / config clear user — the author binding (record 006
       expect(res).toMatchObject({
         ok: false,
         error: "unauthorized",
-        decidedBy: "registry",
+        decidedBy: "door",
         message: ME_GITHUB_MESSAGE,
       });
       expect(audits.at(-1)).toMatchObject({ commandId: "config.set", outcome: "unauthorized", reason: "identity" });
@@ -1155,6 +1155,22 @@ describe("config set user / config clear user — the author binding (record 006
     const { text } = await say(commands, "config set me --github ivy-dev", chat(config, "slack:UX"));
     expect(text).toContain(ME_GITHUB_MESSAGE);
     expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
+  });
+
+  it("the chat surface prints the door's own sentence — never the restricted-admins hint — for `config set me --github` (the Slack reply)", async () => {
+    const config = store();
+    const { commands, audits } = bindWithIdentity(config);
+    const parsed = parseChatCommand("config set me --github ivy-dev", commands);
+    expect(parsed?.kind).toBe("invoke");
+    const text = await handleChatCommand({
+      commands,
+      parsed: parsed!,
+      msg: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0" },
+      config,
+    });
+    expect(text).toBe(`🚫 \`config set\`: ${ME_GITHUB_MESSAGE}`);
+    expect(text).not.toContain("is restricted");
+    expect(audits.at(-1)).toMatchObject({ commandId: "config.set", outcome: "unauthorized", reason: "identity" });
   });
 
   it("`config clear me` removes the other overrides and keeps the binding", async () => {

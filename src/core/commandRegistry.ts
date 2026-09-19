@@ -424,11 +424,14 @@ export const ERROR_STATUS: Readonly<Record<InvokeErrorCode, number>> = {
 
 /** A failure says WHO decided it: `registry` — the id was unknown, the policy
  *  table denied the caller the command's action, or the input failed its schema (the message
- *  is the registry's, e.g. `slack:UALICE is not allowed to run runs.list`); `handler`
- *  — the command itself threw a `CommandError` about the request (the message
+ *  is the registry's, e.g. `slack:UALICE is not allowed to run runs.list`); `door`
+ *  — the definition's own door refused the raw input (record 0062: the message
+ *  is the definition's one sentence, meant for the caller on every surface);
+ *  `handler` — the command itself threw a `CommandError` about the request (the message
  *  is the command's own, meant for the caller: `You're not on the allowlist for
  *  the \`acme/api\` repo environment.`). Chat renders a registry refusal with
- *  the shared "is restricted" line and a handler refusal with its message. */
+ *  the shared "is restricted" line, a door refusal with the definition's own
+ *  sentence alone, and a handler refusal with its message. */
 export type InvokeResult =
   | { ok: true; value: JsonValue }
   | {
@@ -436,7 +439,7 @@ export type InvokeResult =
       error: InvokeErrorCode;
       status: number;
       message: string;
-      decidedBy: "registry" | "handler";
+      decidedBy: "registry" | "door" | "handler";
       guess?: CommandGuessHint;
     };
 
@@ -585,9 +588,11 @@ export class CommandRegistry<D> {
 
     // The definition's own door refusal (record 0062): decided on the raw
     // input before parse, so every surface answers the definition's one
-    // sentence with its reason on the audit line — never a handler's rewording.
+    // sentence with its reason on the audit line — never a handler's rewording,
+    // and never the registry's "is restricted" template (`decidedBy: "door"`
+    // tells the chat renderer to print the sentence alone).
     const refusedAtDoor = cmd.door?.(rawInput(input), caller);
-    if (refusedAtDoor) return done(fail("unauthorized", refusedAtDoor.message), refusedAtDoor.reason);
+    if (refusedAtDoor) return done(fail("unauthorized", refusedAtDoor.message, "door"), refusedAtDoor.reason);
 
     const parsed = parseInput(cmd, input);
     if (!parsed.ok) return done(fail("invalid_input", parsed.message));
@@ -657,7 +662,7 @@ export function bindCommands<D>(registry: CommandRegistry<D>, deps: D): CommandI
 function fail(
   error: InvokeErrorCode,
   message: string,
-  decidedBy: "registry" | "handler" = "registry",
+  decidedBy: "registry" | "door" | "handler" = "registry",
   guess?: CommandGuessHint,
 ): InvokeResult {
   return { ok: false, error, status: ERROR_STATUS[error], message, decidedBy, ...(guess ? { guess } : {}) };
