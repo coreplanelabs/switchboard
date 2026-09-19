@@ -82,4 +82,8 @@ export const CLOCK_BAN_EXEMPT = [
   "web/src/lib/wallClock.ts",
   "deploy/bin/**",
   "deploy/cloudflare/write-build.mjs",
+  // The sandbox container's PID-1 supervisor: it runs inside the image, not
+  // the bot process, so no injected clock exists there; its loop takes `now`
+  // as an argument and only its entry wires Date.now in.
+  "deploy/cloudflare-sandbox/runtime-supervisor.mjs",
 ];
