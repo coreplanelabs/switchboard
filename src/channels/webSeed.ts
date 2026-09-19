@@ -253,6 +253,31 @@ export interface HomeReceiptTurnSeed {
   decidedAt: number;
 }
 
+/** One word of the hosted ship parent in a unit's thread (record 0060; web-chat
+ *  item 2): a `ship_unit` event of the parent run naming this thread, drawn as a
+ *  compact turn linked to the parent's run page — never the thread's own run,
+ *  so the composer ignores it. `kind` tells it from a run's turn and a receipt's. */
+export interface HomeParentTurnSeed {
+  kind: "parent";
+  /** The hosted parent run the turn links to (`/runs/<id>`). */
+  runId: string;
+  /** The parent's live capability token while it runs (`?t=…` on the link, as
+   *  the run page's own "part of" link carries it): a live run's page 404s a
+   *  tokenless read, and a hosted ship parent is live for the pipeline's whole
+   *  life. Absent once the parent finished — the bare href reads its record. */
+  token?: string;
+  unit: string;
+  /** The unit's state as the runner reported it (`started`, a round's outcome, an ending's kind). */
+  state: string;
+  /** The one-line lead (`unit-start`), when the event carried one. */
+  lead?: string;
+  /** The report (`round`, `unit-end`), when the event carried one. */
+  report?: string;
+  pr?: number;
+  /** When the parent said it (epoch ms) — the turn's place in the thread. */
+  at: number;
+}
+
 /** One row of the rail: a thread of the viewer's, on any channel (record 0043,
  *  amended): a `web:` conversation by its id, any other thread by its full key. */
 export interface HomeConversationRowSeed {
@@ -284,8 +309,8 @@ export interface HomeSeed {
   /** The open conversation's id (a fresh one on `/threads`). */
   conversation: string;
   /** The thread's runs as turns, oldest first, with its silent intake receipts
-   *  interleaved by `decidedAt` (item 12). */
-  turns: (HomeTurnSeed | HomeReceiptTurnSeed)[];
+   *  interleaved by `decidedAt` (item 12) and the hosted parent's word by `at` (item 2). */
+  turns: (HomeTurnSeed | HomeReceiptTurnSeed | HomeParentTurnSeed)[];
   conversations: HomeConversationRowSeed[];
   viewer: { name: string };
   /** Where the composer POSTs (`/threads/<conversation>/send`). */

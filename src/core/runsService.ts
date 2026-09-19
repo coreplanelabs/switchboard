@@ -399,6 +399,13 @@ export interface RunsService {
    *  is; `null` for an unknown instance, a process without the coordinator's
    *  records, and a reader outside the instance's channel. */
   unitLineage(instanceId: string, threadKey: string | undefined, visibleTo: Predicate): Promise<UnitLineage | null>;
+  /** The run the instance's parent record lives on (`CoordinatorInstance.runId`)
+   *  — what a unit thread's conversation links the parent's word to (web-chat
+   *  item 2). `undefined` for an unknown instance, one with no run recorded
+   *  yet, a process without the coordinator's records, and a reader a run of
+   *  the instance's requester in its channel would not be admitted to (the
+   *  `listInstanceUnits` rule): existence is never revealed across a channel. */
+  parentRunOfInstance(instanceId: string, visibleTo: Predicate): Promise<string | undefined>;
   /** A pull request's findings ledger (agent-ship item 18): the runs whose
    *  records name it (`ListRunsOptions.pr`) plus, when one of them belongs to a
    *  coordinator instance whose unit row names the pull request, that unit's
@@ -1125,6 +1132,13 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             }
           : {}),
       };
+    },
+
+    async parentRunOfInstance(instanceId, visibleTo) {
+      if (!units || visibleTo.kind === "none") return undefined;
+      const instance = await units.get(instanceId);
+      if (!instance || !instanceAdmits(instance, visibleTo)) return undefined;
+      return instance.runId;
     },
 
     async listFindings(pr, visibleTo) {

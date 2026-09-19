@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, onUnmounted, provide, reactive, ref, watch } from "vue";
-import type { HomeTurnSeed } from "@core/channels/webSeed.js";
+import type { HomeParentTurnSeed, HomeTurnSeed } from "@core/channels/webSeed.js";
 import { retentionSentence } from "@core/channels/webSeed.js";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 import AppShell from "../components/AppShell.vue";
@@ -9,6 +9,7 @@ import ConversationRail from "../components/home/ConversationRail.vue";
 import EmptyState from "../components/home/EmptyState.vue";
 import PersonTurn from "../components/home/PersonTurn.vue";
 import AssistantTurn from "../components/home/AssistantTurn.vue";
+import ParentTurn from "../components/home/ParentTurn.vue";
 import SilentTurn from "../components/home/SilentTurn.vue";
 import MarkdownText from "../components/MarkdownText.vue";
 import { browser } from "../lib/browser";
@@ -57,6 +58,7 @@ type Item =
       ended: boolean;
     }
   | { key: string; kind: "silent"; reason: string; at: number }
+  | { key: string; kind: "parent"; turn: HomeParentTurnSeed }
   | { key: string; kind: "inline"; text: string };
 
 let seq = 0;
@@ -64,9 +66,12 @@ const key = (k: string) => `${k}-${++seq}`;
 const items = reactive<Item[]>([]);
 for (const t of seed?.turns ?? []) {
   // A silent intake receipt (item 12): the gate read a message and answered
-  // nothing — one read-not-answered line where the run would have been.
+  // nothing — one read-not-answered line where the run would have been. The
+  // hosted parent's word (item 2): one line linked to the parent's run —
+  // neither is a run of this thread, so the composer never reads them.
   if ("kind" in t) {
-    items.push({ key: key("s"), kind: "silent", reason: t.reason, at: t.decidedAt });
+    if (t.kind === "receipt") items.push({ key: key("s"), kind: "silent", reason: t.reason, at: t.decidedAt });
+    else items.push({ key: key("w"), kind: "parent", turn: t });
     continue;
   }
   items.push({ key: key("p"), kind: "person", text: t.request, at: t.receivedAt ?? t.startedAt, pending: false });
@@ -521,6 +526,7 @@ const elsewhereLine = !elsewhere
               @stop="(url) => (stopUrl = url)"
             />
             <SilentTurn v-else-if="item.kind === 'silent'" :reason="item.reason" :decided-at="item.at" :now="now" />
+            <ParentTurn v-else-if="item.kind === 'parent'" :turn="item.turn" :now="now" />
             <div v-else class="inline text-[0.875rem] text-toned" data-testid="inline">
               <MarkdownText :text="item.text" />
             </div>

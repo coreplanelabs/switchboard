@@ -19,6 +19,7 @@ import { readableRuns } from "./liveView/viewer.js";
 import type {
   HomeCommandSeed,
   HomeConversationRowSeed,
+  HomeParentTurnSeed,
   HomeReceiptTurnSeed,
   HomeSeed,
   HomeTurnSeed,
@@ -157,24 +158,54 @@ export function turnOf(view: RunRecordView, token?: string): HomeTurnSeed {
   };
 }
 
+/** Any turn of a conversation's seed: a run's, a silent receipt's, the parent's word. */
+type ConversationTurn = HomeTurnSeed | HomeReceiptTurnSeed | HomeParentTurnSeed;
+
 /** True for the seed's receipt variant (item 12) — a read-not-answered turn, never a run. */
-export function isReceiptTurn(t: HomeTurnSeed | HomeReceiptTurnSeed): t is HomeReceiptTurnSeed {
-  return "kind" in t;
+export function isReceiptTurn(t: ConversationTurn): t is HomeReceiptTurnSeed {
+  return "kind" in t && t.kind === "receipt";
+}
+
+/** True for a run's own turn — never a receipt's or the parent's word. */
+export function isRunTurn(t: ConversationTurn): t is HomeTurnSeed {
+  return !("kind" in t);
+}
+
+/** Where a turn sits in the thread: a run at its arrival, the parent's word at its stamp. */
+function stampOf(t: HomeTurnSeed | HomeParentTurnSeed): number {
+  return "kind" in t ? t.at : (t.receivedAt ?? t.startedAt);
+}
+
+/** The hosted parent's word merged among the thread's runs by stamp (item 2):
+ *  each `ship_unit` event sits where the parent said it. */
+export function withParentWord(
+  turns: readonly HomeTurnSeed[],
+  parents: readonly HomeParentTurnSeed[],
+): (HomeTurnSeed | HomeParentTurnSeed)[] {
+  if (parents.length === 0) return [...turns];
+  const sorted = [...parents].sort((a, b) => a.at - b.at);
+  const out: (HomeTurnSeed | HomeParentTurnSeed)[] = [];
+  let i = 0;
+  for (const t of turns) {
+    while (i < sorted.length && sorted[i].at < stampOf(t)) out.push(sorted[i++]);
+    out.push(t);
+  }
+  return [...out, ...sorted.slice(i)];
 }
 
 /** The thread's silent receipts merged among its turns by stamp (item 12): a
  *  receipt sits where its message fell — before the first run decided after it
  *  — and the ones after the newest run close the list. */
 export function interleaveReceipts(
-  turns: readonly HomeTurnSeed[],
+  turns: readonly (HomeTurnSeed | HomeParentTurnSeed)[],
   receipts: readonly HomeReceiptTurnSeed[],
-): (HomeTurnSeed | HomeReceiptTurnSeed)[] {
+): ConversationTurn[] {
   if (receipts.length === 0) return [...turns];
   const sorted = [...receipts].sort((a, b) => a.decidedAt - b.decidedAt);
-  const out: (HomeTurnSeed | HomeReceiptTurnSeed)[] = [];
+  const out: ConversationTurn[] = [];
   let i = 0;
   for (const t of turns) {
-    const at = t.receivedAt ?? t.startedAt;
+    const at = stampOf(t);
     while (i < sorted.length && sorted[i].decidedAt < at) out.push(sorted[i++]);
     out.push(t);
   }
@@ -183,11 +214,12 @@ export function interleaveReceipts(
 
 /** The thread's turns as the history a run reads (`ChannelIO.history`): the
  *  request as the person's line, the reply as the agent's, each stamped. A
- *  receipt turn is no one's line — its message was never stored — and is skipped. */
-export function historyOf(turns: readonly (HomeTurnSeed | HomeReceiptTurnSeed)[]): HistoryItem[] {
+ *  receipt turn is no one's line — its message was never stored — and the
+ *  parent's word is the parent run's, not this thread's: both are skipped. */
+export function historyOf(turns: readonly ConversationTurn[]): HistoryItem[] {
   const items: HistoryItem[] = [];
   for (const t of turns) {
-    if (isReceiptTurn(t)) continue;
+    if (!isRunTurn(t)) continue;
     if (t.request) items.push({ role: "user", text: t.request, at: t.receivedAt ?? t.startedAt });
     if (t.answer !== undefined && t.finishedAt !== undefined)
       items.push({ role: "assistant", text: t.answer, at: t.finishedAt });
@@ -228,16 +260,61 @@ async function silentReceiptsOf(
   }
 }
 
+/** The hosted parent's word in this thread (item 2): when the thread's runs
+ *  carry an instance tag, the parent run's `ship_unit` events naming this
+ *  thread as parent turns — one read of the parent's messages per instance,
+ *  under the viewer's own predicate (`parentRunOfInstance` admits the parent as
+ *  `listInstanceUnits` does), so an excluded parent seeds nothing. */
+async function parentWordsOf(
+  deps: ConversationDeps,
+  threadKey: string,
+  actor: Actor,
+  runs: readonly RunView[],
+): Promise<HomeParentTurnSeed[]> {
+  const instanceIds = [...new Set(runs.map((r) => r.parentInstanceId).filter((id) => id !== undefined))];
+  if (instanceIds.length === 0) return [];
+  const visibleTo = readableRuns(actor);
+  const out: HomeParentTurnSeed[] = [];
+  for (const instanceId of instanceIds) {
+    const runId = await deps.service.parentRunOfInstance(instanceId, visibleTo);
+    if (runId === undefined) continue;
+    const read = await deps.service.getRun(runId, { include: "messages" });
+    if (!read.ok) continue;
+    // The parent's live token, so the link reads while the pipeline runs — a
+    // live run's page 404s a tokenless read; the registry only holds live runs,
+    // so a finished parent gets none and the bare href reads its record.
+    const token = deps.registry.getById(runId)?.token;
+    for (const e of read.value.events ?? []) {
+      if (e.type !== "ship_unit" || e.threadKey !== threadKey) continue;
+      out.push({
+        kind: "parent",
+        runId,
+        ...(token !== undefined ? { token } : {}),
+        unit: e.unit,
+        state: e.state,
+        ...(e.lead !== undefined ? { lead: e.lead } : {}),
+        ...(e.report !== undefined ? { report: e.report } : {}),
+        ...(e.pr !== undefined ? { pr: e.pr } : {}),
+        // An event without a stamp sits at the parent's own start, never at
+        // epoch 0 — which would sort the word before the whole conversation.
+        at: e.at ?? read.value.startedAt,
+      });
+    }
+  }
+  return out;
+}
+
 /** The thread's runs the viewer may read, oldest first, with their messages — one read per run, in
- *  parallel — and its silent receipts interleaved by decidedAt (item 12). The history path passes
- *  `receipts: false`: `historyOf` skips receipt turns anyway, so reading the intake ledger there
- *  would only fetch rows to discard. */
+ *  parallel — its silent receipts interleaved by decidedAt (item 12) and the hosted parent's word
+ *  by its stamp (item 2). The history path passes `receipts: false`: `historyOf` skips receipt and
+ *  parent turns anyway, so reading the intake ledger or the parent's record there would only fetch
+ *  rows to discard. */
 export async function turnsOf(
   deps: ConversationDeps,
   threadKey: string,
   actor: Actor,
   opts?: { receipts?: boolean },
-): Promise<{ turns: (HomeTurnSeed | HomeReceiptTurnSeed)[]; runs: RunView[] }> {
+): Promise<{ turns: ConversationTurn[]; runs: RunView[] }> {
   const listed = await deps.service.listRuns({
     status: "all",
     visibleTo: readableRuns(actor),
@@ -248,16 +325,18 @@ export async function turnsOf(
   const runs = [...listed.runs].sort((a, b) => a.startedAt - b.startedAt);
   const liveToken = (run: RunView): string | undefined =>
     run.finished ? undefined : deps.registry.getById(run.id)?.token;
-  const [turns, receipts] = await Promise.all([
+  const seedOnly = opts?.receipts !== false;
+  const [turns, receipts, parents] = await Promise.all([
     Promise.all(
       runs.map(async (run) => {
         const read = await deps.service.getRun(run.id, { include: "messages" });
         return turnOf(read.ok ? read.value : { ...run }, liveToken(run));
       }),
     ),
-    opts?.receipts === false ? [] : silentReceiptsOf(deps, threadKey, runs.length > 0),
+    seedOnly ? silentReceiptsOf(deps, threadKey, runs.length > 0) : [],
+    seedOnly ? parentWordsOf(deps, threadKey, actor, runs) : [],
   ]);
-  return { turns: interleaveReceipts(turns, receipts), runs };
+  return { turns: interleaveReceipts(withParentWord(turns, parents), receipts), runs };
 }
 
 /** ConversationDeps plus the handle's own knobs: the id generator `openThread`
@@ -282,7 +361,7 @@ export function webThreadIO(deps: WebHandleDeps, thread: { threadKey: string; ac
     async (exceptRunId) =>
       historyOf(
         (await turnsOf(deps, thread.threadKey, thread.actor, { receipts: false })).turns.filter(
-          (t) => isReceiptTurn(t) || t.id !== exceptRunId,
+          (t) => !isRunTurn(t) || t.id !== exceptRunId,
         ),
       ),
     {
@@ -572,7 +651,7 @@ export function createWebChatHandler(
     ctx: WebChatContext,
     conversation: string,
     threadKey: string,
-    open: { turns: (HomeTurnSeed | HomeReceiptTurnSeed)[]; runs: RunView[] },
+    open: { turns: ConversationTurn[]; runs: RunView[] },
   ): Promise<HomeSeed> {
     const sub = subOf(ctx.actor);
     const rail = await railOf(ctx.actor, sub);
@@ -677,7 +756,7 @@ export function createWebChatHandler(
       async (exceptRunId) =>
         historyOf(
           (await readTurns(threadKey, ctx.actor, { receipts: false })).turns.filter(
-            (t) => isReceiptTurn(t) || t.id !== exceptRunId,
+            (t) => !isRunTurn(t) || t.id !== exceptRunId,
           ),
         ),
       // The lane: this handle can open a thread of its own — a conversation in

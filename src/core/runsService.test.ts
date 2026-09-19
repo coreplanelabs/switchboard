@@ -1702,6 +1702,22 @@ describe("RunsService.listUnitRuns — a unit's runs in round order", () => {
     const { reg } = testRegistry();
     expect(await createRunsService({ registry: reg, store }).listInstanceUnits("plan-p-1", ALL)).toEqual([]);
   });
+
+  // web-chat item 2: the conversation seed asks which run carries the parent's word.
+  it("parentRunOfInstance answers the instance's runId under a predicate that admits it, and undefined for an unknown instance, an excluded reader, a `none` predicate, an instance with no run yet and a process without the coordinator's records", async () => {
+    const { svc, instances, store } = await world();
+    await instances.replace({ ...instance, runId: "parent-run" });
+    expect(await svc.parentRunOfInstance("plan-p-1", ALL)).toBe("parent-run");
+    expect(await svc.parentRunOfInstance("plan-p-1", CHANNEL_C1)).toBe("parent-run");
+    expect(await svc.parentRunOfInstance("plan-p-9", ALL)).toBeUndefined();
+    expect(await svc.parentRunOfInstance("plan-p-1", CHANNEL_C2)).toBeUndefined();
+    expect(await svc.parentRunOfInstance("plan-p-1", PUBLIC)).toBeUndefined();
+    expect(await svc.parentRunOfInstance("plan-p-1", { kind: "none" })).toBeUndefined();
+    await instances.replace(instance); // no runId recorded yet: nothing to link
+    expect(await svc.parentRunOfInstance("plan-p-1", ALL)).toBeUndefined();
+    const { reg } = testRegistry();
+    expect(await createRunsService({ registry: reg, store }).parentRunOfInstance("plan-p-1", ALL)).toBeUndefined();
+  });
 });
 
 describe("RunsService.unitLineage — a pipeline child's way up (live-view item 33)", () => {

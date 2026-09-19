@@ -16,6 +16,8 @@ import { channelOf, startRequestRoot } from "../core/requestTrace.js";
 import { recordRoutedDecision, type RouteEventFields } from "../core/dispatch/commandRun.js";
 import type { FastPathDeps } from "../core/dispatch/fastPath.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
+import type { CoordinatorInstance } from "../core/coordinator/contract.js";
+import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import type { DispatchFn } from "./http.js";
 import {
@@ -38,6 +40,7 @@ import {
 } from "./web.js";
 import {
   SEED_ELEMENT_ID,
+  type HomeParentTurnSeed,
   type HomeReceiptTurnSeed,
   type HomeSeed,
   type HomeTurnSeed,
@@ -118,12 +121,14 @@ function setup(
     channelNames?: Record<string, string>;
     /** The thread view's receipt read; defaults to an empty ledger, `null` is a ledger that is off. */
     intake?: { listIntake: (query: { threadKey?: string; since?: number }) => Promise<IntakeReceipt[]> } | null;
+    /** The coordinator's records, for a thread whose runs carry an instance tag (item 2). */
+    units?: InMemoryCoordinatorInstanceStore;
   } = {},
 ) {
   let n = 0;
   const registry = new RunRegistry({ genId: () => `id-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
   const store = new InMemoryRunStore({ now: () => NOW });
-  const service = createRunsService({ registry, store });
+  const service = createRunsService({ registry, store, ...(opts.units ? { units: opts.units } : {}) });
   const core = { config: { grantsFor: () => NO_GRANTS, config: {} } } as unknown as CoreDeps;
   const calls: { msg: IncomingMessage; io: ChannelIO }[] = [];
   const dispatch: DispatchFn =
@@ -951,7 +956,8 @@ describe("GET /threads/<id> — silent intake receipts on the thread view (item 
       userId: "slack:UALICE",
       channelVisibility: "unknown",
     });
-  const shapeOf = (t: HomeTurnSeed | HomeReceiptTurnSeed) => ("kind" in t ? [t.kind, t.reason, t.decidedAt] : t.id);
+  const shapeOf = (t: HomeTurnSeed | HomeReceiptTurnSeed | HomeParentTurnSeed) =>
+    "kind" in t ? (t.kind === "receipt" ? [t.kind, t.reason, t.decidedAt] : [t.kind]) : t.id;
 
   it("two silent receipts seed two read-not-answered turns with their reasons, interleaved among the runs by decidedAt; an addressed receipt seeds nothing", async () => {
     const rows = [
@@ -1002,5 +1008,144 @@ describe("GET /threads/<id> — silent intake receipts on the thread view (item 
     expect(res.status).toBe(404);
     expect(res.body).not.toContain("smalltalk");
     expect(listIntake).not.toHaveBeenCalled();
+  });
+});
+
+// ---- the parent's word on a unit's thread --------------------------------------
+
+describe("GET /threads/<id> — the parent's word on a unit's thread (item 2)", () => {
+  const THREAD = "web:a1:conv-1";
+  const instance: CoordinatorInstance = {
+    id: "plan-p-1",
+    kind: "ship",
+    userId: "access:a1",
+    channelId: "web:a1",
+    threadKey: "web:a1:conv-0",
+    repo: "acme/api",
+    branch: "plan/p/u9",
+    createdAt: NOW - 400_000,
+    runId: "parent-run",
+  };
+  const word = (state: string, at: number, over: Partial<Extract<RunEvent, { type: "ship_unit" }>> = {}) =>
+    ({ type: "ship_unit", unit: "U16", state, threadKey: THREAD, at, ...over }) as RunEvent;
+  const parentRecord = (events: RunEvent[]) =>
+    record("parent-run", NOW - 10_000, {
+      agent: "ship",
+      channelId: instance.channelId,
+      userId: instance.userId,
+      threadKey: instance.threadKey,
+      events,
+      eventCount: events.length,
+      storedEventCount: events.length,
+    });
+  const tagged = (id: string, finishedAt: number) =>
+    record(id, finishedAt, {
+      parentInstanceId: "plan-p-1",
+      idempotencyKey: "plan-p-1:U16/0/coding",
+    });
+  const shapeOf = (t: HomeTurnSeed | HomeReceiptTurnSeed | HomeParentTurnSeed) =>
+    "kind" in t ? (t.kind === "parent" ? [t.kind, t.runId, t.unit, t.state, t.at] : [t.kind]) : t.id;
+
+  it("a conversation whose runs carry an instance tag lists the parent's ship_unit events naming this thread, in time order among its runs, and none naming another thread", async () => {
+    const units = new InMemoryCoordinatorInstanceStore();
+    await units.put(instance);
+    const { handler, store } = setup({ units });
+    // r-1 starts NOW-70_000, r-2 starts NOW-40_000 (record() starts 10 s before the finish).
+    await store.put(tagged("r-1", NOW - 60_000));
+    await store.put(tagged("r-2", NOW - 30_000));
+    await store.put(
+      parentRecord([
+        word("approve", NOW - 35_000, { report: "round 1 approved", pr: 7 }),
+        word("started", NOW - 65_000, { lead: "↳ unit U16" }),
+        word("started", NOW - 50_000, { threadKey: "web:a1:conv-9" }),
+      ]),
+    );
+    const res = await request(handler, { url: "/threads/conv-1" });
+    expect(res.status).toBe(200);
+    const seed = seedOf<HomeSeed>(res.body);
+    expect(seed.turns.map(shapeOf)).toEqual([
+      "r-1",
+      ["parent", "parent-run", "U16", "started", NOW - 65_000],
+      "r-2",
+      ["parent", "parent-run", "U16", "approve", NOW - 35_000],
+    ]);
+    const approve = seed.turns.at(-1) as HomeParentTurnSeed;
+    expect(approve).toEqual({
+      kind: "parent",
+      runId: "parent-run",
+      unit: "U16",
+      state: "approve",
+      report: "round 1 approved",
+      pr: 7,
+      at: NOW - 35_000,
+    });
+  });
+
+  it("a live parent's turn carries its capability token — the link reads during the pipeline's whole life — and a finished parent's carries none", async () => {
+    const units = new InMemoryCoordinatorInstanceStore();
+    const { handler, store, registry } = setup({ units });
+    // The parent is live: only its registry row holds it, under its own token.
+    const live = registry.create("ship · plan p", {
+      channelId: instance.channelId,
+      userId: instance.userId,
+      threadKey: instance.threadKey,
+      channelVisibility: "dm",
+    });
+    registry.publish(live.id, word("started", NOW - 65_000, { lead: "↳ unit U16" }));
+    await units.put({ ...instance, runId: live.id });
+    await store.put(tagged("r-1", NOW - 60_000));
+    const seed = seedOf<HomeSeed>((await request(handler, { url: "/threads/conv-1" })).body);
+    const parent = seed.turns.find((t) => "kind" in t && t.kind === "parent") as HomeParentTurnSeed;
+    expect(parent.runId).toBe(live.id);
+    expect(parent.token).toBe(live.token);
+  });
+
+  it("a ship_unit event without a stamp sits at the parent's own start, never at epoch 0", async () => {
+    const units = new InMemoryCoordinatorInstanceStore();
+    await units.put(instance);
+    const { handler, store } = setup({ units });
+    await store.put(tagged("r-1", NOW - 60_000));
+    await store.put(
+      parentRecord([{ type: "ship_unit", unit: "U16", state: "started", threadKey: THREAD } as RunEvent]),
+    );
+    const seed = seedOf<HomeSeed>((await request(handler, { url: "/threads/conv-1" })).body);
+    // parentRecord finishes at NOW - 10_000; record() starts 10 s earlier.
+    expect(seed.turns.map(shapeOf)).toEqual(["r-1", ["parent", "parent-run", "U16", "started", NOW - 20_000]]);
+  });
+
+  it("a conversation with no tagged run reads no parent, and so does a process without the coordinator's records", async () => {
+    const units = new InMemoryCoordinatorInstanceStore();
+    await units.put(instance);
+    const withUnits = setup({ units });
+    await withUnits.store.put(record("r-1", NOW - 60_000));
+    await withUnits.store.put(parentRecord([word("started", NOW - 65_000)]));
+    const plain = seedOf<HomeSeed>((await request(withUnits.handler, { url: "/threads/conv-1" })).body);
+    expect(plain.turns.map(shapeOf)).toEqual(["r-1"]);
+
+    const bare = setup();
+    await bare.store.put(tagged("r-1", NOW - 60_000));
+    await bare.store.put(parentRecord([word("started", NOW - 65_000)]));
+    const seed = seedOf<HomeSeed>((await request(bare.handler, { url: "/threads/conv-1" })).body);
+    expect(seed.turns.map(shapeOf)).toEqual(["r-1"]);
+  });
+
+  it("a viewer whose predicate excludes the parent sees no parent turns in a conversation whose runs carry the instance tag", async () => {
+    const units = new InMemoryCoordinatorInstanceStore();
+    // Another channel's instance: alice reads the thread's runs, never the parent.
+    await units.put({ ...instance, userId: "slack:UBOB", channelId: "slack:C9", threadKey: "slack:C9:1.1" });
+    const { handler, store } = setup({ units });
+    await store.put(tagged("r-1", NOW - 60_000));
+    await store.put(
+      record("parent-run", NOW - 10_000, {
+        agent: "ship",
+        channelId: "slack:C9",
+        userId: "slack:UBOB",
+        threadKey: "slack:C9:1.1",
+        events: [word("started", NOW - 65_000)],
+      }),
+    );
+    const res = await request(handler, { url: "/threads/conv-1" });
+    expect(res.status).toBe(200);
+    expect(seedOf<HomeSeed>(res.body).turns.map(shapeOf)).toEqual(["r-1"]);
   });
 });
