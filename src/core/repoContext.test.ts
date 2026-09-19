@@ -92,7 +92,9 @@ describe("resolveRepoContext: explicit signals in the current message", () => {
 
 describe("resolveRepoContext: PR URLs and shorthand", () => {
   it("a PR URL yields repo + head ref via the GitHub REST API", async () => {
-    const { fn, calls } = stubFetch({ body: { head: { ref: "patch-1", repo: { full_name: "jshttp/vary" } } } });
+    const { fn, calls } = stubFetch({
+      body: { state: "open", head: { ref: "patch-1", repo: { full_name: "jshttp/vary" } } },
+    });
     await expect(resolveRepoContext(msg("review <https://github.com/jshttp/vary/pull/42|PR 42>"), [])).resolves.toEqual(
       {
         repo: "jshttp/vary",
@@ -109,7 +111,7 @@ describe("resolveRepoContext: PR URLs and shorthand", () => {
   });
 
   it("owner/name#N shorthand resolves the same way", async () => {
-    stubFetch({ body: { head: { ref: "patch-1", repo: { full_name: "acme/api" } } } });
+    stubFetch({ body: { state: "open", head: { ref: "patch-1", repo: { full_name: "acme/api" } } } });
     await expect(resolveRepoContext(msg("agent:review acme/api#7"), [])).resolves.toEqual({
       repo: "acme/api",
       ref: "patch-1",
@@ -293,6 +295,58 @@ describe("resolveRepoContext: PR-source flags for ship", () => {
     expect(ctx.prFromMessage).toBe(true);
     expect(ctx.ref).toBeUndefined();
     expect(ctx.refFromPr).toBeUndefined();
+  });
+
+  // Issue 1860: a merged pull request cited as a receipt in a coding ask must
+  // not bind the thread's branch to its dead head branch — a ship child bound
+  // there has its contract branch refused by the resident's push guard and the
+  // commit lands as an orphan on the merged branch. Only an OPEN pull request
+  // contributes the ref hint; the cited PR's facts still ride as context.
+  it("a merged PR URL in a plain ask yields no ref hint — the PR's facts (pr, headSha) still ride as context (issue 1860)", async () => {
+    stubFetch({
+      body: {
+        state: "closed",
+        merged: true,
+        head: { ref: "feat/schema", sha: SHA, repo: { full_name: "acme/api" } },
+        base: { ref: "main" },
+      },
+    });
+    const ctx = await resolveRepoContext(
+      msg("fix the follow-up — https://github.com/acme/api/pull/91 landed the schema"),
+      [],
+    );
+    expect(ctx.repo).toBe("acme/api");
+    expect(ctx.ref).toBeUndefined();
+    expect(ctx.refFromPr).toBeUndefined();
+    // The reference is still the user's instruction: its facts stay context.
+    expect(ctx.pr).toBe(91);
+    expect(ctx.prFromMessage).toBe(true);
+    expect(ctx.headSha).toBe(SHA);
+  });
+
+  it("a closed-unmerged PR contributes no ref hint either, and an explicit `on branch X` beside a merged PR binds the phrase's ref with refFromPr unset (a contract child attaches on its contract branch)", async () => {
+    stubFetch({
+      body: { state: "closed", merged: false, head: { ref: "feat/x", sha: SHA, repo: { full_name: "acme/api" } } },
+    });
+    const closed = await resolveRepoContext(msg("see https://github.com/acme/api/pull/91"), []);
+    expect(closed.ref).toBeUndefined();
+    expect(closed.refFromPr).toBeUndefined();
+    stubFetch({
+      body: {
+        state: "closed",
+        merged: true,
+        head: { ref: "feat/schema", sha: SHA, repo: { full_name: "acme/api" } },
+      },
+    });
+    const phrased = await resolveRepoContext(
+      msg(
+        "agent:coding in acme/api on branch plan/p/u1: do the unit — https://github.com/acme/api/pull/91 landed the schema",
+      ),
+      [],
+    );
+    expect(phrased.ref).toBe("plan/p/u1");
+    expect(phrased.refFromPr).toBeUndefined();
+    expect(phrased.pr).toBe(91);
   });
 
   it("an in-message PR that IS the thread's own (the run record's `pr`) sets prIsThreadOwn beside prFromMessage — even when its head fetch fails — and another number or no record leaves it unset", async () => {
@@ -538,7 +592,9 @@ describe("resolveRepoContext: thread history inheritance", () => {
   });
 
   it("a PR URL's repo outranks a bare slug elsewhere in the same message", async () => {
-    stubFetch({ body: { head: { ref: "feat/x", sha: "b".repeat(40), repo: { full_name: "acme/api" } } } });
+    stubFetch({
+      body: { state: "open", head: { ref: "feat/x", sha: "b".repeat(40), repo: { full_name: "acme/api" } } },
+    });
     await expect(
       resolveRepoContext(msg("re-review https://github.com/acme/api/pull/9 — I removed the unset/unset sentinel"), []),
     ).resolves.toEqual({
@@ -754,7 +810,7 @@ describe("PR head SHA for review pinning", () => {
   const SHA = "a".repeat(40);
 
   it("a same-repo PR carries headSha alongside ref and pr", async () => {
-    stubFetch({ body: { head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } });
+    stubFetch({ body: { state: "open", head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } });
     const ctx = await resolveRepoContext({ text: "review https://github.com/acme/api/pull/7" });
     expect(ctx).toEqual({
       repo: "acme/api",
@@ -785,7 +841,7 @@ describe("PR head SHA for review pinning", () => {
     const TIP = "b".repeat(40);
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { calls } = stubFetch(
-      { body: { head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } },
+      { body: { state: "open", head: { ref: "patch-1", sha: SHA, repo: { full_name: "acme/api" } } } },
       { body: { ref: "refs/heads/patch-1", object: { sha: TIP, type: "commit" } } },
     );
     const ctx = await resolveRepoContext({ text: "review https://github.com/acme/api/pull/7" });

@@ -630,7 +630,16 @@ export async function resolveRepoContext(
   let facts: PrFacts | undefined;
   if (s.pr && repo === s.pr.repo) {
     const head = await prHead(s.pr).catch(() => undefined);
-    if (head?.ref) {
+    // Only an OPEN pull request contributes the ref hint (issue 1860): a
+    // merged or closed pull request cited as a receipt in a coding ask must
+    // not bind the thread's branch to its dead head branch — a ship child
+    // bound there has its contract branch refused by the resident's push
+    // guard and the commit lands as an orphan. Its facts below still ride as
+    // context — the dispatcher drops the frozen `headSha` before the attach
+    // (it pins no ref here, and as the attach's expected commit it could only
+    // earn a `stale-tip` refusal) — and a state the answer did not carry
+    // binds nothing.
+    if (head?.ref && head.state === "open") {
       ref = head.ref;
       refFromPr = true;
     }

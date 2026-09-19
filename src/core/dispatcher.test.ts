@@ -4471,6 +4471,133 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
     expect(replies.some((r) => /PR opened/.test(r) && r.includes("`plan/p/u1` → `main`"))).toBe(true);
   });
 
+  // Issue 1860: a pull request cited as a receipt in the unit's own request
+  // text binds the resolver's ref to that PR's head branch (`refFromPr`) — the
+  // attach lands off the unit branch, the resident's push guard refuses the
+  // contract branch, the commit orphans on the cited branch and the pipeline
+  // aborts at round 0 with no pull request. A coordinator child's ref hint is
+  // its contract's branch, always: the PR-derived ref (and the head sha that
+  // pinned the cited PR's head) is dropped before the attach — the drop the
+  // repoContext comment on `refFromPr` asks of a consumer that does not bind
+  // the PR. The PR's facts stay context.
+  it("a coordinator's contract child whose request text cites a PR attaches on the contract branch — the PR-derived ref never rebinds the attach, so the push guard allows the unit branch (issue 1860)", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    // What the resolver yields when the child's request text cites an open
+    // pull request: its head branch bound as the ref, pinned at its head sha.
+    // (A merged PR yields no ref hint at the resolver — repoContext.test.ts —
+    // so this guard is what holds for an open one.)
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "feat/receipt",
+      refFromPr: true,
+      pr: 91,
+      prFromMessage: true,
+      headSha: "9".repeat(40),
+    });
+    codingExecutor({ head: HEAD, branch: "plan/p/u1", bindingRef: "plan/p/u1" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const contract = contractFromPlan({
+      planMarkdown: "### U10. do the unit\n\ndo the unit\n",
+      unitId: "U10",
+      readSpec: () => undefined,
+      rebase: { branch: "plan/p/u1", onto: "main" },
+    });
+    const { io } = fakeIO();
+    await dispatch(
+      deps,
+      msg(
+        "agent:coding in acme/api on branch plan/p/u1: do the unit — https://github.com/acme/api/pull/91 landed the schema",
+        "slack:UADMIN",
+      ),
+      io,
+      { coordinator: { parentInstanceId: "plan-p", idempotencyKey: "plan-p:u1/0/coding", base: "main" }, contract },
+    );
+    // The attach's ref hint is the contract's branch — never the cited PR's
+    // head branch, and never pinned at that PR's head sha.
+    const ctx = vi.mocked(makeExecutor).mock.calls[0][1];
+    expect(ctx).toMatchObject({ repo: "acme/api", ref: "plan/p/u1" });
+    expect(ctx.headSha).toBeUndefined();
+    // Bound at the unit branch, the child's push heads the unit's pull request.
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].headBranch).toBe("plan/p/u1");
+    expect(spy.calls[0].base).toBe("main");
+  });
+
+  // Issue 1860, the merged half: a MERGED pull request cited as a receipt
+  // binds no ref at the resolver (`refFromPr` unset), so the coordinator drop
+  // above never fires — yet the resolver still carries the merged PR's frozen
+  // head sha. Riding the attach as the expected commit (resident-repos item
+  // 51's `wantSha`) it can only refuse: no fetch brings the contract branch's
+  // tip to a dead PR's frozen head, the resident answers `stale-tip`, and the
+  // child falls back cold at the dead commit — orphaned work in a different
+  // coat. A cited PR that did not bind the ref contributes no attach sha.
+  it("a coordinator's contract child whose request text cites a MERGED PR attaches on the contract branch with NO expected commit — the merged PR's frozen headSha never rides the attach (issue 1860)", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    // What the resolver yields for a merged cited PR beside `on branch
+    // plan/p/u1`: the phrase's ref stands, refFromPr unset, and the merged
+    // PR's facts — its number and frozen head sha — ride as context
+    // (repoContext.test.ts).
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      ref: "plan/p/u1",
+      pr: 91,
+      prFromMessage: true,
+      headSha: "9".repeat(40),
+    });
+    codingExecutor({ head: HEAD, branch: "plan/p/u1", bindingRef: "plan/p/u1" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const contract = contractFromPlan({
+      planMarkdown: "### U10. do the unit\n\ndo the unit\n",
+      unitId: "U10",
+      readSpec: () => undefined,
+      rebase: { branch: "plan/p/u1", onto: "main" },
+    });
+    const { io } = fakeIO();
+    await dispatch(
+      deps,
+      msg(
+        "agent:coding in acme/api on branch plan/p/u1: do the unit — https://github.com/acme/api/pull/91 landed the schema",
+        "slack:UADMIN",
+      ),
+      io,
+      { coordinator: { parentInstanceId: "plan-p", idempotencyKey: "plan-p:u1/0/coding", base: "main" }, contract },
+    );
+    const ctx = vi.mocked(makeExecutor).mock.calls[0][1];
+    expect(ctx).toMatchObject({ repo: "acme/api", ref: "plan/p/u1" });
+    expect(ctx.headSha).toBeUndefined();
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0].headBranch).toBe("plan/p/u1");
+    expect(spy.calls[0].base).toBe("main");
+  });
+
+  // The same drop for a plain coding ask: a merged PR cited in the message
+  // resolves no ref, so the attach lands on the thread's bound (default)
+  // branch — pinning it at the merged PR's frozen head would refuse every
+  // warm attach (`stale-tip`) and send the run cold at the dead commit.
+  it("a plain coding ask citing a merged PR attaches with no expected commit — the frozen headSha is context, never the attach's wantSha (issue 1860)", async () => {
+    const deps = codingDeps(describeThenAnswer(DESCRIPTION));
+    deps.resolveRepoContext = () => ({
+      repo: "acme/api",
+      pr: 91,
+      prFromMessage: true,
+      headSha: "9".repeat(40),
+    });
+    codingExecutor({ head: HEAD, branch: "feat/follow-up", bindingRef: "main" });
+    const spy = openSpy();
+    deps.openPullRequest = spy.fn;
+    const { io } = fakeIO();
+    await dispatch(
+      deps,
+      msg("agent:coding fix the follow-up — https://github.com/acme/api/pull/91 landed the schema", "slack:UADMIN"),
+      io,
+    );
+    const ctx = vi.mocked(makeExecutor).mock.calls[0][1];
+    expect(ctx.headSha).toBeUndefined();
+    expect(spy.calls).toHaveLength(1);
+  });
+
   // resident-repos item 16: the release hands the resident the branch the run
   // pushed and the PR it heads — read off the run's own `pr_opened` event, so
   // the thread remembers the branch after its clean tree is released and a
