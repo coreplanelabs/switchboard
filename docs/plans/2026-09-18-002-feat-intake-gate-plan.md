@@ -2,7 +2,7 @@
 title: A thread reply is read before it is answered - the gate, the receipt, the catch-up, the thread scope, the replay row - Plan
 type: feat
 date: 2026-09-18
-status: proposed
+status: implemented
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
