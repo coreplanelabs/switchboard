@@ -32,6 +32,7 @@ import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
 import { isRunSchedule, SCHEDULES } from "../src/core/schedules.js";
 import { normalizeSpans } from "../src/core/normalizeSpans.js";
 import type { RunEvent } from "../src/core/runEvents.js";
+import { buildPlaneTable } from "../src/core/plane/table.js";
 import { systemClock } from "../src/core/trace/clock.js";
 import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web-preview-reading-diff.js";
 
@@ -45,6 +46,7 @@ import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web
 //   /runs/review-1   a finished PR review carrying both reading diffs (the panel)
 //   /runs/hist-4     a finished PR review with a request_changes verdict as the Reply and a Findings link to its unit's ledger
 //   /runs/scheduled  the Scheduled tab                     /residents   /costs   /costs?view=users   /delivery
+//   /plane           the plane's table over the index rows: runs, units and pull requests with owners and health
 //   /runs/unit/plan-acme-3:U13   a ship unit through two review rounds, both threads, with the pull request's findings
 //                               ledger (`?open=<run id>` opens a row's timeline; `?session=coding&q=lockfile` runs the
 //                               search on first paint)
@@ -2443,6 +2445,72 @@ function page(
     return { title: "(1) Resident repos", seed: { page: "residents", ...RESIDENTS, now: NOW, runs: RESIDENT_RUNS } };
   if (pathname.startsWith("/residents/"))
     return { title: "acme/web", seed: { page: "resident", slug: "acme/web", record: RESIDENTS.residents[0] } };
+  if (pathname === "/plane") {
+    // The plane's table over the index rows (docs/reference/specs/orchestration-plane.md): one
+    // instance with a waiting unit and a merge-ready unit whose pull request is still open.
+    const instance = { id: "plan-acme-3", repo: "acme/api", createdAt: INDEX_ROWS[0].startedAt };
+    const table = buildPlaneTable({
+      now: NOW,
+      runs: INDEX_ROWS,
+      instances: [
+        {
+          instance,
+          units: [
+            {
+              unit: "plan-acme-3:U13",
+              instanceId: "plan-acme-3",
+              id: "U13",
+              title: "The lockfile check runs first",
+              branch: "plan/acme-3/u13",
+              threads: {},
+              sourceUrls: {},
+              rounds: [],
+              pr: { number: 213, url: "https://github.com/acme/api/pull/213" },
+            },
+            {
+              unit: "plan-acme-3:U14",
+              instanceId: "plan-acme-3",
+              id: "U14",
+              title: "The review reads the checks",
+              branch: "plan/acme-3/u14",
+              threads: {},
+              sourceUrls: {},
+              rounds: [],
+              pr: { number: 214, url: "https://github.com/acme/api/pull/214" },
+              ending: { kind: "merge_ready", report: "approved after 2 rounds", at: INDEX_ROWS[0].startedAt },
+            },
+          ],
+        },
+      ],
+      pullRequests: [
+        {
+          repo: "acme/api",
+          number: 213,
+          url: "https://github.com/acme/api/pull/213",
+          title: "fix(deps): the lockfile check runs first",
+          state: "open",
+          headSha: "a".repeat(40),
+          checks: { total: 3, pending: ["ci / bot"], failed: [] },
+          titleOk: true,
+        },
+        {
+          repo: "acme/api",
+          number: 214,
+          url: "https://github.com/acme/api/pull/214",
+          title: "feat(ship): the review reads the checks at the head",
+          state: "open",
+          headSha: "b".repeat(40),
+          checks: { total: 3, pending: [], failed: ["ci / bot / test 4 of 4"] },
+          approvedAtHead: true,
+          titleOk: true,
+        },
+      ],
+    });
+    const tokens = Object.fromEntries(
+      INDEX_ROWS.filter((r) => !r.finished && r.token).map((r) => [r.id, r.token as string]),
+    );
+    return { title: "Plane", seed: { page: "plane", table, tokens } };
+  }
   if (pathname.startsWith("/costs")) {
     const asked = new URLSearchParams(search).get("view");
     const view: CostsView = asked !== null && asked in DIMENSION_OF_VIEW ? (asked as CostsByView) : "daily";

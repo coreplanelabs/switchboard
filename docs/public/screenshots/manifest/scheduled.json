@@ -7,9 +7,9 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "8d507868382af4fdd9ebbad5a93fbd47db331dd9d303aad0c6f1fc651f153b2f",
-    "scripts/web-preview.ts": "a7d56ae5f213c91bd16cbf2bd1e8377f250002323199d48fcbcf4bdeec627d3b",
+    "scripts/web-preview.ts": "69e48fca7d35f91712fbea29f87842529319c1c3683bf77783dc26428ed8954b",
     "src/channels/webShell.ts": "c3f74aeb04010dd88204b86e7a782f5a45f6731bf6f0f29cc8a4b5039df8f090",
-    "src/docs/screenshotManifest.ts": "af734f26c25e8ff0d55c887a21cceef839e766785e97d0f52c134cb0a3d072d7",
+    "src/docs/screenshotManifest.ts": "5b576b3c8519a2cf32bbfb260b0f55f763501a95507ce11598325be5fd43dec9",
     "web/src/App.vue": "4f602098f253ba82425491f6665f6ce8647e559703d3da8efe18ed6cc66c72f6",
     "web/src/assets/main.css": "64d8dd8426df76b08c2b08cbe0098ae2e329a67e9c475a3ddb55f6fb292cdddd",
     "web/src/components/AppNav.vue": "19d68cc7cb5b71bf01d2dd8c0cb445f22c554d0367496891b9e8062d6382fb16",
@@ -24,13 +24,13 @@
     "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",
     "web/src/lib/format.ts": "c606fee13ee47cd493bc70bc5c8d70fe697bc1903afa8434261b48c29e682759",
     "web/src/lib/markPulse.ts": "df29e8abee12f0827e8e1295f8fcb1184530240139790da7bffb5929fad8f647",
-    "web/src/lib/navSections.ts": "dd842db8c9b0fc1d7cc592f145803622047d03131d876e7681710c28f4f348db",
+    "web/src/lib/navSections.ts": "596df9e16e734a4eee3f84fcd31effd1b8082383cfdaf7db7b3a69e25482adb1",
     "web/src/lib/seed.ts": "b7ac1e0780a5f69b2ef2d5d0c40e41119a015fd29fb63c4026d4425b02d53661",
     "web/src/lib/viewAs.ts": "7907b58fbf6464532a1c3f2ba880b7ea791971ea3f4ce15efaf98da8b4219187",
     "web/src/lib/wallClock.ts": "d81d36cd618a94540500e6ae2b6e867156dcad0e910b644cb6d7bf619a501c6f",
     "web/src/main.ts": "84ca021b55e606fcfd533c2612e66dc777af04760e2153ed1ecfe483810e0827",
     "web/src/pages/ScheduledPage.vue": "227f5109248a6b838fcc886d98e32160874f4f6f3b753de8d5fa0b2835f51589",
-    "web/src/routes.ts": "2a0575461ac2a995b74ab274d443336f63bbedcc50b3dcc9ea3de36ec0af8f89",
+    "web/src/routes.ts": "5f60b25334eb08486d5e6e1445edc4887d8e50ae1fd516227994a5bc442eec3f",
     "web/vite.config.ts": "448df7a321d76dcd79e25bf32ce574d83cdc9260996e40457caa0be7a0e910bb"
   }
 }

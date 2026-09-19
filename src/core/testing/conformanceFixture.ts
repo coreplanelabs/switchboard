@@ -79,6 +79,7 @@ import type { RunRecord } from "../runRecord.js";
 import { RunRegistry } from "../runRegistry.js";
 import { InMemoryRunStore } from "../runStore.js";
 import { createRunsService } from "../runsService.js";
+import { createPlaneService } from "../planeService.js";
 import type { ChatMessage } from "../chatMessage.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
@@ -677,6 +678,9 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   return {
     delivery: { service: async () => delivery },
     costs: { service: async () => costs },
+    // `plane show`: the table over the same registry, store and unit rows the runs
+    // fixtures seed; no GitHub reader, so every pull request reads `unknown`.
+    plane: { service: async () => createPlaneService({ runs: await runs(), instances: s.units, clock: () => NOW }) },
     // `providers check`: one aggregator block with one ref, the endpoints
     // answered canned through the deps' own fetch (the global one is disarmed
     // in the conformance suite — nothing here may reach a network).

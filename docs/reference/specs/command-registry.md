@@ -162,6 +162,7 @@ Every registered command, rendered from the registry by `npm run docs:gen` and h
 | `providers.check` | `providers check` | `providers:read` | `command` | read | read | chat, cli, http, mcp | Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each. |
 | `artifacts.lifecycle` | `artifacts lifecycle [--dry-run]` | `deploy:write` | `command` | write | write | cli | Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after `artifacts.retentionDays` (default 30), incomplete multipart uploads abort after one day — and read them back; `--dry-run` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token. |
 | `artifacts.check` | `artifacts check` | `deploy:write` | `command` | read | read | cli | Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token. |
+| `plane.show` | `plane show` | `runs:read` | `command` | read | read | chat, cli, http, mcp | What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written. |
 
 <!-- /generated:catalogue -->
 

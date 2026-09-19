@@ -175,6 +175,9 @@ export const HOSTED_DEADLINE_MARGIN_MINUTES = 60;
  *  and the pause before a busy spawn is asked again. */
 export const SHIP_WAIT = { marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes: 5, busyRetryMinutes: 2 } as const;
 
+/** The plane's table (docs/decisions/0064): how long a finished run stays on it. */
+export const PLANE = { recentMinutes: 60 } as const;
+
 /** The named amounts a lease holds back, in minutes. Each stands for a step
  *  every run or round pays: `provision` is attach and restore before the
  *  harness's clock starts; `writeUp` is the final answer after the loop ends;

@@ -7,9 +7,9 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "8d507868382af4fdd9ebbad5a93fbd47db331dd9d303aad0c6f1fc651f153b2f",
-    "scripts/web-preview.ts": "a7d56ae5f213c91bd16cbf2bd1e8377f250002323199d48fcbcf4bdeec627d3b",
+    "scripts/web-preview.ts": "69e48fca7d35f91712fbea29f87842529319c1c3683bf77783dc26428ed8954b",
     "src/channels/webShell.ts": "c3f74aeb04010dd88204b86e7a782f5a45f6731bf6f0f29cc8a4b5039df8f090",
-    "src/docs/screenshotManifest.ts": "af734f26c25e8ff0d55c887a21cceef839e766785e97d0f52c134cb0a3d072d7",
+    "src/docs/screenshotManifest.ts": "5b576b3c8519a2cf32bbfb260b0f55f763501a95507ce11598325be5fd43dec9",
     "web/src/App.vue": "4f602098f253ba82425491f6665f6ce8647e559703d3da8efe18ed6cc66c72f6",
     "web/src/assets/main.css": "64d8dd8426df76b08c2b08cbe0098ae2e329a67e9c475a3ddb55f6fb292cdddd",
     "web/src/components/AppNav.vue": "19d68cc7cb5b71bf01d2dd8c0cb445f22c554d0367496891b9e8062d6382fb16",
@@ -44,7 +44,7 @@
     "web/src/lib/homeModel.ts": "60a6f25b398c714bc77a5b85cb6ee2dce49a9d59eb8af3ca8db32972310b81af",
     "web/src/lib/indexRow.ts": "e26c640aee8998df23ba39735baa60db4b74906fe608cbbcf251da08f4b193dd",
     "web/src/lib/markPulse.ts": "df29e8abee12f0827e8e1295f8fcb1184530240139790da7bffb5929fad8f647",
-    "web/src/lib/navSections.ts": "dd842db8c9b0fc1d7cc592f145803622047d03131d876e7681710c28f4f348db",
+    "web/src/lib/navSections.ts": "596df9e16e734a4eee3f84fcd31effd1b8082383cfdaf7db7b3a69e25482adb1",
     "web/src/lib/railLive.ts": "2dff4438d1707f53cbdd1d21dd9d3f96e2a5e5fa76cae79d3049758384e00a56",
     "web/src/lib/runPageModel.ts": "2d24ef43640ec1da84a27675cdedbf6204082630e955a9a66f07793c6c4a79e2",
     "web/src/lib/runStream.ts": "3ee9f3758a47682f846ba8b9f11462df4898cd3b2e4dc0e4d8ea08227a312369",
@@ -56,7 +56,7 @@
     "web/src/lib/wallClock.ts": "d81d36cd618a94540500e6ae2b6e867156dcad0e910b644cb6d7bf619a501c6f",
     "web/src/main.ts": "84ca021b55e606fcfd533c2612e66dc777af04760e2153ed1ecfe483810e0827",
     "web/src/pages/HomePage.vue": "081bce2c88919990d774ef99e512024604f88d50ff5caf258041235e1845cdee",
-    "web/src/routes.ts": "2a0575461ac2a995b74ab274d443336f63bbedcc50b3dcc9ea3de36ec0af8f89",
+    "web/src/routes.ts": "5f60b25334eb08486d5e6e1445edc4887d8e50ae1fd516227994a5bc442eec3f",
     "web/vite.config.ts": "448df7a321d76dcd79e25bf32ce574d83cdc9260996e40457caa0be7a0e910bb"
   }
 }

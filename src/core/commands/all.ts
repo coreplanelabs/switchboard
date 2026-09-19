@@ -10,6 +10,7 @@ import { registerFrictionCommands, type FrictionCommandDeps } from "./friction.j
 import { registerHelpCommands, type HelpCommandDeps } from "./help.js";
 import { registerMcpCommands, type McpCommandDeps } from "./mcp.js";
 import { registerMemoryCommands, type MemoryCommandDeps } from "./memory.js";
+import { registerPlaneCommands, type PlaneCommandDeps } from "./plane.js";
 import { registerProvidersCommands, type ProvidersCommandDeps } from "./providers.js";
 import { registerRepoCommands, type RepoCommandDeps } from "./repo.js";
 import { registerReviewCommands, type ReviewCommandDeps } from "./review.js";
@@ -43,7 +44,8 @@ export type CoreCommandDeps = HelpCommandDeps &
   DeliveryCommandDeps &
   CostsCommandDeps &
   ProvidersCommandDeps &
-  ArtifactsCommandDeps;
+  ArtifactsCommandDeps &
+  PlaneCommandDeps;
 
 export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>): void {
   registerHelpCommands(registry);
@@ -64,6 +66,7 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerCostsCommands(registry);
   registerProvidersCommands(registry);
   registerArtifactsCommands(registry);
+  registerPlaneCommands(registry);
 }
 
 /** The `<group>` of every registered command's action, once each, sorted — the
