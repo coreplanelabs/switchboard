@@ -66,6 +66,7 @@ import {
   type LoadedProfile,
 } from "./profile.js";
 import { classifyRestartResponse, type RestartPlan } from "./restart.js";
+import { postPlaneDeploy } from "./planeDeploy.js";
 import { PROJECT_FACTS_FILE, renderWorkerConfigs } from "./wranglerTemplate.js";
 import { supersededSteps } from "./supersede.js";
 import {
@@ -1171,45 +1172,62 @@ export async function runDeployPlan(
   for (const note of supersede.notes) io.warn(`[deploy:all] WARNING ${note}`);
   if (supersede.problems.length > 0) return { kind: "refused", problems: supersede.problems };
 
+  // The plane's deploy window (record 0064, "The queue"): opened before the
+  // first Worker uploads when the bot rolls — an ask that arrives mid-roll
+  // queues on `deploy_settled` — and lifted in the `finally`, landed or
+  // failed alike, so a broken run never leaves asks queued forever.
+  const planeDeploy =
+    plan.steps.some((s) => s.name === "bot") && stateWorkerUrl !== undefined
+      ? { stateWorkerUrl, env: process.env, log: (l: string) => io.log(l) }
+      : undefined;
+  if (planeDeploy) await postPlaneDeploy(planeDeploy, "pending", expectedCommit);
   const results: DeployStepResult[] = [];
-  for (const step of plan.steps) {
-    if (step.name === "bot" && configToPush && stateWorkerUrl !== undefined) {
-      // After the memory step (the document lives there), before the bot rolls (it reads it on start).
-      const pushed = await pushConfigDocument(configToPush, {
-        stateWorkerUrl,
-        key: plan.config.document,
-        env: process.env,
-      });
-      if (!pushed.ok) {
-        results.push({
-          name: step.name,
-          script: step.script,
-          live: "not deployed",
-          status: `FAILED: config push — ${pushed.problem}`,
+  try {
+    for (const step of plan.steps) {
+      if (step.name === "bot" && configToPush && stateWorkerUrl !== undefined) {
+        // After the memory step (the document lives there), before the bot rolls (it reads it on start).
+        const pushed = await pushConfigDocument(configToPush, {
+          stateWorkerUrl,
+          key: plan.config.document,
+          env: process.env,
         });
+        if (!pushed.ok) {
+          results.push({
+            name: step.name,
+            script: step.script,
+            live: "not deployed",
+            status: `FAILED: config push — ${pushed.problem}`,
+          });
+          break;
+        }
+        io.log(
+          `[deploy:all] config: ${pushed.how} → document "${plan.config.document}" v${pushed.version} on ${stateWorkerUrl} (sha256 ${pushed.sha256.slice(0, 12)}, ${pushed.bytes} bytes)`,
+        );
+      }
+      if (!(await ensureNodeModules(step, io))) {
+        results.push({ name: step.name, script: step.script, live: "not deployed", status: "npm ci failed" });
         break;
       }
-      io.log(
-        `[deploy:all] config: ${pushed.how} → document "${plan.config.document}" v${pushed.version} on ${stateWorkerUrl} (sha256 ${pushed.sha256.slice(0, 12)}, ${pushed.bytes} bytes)`,
-      );
+      const r = await deployStep(step, plan, expectedCommit, io, deps);
+      // wrangler always prints `Current Version ID`; a deploy that exits 0 without one is odd enough to say so.
+      results.push({
+        name: step.name,
+        script: step.script,
+        ...(r.versionId !== undefined ? { versionId: r.versionId } : {}),
+        live: r.live,
+        status: r.ok ? (r.versionId ? "deployed" : "deployed (no version id in output?)") : `FAILED: ${r.reason}`,
+      });
+      if (!r.ok) {
+        io.warn(
+          `[deploy:all] ${step.name} failed — stopping here so the order holds (later Workers were NOT deployed)`,
+        );
+        break;
+      }
     }
-    if (!(await ensureNodeModules(step, io))) {
-      results.push({ name: step.name, script: step.script, live: "not deployed", status: "npm ci failed" });
-      break;
-    }
-    const r = await deployStep(step, plan, expectedCommit, io, deps);
-    // wrangler always prints `Current Version ID`; a deploy that exits 0 without one is odd enough to say so.
-    results.push({
-      name: step.name,
-      script: step.script,
-      ...(r.versionId !== undefined ? { versionId: r.versionId } : {}),
-      live: r.live,
-      status: r.ok ? (r.versionId ? "deployed" : "deployed (no version id in output?)") : `FAILED: ${r.reason}`,
-    });
-    if (!r.ok) {
-      io.warn(`[deploy:all] ${step.name} failed — stopping here so the order holds (later Workers were NOT deployed)`);
-      break;
-    }
+  } finally {
+    // Landed or failed, the deploy is settled: the window lifts and the plane
+    // walks its queue (the state Worker logs how many asks were admitted).
+    if (planeDeploy) await postPlaneDeploy(planeDeploy, "landed", expectedCommit);
   }
   const notAttempted = plan.steps.slice(results.length).map((s) => s.name);
   const ok =
