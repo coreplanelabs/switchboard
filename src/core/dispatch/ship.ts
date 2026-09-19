@@ -370,6 +370,7 @@ export async function runShipBranch(
           msg,
           channelVisibility,
           repo: repoCtx.repo,
+          hosted: true, // the ship parent's run is created hosted (record 0060)
           finishedAt: startSnap.startedAt,
           status: "interrupted",
           diagnosis: analyzeRunFriction(startSnap.events, {
@@ -600,6 +601,7 @@ export async function runShipBranch(
               msg,
               channelVisibility,
               repo: repoCtx.repo,
+              hosted: true,
               finishedAt,
               status: failedAfterFinish && status === "completed" ? "failed" : status,
               diagnosis,

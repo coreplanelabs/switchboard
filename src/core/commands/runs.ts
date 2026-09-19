@@ -219,22 +219,50 @@ export const runsList = defineCommand({
   },
 });
 
-/** `runs get` on the text surfaces: the record's `key: value` lines, its cost
- *  read as dollars (costs.md item 4c) — the total, then each model — or
- *  `unpriced` where the price table knows no model, never `$0`. */
+/** The standing block `runs get` prints under the meta lines (record 0065):
+ *  a header with the units seen and the stage counts — an older record's
+ *  rounds name no unit, so its newest unnamed round rides the header — then
+ *  one line per open unit with its stage, round and pull request. */
+function pipelineLines(pipeline: JsonObject): string[] {
+  const counts = Object.entries(isObject(pipeline.counts) ? pipeline.counts : {})
+    .filter(([, n]) => typeof n === "number" && n > 0)
+    .map(([stage, n]) => `${n as number} ${stage}`);
+  const total = typeof pipeline.total === "number" ? pipeline.total : 0;
+  const last = isObject(pipeline.lastRound)
+    ? ` · round ${pipeline.lastRound.index} · ${pipeline.lastRound.agent} ${pipeline.lastRound.outcome}`
+    : "";
+  const head = `pipeline: ${total} unit${total === 1 ? "" : "s"}${counts.length > 0 ? ` — ${counts.join(" · ")}` : ""}${last}`;
+  const rows = (Array.isArray(pipeline.current) ? pipeline.current : [])
+    .filter(isObject)
+    .map(
+      (u) =>
+        `  ${String(u.unit)} ${String(u.stage)} · round ${String(u.round)}${typeof u.pr === "number" ? ` · #${u.pr}` : ""}`,
+    );
+  return [head, ...rows];
+}
+
+/** `runs get` on the text surfaces: the record's `key: value` lines, the
+ *  pipeline's standing under them for a run that has one (record 0065), and
+ *  its cost read as dollars (costs.md item 4c) — the total, then each model —
+ *  or `unpriced` where the price table knows no model, never `$0`. */
 function renderRunRecord(rawOutput: JsonValue): string {
   // A provisional tombstone (run-history item 27) renders the third state in
   // its status line: the run may still be live in a registry this store-only
   // read cannot see, so `interrupted` would be a misread.
   const output =
     isObject(rawOutput) && rawOutput.provisional === true ? { ...rawOutput, status: PROVISIONAL_LABEL } : rawOutput;
-  if (!isObject(output) || !isObject(output.cost)) return renderCompact("runs.get", output);
-  const { cost, ...rest } = output;
+  if (!isObject(output)) return renderCompact("runs.get", output);
+  const { pipeline, ...withoutPipeline } = output;
+  const standing = isObject(pipeline) ? pipelineLines(pipeline) : [];
+  const { cost, ...rest } = withoutPipeline;
+  if (!isObject(cost)) return [renderCompact("runs.get", withoutPipeline), ...standing].join("\n");
   const dollars = (usd: unknown): string => (typeof usd === "number" ? formatUsd(usd) : "unpriced");
   const models = Object.entries(isObject(cost.byModel) ? cost.byModel : {}).map(
     ([ref, m]) => `${ref} ${dollars(isObject(m) ? m.usd : undefined)}`,
   );
-  return [renderCompact("runs.get", rest), `cost: ${[dollars(cost.usd), ...models].join(" · ")}`].join("\n");
+  return [renderCompact("runs.get", rest), ...standing, `cost: ${[dollars(cost.usd), ...models].join(" · ")}`].join(
+    "\n",
+  );
 }
 
 export const runsGet = defineCommand({

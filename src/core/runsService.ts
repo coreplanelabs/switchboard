@@ -26,6 +26,7 @@ import type { RunLedger } from "./runLedger/ledger.js";
 import type { LiveRunRow } from "./runLedger/types.js";
 import { snippetOf } from "./runLedger/sessionLog.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
+import { pipelineOfEvents, type PipelineSummary } from "./pipelineStanding.js";
 import { parseUnitKey, unitKeyOf, type CoordinatorUnit } from "./coordinator/contract.js";
 import { assembleRunRecord } from "./dispatch/record.js";
 import { NO_PRICES, runCostOf, type ModelPriceTable, type RunCost } from "./modelPricing.js";
@@ -160,6 +161,12 @@ export interface RunView {
    *  the run's own events (`ship_handoff`, the hosted `run_meta`); absent on a
    *  row whose run hosts nothing and on records written before the event. */
   instanceId?: string;
+  /** The pipeline's standing (record 0065): the one fold of the run's own
+   *  `ship_round`/`ship_unit` events — from the registry summary on a live
+   *  row, folded from the mirrored events on a ledger row, from the record on
+   *  a persisted one — so a hosted row reads the same on every source. Absent
+   *  on a run without ship facts and on records written before the field. */
+  pipeline?: PipelineSummary;
   /** The typed artifacts a finished run's record carries (run-history item 2) —
    *  the review's verdict, reviewed head and post, the fix round's dispositions,
    *  the coding child's handoff. A live view has none yet; a finished row the
@@ -474,6 +481,9 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
   // A hosted parent live under another generation still names its instance:
   // the ledger mirrors the run's events, so the record's rule reads it here.
   const instanceId = instanceIdOfEvents(events);
+  // The pipeline's standing (record 0065): the same fold the registry and the
+  // record run, over the mirrored events, so the three sources agree.
+  const pipeline = pipelineOfEvents(events);
   return {
     id: row.runId,
     ...(m.label !== undefined ? { label: m.label } : {}),
@@ -497,6 +507,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     ...(m.idempotencyKey !== undefined ? { idempotencyKey: m.idempotencyKey } : {}),
     ...(m.hosted ? { hosted: true as const } : {}),
     ...(instanceId !== undefined ? { instanceId } : {}),
+    ...(pipeline !== undefined ? { pipeline } : {}),
     ...(row.stop ? { stop: { mode: row.stop, state: "stopping" as const } } : {}),
     schema: SPAN_SCHEMA, // a ledger run is a current runner's: spans carry its timing
     ownerGen: row.ownerGen,
@@ -540,6 +551,7 @@ function liveView(s: RunSummary): RunView {
     ...(s.idempotencyKey !== undefined ? { idempotencyKey: s.idempotencyKey } : {}),
     ...(s.hosted ? { hosted: true as const } : {}),
     ...(s.instanceId !== undefined ? { instanceId: s.instanceId } : {}),
+    ...(s.pipeline !== undefined ? { pipeline: s.pipeline } : {}),
     ...(s.persisted ? { persisted: true } : {}),
   };
 }
@@ -817,6 +829,10 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             },
             channelVisibility: m.channelVisibility ?? "unknown",
             ...(m.repo !== undefined ? { repo: m.repo } : {}),
+            ...(m.hosted ? { hosted: true as const } : {}),
+            // The registry's whole-list standing (record 0065): the snapshot
+            // is the trimmed backlog, which may have dropped a ship event.
+            ...(summary?.pipeline !== undefined ? { pipeline: summary.pipeline } : {}),
             finishedAt,
             status: "failed",
             diagnosis: analyze(snap?.events ?? [], {

@@ -27,6 +27,7 @@ import {
   type RunSession,
   type RunStatus,
 } from "../runRecord.js";
+import { pipelineOfEvents, type PipelineSummary } from "../pipelineStanding.js";
 import type { RunProfile } from "../../config/profile.js";
 import { redactHandoff, type Handoff } from "../ship/handoff.js";
 import {
@@ -166,6 +167,7 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
       ...(summary.parentInstanceId !== undefined && summary.idempotencyKey !== undefined
         ? { coordinator: { parentInstanceId: summary.parentInstanceId, idempotencyKey: summary.idempotencyKey } }
         : {}),
+      ...(summary.hosted ? { hosted: true as const } : {}),
       finishedAt,
       status: "interrupted",
       diagnosis: analyzeRunFriction(snap.events, { finished: false, truncated: snap.truncated }),
@@ -231,6 +233,7 @@ export function reclaimedRunRecord(input: {
     ...(row.meta.parentInstanceId !== undefined && row.meta.idempotencyKey !== undefined
       ? { coordinator: { parentInstanceId: row.meta.parentInstanceId, idempotencyKey: row.meta.idempotencyKey } }
       : {}),
+    ...(row.meta.hosted ? { hosted: true as const } : {}),
     finishedAt,
     status,
     diagnosis: analyzeRunFriction(events, {
@@ -345,6 +348,17 @@ export function assembleRunRecord(input: {
   /** The failure by name (item 57), when the runner's throw had one — the
    *  provider's refusal under its usage policy. Omitted for every other run. */
   failure?: RunFailure;
+  /** A ship pipeline's parent (record 0060; record 0065): `RunMeta.hosted`
+   *  from the caller's row or summary, stored on the record so a history
+   *  reader draws the run as a pipeline. Omitted for every other run. */
+  hosted?: true;
+  /** The registry's own standing (record 0065): folded over the run's WHOLE
+   *  ship-event list (`RunState.pipelineEvents`), which the bounded backlog's
+   *  trim never touches. The seal passes it so the record cannot demote a
+   *  round or leave a unit open when the trim dropped a ship event from the
+   *  snapshot; absent (a reclaim over the ledger's mirror), the fold over the
+   *  snapshot's events stands in. */
+  pipeline?: PipelineSummary;
 }): RunRecord {
   const { run, snap, msg, seal } = input;
   const atFinish = snap?.events ?? [];
@@ -366,6 +380,10 @@ export function assembleRunRecord(input: {
   // The plan runner instance a ship run's hand-off created (record 0051 R2):
   // its `ship_handoff` event, projected like the coordinator tag.
   const instanceId = instanceIdOfEvents(events);
+  // The pipeline's standing (record 0065): the registry's whole-list fold
+  // when the caller has it, else the one fold over the snapshot's events —
+  // the snapshot is the trimmed backlog, so the registry summary wins.
+  const pipeline = input.pipeline ?? pipelineOfEvents(events);
   const fitted = fitRecordToBudget({
     id: run.id,
     ...(run.label !== undefined ? { label: run.label } : {}),
@@ -411,6 +429,8 @@ export function assembleRunRecord(input: {
     ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
     ...coordinatorFields(input.coordinator),
     ...(instanceId !== undefined ? { instanceId } : {}),
+    ...(pipeline !== undefined ? { pipeline } : {}),
+    ...(input.hosted ? { hosted: true as const } : {}),
     ...(input.seed !== undefined ? { seed: input.seed } : {}),
     ...(input.session !== undefined ? { session: input.session } : {}),
     ...(input.failure !== undefined ? { failure: input.failure } : {}),

@@ -12,6 +12,8 @@ import { RunRegistry, type RunRegistryOptions } from "./runRegistry.js";
 import { parseModelPrices } from "./modelPricing.js";
 import { InMemoryRunStore, type RunStore } from "./runStore.js";
 import { createRunsService, type RunActor, type RunsService } from "./runsService.js";
+import { assembleRunRecord } from "./dispatch/record.js";
+import { pipelineOfEvents } from "./pipelineStanding.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
 import type { ChatMessage } from "./chatMessage.js";
 import type { Predicate } from "./authz/types.js";
@@ -2188,8 +2190,8 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     ...over,
   });
 
-  async function hostedWorld() {
-    const { reg } = testRegistry();
+  async function hostedWorld(regOver: Parameters<typeof testRegistry>[0] = {}) {
+    const { reg } = testRegistry(regOver);
     const ledger = new InMemoryRunLedger(() => NOW);
     const units = new InMemoryCoordinatorInstanceStore();
     await units.putUnits([
@@ -2288,5 +2290,144 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
       value: { id: "far-host", mode: "hard", state: "stopping" },
     });
     expect(ledger.live.get("far-host")!.stop).toBe("hard");
+  });
+
+  // Record 0065 — the seal must carry the registry's whole-list standing:
+  // `RunState.pipelineEvents` is kept whole beside the bounded backlog exactly
+  // because the trim may drop a ship event (they are not head material), so a
+  // record folded over the trimmed snapshot could demote a round or lose a
+  // unit's pull request while the live summary had it right.
+  it("a hard stop's sealed record carries the registry's whole-list standing even when the backlog trimmed ship events out of the snapshot", async () => {
+    const { reg, ledger, svc, id } = await hostedWorld({ backlogLimit: 3 });
+    const shipEvents: RunEvent[] = [
+      { type: "ship_unit", unit: "U16", state: "started", at: NOW - 9_000 },
+      { type: "ship_round", index: 0, agent: "coding", outcome: "started", at: NOW - 8_000 },
+      { type: "ship_unit", unit: "U16", state: "started", at: NOW - 8_000 },
+      { type: "ship_round", index: 0, agent: "coding", outcome: "pr_opened", at: NOW - 5_000 },
+      { type: "ship_unit", unit: "U16", state: "pr_opened", pr: 412, at: NOW - 5_000 },
+      { type: "ship_round", index: 1, agent: "review", outcome: "started", at: NOW - 4_000 },
+      { type: "ship_unit", unit: "U16", state: "started", at: NOW - 4_000 },
+    ];
+    for (const e of shipEvents) reg.publish(id, e);
+    const live = reg.getById(id)!.pipeline;
+    expect(live?.current).toMatchObject([{ unit: "U16", stage: "review", round: 1, pr: 412 }]);
+    expect(await svc.stopRun(id, "hard", actor)).toMatchObject({ ok: true });
+    const rec = ledger.finished.get(id)!;
+    // The guard is real: the trimmed events on the record fold to a DIFFERENT
+    // standing (the round demoted, the pull request gone) than the one sealed.
+    expect(pipelineOfEvents(rec.events)).not.toEqual(live);
+    expect(rec.pipeline).toEqual(live);
+  });
+});
+
+// The standing fold's three carriers (record 0065): one event list must read
+// as ONE standing on the registry summary (a fresh publish and the re-host
+// replay), the ledger view of a row live under another generation, and the
+// assembled record's row — the fold is the only reader of the ship events.
+describe("the registry summary, the ledger view and the record carry one standing", () => {
+  const shipEvents: RunEvent[] = [
+    { type: "ship_unit", unit: "U12", state: "started", at: NOW - 9_000 },
+    { type: "ship_round", index: 0, agent: "coding", outcome: "started", at: NOW - 8_000 },
+    { type: "ship_unit", unit: "U12", state: "started", at: NOW - 8_000 },
+    { type: "ship_round", index: 0, agent: "coding", outcome: "pr_opened", at: NOW - 5_000 },
+    { type: "ship_unit", unit: "U12", state: "pr_opened", pr: 412, at: NOW - 5_000 },
+    { type: "ship_round", index: 1, agent: "review", outcome: "started", at: NOW - 4_000 },
+    { type: "ship_unit", unit: "U12", state: "started", at: NOW - 4_000 },
+  ];
+  const expected = {
+    total: 1,
+    current: [{ unit: "U12", stage: "review", round: 1, segment: 1, since: NOW - 5_000, pr: 412 }],
+  };
+
+  it("one event list yields one standing on publish, on the re-host replay, on the ledger view and on the record", async () => {
+    // The registry summary, folded at publish (appendToBacklog).
+    const { reg } = testRegistry();
+    const run = reg.create("ship · acme/api", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:1.0",
+      hosted: true,
+    });
+    for (const e of shipEvents) reg.publish(run.id, e);
+    const live = reg.getById(run.id);
+    expect(live?.pipeline).toMatchObject(expected);
+    expect(live?.pipeline?.counts).toMatchObject({ review: 1, coding: 0 });
+
+    // The re-host replay: create() with the ledger's events under their seqs.
+    const { reg: reg2 } = testRegistry();
+    reg2.create(
+      "ship · acme/api",
+      { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0", hosted: true },
+      { id: "rehost-1", startedAt: NOW - 10_000, replay: shipEvents.map((e, i) => ({ ...e, seq: i + 1 })) },
+    );
+    expect(reg2.getById("rehost-1")?.pipeline).toEqual(live?.pipeline);
+
+    // The ledger view: a hosted row live under another generation, its
+    // mirrored events folded on read.
+    const { reg: reg3, store } = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const svc = createRunsService({ registry: reg3, store, ledger });
+    await ledger.claim({
+      runId: "far-host",
+      threadKey: "slack:C1:1.0#host",
+      gen: "g-OTHER",
+      leaseMs: 30_000,
+      startedAt: NOW - 10_000,
+      meta: {
+        channelId: "slack:C1",
+        userId: "slack:UALICE",
+        threadKey: "slack:C1:1.0",
+        agent: "ship",
+        channelVisibility: "public",
+        hosted: true,
+      },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    await ledger.append("far-host", "g-OTHER", shipEvents.map((e, i) => ({ ...e, seq: i + 1 })) as never);
+    const listed = await svc.listRuns({ visibleTo: ALL, status: "active" });
+    const farRow = listed.runs.find((r) => r.id === "far-host");
+    expect(farRow?.pipeline).toEqual(live?.pipeline);
+
+    // The assembled record: the fold at the seal, plus the hosted marker; the
+    // stored row then projects both onto the persisted view.
+    const rec = record("ship-1", NOW - 1_000, {
+      agent: "ship",
+      events: shipEvents.map((e, i) => ({ ...e, seq: i + 1 })),
+      hosted: true,
+      pipeline: live!.pipeline,
+    });
+    const assembled = assembleRunRecord({
+      run: { id: "ship-1" },
+      snap: {
+        events: shipEvents,
+        finished: true,
+        startedAt: NOW - 10_000,
+        finishedAt: NOW - 1_000,
+        eventCount: shipEvents.length,
+        stepCount: shipEvents.length,
+        truncated: false,
+      },
+      agent: "ship",
+      msg: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0" },
+      channelVisibility: "public",
+      hosted: true,
+      finishedAt: NOW - 1_000,
+      status: "completed",
+      diagnosis: analyzeRunFriction(shipEvents),
+    });
+    expect(assembled.pipeline).toEqual(live?.pipeline);
+    expect(assembled.hosted).toBe(true);
+    await store!.put(rec);
+    const got = await svc.getRun("ship-1", {});
+    expect(got.ok && got.value.pipeline).toEqual(live?.pipeline);
+    expect(got.ok && got.value.hosted).toBe(true);
+
+    // A record without the fields projects neither (written before the field).
+    await store!.put(record("old-1", NOW - 2_000));
+    const old = await svc.getRun("old-1", {});
+    expect(old.ok && old.value).not.toHaveProperty("pipeline");
+    expect(old.ok && old.value).not.toHaveProperty("hosted");
   });
 });

@@ -1439,7 +1439,13 @@ async function branch(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
   }
 }
 
-const ROUND_OUTCOMES: readonly ShipRoundOutcome[] = [
+/** Every word the runner may report a round with — the whole of
+ *  `ShipRoundOutcome`, pinned below so the route and the union can never
+ *  drift apart again (record 0065; a renewed round 0's `continued` once threw
+ *  in the driver because the route lacked it, issue 1968). `idle` has no emitter
+ *  until record 0051's wake lands; accepted now so rows written then read
+ *  beside today's. */
+const ROUND_OUTCOMES = [
   "started",
   "pr_opened",
   "completed",
@@ -1449,7 +1455,14 @@ const ROUND_OUTCOMES: readonly ShipRoundOutcome[] = [
   "checks_failed",
   "aborted",
   "stopped",
-];
+  "continued",
+  "idle",
+] as const satisfies readonly ShipRoundOutcome[];
+// Type-level exhaustiveness: an outcome added to the union and missing here
+// leaves `MissingRoundOutcome` non-never, and this assignment fails the build.
+type MissingRoundOutcome = Exclude<ShipRoundOutcome, (typeof ROUND_OUTCOMES)[number]>;
+const ROUND_OUTCOMES_COVER_THE_UNION: [MissingRoundOutcome] extends [never] ? true : never = true;
+void ROUND_OUTCOMES_COVER_THE_UNION;
 
 /** One line per unit on the parent's card: the round in flight or how the unit
  *  ended — the task wording (no unit id) for a generated plan's one unit. The
@@ -2157,6 +2170,10 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
       },
       channelVisibility: visibility,
       repo: instance.repo,
+      hosted: true, // the host run is the pipeline's parent (record 0060)
+      // The registry's whole-list standing (record 0065): the snapshot is the
+      // trimmed backlog, which may have dropped a ship event.
+      ...(summary?.pipeline !== undefined ? { pipeline: summary.pipeline } : {}),
       finishedAt,
       status: body.outcome,
       diagnosis: analyzeRunFriction(snap?.events ?? [], {

@@ -8,6 +8,7 @@ import { ALL_GRANTS, grantsFor, parseGrantsConfig } from "../authz/grants.js";
 import type { Actor } from "../authz/types.js";
 import { chatCallerFor } from "../commandChat.js";
 import { CommandRegistry, renderText, UNTRUSTED_OPEN, type Caller } from "../commandRegistry.js";
+import { pipelineOfEvents } from "../pipelineStanding.js";
 import type { ChatMessage } from "../chatMessage.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
@@ -579,6 +580,41 @@ describe("runs.get / runs.events / runs.friction", () => {
     // A record from before usage existed has no cost line at all.
     const old = await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, reader, deps);
     expect(renderText(get, old.ok ? old.value : null)).not.toContain("cost:");
+  });
+
+  // Record 0065: a hosted parent's standing rides the view as `pipeline` on
+  // every surface — JSON verbatim, and the text render prints the block under
+  // the meta lines; a record without the field prints no block.
+  it("runs.get prints the pipeline's standing under the meta block and carries it as JSON", async () => {
+    const { registry, store, deps } = await setup();
+    const machine = { channelId: "mcp:X", channelVisibility: "machine" as const };
+    const shipEvents: RunEvent[] = [
+      { type: "ship_unit", unit: "U12", state: "started", at: NOW - 9_000, seq: 1 },
+      { type: "ship_round", index: 0, agent: "coding", outcome: "pr_opened", at: NOW - 5_000, seq: 2 },
+      { type: "ship_unit", unit: "U12", state: "pr_opened", pr: 412, at: NOW - 5_000, seq: 3 },
+      { type: "ship_unit", unit: "U16", state: "merged", at: NOW - 4_000, seq: 4 },
+    ];
+    await store.put(
+      record("fin-host", NOW - 200, {
+        ...machine,
+        agent: "ship",
+        hosted: true,
+        events: shipEvents,
+        pipeline: pipelineOfEvents(shipEvents),
+      }),
+    );
+    const get = runsCommands.find((c) => c.id === "runs.get")!;
+    const out = await registry.invoke("runs.get", { args: ["fin-host"], options: {} }, reader, deps);
+    const view = value<{ hosted?: true; pipeline?: { total: number } }>(out);
+    expect(view.hosted).toBe(true);
+    expect(view.pipeline?.total).toBe(2);
+    const text = renderText(get, out.ok ? out.value : null);
+    expect(text).toContain("id: fin-host"); // the meta lines stay
+    expect(text).toContain("pipeline: 2 units — 1 review · 1 merged");
+    expect(text).toContain(`  U12 review · round 0 · #${412}`);
+    // A record without the field prints no block (written before it existed).
+    const old = await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, reader, deps);
+    expect(renderText(get, old.ok ? old.value : null)).not.toContain("pipeline:");
   });
 
   // run-history item 27: the provisional tombstone's third state on the CLI.
