@@ -12,6 +12,7 @@ import {
   type CommandRegistry,
   type JsonObject,
   type JsonValue,
+  type ParsedCommandInput,
 } from "../commandRegistry.js";
 
 export { MCP_OFF_MESSAGE };
@@ -62,6 +63,15 @@ const channelOption = z
   .optional()
   .describe("target channel for `--scope channel` and for `list` (default: the channel you are speaking in)");
 const nameArg = { name: "name", schema: serverName, describe: "the server's name (see `mcp list`)" } as const;
+
+/** Record 0057's audit rule over the parsed scope option: a `me` server is the
+ *  caller's own — write; `channel` or `org` changes what every run in the
+ *  scope can reach — destructive. An absent scope is the handler's own `me`
+ *  default (the narrowest — never a widening default, which the conformance
+ *  suite refuses); anything the enum did not accept never reaches here
+ *  (`boundBlastRadius` fails closed). */
+const destructiveBeyondMe = (input: ParsedCommandInput): boolean =>
+  input.options.scope !== undefined && input.options.scope !== "me";
 /** A platform-namespaced user id (AGENTS.md invariant 4): `slack:U…`, `cli:local`, `access:<sub>`. */
 const USER_ID_PATTERN = /^[a-z]+:[A-Za-z0-9_.@-]{1,200}$/;
 
@@ -263,8 +273,9 @@ export const mcpPromote = defineCommand({
   // table's, at the door: the same `mcp:write` on `config-scope { org }` that `mcp add --scope org` asks.
   resource: () => ({ type: "config-scope", kind: "org" }),
   effect: "write",
-  // Reversible by `mcp remove`; it changes what every run in the org can reach.
-  annotations: { destructive: false, risk: () => "adds or moves a server every run in the scope can use" },
+  // Org-only by definition: it changes what every run in the org can reach,
+  // so it is destructive at its every input (record 0057's audit rule).
+  annotations: { destructive: true, risk: () => "adds or moves a server every run in the scope can use" },
   describe:
     "Re-issue a person's MCP server in the org tier (admins): the same name, URL and auth, added by you; a bearer/oauth server gets a fresh org connect link for you to complete — the person's credential is never copied.",
   render: renderAdd,
@@ -313,8 +324,12 @@ export const mcpAdd = defineCommand({
   }),
   action: "mcp:write",
   effect: "write",
-  // Reversible by `mcp remove`; a token entered through the link is never in chat.
-  annotations: { destructive: false, risk: () => "adds or moves a server every run in the scope can use" },
+  // A token entered through the link is never in chat; a shared scope changes
+  // what every run in it can reach — destructive beyond `me` (record 0057).
+  annotations: {
+    destructive: destructiveBeyondMe,
+    risk: () => "adds or moves a server every run in the scope can use",
+  },
   describe:
     "Register an external MCP server for yourself, this channel, or the org — auth is detected from the server; sign-in or a token happens on a one-time link, never in chat.",
   render: renderAdd,
@@ -342,7 +357,12 @@ export const mcpConnect = defineCommand({
   options: z.object({ scope: scopeOption, channel: channelOption }),
   action: "mcp:write",
   effect: "write",
-  annotations: { destructive: false, risk: () => "adds or moves a server every run in the scope can use" },
+  // Replacing a shared server's credential changes what every run in the
+  // scope reaches — destructive beyond `me` (record 0057).
+  annotations: {
+    destructive: destructiveBeyondMe,
+    risk: () => "adds or moves a server every run in the scope can use",
+  },
   describe:
     "A fresh one-time link to sign in to an OAuth server or enter (or replace) a bearer server's token — only you can complete it; it expires in 10 minutes.",
   render: renderAdd,

@@ -263,7 +263,15 @@ describe("the real catalogue", () => {
         .filter((c) => c.blastRadius === "destructive")
         .map((c) => c.id)
         .sort(),
-    ).toEqual(["friction.propose", "mcp.remove", "memory.forget", "repo.offboard", "repo.rebuild", "runs.stop"]);
+    ).toEqual([
+      "friction.propose",
+      "mcp.promote",
+      "mcp.remove",
+      "memory.forget",
+      "repo.offboard",
+      "repo.rebuild",
+      "runs.stop",
+    ]);
     expect(real.filter((c) => c.effect === "read").every((c) => c.blastRadius === "read")).toBe(true);
   });
 

@@ -30,8 +30,8 @@ import { RunStoreFrictionLedger } from "./frictionLedger.js";
 import { NO_CAPABILITIES, type Capabilities } from "./capabilities.js";
 import { routableCommands } from "./dispatch/route.js";
 import { ROUTE_COMMAND_DECOYS, ROUTE_COMMAND_FIXTURES } from "../load/routeCommandFixtures.js";
-import { blastRadiusGaps, fixturesFor } from "./testing/commandConformance.js";
-import { parseInput } from "./commandRegistry.js";
+import { blastRadiusGaps, fixturesFor, scopeDefaultGaps } from "./testing/commandConformance.js";
+import { boundBlastRadius, parseInput } from "./commandRegistry.js";
 import { dependsOn, isEnabled, withOff, withOn } from "./capabilityGating.js";
 import { RunRegistry } from "./runRegistry.js";
 import { InMemoryRunStore } from "./runStore.js";
@@ -315,6 +315,125 @@ describe("command conformance — catalogue fences", () => {
       expect.stringMatching(/^demo\.silent: annotations\.destructive is not declared/),
       expect.stringMatching(/^demo\.norisk: annotations\.risk is missing/),
       expect.stringMatching(/^demo\.mute: annotations\.risk answered an empty line/),
+    ]);
+  });
+
+  // Record 0057: the class can be a predicate over the
+  // PARSED input — one declaration classes `config set channel` destructive and
+  // `config set me` write — and the suite proves totality and fail-closed
+  // parsing, never the predicate's judgement (that is the audit table's).
+  it("blast radius: the scope predicates class over the parsed input — `me` is write, a shared scope is destructive, and a look-alike, a wrong case or an array never classes write", () => {
+    const byId = new Map(CATALOGUE.map((c) => [c.id, c]));
+    const radiusOf = (id: string, args: unknown[], options: Record<string, unknown> = {}) =>
+      boundBlastRadius(byId.get(id)!, { args, options });
+    // config set|clear|instructions: the positional scope decides.
+    expect(radiusOf("config.set", ["me"])).toBe("write");
+    expect(radiusOf("config.set", ["channel"])).toBe("destructive");
+    expect(radiusOf("config.set", ["thread"])).toBe("destructive");
+    expect(radiusOf("config.clear", ["me"])).toBe("write");
+    expect(radiusOf("config.clear", ["channel"])).toBe("destructive");
+    expect(radiusOf("config.clear", ["thread"])).toBe("destructive");
+    expect(radiusOf("config.instructions", ["me", "be brief"])).toBe("write");
+    expect(radiusOf("config.instructions", ["channel", "be brief"])).toBe("destructive");
+    // mcp add|connect: the scope option decides; absent is the handler's own `me`.
+    expect(radiusOf("mcp.add", ["srv"], { url: "https://example.test/mcp" })).toBe("write");
+    expect(radiusOf("mcp.add", ["srv"], { url: "https://example.test/mcp", scope: "me" })).toBe("write");
+    expect(radiusOf("mcp.add", ["srv"], { url: "https://example.test/mcp", scope: "channel" })).toBe("destructive");
+    expect(radiusOf("mcp.add", ["srv"], { url: "https://example.test/mcp", scope: "org" })).toBe("destructive");
+    expect(radiusOf("mcp.connect", ["srv"])).toBe("write");
+    expect(radiusOf("mcp.connect", ["srv"], { scope: "me" })).toBe("write");
+    expect(radiusOf("mcp.connect", ["srv"], { scope: "channel" })).toBe("destructive");
+    expect(radiusOf("mcp.connect", ["srv"], { scope: "org" })).toBe("destructive");
+    // A value the schema refuses classes destructive — fail closed, never the narrow word.
+    for (const cmd of ["config.set", "config.clear"]) {
+      for (const scope of ["CHANNEL", " channel", "сhannel", ["channel"], "ME", ["me"]]) {
+        expect(radiusOf(cmd, [scope]), `${cmd} scope ${JSON.stringify(scope)}`).toBe("destructive");
+      }
+    }
+    for (const scope of ["ORG", " org", "оrg", ["org"], "ME", ["me"]]) {
+      expect(
+        radiusOf("mcp.add", ["srv"], { url: "https://example.test/mcp", scope }),
+        `mcp.add scope ${JSON.stringify(scope)}`,
+      ).toBe("destructive");
+    }
+    // The audit's unconditional booleans: destructive at every input.
+    for (const id of ["memory.forget", "mcp.remove", "mcp.promote", "runs.stop"]) {
+      expect(byId.get(id)!.annotations?.destructive, id).toBe(true);
+    }
+  });
+
+  it("blast radius: a predicate is total over the schema's enum grid — one that throws for an enum value is named with the variant, and a total one passes", () => {
+    const define = commandDefiner<CoreCommandDeps>();
+    const handler = async () => ({});
+    const scopeArg = { name: "scope", schema: z.enum(["channel", "me"]), describe: "scope" } as const;
+    const partial = define({
+      id: "demo.partial",
+      args: [scopeArg],
+      action: "config:write",
+      effect: "write",
+      annotations: {
+        destructive: (input) => {
+          if (input.args.scope === "me") throw new Error("unhandled shape");
+          return true;
+        },
+        risk: () => "a line",
+      },
+      describe: "a predicate with a hole",
+      handler,
+    });
+    const total = define({
+      id: "demo.total",
+      args: [scopeArg],
+      action: "config:write",
+      effect: "write",
+      annotations: { destructive: (input) => input.args.scope !== "me", risk: () => "a line" },
+      describe: "a total predicate",
+      handler,
+    });
+    expect(blastRadiusGaps([total] as CommandDef<unknown>[])).toEqual([]);
+    expect(blastRadiusGaps([partial] as CommandDef<unknown>[])).toEqual([
+      expect.stringMatching(/^demo\.partial: annotations\.destructive threw for scope=me/),
+    ]);
+    // The whole catalogue's predicates are total — the live fence over the real declarations.
+    expect(blastRadiusGaps(CATALOGUE)).toEqual([]);
+  });
+
+  it("blast radius: no chat-exposed write carries a scope-like argument with a widening default — a defaulted one is named; a default of `me` and an optional without a default pass", () => {
+    expect(scopeDefaultGaps(CATALOGUE)).toEqual([]);
+    const define = commandDefiner<CoreCommandDeps>();
+    const handler = async () => ({});
+    const widened = define({
+      id: "demo.widescope",
+      options: z.object({ scope: z.enum(["me", "channel", "org"]).default("org") }),
+      action: "config:write",
+      effect: "write",
+      annotations: { destructive: (input) => input.options.scope !== "me", risk: () => "a line" },
+      describe: "a scope that defaults wide",
+      handler,
+    });
+    const narrow = define({
+      id: "demo.mescope",
+      options: z.object({ scope: z.enum(["me", "channel", "org"]).default("me") }),
+      action: "config:write",
+      effect: "write",
+      annotations: { destructive: (input) => input.options.scope !== "me", risk: () => "a line" },
+      describe: "a scope that defaults to me",
+      handler,
+    });
+    const bare = define({
+      id: "demo.noscope",
+      options: z.object({ scope: z.enum(["me", "channel", "org"]).optional() }),
+      action: "config:write",
+      effect: "write",
+      annotations: {
+        destructive: (input) => input.options.scope !== undefined && input.options.scope !== "me",
+        risk: () => "a line",
+      },
+      describe: "a scope with no default",
+      handler,
+    });
+    expect(scopeDefaultGaps([widened, narrow, bare] as CommandDef<unknown>[])).toEqual([
+      expect.stringMatching(/^demo\.widescope: scope defaults to "org"/),
     ]);
   });
 

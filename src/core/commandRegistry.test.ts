@@ -10,6 +10,7 @@ import {
   PLAN_ONLY_RISK,
   bindCommands,
   blastRadius,
+  boundBlastRadius,
   commandDefiner,
   defineCommand,
   dryRunRequested,
@@ -1170,6 +1171,76 @@ describe("blastRadius — the class a definition's own fields decide, derived on
     ).toBe("destructive");
   });
 
+  // Record 0057: the class can depend on the input,
+  // and then it is a predicate over the PARSED input — evaluated after
+  // `parseInput`, never over raw strings a look-alike can fool.
+  it("a write declaring a predicate classes over the parsed input: true → destructive, false → write", () => {
+    const cmd = define({
+      ...base,
+      id: "a.scope",
+      args: [{ name: "scope", schema: z.enum(["channel", "me"]), describe: "scope" }],
+      action: "a:write",
+      effect: "write",
+      annotations: { destructive: (input) => input.args.scope !== "me" },
+    });
+    expect(blastRadius(cmd, { args: { scope: "channel" }, options: {} })).toBe("destructive");
+    expect(blastRadius(cmd, { args: { scope: "me" }, options: {} })).toBe("write");
+  });
+
+  it("a thrown predicate classes as destructive — fail closed, never a throw out of the class", () => {
+    const cmd = define({
+      ...base,
+      id: "a.throws",
+      action: "a:write",
+      effect: "write",
+      annotations: {
+        destructive: () => {
+          throw new Error("predicate bug");
+        },
+      },
+    });
+    expect(blastRadius(cmd, { args: {}, options: {} })).toBe("destructive");
+  });
+
+  it("a predicate with no parsed input in hand reads as the base `write` — the catalogue column and the MCP hints, where no input exists; every deciding path passes the bound input", () => {
+    const cmd = define({
+      ...base,
+      id: "a.rest",
+      action: "a:write",
+      effect: "write",
+      annotations: { destructive: () => true },
+    });
+    expect(blastRadius(cmd)).toBe("write");
+  });
+
+  it("a read and an exec-class write keep their class whatever the predicate says", () => {
+    expect(
+      blastRadius(
+        define({
+          ...base,
+          id: "a.look",
+          action: "a:read",
+          effect: "read",
+          annotations: { destructive: () => true, risk: () => "never shown" },
+        }),
+        { args: {}, options: {} },
+      ),
+    ).toBe("read");
+    expect(
+      blastRadius(
+        define({
+          ...base,
+          id: "a.op",
+          action: "a:exec",
+          resource: () => ({ type: "agent", name: "coding" }),
+          effect: "write",
+          annotations: { destructive: () => true },
+        }),
+        { args: {}, options: {} },
+      ),
+    ).toBe("exec");
+  });
+
   it("dryRunRequested reads the parsed input's --dry-run and nothing else; the plan-only risk line is one constant", () => {
     expect(dryRunRequested({ options: { dryRun: true } })).toBe(true);
     expect(dryRunRequested({ options: { dryRun: false } })).toBe(false);
@@ -1177,5 +1248,70 @@ describe("blastRadius — the class a definition's own fields decide, derived on
     expect(dryRunRequested({})).toBe(false);
     expect(dryRunRequested({ args: ["acme/api"], options: { dryRun: "true" } })).toBe(false);
     expect(PLAN_ONLY_RISK).toBe("plan only; changes nothing");
+  });
+});
+
+// Record 0057: the door's helper — parse with the
+// command's own schemas, then class over what parsed; an input the schema
+// refuses classes as `destructive`, fail closed, because an input nobody
+// vetted gets the widest word, never the narrow one.
+describe("boundBlastRadius — parses, then classes; a parse failure is destructive", () => {
+  const define = commandDefiner<Record<string, never>>();
+  const base = { describe: "d", handler: async () => ({}) };
+  const scoped = define({
+    ...base,
+    id: "b.set",
+    args: [{ name: "scope", schema: z.enum(["channel", "me"]), describe: "scope" }],
+    action: "b:write",
+    effect: "write",
+    annotations: { destructive: (input) => input.args.scope !== "me" },
+  });
+
+  it("a parsed input reaches the predicate: me → write, channel → destructive", () => {
+    expect(boundBlastRadius(scoped, { args: ["me"] })).toBe("write");
+    expect(boundBlastRadius(scoped, { args: ["channel"] })).toBe("destructive");
+  });
+
+  it("an input the schema refuses classes as destructive — a look-alike, a wrong case, an array — never write", () => {
+    expect(boundBlastRadius(scoped, { args: ["CHANNEL"] })).toBe("destructive");
+    expect(boundBlastRadius(scoped, { args: [" channel"] })).toBe("destructive");
+    // A Cyrillic с in place of the Latin c — the same glyph to an eye, not to the enum.
+    expect(boundBlastRadius(scoped, { args: ["сhannel"] })).toBe("destructive");
+    expect(boundBlastRadius(scoped, { args: [["channel"]] })).toBe("destructive");
+    expect(boundBlastRadius(scoped, { args: [] })).toBe("destructive");
+  });
+
+  it("a boolean-declared write is destructive on a parse failure too — the fail-closed rule is the helper's, not the predicate's", () => {
+    const plain = define({
+      ...base,
+      id: "b.put",
+      args: [{ name: "name", schema: z.string().min(1), describe: "name" }],
+      action: "b:write",
+      effect: "write",
+      annotations: { destructive: false },
+    });
+    expect(boundBlastRadius(plain, { args: ["ok"] })).toBe("write");
+    expect(boundBlastRadius(plain, { args: [] })).toBe("destructive");
+    expect(boundBlastRadius(plain, { args: ["ok", "surplus"] })).toBe("destructive");
+  });
+
+  it("a read stays read and an exec-class write stays exec, whatever the input — running either changes nothing of the bot's own", () => {
+    const read = define({
+      ...base,
+      id: "b.show",
+      args: [{ name: "id", schema: z.string(), describe: "id" }],
+      action: "b:read",
+      effect: "read",
+    });
+    const exec = define({
+      ...base,
+      id: "b.exec",
+      args: [{ name: "repo", schema: z.string(), describe: "repo" }],
+      action: "b:exec",
+      resource: () => ({ type: "agent", name: "coding" }),
+      effect: "write",
+    });
+    expect(boundBlastRadius(read, { args: [] })).toBe("read");
+    expect(boundBlastRadius(exec, { args: [] })).toBe("exec");
   });
 });

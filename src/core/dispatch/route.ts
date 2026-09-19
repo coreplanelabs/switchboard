@@ -70,6 +70,7 @@ import type { RequestTrace } from "../requestTrace.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
 import {
   blastRadius,
+  boundBlastRadius,
   CommandRegistry,
   type CommandDef,
   type CommandEffect,
@@ -142,12 +143,20 @@ export { HAND_BACK_PREFIX };
  * misread sentence costs one wasted run and nothing to undo), a `write` or a
  * `destructive` command is handed back — the door exactly as it was. Under
  * `destructive`, the one other settable class, a `write` runs too.
+ *
+ * With the bound `input` (record 0057: the door always passes it) the class is
+ * read over the PARSED input — `boundBlastRadius` parses with the command's
+ * own schemas before it classes, so a definition whose `destructive` is a
+ * predicate answers per input (`config set me` write, `config set channel`
+ * destructive) and an input the schema refuses classes as destructive, fail
+ * closed. Without an input the definition alone decides, as before.
  */
 export function routedRunsAtOnce(
-  def: Pick<CommandDef<unknown>, "effect" | "action" | "annotations">,
+  def: Pick<CommandDef<unknown>, "effect" | "action" | "annotations" | "args" | "options">,
   confirm: ConfirmClass,
+  input?: CommandInput,
 ): boolean {
-  const radius = blastRadius(def);
+  const radius = input === undefined ? blastRadius(def) : boundBlastRadius(def, input);
   return radius === "read" || CONFIRM_ORDER[radius] < CONFIRM_ORDER[confirm];
 }
 
@@ -1363,9 +1372,13 @@ async function answerCommand(
   // any of the defaults', the channel's and the user's boundaries named, or the
   // built-in `write` — read here, at the one place the door decides.
   const confirm = effectiveConfirm(routeDeps.config.boundaryLayers(msg.channelId, msg.userId));
-  if (!routedRunsAtOnce(def, confirm.value)) {
+  // The parse comes before the class (record 0057): the bound input is
+  // validated with the command's own schemas inside `boundBlastRadius`, so the
+  // class — and the risk line the offer shows — are read over what parsed,
+  // and a bind the schema refuses is handed back as destructive, never run.
+  if (!routedRunsAtOnce(def, confirm.value, decided.input)) {
     console.log(
-      `[route] ${msg.threadKey} handed back ${def.id} on ${modelRef} (${blastRadius(def)} at or after confirm ${confirm.value}, ${confirm.scope}): ${receipt}`,
+      `[route] ${msg.threadKey} handed back ${def.id} on ${modelRef} (${boundBlastRadius(def, decided.input)} at or after confirm ${confirm.value}, ${confirm.scope}): ${receipt}`,
     );
     return answerHandBack(branch, msg, def, decided.input, route, receipt, confirm, root);
   }
