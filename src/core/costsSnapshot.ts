@@ -4,9 +4,12 @@ import {
   resolveRange,
   type CloudflareUsageSource,
   type CostGroupConfig,
+  buildBillerTieOuts,
   type CostReport,
   type CostReportMeta,
+  type InvoiceDay,
   type LlmCostSource,
+  type LlmInvoiceSource,
 } from "./costs.js";
 import { buildCostsByReport, type CostDimension, type CostsByReport } from "./costsBy.js";
 import type { CostsSnapshot, CostsSnapshotStore } from "./costsSnapshotStore.js";
@@ -103,6 +106,8 @@ export interface CostsSnapshotStatus {
 export interface CostsSnapshotSources {
   cloudflare: CloudflareUsageSource;
   llm: LlmCostSource;
+  /** One invoice source per provider block that names one (costs.md item 4d). */
+  invoices?: LlmInvoiceSource[];
   runStore?: RunStore;
 }
 
@@ -113,6 +118,9 @@ export interface TakeOptions {
   now?: () => Date;
   /** The take's start, when the caller already read the clock for it. */
   startedAt?: Date;
+  /** Told when a biller's invoice source fails — that biller is omitted from the
+   *  snapshot ("no invoice" until the next take) rather than failing the whole take. */
+  warn?: (message: string) => void;
 }
 
 const stampOf = (s: CostsSnapshot): CostsSnapshotStamp => ({
@@ -144,9 +152,26 @@ export async function takeCostsSnapshot(sources: CostsSnapshotSources, opts: Tak
   const startedAt = opts.startedAt ?? now();
   const range = resolveRange(String(SNAPSHOT_DAYS), startedAt);
   const store = sources.runStore instanceof NullRunStore ? undefined : sources.runStore;
-  const [usage, llm, runUsage] = await Promise.all([
+  const warn = opts.warn ?? (() => undefined);
+  // A failing invoice source degrades to that biller alone — the other billers'
+  // figures and both main sources stay fresh instead of staling the whole take.
+  const readInvoices = async (): Promise<Record<string, InvoiceDay[]>> => {
+    const out: Record<string, InvoiceDay[]> = {};
+    await Promise.all(
+      (sources.invoices ?? []).map(async (source) => {
+        try {
+          out[source.biller] = await source.fetchInvoice(range);
+        } catch (err) {
+          warn(`invoice source ${source.biller} failed, its tie-out reads "no invoice" this snapshot: ${message(err)}`);
+        }
+      }),
+    );
+    return out;
+  };
+  const [usage, llm, invoices, runUsage] = await Promise.all([
     sources.cloudflare.fetchUsage(range),
     sources.llm.fetchDailyCost(range),
+    readInvoices(),
     store
       ? readRunUsage(store, Date.parse(`${range.from}T00:00:00Z`), Date.parse(`${range.to}T00:00:00Z`) + 86_400_000)
       : Promise.resolve(null),
@@ -158,6 +183,7 @@ export async function takeCostsSnapshot(sources: CostsSnapshotSources, opts: Tak
     range,
     usage,
     llm,
+    invoices,
     runUsage,
   };
 }
@@ -170,12 +196,20 @@ export function reportFromSnapshot(
   cfg: CostGroupConfig,
   daysParam: string | null,
   meta: Omit<CostReportMeta, "generatedAt">,
+  /** The provider blocks and whether each names an invoice source — the billers of item 4d;
+   *  absent (a caller without the wiring) leaves the report without tie-outs. */
+  billers?: ReadonlyArray<{ name: string; invoice: boolean }>,
 ): CostReport {
   const at = Date.parse(snapshot.takenAt);
   const range = resolveRange(daysParam, new Date(at));
+  const tieOuts =
+    billers && billers.length > 0 && snapshot.runUsage
+      ? buildBillerTieOuts(billers, snapshot.invoices ?? {}, snapshot.runUsage.rows, range)
+      : undefined;
   return {
     ...buildCostReport(group, cfg, snapshot.usage, snapshot.llm, range, { ...meta, generatedAt: at }),
     snapshot: stampOf(snapshot),
+    ...(tieOuts ? { billers: tieOuts } : {}),
   };
 }
 
@@ -279,7 +313,7 @@ export class CostsSnapshotter {
   refresh(by: string): Promise<CostsSnapshot> {
     if (this.taking) return this.taking.promise;
     const startedAt = this.now();
-    const promise = takeCostsSnapshot(this.sources, { by, startedAt, now: this.now })
+    const promise = takeCostsSnapshot(this.sources, { by, startedAt, now: this.now, warn: this.warn })
       .then(async (snapshot) => {
         this.memory = snapshot;
         const failed = this.lastFailure;

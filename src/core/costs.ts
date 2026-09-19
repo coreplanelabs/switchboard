@@ -4,6 +4,8 @@ import {
   type AnthropicTokens,
   type ModelPriceTable,
 } from "./modelPricing.js";
+import { parseModelRef } from "./provider.js";
+import type { RunUsage } from "./runUsage.js";
 import { systemClock } from "./trace/clock.js";
 // Spend report: what a group of deployed pieces ("switchboard" = the bot
 // Worker + its containers, the resident/sandbox/memory Workers) costs per day,
@@ -511,6 +513,9 @@ export interface CostReport {
   /** The snapshot the report was built from (src/core/costsSnapshot.ts): when it was
    *  taken, by whom, how long the read took. Absent on a report built straight from the sources. */
   snapshot?: { takenAt: string; takenBy: string; durationMs: number };
+  /** Each biller's daily invoice tie-out (item 4d); absent when no provider block is known
+   *  (a report built without the wiring) or run history is off. */
+  billers?: BillerTieOut[];
 }
 
 /** What the report carries beyond the priced rows: the account behind the
@@ -729,6 +734,208 @@ export interface LlmCostSource {
   fetchDailyCost(range: DateRange): Promise<LlmCostRow[] | null>;
 }
 
+// ---- invoices per biller (costs.md item 4d) ---------------------------------------------
+
+/** One day of a biller's invoice, as its own billing API reports it. */
+export interface InvoiceDay {
+  date: string;
+  /** The biller's invoiced dollars for the day (an aggregator's fee + BYOK upstream). */
+  usd: number;
+  /** An aggregator's own charge (OpenRouter's `usage`) — what the summed `feeUsd` ties against. */
+  feeUsd?: number;
+  /** An aggregator's BYOK upstream half (`byok_usage_inference`) — what the remainder ties against. */
+  byokUsd?: number;
+}
+
+/** One invoice source per provider block that names an invoice API and an
+ *  `invoiceKeyEnv`: the biller's own billing figures, per UTC day. */
+export interface LlmInvoiceSource {
+  /** The provider block this invoice bills — the `biller` its `model.turn` rows carry. */
+  readonly biller: string;
+  fetchInvoice(range: DateRange): Promise<InvoiceDay[]>;
+}
+
+/** One day of a biller's tie-out: its invoice beside the summed `model.turn` rows. */
+export interface BillerTieOutDay {
+  date: string;
+  /** The biller's invoiced dollars; absent when the block names no source. */
+  invoiceUsd?: number;
+  invoiceFeeUsd?: number;
+  invoiceByokUsd?: number;
+  /** The summed `model.turn` dollars whose ref names this block. */
+  attributedUsd: number;
+  /** The summed BYOK fees — the half an aggregator's `usage` ties against. */
+  attributedFeeUsd?: number;
+  /** `attributedUsd − attributedFeeUsd` — the half `byok_usage_inference` ties against. */
+  attributedUpstreamUsd?: number;
+}
+
+/** One biller's daily tie-out over the range. */
+export interface BillerTieOut {
+  biller: string;
+  /** false = the block names no invoice source: it ties out against nothing and the page says "no invoice". */
+  invoice: boolean;
+  days: BillerTieOutDay[];
+  totals: { invoiceUsd: number; attributedUsd: number };
+}
+
+/** The block a ref bills to, or undefined for a ref that names none (`unknown`). */
+const billerOfRef = (ref: string): string | undefined => (ref.includes("/") ? parseModelRef(ref).provider : undefined);
+
+/**
+ * Pure: each biller's invoice compared with the summed `model.turn` rows whose
+ * ref names that block, per UTC day of the range. An aggregator's invoice
+ * halves (`feeUsd`, `byokUsd`) sit beside the summed fees and the remainder. A
+ * model whose `usd` is null or absent (unpriced, or from before the meter row)
+ * contributes nothing to `attributedUsd` — an understated side is honest, an
+ * invented one is not, so a day the source returned no row for keeps its
+ * invoice side absent (the page renders —): the source holds closed days only,
+ * and a trailing uninvoiced day beside real spend is not a $0 invoice. A day
+ * with neither an invoice row nor a nonzero attributed figure is dropped; a
+ * biller without a source (`invoice: false`) ties out against nothing.
+ */
+export function buildBillerTieOuts(
+  billers: ReadonlyArray<{ name: string; invoice: boolean }>,
+  invoices: Readonly<Record<string, InvoiceDay[]>>,
+  cells: ReadonlyArray<{ day: string; usage: RunUsage }>,
+  range: DateRange,
+): BillerTieOut[] {
+  return billers.map(({ name, invoice }) => {
+    const attributed = new Map<string, { usd: number; fee: number; hasFee: boolean }>();
+    for (const cell of cells) {
+      if (cell.day < range.from || cell.day > range.to) continue;
+      for (const [ref, m] of Object.entries(cell.usage.byModel)) {
+        if (billerOfRef(ref) !== name) continue;
+        const day = attributed.get(cell.day) ?? { usd: 0, fee: 0, hasFee: false };
+        if (typeof m.usd === "number") day.usd += m.usd;
+        if (m.feeUsd !== undefined) {
+          day.fee += m.feeUsd;
+          day.hasFee = true;
+        }
+        attributed.set(cell.day, day);
+      }
+    }
+    const invoiced = new Map<string, InvoiceDay>();
+    if (invoice)
+      for (const d of invoices[name] ?? []) if (d.date >= range.from && d.date <= range.to) invoiced.set(d.date, d);
+    const dates = [...new Set([...attributed.keys(), ...invoiced.keys()])].sort().filter((date) => {
+      const a = attributed.get(date);
+      return invoiced.has(date) || (a !== undefined && (a.usd !== 0 || a.hasFee));
+    });
+    const days: BillerTieOutDay[] = dates.map((date) => {
+      const a = attributed.get(date);
+      const inv = invoiced.get(date);
+      return {
+        date,
+        ...(inv ? { invoiceUsd: inv.usd } : {}),
+        ...(inv?.feeUsd !== undefined ? { invoiceFeeUsd: inv.feeUsd } : {}),
+        ...(inv?.byokUsd !== undefined ? { invoiceByokUsd: inv.byokUsd } : {}),
+        attributedUsd: a?.usd ?? 0,
+        ...(a?.hasFee ? { attributedFeeUsd: a.fee, attributedUpstreamUsd: a.usd - a.fee } : {}),
+      };
+    });
+    return {
+      biller: name,
+      invoice,
+      days,
+      totals: {
+        invoiceUsd: days.reduce((s, d) => s + (d.invoiceUsd ?? 0), 0),
+        attributedUsd: days.reduce((s, d) => s + d.attributedUsd, 0),
+      },
+    };
+  });
+}
+
+/** OpenRouter's activity endpoint (`GET /api/v1/activity`, a management key —
+ *  never the inference key): per-day, per-model rows whose `usage` is the
+ *  aggregator's own charge and `byok_usage_inference` the BYOK upstream cost.
+ *  Summed per day; the key travels only in the Authorization header and never
+ *  appears in errors. The endpoint holds roughly the last 30 days, one short of
+ *  the 31-day snapshot range: the oldest window day may come back with no row,
+ *  and the tie-out then leaves that day's invoice side absent (rendered —),
+ *  never an invented $0. */
+export const OPENROUTER_ACTIVITY_URL = "https://openrouter.ai/api/v1/activity";
+export class OpenRouterActivitySource implements LlmInvoiceSource {
+  readonly biller: string;
+  private readonly key: string;
+  private readonly fetchImpl: typeof fetch;
+  constructor(opts: { biller: string; managementKey: string; fetchImpl?: typeof fetch }) {
+    this.biller = opts.biller;
+    this.key = opts.managementKey;
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+  }
+
+  async fetchInvoice(range: DateRange): Promise<InvoiceDay[]> {
+    const res = await this.fetchImpl(OPENROUTER_ACTIVITY_URL, {
+      headers: { authorization: `Bearer ${this.key}` },
+    });
+    if (res.status !== 200) throw new Error(`openrouter activity ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    const body = (await res.json()) as {
+      data?: { date?: string; usage?: number; byok_usage_inference?: number }[];
+    };
+    const byDay = new Map<string, { fee: number; byok: number }>();
+    for (const r of body.data ?? []) {
+      const date = str(r.date).slice(0, 10);
+      if (!date || date < range.from || date > range.to) continue;
+      const d = byDay.get(date) ?? { fee: 0, byok: 0 };
+      d.fee += num(r.usage);
+      d.byok += num(r.byok_usage_inference);
+      byDay.set(date, d);
+    }
+    return [...byDay]
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([date, d]) => ({ date, usd: d.fee + d.byok, feeUsd: d.fee, byokUsd: d.byok }));
+  }
+}
+
+/** OpenAI's organization costs (`GET /v1/organization/costs`, an admin key):
+ *  daily buckets whose results carry `amount.value` dollars. Paginated like the
+ *  Anthropic report, a non-USD row refused the same way, the key never in errors. */
+export const OPENAI_COSTS_URL = "https://api.openai.com/v1/organization/costs";
+export class OpenAICostsSource implements LlmInvoiceSource {
+  readonly biller: string;
+  private readonly key: string;
+  private readonly fetchImpl: typeof fetch;
+  constructor(opts: { biller: string; adminKey: string; fetchImpl?: typeof fetch }) {
+    this.biller = opts.biller;
+    this.key = opts.adminKey;
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+  }
+
+  async fetchInvoice(range: DateRange): Promise<InvoiceDay[]> {
+    const byDay = new Map<string, number>();
+    let page: string | null = null;
+    for (let i = 0; ; i++) {
+      if (i >= MAX_COST_PAGES)
+        throw new Error(`openai organization costs: more than ${MAX_COST_PAGES} pages; refusing a truncated total`);
+      const url = new URL(OPENAI_COSTS_URL);
+      url.searchParams.set("start_time", String(Date.parse(`${range.from}T00:00:00Z`) / 1000));
+      url.searchParams.set("end_time", String(Date.parse(`${addDays(range.to, 1)}T00:00:00Z`) / 1000));
+      url.searchParams.set("limit", String(MAX_DAYS));
+      if (page) url.searchParams.set("page", page);
+      const res = await this.fetchImpl(url.toString(), { headers: { authorization: `Bearer ${this.key}` } });
+      if (res.status !== 200)
+        throw new Error(`openai organization costs ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      const body = (await res.json()) as {
+        data?: { start_time?: number; results?: { amount?: { value?: number; currency?: string } }[] }[];
+        has_more?: boolean;
+        next_page?: string | null;
+      };
+      for (const bucket of body.data ?? []) {
+        const date = new Date(num(bucket.start_time) * 1000).toISOString().slice(0, 10);
+        for (const r of bucket.results ?? []) {
+          const currency = str(r.amount?.currency).toLowerCase();
+          if (currency !== "usd") throw new Error(`openai organization costs: unexpected currency ${currency || "?"}`);
+          byDay.set(date, (byDay.get(date) ?? 0) + num(r.amount?.value));
+        }
+      }
+      if (!body.has_more || !body.next_page) break;
+      page = body.next_page;
+    }
+    return [...byDay].sort(([a], [b]) => (a < b ? -1 : 1)).map(([date, usd]) => ({ date, usd }));
+  }
+}
+
 export class NullLlmCostSource implements LlmCostSource {
   fetchDailyCost(_range: DateRange): Promise<LlmCostRow[] | null> {
     return Promise.resolve(null);
@@ -917,12 +1124,24 @@ type UsageReportBody = {
  *  `estimated` — the page can then show today, and a 1-day range means
  *  something. Read live when this was written: fourteen hourly buckets for the
  *  open day, none at `1d`; the cost report's last bucket was the day before. */
-export class AnthropicCostReportSource implements LlmCostSource {
+export class AnthropicCostReportSource implements LlmCostSource, LlmInvoiceSource {
+  /** The provider block this cost report bills; `anthropic` unless a block renames it. */
+  readonly biller: string;
   private readonly adminKey: string;
   private readonly fetchImpl: typeof fetch;
-  constructor(opts: { adminKey: string; fetchImpl?: typeof fetch }) {
+  constructor(opts: { adminKey: string; biller?: string; fetchImpl?: typeof fetch }) {
+    this.biller = opts.biller ?? "anthropic";
     this.adminKey = opts.adminKey;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+  }
+
+  /** The biller's invoice per day: the cost report's closed days summed across
+   *  workspaces — the invoice, never the estimate (costs.md item 4d). */
+  async fetchInvoice(range: DateRange): Promise<InvoiceDay[]> {
+    const report = await this.fetchCostReport(range);
+    const byDay = new Map<string, number>();
+    for (const r of report.rows) byDay.set(r.date, (byDay.get(r.date) ?? 0) + r.amountUsd);
+    return [...byDay].sort(([a], [b]) => (a < b ? -1 : 1)).map(([date, usd]) => ({ date, usd }));
   }
 
   async fetchDailyCost(range: DateRange): Promise<LlmCostRow[]> {

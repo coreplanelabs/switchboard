@@ -5,6 +5,11 @@ import {
   COSTS_SNAPSHOT_EVERY_HOURS,
   CloudflareGraphqlUsageSource,
   NullLlmCostSource,
+  OPENAI_COSTS_URL,
+  OPENROUTER_ACTIVITY_URL,
+  OpenAICostsSource,
+  OpenRouterActivitySource,
+  buildBillerTieOuts,
   buildCostReport,
   containerCostUsd,
   DAYS_PER_MONTH,
@@ -1004,5 +1009,211 @@ describe("AnthropicCostReportSource", () => {
 describe("NullLlmCostSource", () => {
   it("answers null so the report can say 'not configured' instead of $0", async () => {
     expect(await new NullLlmCostSource().fetchDailyCost(RANGE)).toBeNull();
+  });
+});
+
+// ---- invoices per biller and the tie-out (item 4d) --------------------------------------
+
+const SEP_17 = iso(2026, 9, 17);
+const SEP_18 = iso(2026, 9, 18);
+const SEP_19 = iso(2026, 9, 19);
+
+describe("invoice sources per biller", () => {
+  const RANGE_SEPT = { from: SEP_17, to: SEP_19, days: 3, partialLastDay: false };
+
+  it("OpenRouterActivitySource sums the activity rows' usage and byok_usage_inference per day in range, bearer only in the header, a failure by status without the key", async () => {
+    const f = fakeFetch(() => ({
+      status: 200,
+      body: {
+        data: [
+          { date: SEP_18, usage: 0.03, byok_usage_inference: 0.4 },
+          { date: SEP_18, usage: 0.02, byok_usage_inference: 0.1 },
+          { date: SEP_19, usage: 0.05, byok_usage_inference: 0 },
+          { date: AUG_1, usage: 9, byok_usage_inference: 9 }, // outside the range: dropped
+        ],
+      },
+    }));
+    const src = new OpenRouterActivitySource({
+      biller: "openrouter",
+      managementKey: "or-mgmt-SECRET",
+      fetchImpl: f.fetchImpl,
+    });
+    expect(src.biller).toBe("openrouter");
+    const days = await src.fetchInvoice(RANGE_SEPT);
+    expect(days).toEqual([
+      { date: SEP_18, usd: 0.55, feeUsd: 0.05, byokUsd: 0.5 },
+      { date: SEP_19, usd: 0.05, feeUsd: 0.05, byokUsd: 0 },
+    ]);
+    expect(f.calls[0].url).toBe(OPENROUTER_ACTIVITY_URL);
+    expect((f.calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer or-mgmt-SECRET");
+    const bad = fakeFetch(() => ({ status: 401, body: { error: "nope" } }));
+    const err = await new OpenRouterActivitySource({
+      biller: "openrouter",
+      managementKey: "or-mgmt-SECRET",
+      fetchImpl: bad.fetchImpl,
+    })
+      .fetchInvoice(RANGE_SEPT)
+      .catch((e: unknown) => e as Error);
+    expect(String(err)).toMatch(/openrouter activity 401/);
+    expect(String(err)).not.toContain("SECRET");
+  });
+
+  it("OpenAICostsSource sums the daily buckets' amounts, paginates via next_page, and refuses a non-USD row rather than mis-summing", async () => {
+    const bucket = (day: string, value: number, currency = "usd") => ({
+      start_time: Date.parse(`${day}T00:00:00Z`) / 1000,
+      results: [{ amount: { value, currency } }],
+    });
+    const f = fakeFetch((url) => {
+      const page = new URL(url).searchParams.get("page");
+      return page === null
+        ? { status: 200, body: { data: [bucket(SEP_17, 1.5)], has_more: true, next_page: "p2" } }
+        : { status: 200, body: { data: [bucket(SEP_18, 2.25)], has_more: false, next_page: null } };
+    });
+    const src = new OpenAICostsSource({ biller: "openai", adminKey: "sk-admin-SECRET", fetchImpl: f.fetchImpl });
+    expect(await src.fetchInvoice(RANGE_SEPT)).toEqual([
+      { date: SEP_17, usd: 1.5 },
+      { date: SEP_18, usd: 2.25 },
+    ]);
+    expect(f.calls[0].url).toContain(OPENAI_COSTS_URL);
+    expect(f.calls[0].url).not.toContain("SECRET");
+    expect((f.calls[0].init.headers as Record<string, string>).authorization).toBe("Bearer sk-admin-SECRET");
+    const eur = fakeFetch(() => ({ status: 200, body: { data: [bucket(SEP_17, 3, "eur")] } }));
+    await expect(
+      new OpenAICostsSource({ biller: "openai", adminKey: "k", fetchImpl: eur.fetchImpl }).fetchInvoice(RANGE_SEPT),
+    ).rejects.toThrow(/unexpected currency eur/);
+  });
+
+  it("AnthropicCostReportSource.fetchInvoice sums the cost report's closed days across workspaces — the invoice, never the estimate", async () => {
+    const f = fakeFetch((url) =>
+      url.startsWith("https://api.anthropic.com/v1/organizations/cost_report")
+        ? {
+            status: 200,
+            body: {
+              data: [
+                {
+                  starting_at: midnight(SEP_17),
+                  results: [
+                    { amount: "150", currency: "USD", workspace_id: "w1" },
+                    { amount: "50", currency: "USD", workspace_id: "w2" },
+                  ],
+                },
+              ],
+              has_more: false,
+            },
+          }
+        : { status: 200, body: { data: [], has_more: false } },
+    );
+    const src = new AnthropicCostReportSource({ adminKey: "k", fetchImpl: f.fetchImpl });
+    expect(src.biller).toBe("anthropic");
+    expect(await src.fetchInvoice(RANGE_SEPT)).toEqual([{ date: SEP_17, usd: 2 }]);
+    // the invoice read asks the cost report alone — never the hourly usage estimate
+    expect(f.calls.every((c) => c.url.includes("cost_report"))).toBe(true);
+  });
+});
+
+describe("buildBillerTieOuts", () => {
+  const range = { from: SEP_18, to: SEP_18, days: 1, partialLastDay: false };
+  const model = (usd: number | null, feeUsd?: number) => ({
+    turns: 1,
+    inputTokens: 1,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    ...(usd === null ? { usd: null } : { usd }),
+    ...(feeUsd !== undefined ? { feeUsd } : {}),
+  });
+  const cell = (day: string, byModel: Record<string, ReturnType<typeof model>>) => ({
+    day,
+    usage: { turns: 1, byModel },
+  });
+
+  it("three billers on one day tie out independently, each invoice against the summed rows whose ref names its block", () => {
+    const cells = [
+      cell(SEP_18, {
+        "anthropic/claude-fable-5": model(1.2),
+        "openai/gpt-5": model(0.8),
+        "openrouter/deepseek/deepseek-v4.1-flash": model(0.5, 0.05),
+      }),
+    ];
+    const invoices = {
+      anthropic: [{ date: SEP_18, usd: 1.25 }],
+      openai: [{ date: SEP_18, usd: 0.8 }],
+      openrouter: [{ date: SEP_18, usd: 0.55, feeUsd: 0.05, byokUsd: 0.5 }],
+    };
+    const out = buildBillerTieOuts(
+      [
+        { name: "anthropic", invoice: true },
+        { name: "openai", invoice: true },
+        { name: "openrouter", invoice: true },
+      ],
+      invoices,
+      cells,
+      range,
+    );
+    expect(out.map((t) => t.biller)).toEqual(["anthropic", "openai", "openrouter"]);
+    expect(out[0].days).toEqual([{ date: SEP_18, invoiceUsd: 1.25, attributedUsd: 1.2 }]);
+    expect(out[0].totals).toEqual({ invoiceUsd: 1.25, attributedUsd: 1.2 });
+    expect(out[1].days[0]).toEqual({ date: SEP_18, invoiceUsd: 0.8, attributedUsd: 0.8 });
+    expect(out[2].totals.attributedUsd).toBe(0.5);
+  });
+
+  it("a BYOK day splits fee and upstream: the invoice's usage beside the summed feeUsd, byok_usage_inference beside the remainder", () => {
+    const cells = [cell(SEP_18, { "openrouter/anthropic/claude-fable-5": model(0.55, 0.05) })];
+    const out = buildBillerTieOuts(
+      [{ name: "openrouter", invoice: true }],
+      { openrouter: [{ date: SEP_18, usd: 0.57, feeUsd: 0.06, byokUsd: 0.51 }] },
+      cells,
+      range,
+    );
+    expect(out[0].days[0]).toEqual({
+      date: SEP_18,
+      invoiceUsd: 0.57,
+      invoiceFeeUsd: 0.06,
+      invoiceByokUsd: 0.51,
+      attributedUsd: 0.55,
+      attributedFeeUsd: 0.05,
+      attributedUpstreamUsd: 0.5,
+    });
+  });
+
+  it("a sourced biller's day with attributed spend but no invoice row keeps its invoice side absent — never an invented $0 — and the totals sum the present invoices alone", () => {
+    const cells = [
+      cell(SEP_17, { "anthropic/claude-fable-5": model(1.2) }),
+      cell(SEP_18, { "anthropic/claude-fable-5": model(0.9) }),
+    ];
+    const out = buildBillerTieOuts(
+      [{ name: "anthropic", invoice: true }],
+      { anthropic: [{ date: SEP_17, usd: 1.25 }] },
+      cells,
+      { from: SEP_17, to: SEP_18, days: 2, partialLastDay: false },
+    );
+    expect(out[0].days).toEqual([
+      { date: SEP_17, invoiceUsd: 1.25, attributedUsd: 1.2 },
+      { date: SEP_18, attributedUsd: 0.9 },
+    ]);
+    expect(out[0].days[1]).not.toHaveProperty("invoiceUsd");
+    expect(out[0].totals).toEqual({ invoiceUsd: 1.25, attributedUsd: 2.1 });
+  });
+
+  it("a day with neither an invoice row nor a nonzero attributed figure is dropped — purely unpriced spend yields no 0/0 row", () => {
+    const cells = [cell(SEP_18, { "anthropic/claude-fable-5": model(null) })];
+    const out = buildBillerTieOuts([{ name: "anthropic", invoice: true }], {}, cells, range);
+    expect(out[0].days).toEqual([]);
+  });
+
+  it("a biller without a source ties out against nothing (invoice: false, no invoice figures); a model whose usd is null or absent contributes nothing; days outside the range and refs without a block are dropped", () => {
+    const cells = [
+      cell(SEP_18, { "groq/kimi-k2": model(0.3), "groq/other": model(null), unknown: model(9) }),
+      cell(AUG_1, { "groq/kimi-k2": model(4) }),
+    ];
+    const out = buildBillerTieOuts([{ name: "groq", invoice: false }], {}, cells, range);
+    expect(out).toEqual([
+      {
+        biller: "groq",
+        invoice: false,
+        days: [{ date: SEP_18, attributedUsd: 0.3 }],
+        totals: { invoiceUsd: 0, attributedUsd: 0.3 },
+      },
+    ]);
   });
 });

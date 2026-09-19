@@ -218,6 +218,9 @@ const projectionLine = computed(() => {
 });
 /** Newest first: the open day on top, where the eye lands. */
 const daysNewestFirst = computed(() => (report.value ? [...report.value.days].reverse() : []));
+// Invoice tie-out per biller (costs.md item 4d): each biller's own invoice beside
+// the summed model.turn dollars its refs attributed; newest day first, like the table.
+const billers = computed(() => (report.value?.billers ?? []).map((t) => ({ ...t, days: [...t.days].reverse() })));
 /** The range presets. Both billing sources bucket by UTC day (the cost report
  *  offers nothing finer), so the short one is today, not a rolling 24 hours. */
 const ranges = [1, 7, 30];
@@ -539,6 +542,73 @@ function monthDay(date: string): string {
         Machine-readable twin:
         <code class="rounded bg-accented px-1 py-0.5">GET /costs/{{ report.group }}.json</code> (same Access gate).
       </p>
+    </section>
+
+    <section
+      v-if="view === 'daily' && billers.length"
+      class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4"
+    >
+      <div>
+        <h2 class="text-[0.9375rem] font-medium">Invoice tie-out by biller</h2>
+        <p class="text-xs text-muted">
+          Each biller's own invoice beside the summed <code>model.turn</code> dollars its runs attributed — an
+          aggregator's fee against the summed fees, its BYOK upstream against the remainder.
+        </p>
+      </div>
+      <div v-for="t in billers" :key="t.biller" class="grid gap-1.5" :data-biller="t.biller">
+        <p class="text-sm">
+          <b>{{ t.biller }}</b>
+          <template v-if="t.invoice">
+            · invoice {{ usd(t.totals.invoiceUsd, 4) }} · attributed {{ usd(t.totals.attributedUsd, 4) }}
+          </template>
+          <span v-else class="text-muted"> · no invoice — the block names no invoice source</span>
+        </p>
+        <div v-if="t.days.length" class="overflow-x-auto">
+          <table class="data w-full border-collapse whitespace-nowrap font-mono text-[0.8125rem] tabular-nums">
+            <thead>
+              <tr>
+                <th class="border-b border-muted px-2.5 py-1 text-left text-xs font-medium text-muted">Date</th>
+                <th
+                  v-if="t.invoice"
+                  class="border-b border-muted px-2.5 py-1 text-right text-xs font-medium text-muted"
+                >
+                  Invoice
+                </th>
+                <th class="border-b border-muted px-2.5 py-1 text-right text-xs font-medium text-muted">Attributed</th>
+                <th class="border-b border-muted px-2.5 py-1 text-right text-xs font-medium text-muted">
+                  Fee (invoice / rows)
+                </th>
+                <th class="border-b border-muted px-2.5 py-1 text-right text-xs font-medium text-muted">
+                  Upstream (invoice / remainder)
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="d in t.days" :key="d.date">
+                <td class="border-b border-muted px-2.5 py-1" :title="d.date">{{ monthDay(d.date) }}</td>
+                <td v-if="t.invoice" class="border-b border-muted px-2.5 py-1 text-right">
+                  {{ d.invoiceUsd !== undefined ? usd(d.invoiceUsd, 4) : "—" }}
+                </td>
+                <td class="border-b border-muted px-2.5 py-1 text-right">{{ usd(d.attributedUsd, 4) }}</td>
+                <td class="border-b border-muted px-2.5 py-1 text-right">
+                  <template v-if="d.invoiceFeeUsd !== undefined || d.attributedFeeUsd !== undefined">
+                    {{ d.invoiceFeeUsd !== undefined ? usd(d.invoiceFeeUsd, 4) : "—" }} /
+                    {{ d.attributedFeeUsd !== undefined ? usd(d.attributedFeeUsd, 4) : "—" }}
+                  </template>
+                  <template v-else>—</template>
+                </td>
+                <td class="border-b border-muted px-2.5 py-1 text-right">
+                  <template v-if="d.invoiceByokUsd !== undefined || d.attributedUpstreamUsd !== undefined">
+                    {{ d.invoiceByokUsd !== undefined ? usd(d.invoiceByokUsd, 4) : "—" }} /
+                    {{ d.attributedUpstreamUsd !== undefined ? usd(d.attributedUpstreamUsd, 4) : "—" }}
+                  </template>
+                  <template v-else>—</template>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <!-- The methodology matters and stays — one click away instead of two

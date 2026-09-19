@@ -33,7 +33,7 @@
     "web/src/lib/viewAs.ts": "7907b58fbf6464532a1c3f2ba880b7ea791971ea3f4ce15efaf98da8b4219187",
     "web/src/lib/wallClock.ts": "d81d36cd618a94540500e6ae2b6e867156dcad0e910b644cb6d7bf619a501c6f",
     "web/src/main.ts": "84ca021b55e606fcfd533c2612e66dc777af04760e2153ed1ecfe483810e0827",
-    "web/src/pages/CostsPage.vue": "2feec8c2ebb63bbd1c498ffd6a44f9219adaaee96279b0519354cb3eee42f36a",
+    "web/src/pages/CostsPage.vue": "07fb2b9334bd6c8ac9dd3d0c0f542a638265cbb11a74d91dee97183aa3f0ae58",
     "web/src/routes.ts": "5f60b25334eb08486d5e6e1445edc4887d8e50ae1fd516227994a5bc442eec3f",
     "web/vite.config.ts": "448df7a321d76dcd79e25bf32ce574d83cdc9260996e40457caa0be7a0e910bb"
   }

@@ -913,3 +913,57 @@ describe("CostsPage · the other dimensions", () => {
     expect(hrefs).toContain("/costs/switchboard?days=7&view=threads"); // the range pill keeps the tab
   });
 });
+
+// costs.md item 4d — the invoice tie-out card per biller.
+describe("CostsPage — invoice tie-out by biller", () => {
+  // A closed day of the standing fixture (its literal dates are the allowed imprint).
+  const AUG_28 = report().days[1].date;
+  const billers = (): CostReport["billers"] => [
+    {
+      biller: "anthropic",
+      invoice: true,
+      days: [{ date: AUG_28, invoiceUsd: 12.5, attributedUsd: 12.1 }],
+      totals: { invoiceUsd: 12.5, attributedUsd: 12.1 },
+    },
+    {
+      biller: "openrouter",
+      invoice: true,
+      days: [
+        {
+          date: AUG_28,
+          invoiceUsd: 0.55,
+          invoiceFeeUsd: 0.05,
+          invoiceByokUsd: 0.5,
+          attributedUsd: 0.55,
+          attributedFeeUsd: 0.05,
+          attributedUpstreamUsd: 0.5,
+        },
+      ],
+      totals: { invoiceUsd: 0.55, attributedUsd: 0.55 },
+    },
+    { biller: "groq", invoice: false, days: [], totals: { invoiceUsd: 0, attributedUsd: 0 } },
+  ];
+
+  it("renders one tie-out per biller: the invoice beside the attributed rows, an aggregator's fee and BYOK upstream split out", () => {
+    const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
+      seed: seed(report({ billers: billers() })),
+    });
+    const anthropic = w.find('[data-biller="anthropic"]');
+    expect(anthropic.text()).toContain("invoice $12.5000");
+    expect(anthropic.text()).toContain("attributed $12.1000");
+    const openrouter = w.find('[data-biller="openrouter"]');
+    expect(openrouter.text()).toContain("$0.0500 / $0.0500"); // the invoice's fee beside the summed feeUsd
+    expect(openrouter.text()).toContain("$0.5000 / $0.5000"); // byok_usage_inference beside the remainder
+  });
+
+  it("says 'no invoice' for a biller whose block names no invoice source, and draws no card at all on a report without tie-outs", () => {
+    const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
+      seed: seed(report({ billers: billers() })),
+    });
+    expect(w.find('[data-biller="groq"]').text()).toContain("no invoice — the block names no invoice source");
+    const without = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
+    expect(without.text()).not.toContain("Invoice tie-out");
+  });
+});

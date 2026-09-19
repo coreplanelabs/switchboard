@@ -11,6 +11,13 @@ providers:
   anthropic:
     wire: anthropic-messages
     apiKeyEnv: ANTHROPIC_API_KEY
+    # The biller's invoice for the daily tie-out on the costs page (costs.md item
+    # 4d): each block may name its own invoice API and the env var holding that
+    # API's key — an admin or management key, never the inference key. This is
+    # where `costs.anthropicAdminKeyEnv` moved; the old key under `costs:` is
+    # still accepted for one release.
+    # invoiceApi: anthropic-cost-report   # GET /v1/organizations/cost_report
+    # invoiceKeyEnv: ANTHROPIC_ADMIN_KEY  # sk-ant-admin…
   # OpenAI itself runs on its Responses API (record 0052): every first-party
   # OpenAI card in pi's registry is `openai-responses`, OpenAI recommends the
   # wire for new projects, and its chat route loses tool calling with any
@@ -21,6 +28,8 @@ providers:
     wire: openai-responses
     baseUrl: https://api.openai.com/v1
     apiKeyEnv: OPENAI_API_KEY
+    # invoiceApi: openai-costs            # GET /v1/organization/costs, an admin key
+    # invoiceKeyEnv: OPENAI_ADMIN_KEY
   # groq:
   #   wire: openai-chat
   #   baseUrl: https://api.groq.com/openai/v1
@@ -42,6 +51,10 @@ providers:
     catalog: openrouter
     baseUrl: https://openrouter.ai/api/v1
     apiKeyEnv: OPENROUTER_API_KEY
+    # invoiceApi: openrouter-activity     # GET /api/v1/activity, a management key;
+    #                                     #   its `usage` ties against the summed BYOK
+    #                                     #   fees, `byok_usage_inference` the remainder
+    # invoiceKeyEnv: OPENROUTER_MANAGEMENT_KEY
     # The operator's layer over the registry card: what a run needs that no
     # layer names goes out unvouched (and a note says so on the record) until
     # an override like this pins it. `providers check` (a later unit) reads the
@@ -521,7 +534,8 @@ workspaceDir: ./workspaces
 #   cloudflareAccountId: <32-hex account id>
 #   cloudflareAccountName: acme-infra              # optional: how the page names the account beside its share (else the id's first hex)
 #   cloudflareTokenEnv: CF_ANALYTICS_TOKEN     # token with Account Analytics:Read
-#   anthropicAdminKeyEnv: ANTHROPIC_ADMIN_KEY  # optional: sk-ant-admin… for LLM spend
+#   anthropicAdminKeyEnv: ANTHROPIC_ADMIN_KEY  # legacy (one release): moved to providers.anthropic.invoiceKeyEnv
+#                                              #   (invoiceApi: anthropic-cost-report); still feeds the LLM line here
 #   snapshot:                                  # the page serves a snapshot of both billing sources, never a live read;
 #     everyHours: 24                           #   how often the bot reads them (1–168, default 24). `costs snapshot`
 #                                              #   takes one now. Kept on the state Worker any `*.worker` block names
