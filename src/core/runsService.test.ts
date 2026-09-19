@@ -2052,3 +2052,131 @@ describe("RunView.instanceId — the ship run's instance (record 0051 R2)", () =
     expect(old.ok && "instanceId" in old.value).toBe(false);
   });
 });
+
+// Feature: docs/reference/specs/live-view.md items 10 and 16 (record 0060) — a
+// hosted ship parent takes no soft stop (its units run elsewhere; a soft stop
+// would end nothing), and a hard stop is the maintainer's escape for an
+// orphaned pipeline: the parent seals `failed` with the units' state as its
+// answer and the host key is released with the row, so a later `agent:ship`
+// in the thread can claim it.
+describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (record 0060)", () => {
+  const GEN = "g-us";
+  const hostedMeta = {
+    agent: "ship",
+    channelId: "web:s",
+    userId: "access:u1",
+    threadKey: "web:s:c9",
+    hosted: true as const,
+  };
+  const unitRow = (unit: string, over: Partial<CoordinatorUnit> = {}): CoordinatorUnit => ({
+    instanceId: "plan-p-1",
+    unit,
+    slug: unit.toLowerCase(),
+    branch: `plan/p/${unit.toLowerCase()}`,
+    dependsOn: [],
+    rounds: [],
+    ...over,
+  });
+
+  async function hostedWorld() {
+    const { reg } = testRegistry();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const units = new InMemoryCoordinatorInstanceStore();
+    await units.putUnits([
+      unitRow("U16", {
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        ending: { kind: "merged", report: "done", at: NOW },
+      }),
+      unitRow("U17", { threadKey: "web:s:u2" }),
+    ]);
+    const svc = createRunsService({ registry: reg, store: new InMemoryRunStore({ now: () => NOW }), ledger, units });
+    const { id, token } = reg.create("ship · acme/api", hostedMeta);
+    reg.publish(id, { type: "input", messageId: "m1", text: "ship the plan" });
+    reg.publish(id, { type: "run_meta", agent: "ship", instanceId: "plan-p-1", at: NOW });
+    await ledger.claim({
+      runId: id,
+      threadKey: "web:s:c9#host",
+      gen: GEN,
+      leaseMs: 30_000,
+      startedAt: NOW - 5_000,
+      meta: { ...hostedMeta, label: "ship · acme/api" },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    return { reg, ledger, svc, id, token };
+  }
+
+  it("a soft stop answers `hosted` and touches nothing: the run stays live, no stop_requested, the ledger untouched", async () => {
+    const { reg, ledger, svc, id } = await hostedWorld();
+    const requestStop = vi.spyOn(ledger, "requestStop");
+    expect(await svc.stopRun(id, "soft", actor)).toEqual({ ok: false, error: "hosted" });
+    expect(reg.getById(id)!.finished).toBe(false);
+    expect(reg.getById(id)!.stop).toBeUndefined();
+    expect(requestStop).not.toHaveBeenCalled();
+    expect(ledger.live.has(id)).toBe(true);
+  });
+
+  it("a hard stop seals the parent `failed` with the units' state as its answer, releases the host key through the ledger, and a later ship claim on the thread succeeds", async () => {
+    const { reg, ledger, svc, id } = await hostedWorld();
+    expect(await svc.stopRun(id, "hard", actor)).toEqual({
+      ok: true,
+      value: { id, mode: "hard", state: "stopping" },
+    });
+    // The registry row is finished `failed` and sealed: nothing lists it live.
+    const row = reg.getById(id)!;
+    expect(row.finished).toBe(true);
+    expect(row.status).toBe("failed");
+    expect(row.sealedAt).toBe(NOW);
+    // The answer is the units' state, published before the finish so the record carries it.
+    const events = reg.snapshotById(id)!.events;
+    const answer = [...events].reverse().find((e) => e.type === "answer");
+    expect(answer && "text" in answer && answer.text).toContain("U16 — merged");
+    expect(answer && "text" in answer && answer.text).toContain("U17 — unfinished");
+    // Who asked is on the stream, as every operator stop records it.
+    expect(events.find((e) => e.type === "run_note" && e.kind === "stop_requested")).toMatchObject({
+      mode: "hard",
+      actor: { kind: "cli", id: "cli:local" },
+    });
+    // The one-transaction ledger finish: the record replaces the live row, releasing the host key.
+    expect(ledger.live.has(id)).toBe(false);
+    expect(ledger.finished.get(id)).toMatchObject({ id, status: "failed", threadKey: "web:s:c9" });
+    const claim = await ledger.claim({
+      runId: "next-ship",
+      threadKey: "web:s:c9#host",
+      gen: "g-next",
+      leaseMs: 30_000,
+      startedAt: NOW + 1,
+      meta: { ...hostedMeta, label: "ship again" },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    expect(claim.ok).toBe(true);
+  });
+
+  it("a soft stop on a foreign hosted ledger row refuses without calling the ledger's requestStop; a hard stop rides the row", async () => {
+    const { reg } = testRegistry();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const svc = createRunsService({ registry: reg, store: null, ledger });
+    await ledger.claim({
+      runId: "far-host",
+      threadKey: "web:s:c9#host",
+      gen: "g-OTHER",
+      leaseMs: 30_000,
+      startedAt: NOW - 5_000,
+      meta: { ...hostedMeta, label: "ship · acme/api" },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    const requestStop = vi.spyOn(ledger, "requestStop");
+    expect(await svc.stopRun("far-host", "soft", actor)).toEqual({ ok: false, error: "hosted" });
+    expect(requestStop).not.toHaveBeenCalled();
+    expect(await svc.stopRun("far-host", "hard", actor)).toEqual({
+      ok: true,
+      value: { id: "far-host", mode: "hard", state: "stopping" },
+    });
+    expect(ledger.live.get("far-host")!.stop).toBe("hard");
+  });
+});

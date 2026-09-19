@@ -1520,6 +1520,19 @@ describe("RunPage — live mode", () => {
     expect(wrapper.find(".conn .chip").text()).toBe("stopped early");
   });
 
+  // Feature: record 0060 (live-view items 10 and 16) — a hosted ship parent's
+  // seed carries no stopUrl: the page draws no stop control that could only fail.
+  it("a live seed without a stopUrl draws no stop control (a hosted parent)", async () => {
+    const { created, factory } = fakeEventSourceFactory();
+    const { stopUrl: _stop, ...hosted } = liveSeed;
+    const wrapper = mountApp(RunPage, { seed: hosted, eventSource: factory });
+    created[0].emitOpen();
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find("#state").text()).toContain("running");
+    expect(wrapper.find("#actions").exists()).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("Kill confirms first and marks killed at end; a refused confirm does nothing", async () => {
     const confirmSpy = vi.spyOn(browser, "confirm").mockReturnValue(false);
     const { wrapper, es } = mountLive();

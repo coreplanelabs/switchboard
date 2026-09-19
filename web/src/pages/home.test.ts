@@ -798,6 +798,67 @@ describe("HomePage — a live turn from the seed", () => {
     expect(wrapper.find("form.composer").attributes("data-mode")).toBe("stop");
     expect(wrapper.find(".turn.assistant [data-testid=elapsed]").exists()).toBe(true);
   });
+
+  // Feature: record 0060 (web-chat item 2) — a hosted ship parent occupies no
+  // thread: the composer reads `send` while only a hosted turn is live, so the
+  // person can keep talking to the thread; the hosted turn still streams live.
+  it("with only a hosted turn live the composer reads send; the turn still streams live", async () => {
+    const { created, factory } = fakeEventSourceFactory();
+    const wrapper = mountApp(HomePage, {
+      seed: seed({
+        turns: [
+          finished({
+            id: "r-host",
+            agent: "ship",
+            hosted: true,
+            finished: false,
+            status: undefined,
+            answer: undefined,
+            finishedAt: undefined,
+            token: "tokh",
+          }),
+        ],
+      }),
+      eventSource: factory,
+    });
+    expect(streams(created)).toEqual(["/runs/r-host/events?t=tokh"]);
+    expect(wrapper.find("form.composer").attributes("data-mode")).toBe("send");
+    expect(wrapper.find(".turn.assistant [data-testid=elapsed]").exists()).toBe(true);
+    await type(wrapper, "more words");
+    expect(wrapper.find("form.composer").attributes("data-mode")).toBe("send");
+  });
+
+  it("with a hosted turn AND a normal live turn, the composer reads stop/steer as today", async () => {
+    const { factory } = fakeEventSourceFactory();
+    const wrapper = mountApp(HomePage, {
+      seed: seed({
+        turns: [
+          finished({
+            id: "r-host",
+            agent: "ship",
+            hosted: true,
+            finished: false,
+            status: undefined,
+            answer: undefined,
+            finishedAt: undefined,
+            token: "tokh",
+          }),
+          finished({
+            id: "r-2",
+            finished: false,
+            status: undefined,
+            answer: undefined,
+            finishedAt: undefined,
+            token: "tok2",
+          }),
+        ],
+      }),
+      eventSource: factory,
+    });
+    expect(wrapper.find("form.composer").attributes("data-mode")).toBe("stop");
+    await type(wrapper, "steer it");
+    expect(wrapper.find("form.composer").attributes("data-mode")).toBe("steer");
+  });
 });
 
 describe("AppShell — the mark is the way home (item 1)", () => {

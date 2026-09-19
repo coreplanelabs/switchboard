@@ -59,7 +59,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/runs.get` | `GET`, `POST` | `runs:read` | One run's record, its cost in dollars per model (or unpriced) included; `--include messages` adds its events with free text wrapped as untrusted content. |
 | `/api/runs.events` | `GET`, `POST` | `runs:read` | A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content. |
 | `/api/runs.friction` | `GET`, `POST` | `runs:read` | One run's friction diagnosis (live: computed now; persisted: as stored). |
-| `/api/runs.stop` | `POST` | `runs:write` | Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor. |
+| `/api/runs.stop` | `POST` | `runs:write` | Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). A hosted pipeline's parent refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the actor. |
 | `/api/runs.unit` | `GET`, `POST` | `runs:read` | A ship unit's runs in round order — its coding thread's and its review thread's, live and finished, each with its round and thread — from one read. |
 | `/api/runs.children` | `GET`, `POST` | `runs:read` | The runs one run spawned — a conductor's children, live and finished — oldest started first. |
 | `/api/runs.findings` | `GET`, `POST` | `runs:read` | A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone. |

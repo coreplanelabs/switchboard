@@ -1155,6 +1155,73 @@ describe("run control: POST /runs/:id/stop", () => {
     expect(t.status).toBe(409);
   });
 
+  // Feature: record 0060 (live-view items 10 and 16) — a hosted ship parent has
+  // no run loop observing its control: the capability token stops nothing on it.
+  it("409s both modes on a hosted run through the token route, control untouched", () => {
+    const reg = fixedRegistry();
+    const { id, token, control } = reg.create("ship · acme/api", {
+      agent: "ship",
+      channelId: "web:s",
+      userId: "access:u1",
+      threadKey: "web:s:c9",
+      hosted: true,
+    });
+    const handler = liveOnlyHandler(reg);
+    for (const mode of ["soft", "hard"]) {
+      const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=${mode}`);
+      handler(t.req, t.res);
+      expect(t.status).toBe(409);
+      expect(t.body()).toContain("hosts a ship pipeline");
+    }
+    expect(control.requested).toBeUndefined();
+    expect(reg.getById(id)!.finished).toBe(false);
+  });
+
+  it("the tokenless route: 409 hosted for soft; hard seals the parent failed (the operator's escape)", async () => {
+    const reg = fixedRegistry();
+    const { id } = reg.create("ship · acme/api", {
+      agent: "ship",
+      channelId: "web:s",
+      userId: "access:u1",
+      threadKey: "web:s:c9",
+      hosted: true,
+    });
+    const handler = liveOnlyHandler(reg);
+    const soft = fakeReqRes("POST", `/runs/${id}/stop?mode=soft`);
+    handler(soft.req, soft.res);
+    await soft.finished;
+    expect(soft.status).toBe(409);
+    expect(soft.body()).toContain("hosts a ship pipeline");
+    expect(reg.getById(id)!.finished).toBe(false);
+    const hard = fakeReqRes("POST", `/runs/${id}/stop?mode=hard`);
+    handler(hard.req, hard.res);
+    await hard.finished;
+    expect(hard.status).toBe(200);
+    expect(JSON.parse(hard.body())).toEqual({ id, mode: "hard", state: "stopping" });
+    expect(reg.getById(id)!).toMatchObject({ finished: true, status: "failed" });
+  });
+
+  it("the live page seed of a hosted run carries no stopUrl — the page draws no stop control; a normal run's seed is unchanged", () => {
+    const reg = fixedRegistry();
+    const { id, token } = reg.create("ship · acme/api", {
+      agent: "ship",
+      channelId: "web:s",
+      userId: "access:u1",
+      threadKey: "web:s:c9",
+      hosted: true,
+    });
+    const handler = liveOnlyHandler(reg);
+    const t = fakeReqRes("GET", `/runs/${id}?t=${token}`);
+    handler(t.req, t.res);
+    const seed = runSeedOf(t.body()) as RunLiveSeed;
+    expect(seed.eventsUrl).toBe(`/runs/${id}/events?t=${token}`);
+    expect(seed.stopUrl).toBeUndefined();
+    const plain = reg.create();
+    const p = fakeReqRes("GET", `/runs/${plain.id}?t=${plain.token}`);
+    handler(p.req, p.res);
+    expect((runSeedOf(p.body()) as RunLiveSeed).stopUrl).toBe(`/runs/${plain.id}/stop?t=${plain.token}`);
+  });
+
   it("is POST-only: GET on the stop route is 405 with allow: POST, and never stops the run", () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create();

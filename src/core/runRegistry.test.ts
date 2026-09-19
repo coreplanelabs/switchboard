@@ -812,3 +812,46 @@ describe("RunRegistry — token-free operator reads", () => {
     expect(seen.at(-1)).toMatchObject({ actor: { kind: "chat", id: "unknown" } });
   });
 });
+
+// Feature: docs/reference/specs/live-view.md items 10 and 16 (record 0060) — a
+// hosted ship parent has no run loop observing its control, so a stop through
+// the registry would do nothing: the token path refuses BOTH modes and the
+// operator path refuses the soft one (the hard escape is `RunsService.stopRun`'s
+// seal, which never comes here). The refusal publishes nothing: no viewer sees
+// a `stop_requested` that stops nothing.
+describe("RunRegistry — a hosted run refuses the stop that would do nothing (record 0060)", () => {
+  const hostedMeta = { channelId: "web:s", userId: "access:u1", threadKey: "web:s:c9", hosted: true as const };
+
+  it("requestStopById refuses a soft stop on a hosted run: no stop_requested, control untouched", () => {
+    const { reg } = testRegistry();
+    const { id, token, control } = reg.create("ship · acme/api", hostedMeta);
+    const seen: RunEvent[] = [];
+    reg.subscribe(id, token, { onEvent: (e) => seen.push(e) });
+    expect(reg.requestStopById(id, "soft", { kind: "cli", id: "cli:local" })).toEqual({
+      ok: false,
+      reason: "hosted",
+    });
+    expect(control.requested).toBeUndefined();
+    expect(seen).toEqual([]);
+    expect(reg.listActive()[0].stop).toBeUndefined();
+  });
+
+  it("requestStop (the token path) refuses both modes for a hosted run", () => {
+    const { reg } = testRegistry();
+    const { id, token, control } = reg.create("ship · acme/api", hostedMeta);
+    expect(reg.requestStop(id, token, "soft")).toEqual({ ok: false, reason: "hosted" });
+    expect(reg.requestStop(id, token, "hard")).toEqual({ ok: false, reason: "hosted" });
+    expect(control.requested).toBeUndefined();
+  });
+
+  it("a finished hosted run answers `finished`, as any finished run does; an unknown one stays not-found", () => {
+    const { reg } = testRegistry();
+    const { id, token } = reg.create("ship · acme/api", hostedMeta);
+    reg.finish(id, "failed");
+    expect(reg.requestStop(id, token, "soft")).toEqual({ ok: false, reason: "finished" });
+    expect(reg.requestStopById(id, "soft", { kind: "cli", id: "cli:local" })).toEqual({
+      ok: false,
+      reason: "finished",
+    });
+  });
+});

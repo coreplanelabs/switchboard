@@ -91,8 +91,12 @@ export interface RunHandle {
 
 /** Outcome of `RunRegistry.requestStop`. `not-found` covers BOTH an unknown run
  *  and a wrong token (the caller maps it to 404 — existence is never revealed);
- *  `finished` is a run that already ended (409). */
-export type StopRequestResult = { ok: true; mode: StopMode } | { ok: false; reason: "not-found" | "finished" };
+ *  `finished` is a run that already ended (409); `hosted` is a ship pipeline's
+ *  parent (record 0060), which no run loop observes — a stop here would do
+ *  nothing, so the token path refuses both modes and the operator path the soft
+ *  one (the hard escape is `RunsService.stopRun`'s seal, not a control). */
+export type StopRequestResult =
+  { ok: true; mode: StopMode } | { ok: false; reason: "not-found" | "finished" | "hosted" };
 
 /** How long a finished run may stay unsealed before the sweep seals it (with
  *  no `replyOk`) and evicts it: the reply that would have sealed it never
@@ -263,6 +267,9 @@ export class RunRegistry {
     this.sweep();
     const run = this.validate(id, token);
     if (!run) return { ok: false, reason: "not-found" };
+    // A hosted parent (record 0060): the capability token stops nothing on it,
+    // in either mode — its units run elsewhere and no loop reads its control.
+    if (!run.finished && run.meta?.hosted) return { ok: false, reason: "hosted" };
     return this.stopRun(run, mode);
   }
 
@@ -277,6 +284,9 @@ export class RunRegistry {
     this.sweep();
     const run = this.runs.get(id);
     if (!run) return { ok: false, reason: "not-found" };
+    // A hosted parent refuses the soft stop that would stop nothing (record
+    // 0060); the hard escape is `RunsService.stopRun`'s seal, never this control.
+    if (!run.finished && run.meta?.hosted && mode === "soft") return { ok: false, reason: "hosted" };
     return this.stopRun(run, mode, sanitizeActor(actor));
   }
 

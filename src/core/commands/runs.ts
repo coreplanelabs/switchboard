@@ -84,8 +84,15 @@ const runId = z.string().regex(RUN_ID_PATTERN);
 const positiveInt = z.coerce.number().int().positive();
 const idArg = { name: "id", schema: runId, describe: "run id" } as const;
 
+/** A hosted parent's soft-stop refusal (record 0060; live-view items 10 and
+ *  16), a 409 pointing at the units and the escape — the same sentence the
+ *  tokenless stop route writes. */
+export const HOSTED_STOP_REFUSAL =
+  "this run hosts a ship pipeline — its units run elsewhere, so a soft stop ends nothing; `--mode hard` is the escape: it seals the run failed and releases the thread";
+
 function unwrap<T>(res: Result<T>, what: "run" | "unit" = "run"): T {
   if (res.ok) return res.value;
+  if (res.error === "hosted") throw new CommandError("conflict", HOSTED_STOP_REFUSAL);
   throw new CommandError(res.error, res.error === "not_found" ? `${what} not found` : "run already finished");
 }
 
@@ -293,13 +300,17 @@ export const runsFriction = defineCommand({
 export const runsStop = defineCommand({
   id: "runs.stop",
   args: [idArg],
-  options: z.object({ mode: z.enum(["soft", "hard"]).describe("soft = finish the current step; hard = abort now") }),
+  options: z.object({
+    mode: z
+      .enum(["soft", "hard"])
+      .describe("soft = finish the current step; hard = abort now (and the escape that seals a hosted pipeline)"),
+  }),
   action: "runs:write",
   effect: "write",
   // Ends someone's live run; nothing restarts it.
   annotations: { destructive: true, risk: () => "stops a live run; hard aborts it now" },
   describe:
-    "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). Records the caller as the actor.",
+    "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). A hosted pipeline's parent refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the actor.",
   handler: async ({ args, options, caller, deps }) => {
     const runs = await deps.runs();
     await getVisibleRun(runs, args.id, caller, "runs:write", deps, "runs.stop");
