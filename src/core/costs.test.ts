@@ -1216,10 +1216,19 @@ describe("buildBillerTieOuts", () => {
     expect(out[0].totals).toEqual({ invoiceUsd: 1.25, attributedUsd: 2.1 });
   });
 
-  it("a day with neither an invoice row nor a nonzero attributed figure is dropped — purely unpriced spend yields no 0/0 row", () => {
+  it("a day with no invoice row, no nonzero attributed figure and no unpriced tokens is dropped, but purely unpriced spend keeps its day so the token count renders", () => {
+    // $0 priced spend, nothing unpriced: no invoice row, so the day is dropped.
+    const zero = buildBillerTieOuts(
+      [{ name: "anthropic", invoice: true }],
+      {},
+      [cell(SEP_18, { "anthropic/claude-fable-5": model(0) })],
+      range,
+    );
+    expect(zero[0].days).toEqual([]);
+    // Purely unpriced spend: the day stays alive to carry its token count.
     const cells = [cell(SEP_18, { "anthropic/claude-fable-5": model(null) })];
     const out = buildBillerTieOuts([{ name: "anthropic", invoice: true }], {}, cells, range);
-    expect(out[0].days).toEqual([]);
+    expect(out[0].days).toEqual([{ date: SEP_18, attributedUsd: 0, unpricedTokens: 2 }]);
   });
 
   it("an unpriced model's feeUsd is skipped with its usd — attributedUpstreamUsd never goes negative on an unpriced+fee row", () => {
@@ -1230,15 +1239,56 @@ describe("buildBillerTieOuts", () => {
       attributedUsd: 0.55,
       attributedFeeUsd: 0.05,
       attributedUpstreamUsd: 0.5,
+      unpricedTokens: 2,
     });
-    // a day that is only unpriced+fee rows carries no figures at all and is dropped
+    // a day that is only unpriced+fee rows carries no dollar figures — the fee
+    // is skipped with the usd — but stays for its unpriced token count
     const only = buildBillerTieOuts(
       [{ name: "openrouter", invoice: true }],
       {},
       [cell(SEP_18, { "openrouter/unpriced": model(null, 0.05) })],
       range,
     );
-    expect(only[0].days).toEqual([]);
+    expect(only[0].days).toEqual([{ date: SEP_18, attributedUsd: 0, unpricedTokens: 2 }]);
+  });
+
+  it("counts the tokens of turns that carried no usd as the day's unpricedTokens, per biller and per day, beside the meter-charged attributed figure; a fully priced day carries none", () => {
+    const unpriced = (tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }) => ({
+      turns: 1,
+      inputTokens: tokens.input,
+      outputTokens: tokens.output,
+      cacheReadTokens: tokens.cacheRead,
+      cacheWriteTokens: tokens.cacheWrite,
+      usd: null,
+    });
+    const cells = [
+      // SEP_17: one priced and one unpriced model on the same biller — the priced
+      // dollars and the unpriced tokens sit beside each other on the same day.
+      cell(SEP_17, {
+        "anthropic/claude-fable-5": model(1.2),
+        "anthropic/claude-old": unpriced({ input: 100, output: 40, cacheRead: 10, cacheWrite: 5 }),
+        // another biller's unpriced model never leaks into this biller's count
+        "openai/gpt-5": unpriced({ input: 999, output: 0, cacheRead: 0, cacheWrite: 0 }),
+      }),
+      // SEP_18: priced turns only — the day carries no unpricedTokens field.
+      cell(SEP_18, { "anthropic/claude-fable-5": model(0.9) }),
+    ];
+    const out = buildBillerTieOuts(
+      [
+        { name: "anthropic", invoice: true },
+        { name: "openai", invoice: true },
+      ],
+      { anthropic: [{ date: SEP_17, usd: 1.6 }], openai: [{ date: SEP_17, usd: 0.4 }] },
+      cells,
+      { from: SEP_17, to: SEP_18, days: 2, partialLastDay: false },
+    );
+    expect(out[0].days).toEqual([
+      { date: SEP_17, invoiceUsd: 1.6, attributedUsd: 1.2, unpricedTokens: 155 },
+      { date: SEP_18, attributedUsd: 0.9 },
+    ]);
+    expect(out[0].days[1]).not.toHaveProperty("unpricedTokens");
+    // the openai biller's day counts its own unpriced tokens alone
+    expect(out[1].days).toEqual([{ date: SEP_17, invoiceUsd: 0.4, attributedUsd: 0, unpricedTokens: 999 }]);
   });
 
   it("a biller without a source ties out against nothing (invoice: false, no invoice figures); a model whose usd is null or absent contributes nothing; days outside the range and refs without a block are dropped", () => {
@@ -1251,7 +1301,7 @@ describe("buildBillerTieOuts", () => {
       {
         biller: "groq",
         invoice: false,
-        days: [{ date: SEP_18, attributedUsd: 0.3 }],
+        days: [{ date: SEP_18, attributedUsd: 0.3, unpricedTokens: 2 }],
         totals: { invoiceUsd: 0, attributedUsd: 0.3 },
       },
     ]);

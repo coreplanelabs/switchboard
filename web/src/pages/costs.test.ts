@@ -957,6 +957,39 @@ describe("CostsPage — invoice tie-out by biller", () => {
     expect(openrouter.text()).toContain("$0.5000 / $0.5000"); // byok_usage_inference beside the remainder
   });
 
+  it("says which dollars the attributed side is, counts a day's unpriced tokens beside it, and shows no such column for a fully priced biller", () => {
+    const withUnpriced = billers()!;
+    const AUG_29 = report().days[2].date;
+    withUnpriced[0] = {
+      ...withUnpriced[0],
+      days: [
+        { date: AUG_28, invoiceUsd: 12.5, attributedUsd: 12.1, unpricedTokens: 1234 },
+        // a fully priced day beside it: its cell must read 0, never the — the invoice side uses for "no row"
+        { date: AUG_29, invoiceUsd: 3, attributedUsd: 2.9 },
+      ],
+    };
+    const w = mountApp(CostsPage, {
+      eventSource: fakeEventSourceFactory().factory,
+      seed: seed(report({ billers: withUnpriced })),
+    });
+    // the sentence saying the attributed side is the meter's figure, never the price table's repricing
+    expect(w.text()).toContain("Attributed is the meter's charged figure");
+    expect(w.text()).toContain("never the price table's repricing");
+    const anthropic = w.find('[data-biller="anthropic"]');
+    expect(anthropic.text()).toContain("1,234 tokens unpriced — not in the attributed figure");
+    expect(anthropic.text()).toContain("Unpriced tokens");
+    const rows = anthropic.findAll("tbody tr");
+    const unpricedCellOf = (row: (typeof rows)[number]) => row.findAll("td").at(-1)!.text();
+    // days render newest first: the fully priced day prints a known zero —
+    // never the — that means "no row" — and the unpriced day its count
+    expect(unpricedCellOf(rows[0])).toBe("0");
+    expect(unpricedCellOf(rows[1])).toBe("1,234");
+    // a biller whose days are all priced carries no unpriced column and no note
+    const openrouter = w.find('[data-biller="openrouter"]');
+    expect(openrouter.text()).not.toContain("Unpriced tokens");
+    expect(openrouter.text()).not.toContain("tokens unpriced");
+  });
+
   it("says 'no invoice' for a biller whose block names no invoice source, and draws no card at all on a report without tie-outs", () => {
     const w = mountApp(CostsPage, {
       eventSource: fakeEventSourceFactory().factory,

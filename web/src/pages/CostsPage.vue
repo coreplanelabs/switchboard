@@ -222,7 +222,15 @@ const projectionLine = computed(() => {
 const daysNewestFirst = computed(() => (report.value ? [...report.value.days].reverse() : []));
 // Invoice tie-out per biller (costs.md item 4d): each biller's own invoice beside
 // the summed model.turn dollars its refs attributed; newest day first, like the table.
-const billers = computed(() => (report.value?.billers ?? []).map((t) => ({ ...t, days: [...t.days].reverse() })));
+// A biller whose days carry unpriced tokens gets that column, so the gap they leave
+// on the attributed side is explained rather than silent.
+const billers = computed(() =>
+  (report.value?.billers ?? []).map((t) => ({
+    ...t,
+    days: [...t.days].reverse(),
+    unpricedTokens: t.days.reduce((s, d) => s + (d.unpricedTokens ?? 0), 0),
+  })),
+);
 /** The range presets. Both billing sources bucket by UTC day (the cost report
  *  offers nothing finer), so the short one is today, not a rolling 24 hours. */
 const ranges = [1, 7, 30];
@@ -554,7 +562,9 @@ function monthDay(date: string): string {
         <h2 class="text-[0.9375rem] font-medium">Invoice tie-out by biller</h2>
         <p class="text-xs text-muted">
           Each biller's own invoice beside the summed <code>model.turn</code> dollars its runs attributed — an
-          aggregator's fee against the summed fees, its BYOK upstream against the remainder.
+          aggregator's fee against the summed fees, its BYOK upstream against the remainder. Attributed is the meter's
+          charged figure — each turn's own <code>usd</code> (the provider's, the operator's or the registry's price at
+          the time) — never the price table's repricing the dimension tabs show, so the two need not agree.
         </p>
       </div>
       <div v-for="t in billers" :key="t.biller" class="grid gap-1.5" :data-biller="t.biller">
@@ -564,6 +574,9 @@ function monthDay(date: string): string {
             · invoice {{ usd(t.totals.invoiceUsd, 4) }} · attributed {{ usd(t.totals.attributedUsd, 4) }}
           </template>
           <span v-else class="text-muted"> · no invoice — the block names no invoice source</span>
+          <span v-if="t.unpricedTokens > 0" class="text-muted">
+            · {{ t.unpricedTokens.toLocaleString("en-US") }} tokens unpriced — not in the attributed figure</span
+          >
         </p>
         <div v-if="t.days.length" class="overflow-x-auto">
           <table class="data w-full border-collapse whitespace-nowrap font-mono text-[0.8125rem] tabular-nums">
@@ -582,6 +595,12 @@ function monthDay(date: string): string {
                 </th>
                 <th class="border-b border-muted px-2.5 py-1 text-right text-xs font-medium text-muted">
                   Upstream (invoice / remainder)
+                </th>
+                <th
+                  v-if="t.unpricedTokens > 0"
+                  class="border-b border-muted px-2.5 py-1 text-right text-xs font-medium text-muted"
+                >
+                  Unpriced tokens
                 </th>
               </tr>
             </thead>
@@ -606,6 +625,11 @@ function monthDay(date: string): string {
                   </template>
                   <template v-else>—</template>
                 </td>
+                <!-- A fully priced day is a known zero, so it prints 0 — never the
+                     — glyph, which on this table means "the source returned no row". -->
+                <td v-if="t.unpricedTokens > 0" class="border-b border-muted px-2.5 py-1 text-right">
+                  {{ (d.unpricedTokens ?? 0).toLocaleString("en-US") }}
+                </td>
               </tr>
             </tbody>
           </table>
@@ -628,7 +652,9 @@ function monthDay(date: string): string {
             the provisioned size for every second a container is awake. LLM spend is the Anthropic Admin API cost report
             for this group's workspace (gross, USD); a day the cost report has not closed is the Admin API usage report,
             hourly, priced at Anthropic list per model (input, output, cache writes, cache reads) and marked as an
-            estimate.
+            estimate. The invoice tie-out's attributed side is different money: the meter's charged figure from each
+            turn's own <code>usd</code>, never the price table's repricing the dimension tabs show, with the tokens no
+            turn priced counted beside it as unpriced.
           </div>
           <div>
             <b>Method.</b> Cloudflare GraphQL Analytics, every meter a Workers deployment is billed on:
