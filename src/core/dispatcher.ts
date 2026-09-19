@@ -851,6 +851,49 @@ export async function dispatch(
     // the branch moved between resolution and attach (item 12).
     let repoCtx: RepoContext = await repoCtxP;
 
+    // A coordinator child's ref hint is its contract's branch, always (issue
+    // 1860): a pull request cited in the child's own request text is a
+    // receipt, never the attach target — a PR-derived ref (`refFromPr`) would
+    // rebind the attach off the unit branch, the resident's push guard would
+    // refuse the contract branch, and the commit would orphan on the cited
+    // branch. The resolver's comment on `refFromPr` says a consumer that does
+    // not bind the PR must drop its ref; the coding child does not bind it —
+    // its facts stay context — and the head sha goes with the ref (it pinned
+    // the cited PR's head, not the contract branch). A review child keeps the
+    // binding: the pull request IS its target.
+    const contractBranch = opts.contract?.rebase.branch;
+    if (
+      opts.coordinator !== undefined &&
+      contractBranch !== undefined &&
+      agent.name !== "review" &&
+      repoCtx.refFromPr === true &&
+      repoCtx.ref !== contractBranch
+    ) {
+      const { refFromPr: _refFromPr, headSha: _headSha, ...kept } = repoCtx;
+      repoCtx = { ...kept, ref: contractBranch };
+    }
+
+    // The other half of issue 1860: a cited pull request that did NOT bind the
+    // ref (merged or closed — `refFromPr` unset — or a phrase's ref standing
+    // beside it) still resolved a frozen `headSha`. Riding the attach as the
+    // expected commit (resident-repos item 51's `wantSha`) it can only refuse:
+    // no fetch brings a live branch's tip to a dead pull request's frozen
+    // head, the resident answers `stale-tip`, and the run falls back cold at
+    // the dead commit — the coordinator child off its unit branch, the plain
+    // ask off the default. For a non-review run the sha pins only the ref
+    // that came WITH it from the same open PR; otherwise it is context, never
+    // the attach's expected commit. A review run keeps it: the pull request
+    // is its target and the sha is the reviewed head's pin.
+    if (
+      agent.name !== "review" &&
+      repoCtx.prFromMessage === true &&
+      repoCtx.refFromPr !== true &&
+      repoCtx.headSha !== undefined
+    ) {
+      const { headSha: _headSha, ...kept } = repoCtx;
+      repoCtx = kept;
+    }
+
     // The repository gates (dispatch/authorize.ts): not onboarded, unverified,
     // access — each closes the card and replies by name.
     const repoGate = await authorizeRepo(deps, {
