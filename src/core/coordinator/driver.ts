@@ -42,6 +42,8 @@ import {
   openPlanCursor,
   openUnitPipeline,
   readyUnits,
+  type PlanCursor,
+  type UnitStatus,
   renderUnitReport,
   settleUnit,
   startUnit,
@@ -163,8 +165,18 @@ export function readBotAnswer(
 }
 
 /** The answers the bot itself calls a passing condition — the step is asked
- *  again, under the policy. Everything else, refusals included, is the machine's. */
-const TRANSIENT = new Set(["github_unavailable", "no_channel", "thread_failed", "unit_not_started", "not_host"]);
+ *  again, under the policy. Everything else, refusals included, is the machine's.
+ *  `queued` is the plane's hold on a spawn (record 0064, "The queue"): a `409`
+ *  saying the child's admission waits on an event — the step re-asks until the
+ *  child is admitted, and the instance is never failed over a full plane. */
+const TRANSIENT = new Set([
+  "github_unavailable",
+  "no_channel",
+  "thread_failed",
+  "unit_not_started",
+  "not_host",
+  "queued",
+]);
 export function transientRefusal(answer: BotAnswer): string | undefined {
   const { ok, error, message } = answer.body;
   if (ok !== false || typeof error !== "string" || !TRANSIENT.has(error)) return undefined;
@@ -793,12 +805,9 @@ function blockedReport(unit: string, dep: string, depEnding: string): string {
   return `⛔ Blocked: ${unit} waits on ${dep}, which ended ${depEnding}${person ? " — a person's merge" : ""}. Re-issue the plan naming the remaining units once it is ${person ? "merged" : "resolved"}.`;
 }
 
-/** The plan: its units one at a time in dependency order, then the endings of the units it never reached. */
-async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): Promise<PlanRunSummary> {
-  const plan = readPlan(
-    answerOf("plan", await step.do("plan", STEP_CONFIG, () => call(bot, "plan", { parentInstanceId: instanceId }))),
-  );
-  const graph: PlanGraph = {
+/** The graph as one plan answer carries it: the instance's unit rows, in the plan's order. */
+function graphOf(plan: PlanFacts, instanceId: string): PlanGraph {
+  return {
     planId: plan.planId ?? instanceId,
     units: plan.units.map((u) => ({
       id: u.unit,
@@ -808,6 +817,54 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
       dependsOn: u.dependsOn,
     })),
   };
+}
+
+/** The cursor over a freshly read selection (the orchestration-plane plan's
+ *  re-read requirement): a surviving unit keeps its standing, a row appended
+ *  mid-walk joins pending — walked after the current unit — and a row gone from the selection
+ *  was merged by hand: it is walked as merged with nothing run and nothing
+ *  told (`gone`), a dependency on it counted satisfied like any dependency
+ *  outside the selection. `blocked` is derived state, so it is recomputed over
+ *  the fresh graph rather than carried — a blocked unit whose failing
+ *  dependency left the selection is in play again. */
+function rereadCursor(cursor: PlanCursor, fresh: PlanGraph): { cursor: PlanCursor; gone: string[] } {
+  const gone = cursor.order.filter((id) => !fresh.units.some((u) => u.id === id));
+  const order = fresh.units.map((u) => u.id);
+  const status: Record<string, UnitStatus> = {};
+  for (const id of order) {
+    const prior = cursor.status[id];
+    status[id] = prior === undefined || prior === "blocked" ? "pending" : prior;
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const u of fresh.units) {
+      if (status[u.id] !== "pending") continue;
+      if (u.dependsOn.some((d) => d in status && (status[d] === "failed" || status[d] === "blocked"))) {
+        status[u.id] = "blocked";
+        changed = true;
+      }
+    }
+  }
+  return { cursor: { order, status }, gone };
+}
+
+/** The plan: its units one at a time in dependency order, then the endings of the units it never reached. */
+async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): Promise<PlanRunSummary> {
+  // The selection is read at every unit boundary (the orchestration-plane plan): the first read opens
+  // the cursor, and each boundary's — its own durable step, `plan/<n>`, so a
+  // replay meets the same read — rebuilds it, so a later bot can append a unit
+  // to a live instance or drop one merged by hand without killing it.
+  let reads = 0;
+  const readSelection = async (): Promise<PlanFacts> => {
+    reads += 1;
+    const name = reads === 1 ? "plan" : `plan/${reads}`;
+    return readPlan(
+      answerOf("plan", await step.do(name, STEP_CONFIG, () => call(bot, "plan", { parentInstanceId: instanceId }))),
+    );
+  };
+  let plan = await readSelection();
+  let graph = graphOf(plan, instanceId);
   let cursor = openPlanCursor(graph);
   const endings: Record<string, string> = {};
   for (;;) {
@@ -838,6 +895,12 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
     // the indexed wait and the wake land with the fifth unit of record 0051's
     // plan — so the walk is unchanged until then and the flag ships at zero.
     cursor = settleUnit(graph, cursor, next, isSettledDone(ending.kind) ? "done" : "failed");
+    // The unit boundary's re-read (the orchestration-plane plan): the fresh rows are the selection now.
+    plan = await readSelection();
+    graph = graphOf(plan, instanceId);
+    const reread = rereadCursor(cursor, graph);
+    cursor = reread.cursor;
+    for (const id of reread.gone) endings[id] ??= "merged";
   }
   // Blocked units, in the plan's order: each told its own ending, so the rows
   // and the summary say why it never ran. Every blocked unit's ending is known
