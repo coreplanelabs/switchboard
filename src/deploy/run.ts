@@ -67,6 +67,7 @@ import {
 } from "./profile.js";
 import { classifyRestartResponse, type RestartPlan } from "./restart.js";
 import { PROJECT_FACTS_FILE, renderWorkerConfigs } from "./wranglerTemplate.js";
+import { supersededSteps } from "./supersede.js";
 import {
   containerAppId,
   decideSandboxLive,
@@ -1147,6 +1148,26 @@ export async function runDeployPlan(
       ],
     };
   }
+
+  // The supersede guard (src/deploy/supersede.ts, release-and-deploy.md item 32): each
+  // selected Worker's live build.commit is read before anything uploads, and a live
+  // commit that already contains the commit being deployed — an older release's re-run
+  // queued behind the newer one that went live — refuses the Worker by name. Forced,
+  // it deploys anyway and the warning says a deliberate rollback is happening.
+  const supersede = await supersededSteps(plan, expectedCommit, {
+    env: deps.env,
+    readLive: async (url, bearerEnv) => {
+      const bearer = bearerEnv ? deps.env[bearerEnv] : undefined;
+      const r = await readHealthz(url, bearer);
+      return "body" in r && r.status >= 200 && r.status < 300 ? r.body : undefined;
+    },
+    liveContains: async (deploying, live) => {
+      const r = await run("git", ["merge-base", "--is-ancestor", deploying, live], { cwd: OPERATOR_ROOT.root });
+      return r.code === 0 ? true : r.code === 1 ? false : undefined;
+    },
+  });
+  for (const note of supersede.notes) io.warn(`[deploy:all] WARNING ${note}`);
+  if (supersede.problems.length > 0) return { kind: "refused", problems: supersede.problems };
 
   const results: DeployStepResult[] = [];
   for (const step of plan.steps) {

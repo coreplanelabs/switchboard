@@ -22,7 +22,7 @@ Nothing runs: it prints which Workers are stale, why, and each preflight. `GET /
 npx @coreplane/switchboard deploy all --affected
 ```
 
-`deploy all` is the only runner: memory, bot, resident, sandbox, never the four by hand. A refusing preflight is retried every 60 s (`--wait-max` minutes), then the deploy fails by name — it never rolls over what refused; re-run it once the runs finish (`gh run rerun RUN_ID --failed` for a CI job). `--force` bypasses the preflight and kills the runs in flight that no resume recovers.
+`deploy all` is the only runner: memory, bot, resident, sandbox, never the four by hand. A refusing preflight is retried every 60 s (`--wait-max` minutes), then the deploy fails by name — it never rolls over what refused; re-run it once the runs finish (`gh run rerun RUN_ID --failed` for a CI job). `--force` bypasses the preflight and kills the runs in flight that no resume recovers. A newer release cut while an older run's re-run is pending supersedes it — cancel the older run; if it runs anyway, `deploy all` refuses a Worker whose live `/healthz` commit already contains the commit being deployed (`refused: … this release is superseded — re-run nothing, the newer release carries it`), and only `--force` / `SWITCHBOARD_DEPLOY_FORCE=1` deploys over it, as a deliberate rollback.
 
 | Preflight | Refuses while |
 |---|---|
