@@ -241,7 +241,7 @@ describe("run ledger — the fence (item 28)", () => {
     });
     await new Promise((r) => setTimeout(r, 5));
     const hb = await post("/runs/heartbeat", { storeKey: key, runId: "r1", gen: "g1", leaseMs: LEASE_MS });
-    expect(hb).toEqual({ status: 200, data: { ok: true, stop: "soft", phase: "live" } });
+    expect(hb).toEqual({ status: 200, data: { ok: true, stop: "soft", phase: "live", effects: [] } });
     const after = ((await post("/runs/live", { storeKey: key })).data.runs as Array<{ leaseUntil: number }>)[0]
       .leaseUntil;
     expect(after).toBeGreaterThanOrEqual(before);

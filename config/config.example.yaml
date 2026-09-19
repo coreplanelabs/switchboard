@@ -493,6 +493,19 @@ workspaceDir: ./workspaces
 #   threadReplies: classify
 #   model: anthropic/claude-haiku-4-5
 
+# The orchestration plane (docs/decisions/0064-the-plane-owns-every-runs-state-a-refusal-becomes-a-queue-position-an-ending-is-judged-by-the-ledger-that-saw-it-and-a-release-is-a-quiet-window-a-person-closes.md;
+# docs/reference/specs/routing-and-config.md item 31; orchestration-plane.md).
+# `admission` gates the ledger object's queue decider: `off` (default) — the
+# plane hears of no dispatch and nothing is posted; `shadow` — the bot posts
+# its own outcome per dispatch (`proceeded`, `refused:<code>`) to the ledger
+# object, which logs its decider's decision beside it — nothing runs from the
+# decider; `on` — a later release's flip (the decider's answer is what runs).
+# `reaskMinutes` (default 2) is the plane's one re-ask cadence, used only while
+# something waits on a reporter that fell silent; nothing reads it yet.
+# plane:
+#   admission: shadow
+#   reaskMinutes: 2
+
 # Linked threads (docs/decisions/0037-a-linked-thread-is-quoted-not-joined.md;
 # docs/reference/specs/routing-and-config.md item 22). Off by default. On, a
 # permalink in a request to a thread in another PUBLIC channel the bot is a

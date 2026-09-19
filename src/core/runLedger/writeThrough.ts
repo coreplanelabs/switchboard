@@ -24,6 +24,7 @@ import type { FenceResult, Notepad, SessionHit } from "./types.js";
 import { PermanentStoreError, RouteMissingError } from "../runStoreWorker.js";
 import { createAppendFlusher } from "./flusher.js";
 import type { RunLedger } from "./ledger.js";
+import type { PlaneOutcomePost } from "../plane/decide.js";
 import { requestIndex, sessionKey } from "./sessionLog.js";
 import {
   APPEND_FLUSH_EVENTS,
@@ -294,6 +295,11 @@ export interface LedgerWriteThrough {
    *  warning) when the ledger cannot say — the route missing, a permanent
    *  refusal, or the retry failing too — the caller's degrade (record 0058). */
   recordIntake(key: string, receipt: IntakeReceipt): Promise<IntakeWriteResult | undefined>;
+  /** The shadow outcome post (orchestration-plane; record 0064; orchestration-plane item 8): fire and
+   *  forget — the dispatch's answer never waits on the plane, and a failed or
+   *  missing route is one warning, never a throw. The caller gates on
+   *  `plane.admission`; this seam only carries the post. */
+  planeOutcome(post: PlaneOutcomePost): void;
 }
 
 /** The write-through of a process without a run ledger (a Null Object,
@@ -342,6 +348,9 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   }
   async handoff(): Promise<{ marked: string[]; failed?: string }> {
     return { marked: [] };
+  }
+  planeOutcome(_post: PlaneOutcomePost): void {
+    // No ledger, no plane: the post has nowhere to land and shadow is moot.
   }
   async recordIntake(_key: string, _receipt: IntakeReceipt): Promise<IntakeWriteResult | undefined> {
     return undefined;
@@ -990,6 +999,17 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           this.stopRelayed = result.stop;
           this.onStop(result.stop);
         }
+        // The plane's effects (orchestration-plane; record 0064; orchestration-plane item 7): this
+        // generation cannot execute any yet — the admit path lands with the
+        // transport unit — so each is deferred by name and stays offered for a
+        // bot that can. Best-effort: a failed ack leaves the offer standing.
+        for (const effect of result.effects ?? []) {
+          try {
+            await ledger.planeAck(effect.id, "deferred");
+          } catch (err) {
+            warn(`[ledger] plane ack failed for effect ${effect.id}: ${describe(err)} — it stays offered`);
+          }
+        }
       } catch (err) {
         warn(`[ledger] ${this.threadKey} heartbeat failed: ${describe(err)}`);
       }
@@ -1140,6 +1160,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       } catch (err) {
         return { marked: [], failed: describe(err) };
       }
+    },
+
+    planeOutcome(post) {
+      void ledger.planeOutcome(post).catch((err: unknown) => {
+        warn(
+          `[ledger] plane outcome post failed for ${post.threadKey}: ${describe(err)} — shadow loses one comparison`,
+        );
+      });
     },
 
     async recordIntake(key, receipt) {

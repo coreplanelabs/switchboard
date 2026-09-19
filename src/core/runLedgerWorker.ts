@@ -50,6 +50,7 @@ import {
   TransientStoreError,
 } from "./runStoreWorker.js";
 import type { FinishResult, HeartbeatResult, RunLedger } from "./runLedger/ledger.js";
+import type { PlaneAckOutcome, PlaneEffect, PlaneOutcomePost } from "./plane/decide.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./runLedger/sessionLog.js";
 import { assembleTranscript, chunkRows, turnRows, type AssembledTranscript } from "./runLedger/transcript.js";
 import {
@@ -345,7 +346,19 @@ export class WorkerRunLedger implements RunLedger {
       ok: true,
       stop: (r.data.stop as StopMode | null | undefined) ?? null,
       phase: r.data.phase as HeartbeatResult["phase"],
+      // The plane's open effects (orchestration-plane; record 0064; orchestration-plane item 7) — an
+      // older state Worker's answer has no field, read as none offered.
+      effects: Array.isArray(r.data.effects) ? (r.data.effects as PlaneEffect[]) : [],
     };
+  }
+
+  async planeOutcome(post: PlaneOutcomePost): Promise<{ ok: boolean; decider?: string; agreed?: boolean | null }> {
+    const r = await this.post("/plane/outcome", { storeKey: this.opts.storeKey, ...post });
+    return r.data as { ok: boolean; decider?: string; agreed?: boolean | null };
+  }
+
+  async planeAck(id: string, outcome: PlaneAckOutcome): Promise<void> {
+    await this.post("/plane/ack", { storeKey: this.opts.storeKey, id, outcome });
   }
 
   async append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult> {

@@ -15,6 +15,8 @@ import {
   openConfigStore,
   OverridesConflictError,
   overridesBackingFor,
+  planeAdmissionOf,
+  planeReaskMinutesOf,
   referencesOn,
   routingOn,
   WorkerOverridesBacking,
@@ -904,6 +906,34 @@ describe("routing block (routing.auto, routing.model)", () => {
     expect(() => store(YAML_FIXTURE + "routing:\n  automatic: true\n")).toThrow(
       /routing\.automatic is not a known key/,
     );
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 31 (record 0064) —
+// the `plane` block: the orchestration plane's admission mode and its one
+// re-ask cadence, each with its default in one accessor.
+describe("plane block (routing-and-config item 31, record 0064)", () => {
+  it("parses the block; a config without one resolves admission off and reaskMinutes 2", () => {
+    const s = store(YAML_FIXTURE + "plane:\n  admission: shadow\n  reaskMinutes: 5\n");
+    expect(s.config.plane).toEqual({ admission: "shadow", reaskMinutes: 5 });
+    expect(planeAdmissionOf(s.config)).toBe("shadow");
+    expect(planeReaskMinutesOf(s.config)).toBe(5);
+    expect(store().config.plane).toBeUndefined();
+    expect(planeAdmissionOf(store().config)).toBe("off");
+    expect(planeReaskMinutesOf(store().config)).toBe(2);
+  });
+
+  it("refuses an unknown mode, a bad cadence, a non-mapping and an unknown key by name", () => {
+    for (const value of ['"sometimes"', "true", '"Shadow"'])
+      expect(() => store(YAML_FIXTURE + `plane:\n  admission: ${value}\n`)).toThrow(
+        /plane\.admission must be off, shadow, on/,
+      );
+    for (const value of ["0", "-1", '"two"'])
+      expect(() => store(YAML_FIXTURE + `plane:\n  reaskMinutes: ${value}\n`)).toThrow(
+        /plane\.reaskMinutes must be a positive number of minutes/,
+      );
+    expect(() => store(YAML_FIXTURE + "plane: true\n")).toThrow(/plane must be a mapping/);
+    expect(() => store(YAML_FIXTURE + "plane:\n  mode: shadow\n")).toThrow(/plane\.mode is not a known key/);
   });
 });
 

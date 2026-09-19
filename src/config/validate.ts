@@ -42,6 +42,7 @@ import type {
   OpenCodeConfig,
   PiCompactionConfig,
   PiConfig,
+  PlaneConfig,
   ReferencesConfig,
   ReviewConfig,
   RoutingConfig,
@@ -81,6 +82,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   routing: true,
   intake: true,
   references: true,
+  plane: true,
   harness: true,
   pi: true,
   opencode: true,
@@ -351,6 +353,7 @@ export function validateConfig(cfg: AppConfig): void {
   if (cfg.routing !== undefined) validateRouting(cfg.routing, cfg.providers);
   validateIntake(cfg);
   if (cfg.references !== undefined) validateReferences(cfg.references);
+  if (cfg.plane !== undefined) validatePlane(cfg.plane);
   if (cfg.artifacts !== undefined) validateArtifacts(cfg.artifacts);
   if (cfg.pi !== undefined) validatePi(cfg.pi);
   if (cfg.opencode !== undefined) validateOpenCode(cfg.opencode);
@@ -508,6 +511,30 @@ export type RouteAnswerMode = (typeof ROUTE_ANSWER_MODES)[number];
  *  nothing runs from it; `on` — its decision is what runs. */
 export const OPERATOR_MODES = ["off", "shadow", "on"] as const;
 export type OperatorMode = (typeof OPERATOR_MODES)[number];
+
+/** The plane's admission modes (`plane.admission`; record 0064;
+ *  routing-and-config item 31): `off` (the default) — the plane hears of no
+ *  dispatch; `shadow` — the bot posts its outcome per dispatch and the ledger
+ *  object logs the decider's decision beside it, nothing runs from the
+ *  decider; `on` — the decider's answer is what runs (a later unit's flip). */
+export const PLANE_ADMISSION_MODES = ["off", "shadow", "on"] as const;
+export type PlaneAdmissionMode = (typeof PLANE_ADMISSION_MODES)[number];
+
+/** The `plane` block's keys, held equal to `PlaneConfig` the way the top-level keys are. */
+const PLANE_KEYS: Record<keyof PlaneConfig, true> = { admission: true, reaskMinutes: true };
+
+/** `plane` (record 0064): `admission` is one of the three modes and
+ *  `reaskMinutes` a positive number of minutes — anything else is refused by
+ *  name at load, never read as off. Any other key is refused by name. */
+function validatePlane(plane: PlaneConfig): void {
+  if (typeof plane !== "object" || plane === null || Array.isArray(plane))
+    throw new Error("config.yaml: plane must be a mapping");
+  for (const key of unknownKeys(plane, PLANE_KEYS)) throw new Error(`config.yaml: plane.${key} is not a known key`);
+  if (plane.admission !== undefined && !(PLANE_ADMISSION_MODES as readonly unknown[]).includes(plane.admission))
+    throw new Error(`config.yaml: plane.admission must be ${PLANE_ADMISSION_MODES.join(", ")}`);
+  if (plane.reaskMinutes !== undefined && (typeof plane.reaskMinutes !== "number" || !(plane.reaskMinutes > 0)))
+    throw new Error("config.yaml: plane.reaskMinutes must be a positive number of minutes");
+}
 
 /** The `references` block's keys, held equal to `ReferencesConfig` the way the top-level keys are. */
 const REFERENCES_KEYS: Record<keyof ReferencesConfig, true> = { enabled: true };

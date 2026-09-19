@@ -19,6 +19,7 @@ import {
 import { NullRunStore } from "../runStore.js";
 import { TransientStoreError } from "../runStoreWorker.js";
 import type { RunRecord } from "../runRecord.js";
+import type { PlaneOutcomePost } from "../plane/decide.js";
 import type { InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import {
@@ -72,10 +73,10 @@ restrict:
   agents: [coding]
 `;
 
-function configStore(): ConfigStore {
+function configStore(yamlSuffix = ""): ConfigStore {
   const dir = mkdtempSync(join(tmpdir(), "swb-admission-"));
   const path = join(dir, "config.yaml");
-  writeFileSync(path, YAML);
+  writeFileSync(path, YAML + yamlSuffix);
   return new ConfigStore(path, join(dir, "overrides.json"));
 }
 
@@ -105,6 +106,8 @@ class RecordingLedger extends NullLedgerWriteThrough {
   readonly reads: Array<{ runId: string; afterSeq: number }> = [];
   /** The finish records closed through an adopted or reserved handle's sink. */
   readonly puts: RunRecord[] = [];
+  /** The plane outcome posts (orchestration-plane item 8) the stage fired. */
+  readonly planeOutcomes: PlaneOutcomePost[] = [];
   constructor(
     private readonly answers: {
       pushSeq?: (runId: string) => number | undefined;
@@ -134,6 +137,9 @@ class RecordingLedger extends NullLedgerWriteThrough {
     this.reads.push({ runId, afterSeq });
     return this.answers.inbox ?? [];
   }
+  override planeOutcome(post: PlaneOutcomePost): void {
+    this.planeOutcomes.push(post);
+  }
 }
 
 const hooks = {
@@ -155,6 +161,8 @@ function setup(
     restart?: RestartContext;
     /** The run this request restarts (`DispatchOptions.restartOf`): a restart from the request. */
     restartOf?: string;
+    /** Appended to the config.yaml fixture (e.g. the `plane` block). */
+    yaml?: string;
   } = {},
 ) {
   const message = msg(text, over.user);
@@ -163,7 +171,7 @@ function setup(
   const ledger = over.ledger ?? new RecordingLedger();
   const elsewhere = over.elsewhere ?? new ThreadsElsewhere();
   const deps: AdmissionDeps = {
-    config: configStore(),
+    config: configStore(over.yaml ?? ""),
     runLedger: ledger,
     threadsElsewhere: elsewhere,
     clock: () => NOW,
@@ -566,6 +574,59 @@ describe("admit — the thread admission claim", () => {
       expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "elsewhere" });
       expect(ledger.pushes.map((p) => p.runId)).toEqual(["run-far"]);
     });
+  });
+});
+
+// Feature: docs/reference/specs/orchestration-plane.md — the shadow outcome
+// post (record 0064; orchestration-plane item 8): under `plane.admission: shadow` the stage posts its
+// own outcome per dispatch, fire and forget; `off` (the default) posts nothing.
+describe("admit — the plane's shadow outcome post (orchestration-plane item 8)", () => {
+  const SHADOW = "plane:\n  admission: shadow\n";
+
+  it("under shadow a claim posts proceeded with the requester, the thread and the admission stage", async () => {
+    const { deps, ctx, ledger } = setup("write the report", { yaml: SHADOW });
+    expect((await admit(deps, ctx)).kind).toBe("proceed");
+    expect(ledger.planeOutcomes).toEqual([
+      { requester: "slack:UX", threadKey: THREAD, stage: "admission", outcome: "proceeded" },
+    ]);
+  });
+
+  it("under shadow a second ask on a live thread that asks for another agent posts refused:thread-live", async () => {
+    const first = setup("write the report", { yaml: SHADOW });
+    await admit(first.deps, first.ctx);
+    const second = setup("agent:general summarize", {
+      yaml: SHADOW,
+      admission: first.admission,
+      ledger: first.ledger,
+      agentName: "coding",
+    });
+    // The live run is general's; an explicit ask for a different agent is the
+    // follow-up refusal — the thread-live class the plane's queue would hold.
+    second.ctx.directives = { ...second.ctx.directives, agent: "coding" };
+    const outcome = await admit(second.deps, second.ctx);
+    expect(outcome).toEqual({ kind: "refused", reason: "follow_up_refused" });
+    expect(first.ledger.planeOutcomes.map((p) => p.outcome)).toEqual(["proceeded", "refused:thread-live"]);
+  });
+
+  it("a steered follow-up is not an ask for a new run: nothing is posted for it", async () => {
+    const first = setup("write the report", { yaml: SHADOW });
+    await admit(first.deps, first.ctx);
+    const reply = setup("and add numbers", { yaml: SHADOW, admission: first.admission, ledger: first.ledger });
+    expect((await admit(reply.deps, reply.ctx)).kind).toBe("steered");
+    expect(first.ledger.planeOutcomes.map((p) => p.outcome)).toEqual(["proceeded"]);
+  });
+
+  it("off — the default — posts nothing, for a claim and for a refusal alike", async () => {
+    const first = setup("write the report");
+    await admit(first.deps, first.ctx);
+    const second = setup("agent:general summarize", {
+      admission: first.admission,
+      ledger: first.ledger,
+      agentName: "coding",
+    });
+    second.ctx.directives = { ...second.ctx.directives, agent: "coding" };
+    await admit(second.deps, second.ctx);
+    expect(first.ledger.planeOutcomes).toEqual([]);
   });
 });
 
