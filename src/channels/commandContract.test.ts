@@ -445,7 +445,7 @@ describe("adapter contract — chat", () => {
         msg: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:t" },
         config: f.config,
       }),
-    ).toBe("🚫 `runs list` is restricted. Ask <@slack:UADMIN>.");
+    ).toBe("🚫 `runs list` is restricted. Ask slack:UADMIN.");
     const admin = await handleChatCommand({
       commands: f.commands,
       parsed,

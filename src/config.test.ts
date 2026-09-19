@@ -606,7 +606,7 @@ describe("grantsFor — the grants the policy table decides on", () => {
   it("adminsHint names people, never a surface: `slack:*` holding everything makes everyone an admin, and the hint still points at UADMIN", async () => {
     const s = store(withGrants(`  "slack:*": { actions: all, channels: all, repos: all }\n`));
     expect(s.grantsFor("slack:URANDOM")).toEqual(ALL_GRANTS);
-    expect(s.adminsHint()).toBe("<@slack:UADMIN>");
+    expect(s.adminsHint()).toBe("slack:UADMIN");
   });
 });
 
@@ -738,7 +738,7 @@ describe("grants config — the one shape", () => {
 
   it("the permission helpers answer from the grants table: adminsHint names the `all` holders, they manage repos and edit channel config, an unlisted user does neither", () => {
     const s = load(withGrants(`  "slack:UMGR":\n    actions: [repo:write]\n`));
-    expect(s.adminsHint()).toBe("<@slack:UADMIN>");
+    expect(s.adminsHint()).toBe("slack:UADMIN");
     expect([
       s.canManageRepos("slack:UADMIN"),
       s.canManageRepos("slack:UMGR"),

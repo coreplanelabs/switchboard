@@ -8,6 +8,9 @@ import {
   render,
   setForeignLiveCardsSource,
 } from "./statusCard.js";
+import { guardOutbound, installOutboundGuard } from "../testing/outboundGuard.js";
+
+installOutboundGuard();
 
 // Feature: docs/reference/specs/run-history.md item 36 — the orphan sweep's question is
 // "live anywhere we know of", not "driven here": a card the ledger says another
@@ -53,7 +56,7 @@ describe("live cards", () => {
 
   it("closeReclaimedCards closes the cards of runs that had replied with how they ended and an interrupted run's card with its closure note, skips runs without a card, and isolates a failed edit", async () => {
     const updates: { channel: string; ts: string; text: string }[] = [];
-    const client = {
+    const client = guardOutbound({
       chat: {
         update: async (args: { channel: string; ts: string; text: string; blocks: object[] }) => {
           if (args.ts === "fail.1") throw new Error("message_not_found");
@@ -61,7 +64,7 @@ describe("live cards", () => {
           return {};
         },
       },
-    };
+    });
     const warnings: string[] = [];
     const closed = await closeReclaimedCards(
       client,
@@ -90,14 +93,14 @@ describe("live cards", () => {
 
   it("a reclaimed close — interrupted or replied — is its own sentence and nothing after it: no override footer on any card (routing-and-config item 21)", async () => {
     const blocks: Record<string, string> = {};
-    const client = {
+    const client = guardOutbound({
       chat: {
         update: async (args: { channel: string; ts: string; text: string; blocks: object[] }) => {
           blocks[args.ts] = JSON.stringify(args.blocks);
           return {};
         },
       },
-    };
+    });
     await closeReclaimedCards(client, [
       { status: "interrupted", agent: "coding", card: { channel: "C1", ts: "r.1" } },
       { status: "completed", agent: "review", card: { channel: "C1", ts: "r.2" } },

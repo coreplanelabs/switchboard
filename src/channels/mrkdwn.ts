@@ -89,6 +89,24 @@ function convert(text: string): string {
     stash(`<${encodeMrkdwnUrl(url)}|${escapeMrkdwn(label)}>`),
   );
 
+  // A person's actor id in bot-authored text — bare `slack:U…` (AGENTS.md
+  // invariant 4) or a stray pre-wrapped `<@slack:U…>` — becomes the mention
+  // Slack resolves: `<@U…>`. This is the ONE renderer of actor ids into Slack
+  // syntax (docs/reference/specs/slack-channel.md item 16): the core prints the
+  // plain namespaced id everywhere (refusals, admin hints, thread leads) and
+  // only this adapter turns it into platform syntax, so every other surface
+  // keeps the plain id. Stashed so the prose escape below leaves the produced
+  // mention live. Word-bounded: an id inside a longer token (`user:slack:U…`,
+  // a memory scope key) and one inside a code span (protected above) stay
+  // literal text; a non-person id (`slack:C…`, `slack:bot:B…`) is untouched.
+  // A markdown link's URL is already stashed above; a BARE URL is plain prose
+  // here, so the lookbehind also excludes URL-structural chars (`=`, `/`, `?`,
+  // `#`, `&`) — `see https://x.test/runs?user=slack:U123` keeps its query value
+  // instead of gaining a mention that corrupts the address.
+  out = out.replace(/<@slack:(U[A-Z0-9]+)>|(?<![\w:@=/?#&])slack:(U[A-Z0-9]+)(?!\w)/g, (_, a?: string, b?: string) =>
+    stash(`<@${a ?? b}>`),
+  );
+
   // Blockquotes use the same leading `>` in Markdown and Slack. Stash the leading
   // marker run so the escape pass doesn't turn it into `&gt;` (which would kill
   // the quote); a `>` anywhere else on the line is prose and stays escaped.

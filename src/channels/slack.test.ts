@@ -31,6 +31,9 @@ import {
   OFFER_USED_LINE,
 } from "../core/dispatch/confirm.js";
 import { NO_GRANTS } from "../core/authz/index.js";
+import { guardOutbound, installOutboundGuard } from "./testing/outboundGuard.js";
+
+installOutboundGuard();
 
 // Feature: docs/reference/specs/slack-channel.md — trigger gating (which events start a
 // run) and the channel IO over the Slack Web API.
@@ -197,7 +200,7 @@ describe("SlackIO.history — thread reuse and concurrent attachment downloads",
 
   it("uses the thread the handler already fetched instead of calling conversations.replies again", async () => {
     const replies = vi.fn();
-    const client = { conversations: { replies } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const client = guardOutbound({ conversations: { replies } } as unknown as ConstructorParameters<typeof SlackIO>[0]);
     const thread = [
       { user: "UA", text: "<@UBOT> first ask", ts: "1.0" },
       { bot_id: "B1", text: "an answer", ts: "2.0" },
@@ -215,7 +218,9 @@ describe("SlackIO.history — thread reuse and concurrent attachment downloads",
   });
 
   it("a message whose ts does not parse carries no time; the item is kept", async () => {
-    const client = { conversations: { replies: vi.fn() } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const client = guardOutbound({ conversations: { replies: vi.fn() } } as unknown as ConstructorParameters<
+      typeof SlackIO
+    >[0]);
     const thread = [
       { user: "UA", text: "no clock", ts: "not-a-ts" },
       { user: "UA", text: "hi", ts: "3.0" },
@@ -227,7 +232,9 @@ describe("SlackIO.history — thread reuse and concurrent attachment downloads",
   });
 
   it("a user turn carries its author's platform-namespaced id; a bot's turn carries none (session-log item 12)", async () => {
-    const client = { conversations: { replies: vi.fn() } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const client = guardOutbound({ conversations: { replies: vi.fn() } } as unknown as ConstructorParameters<
+      typeof SlackIO
+    >[0]);
     const thread = [
       { user: "UALICE", text: "first ask", ts: "1.0" },
       { bot_id: "B1", text: "an answer", ts: "2.0" },
@@ -240,7 +247,7 @@ describe("SlackIO.history — thread reuse and concurrent attachment downloads",
 
   it("fetches the thread itself when no prefetched page is given (mention path)", async () => {
     const replies = vi.fn(async () => ({ messages: [{ user: "UA", text: "earlier", ts: "1.0" }] }));
-    const client = { conversations: { replies } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const client = guardOutbound({ conversations: { replies } } as unknown as ConstructorParameters<typeof SlackIO>[0]);
     const items = await new SlackIO(client, ev).history();
     expect(replies).toHaveBeenCalledWith({ channel: "C1", ts: "1.0", limit: 50 });
     expect(items.map((i) => i.text)).toEqual(["earlier"]);
@@ -305,10 +312,10 @@ describe("SlackIO.status on a resumed run (existing card)", () => {
     const update = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
     const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true, ts: "new.1" }));
     const setStatus = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
-    const c = {
+    const c = guardOutbound({
       chat: { update, postMessage },
       assistant: { threads: { setStatus } },
-    } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    } as unknown as ConstructorParameters<typeof SlackIO>[0]);
     return { c, update, postMessage, setStatus };
   }
 
@@ -363,7 +370,9 @@ describe("SlackIO.openThread (docs/reference/specs/slack-channel.md item 11)", (
   function client(teamUrl?: string) {
     const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true, ts: "77.1" }));
     const test = vi.fn(async () => ({ ok: true, ...(teamUrl ? { url: teamUrl } : {}) }));
-    const c = { chat: { postMessage }, auth: { test } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const c = guardOutbound({ chat: { postMessage }, auth: { test } } as unknown as ConstructorParameters<
+      typeof SlackIO
+    >[0]);
     return { c, postMessage };
   }
 
@@ -389,7 +398,9 @@ describe("SlackIO.openThread (docs/reference/specs/slack-channel.md item 11)", (
   it("a chat.postMessage answer without a ts is refused by name — never a thread keyed on `undefined`", async () => {
     const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
     const test = vi.fn(async () => ({ ok: true }));
-    const c = { chat: { postMessage }, auth: { test } } as unknown as ConstructorParameters<typeof SlackIO>[0];
+    const c = guardOutbound({ chat: { postMessage }, auth: { test } } as unknown as ConstructorParameters<
+      typeof SlackIO
+    >[0]);
     await expect(new SlackIO(c, ev).openThread("lead")).rejects.toThrow(/chat\.postMessage answered without a ts/);
   });
 });
@@ -405,9 +416,9 @@ describe("SlackIO.attach (docs/reference/specs/slack-channel.md item 10)", () =>
   it("uploads the text as a snippet in the thread with the lead (in mrkdwn) as the comment — one call, no chunked messages", async () => {
     const uploadV2 = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
     const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
-    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
+    const client = guardOutbound({ files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
       typeof SlackIO
-    >[0];
+    >[0]);
     await new SlackIO(client, ev).attach(file);
     expect(uploadV2).toHaveBeenCalledTimes(1);
     expect(uploadV2.mock.calls[0][0]).toMatchObject({
@@ -426,9 +437,9 @@ describe("SlackIO.attach (docs/reference/specs/slack-channel.md item 10)", () =>
       throw new Error("An API error occurred: missing_scope");
     });
     const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
-    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
+    const client = guardOutbound({ files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
       typeof SlackIO
-    >[0];
+    >[0]);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       await new SlackIO(client, ev).attach(file);
@@ -450,9 +461,9 @@ describe("SlackIO.attachFile (docs/reference/specs/slack-channel.md item 10)", (
   it("uploads the bytes as the file in the thread, titled by name, with the lead (in mrkdwn) as the comment — no chunked messages", async () => {
     const uploadV2 = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
     const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
-    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
+    const client = guardOutbound({ files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
       typeof SlackIO
-    >[0];
+    >[0]);
     await new SlackIO(client, ev).attachFile({ name: "verdict-dark.png", bytes, lead: "**PR verdict mock** — dark" });
     expect(uploadV2).toHaveBeenCalledTimes(1);
     const call = uploadV2.mock.calls[0]![0];
@@ -474,9 +485,9 @@ describe("SlackIO.attachFile (docs/reference/specs/slack-channel.md item 10)", (
       throw new Error("An API error occurred: missing_scope");
     });
     const postMessage = vi.fn(async (_opts: Record<string, unknown>) => ({ ok: true }));
-    const client = { files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
+    const client = guardOutbound({ files: { uploadV2 }, chat: { postMessage } } as unknown as ConstructorParameters<
       typeof SlackIO
-    >[0];
+    >[0]);
     await expect(new SlackIO(client, ev).attachFile({ name: "a.png", bytes, lead: "a" })).rejects.toThrow(
       /missing_scope/,
     );
@@ -499,7 +510,7 @@ describe("SlackIO.uploadTicket", () => {
       file_id: "F0AAA",
     }));
     const completeUploadExternal = vi.fn(async (_o: Record<string, unknown>) => ({ ok: true }));
-    const client = { files: { getUploadURLExternal, completeUploadExternal } } as unknown as Client;
+    const client = guardOutbound({ files: { getUploadURLExternal, completeUploadExternal } } as unknown as Client);
     const ticket = await new SlackIO(client, ev).uploadTicket({ name: "clip.mp4", size: 314_572_800 });
     expect(getUploadURLExternal).toHaveBeenCalledWith({ filename: "clip.mp4", length: 314_572_800 });
     expect(ticket.url).toBe("https://files.slack.com/upload/v1/CwABAAAAB?x=y");
@@ -514,17 +525,19 @@ describe("SlackIO.uploadTicket", () => {
   });
 
   it("a ticket Slack answers without a URL or an id is refused by name; a refused mint propagates the platform's words", async () => {
-    const bare = { files: { getUploadURLExternal: vi.fn(async () => ({ ok: true })) } } as unknown as Client;
+    const bare = guardOutbound({
+      files: { getUploadURLExternal: vi.fn(async () => ({ ok: true })) },
+    } as unknown as Client);
     await expect(new SlackIO(bare, ev).uploadTicket({ name: "a.png", size: 1 })).rejects.toThrow(
       /files\.getUploadURLExternal answered without an upload_url and file_id for a\.png/,
     );
-    const refused = {
+    const refused = guardOutbound({
       files: {
         getUploadURLExternal: vi.fn(async () => {
           throw new Error("An API error occurred: missing_scope");
         }),
       },
-    } as unknown as Client;
+    } as unknown as Client);
     await expect(new SlackIO(refused, ev).uploadTicket({ name: "a.png", size: 1 })).rejects.toThrow(/missing_scope/);
   });
 });
@@ -546,14 +559,14 @@ describe("SlackIO.status — status budget", () => {
       setStatus: vi.fn(async (_o: Record<string, unknown>) => ({ ok: true })),
     };
     type Client = ConstructorParameters<typeof SlackIO>[0];
-    const client = {
+    const client = guardOutbound({
       chat: { update: main.update, postMessage: main.postMessage },
       assistant: { threads: { setStatus: main.setStatus } },
-    } as unknown as Client;
-    const statusClient = {
+    } as unknown as Client);
+    const statusClient = guardOutbound({
       chat: { update: status.update },
       assistant: { threads: { setStatus: status.setStatus } },
-    } as unknown as Client;
+    } as unknown as Client);
     return { client, statusClient, main, status };
   }
 
@@ -705,7 +718,7 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
   const RISK = "changes the scope's settings for everyone in it until reset";
   const client = () => {
     const postMessage = vi.fn(async (_o: Record<string, unknown>) => ({ ok: true, ts: "4.0" }));
-    return { c: { chat: { postMessage } } as unknown as Client, postMessage };
+    return { c: guardOutbound({ chat: { postMessage } } as unknown as Client), postMessage };
   };
   type Block = { type: string; text?: { type: string; text: string }; elements?: Array<Record<string, unknown>> };
   const blocksOf = (call: Record<string, unknown>) => call.blocks as Block[];
@@ -830,7 +843,7 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
     });
     const grantsFor = vi.fn(() => NO_GRANTS);
     const deps = { config: { config: {}, grantsFor } } as unknown as CoreDeps;
-    const c = { chat: { update, postMessage }, conversations: { replies } } as unknown as Client;
+    const c = guardOutbound({ chat: { update, postMessage }, conversations: { replies } } as unknown as Client);
     return { calls, update, postMessage, replies, ack, grantsFor, deps, clients: { client: c, statusClient: c } };
   }
   /** A `block_actions` payload for one of the offer's buttons, as Bolt hands it to the listener. */
@@ -1129,13 +1142,13 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     const info = vi.fn(async () => ({ ok: true, channel: { name: "general" } }));
     const usersInfo = vi.fn(async () => ({ ok: true, user: { real_name: "Ada" } }));
     const test = vi.fn(async () => ({ ok: true }));
-    const client = {
+    const client = guardOutbound({
       reactions: { add },
       chat: { postMessage },
       conversations: { replies, info },
       users: { info: usersInfo },
       auth: { test },
-    } as unknown as Parameters<typeof receiveSlackMessage>[0];
+    } as unknown as Parameters<typeof receiveSlackMessage>[0]);
     return { calls, add, postMessage, replies, client };
   }
 
@@ -1678,13 +1691,13 @@ describe("the catch-up reads the receipt — onMissed's act (docs/reference/spec
     const r1 = { user: "UA", text: "for you, colleague", ts: cts(120), thread_ts: parent.ts };
     const r2 = { user: "UB", text: "re-run the suite", ts: cts(80), thread_ts: parent.ts };
     const r3 = { user: "UC", text: "and the tests?", ts: cts(40), thread_ts: parent.ts };
-    const client = {
+    const client = guardOutbound({
       users: { conversations: vi.fn(async () => ({ channels: [{ id: "CCU" }] })) },
       conversations: {
         history: vi.fn(async () => ({ messages: [parent] })),
         replies: vi.fn(async () => ({ messages: [parent, r1, r2, r3] })),
       },
-    } as unknown as CatchUpClient;
+    } as unknown as CatchUpClient);
     const ledger = receiptLedger({ [`CCU:${r1.ts}`]: "silent", [`CCU:${r2.ts}`]: "addressed" });
     const { gate, decide } = catchGate({ ledger });
     const seen = seenSet();

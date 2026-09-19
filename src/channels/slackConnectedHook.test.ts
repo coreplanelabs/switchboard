@@ -5,6 +5,9 @@ import { ACK_EMOJI } from "./slackCatchUp.js";
 import { getCatchUpStatus, resetCatchUpStatus, REQUIRED_BOT_SCOPES } from "./slackCatchUpStatus.js";
 import { getSocketStatus, resetSocketStatus } from "./slackSocketStatus.js";
 import { dispatch, type CoreDeps } from "../core/dispatcher.js";
+import { guardOutbound, installOutboundGuard } from "./testing/outboundGuard.js";
+
+installOutboundGuard();
 
 // Feature: docs/reference/specs/slack-channel.md item 7 — reconnect catch-up wiring.
 // Bolt-level harness: `createSlackApp` builds a real App on a real
@@ -26,7 +29,7 @@ const dispatchMock = vi.mocked(dispatch);
 /** A fake Web API covering every endpoint the connected hook can reach. Each
  *  method is a vi.fn so tests assert which calls the emitted event caused. */
 function fakeWebApi(historyMessages: object[]) {
-  return {
+  return guardOutbound({
     auth: {
       test: vi.fn(async () => ({
         ok: true,
@@ -49,7 +52,7 @@ function fakeWebApi(historyMessages: object[]) {
       postMessage: vi.fn(async () => ({ ok: true, ts: "9999999999.000001" })),
       update: vi.fn(async () => ({ ok: true })),
     },
-  };
+  });
 }
 
 /** Build the app exactly as production does (env tokens, real receiver) and

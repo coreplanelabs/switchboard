@@ -3,6 +3,9 @@ import { WebClient, type WebAPICallResult } from "@slack/web-api";
 import { createSlackApp } from "./slack.js";
 import { dispatchClick, type CoreDeps } from "../core/dispatcher.js";
 import { NO_GRANTS } from "../core/authz/index.js";
+import { guardOutbound, installOutboundGuard } from "./testing/outboundGuard.js";
+
+installOutboundGuard();
 
 // Feature: docs/reference/specs/slack-channel.md item 14 — the action intake's
 // wiring. Bolt-level harness on the connected-hook test's pattern: `createSlackApp`
@@ -72,11 +75,11 @@ describe("the confirm.* action intake — Bolt-level wiring (docs/reference/spec
     // Bolt verifies the token with an eager auth.test on its own WebClient and
     // authorizes every event through it — ground every WebClient call at the
     // transport seam so nothing leaves the process.
-    vi.spyOn(WebClient.prototype, "apiCall").mockResolvedValue({
-      ok: true,
-      user_id: BOT,
-      bot_id: "B0BOT",
-    } as WebAPICallResult);
+    // Grounded at the transport seam AND guarded: every apiCall's payload is
+    // scanned for a raw actor id like the other slack tests' fake clients.
+    vi.spyOn(WebClient.prototype, "apiCall").mockImplementation(
+      guardOutbound(async () => ({ ok: true, user_id: BOT, bot_id: "B0BOT" }) as WebAPICallResult),
+    );
     dispatchClickMock.mockClear();
     vi.spyOn(console, "log").mockImplementation(() => {});
   });
