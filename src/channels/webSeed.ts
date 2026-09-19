@@ -212,6 +212,18 @@ export type HomeTurnSeed = Omit<RunView, "route"> & {
   route?: { preset: string; reason: string };
 };
 
+/** One silent intake receipt of the thread (record 0058; run-history item 59):
+ *  the gate read a message and answered nothing — the thread view shows it as a
+ *  read-not-answered turn with the verdict's reason, in order among the runs by
+ *  `decidedAt`. `kind` tells it from a run's turn, which carries none. */
+export interface HomeReceiptTurnSeed {
+  kind: "receipt";
+  /** Why the gate stayed silent (the verdict's reason). */
+  reason: string;
+  /** When the verdict was decided (epoch ms) — the turn's place in the thread. */
+  decidedAt: number;
+}
+
 /** One row of the rail: a thread of the viewer's, on any channel (record 0043,
  *  amended): a `web:` conversation by its id, any other thread by its full key. */
 export interface HomeConversationRowSeed {
@@ -242,7 +254,9 @@ export interface HomeSeed {
   page: "home";
   /** The open conversation's id (a fresh one on `/threads`). */
   conversation: string;
-  turns: HomeTurnSeed[];
+  /** The thread's runs as turns, oldest first, with its silent intake receipts
+   *  interleaved by `decidedAt` (item 12). */
+  turns: (HomeTurnSeed | HomeReceiptTurnSeed)[];
   conversations: HomeConversationRowSeed[];
   viewer: { name: string };
   /** Where the composer POSTs (`/threads/<conversation>/send`). */

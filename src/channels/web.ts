@@ -15,7 +15,14 @@ import type { AccessIdentity } from "./accessAuth.js";
 import { originAllowed } from "./commandHttp.js";
 import { HttpIO, MAX_BODY_BYTES, readBody, type DispatchFn } from "./http.js";
 import { readableRuns } from "./liveView/viewer.js";
-import type { HomeCommandSeed, HomeConversationRowSeed, HomeSeed, HomeTurnSeed } from "./webSeed.js";
+import type {
+  HomeCommandSeed,
+  HomeConversationRowSeed,
+  HomeReceiptTurnSeed,
+  HomeSeed,
+  HomeTurnSeed,
+} from "./webSeed.js";
+import type { IntakeQuery, IntakeReceipt } from "../core/runLedger/types.js";
 import type { PageSender } from "./webShell.js";
 import { viewingRefusal } from "../core/authz/viewAs.js";
 
@@ -149,11 +156,37 @@ export function turnOf(view: RunRecordView, token?: string): HomeTurnSeed {
   };
 }
 
+/** True for the seed's receipt variant (item 12) — a read-not-answered turn, never a run. */
+export function isReceiptTurn(t: HomeTurnSeed | HomeReceiptTurnSeed): t is HomeReceiptTurnSeed {
+  return "kind" in t;
+}
+
+/** The thread's silent receipts merged among its turns by stamp (item 12): a
+ *  receipt sits where its message fell — before the first run decided after it
+ *  — and the ones after the newest run close the list. */
+export function interleaveReceipts(
+  turns: readonly HomeTurnSeed[],
+  receipts: readonly HomeReceiptTurnSeed[],
+): (HomeTurnSeed | HomeReceiptTurnSeed)[] {
+  if (receipts.length === 0) return [...turns];
+  const sorted = [...receipts].sort((a, b) => a.decidedAt - b.decidedAt);
+  const out: (HomeTurnSeed | HomeReceiptTurnSeed)[] = [];
+  let i = 0;
+  for (const t of turns) {
+    const at = t.receivedAt ?? t.startedAt;
+    while (i < sorted.length && sorted[i].decidedAt < at) out.push(sorted[i++]);
+    out.push(t);
+  }
+  return [...out, ...sorted.slice(i)];
+}
+
 /** The thread's turns as the history a run reads (`ChannelIO.history`): the
- *  request as the person's line, the reply as the agent's, each stamped. */
-export function historyOf(turns: readonly HomeTurnSeed[]): HistoryItem[] {
+ *  request as the person's line, the reply as the agent's, each stamped. A
+ *  receipt turn is no one's line — its message was never stored — and is skipped. */
+export function historyOf(turns: readonly (HomeTurnSeed | HomeReceiptTurnSeed)[]): HistoryItem[] {
   const items: HistoryItem[] = [];
   for (const t of turns) {
+    if (isReceiptTurn(t)) continue;
     if (t.request) items.push({ role: "user", text: t.request, at: t.receivedAt ?? t.startedAt });
     if (t.answer !== undefined && t.finishedAt !== undefined)
       items.push({ role: "assistant", text: t.answer, at: t.finishedAt });
@@ -291,6 +324,10 @@ export interface WebChatDeps {
   names?: NameDirectory;
   /** null when run history is off (store: null). */
   retention: { retentionDays: number } | null;
+  /** The intake receipts the thread view interleaves as read-not-answered turns
+   *  (item 12; run-history item 59): the run ledger's `listIntake`. null when
+   *  the ledger is off — the seed then carries the runs alone. */
+  intake: { listIntake(query: IntakeQuery): Promise<IntakeReceipt[]> } | null;
   /** `PUBLIC_BASE_URL`, when set: the origin a send must come from. */
   publicBaseUrl?: string;
   /** Defaults to the real core dispatch(); overridden in tests. */
@@ -323,8 +360,30 @@ export function createWebChatHandler(
   const liveToken = (run: RunView): string | undefined =>
     run.finished ? undefined : deps.registry.getById(run.id)?.token;
 
-  /** The thread's runs the viewer may read, oldest first, with their messages — one read per run, in parallel. */
-  async function turnsOf(threadKey: string, actor: Actor): Promise<{ turns: HomeTurnSeed[]; runs: RunView[] }> {
+  /** The thread's silent receipts as turns (item 12), read only when the viewer
+   *  may see the thread — at least one of its runs — so a receipt never reveals
+   *  a thread its runs would not; a failing ledger seeds the runs alone. */
+  async function silentReceiptsOf(threadKey: string, visible: boolean): Promise<HomeReceiptTurnSeed[]> {
+    if (!deps.intake || !visible) return [];
+    try {
+      const rows = await deps.intake.listIntake({ threadKey });
+      return rows
+        .filter((r) => r.verdict === "silent")
+        .map((r): HomeReceiptTurnSeed => ({ kind: "receipt", reason: r.reason, decidedAt: r.decidedAt }));
+    } catch (err) {
+      warn(
+        `intake receipts unavailable (${err instanceof Error ? err.message : String(err)}): ${threadKey} seeds its runs alone`,
+      );
+      return [];
+    }
+  }
+
+  /** The thread's runs the viewer may read, oldest first, with their messages — one read per run, in
+   *  parallel — and its silent receipts interleaved by decidedAt (item 12). */
+  async function turnsOf(
+    threadKey: string,
+    actor: Actor,
+  ): Promise<{ turns: (HomeTurnSeed | HomeReceiptTurnSeed)[]; runs: RunView[] }> {
     const listed = await deps.service.listRuns({
       status: "all",
       visibleTo: readableRuns(actor),
@@ -333,13 +392,16 @@ export function createWebChatHandler(
     });
     if (listed.storeUnavailable) warn(`the run store is unavailable: ${threadKey} seeds its live runs only`);
     const runs = [...listed.runs].sort((a, b) => a.startedAt - b.startedAt);
-    const turns = await Promise.all(
-      runs.map(async (run) => {
-        const read = await deps.service.getRun(run.id, { include: "messages" });
-        return turnOf(read.ok ? read.value : { ...run }, liveToken(run));
-      }),
-    );
-    return { turns, runs };
+    const [turns, receipts] = await Promise.all([
+      Promise.all(
+        runs.map(async (run) => {
+          const read = await deps.service.getRun(run.id, { include: "messages" });
+          return turnOf(read.ok ? read.value : { ...run }, liveToken(run));
+        }),
+      ),
+      silentReceiptsOf(threadKey, runs.length > 0),
+    ]);
+    return { turns: interleaveReceipts(turns, receipts), runs };
   }
 
   /** The rail: the viewer's own threads across every channel, titled by each first request. */
@@ -393,7 +455,7 @@ export function createWebChatHandler(
     ctx: WebChatContext,
     conversation: string,
     threadKey: string,
-    open: { turns: HomeTurnSeed[]; runs: RunView[] },
+    open: { turns: (HomeTurnSeed | HomeReceiptTurnSeed)[]; runs: RunView[] },
   ): Promise<HomeSeed> {
     const sub = subOf(ctx.actor);
     const rail = await railOf(ctx.actor, sub);
@@ -495,7 +557,7 @@ export function createWebChatHandler(
       receivedAt,
     };
     const io = new WebIO(async (exceptRunId) =>
-      historyOf((await turnsOf(threadKey, ctx.actor)).turns.filter((t) => t.id !== exceptRunId)),
+      historyOf((await turnsOf(threadKey, ctx.actor)).turns.filter((t) => isReceiptTurn(t) || t.id !== exceptRunId)),
     );
     // Started, not awaited: the dispatcher counts the run from its first line,
     // so the shutdown drain waits for it like any run; its errors are its own.

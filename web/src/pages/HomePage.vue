@@ -9,6 +9,7 @@ import ConversationRail from "../components/home/ConversationRail.vue";
 import EmptyState from "../components/home/EmptyState.vue";
 import PersonTurn from "../components/home/PersonTurn.vue";
 import AssistantTurn from "../components/home/AssistantTurn.vue";
+import SilentTurn from "../components/home/SilentTurn.vue";
 import MarkdownText from "../components/MarkdownText.vue";
 import { browser } from "../lib/browser";
 import { useSeed } from "../lib/seed";
@@ -55,12 +56,19 @@ type Item =
       live: { eventsUrl: string; stopUrl: string; serverNow?: number } | null;
       ended: boolean;
     }
+  | { key: string; kind: "silent"; reason: string; at: number }
   | { key: string; kind: "inline"; text: string };
 
 let seq = 0;
 const key = (k: string) => `${k}-${++seq}`;
 const items = reactive<Item[]>([]);
 for (const t of seed?.turns ?? []) {
+  // A silent intake receipt (item 12): the gate read a message and answered
+  // nothing — one read-not-answered line where the run would have been.
+  if ("kind" in t) {
+    items.push({ key: key("s"), kind: "silent", reason: t.reason, at: t.decidedAt });
+    continue;
+  }
   items.push({ key: key("p"), kind: "person", text: t.request, at: t.receivedAt ?? t.startedAt, pending: false });
   const live =
     !t.finished && t.token
@@ -507,6 +515,7 @@ const elsewhereLine = !elsewhere
               @ended="onEnded(item)"
               @stop="(url) => (stopUrl = url)"
             />
+            <SilentTurn v-else-if="item.kind === 'silent'" :reason="item.reason" :decided-at="item.at" :now="now" />
             <div v-else class="inline text-[0.875rem] text-toned" data-testid="inline">
               <MarkdownText :text="item.text" />
             </div>

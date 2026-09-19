@@ -706,6 +706,44 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
   });
 });
 
+describe("HomePage — silent receipts on the thread view (item 12)", () => {
+  it("a silent receipt draws as a read-not-answered turn with its reason, in order among the runs", () => {
+    const wrapper = mountApp(HomePage, {
+      seed: seed({
+        conversation: "slack:C1:1712.34",
+        elsewhere: { surface: "slack" },
+        turns: [
+          finished(),
+          { kind: "receipt", reason: "a question to another person", decidedAt: NOW - 500_000 },
+          finished({ id: "r-2", request: "and the migration?", answer: "Safe: additive, no locks." }),
+        ],
+      }),
+    });
+    const rows = wrapper.findAll(".transcript li");
+    // person, assistant, the receipt, person, assistant — the seed's order stands.
+    expect(rows).toHaveLength(5);
+    const silent = rows[2].find("[data-testid=silent-receipt]");
+    expect(silent.exists()).toBe(true);
+    expect(silent.text()).toContain("Read, not answered");
+    expect(silent.text()).toContain("a question to another person");
+    expect(wrapper.findAll(".turn.assistant")).toHaveLength(2);
+    expect(wrapper.findAll(".turn.person")).toHaveLength(2);
+  });
+
+  it("a receipt is never a run: no stream opens for it and the conversation's title is the first person's turn", () => {
+    const setTitle = vi.spyOn(browser, "setTitle");
+    const { created, factory } = fakeEventSourceFactory();
+    mountApp(HomePage, {
+      seed: seed({
+        turns: [{ kind: "receipt", reason: "smalltalk between people", decidedAt: NOW - 500 }, finished()],
+      }),
+      eventSource: factory,
+    });
+    expect(streams(created)).toEqual([]);
+    expect(setTitle).toHaveBeenLastCalledWith("review https://github.com/acme/api/pull/1391");
+  });
+});
+
 describe("HomePage — a thread from another channel (item 7)", () => {
   it("opens read-only: the turns draw, no composer, a line names the channel and links to the thread", () => {
     const wrapper = mountApp(HomePage, {
