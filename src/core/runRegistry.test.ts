@@ -502,6 +502,22 @@ describe("RunRegistry — the stall signal's pace facts (live-view item 32)", ()
     expect(s.eventsLast5m).toBe(0); // the call aged out of the window: no events, the stall reads
   });
 
+  it("a hosted ship parent carries none of the pace facts — a coordinator makes no tool calls, so its quiet is not a stall", () => {
+    const { reg, tick } = testRegistry();
+    reg.create("ship pipeline", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:1#host",
+      hosted: true,
+    });
+    tick(30 * 60_000); // half an hour of pipeline quiet — the units run elsewhere
+    const [s] = reg.listActive();
+    expect(s.hosted).toBe(true);
+    expect(s.eventsLast5m).toBeUndefined();
+    expect(s.lastToolCallAt).toBeUndefined();
+    expect(s.inFlight).toBeUndefined();
+  });
+
   it("a finished run carries none of the pace facts — there is no pace to misread", () => {
     const { reg } = testRegistry();
     const run = reg.create();
