@@ -1,5 +1,82 @@
 # Changelog
 
+## [1.252.0](https://github.com/coreplanelabs/switchboard/compare/v1.251.0...v1.252.0) (2026-09-19)
+
+
+### Features
+
+* **core:** a hosted parent refuses soft stops; hard seals and frees it ([#1926](https://github.com/coreplanelabs/switchboard/issues/1926)) ([52dfd75](https://github.com/coreplanelabs/switchboard/commit/52dfd7596052ce6dde5a354bf851eb37f1d17ca8))
+* **core:** config set at a shared scope classes destructive per input ([#1881](https://github.com/coreplanelabs/switchboard/issues/1881)) ([3bf4a51](https://github.com/coreplanelabs/switchboard/commit/3bf4a51ac48f094d1a0235aa8d293aecbb974ba1))
+* **core:** reclaim re-hosts a hosted parent, with a deadline ([#1900](https://github.com/coreplanelabs/switchboard/issues/1900)) ([65b6aa4](https://github.com/coreplanelabs/switchboard/commit/65b6aa4646f2311ed7f31aff7b46a4224d737d38))
+* **core:** the offer footer is gone; four more asides move to verbose ([#1850](https://github.com/coreplanelabs/switchboard/issues/1850)) ([da56fbe](https://github.com/coreplanelabs/switchboard/commit/da56fbe4bbee4ea6ba90df2fcd4776f12c9fe65b))
+* **costs:** meter each model.turn with biller, vendor, usd and source ([#1901](https://github.com/coreplanelabs/switchboard/issues/1901)) ([c9fcf01](https://github.com/coreplanelabs/switchboard/commit/c9fcf016f5dc56275fd31120939dbdcd53075182))
+* **load:** the intake op scores the verdict and the live silence ratio ([#1891](https://github.com/coreplanelabs/switchboard/issues/1891)) ([dddb16a](https://github.com/coreplanelabs/switchboard/commit/dddb16a529b1853c136fc3cb6ed7d4e0d7dd1ec8))
+* **load:** the route replay gains four bind rows and a volume line ([#1892](https://github.com/coreplanelabs/switchboard/issues/1892)) ([df28cd0](https://github.com/coreplanelabs/switchboard/commit/df28cd06d960fce4d99f68d62baee53e97399f70))
+* **memory:** a repo run leads its block with the repo's newest facts ([#1895](https://github.com/coreplanelabs/switchboard/issues/1895)) ([65edcfa](https://github.com/coreplanelabs/switchboard/commit/65edcfac67b17c70fb71b3595099608b642e01a5))
+* **memory:** memory sweep retires stored status rows by the write gate ([#1920](https://github.com/coreplanelabs/switchboard/issues/1920)) ([ff7f718](https://github.com/coreplanelabs/switchboard/commit/ff7f718985d03263872673f9e390d271d646b08f))
+* **memory:** reject status facts at a gate and count every write ([#1869](https://github.com/coreplanelabs/switchboard/issues/1869)) ([56d351e](https://github.com/coreplanelabs/switchboard/commit/56d351ef301101cca06c0c19ac2e47c080ad31ad))
+* **resident:** refuse new work near the memory cap, by name ([#1910](https://github.com/coreplanelabs/switchboard/issues/1910)) ([79a1768](https://github.com/coreplanelabs/switchboard/commit/79a1768d77cbda80a32b1737b58133f7a340bd81))
+* **runs:** index row and status card carry a stall signal ([#1893](https://github.com/coreplanelabs/switchboard/issues/1893)) ([534e0ea](https://github.com/coreplanelabs/switchboard/commit/534e0ea33073dbb000a720efbdeda2b227d2676f))
+* **ship:** a round's verdict reads the checks at the reviewed head ([#1921](https://github.com/coreplanelabs/switchboard/issues/1921)) ([bbc41e5](https://github.com/coreplanelabs/switchboard/commit/bbc41e59926e66e3017c3d12c5bf05f1f5ce7665))
+* **ship:** runner routes write the hosted parent through hostPublish ([#1918](https://github.com/coreplanelabs/switchboard/issues/1918)) ([a578f31](https://github.com/coreplanelabs/switchboard/commit/a578f314e655672a230737b86266a22363b78098))
+* **ship:** the pipeline's parent run stays live after the hand-off ([#1871](https://github.com/coreplanelabs/switchboard/issues/1871)) ([17ff48a](https://github.com/coreplanelabs/switchboard/commit/17ff48aaf6da6f581d7fafd649937e6139a79998))
+* **ship:** the plan runner hears a deploy roll under its coding child ([#1844](https://github.com/coreplanelabs/switchboard/issues/1844)) ([58bd84f](https://github.com/coreplanelabs/switchboard/commit/58bd84fdbc6500a90916ed9dcfcebf45fd4f1bda))
+* **ship:** unit threads speak at the request's verbosity ([#1865](https://github.com/coreplanelabs/switchboard/issues/1865)) ([dc513dc](https://github.com/coreplanelabs/switchboard/commit/dc513dc332d953c63761123d4bfbfd3f64e4e903))
+* **slack:** the catch-up reads the intake receipt before it re-runs ([#1848](https://github.com/coreplanelabs/switchboard/issues/1848)) ([87d3f3f](https://github.com/coreplanelabs/switchboard/commit/87d3f3f214aa849dd0d9bfa6b297d53608bd4208))
+* **web:** silent receipts render on the thread view ([#1898](https://github.com/coreplanelabs/switchboard/issues/1898)) ([355a913](https://github.com/coreplanelabs/switchboard/commit/355a913bf4f0e726c2be520f414f57c055189685))
+
+
+### Bug fixes
+
+* **agents:** general never promises a hand-off; points at a new ask ([#1874](https://github.com/coreplanelabs/switchboard/issues/1874)) ([b1e9273](https://github.com/coreplanelabs/switchboard/commit/b1e92736bf3693f730e0f03a77de8c3b1158a6f5))
+* **deploy:** a drain exits within the handoff grace once held runs end ([#1896](https://github.com/coreplanelabs/switchboard/issues/1896)) ([b5579ca](https://github.com/coreplanelabs/switchboard/commit/b5579ca765054e782a7072c11efb57c3cebb28c0))
+* **deploy:** a superseded release's re-run never rolls production back ([#1908](https://github.com/coreplanelabs/switchboard/issues/1908)) ([3aa63a9](https://github.com/coreplanelabs/switchboard/commit/3aa63a9bfd74162ca1f2c324e8755213ce0795ff))
+* **deploy:** bot step waits 90 min and drain lines name held run ids ([#1867](https://github.com/coreplanelabs/switchboard/issues/1867)) ([de068a4](https://github.com/coreplanelabs/switchboard/commit/de068a40031792bbe03c1148061f81ee82d68b07))
+* **dispatcher:** a cited merged PR neither rebinds nor pins the attach ([#1883](https://github.com/coreplanelabs/switchboard/issues/1883)) ([344632f](https://github.com/coreplanelabs/switchboard/commit/344632f4f3923695d361e7dd12b4db050d1d5e72))
+* **dispatcher:** agent token binds only at the head; bad values are text ([#1884](https://github.com/coreplanelabs/switchboard/issues/1884)) ([6593ddf](https://github.com/coreplanelabs/switchboard/commit/6593ddf1b90bec73882898fba17300841666b68e))
+* **dispatcher:** the outer finally nets a run its branch left running ([#1923](https://github.com/coreplanelabs/switchboard/issues/1923)) ([6dc257b](https://github.com/coreplanelabs/switchboard/commit/6dc257bdf0f1c96bcc5ffbbb20b42ce1a31b2782))
+* **harness:** a bot roll under a live OpenCode re-attaches in place ([#1919](https://github.com/coreplanelabs/switchboard/issues/1919)) ([6eb4f90](https://github.com/coreplanelabs/switchboard/commit/6eb4f907836af9e30adf9f0f080d4ed07176d956))
+* **harness:** a shell redirection never hides a push's remote or refspec ([#1872](https://github.com/coreplanelabs/switchboard/issues/1872)) ([d8037ec](https://github.com/coreplanelabs/switchboard/commit/d8037ece6295d3c6a32253f43e4232dd34f1e824))
+* **harness:** the first tool call after an OpenCode rebuild runs ([#1917](https://github.com/coreplanelabs/switchboard/issues/1917)) ([02a00e4](https://github.com/coreplanelabs/switchboard/commit/02a00e400c4b6b9c4e545c2fd3cada92b5a1bff7))
+* **resident:** a reset met during a live drain waits out the drain ([#1894](https://github.com/coreplanelabs/switchboard/issues/1894)) ([32622b3](https://github.com/coreplanelabs/switchboard/commit/32622b304cb82b0bc2dd9765b88304ab4a22872f))
+* **resident:** a resumed run re-attaches through a restore, not restarts ([#1903](https://github.com/coreplanelabs/switchboard/issues/1903)) ([051a322](https://github.com/coreplanelabs/switchboard/commit/051a322ede3e79aa929f63b6677f2f1dc7f20e6b))
+* **resident:** deps store carries nested workspace node_modules ([#1835](https://github.com/coreplanelabs/switchboard/issues/1835)) ([ea55374](https://github.com/coreplanelabs/switchboard/commit/ea553742176e8a919ad5af5a1a446353d71b92aa))
+* **resident:** the refresh rebuild stages off-lock and swaps under it ([#1840](https://github.com/coreplanelabs/switchboard/issues/1840)) ([87b2773](https://github.com/coreplanelabs/switchboard/commit/87b27730035d2a3ecb978bf66557d2fa7fd51fce))
+* **sandbox:** the runtime supervisor's tests run deterministically ([#1873](https://github.com/coreplanelabs/switchboard/issues/1873)) ([2f66bc1](https://github.com/coreplanelabs/switchboard/commit/2f66bc1f86474b0b04041891f02602236e04113d))
+* **ship:** a throw at the ledger claim finishes the run as failed ([#1855](https://github.com/coreplanelabs/switchboard/issues/1855)) ([024bd33](https://github.com/coreplanelabs/switchboard/commit/024bd33d659f5947c89aee7587afb7058de51d02))
+* **ship:** gate exit lines go to the description's validation table ([#1831](https://github.com/coreplanelabs/switchboard/issues/1831)) ([2b71c25](https://github.com/coreplanelabs/switchboard/commit/2b71c25ffb78596cad9442ee719600d4f25f026a))
+* **ship:** merge-ready is refused over a conflicting or fix-up head ([#1822](https://github.com/coreplanelabs/switchboard/issues/1822)) ([6a07690](https://github.com/coreplanelabs/switchboard/commit/6a076904799107ff8f8631f9e0508c5c8564fc32))
+* **ship:** pipeline children run changed-set checks, not the full suite ([#1842](https://github.com/coreplanelabs/switchboard/issues/1842)) ([92cd5c3](https://github.com/coreplanelabs/switchboard/commit/92cd5c317cd3aa68b2c112ad2a9e05cd9acf0e20))
+* **ship:** preflight verifies the base ref before cutting the branch ([#1902](https://github.com/coreplanelabs/switchboard/issues/1902)) ([8f3c08a](https://github.com/coreplanelabs/switchboard/commit/8f3c08a26d9909d8e3156c77a46f0410b88dcadd))
+* **ship:** the renewal stop says what spends one, not a fake keyword ([#1875](https://github.com/coreplanelabs/switchboard/issues/1875)) ([54984dc](https://github.com/coreplanelabs/switchboard/commit/54984dc3e8750d79dc8652016c985f425fd2f1e1))
+* **web:** a live duration seeds from its span's real start on page load ([#1868](https://github.com/coreplanelabs/switchboard/issues/1868)) ([62825e7](https://github.com/coreplanelabs/switchboard/commit/62825e787c89c78f67c044d185d8c9dc9540a866))
+* **web:** a step cut by the run's death is marked, not ranked ([#1912](https://github.com/coreplanelabs/switchboard/issues/1912)) ([6e3f813](https://github.com/coreplanelabs/switchboard/commit/6e3f813a198a9a462e906878cb0e98cde24cbfe0))
+
+
+### Reverts
+
+* **deploy:** a deploy over in-flight bot runs proceeds by handoff ([#1922](https://github.com/coreplanelabs/switchboard/issues/1922)) ([7709d9f](https://github.com/coreplanelabs/switchboard/commit/7709d9f3e02dab80796a97d867e05ac4a3fa6143))
+
+
+### Documentation
+
+* **core:** retitle route-note tests and unfuse a config grammar comment ([#1925](https://github.com/coreplanelabs/switchboard/issues/1925)) ([6188887](https://github.com/coreplanelabs/switchboard/commit/618888726a3731d7a97347ec477ac3af32f4e33c))
+* **deploy:** a pending bot deploy drains the bot like the fleet ([#1856](https://github.com/coreplanelabs/switchboard/issues/1856)) ([853e0cd](https://github.com/coreplanelabs/switchboard/commit/853e0cd8d01ea6f7b7ef8041e241b7a52dd73394))
+* **docs:** plan unit U45 reads built, merged and live in 1.251.0 ([#1863](https://github.com/coreplanelabs/switchboard/issues/1863)) ([a05cc3a](https://github.com/coreplanelabs/switchboard/commit/a05cc3a031679fbb7105f010c5c1e663b09fe98e))
+* **docs:** record 0057 reconciled with 0060 on threads and reports ([#1852](https://github.com/coreplanelabs/switchboard/issues/1852)) ([e340fe1](https://github.com/coreplanelabs/switchboard/commit/e340fe174deaa7f7167b8eeed2ab657198c285e8))
+* **docs:** record 0060 amended after the reconciliation with 0057 ([#1854](https://github.com/coreplanelabs/switchboard/issues/1854)) ([e8d58e3](https://github.com/coreplanelabs/switchboard/commit/e8d58e3899edb33b2bdab25b90b882e9dc060fcf))
+* **docs:** record 0062, the requester authors the commits the bot opens ([#1870](https://github.com/coreplanelabs/switchboard/issues/1870)) ([2aa7638](https://github.com/coreplanelabs/switchboard/commit/2aa763815fde6efe2f76102c99eb5e82d1d6b1cc))
+* **docs:** the operator plan proves a unit with changed-set forms ([#1866](https://github.com/coreplanelabs/switchboard/issues/1866)) ([b0ce15c](https://github.com/coreplanelabs/switchboard/commit/b0ce15cc736a96770a777bf5c7db1263c08983dc))
+* **docs:** the program plan marks U40 built ([#1905](https://github.com/coreplanelabs/switchboard/issues/1905)) ([2817ffc](https://github.com/coreplanelabs/switchboard/commit/2817ffc5e1950f10cce13522cd977c121d8f9fab))
+* **memory:** record 0061, memory keeps lessons not status, and its plan ([#1849](https://github.com/coreplanelabs/switchboard/issues/1849)) ([30a76b1](https://github.com/coreplanelabs/switchboard/commit/30a76b198cd671cd299ada2112a25d45891d2aae))
+* **process:** file record 0063 and its run-metrics plan ([#1886](https://github.com/coreplanelabs/switchboard/issues/1886)) ([ff89203](https://github.com/coreplanelabs/switchboard/commit/ff8920309e214cc4caa3fc65f638955afb0e4fb7))
+
+
+### Refactoring
+
+* **core:** reorder intake budget docs and drop unused IntakeRate ([#1911](https://github.com/coreplanelabs/switchboard/issues/1911)) ([4cd3372](https://github.com/coreplanelabs/switchboard/commit/4cd33723d0f927a709b52739afac75efb4073c56))
+* **slack:** catch-up intake gets no user scope for a userless reply ([#1916](https://github.com/coreplanelabs/switchboard/issues/1916)) ([8271a4f](https://github.com/coreplanelabs/switchboard/commit/8271a4f8ee08e67d991ad9747cc7dd187238db14))
+
 ## [1.251.0](https://github.com/coreplanelabs/switchboard/compare/v1.250.0...v1.251.0) (2026-09-18)
 
 
