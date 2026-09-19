@@ -95,10 +95,16 @@ export type ShipPreflightResult =
   { ok: true; entry: ShipEntry } | { ok: false; where: string; card: string; reply: string; refusal: Refusal };
 
 export interface ShipPreflightInput {
-  /** Platform-namespaced channel id (AGENTS.md invariant 4) — the prefix IS
-   *  the adapter kind: only `slack:` and `cli:` may run a pipeline. */
+  /** Platform-namespaced channel id (AGENTS.md invariant 4) — names the
+   *  adapter in the channel refusal; the capability below decides it. */
   channelId: string;
   threadKey: string;
+  /** Whether the request's channel handle can open a thread of its own
+   *  (`ChannelIO.openThread`, thread-admission item 6; record 0060): the
+   *  runner posts its card and opens each unit's thread through the requesting
+   *  thread's channel, so the capability — never a prefix list — decides who
+   *  may run a pipeline. The ship branch passes `io.openThread !== undefined`. */
+  canOpenThread: boolean;
   /** Directive-stripped request text. */
   requestText: string;
   repoCtx: Pick<
@@ -181,17 +187,20 @@ function noRepoQuestion(input: ShipPreflightInput): string {
  */
 export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPreflightResult> {
   const { repoCtx } = input;
-  // Spec item 1: HTTP /ingress and the MCP dispatch tool are single-shot
-  // request/response and cannot hold a pipeline-length connection.
-  if (!input.channelId.startsWith("slack:") && !input.channelId.startsWith("cli:")) {
+  // Spec item 1 (record 0060): the runner posts its card and opens each unit's
+  // thread through the requesting thread's channel, so the request handle's
+  // own capability decides — a handle without `openThread` (HTTP /ingress, the
+  // MCP dispatch tool) is refused with the spawn's reason.
+  if (!input.canOpenThread) {
     const base = input.runsBase?.trim();
     const page = base ? `${base.replace(/\/+$/, "")}/runs` : "the bot's /runs page";
+    const platform = input.channelId.split(":")[0] || input.channelId;
     return refuse(
       "ship_preflight_channel",
       "channel",
-      "not started (Slack/CLI only)",
-      `🚫 \`agent:ship\` runs only from Slack or the CLI — this adapter is single-shot and cannot hold a pipeline-length run. ` +
-        `Start it there instead, and watch pipelines on the run page (${page}).`,
+      "not started (channel cannot open a thread)",
+      `🚫 The ${platform} channel cannot open a thread of its own, so \`agent:ship\` cannot run a pipeline from it — the runner posts its card and opens each unit's thread through the requesting thread's channel. ` +
+        `Start it from a channel that can (Slack, the CLI or the web chat), and watch pipelines on the run page (${page}).`,
     );
   }
   // Spec item 2: child rounds never re-enter dispatch(), so without the

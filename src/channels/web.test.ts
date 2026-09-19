@@ -22,6 +22,8 @@ import {
   conversationIdOf,
   createWebChatHandler,
   historyOf,
+  resumeWebIO,
+  webThreadIO,
   EXCERPT_MAX,
   ownLane,
   paletteCommands,
@@ -371,6 +373,82 @@ describe("the projections — requester, turn, history, threads, title, palette,
   });
 });
 
+// ---- the rebuilt handle (record 0060) --------------------------------------------------
+
+describe("the web handle rebuilt from a bare thread key — threadIoFor's web: arm (record 0060; web-chat item 11)", () => {
+  function resumeSetup() {
+    const registry = new RunRegistry({ genId: () => "id-r", genToken: () => "tok-r", now: () => NOW });
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const service = createRunsService({ registry, store });
+    return { registry, store, service };
+  }
+
+  it("history() lists the thread's runs as the session's own actor; reply resolves and logs the length, never the text; undeliverable is set", async () => {
+    const { registry, store, service } = resumeSetup();
+    await store.put(record("r1", NOW - 1_000, { threadKey: "web:a1:c9" }));
+    const log = vi.fn();
+    const io = resumeWebIO(
+      { service, registry, grantsFor: () => BROWSER_GRANTS, log },
+      { threadKey: "web:a1:c9", userId: "access:a1" },
+    );
+    expect(io).toBeDefined();
+    expect(io!.undeliverable).toBeTruthy();
+    expect(await io!.history()).toEqual([
+      { role: "user", text: "request of r1", at: NOW - 11_000 },
+      { role: "assistant", text: "answer of r1", at: NOW - 1_000 },
+    ]);
+    await expect(io!.reply("twelve chars")).resolves.toBeUndefined();
+    expect(log).toHaveBeenCalledTimes(1);
+    const line = log.mock.calls[0][0] as string;
+    expect(line).toContain("web:a1:c9");
+    expect(line).toContain("12 chars");
+    expect(line).not.toContain("twelve");
+  });
+
+  it("a key that is not a web conversation rebuilds nothing", () => {
+    const { registry, service } = resumeSetup();
+    const deps = { service, registry, grantsFor: () => BROWSER_GRANTS };
+    expect(resumeWebIO(deps, { threadKey: "slack:C1:1.0", userId: "access:a1" })).toBeUndefined();
+    expect(resumeWebIO(deps, { threadKey: "web:a1", userId: "access:a1" })).toBeUndefined();
+  });
+
+  it("openThread(lead) mints a conversation in the same lane — the key `web:<sub>:<id>`, a handle bound to it, the lead's length logged — and two calls mint two ids (thread-admission item 6)", async () => {
+    const { registry, store, service } = resumeSetup();
+    await store.put(record("r2", NOW - 2_000, { threadKey: "web:a1:conv-9" }));
+    let n = 8;
+    const log = vi.fn();
+    const io = resumeWebIO(
+      { service, registry, grantsFor: () => BROWSER_GRANTS, mintId: () => `conv-${++n}`, log },
+      { threadKey: "web:a1:c9", userId: "access:a1" },
+    );
+    expect(io?.openThread).toBeDefined();
+    const first = await io!.openThread!("↳ the unit thread lead");
+    expect(first.thread).toEqual({ threadKey: "web:a1:conv-9" });
+    // The child's handle is bound to the new key: it reads that thread's runs.
+    expect(await first.io.history()).toEqual([
+      { role: "user", text: "request of r2", at: NOW - 12_000 },
+      { role: "assistant", text: "answer of r2", at: NOW - 2_000 },
+    ]);
+    expect(first.io.undeliverable).toBeTruthy();
+    const second = await io!.openThread!("↳ another");
+    expect(second.thread.threadKey).toBe("web:a1:conv-10");
+    const leadLine = (log.mock.calls as string[][]).map((c) => c[0]).find((l) => l.includes("conv-9"));
+    expect(leadLine).toContain(`${"↳ the unit thread lead".length} chars`);
+    expect(leadLine).not.toContain("the lead");
+  });
+
+  it("webThreadIO builds the same handle over a known actor — what the request path's openThread hands a child", async () => {
+    const { registry, store, service } = resumeSetup();
+    await store.put(record("r3", NOW - 3_000, { threadKey: "web:a1:c9" }));
+    const io = webThreadIO({ service, registry }, { threadKey: "web:a1:c9", actor: alice });
+    expect(await io.history()).toEqual([
+      { role: "user", text: "request of r3", at: NOW - 13_000 },
+      { role: "assistant", text: "answer of r3", at: NOW - 3_000 },
+    ]);
+    expect(io.undeliverable).toBeTruthy();
+  });
+});
+
 // ---- POST /threads/<id>/send ---------------------------------------------------------
 
 describe("POST /threads/<id>/send — the body into dispatch() as this session (item 11)", () => {
@@ -407,6 +485,20 @@ describe("POST /threads/<id>/send — the body into dispatch() as this session (
       text: "review https://github.com/acme/api/pull/1",
       receivedAt: NOW,
     });
+  });
+
+  it("the dispatched handle can open a thread of its own (record 0060): openThread mints a conversation in the session's lane, so the ship preflight admits the web by capability", async () => {
+    const { handler, calls } = setup();
+    const res = await request(handler, {
+      url: "/threads/conv-1/send",
+      method: "POST",
+      body: JSON.stringify({ text: "help" }),
+    });
+    expect(res.status).toBe(200);
+    expect(calls[0].io.openThread).toBeDefined();
+    const opened = await calls[0].io.openThread!("↳ a child");
+    expect(opened.thread.threadKey).toBe("web:a1:fresh-1");
+    expect(opened.io.undeliverable).toBeTruthy();
   });
 
   it("a linked session sends as its person with the session as authenticatedAs (authorization.md item 15)", async () => {

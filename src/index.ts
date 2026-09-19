@@ -19,7 +19,7 @@ import { loadWebAssets, webDistDir } from "./channels/webAssets.js";
 import { PACKAGE_ROOT, packageVersion } from "./packageRoot.js";
 import { makePageSender } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
-import { createWebChatHandler } from "./channels/web.js";
+import { createWebChatHandler, resumeWebIO } from "./channels/web.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
 import { createPlaneViewHandler } from "./channels/planeView.js";
 import { createDeliveryViewHandler } from "./channels/deliveryView.js";
@@ -666,8 +666,11 @@ export async function runBot(): Promise<void> {
   // A thread's channel handle rebuilt from a stored row's parts, with no
   // triggering event (run-history item 38): what a resumed run replies through
   // and what a coordinator's child is dispatched into. Slack from the key's
-  // channel and ts (and the row's card, when it has one); HTTP and MCP have
-  // no thread to speak into, so their handle logs; any other platform, none.
+  // channel and ts (and the row's card, when it has one); the web from the
+  // key's sub — history as the session's own actor, `openThread` minting a
+  // conversation in the same lane, replies logged as undeliverable (record
+  // 0060); HTTP and MCP have no thread to speak into, so their handle logs;
+  // any other platform, none.
   const threadIoFor = (thread: { threadKey: string; userId: string; cardTs?: string }): ChannelIO | undefined => {
     const [platform, channel, threadTs] = thread.threadKey.split(":");
     if (platform === "slack" && channel && threadTs) {
@@ -680,6 +683,17 @@ export async function runBot(): Promise<void> {
           ...(thread.cardTs ? { cardTs: thread.cardTs } : {}),
         },
         { statusClient },
+      );
+    }
+    if (platform === "web") {
+      return resumeWebIO(
+        {
+          service: runsService,
+          registry: defaultRunRegistry,
+          intake: ledgerClient ? { listIntake: (query) => ledgerClient.listIntake(query) } : null,
+          grantsFor: (id) => config.grantsFor(id),
+        },
+        thread,
       );
     }
     if (platform === "http" || platform === "mcp") return nullChannelIO(thread.threadKey);
