@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import type { CostReport } from "@core/core/costs.js";
-import { chartModelOf, type ChartDayHover, type DayTip, SERIES_FILL, usd } from "../../lib/costs";
+import { type ChartDayHover, type ChartModel, type DayTip, SERIES_FILL, usd } from "../../lib/costs";
 
-// The daily-cost stacked bars as inline SVG. Hover is per DAY, not per
+// A day-bucketed stacked-bar chart as inline SVG, drawn from a prebuilt
+// ChartModel: the costs page hands it `chartModelOf(report, series)` (dollars),
+// the metrics page `runsChartModelOf(byDay, statuses)` (counts) — `format`
+// renders the tooltip's numbers, dollars unless told otherwise
+// (docs/reference/specs/run-metrics.md item 10). Hover is per DAY, not per
 // segment: one transparent column over each bar; pointing at it shows a
 // tooltip panel with that day's breakdown — the day and its total on top, then
 // one row per component, largest first — at once and styled. The browser's
@@ -18,8 +21,9 @@ import { chartModelOf, type ChartDayHover, type DayTip, SERIES_FILL, usd } from 
 // pointer near the host's right edge and above it near the bottom, so it
 // stays inside the card.
 
-const props = defineProps<{ report: CostReport; series: string[] }>();
-const model = computed(() => chartModelOf(props.report, props.series));
+const props = defineProps<{ model: ChartModel; label: string; format?: (v: number) => string }>();
+const model = computed(() => props.model);
+const fmt = computed(() => props.format ?? usd);
 
 /** The panel's width in CSS px (`w-64`), and its height from its row count, for the flip. */
 const TIP_WIDTH = 256;
@@ -55,7 +59,7 @@ function showTip(d: ChartDayHover, ev: PointerEvent): void {
         class="block h-auto w-full font-mono"
         :viewBox="`0 0 ${model.width} ${model.height}`"
         role="img"
-        aria-label="Daily cost, stacked by component"
+        :aria-label="label"
       >
         <template v-for="(g, i) in model.gridLines" :key="`g${i}`">
           <line
@@ -128,7 +132,7 @@ function showTip(d: ChartDayHover, ev: PointerEvent): void {
           >{{ tip.data.label
           }}<span v-if="tip.data.partial" class="ml-1.5 font-normal text-dimmed">partial day</span></span
         >
-        <span class="font-medium text-highlighted">{{ usd(tip.data.total) }}</span>
+        <span class="font-medium text-highlighted">{{ fmt(tip.data.total) }}</span>
       </div>
       <div
         v-for="r in tip.data.rows"
@@ -137,7 +141,7 @@ function showTip(d: ChartDayHover, ev: PointerEvent): void {
       >
         <span class="tip-name truncate text-muted">{{ r.series }}</span>
         <span class="text-highlighted"
-          ><span class="tip-usd">{{ usd(r.usd) }}</span
+          ><span class="tip-usd">{{ fmt(r.usd) }}</span
           ><span v-if="r.estimated" class="ml-1 text-dimmed">est.</span></span
         >
       </div>
