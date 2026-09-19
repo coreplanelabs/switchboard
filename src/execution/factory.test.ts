@@ -9,6 +9,7 @@ import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { ExecInfraError, LocalExecutor } from "./executor.js";
 import { ResidentExecutor, ResidentNeedsRefError } from "./resident.js";
 import {
+  gitIdentityEnvs,
   makeExecutor,
   resetResidentProbeCache,
   residentOnboardedProbe,
@@ -20,16 +21,19 @@ import {
   type ExecutorFactoryOptions,
   type WorkspaceBinding,
 } from "./factory.js";
-import { resolveGithubToken } from "./githubApp.js";
+import { resolveGithubIdentity, resolveGithubToken } from "./githubApp.js";
 
 // The sandbox's GitHub credential is minted per identity (least-privilege), so
 // mock the mint to a scope-tagged token: the test asserts the SCOPE requested
 // and the token that lands in the sandbox env, without JWT signing or network.
+// The bot identity is mocked to "unknown" by default (no commit identity env
+// rides — the images' fallback stands); tests of the four variables set it.
 vi.mock("./githubApp.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("./githubApp.js")>();
   return {
     ...mod,
     resolveGithubToken: vi.fn(async (scope?: "read" | "write") => `ghs_${scope ?? "write"}`),
+    resolveGithubIdentity: vi.fn(async () => undefined),
   };
 });
 
@@ -154,6 +158,99 @@ describe("makeExecutor per-agent provisioning", () => {
     // sees the new one, because nothing was captured.
     vi.mocked(resolveGithubToken).mockResolvedValueOnce("ghs_read_rotated");
     expect((await envOf(review.executor)).GH_TOKEN).toBe("ghs_read_rotated");
+  });
+
+  // Feature: docs/reference/specs/execution.md item 5 — the commit identity
+  // rides the same resolver as the credential: a write run's sandbox env
+  // carries the four variables, the author pair from the requester's stored
+  // binding, the committer pair the bot's.
+  it("a write run's sandbox env carries the four identity variables — author the bound requester pair, committer the bot pair", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.mocked(resolveGithubIdentity).mockResolvedValue({ login: "switchboard-app[bot]", id: 111 });
+    // The stored binding is re-read by id (authorBinding.ts): answer it here.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ login: "ivy-dev", id: 4242 }), { status: 200 })),
+    );
+    const cf: ExecutorFactoryOptions = {
+      execution: { type: "cloudflare", url: "https://sandbox.example" },
+      ...dirs(),
+      bindings: { userGithubBinding: () => ({ login: "ivy-dev", id: 4242 }) },
+    };
+    const coding = await makeExecutor(cf, { ...ctx("coding"), requester: "slack:U0123" });
+    const env = await envOf(coding.executor);
+    expect(env).toEqual({
+      GH_TOKEN: "ghs_write",
+      GIT_AUTHOR_NAME: "ivy-dev",
+      GIT_AUTHOR_EMAIL: "4242+ivy-dev@users.noreply.github.com",
+      GIT_COMMITTER_NAME: "switchboard-app[bot]",
+      GIT_COMMITTER_EMAIL: "111+switchboard-app[bot]@users.noreply.github.com",
+    });
+    vi.mocked(resolveGithubIdentity).mockResolvedValue(undefined);
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 5 — the commit identity env
+// (record 0062): a `write` identity's commits are committed by the bot pair
+// always and authored by the requester's bound pair (or the bot pair,
+// unbound); `read` and `none` get none of the four; an unknown bot pair
+// yields none, so the images' fallback identity stands.
+describe("gitIdentityEnvs — the commit identity for a run's workspace", () => {
+  const BOT = { login: "switchboard-app[bot]", id: 111 };
+  const IVY = { login: "ivy-dev", id: 4242 };
+  const seams = (over: { bot?: typeof BOT; binding?: typeof IVY } = {}) => ({
+    bot: async () => over.bot,
+    binding: async () => over.binding,
+  });
+  const source = { requester: "slack:U0123", bindings: { userGithubBinding: () => ({ ...IVY }) } };
+
+  it("write identity, bound requester: the four variables — author the requester pair, committer the bot pair", async () => {
+    await expect(gitIdentityEnvs("write", source, seams({ bot: BOT, binding: IVY }))).resolves.toEqual({
+      GIT_AUTHOR_NAME: "ivy-dev",
+      GIT_AUTHOR_EMAIL: "4242+ivy-dev@users.noreply.github.com",
+      GIT_COMMITTER_NAME: "switchboard-app[bot]",
+      GIT_COMMITTER_EMAIL: "111+switchboard-app[bot]@users.noreply.github.com",
+    });
+  });
+
+  it("write identity, unbound requester: author and committer both the bot pair", async () => {
+    await expect(gitIdentityEnvs("write", source, seams({ bot: BOT }))).resolves.toEqual({
+      GIT_AUTHOR_NAME: "switchboard-app[bot]",
+      GIT_AUTHOR_EMAIL: "111+switchboard-app[bot]@users.noreply.github.com",
+      GIT_COMMITTER_NAME: "switchboard-app[bot]",
+      GIT_COMMITTER_EMAIL: "111+switchboard-app[bot]@users.noreply.github.com",
+    });
+  });
+
+  it("a run with no requester or no binding store reads no binding: the bot pair authors", async () => {
+    const binding = vi.fn(async () => IVY);
+    await expect(
+      gitIdentityEnvs("write", { bindings: source.bindings }, { bot: async () => BOT, binding }),
+    ).resolves.toMatchObject({ GIT_AUTHOR_NAME: "switchboard-app[bot]" });
+    await expect(
+      gitIdentityEnvs("write", { requester: "slack:U0123" }, { bot: async () => BOT, binding }),
+    ).resolves.toMatchObject({ GIT_AUTHOR_NAME: "switchboard-app[bot]" });
+    expect(binding).not.toHaveBeenCalled();
+  });
+
+  it("read and none identities: none of the four, even for a bound requester", async () => {
+    await expect(gitIdentityEnvs("read", source, seams({ bot: BOT, binding: IVY }))).resolves.toEqual({});
+    await expect(gitIdentityEnvs("none", source, seams({ bot: BOT, binding: IVY }))).resolves.toEqual({});
+  });
+
+  it("an unknown bot pair (no GitHub credential) yields none: the image fallback stands", async () => {
+    await expect(gitIdentityEnvs("write", source, seams({ binding: IVY }))).resolves.toEqual({});
+  });
+
+  it("a binding read that throws falls back to the bot pair, never a failed exec", async () => {
+    await expect(
+      gitIdentityEnvs("write", source, {
+        bot: async () => BOT,
+        binding: async () => {
+          throw new Error("github unreachable");
+        },
+      }),
+    ).resolves.toMatchObject({ GIT_AUTHOR_NAME: "switchboard-app[bot]" });
   });
 });
 

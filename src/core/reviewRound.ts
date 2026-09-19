@@ -138,6 +138,9 @@ export async function attachRoundWorkspace(input: {
      *  (`RunControl.remainingMs`; undefined until the lease starts): every
      *  attach the resident executor opens is clipped to it (execution.md item 9). */
     remainingMs?: () => number | undefined;
+    /** The run's requester (the platform-namespaced user id), whose stored
+     *  GitHub binding names the commits' author pair (record 0062). */
+    requester?: string;
   };
   logKey: string;
   /** The caller's `dispatch.workspace.attach` span: the probe and the attach
@@ -158,6 +161,7 @@ export async function attachRoundWorkspace(input: {
       ...(input.round.reattach !== undefined ? { reattach: input.round.reattach } : {}),
       ...(input.round.stopSignal !== undefined ? { stopSignal: input.round.stopSignal } : {}),
       ...(input.round.remainingMs !== undefined ? { remainingMs: input.round.remainingMs } : {}),
+      ...(input.round.requester !== undefined ? { requester: input.round.requester } : {}),
     },
     input.span,
   );

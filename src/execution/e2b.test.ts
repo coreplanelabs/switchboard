@@ -42,6 +42,24 @@ describe("E2BExecutor credential freshness", () => {
     expect(run.mock.calls[0][1]).toMatchObject({ envs: { GH_TOKEN: "ghs_first" } });
     expect(run.mock.calls[1][1]).toMatchObject({ envs: { GH_TOKEN: "ghs_second" } });
   });
+
+  // Feature: docs/reference/specs/execution.md item 5 — the commit identity
+  // (record 0062) rides the same shared resolver: the four variables reach
+  // the SDK's per-command env option beside the credential.
+  it("the four commit identity variables reach each command's envs beside the credential", async () => {
+    const FOUR = {
+      GIT_AUTHOR_NAME: "ivy-dev",
+      GIT_AUTHOR_EMAIL: "4242+ivy-dev@users.noreply.github.com",
+      GIT_COMMITTER_NAME: "switchboard-app[bot]",
+      GIT_COMMITTER_EMAIL: "111+switchboard-app[bot]@users.noreply.github.com",
+    };
+    const { ex, run } = e2bWith(
+      async () => OK,
+      async () => ({ GH_TOKEN: "ghs_write", ...FOUR }),
+    );
+    await ex.exec("git commit -m x");
+    expect(run.mock.calls[0][1]).toMatchObject({ envs: { GH_TOKEN: "ghs_write", ...FOUR } });
+  });
 });
 
 describe("E2BExecutor per-call timeout", () => {

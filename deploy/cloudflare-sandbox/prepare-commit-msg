@@ -1,0 +1,17 @@
+#!/bin/sh
+# The agent trailer (docs/reference/specs/execution.md): every commit made in a
+# Switchboard image carries `Co-Authored-By: <bot pair>`, so the agent's hand
+# stays visible even when the author is the requester. The pair is read from
+# GIT_COMMITTER_NAME/GIT_COMMITTER_EMAIL at commit time — the bot fills them
+# per exec — so the image stays installation-agnostic; without them the
+# image's own git identity stands (its fallback address is off the GitHub
+# domain, so it never renders as a GitHub account). Idempotent: a message that
+# already carries this exact trailer is left unchanged; a foreign
+# Co-Authored-By does not stop it (the identity rewrite scrubs those).
+set -e
+msg="$1"
+name="${GIT_COMMITTER_NAME:-$(git config user.name || true)}"
+email="${GIT_COMMITTER_EMAIL:-$(git config user.email || true)}"
+[ -n "$name" ] && [ -n "$email" ] || exit 0
+git interpret-trailers --in-place --if-exists addIfDifferent \
+  --trailer "Co-Authored-By: $name <$email>" "$msg"

@@ -16,6 +16,9 @@ deploy
 # Which variables are credentials: src/secrets.ts reads the manifest at startup
 # (src/core/secretsManifest.test.ts holds this line and the Dockerfile's COPY in place).
 !deploy/secrets.manifest.json
+# The agent-trailer hook: the root Dockerfile COPYs it to /opt/switchboard/hooks
+# (src/execution/prepareCommitMsgHook.test.ts holds this line in place).
+!deploy/hooks/prepare-commit-msg
 docs
 !docs/package.json
 README.md

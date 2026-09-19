@@ -12,15 +12,50 @@ import { truncate, type ExecOptions, type Executor, type ReleaseMode, type Relea
 
 const WORKDIR = "/home/user/workspace";
 
-// Best-effort per-sandbox setup: gh CLI + git identity + credential helper.
-// GH_TOKEN is provided via sandbox env, so `gh` and (through the credential
-// helper) `git` are authenticated without the token ever appearing on disk.
+// The shared agent-trailer hook (deploy/hooks/prepare-commit-msg): the E2B
+// sandbox has no image build to COPY it in, so setup writes this copy — held
+// byte-identical to the canonical file by a test — and points core.hooksPath
+// at it, the same wiring as the images'.
+export const PREPARE_COMMIT_MSG_HOOK = `#!/bin/sh
+# The agent trailer (docs/reference/specs/execution.md): every commit made in a
+# Switchboard image carries \`Co-Authored-By: <bot pair>\`, so the agent's hand
+# stays visible even when the author is the requester. The pair is read from
+# GIT_COMMITTER_NAME/GIT_COMMITTER_EMAIL at commit time — the bot fills them
+# per exec — so the image stays installation-agnostic; without them the
+# image's own git identity stands (its fallback address is off the GitHub
+# domain, so it never renders as a GitHub account). Idempotent: a message that
+# already carries this exact trailer is left unchanged; a foreign
+# Co-Authored-By does not stop it (the identity rewrite scrubs those).
+set -e
+msg="$1"
+name="\${GIT_COMMITTER_NAME:-$(git config user.name || true)}"
+email="\${GIT_COMMITTER_EMAIL:-$(git config user.email || true)}"
+[ -n "$name" ] && [ -n "$email" ] || exit 0
+git interpret-trailers --in-place --if-exists addIfDifferent \\
+  --trailer "Co-Authored-By: $name <$email>" "$msg"
+`;
+
+const HOOKS_DIR = "/home/user/.switchboard-hooks";
+
+// Best-effort per-sandbox setup: gh CLI + git identity + credential helper +
+// the agent-trailer hook. GH_TOKEN is provided via sandbox env, so `gh` and
+// (through the credential helper) `git` are authenticated without the token
+// ever appearing on disk. The fallback user.email stays OFF the GitHub domain
+// (a noreply-shaped address would render as a GitHub account it is not); the
+// real pairs ride the per-command env. The global core.hooksPath replaces
+// repo-local .git/hooks entirely — deliberate: an untrusted checkout's own
+// hooks never run here (a repo-local core.hooksPath still wins) —
+// docs/reference/specs/execution.md item 5.
 const SETUP = [
   `mkdir -p ${WORKDIR}`,
   `command -v gh >/dev/null 2>&1 || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null && sudo apt-get update -qq && sudo apt-get install -y -qq gh)`,
   `git config --global credential.helper '!gh auth git-credential' || true`,
   `git config --global user.name "switchboard-bot" || true`,
-  `git config --global user.email "switchboard-bot@users.noreply.github.com" || true`,
+  `git config --global user.email "switchboard-bot@switchboard.invalid" || true`,
+  `mkdir -p ${HOOKS_DIR}`,
+  `printf '%s' '${Buffer.from(PREPARE_COMMIT_MSG_HOOK).toString("base64")}' | base64 -d > ${HOOKS_DIR}/prepare-commit-msg`,
+  `chmod +x ${HOOKS_DIR}/prepare-commit-msg`,
+  `git config --global core.hooksPath ${HOOKS_DIR} || true`,
 ].join(" && ");
 
 export interface E2BOptions {

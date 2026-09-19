@@ -69,6 +69,10 @@ export interface RelaunchContext {
   remainingMs?: () => number | undefined;
   /** The row's write for the harness facts — issued inside the rotation, as its contract requires. */
   saveFacts: (facts: HarnessFacts) => void;
+  /** The run's requester (the platform-namespaced user id), whose stored
+   *  GitHub binding names the commits' author pair in the re-attached
+   *  workspace's env (record 0062). */
+  requester?: string;
 }
 
 export type RelaunchDecision =
@@ -139,6 +143,7 @@ export async function prepareRelaunch(
       root: ctx.root,
       clock: ctx.clock,
       reattach: ctx.binding,
+      ...(ctx.requester !== undefined ? { requester: ctx.requester } : {}),
       ...(ctx.stopSignal !== undefined ? { stopSignal: ctx.stopSignal } : {}),
       ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
     });

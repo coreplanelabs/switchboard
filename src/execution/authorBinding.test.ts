@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AUTHOR_BINDING_TTL_MS } from "../core/budgets.js";
 
 // Feature: docs/reference/specs/authorization.md item 18 (record 0062) — the
 // author binding read side: `resolveLogin` is one `GET /users/<login>` over the
@@ -49,6 +50,7 @@ afterEach(() => {
   }
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("resolveLogin / resolveById", () => {
@@ -127,6 +129,61 @@ describe("bindingOf — reads the stored binding only", () => {
     expect(await mod.bindingOf("slack:UONE", storeWith("ivy-dev"))).toEqual({ login: "ivy-dev", id: 4242 });
     expect(await mod.bindingOf("slack:UONE", storeWith("ivy-dev"))).toEqual({ login: "ivy-dev", id: 4242 });
     expect(calls).toHaveLength(1);
+  });
+
+  it("a stored pair's answer is cached for AUTHOR_BINDING_TTL_MS — per-exec reads cost no GitHub call inside the window, and are re-read past it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const mod = await freshModule();
+    const { fetchMock, calls } = routes({
+      "https://api.github.com/user/4242": json({ login: "ivy-dev", id: 4242 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const store = storeWith({ login: "ivy-dev", id: 4242 });
+    expect(await mod.bindingOf("slack:UONE", store)).toEqual({ login: "ivy-dev", id: 4242 });
+    expect(await mod.bindingOf("slack:UONE", store)).toEqual({ login: "ivy-dev", id: 4242 });
+    expect(calls).toHaveLength(1);
+    vi.setSystemTime(Date.now() + AUTHOR_BINDING_TTL_MS + 1);
+    expect(await mod.bindingOf("slack:UONE", store)).toEqual({ login: "ivy-dev", id: 4242 });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("a refused rename is an answer and cached too: one `[identity]` line per window, not one per exec", async () => {
+    const mod = await freshModule();
+    const { fetchMock, calls } = routes({
+      "https://api.github.com/user/4242": json({ login: "ivy-renamed", id: 4242 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const store = storeWith({ login: "ivy-dev", id: 4242 });
+    expect(await mod.bindingOf("slack:UONE", store)).toBeUndefined();
+    expect(await mod.bindingOf("slack:UONE", store)).toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(console.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("a rebind reads fresh at once — the cache keys on both halves of the stored pair", async () => {
+    const mod = await freshModule();
+    const { fetchMock, calls } = routes({
+      "https://api.github.com/user/4242": json({ login: "ivy-renamed", id: 4242 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await mod.bindingOf("slack:UONE", storeWith({ login: "ivy-dev", id: 4242 }))).toBeUndefined();
+    expect(await mod.bindingOf("slack:UONE", storeWith({ login: "ivy-renamed", id: 4242 }))).toEqual({
+      login: "ivy-renamed",
+      id: 4242,
+    });
+    expect(calls).toHaveLength(2);
+  });
+
+  it("`fresh: true` bypasses the cache — the identity rewrite's authoritative read before the PR opens", async () => {
+    const mod = await freshModule();
+    const { fetchMock, calls } = routes({
+      "https://api.github.com/user/4242": json({ login: "ivy-dev", id: 4242 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const store = storeWith({ login: "ivy-dev", id: 4242 });
+    expect(await mod.bindingOf("slack:UONE", store)).toEqual({ login: "ivy-dev", id: 4242 });
+    expect(await mod.bindingOf("slack:UONE", store, { fresh: true })).toEqual({ login: "ivy-dev", id: 4242 });
+    expect(calls).toHaveLength(2);
   });
 
   it("a failed read yields no pair (fail closed), and is not cached as an answer", async () => {
