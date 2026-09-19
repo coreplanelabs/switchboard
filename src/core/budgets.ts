@@ -28,6 +28,10 @@ export const minutesToMs = (minutes: number): number => minutes * MINUTE_MS;
  *  as a literal where it is used. */
 export const DAY_MS = 24 * 60 * MINUTE_MS;
 
+/** One calendar week in milliseconds: the bucket the live false-silence ratio
+ *  is printed per (docs/reference/specs/load-harness.md item 20). */
+export const WEEK_MS = 7 * DAY_MS;
+
 /** How long the confirmation a routed write is offered as stays pending
  *  (docs/decisions/0044; docs/reference/specs/routing-and-config.md item 25):
  *  the connect ticket's ten minutes. The bot passes it to the config object,
@@ -92,6 +96,13 @@ export const DRAIN = {
  *  that runs after the longest allowed drain still reads the verdict instead
  *  of deciding the reply again. The window is clamped to a month so a
  *  misconfigured writer cannot make retention unbounded. */
+/** The live false-silence join's recovery window (docs/reference/specs/load-harness.md
+ *  item 20; docs/decisions/0058): a `silent` intake receipt counts as a false
+ *  silence when the same person mentions the bot in the same thread within
+ *  this window — the mention is the ignored person's recovery move, so a
+ *  prompt one bounds the ratio the gate is judged by. */
+export const INTAKE_RECOVERY_WINDOW_MS = 10 * MINUTE_MS;
+
 export const INTAKE_WINDOW_MAX_MS = 30 * DAY_MS;
 export function intakeReceiptRetentionMs(catchUpWindowMs: number): number {
   const window = Math.min(Math.max(0, catchUpWindowMs), INTAKE_WINDOW_MAX_MS);
