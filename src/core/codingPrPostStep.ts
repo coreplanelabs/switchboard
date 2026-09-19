@@ -76,7 +76,13 @@ import {
   type PullRequestTarget,
   type RepoShipInfo,
 } from "../execution/githubPulls.js";
-import { encodeGithubPathSegments, renderPrDescriptionMarkdown, type PrDescription } from "./prDescription.js";
+import {
+  encodeGithubPathSegments,
+  renderPrDescriptionMarkdown,
+  type PrDescription,
+  type RequestedBy,
+} from "./prDescription.js";
+import { EMPTY_START_STATE, type BranchStartState, type RewriteResult } from "../execution/identityRewrite.js";
 import { submittedPrDescriptionArtifact } from "./reviewDescription.js";
 import { normalizeHead, parseRevParseOutput, sameCommit } from "./reviewedHead.js";
 import { parseExitPrefix, type RunEvent } from "./runEvents.js";
@@ -471,6 +477,15 @@ export interface CodingPrTarget {
    *  head — and with `headBranch` unknown no branch is taken for it. Never a
    *  pull request a person named. */
   ownPr?: { number: number; headSha: string; headBranch?: string; state: "open" | "merged" | "closed" };
+  /** The start state of the run's branch as the dispatch recorded it at
+   *  attach or clone (record 0062; identityRewrite.ts): what the identity
+   *  rewrite subtracts before judging the run's commits. Absent on a caller
+   *  that recorded none — the rewrite then treats it as unknown. */
+  startState?: BranchStartState;
+  /** The branch `startState` was read for — the branch the dispatch knew at
+   *  attach. A run that pushed a DIFFERENT branch cut it in the workspace, so
+   *  that branch's start state is empty, never the recorded one. */
+  startBranch?: string;
   /** True for a coordinator's child whose plan base is unknown even after the
    *  second guard — the tag's `coordinator_tag` event lost across a roll and
    *  the coordinator store's instance record without a `base`. The child is
@@ -533,6 +548,30 @@ export async function runCodingPrPostStep(input: {
    *  agent-ship.md item 12), so the note says so and offers no link over an
    *  empty diff. Absent, unread or failed, the compare link stands. */
   commitsOverBase?: (repo: string, base: string, branch: string) => Promise<number | undefined>;
+  /** The identity rewrite and its follow-ups (record 0062): absent,
+   *  the post-step opens as before (a caller predating the rewrite, or a test
+   *  of the other paths). Present, the rewrite runs before the open or edit of
+   *  the pushed branch, the pull request's head is pinned to the rebuilt tip,
+   *  the requester's bound login is assigned after the pre-check answers 204,
+   *  and the body carries the requested-by line when a binding exists. */
+  identity?: {
+    /** rewriteRunCommits over the target's start state (identityRewrite.ts). */
+    rewrite: (args: {
+      repo: string;
+      base: string;
+      branch: string;
+      startState: BranchStartState;
+    }) => Promise<RewriteResult>;
+    /** The pull request's `head.sha` after the open (githubPulls.pullRequestHead). */
+    pullRequestHead: (repo: string, number: number) => Promise<string | undefined>;
+    /** GET /assignees/<login>: true on 204, false on 404 (githubPulls.isAssignable). */
+    isAssignable: (repo: string, login: string) => Promise<boolean | undefined>;
+    /** POST the assignee (githubPulls.addAssignee); a failure is logged, never thrown. */
+    addAssignee: (repo: string, number: number, login: string) => Promise<void>;
+    /** The requested-by line's facts — present only when the requester has a
+     *  binding, so the body carries the line only then. */
+    requestedBy?: RequestedBy;
+  };
   /** True when the dispatcher already ran the description turn
    *  (descriptionTurn.ts) for this push and it still submitted nothing — the
    *  warning then says so, so the reader knows the system asked and the model
@@ -792,12 +831,125 @@ export async function runCodingPrPostStep(input: {
     );
     return `⚠️ A PR description was submitted but the branch \`${branch}\`${branchNote} ${why}, so no PR was opened.`;
   }
-  if (prDescription && pushedBranch && headSha?.length === 40 && base) {
-    try {
-      const body = renderPrDescriptionMarkdown(prDescription, { repo, headSha });
-      const opened = await input.openPullRequest({ repo, headBranch: branch, base, title: prDescription.title, body });
+  if (prDescription && pushedBranch && branch !== undefined && headSha?.length === 40 && base) {
+    // The identity rewrite before the open or edit (record 0062;
+    // agent-coding.md item 2): the run's commits must carry only the allowed
+    // identities before the bot's name goes on a pull request over them. On
+    // `unreadable` nothing is opened or edited and the reply says why; on
+    // `rewritten` the pull request is opened at the rebuilt tip, the note and
+    // the `pr_opened` event carry the count, and an `[identity]` line carries
+    // the identities replaced.
+    let renderHead = headSha;
+    let rewrittenCount = 0;
+    // The start state the rewrite subtracts (record 0062): the recorded one when
+    // it was read for this very branch; empty when the run pushed a branch it
+    // cut itself (the dispatch knew another at attach); unknown when nothing
+    // was recorded, on which the rewrite fails closed. No record means the
+    // dispatch never fired the read — it resolved no repository or branch at
+    // attach (the repo here may be the workspace's own origin, discovered
+    // after the run) — so the refusal's reason says no read was attempted,
+    // never that one failed.
+    const startState: BranchStartState =
+      target.startState === undefined
+        ? {
+            kind: "unknown",
+            reason:
+              "none was recorded — the dispatch resolved no repository or branch at attach, so no read was attempted",
+          }
+        : target.startBranch === undefined || target.startBranch === branch
+          ? target.startState
+          : EMPTY_START_STATE;
+    const rewriteOnce = async (): Promise<RewriteResult | undefined> => {
+      if (!input.identity) return undefined;
+      const result = await input.identity
+        .rewrite({ repo, base, branch, startState })
+        .catch((err: unknown): RewriteResult => ({
+          kind: "unreadable",
+          reason: err instanceof Error ? err.message : String(err),
+        }));
+      if (result.kind === "rewritten") {
+        rewrittenCount += result.count;
+        console.log(
+          `[identity] ${logKey} re-authored ${result.count} commit(s) on ${repo} ${branch}: ${result.replaced.join("; ")}`,
+        );
+      }
+      if (result.kind !== "unreadable" && result.tip !== undefined && /^[0-9a-f]{40}$/.test(result.tip))
+        renderHead = result.tip;
+      return result;
+    };
+    const rewrite = await rewriteOnce();
+    if (rewrite?.kind === "unreadable") {
       console.log(
-        `[pr-post] ${logKey} ${opened.created ? "opened" : "updated"} ${repo}#${opened.number} (${branchLog} → ${base} @ ${headSha.slice(0, 7)})`,
+        `[pr-post] ${logKey} skipped: the identity rewrite found ${repo} ${branchLog} unreadable (${rewrite.reason})`,
+      );
+      input.publish({
+        type: "run_note",
+        kind: "pr_not_opened",
+        summary: `no PR opened: the commits' identities could not be verified (${rewrite.reason})`,
+        at: systemClock(),
+      });
+      return `⚠️ A PR description was submitted but the identities of the commits on \`${branch}\`${branchNote} could not be verified or rewritten (${rewrite.reason}), so no PR was opened or edited.`;
+    }
+    try {
+      const requestedBy = input.identity?.requestedBy;
+      const renderCtx = { repo, headSha: renderHead, ...(requestedBy ? { requestedBy } : {}) };
+      let body = renderPrDescriptionMarkdown(prDescription, renderCtx);
+      const opened = await input.openPullRequest({ repo, headBranch: branch, base, title: prDescription.title, body });
+      // The head pin: after the open or edit, the pull request's head
+      // must be the tip the rewrite settled; a mismatch (the model pushed once
+      // more between the rewrite and the open) runs the rewrite once more and
+      // re-renders at the tip it settles. A second rewrite that answers
+      // `unreadable` cannot un-open the pull request, so the reply and the
+      // record carry a warning instead of claiming a verified head.
+      let pinWarning = "";
+      if (input.identity) {
+        const prHead = await input.identity.pullRequestHead(repo, opened.number).catch(() => undefined);
+        if (prHead !== undefined && !sameCommit(prHead, renderHead)) {
+          console.log(
+            `[pr-post] ${logKey} head mismatch after open on ${repo}#${opened.number} (pr at ${prHead.slice(0, 7)}, rewrite settled ${renderHead.slice(0, 7)}) — running the rewrite once more`,
+          );
+          const again = await rewriteOnce();
+          if (again?.kind === "unreadable") {
+            console.error(
+              `[pr-post] ${logKey} the head pin on ${repo}#${opened.number} could not be verified (${again.reason})`,
+            );
+            input.publish({
+              type: "run_note",
+              kind: "pr_head_unverified",
+              summary: `the pull request's head moved after the open and the identities at its new tip could not be verified (${again.reason})`,
+              at: systemClock(),
+            });
+            pinWarning = ` — ⚠️ the head moved after the open and the identities at its new tip could not be verified (${again.reason})`;
+          }
+          if (again !== undefined && again.kind !== "unreadable") {
+            body = renderPrDescriptionMarkdown(prDescription, { ...renderCtx, headSha: renderHead });
+            await input
+              .updatePullRequest(repo, opened.number, { title: prDescription.title, body })
+              .catch((err: unknown) =>
+                console.error(
+                  `[pr-post] ${logKey} re-render after the head pin failed for ${repo}#${opened.number}: ${err instanceof Error ? err.message : String(err)}`,
+                ),
+              );
+          }
+        }
+        // The assignee: the requester's bound login, added after the
+        // pre-check answers 204 and skipped with one log line after a 404.
+        if (requestedBy !== undefined) {
+          const assignable = await input.identity.isAssignable(repo, requestedBy.login).catch(() => undefined);
+          if (assignable === true)
+            await input.identity
+              .addAssignee(repo, opened.number, requestedBy.login)
+              .catch((err: unknown) =>
+                console.error(
+                  `[pr-post] ${logKey} assignee add failed for ${requestedBy.login} on ${repo}#${opened.number}: ${err instanceof Error ? err.message : String(err)}`,
+                ),
+              );
+          else if (assignable === false)
+            console.log(`[identity] ${logKey} ${requestedBy.login} is not assignable on ${repo}; skipped`);
+        }
+      }
+      console.log(
+        `[pr-post] ${logKey} ${opened.created ? "opened" : "updated"} ${repo}#${opened.number} (${branchLog} → ${base} @ ${renderHead.slice(0, 7)})`,
       );
       input.publish({
         type: "pr_opened",
@@ -805,6 +957,7 @@ export async function runCodingPrPostStep(input: {
         number: opened.number,
         created: opened.created,
         head: branch,
+        ...(rewrittenCount > 0 ? { rewritten: rewrittenCount } : {}),
         at: systemClock(),
       });
       // The description as data, persisted at its source (reading-diff.md item
@@ -813,12 +966,13 @@ export async function runCodingPrPostStep(input: {
       // of parsing the body back.
       input.publish({
         type: "review_artifact",
-        ...submittedPrDescriptionArtifact(prDescription, { repo, pr: opened.number, headSha, body }),
+        ...submittedPrDescriptionArtifact(prDescription, { repo, pr: opened.number, headSha: renderHead, body }),
         at: systemClock(),
       });
+      const reauthored = rewrittenCount > 0 ? ` — ${rewrittenCount} commit(s) re-authored` : "";
       return opened.created
-        ? `🔀 PR opened: ${opened.htmlUrl} (\`${branch}\` → \`${base}\`)`
-        : `🔀 PR updated: ${opened.htmlUrl}${renderedAt(input.verbosity, headSha)}`;
+        ? `🔀 PR opened: ${opened.htmlUrl} (\`${branch}\` → \`${base}\`)${reauthored}${pinWarning}`
+        : `🔀 PR updated: ${opened.htmlUrl}${renderedAt(input.verbosity, renderHead)}${reauthored}${pinWarning}`;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       console.error(`[pr-post] ${logKey} open/edit failed for ${repo} ${branch}: ${reason}`);

@@ -392,6 +392,25 @@ export interface RenderContext {
   /** The PR head the anchors are rendered against — the full 40-char sha, so
    *  the link lands on the exact lines whatever the branch does next. */
   headSha: string;
+  /** The requester behind the run, when a binding names their GitHub login
+   *  (record 0062): one BOT-written line in the agents block — the
+   *  agent's description object is unchanged. No binding, no line. */
+  requestedBy?: RequestedBy;
+}
+
+/** The requested-by line's facts: the bound login, the surface the request
+ *  arrived on, and the display names of the senders who steered the run. */
+export interface RequestedBy {
+  login: string;
+  surface: string;
+  steeredBy?: string[];
+}
+
+/** The one bot-written line in the agents block (record 0062). */
+export function requestedByLine(by: RequestedBy): string {
+  const steered =
+    by.steeredBy !== undefined && by.steeredBy.length > 0 ? `; steered by ${by.steeredBy.join(", ")}` : "";
+  return `Requested by @${by.login} in ${by.surface}${steered}`;
 }
 
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -491,7 +510,13 @@ export function renderPrDescriptionMarkdown(desc: PrDescription, ctx: RenderCont
       ...desc.validation.criteria.map((c) => `| ${cell(c.criterion)} | ${cell(c.proof)} |`),
     ]),
   );
-  if (desc.agentNotes) out.push(...details(FOLD_SUMMARIES.agents, [desc.agentNotes]));
+  // The requester's line rides the agents block beside the agent's own notes
+  // (record 0062): bot-written from the binding, never from the object.
+  const agentLines = [
+    ...(desc.agentNotes ? [desc.agentNotes] : []),
+    ...(ctx.requestedBy ? [requestedByLine(ctx.requestedBy)] : []),
+  ];
+  if (agentLines.length > 0) out.push(...details(FOLD_SUMMARIES.agents, agentLines));
   out.push(GENERATED_FOOTER, "");
   return out.join("\n");
 }

@@ -847,6 +847,232 @@ export async function fetchPullRequestReviews(pr: {
   });
 }
 
+// ---- the identity rewrite's Git Data reads and writes (record 0062) ----
+// The compare read, the commit rebuild and the forced ref move the identity
+// rewrite (src/execution/identityRewrite.ts) runs before the bot opens or
+// edits a pull request, plus the assignee pre-check and write the post-step
+// runs after an open. Same REST-with-App-token conventions as the writes
+// above, never a `gh` shell-out (AGENTS.md invariant 5).
+
+/** One commit as the compare endpoint lists it, the fields the identity
+ *  rewrite reads: the exact author and committer pairs, the author date the
+ *  fingerprint keeps, the tree and parents a rebuild reuses. */
+export interface ComparedCommit {
+  sha: string;
+  treeSha: string;
+  parents: string[];
+  author: { name: string; email: string; date: string };
+  committer: { name: string; email: string };
+  message: string;
+}
+
+/** The paginated compare `base...head`: GitHub's own count beside the commits
+ *  read. `commits` may be shorter than `totalCommits` when the caller's cap
+ *  stopped the paging (the rewrite refuses over 300 anyway). */
+export interface CompareResult {
+  totalCommits: number;
+  commits: ComparedCommit[];
+}
+
+/** How many compare pages are read before the rewrite's own >300 refusal
+ *  makes more paging pointless (100 per page; the cap is 301+). */
+const COMPARE_PER_PAGE = 100;
+const COMPARE_MAX_PAGES = 3;
+
+/**
+ * GET /repos/{repo}/compare/{base}...{head}, paginated — the commits reachable
+ * from `head` and not from `base`, with `total_commits` as GitHub counts them.
+ * `"missing"` on a 404 (a branch GitHub has never heard of — an answer, not an
+ * error: a new branch's start state is empty); `undefined` on any other
+ * failure, which the rewrite treats as unreadable. Never throws.
+ */
+export async function compareRange(
+  repo: string,
+  base: string,
+  head: string,
+): Promise<CompareResult | "missing" | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  if (!token) return undefined;
+  const range = `${encodeURIComponent(base)}...${encodeURIComponent(head)}`;
+  const commits: ComparedCommit[] = [];
+  let totalCommits = 0;
+  for (let page = 1; page <= COMPARE_MAX_PAGES; page += 1) {
+    let res: Response;
+    try {
+      res = await fetch(
+        `https://api.github.com/repos/${repo}/compare/${range}?per_page=${COMPARE_PER_PAGE}&page=${page}`,
+        { headers: apiHeaders(token), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+      );
+    } catch {
+      return undefined;
+    }
+    if (res.status === 404) return "missing";
+    if (!res.ok) return undefined;
+    const data = (await res.json().catch(() => null)) as {
+      total_commits?: unknown;
+      commits?: unknown;
+    } | null;
+    if (!data || typeof data.total_commits !== "number" || !Array.isArray(data.commits)) return undefined;
+    totalCommits = data.total_commits;
+    for (const raw of data.commits) {
+      const parsed = parseComparedCommit(raw);
+      if (!parsed) return undefined;
+      commits.push(parsed);
+    }
+    if (commits.length >= totalCommits || data.commits.length < COMPARE_PER_PAGE) break;
+  }
+  return { totalCommits, commits };
+}
+
+function parseComparedCommit(raw: unknown): ComparedCommit | undefined {
+  const row = raw as {
+    sha?: unknown;
+    parents?: unknown;
+    commit?: {
+      message?: unknown;
+      tree?: { sha?: unknown };
+      author?: { name?: unknown; email?: unknown; date?: unknown };
+      committer?: { name?: unknown; email?: unknown };
+    };
+  };
+  const c = row.commit;
+  if (
+    typeof row.sha !== "string" ||
+    !c ||
+    typeof c.message !== "string" ||
+    typeof c.tree?.sha !== "string" ||
+    typeof c.author?.name !== "string" ||
+    typeof c.author?.email !== "string" ||
+    typeof c.author?.date !== "string" ||
+    typeof c.committer?.name !== "string" ||
+    typeof c.committer?.email !== "string" ||
+    !Array.isArray(row.parents)
+  )
+    return undefined;
+  const parents: string[] = [];
+  for (const p of row.parents) {
+    const sha = (p as { sha?: unknown }).sha;
+    if (typeof sha !== "string") return undefined;
+    parents.push(sha);
+  }
+  return {
+    sha: row.sha,
+    treeSha: c.tree.sha,
+    parents,
+    author: { name: c.author.name, email: c.author.email, date: c.author.date },
+    committer: { name: c.committer.name, email: c.committer.email },
+    message: c.message,
+  };
+}
+
+/**
+ * POST /repos/{repo}/git/commits — rebuild one commit with the same tree, the
+ * rebuilt parents, a corrected author (with the original date) and the
+ * committer sent EXPLICITLY (the API defaults the committer to the author it
+ * is given). Returns the new sha; throws on any failure with the status and
+ * body so the rewrite can name a ruleset refusal.
+ */
+export async function createCommit(
+  repo: string,
+  commit: {
+    message: string;
+    tree: string;
+    parents: string[];
+    author: { name: string; email: string; date: string };
+    committer: { name: string; email: string };
+  },
+): Promise<string> {
+  const token = await requireToken();
+  const res = await fetch(`https://api.github.com/repos/${repo}/git/commits`, {
+    method: "POST",
+    headers: apiHeaders(token, true),
+    body: JSON.stringify(commit),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`commit rebuild failed: HTTP ${res.status} ${redactAndCap(text, 300)}`);
+  }
+  const data = (await res.json().catch(() => null)) as { sha?: unknown } | null;
+  if (typeof data?.sha !== "string") throw new Error("commit rebuild answered without a sha");
+  return data.sha;
+}
+
+/**
+ * PATCH /repos/{repo}/git/refs/heads/{branch} `{ sha, force: true }` — move the
+ * branch to the rebuilt tip, a non-ancestor included. Throws on any failure
+ * with the status and body so the rewrite can name a ruleset refusal (a 422 or
+ * 409: force pushes blocked, signed commits required).
+ */
+export async function forceMoveRef(repo: string, branch: string, sha: string): Promise<void> {
+  const token = await requireToken();
+  const path = branch.split("/").map(encodeURIComponent).join("/");
+  const res = await fetch(`https://api.github.com/repos/${repo}/git/refs/heads/${path}`, {
+    method: "PATCH",
+    headers: apiHeaders(token, true),
+    body: JSON.stringify({ sha, force: true }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`ref move failed for ${branch}: HTTP ${res.status} ${redactAndCap(text, 300)}`);
+  }
+}
+
+/** GET /repos/{repo}/pulls/{number} → the pull request's `head.sha` — the pin
+ *  the post-step reads after an open or edit. Undefined on any failure. */
+export async function pullRequestHead(repo: string, number: number): Promise<string | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  if (!token) return undefined;
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/pulls/${number}`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as { head?: { sha?: unknown } } | null;
+  return typeof data?.head?.sha === "string" ? data.head.sha : undefined;
+}
+
+/** GET /repos/{repo}/assignees/{login} — whether the login can be assigned:
+ *  `true` on 204, `false` on 404 (skipped with one log line at the caller),
+ *  `undefined` when GitHub could not be asked. Never throws. */
+export async function isAssignable(repo: string, login: string): Promise<boolean | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  if (!token) return undefined;
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/assignees/${encodeURIComponent(login)}`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (res.status === 204) return true;
+  return res.status === 404 ? false : undefined;
+}
+
+/** POST /repos/{repo}/issues/{number}/assignees — add one assignee. Throws on
+ *  a non-2xx so the caller can log honestly (the open itself already stands). */
+export async function addAssignee(repo: string, number: number, login: string): Promise<void> {
+  const token = await requireToken();
+  const res = await fetch(`https://api.github.com/repos/${repo}/issues/${number}/assignees`, {
+    method: "POST",
+    headers: apiHeaders(token, true),
+    body: JSON.stringify({ assignees: [login] }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`assignee add failed for ${login}: HTTP ${res.status} ${redactAndCap(text, 300)}`);
+  }
+}
+
 async function requireToken(): Promise<string> {
   const token = await resolveGithubToken();
   if (!token) {
