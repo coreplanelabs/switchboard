@@ -1,4 +1,6 @@
-import { parseModelRef } from "./provider.js";
+import { parseModelRef, type TokenUsage } from "./provider.js";
+import type { CardPrice } from "./modelCard.js";
+import type { ReportedCost } from "./modelProxy/usage.js";
 import type { ModelUsage, RunUsage } from "./runUsage.js";
 
 // The price of a model's tokens (docs/reference/specs/costs.md): one table
@@ -148,6 +150,97 @@ export function modelPriceOf(ref: string, prices: ModelPriceTable = NO_PRICES): 
   return { input: list.input, output: list.output, cacheRead: list.cacheRead, cacheWrite: list.cacheWrite5m };
 }
 
+// ---- one turn, priced at the proxy (model-proxy.md item 6) -----------------------
+
+/** Which layer priced the turn: the provider's own reported cost, the
+ *  operator's table (`costs.prices` or a block's `models.<id>.price`), the
+ *  registry card (the Anthropic family list folds into this layer), or none —
+ *  an unpriced turn is never $0. */
+export type PriceSource = "provider" | "operator" | "registry" | "none";
+
+/** The meter row's dollars: `usd` when a layer priced the turn, `feeUsd` on a
+ *  BYOK turn (the aggregator's fee, already inside `usd`), and the layer. */
+export interface TurnPrice {
+  usd?: number;
+  feeUsd?: number;
+  priceSource: PriceSource;
+}
+
+/** What `priceTurn` reads of the run's model card: the ref the spans name,
+ *  the card's rate when a layer named one, and which layer did
+ *  (`ModelCard.provenance.price`). */
+export interface TurnPriceCard {
+  ref: string;
+  price?: CardPrice;
+  pricedBy?: "operator" | "registry" | "wire";
+}
+
+const turnTokensUsd = (u: TokenUsage, p: { input: number; output: number; cacheRead: number; cacheWrite: number }) =>
+  (u.inputTokens * p.input +
+    u.outputTokens * p.output +
+    (u.cacheReadTokens ?? 0) * p.cacheRead +
+    (u.cacheWriteTokens ?? 0) * p.cacheWrite) /
+  1_000_000;
+
+/** A card rate over one turn's counts, tiers by pi's rule (`calculateCost`):
+ *  the input side is input + cache reads + cache writes, and the WHOLE request
+ *  re-rates at the highest tier whose threshold it exceeds. */
+export function cardPriceUsd(usage: TokenUsage, price: CardPrice): number {
+  const inputSide = usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+  let rates: { input: number; output: number; cacheRead: number; cacheWrite: number } = price;
+  let matched = -1;
+  for (const tier of price.tiers ?? []) {
+    if (inputSide > tier.inputTokensAbove && tier.inputTokensAbove > matched) {
+      rates = tier;
+      matched = tier.inputTokensAbove;
+    }
+  }
+  return turnTokensUsd(usage, rates);
+}
+
+/**
+ * One turn's price, by record 0052's precedence: a provider-reported cost is
+ * stored as reported (`provider`; on BYOK the fee and the vendor's upstream
+ * charge sum into `usd` with `feeUsd` beside), else the operator's layer
+ * (`costs.prices` for the exact ref, or the card's operator-named rate), else
+ * the registry layer (the card's rate with its tiers, or the Anthropic family
+ * list — costs.md item 4b's fallback, folded here), else `none` — a turn no
+ * layer prices, and a stream broken before its usage arrived, stays unpriced.
+ */
+export function priceTurn(
+  card: TurnPriceCard,
+  reported: ReportedCost | undefined,
+  usage: TokenUsage | undefined,
+  prices: ModelPriceTable = NO_PRICES,
+): TurnPrice {
+  if (reported) {
+    const usd = reported.byok ? reported.cost + (reported.upstreamCost ?? 0) : reported.cost;
+    return { usd, priceSource: "provider", ...(reported.byok ? { feeUsd: reported.cost } : {}) };
+  }
+  if (!usage) return { priceSource: "none" };
+  const operator = prices[card.ref];
+  if (operator) return { usd: turnTokensUsd(usage, operator), priceSource: "operator" };
+  if (card.price) {
+    return {
+      usd: cardPriceUsd(usage, card.price),
+      priceSource: card.pricedBy === "operator" ? "operator" : "registry",
+    };
+  }
+  const list = anthropicPriceOf(modelIdOf(card.ref));
+  if (list) {
+    return {
+      usd: turnTokensUsd(usage, {
+        input: list.input,
+        output: list.output,
+        cacheRead: list.cacheRead,
+        cacheWrite: list.cacheWrite5m,
+      }),
+      priceSource: "registry",
+    };
+  }
+  return { priceSource: "none" };
+}
+
 /** What a model's counted tokens cost at a price, USD. */
 export function modelUsageUsd(m: ModelUsage, p: ModelPrice): number {
   return (
@@ -211,6 +304,15 @@ export function llmUsdOfUsage(
   let unpricedTokens = 0;
   const byModel: Record<string, PricedModelUsage> = {};
   for (const [ref, m] of Object.entries(usage.byModel)) {
+    // A model whose spans priced their own turns (model-proxy item 6) keeps
+    // the recorded figure — a provider-reported cost beats any table — and
+    // null (a turn without a figure) reads as unpriced, never re-priced here.
+    if (m.usd !== undefined) {
+      if (m.usd === null) unpricedTokens += m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheWriteTokens;
+      else usd += m.usd;
+      byModel[ref] = { ...m, usd: m.usd };
+      continue;
+    }
     const price = modelPriceOf(ref, prices);
     const priced = price ? modelUsageUsd(m, price) : undefined;
     if (priced === undefined) unpricedTokens += m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheWriteTokens;

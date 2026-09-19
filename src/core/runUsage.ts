@@ -23,6 +23,15 @@ export interface ModelUsage {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** The model's dollars summed from its turns' own `usd` attrs (the proxy's
+   *  meter row, model-proxy item 6): a number when every turn carried one,
+   *  null when one lacked it (unpriced — a sum that left a turn out would
+   *  understate the model), absent on a record whose turns predate the meter
+   *  row (the price table then prices the tokens, costs.md item 4b). */
+  usd?: number | null;
+  /** The distinct `priceSource` words the turns carried, sorted — what the
+   *  by-model view names as the source. Absent when no turn carried one. */
+  priceSources?: string[];
 }
 
 export interface RunUsage {
@@ -46,6 +55,11 @@ export const emptyUsage = (): RunUsage => ({ turns: 0, byModel: {} });
 /** The run's usage from its events: one `model.turn` span end per provider call. */
 export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
   const usage = emptyUsage();
+  // The meter row per model (model-proxy item 6): the turns' own dollars and
+  // sources. `usd` sums only when every turn carried one; a model none of
+  // whose turns carried price attrs stays without the fields (a record from
+  // before the meter row — the table prices it, costs.md item 4b).
+  const priced = new Map<string, { usd: number; pricedTurns: number; sources: Set<string> }>();
   for (const e of events) {
     if (e.type !== "span_end" || e.name !== MODEL_TURN) continue;
     const attrs = (e.attrs ?? {}) as Record<string, unknown>;
@@ -64,38 +78,70 @@ export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
     m.cacheWriteTokens += num(attrs.cacheWriteTokens);
     usage.byModel[model] = m;
     usage.turns += 1;
+    const hasUsd = typeof attrs.usd === "number" && Number.isFinite(attrs.usd);
+    const hasSource = typeof attrs.priceSource === "string" && attrs.priceSource !== "";
+    if (!hasUsd && !hasSource) continue;
+    const p = priced.get(model) ?? { usd: 0, pricedTurns: 0, sources: new Set<string>() };
+    if (hasUsd) {
+      p.usd += attrs.usd as number;
+      p.pricedTurns += 1;
+    }
+    if (hasSource) p.sources.add(attrs.priceSource as string);
+    priced.set(model, p);
+  }
+  for (const [model, p] of priced) {
+    const m = usage.byModel[model]!;
+    m.usd = p.pricedTurns === m.turns ? p.usd : null;
+    if (p.sources.size > 0) m.priceSources = [...p.sources].sort();
   }
   return usage;
 }
+
+/** The two sides' `usd` folded: a sum when both carry one, null when either
+ *  has an unpriced turn, absent when either predates the meter row (the whole
+ *  cell then prices from the table, never half a figure). */
+const foldUsd = (a: ModelUsage["usd"], b: ModelUsage["usd"]): ModelUsage["usd"] =>
+  a === undefined || b === undefined ? undefined : a === null || b === null ? null : a + b;
 
 export function addUsage(a: RunUsage, b: RunUsage): RunUsage {
   const out: RunUsage = { turns: a.turns + b.turns, byModel: {} };
   for (const src of [a.byModel, b.byModel]) {
     for (const [model, m] of Object.entries(src)) {
-      const acc = out.byModel[model] ?? {
-        turns: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-      };
+      const acc = out.byModel[model];
+      if (!acc) {
+        out.byModel[model] = { ...m, ...(m.priceSources ? { priceSources: [...m.priceSources] } : {}) };
+        continue;
+      }
       acc.turns += m.turns;
       acc.inputTokens += m.inputTokens;
       acc.outputTokens += m.outputTokens;
       acc.cacheReadTokens += m.cacheReadTokens;
       acc.cacheWriteTokens += m.cacheWriteTokens;
-      out.byModel[model] = acc;
+      const usd = foldUsd(acc.usd, m.usd);
+      if (usd === undefined) delete acc.usd;
+      else acc.usd = usd;
+      const sources = new Set([...(acc.priceSources ?? []), ...(m.priceSources ?? [])]);
+      if (sources.size > 0) acc.priceSources = [...sources].sort();
     }
   }
   return out;
 }
 
-const isModelUsage = (v: unknown): v is ModelUsage =>
-  typeof v === "object" &&
-  v !== null &&
-  (["turns", "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const).every(
-    (k) => typeof (v as Record<string, unknown>)[k] === "number",
+const isModelUsage = (v: unknown): v is ModelUsage => {
+  if (typeof v !== "object" || v === null) return false;
+  const m = v as Record<string, unknown>;
+  if (
+    !["turns", "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"].every(
+      (k) => typeof m[k] === "number",
+    )
+  )
+    return false;
+  if (m.usd !== undefined && m.usd !== null && typeof m.usd !== "number") return false;
+  return (
+    m.priceSources === undefined ||
+    (Array.isArray(m.priceSources) && m.priceSources.every((s) => typeof s === "string"))
   );
+};
 
 export function isRunUsage(v: unknown): v is RunUsage {
   if (typeof v !== "object" || v === null) return false;

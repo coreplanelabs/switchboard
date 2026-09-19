@@ -116,6 +116,50 @@ describe("usageOfEvents", () => {
     expect(isRunUsage({ turns: 1, byModel: { m: { turns: "1" } } })).toBe(false);
     expect(isRunUsage(null)).toBe(false);
   });
+
+  it("the meter row folds per model: usd sums when every turn carries one, null when one lacks it, absent when no turn carried price attrs; the sources collect sorted", () => {
+    const tokens = { inputTokens: 10, outputTokens: 5 };
+    const priced = usageOfEvents([
+      turn("m1", { ...tokens, usd: 0.5, priceSource: "provider" }, 1),
+      turn("m1", { ...tokens, usd: 0.25, priceSource: "registry" }, 2),
+    ]);
+    expect(priced.byModel.m1.usd).toBe(0.75);
+    expect(priced.byModel.m1.priceSources).toEqual(["provider", "registry"]);
+
+    // one turn without a figure (a broken stream's `none`, an errored turn): the model reads unpriced
+    const mixed = usageOfEvents([
+      turn("m1", { ...tokens, usd: 0.5, priceSource: "provider" }, 1),
+      turn("m1", { ...tokens, priceSource: "none" }, 2),
+    ]);
+    expect(mixed.byModel.m1.usd).toBeNull();
+    expect(mixed.byModel.m1.priceSources).toEqual(["none", "provider"]);
+
+    // a record from before the meter row: no fields, the table prices it (costs.md item 4b)
+    const legacy = usageOfEvents([turn("m1", tokens, 1)]);
+    expect(legacy.byModel.m1.usd).toBeUndefined();
+    expect(legacy.byModel.m1.priceSources).toBeUndefined();
+    expect(isRunUsage(priced)).toBe(true);
+    expect(isRunUsage(mixed)).toBe(true);
+    expect(isRunUsage({ turns: 1, byModel: { m: { ...legacy.byModel.m1, usd: "x" } } })).toBe(false);
+    expect(isRunUsage({ turns: 1, byModel: { m: { ...legacy.byModel.m1, priceSources: [1] } } })).toBe(false);
+  });
+
+  it("addUsage folds usd: a sum when both sides carry one, null when either has an unpriced turn, absent when either predates the meter row; sources union", () => {
+    const tokens = { inputTokens: 1, outputTokens: 1 };
+    const priced = usageOfEvents([turn("m1", { ...tokens, usd: 0.5, priceSource: "provider" }, 1)]);
+    const alsoPriced = usageOfEvents([turn("m1", { ...tokens, usd: 0.25, priceSource: "operator" }, 1)]);
+    const legacy = usageOfEvents([turn("m1", tokens, 1)]);
+    const unpriced = usageOfEvents([turn("m1", { ...tokens, priceSource: "none" }, 1)]);
+
+    const sum = addUsage(priced, alsoPriced);
+    expect(sum.byModel.m1.usd).toBe(0.75);
+    expect(sum.byModel.m1.priceSources).toEqual(["operator", "provider"]);
+    expect(addUsage(priced, unpriced).byModel.m1.usd).toBeNull();
+    expect(addUsage(priced, legacy).byModel.m1.usd).toBeUndefined();
+    // one side only: the figure carries through untouched
+    const other = usageOfEvents([turn("m2", tokens, 1)]);
+    expect(addUsage(priced, other).byModel.m1.usd).toBe(0.5);
+  });
 });
 
 describe("aggregateUsage", () => {

@@ -13,6 +13,7 @@ import { createTracer } from "../core/trace/tracer.js";
 import type { SpanRecord } from "../core/trace/types.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { RunBearerStore, type RunBearerGrant } from "../core/modelProxy/runBearers.js";
+import type { ModelCard } from "../core/modelCard.js";
 import type { ProviderConfig } from "../core/provider.js";
 import {
   ANTHROPIC_MESSAGES_PATH,
@@ -729,6 +730,7 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
     expect(turn.status).toBe("ok");
     expect(turn.attrs).toEqual({
       model: "anthropic/claude-opus-5",
+      biller: "anthropic",
       tools: 1, // the fixture offers `bash` and says nothing about tool_choice
       toolNames: "bash",
       toolChoice: "auto",
@@ -737,6 +739,9 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
       outputTokens: 42,
       cacheReadTokens: 1000,
       cacheWriteTokens: 150,
+      // no card on the grant and no wire cost: the Anthropic family list is the registry layer
+      priceSource: "registry",
+      usd: (1200 * 5 + 42 * 25 + 1000 * 0.5 + 150 * 6.25) / 1_000_000,
       ttftMs: 250,
     });
     expect(h.bearers.grantOf("run-1")?.turns).toBe(1);
@@ -785,20 +790,24 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
     const turns = h.ends.filter((s) => s.name === "model.turn");
     expect(turns[0].attrs).toEqual({
       model: "local/llama-3",
+      biller: "local",
       tools: 0,
       toolChoice: "none",
       stopReason: "tool_use",
       inputTokens: 900,
       outputTokens: 30,
       cacheReadTokens: 800,
+      priceSource: "none", // no wire cost, no operator entry, no card, no list family
       ttftMs: 10,
     });
     expect(turns[1].status).toBe("ok");
     expect(turns[1].attrs).toEqual({
       model: "local/llama-3",
+      biller: "local",
       tools: 0,
       toolChoice: "none",
       stopReason: "tool_use",
+      priceSource: "none",
       ttftMs: 10,
     });
   });
@@ -992,6 +1001,122 @@ describe("the meter — one model.turn span per proxied call, the runner's attrs
   });
 });
 
+describe("the meter row — biller, vendor, usd, priceSource (model-proxy item 6)", () => {
+  // The card as the grant carries it (record 0052): only the vendor, the rate
+  // and its provenance matter to the meter row.
+  const cardOf = (over: Partial<ModelCard> = {}): ModelCard => ({
+    ref: "local/llama-3",
+    block: "local",
+    model: "llama-3",
+    vendor: "anthropic",
+    wire: "openai-chat",
+    levels: "unknown",
+    capField: "max_completion_tokens",
+    window: 200_000,
+    inputs: { image: "unknown", document: "unknown" },
+    cache: "unknown",
+    provenance: { levels: "wire", capField: "wire", window: "wire", inputs: "wire", cache: "wire", price: "wire" },
+    ...over,
+  });
+  // An OpenRouter-shaped chat stream: the final chunk's usage carries the cost
+  // fields beside the counters (the A/B's logged shape).
+  const stream = (usage: Record<string, unknown>) => [
+    `data: ${JSON.stringify({ id: "c1", choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: "stop" }] })}\n\n`,
+    `data: ${JSON.stringify({ id: "c1", choices: [], usage })}\n\n`,
+    "data: [DONE]\n\n",
+  ];
+  const send = async (h: ReturnType<typeof harness>, token: string) => {
+    const res = await handleModelProxyRequest(
+      request({ path: OPENAI_CHAT_COMPLETIONS_PATH, headers: bearer(token), json: { model: "x", messages: [] } }).req,
+      h.deps,
+    );
+    await drain(res.body);
+    return h.ends.filter((s) => s.name === "model.turn")[0];
+  };
+
+  it("a provider-priced turn stores the figure as reported with priceSource provider, the biller and the card's vendor on the span, and no feeUsd off BYOK", async () => {
+    const h = harness({
+      answer: () => streamingResponse(stream({ prompt_tokens: 900, completion_tokens: 30, cost: 0.0169 }), h.clock, 5),
+    });
+    const token = h.bearers.mint(h.localGrant("run-1", { card: cardOf() }));
+    const turn = await send(h, token);
+    expect(turn.attrs).toMatchObject({
+      biller: "local",
+      vendor: "anthropic",
+      usd: 0.0169,
+      priceSource: "provider",
+      inputTokens: 900,
+      outputTokens: 30,
+    });
+    expect(turn.attrs.feeUsd).toBeUndefined();
+  });
+
+  it("a BYOK turn sums the aggregator's cost and cost_details.upstream_inference_cost into usd, the fee beside as feeUsd", async () => {
+    const h = harness({
+      answer: () =>
+        streamingResponse(
+          stream({
+            prompt_tokens: 900,
+            completion_tokens: 30,
+            cost: 0.001,
+            is_byok: true,
+            cost_details: { upstream_inference_cost: 0.05 },
+          }),
+          h.clock,
+          5,
+        ),
+    });
+    const token = h.bearers.mint(h.localGrant("run-1", { card: cardOf() }));
+    const turn = await send(h, token);
+    expect(turn.attrs.priceSource).toBe("provider");
+    expect(turn.attrs.usd).toBeCloseTo(0.051, 12);
+    expect(turn.attrs.feeUsd).toBe(0.001);
+  });
+
+  it("a turn with no wire cost and an operator entry for the exact ref prices operator", async () => {
+    const h = harness({
+      answer: () =>
+        streamingResponse(
+          stream({ prompt_tokens: 1000, completion_tokens: 500, prompt_tokens_details: { cached_tokens: 100 } }),
+          h.clock,
+          5,
+        ),
+    });
+    h.deps.prices = () => ({ "local/llama-3": { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } });
+    const token = h.bearers.mint(h.localGrant("run-1", { card: cardOf() }));
+    const turn = await send(h, token);
+    expect(turn.attrs.priceSource).toBe("operator");
+    expect(turn.attrs.usd).toBe((1000 * 1 + 500 * 2 + 100 * 3) / 1_000_000);
+  });
+
+  it("a registry card with a tier above 272,000 input tokens prices the whole request at the tier (pi's rule)", async () => {
+    const h = harness({
+      answer: () => streamingResponse(stream({ prompt_tokens: 300_000, completion_tokens: 10 }), h.clock, 5),
+    });
+    const card = cardOf({
+      price: {
+        input: 2.5,
+        output: 15,
+        cacheRead: 0.25,
+        cacheWrite: 0,
+        tiers: [{ inputTokensAbove: 272_000, input: 5, output: 22.5, cacheRead: 0.5, cacheWrite: 0 }],
+      },
+      provenance: {
+        levels: "wire",
+        capField: "wire",
+        window: "wire",
+        inputs: "wire",
+        cache: "wire",
+        price: "registry",
+      },
+    });
+    const token = h.bearers.mint(h.localGrant("run-1", { card }));
+    const turn = await send(h, token);
+    expect(turn.attrs.priceSource).toBe("registry");
+    expect(turn.attrs.usd).toBe((300_000 * 5 + 10 * 22.5) / 1_000_000);
+  });
+});
+
 describe("the meter — the Responses route (model-proxy item 6)", () => {
   it("a coding preset on pi on the route offers tools with reasoning.effort and gets a tool call back from the fake: the stream forwarded chunk for chunk, the span ended tool_use with the usage shape's four counts and the ttft", async () => {
     const h = harness({ answer: () => streamingResponse(responsesStreamChunks(), h.clock, 40) });
@@ -1010,6 +1135,7 @@ describe("the meter — the Responses route (model-proxy item 6)", () => {
     expect(turn.status).toBe("ok");
     expect(turn.attrs).toEqual({
       model: "openai/gpt-5.4",
+      biller: "openai",
       tools: 2,
       toolNames: "bash,read",
       toolChoice: "auto",
@@ -1018,6 +1144,7 @@ describe("the meter — the Responses route (model-proxy item 6)", () => {
       outputTokens: 33,
       cacheReadTokens: 700,
       cacheWriteTokens: 120,
+      priceSource: "none",
       ttftMs: 40,
     });
     expect(h.bearers.grantOf("run-1")?.turns).toBe(1);
@@ -1190,7 +1317,12 @@ describe("upstream failures", () => {
     const token = h.bearers.mint(h.grant("run-1"));
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, h.deps);
     await expect(drain(res.body)).rejects.toThrow("connection reset");
-    expect(h.ends.filter((s) => s.name === "model.turn")[0].status).toBe("error");
+    const [turn] = h.ends.filter((s) => s.name === "model.turn");
+    expect(turn.status).toBe("error");
+    // broken before its final chunk: unmetered, and the meter row says none
+    expect(turn.attrs.inputTokens).toBeUndefined();
+    expect(turn.attrs.usd).toBeUndefined();
+    expect(turn.attrs.priceSource).toBe("none");
   });
 });
 

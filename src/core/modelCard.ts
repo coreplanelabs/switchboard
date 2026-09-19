@@ -32,11 +32,23 @@ export type LevelMap = Record<Effort, LevelWord | "refused"> | "unknown";
 export type InputSupport = boolean | "unknown";
 export type CacheRule = "automatic" | "markers" | "none" | "unknown";
 
+/** One long-context tier of a card's rate (pi's rule, `calculateCost`): when
+ *  the request's input side (input + cache reads + cache writes) exceeds
+ *  `inputTokensAbove`, the WHOLE request re-rates at the tier. */
+export interface CardPriceTier {
+  inputTokensAbove: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
 export interface CardPrice {
   input: number;
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  tiers?: readonly CardPriceTier[];
 }
 
 export interface ModelCard {
@@ -123,14 +135,30 @@ function levelMapOf(map: Record<string, string | null> | undefined, reasoning: b
   return out;
 }
 
-function priceOf(
-  raw: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } | undefined,
-): CardPrice | undefined {
+type RawPrice = {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  tiers?: Array<{ inputTokensAbove?: number } & Omit<RawPrice, "tiers">>;
+};
+
+function priceOf(raw: RawPrice | undefined): CardPrice | undefined {
   if (!raw) return undefined;
   const { input, output, cacheRead, cacheWrite } = raw;
   if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined)
     return undefined;
-  return { input, output, cacheRead, cacheWrite };
+  // A tier missing a field cannot re-rate the whole request; it is dropped,
+  // never guessed at the base rate.
+  const tiers = (raw.tiers ?? []).filter(
+    (t): t is CardPriceTier =>
+      t.inputTokensAbove !== undefined &&
+      t.input !== undefined &&
+      t.output !== undefined &&
+      t.cacheRead !== undefined &&
+      t.cacheWrite !== undefined,
+  );
+  return { input, output, cacheRead, cacheWrite, ...(tiers.length > 0 ? { tiers } : {}) };
 }
 
 /**

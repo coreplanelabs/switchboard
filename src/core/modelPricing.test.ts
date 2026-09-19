@@ -9,6 +9,7 @@ import {
   modelPriceOf,
   NO_PRICES,
   parseModelPrices,
+  priceTurn,
   runCostOf,
 } from "./modelPricing.js";
 import type { RunUsage } from "./runUsage.js";
@@ -207,6 +208,108 @@ describe("llmUsdOfUsage", () => {
     expect(modelIdOf("anthropic/claude-fable-5")).toBe("claude-fable-5");
     expect(modelIdOf("claude-fable-5")).toBe("claude-fable-5");
     expect(modelIdOf("openrouter/anthropic/claude-sonnet-5")).toBe("anthropic/claude-sonnet-5");
+  });
+});
+
+describe("priceTurn — the meter row's precedence (model-proxy item 6)", () => {
+  const usage = { inputTokens: 1_000, outputTokens: 500, cacheReadTokens: 100 };
+  const ref = "openrouter/anthropic/claude-sonnet-5";
+
+  it("a provider-reported cost is stored as reported, priceSource provider, no feeUsd off BYOK", () => {
+    expect(priceTurn({ ref }, { cost: 0.0169 }, usage)).toEqual({ usd: 0.0169, priceSource: "provider" });
+    // reported wins even over an operator entry, and even without counted usage
+    const prices = parseModelPrices({ [ref]: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } });
+    expect(priceTurn({ ref }, { cost: 0.5 }, undefined, prices)).toEqual({ usd: 0.5, priceSource: "provider" });
+  });
+
+  it("a BYOK turn sums the fee and the upstream cost into usd with feeUsd beside", () => {
+    const priced = priceTurn({ ref }, { cost: 0.001, byok: true, upstreamCost: 0.05 }, usage);
+    expect(priced.priceSource).toBe("provider");
+    expect(priced.usd).toBeCloseTo(0.051, 12);
+    expect(priced.feeUsd).toBe(0.001);
+    // a BYOK chunk without the upstream column is the fee alone, never a guess
+    expect(priceTurn({ ref }, { cost: 0.001, byok: true }, usage)).toEqual({
+      usd: 0.001,
+      feeUsd: 0.001,
+      priceSource: "provider",
+    });
+  });
+
+  it("no reported cost and an operator entry for the exact ref prices operator", () => {
+    const prices = parseModelPrices({ [ref]: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } });
+    expect(priceTurn({ ref }, undefined, usage, prices)).toEqual({
+      usd: (1_000 * 1 + 500 * 2 + 100 * 3) / 1_000_000,
+      priceSource: "operator",
+    });
+  });
+
+  it("a card rate named by the operator layer prices operator; one named by the registry prices registry", () => {
+    const price = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
+    const usd = (1_000 * 2 + 500 * 10 + 100 * 0.2) / 1_000_000;
+    expect(priceTurn({ ref, price, pricedBy: "operator" }, undefined, usage)).toEqual({
+      usd,
+      priceSource: "operator",
+    });
+    expect(priceTurn({ ref, price, pricedBy: "registry" }, undefined, usage)).toEqual({
+      usd,
+      priceSource: "registry",
+    });
+  });
+
+  it("a registry card with a tier above 272,000 input tokens prices the whole request at the tier — the input side counts cache reads and writes (pi's rule)", () => {
+    const price = {
+      input: 2.5,
+      output: 15,
+      cacheRead: 0.25,
+      cacheWrite: 0,
+      tiers: [{ inputTokensAbove: 272_000, input: 5, output: 22.5, cacheRead: 0.5, cacheWrite: 0 }],
+    };
+    const big = { inputTokens: 200_000, outputTokens: 10, cacheReadTokens: 80_000 }; // 280k on the input side
+    expect(priceTurn({ ref, price, pricedBy: "registry" }, undefined, big)).toEqual({
+      usd: (200_000 * 5 + 10 * 22.5 + 80_000 * 0.5) / 1_000_000,
+      priceSource: "registry",
+    });
+    // under the threshold the base rate holds
+    expect(priceTurn({ ref, price, pricedBy: "registry" }, undefined, usage)).toEqual({
+      usd: (1_000 * 2.5 + 500 * 15 + 100 * 0.25) / 1_000_000,
+      priceSource: "registry",
+    });
+  });
+
+  it("the Anthropic family list folds into the registry layer for a card without a rate", () => {
+    const priced = priceTurn({ ref: "anthropic/claude-haiku-4-5" }, undefined, usage);
+    expect(priced.priceSource).toBe("registry");
+    expect(priced.usd).toBeCloseTo((1_000 * 1 + 500 * 5 + 100 * 0.1) / 1_000_000, 12);
+  });
+
+  it("no layer prices none — never $0 — and a turn without usage (a stream broken before its final chunk) is none whatever the card says", () => {
+    expect(priceTurn({ ref }, undefined, usage)).toEqual({ priceSource: "none" });
+    const price = { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 };
+    expect(priceTurn({ ref, price, pricedBy: "registry" }, undefined, undefined)).toEqual({ priceSource: "none" });
+  });
+});
+
+describe("llmUsdOfUsage — a model whose spans priced their own turns", () => {
+  const tokens = { inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 };
+
+  it("keeps the recorded figure over any table, reads null as unpriced tokens, and reprices a legacy model (no usd field) from the table", () => {
+    const u: RunUsage = {
+      turns: 3,
+      byModel: {
+        "openrouter/anthropic/claude-sonnet-5": { turns: 1, ...tokens, usd: 0.5, priceSources: ["provider"] },
+        "local/llama-3": { turns: 1, ...tokens, usd: null, priceSources: ["none"] },
+        "anthropic/claude-haiku-4-5": { turns: 1, ...tokens },
+      },
+    };
+    const priced = llmUsdOfUsage(u);
+    expect(priced.byModel["openrouter/anthropic/claude-sonnet-5"].usd).toBe(0.5);
+    expect(priced.byModel["openrouter/anthropic/claude-sonnet-5"].priceSources).toEqual(["provider"]);
+    expect(priced.byModel["local/llama-3"].usd).toBeNull();
+    expect(priced.unpricedTokens).toBe(30);
+    expect(priced.byModel["anthropic/claude-haiku-4-5"].usd).toBeCloseTo((10 * 1 + 20 * 5) / 1_000_000, 12);
+    expect(priced.usd).toBeCloseTo(0.5 + (10 * 1 + 20 * 5) / 1_000_000, 12);
+    // and runCostOf reads the null as an unpriced run
+    expect(runCostOf(u).usd).toBeNull();
   });
 });
 
