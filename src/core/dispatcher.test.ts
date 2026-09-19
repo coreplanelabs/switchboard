@@ -9585,6 +9585,66 @@ workspaceDir: __WORKDIR__
     expect(instance).toBeNull();
   });
 
+  // The operator's ship (routing-and-config item 29): a bind of `ship` from
+  // prose is a model's decision like the router's, so the seeded-plan guard
+  // holds it too, and a task ask hands off `merge: person` with the decision's
+  // event on the ship run.
+  const SHIP_OPERATOR_YAML = SHIP_YAML.replace(
+    "routing: { auto: false, operator: off }",
+    "routing: { auto: false, operator: on }",
+  );
+  const shipOperator = () =>
+    vi.fn<RouteModel>(async () => ({
+      tool: "decide",
+      input: { reason: "a change to land", binds: [{ line: "ship", reason: "the ask" }] },
+    }));
+  const shipVerifierAgrees = () =>
+    vi.fn<RouteModel>(async () => ({ tool: "verify", input: { agrees: true, reason: "the author asked" } }));
+
+  it("an operator-bound ship on a seeded request (`plan <path>.md`) is refused naming `agent:ship`, nothing written — the guard reads operator like route", async () => {
+    const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.githubApi = new InMemoryGithubApi({
+      "acme/api": { files: { "docs/plans/fixture.md": "### U10. First unit\n- **Dependencies**: none\n" } },
+    });
+    deps.operatorModel = shipOperator();
+    deps.verifierModel = shipVerifierAgrees();
+    const registry = new RunRegistry({ genId: () => "run-shipopseed", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("plan docs/plans/fixture.md", "slack:UADMIN"), io);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(replies[replies.length - 1]).toContain("🚫");
+    expect(replies[replies.length - 1]).toContain("`agent:ship plan docs/plans/fixture.md`");
+    expect(created).toEqual([]);
+    const { instance } = await handed(instances, "run-shipopseed");
+    expect(instance).toBeNull();
+  });
+
+  it("an operator-bound ship on a task hands off merge: person, the run's run_meta reads agentSource operator and the decision's event rides the ship run", async () => {
+    const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
+    deps.operatorModel = shipOperator();
+    deps.verifierModel = shipVerifierAgrees();
+    const registry = new RunRegistry({ genId: () => "run-shipop", genToken: () => "tok" });
+    deps.runRegistry = registry;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("fix the login redirect", "slack:UADMIN"), io);
+    expect(replies.some((r) => r.includes("bound: `agent:ship fix the login redirect` — write — the ask"))).toBe(true);
+    const { instance, unit } = await handed(instances, "run-shipop");
+    expect(instance).toMatchObject({ merge: "person" });
+    expect(instance?.plan?.id).toBe(
+      generatedPlanId(shipUnitText("fix the login redirect", "acme/api"), "slack:CX:1.0"),
+    );
+    expect(unit).toBeDefined();
+    expect(created).toHaveLength(1);
+    const events = registry.snapshotById("run-shipop")!.events;
+    expect(events.find((e) => e.type === "run_meta")).toMatchObject({ agent: "ship", agentSource: "operator" });
+    expect(events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "binds",
+      binds: [{ line: "ship", reason: "the ask" }],
+    });
+  });
+
   it("a resume prefers the PR's OWN base ref over the repo default (non-default-base ship PR): the runner is handed that base", async () => {
     const { deps, instances } = shipDeps();
     deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, headSha: HEAD_A, ref: SHIP_BRANCH }); // thread text names no base
@@ -18145,10 +18205,12 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("what changed this week in acme/repo?", "slack:UADMIN"), io);
       expect(deps.invoked).toEqual([]);
-      // The verifier judged the line the route runs: the preset on the request itself.
+      // The verifier judged the line the route runs: the preset on the request itself — and the receipt prints that line, never the operator's paraphrase.
       const verifierPrompt: RoutePrompt = verifier.mock.calls[0]![0];
       expect(verifierPrompt.user).toContain("agent:general what changed this week in acme/repo?");
-      const receipt = replies.find((r) => r.includes(`bound: \`${line}\` — read — the ask`));
+      const receipt = replies.find((r) =>
+        r.includes("bound: `agent:general what changed this week in acme/repo?` — read — the ask"),
+      );
       expect(receipt).toBeDefined();
       expect(receipt).toContain("verified: the author asked for this run");
       expect(replies.some((r) => r.includes(HAND_BACK_PREFIX))).toBe(false);
@@ -18185,6 +18247,44 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(registry.getById("r1")).toMatchObject({ agent: "general" });
     expect(provider.requests).toHaveLength(1);
     expect(replies.some((r) => r.includes(`${HAND_BACK_PREFIX}\n\`runs list\``))).toBe(true);
+  });
+
+  it("on: a command bind that ran before the preset bind carries the decision's event; the agent run it routes to does not repeat it", async () => {
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    deps.operatorModel = decides({
+      reason: "a listing, then the assistant",
+      binds: [
+        { line: "runs list", reason: "the listing" },
+        { line: "general", reason: "the question" },
+      ],
+    });
+    deps.verifierModel = agrees("asked");
+    const { io } = fakeIO();
+    await dispatch(deps, msg("list the runs, then what changed", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["runs.list"]);
+    expect(provider.requests).toHaveLength(1);
+    const withEvent = ["r1", "r2"].filter((id) => registry.snapshotById(id)?.events.some((e) => e.type === "operator"));
+    expect(withEvent).toHaveLength(1);
+    expect(registry.getById(withEvent[0]!)).toMatchObject({ agent: "command" });
+    expect(["r1", "r2"].some((id) => registry.getById(id)?.agent === "general")).toBe(true);
+  });
+
+  it("on: a bind whose first word is a preset's name but which parses as a registry command is that command — `review abridge <run>` is never a review run", async () => {
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    deps.operatorModel = decides({
+      reason: "the abridged diff",
+      binds: [{ line: "review abridge r-live", reason: "the abridge" }],
+    });
+    deps.verifierModel = agrees("asked");
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("abridge the review of r-live", "slack:UADMIN"), io);
+    // No review agent run: the line is the command's (a write, so the ladder hands it back).
+    expect(provider.requests).toHaveLength(0);
+    expect(registry.getById("r1")?.agent).not.toBe("review");
+    expect(replies.some((r) => r.includes("`review abridge r-live`"))).toBe(true);
+    expect(replies.some((r) => r.includes("bound: `agent:review"))).toBe(false);
   });
 
   it("on: a message that opens with a directive skips the operator — the directive is the person's typed decision — and routes as under off", async () => {

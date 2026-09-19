@@ -13,6 +13,7 @@ import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
+import type { OperatorEventFields } from "./commandRun.js";
 import type { LedgerRun, OpenOutcome } from "../runLedger/writeThrough.js";
 import type { HostingState } from "../runLedger/types.js";
 import { hostKeyOf } from "../runLedger/hostKey.js";
@@ -176,6 +177,10 @@ export interface ShipContext {
   /** The router's decision when it chose ship (routing-and-config item 21):
    *  the record's `route` event, published like the main path's. */
   route?: RouteDecided;
+  /** The operator's decision when it bound ship (routing-and-config item 29;
+   *  run-history item 60): the record's `operator` event, published beside
+   *  `run_meta` like the main path's registration does. */
+  operator?: OperatorEventFields;
 }
 
 /**
@@ -353,6 +358,7 @@ export async function runShipBranch(
       at: clock(),
     });
     if (ctx.route) registry.publish(run.id, { type: "route", ...ctx.route, at: clock() });
+    if (ctx.operator) registry.publish(run.id, { type: "operator", ...ctx.operator, at: clock() });
     if (deps.config.config.runHistory?.includeContext !== false) {
       for (const text of contextMessageTexts(history, humanize)) publishText("context", text);
     }

@@ -230,14 +230,15 @@ async function plan(
       },
     };
   }
-  // The routed guard (agent-ship item 16; routing-and-config item 21): a
-  // seeded plan's units merge under the runner's grant, so only a typed
-  // `agent:ship` may start one — a routed ship runs generated plans alone.
-  if (input.agentSource === "route")
+  // The routed guard (agent-ship item 16; routing-and-config items 21 and 29):
+  // a seeded plan's units merge under the runner's grant, so only a typed
+  // `agent:ship` may start one — a ship the router or the operator bound from
+  // prose runs generated plans alone; both are a model's decision.
+  if (input.agentSource === "route" || input.agentSource === "operator")
     return {
       ok: false,
       code: "plan_routed_seed",
-      reply: `🚫 A routed request never runs a seeded plan — its units would merge under the runner's grant. Type \`agent:ship plan ${request.planPath}\` to run it.`,
+      reply: `🚫 A routed or operator-bound request never runs a seeded plan — its units would merge under the runner's grant. Type \`agent:ship plan ${request.planPath}\` to run it.`,
     };
   let planId: string;
   try {
