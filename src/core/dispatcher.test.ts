@@ -18177,6 +18177,33 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(provider.requests).toHaveLength(0);
   });
 
+  it("on: a refusal the seam produced falls back to the readers' route — the request routes and answers as before, the operator event carrying the parse reason on the run that runs", async () => {
+    const FALLBACK_YAML = YAML_FIXTURE.replace(
+      "routing: { auto: false, operator: off }\n",
+      "routing: { auto: true, operator: on }\n",
+    );
+    const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);
+    // Prose is no decision: the parse refuses it with `fallback: true` — the
+    // seam's own refusal, never the model's decision — so the readers run.
+    deps.operatorModel = vi.fn<RouteModel>(async () => "sure, I will run that for you");
+    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "review", reason: "review fits the request" }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("review it for me", "slack:UADMIN"), io);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    // The route stage ran as under `off`: the router bound review and the agent run answered.
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(provider.requests[0].model).toBe("review-model");
+    expect(replies).toContain("answer");
+    // The seam's refusal never reached the person; the decision is on the run that ran.
+    expect(replies.every((r) => !r.includes("not a decision"))).toBe(true);
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "refusal",
+      fallback: true,
+      reason: expect.stringContaining("not a single JSON object") as unknown as string,
+    });
+  });
+
   it("off is the rollback lever: `routing.operator: off` never calls the operator and the route stage is untouched", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);

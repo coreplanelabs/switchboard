@@ -107,6 +107,21 @@ describe("parseOperatorDecision", () => {
     expect(parseOperatorDecision("sure, I will run that for you").kind).toBe("refusal");
     expect(parseOperatorDecision({ tool: OPERATOR_TOOL_NAME, input: { reason: "hm" } }).kind).toBe("refusal");
   });
+
+  it("a refusal the parse produced is marked fallback — never the model's decision — and a model-authored refusal is not", () => {
+    const parsed = parseOperatorDecision("sure, I will run that for you");
+    expect(parsed).toMatchObject({ kind: "refusal", fallback: true });
+    const authored = parseOperatorDecision({
+      tool: OPERATOR_TOOL_NAME,
+      input: { reason: "forbidden", refusal: { cause: "policy", text: "guests may not steer runs" } },
+    });
+    if (authored.kind !== "refusal") throw new Error("not a refusal");
+    expect(authored.fallback).toBeUndefined();
+    // The event carries the mark: the dispatcher's `on` branch reads it to fall
+    // back to the readers' route instead of rendering the seam's own refusal.
+    expect(operatorEventOf("on", { decision: parsed, latencyMs: 1, outputTokens: 1 }).fallback).toBe(true);
+    expect(operatorEventOf("on", { decision: authored, latencyMs: 1, outputTokens: 1 }).fallback).toBeUndefined();
+  });
 });
 
 describe("the question and its answer-as-a-bind", () => {
@@ -205,7 +220,9 @@ describe("runOperator", () => {
     const answer = await runOperator(input(), async () => {
       throw new Error("provider down");
     });
-    expect(answer.decision).toMatchObject({ kind: "refusal", cause: "request" });
+    // The seam failed, so the refusal is marked fallback: under `on` the
+    // dispatcher falls back to the readers' route instead of rendering it.
+    expect(answer.decision).toMatchObject({ kind: "refusal", cause: "request", fallback: true });
     if (answer.decision.kind === "refusal") expect(answer.decision.text).toContain("provider down");
   });
 });
