@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { usageFromAnthropic, usageFromOpenAI, usageFromResponses } from "./usage.js";
+import { reportedCostOf, usageFromAnthropic, usageFromOpenAI, usageFromResponses } from "./usage.js";
 
 // Feature: docs/reference/specs/model-proxy.md item 6 — the meter reads each wire
 // shape's usage into the one TokenUsage; a malformed usage leaves a turn
@@ -76,5 +76,28 @@ describe("usageFromResponses (token usage → TokenUsage)", () => {
     expect(
       usageFromResponses({ input_tokens: 1, output_tokens: 2, input_tokens_details: { cached_tokens: null } }),
     ).toEqual({ inputTokens: 1, outputTokens: 2 });
+  });
+});
+
+describe("reportedCostOf (the wire's cost fields beside the counters)", () => {
+  it("reads OpenRouter's final chunk: cost as reported, is_byok and the upstream inference cost", () => {
+    expect(reportedCostOf({ prompt_tokens: 900, completion_tokens: 30, cost: 0.0169 })).toEqual({ cost: 0.0169 });
+    expect(
+      reportedCostOf({
+        prompt_tokens: 900,
+        completion_tokens: 30,
+        cost: 0.001,
+        is_byok: true,
+        cost_details: { upstream_inference_cost: 0.05 },
+      }),
+    ).toEqual({ cost: 0.001, byok: true, upstreamCost: 0.05 });
+  });
+  it("a usage without a finite cost reports none — an Anthropic usage never carries one", () => {
+    expect(reportedCostOf({ input_tokens: 12, output_tokens: 3 })).toBeUndefined();
+    expect(reportedCostOf({ cost: "0.01" })).toBeUndefined();
+    expect(reportedCostOf({ cost: Number.NaN })).toBeUndefined();
+    expect(reportedCostOf(undefined)).toBeUndefined();
+    // a malformed cost_details still reports the cost, never a guessed upstream
+    expect(reportedCostOf({ cost: 0.2, cost_details: "x" })).toEqual({ cost: 0.2 });
   });
 });

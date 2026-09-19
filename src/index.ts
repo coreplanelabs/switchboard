@@ -769,6 +769,9 @@ export async function runBot(): Promise<void> {
     const modelProxy = createModelProxyHandler({
       bearers: runBearers,
       providers: () => config.config.providers,
+      // The operator's `costs.prices` (costs.md item 4b): the turn price's
+      // operator layer (model-proxy item 6), parsed once with the runs service's table.
+      ...(costsCfg?.prices ? { prices: () => costsCfg.prices } : {}),
       secrets: processSecrets,
       clock: systemClock,
     });

@@ -924,6 +924,9 @@ export async function attachWorkspace(
 export interface MintBearerContext {
   runId: string;
   agent: AgentDef;
+  /** The run's model card (record 0052): rides the grant so the meter row can
+   *  name the vendor and price from the card's rate (model-proxy item 6). */
+  card?: ModelCard;
   /** The run's effective profile: its minutes are the lease the provisional expiry allows for. */
   profile: RunProfile;
   resolved: ResolvedRequest;
@@ -957,6 +960,7 @@ export function mintRunBearer(deps: ProvisionDeps, ctx: MintBearerContext): stri
     providerName,
     providerWire: wireOf(providerCfg),
     model,
+    ...(ctx.card ? { card: ctx.card } : {}),
     maxTokens: agent.maxTokens,
     maxTurns: agent.maxTurns,
     expiresAt: provisionalBearerExpiresAt(clock(), profile.minutes),

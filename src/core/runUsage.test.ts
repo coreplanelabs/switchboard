@@ -116,6 +116,63 @@ describe("usageOfEvents", () => {
     expect(isRunUsage({ turns: 1, byModel: { m: { turns: "1" } } })).toBe(false);
     expect(isRunUsage(null)).toBe(false);
   });
+
+  it("the meter row folds per model: usd sums when every turn that counted tokens carries one, null when such a turn lacks it, kept over a zero-token turn, absent when no turn carried price attrs; the sources collect sorted", () => {
+    const tokens = { inputTokens: 10, outputTokens: 5 };
+    const priced = usageOfEvents([
+      turn("m1", { ...tokens, usd: 0.5, priceSource: "provider" }, 1),
+      turn("m1", { ...tokens, usd: 0.25, priceSource: "registry" }, 2),
+    ]);
+    expect(priced.byModel.m1.usd).toBe(0.75);
+    expect(priced.byModel.m1.priceSources).toEqual(["provider", "registry"]);
+
+    // a turn that counted tokens but carries no figure: the model reads unpriced — a sum would leave those tokens out
+    const mixed = usageOfEvents([
+      turn("m1", { ...tokens, usd: 0.5, priceSource: "provider" }, 1),
+      turn("m1", { ...tokens, priceSource: "none" }, 2),
+    ]);
+    expect(mixed.byModel.m1.usd).toBeNull();
+    expect(mixed.byModel.m1.priceSources).toEqual(["none", "provider"]);
+
+    // a turn that counted no tokens — an upstream error (no price attrs at all), a retry the
+    // harness's SDK spent, a stream broken before its usage (`none`) — leaves nothing out of the
+    // sum, so it never turns a priced model unpriced
+    const errored = usageOfEvents([
+      turn("m1", { ...tokens, usd: 0.5, priceSource: "provider" }, 1),
+      turn("m1", { httpStatus: 529 }, 2),
+      turn("m1", { priceSource: "none" }, 3),
+      turn("m1", { ...tokens, usd: 0.25, priceSource: "provider" }, 4),
+    ]);
+    expect(errored.byModel.m1.turns).toBe(4);
+    expect(errored.byModel.m1.usd).toBe(0.75);
+    expect(errored.byModel.m1.priceSources).toEqual(["none", "provider"]);
+
+    // a record from before the meter row: no fields, the table prices it (costs.md item 4b)
+    const legacy = usageOfEvents([turn("m1", tokens, 1)]);
+    expect(legacy.byModel.m1.usd).toBeUndefined();
+    expect(legacy.byModel.m1.priceSources).toBeUndefined();
+    expect(isRunUsage(priced)).toBe(true);
+    expect(isRunUsage(mixed)).toBe(true);
+    expect(isRunUsage({ turns: 1, byModel: { m: { ...legacy.byModel.m1, usd: "x" } } })).toBe(false);
+    expect(isRunUsage({ turns: 1, byModel: { m: { ...legacy.byModel.m1, priceSources: [1] } } })).toBe(false);
+  });
+
+  it("addUsage folds usd: a sum when both sides carry one, null when either has an unpriced turn, absent when either predates the meter row; sources union", () => {
+    const tokens = { inputTokens: 1, outputTokens: 1 };
+    const priced = usageOfEvents([turn("m1", { ...tokens, usd: 0.5, priceSource: "provider" }, 1)]);
+    const alsoPriced = usageOfEvents([turn("m1", { ...tokens, usd: 0.25, priceSource: "operator" }, 1)]);
+    const legacy = usageOfEvents([turn("m1", tokens, 1)]);
+    const unpriced = usageOfEvents([turn("m1", { ...tokens, priceSource: "none" }, 1)]);
+
+    const sum = addUsage(priced, alsoPriced);
+    expect(sum.byModel.m1.usd).toBe(0.75);
+    expect(sum.byModel.m1.priceSources).toEqual(["operator", "provider"]);
+    expect(addUsage(priced, unpriced).byModel.m1.usd).toBeNull();
+    expect(addUsage(priced, legacy).byModel.m1.usd).toBeUndefined();
+    // one side only: the figure carries through untouched
+    const other = usageOfEvents([turn("m2", tokens, 1)]);
+    expect(addUsage(priced, other).byModel.m1.usd).toBe(0.5);
+  });
 });
 
 describe("aggregateUsage", () => {

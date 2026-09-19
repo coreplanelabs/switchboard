@@ -268,6 +268,47 @@ describe("buildCostsByReport", () => {
     expect(r.reconciliation.cloudUnallocatedUsd).toBe(0);
   });
 
+  it("the by-model view carries the spans' own figures and sources through the cells (model-proxy item 6)", () => {
+    const ref = "openrouter/anthropic/claude-sonnet-5";
+    const spanPriced = (usd: number | null, priceSources: string[]): RunUsage => ({
+      turns: 1,
+      byModel: {
+        [ref]: {
+          turns: 1,
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          usd,
+          priceSources,
+        },
+      },
+    });
+    const cells: RunUsageReport = {
+      ...report,
+      rows: [
+        row(d0, "slack:UALICE", 1 * H, spanPriced(0.5, ["provider"]), "alice"),
+        row(d1, "slack:UALICE", 1 * H, spanPriced(0.25, ["registry"]), "alice"),
+      ],
+    };
+    const r = build({ dimension: "model", usage: cells });
+    const m = r.rows[0];
+    expect(m.key).toBe(ref);
+    expect(m.llmUsd).toBeCloseTo(0.75, 12);
+    expect(m.unpricedTokens).toBe(0);
+    expect(m.byModel[ref].usd).toBeCloseTo(0.75, 12);
+    expect(m.byModel[ref].priceSources).toEqual(["provider", "registry"]);
+    // a model with an unpriced turn reads as unpriced tokens, never $0
+    const broken: RunUsageReport = {
+      ...report,
+      rows: [row(d0, "slack:UALICE", 1 * H, spanPriced(null, ["none"]), "alice")],
+    };
+    const rb = build({ dimension: "model", usage: broken });
+    expect(rb.rows[0].llmUsd).toBe(0);
+    expect(rb.rows[0].unpricedTokens).toBe(150);
+    expect(rb.rows[0].byModel[ref].usd).toBeNull();
+  });
+
   it("prices every dimension through the configured table: a model the list lacks is priced, an overridden one at the override", () => {
     const prices = parseModelPrices({
       "mystery/model-x": { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 },

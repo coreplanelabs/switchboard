@@ -23,7 +23,21 @@ export interface RegistryCard {
    *  not named (the card's reader applies pi's rule). */
   thinkingLevelMap?: Record<string, string | null>;
   input?: string[];
-  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  cost?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    /** pi's long-context tiers: the whole request re-rates at the highest tier
+     *  whose threshold the input side (input + cache reads + cache writes) exceeds. */
+    tiers?: Array<{
+      inputTokensAbove?: number;
+      input?: number;
+      output?: number;
+      cacheRead?: number;
+      cacheWrite?: number;
+    }>;
+  };
   contextWindow?: number;
   maxTokens?: number;
   compat?: Record<string, unknown>;

@@ -60,6 +60,14 @@ export interface AttrDomain {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** The meter row (model-proxy.md item 6): who bills the turn (the
+   *  block), the vendor the card names, the turn's dollars with the layer
+   *  that priced them, and on a BYOK turn the aggregator's fee (inside `usd`). */
+  biller: string;
+  vendor: string;
+  usd: number;
+  feeUsd: number;
+  priceSource: "provider" | "operator" | "registry" | "none";
   ttftMs: number;
   thinkingMs: number;
   textMs: number;
@@ -137,6 +145,8 @@ const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
   "callId",
   "agent",
   "model",
+  "biller",
+  "vendor",
 ]);
 const IDENTIFIER_RE = /^[A-Za-z0-9_./:@+-]{1,64}$/;
 /** A Workflow instance id: the platform's rule (`^[a-zA-Z0-9_][a-zA-Z0-9-_]*$`, at most 100). */
@@ -197,6 +207,11 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   outputTokens: "number",
   cacheReadTokens: "number",
   cacheWriteTokens: "number",
+  biller: "string",
+  vendor: "string",
+  usd: "number",
+  feeUsd: "number",
+  priceSource: "string",
   ttftMs: "number",
   thinkingMs: "number",
   textMs: "number",

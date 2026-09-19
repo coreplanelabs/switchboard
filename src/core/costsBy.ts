@@ -264,6 +264,10 @@ export function buildCostsByReport(input: {
       acc.cacheReadTokens += m.cacheReadTokens;
       acc.cacheWriteTokens += m.cacheWriteTokens;
       acc.usd = m.usd === null || acc.usd === null ? null : acc.usd + m.usd;
+      // The by-model view names the source (model-proxy item 6): the turns'
+      // distinct `priceSource` words, carried through the cells.
+      const sources = new Set([...(acc.priceSources ?? []), ...(m.priceSources ?? [])]);
+      if (sources.size > 0) acc.priceSources = [...sources].sort();
       row.byModel[ref] = acc;
     }
     rows.set(s.key, row);

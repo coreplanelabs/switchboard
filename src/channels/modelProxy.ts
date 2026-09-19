@@ -20,7 +20,14 @@ import { once } from "node:events";
 import type { RunBearerGrant, RunBearerStore, RunMarks } from "../core/modelProxy/runBearers.js";
 import type { SpanAttrs } from "../core/trace/attrs.js";
 import type { Clock } from "../core/trace/types.js";
-import { usageFromAnthropic, usageFromOpenAI, usageFromResponses } from "../core/modelProxy/usage.js";
+import {
+  reportedCostOf,
+  usageFromAnthropic,
+  usageFromOpenAI,
+  usageFromResponses,
+  type ReportedCost,
+} from "../core/modelProxy/usage.js";
+import { NO_PRICES, priceTurn, type ModelPriceTable, type TurnPrice } from "../core/modelPricing.js";
 import { ANTHROPIC_API_KEY_ENV, wireOf, type ProviderConfig, type TokenUsage, type Wire } from "../core/provider.js";
 import type { Secrets } from "../secrets.js";
 import { readBody } from "./http.js";
@@ -93,6 +100,11 @@ export interface ModelProxyDeps {
   /** One line per call — the run id, the turn, the status and byte counts; never a body or a credential. */
   log?: (line: string) => void;
   maxBodyBytes?: number;
+  /** The operator's `costs.prices` table (costs.md item 4b), read through the
+   *  thunk at each call; the process wires the costs configuration it parsed
+   *  at startup, so unlike `providers` a reload reaches it with the process,
+   *  not before. Absent → no operator layer in the turn's price. */
+  prices?: () => ModelPriceTable;
 }
 
 export interface ProxyRequest {
@@ -311,6 +323,8 @@ export function openAiStopReason(raw: unknown): StopReasonAttr {
 export interface TurnMeter {
   usage?: TokenUsage;
   stopReason?: StopReasonAttr;
+  /** A provider-reported cost beside the counters (OpenRouter's final chunk). */
+  reported?: ReportedCost;
 }
 
 const record = (v: unknown): Record<string, unknown> | undefined =>
@@ -332,9 +346,11 @@ export function meterOpenAiCompletion(json: unknown): TurnMeter {
   const body = record(json);
   if (!body) return {};
   const usage = usageFromOpenAI(body.usage);
+  const reported = reportedCostOf(body.usage);
   const choice = Array.isArray(body.choices) ? record(body.choices[0]) : undefined;
   return {
     ...(usage ? { usage } : {}),
+    ...(reported ? { reported } : {}),
     ...(typeof choice?.finish_reason === "string" ? { stopReason: openAiStopReason(choice.finish_reason) } : {}),
   };
 }
@@ -360,8 +376,10 @@ export function meterResponses(json: unknown): TurnMeter {
   const body = record(json);
   if (!body) return {};
   const usage = usageFromResponses(body.usage);
+  const reported = reportedCostOf(body.usage);
   return {
     ...(usage ? { usage } : {}),
+    ...(reported ? { reported } : {}),
     ...(typeof body.status === "string" ? { stopReason: responsesStopReason(body) } : {}),
   };
 }
@@ -379,6 +397,7 @@ export class SseMeter {
   private buffer = "";
   private usage: Partial<TokenUsage> = {};
   private stopReason: StopReasonAttr | undefined;
+  private reported: ReportedCost | undefined;
 
   constructor(private readonly shape: ProxyShape) {}
 
@@ -412,7 +431,11 @@ export class SseMeter {
             ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
           }
         : undefined;
-    return { ...(usage ? { usage } : {}), ...(this.stopReason ? { stopReason: this.stopReason } : {}) };
+    return {
+      ...(usage ? { usage } : {}),
+      ...(this.reported ? { reported: this.reported } : {}),
+      ...(this.stopReason ? { stopReason: this.stopReason } : {}),
+    };
   }
 
   private apply(json: unknown): void {
@@ -427,6 +450,7 @@ export class SseMeter {
         return;
       const meter = meterResponses(event.response);
       if (meter.usage) this.usage = { ...this.usage, ...meter.usage };
+      if (meter.reported) this.reported = meter.reported;
       if (meter.stopReason) this.stopReason = meter.stopReason;
       return;
     }
@@ -454,6 +478,8 @@ export class SseMeter {
     if (typeof choice?.finish_reason === "string") this.stopReason = openAiStopReason(choice.finish_reason);
     const usage = usageFromOpenAI(event.usage);
     if (usage) this.usage = { ...this.usage, ...usage };
+    const reported = reportedCostOf(event.usage);
+    if (reported) this.reported = reported;
   }
 }
 
@@ -547,18 +573,23 @@ function toolChoiceWord(shape: ProxyShape, choice: unknown, tools: number): Tool
   return record(choice) ? "tool" : tools > 0 ? "auto" : "none";
 }
 
-/** The `model.turn` attrs as the runner sets them: the model ref, what the
- *  request offered, the stop reason, the four token counts and the time to
- *  first token — each only when known. */
+/** The `model.turn` attrs as the runner sets them: the model ref, the meter
+ *  row's biller (the block) and vendor (the card's), what the request offered,
+ *  the stop reason, the four token counts, the turn's dollars with their
+ *  source (model-proxy item 6) and the time to first token — each only
+ *  when known. */
 export function turnAttrs(
-  grant: Pick<RunBearerGrant, "modelRef">,
+  grant: Pick<RunBearerGrant, "modelRef" | "providerName" | "card">,
   meter: TurnMeter,
   ttftMs?: number,
   offered?: ToolsOffered,
+  price?: TurnPrice,
 ): SpanAttrs {
   const u = meter.usage;
   return {
     model: grant.modelRef,
+    biller: grant.providerName,
+    ...(grant.card ? { vendor: grant.card.vendor } : {}),
     ...(offered ?? {}),
     ...(meter.stopReason ? { stopReason: meter.stopReason } : {}),
     ...(u
@@ -567,6 +598,13 @@ export function turnAttrs(
           outputTokens: u.outputTokens,
           ...(u.cacheReadTokens !== undefined ? { cacheReadTokens: u.cacheReadTokens } : {}),
           ...(u.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.cacheWriteTokens } : {}),
+        }
+      : {}),
+    ...(price
+      ? {
+          priceSource: price.priceSource,
+          ...(price.usd !== undefined ? { usd: price.usd } : {}),
+          ...(price.feeUsd !== undefined ? { feeUsd: price.feeUsd } : {}),
         }
       : {}),
     ...(ttftMs !== undefined ? { ttftMs } : {}),
@@ -687,7 +725,29 @@ export async function handleAdmitted(
   const payload = JSON.stringify(pinRequest(shape, shaped.body, grant));
   const offered = { ...toolsOffered(shape, body), toolChoice: shaped.toolChoice };
   const startedAt = deps.clock();
-  const span = grant.span.start("model.turn", { attrs: { model: grant.modelRef, ...offered }, startedAt });
+  const span = grant.span.start("model.turn", {
+    attrs: {
+      model: grant.modelRef,
+      biller: grant.providerName,
+      ...(grant.card ? { vendor: grant.card.vendor } : {}),
+      ...offered,
+    },
+    startedAt,
+  });
+  // The meter row's price (model-proxy item 6): the provider's reported cost,
+  // else the operator's table, else the card's rate (tiers by pi's rule) or
+  // the Anthropic list, else none — computed where the turn's usage is final.
+  const priceOf = (meter: TurnMeter): TurnPrice =>
+    priceTurn(
+      {
+        ref: grant.modelRef,
+        ...(grant.card?.price ? { price: grant.card.price } : {}),
+        ...(grant.card ? { pricedBy: grant.card.provenance.price } : {}),
+      },
+      meter.reported,
+      meter.usage,
+      deps.prices?.() ?? NO_PRICES,
+    );
   const outcome = (status: number, outBytes: number) =>
     `[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → ${status} in=${Buffer.byteLength(payload)} out=${outBytes} ${Math.max(0, deps.clock() - startedAt)}ms`;
   let res: Response;
@@ -723,15 +783,17 @@ export async function handleAdmitted(
         meter.feed(chunk);
       },
       onDone: () => {
+        const result = meter.result();
         span.setAttrs(
-          turnAttrs(grant, meter.result(), firstAt !== undefined ? firstAt - startedAt : undefined, offered),
+          turnAttrs(grant, result, firstAt !== undefined ? firstAt - startedAt : undefined, offered, priceOf(result)),
         );
         span.end("ok");
         log(outcome(res.status, outBytes));
       },
       onError: (err) => {
+        const result = meter.result();
         span.setAttrs(
-          turnAttrs(grant, meter.result(), firstAt !== undefined ? firstAt - startedAt : undefined, offered),
+          turnAttrs(grant, result, firstAt !== undefined ? firstAt - startedAt : undefined, offered, priceOf(result)),
         );
         span.fail(err);
         span.end("error");
@@ -755,7 +817,7 @@ export async function handleAdmitted(
   } catch {
     // not JSON: forwarded as it came, metered as nothing
   }
-  span.setAttrs(turnAttrs(grant, meter, undefined, offered));
+  span.setAttrs(turnAttrs(grant, meter, undefined, offered, priceOf(meter)));
   span.end("ok");
   log(outcome(res.status, text.length));
   return { status: res.status, headers, body: text };

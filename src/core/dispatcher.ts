@@ -1309,7 +1309,16 @@ export async function dispatch(
     // finally for a run that never reached its loop. A run on the pi harness
     // hands it to pi as its provider key (docs/reference/specs/harness-pi.md);
     // a native run never reads it.
-    const bearer = mintRunBearer(deps, { runId, agent, profile, resolved, registry, root, clock });
+    const bearer = mintRunBearer(deps, {
+      runId,
+      agent,
+      ...(modelCard ? { card: modelCard } : {}),
+      profile,
+      resolved,
+      registry,
+      root,
+      clock,
+    });
 
     // Attach-head check (dispatch/authorize.ts): for a PR review on the resident
     // path, the attached sha against the resolved PR head, before any model turn.
