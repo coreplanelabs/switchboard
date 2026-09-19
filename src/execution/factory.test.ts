@@ -725,6 +725,29 @@ describe("makeExecutor resident selection", () => {
       );
     });
 
+    it("the run's own stop during the hold is the stop's typed shape, never a cold fallback on the view the stop produced", async () => {
+      vi.useFakeTimers();
+      try {
+        stubEnvs();
+        stubFetchLate(
+          { body: { state: "restoring", reason: "rehydrating" } },
+          { body: { state: "warm", reason: "" }, afterMs: 9 * 60_000 },
+        );
+        const control = new AbortController();
+        let settled: unknown;
+        void makeExecutor(residentOpts(), { ...repoCtx(), stopSignal: control.signal }).catch(
+          (e: unknown) => (settled = e),
+        );
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(settled).toBeUndefined();
+        control.abort();
+        await vi.advanceTimersByTimeAsync(1);
+        expect((settled as { reason?: string }).reason).toBe("aborted");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("a wait that lands warm but whose attach then fails → cold fallback naming the attach failure AND the wait", async () => {
       stubEnvs();
       const { calls } = stubFetch(
@@ -1750,12 +1773,119 @@ describe("makeExecutor resident selection", () => {
       expect(unreachable).toBeInstanceOf(WorkspaceReattachRefusedError);
       expect((unreachable as Error).message).toMatch(/resident unreachable \(.*fetch failed/);
       resetResidentProbeCache();
-      stubFetch({ body: { state: "restoring", reason: "rehydrating" } });
-      const restoring = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded }).catch(
-        (e: unknown) => e,
-      );
-      expect(restoring).toBeInstanceOf(WorkspaceReattachRefusedError);
-      expect((restoring as Error).message).toContain("resident restoring (rehydrating)");
+      stubFetch({ body: { state: "down", reason: "r2-restore-failed: boom" } });
+      const down = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded }).catch((e: unknown) => e);
+      expect(down).toBeInstanceOf(WorkspaceReattachRefusedError);
+      expect((down as Error).message).toContain("resident down (r2-restore-failed: boom)");
+    });
+
+    // docs/reference/specs/execution.md item 27 on the re-attach (issue 1364
+    // part 1): a resumed run's worktree lives on this resident or nowhere, so
+    // a restoring probe holds the one /await-restore request instead of
+    // refusing at once — a refusal would close the run and restart it from its
+    // request, losing the tree, the transcript and a coordinator child's round.
+    describe("a restoring resident on a re-attach — the restore is waited through, never refused at once (item 27)", () => {
+      it("restoring probe → /await-restore held; a serviceable landing re-attaches the run's own worktree, the note naming the wait — never a refusal, never a sandbox", async () => {
+        stubEnvs();
+        const { calls, bodies } = stubFetch(
+          { body: { state: "restoring", reason: "rehydrating" } },
+          { body: { state: "warm", reason: "" } },
+          attachOk(),
+        );
+        const sel = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded });
+        expect(sel.executor).toBeInstanceOf(ResidentExecutor);
+        expect(sel.resident).toBe(true);
+        expect(calls).toEqual(["/status", "/await-restore", "/attach"]);
+        expect(bodies[1]).toEqual({ resource: "repo:jshttp/vary" });
+        expect(bodies[2]).toMatchObject({ reuse: true });
+        expect(sel.note).toBe(
+          "resident · jshttp/vary · master@1220b9c · re-attached to the run's worktree · after waiting for the resident's restore",
+        );
+      });
+
+      it("a restore landing on a state that cannot serve refuses by name, the state and the wait both named — nothing else provisioned", async () => {
+        stubEnvs();
+        const { calls } = stubFetch(
+          { body: { state: "restoring", reason: "rehydrating" } },
+          { body: { state: "down", reason: "r2-restore-failed: boom" } },
+        );
+        const err = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(WorkspaceReattachRefusedError);
+        expect((err as Error).message).toContain("resident down (r2-restore-failed: boom)");
+        expect((err as Error).message).toContain("after waiting for the resident's restore");
+        expect(calls).toEqual(["/status", "/await-restore"]);
+      });
+
+      it("an older Worker's 404 refuses naming the missing route — a re-attach never falls back cold", async () => {
+        stubEnvs();
+        const { calls } = stubFetch(
+          { body: { state: "restoring", reason: "rehydrating" } },
+          { status: 404, body: { error: "unknown route" } },
+        );
+        const err = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(WorkspaceReattachRefusedError);
+        expect((err as Error).message).toContain("no /await-restore route");
+        expect(calls).toEqual(["/status", "/await-restore"]);
+      });
+
+      it("a hold that fails in transport refuses naming the failed wait, never a throw of the transport's own", async () => {
+        stubEnvs();
+        stubFetch({ body: { state: "restoring", reason: "rehydrating" } }, { reject: "fetch failed" });
+        const err = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(WorkspaceReattachRefusedError);
+        expect((err as Error).message).toMatch(/waiting for the resident's restore failed \(.*fetch failed/);
+      });
+
+      it("the run's own stop ends the hold with the stop's typed shape, never a refusal that would restart the stopped run", async () => {
+        vi.useFakeTimers();
+        try {
+          stubEnvs();
+          stubFetchLate(
+            { body: { state: "restoring", reason: "rehydrating" } },
+            { body: { state: "warm", reason: "" }, afterMs: 9 * 60_000 },
+          );
+          const control = new AbortController();
+          let settled: unknown;
+          void makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded, stopSignal: control.signal }).catch(
+            (e: unknown) => (settled = e),
+          );
+          await vi.advanceTimersByTimeAsync(2_000);
+          expect(settled).toBeUndefined();
+          control.abort();
+          await vi.advanceTimersByTimeAsync(1);
+          expect(settled).not.toBeInstanceOf(WorkspaceReattachRefusedError);
+          expect((settled as { reason?: string }).reason).toBe("aborted");
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("a lease that ran into its write-up reserve under the hold is the run's end on its budget, never a refusal", async () => {
+        vi.useFakeTimers();
+        try {
+          stubEnvs();
+          // 130 s of lease: the hold's budget is clipped to 70 s (the lease less
+          // the 60 s reserve); the restore ends at 45 s with 85 s left — 25 s
+          // past the reserve, under the 30 s an attach needs.
+          stubFetchLate(
+            { body: { state: "restoring", reason: "rehydrating" } },
+            { body: { state: "warm", reason: "" }, afterMs: 45_000 },
+          );
+          const start = Date.now();
+          let settled: unknown;
+          const p = makeExecutor(residentOpts(), {
+            ...repoCtx(),
+            reattach: recorded,
+            remainingMs: () => 130_000 - (Date.now() - start),
+          }).catch((e: unknown) => (settled = e));
+          await vi.advanceTimersByTimeAsync(45_001);
+          await p;
+          expect(settled).toBeInstanceOf(WorkspaceReattachLeaseSpentError);
+          expect((settled as WorkspaceReattachLeaseSpentError).leftMs).toBe(85_000);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
     });
 
     it("any other attach failure on a re-attach (a mirror-busy 503) is the same typed refusal, never the per-thread fallback", async () => {

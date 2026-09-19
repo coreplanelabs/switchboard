@@ -1819,6 +1819,50 @@ describe("the pi harness — the container replaced under a living bot: the rela
     expect(s.releases).toEqual(["paired"]);
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
     expect(registry.get("run-l")).toBeUndefined();
+    // A run no coordinator spawned publishes no child event on the roll it survived (run-history item 47a).
+    expect(record.events.some((e) => e.type === "child_resumed" || e.type === "child_interrupted")).toBe(false);
+  });
+
+  it("a coordinator's child relaunched in the replacement container publishes child_resumed on its record — the roll survived under the run's own id, tag and budget, never a restart", async () => {
+    const registry = new HarnessRegistry();
+    const a = new FakeHarnessContainer();
+    a.onStdin = piThatMeetsTheRoll(registry);
+    const b = new FakeHarnessContainer();
+    b.vm = "vm-new";
+    scriptPiFromProvider(b, {
+      provider: provider("resumed and done"),
+      registry,
+      beforeModelCall: () => new Promise((r) => setTimeout(r, 10)),
+    });
+    const coordinator = { parentInstanceId: "plan-p", idempotencyKey: "plan-p:u1/0/coding" };
+    const containers: FakeHarnessContainer[] = [];
+    const s = setup("unused", {
+      agent: "coding",
+      yaml: yamlWithWorkspace(),
+      harness: harnessOver(registry, () => {
+        const c = containers.length === 0 ? a : b;
+        containers.push(c);
+        return c;
+      }),
+      coordinator,
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.answer).toBe("resumed and done");
+    expect(containers).toEqual([a, b]);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    expect(record.status).toBe("completed");
+    const resumed = record.events.filter((e) => e.type === "child_resumed");
+    expect(resumed).toEqual([
+      expect.objectContaining({
+        type: "child_resumed",
+        parentInstanceId: "plan-p",
+        summary:
+          "resumed after the container was replaced: the run's worktree was re-attached and its process relaunched from the record",
+      }),
+    ]);
+    expect(record.events.some((e) => e.type === "child_interrupted")).toBe(false);
   });
 
   it("a coordinator's child that restarts from its request hands the dispatcher its coordinator tag with the interruption, so the restart is dispatched as the same instance's child — the unit branch its own, the plan's base protected", async () => {

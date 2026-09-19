@@ -1152,6 +1152,21 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           }
           if (decision.bearer !== undefined) bearer = decision.bearer;
           harnessResume = decision.resume;
+          // A coordinator's child relaunched in the replacement container says
+          // the resume on its own record (run-history item 47a; issue 1364
+          // part 1): the typed `child_resumed` beside the harness's
+          // `sandbox_restarted` note, so the parent's read-record and the run
+          // page read the roll as survived — the run keeps its id, budget, tag
+          // and worktree. No Workflow twin from here: a resumed child settles
+          // nothing, the parent's wait keeps waiting on the finish.
+          if (coordinator !== undefined)
+            onEvent({
+              type: "child_resumed",
+              parentInstanceId: coordinator.parentInstanceId,
+              summary:
+                "resumed after the container was replaced: the run's worktree was re-attached and its process relaunched from the record",
+              at: clock(),
+            });
         }
       }
       // No session only when the relaunch's re-attach ended the run: on the

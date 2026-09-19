@@ -856,7 +856,13 @@ function seedHandleOf(snapshot: unknown): ResidentSeedHandle | undefined {
  *  failure. Never throws — every outcome is a value the factory turns into a
  *  card note. */
 export type ResidentRestoreWait =
-  { kind: "status"; state: string; reason: string } | { kind: "unsupported" } | { kind: "unreachable"; error: string };
+  | { kind: "status"; state: string; reason: string }
+  | { kind: "unsupported" }
+  | { kind: "unreachable"; error: string }
+  /** The caller's own stop ended the hold (its signal rode in): the run is
+   *  ending, and the caller answers the stop, never a cold fallback or a
+   *  re-attach refusal on the view the stop produced. */
+  | { kind: "stopped" };
 
 /** The routes whose call is re-issued once when the resident answers
  *  `control-reset` (its Durable Object reset under the call; the container and
@@ -982,13 +988,16 @@ export class ResidentExecutor implements Executor {
    *  polling, no retry timer on either side. The answer streams heartbeat
    *  whitespace then one JSON document; `timeoutMs` bounds the whole wait so a
    *  restore that never ends becomes a named cold fallback. A 404 is an older
-   *  Worker without the route. Never throws. */
+   *  Worker without the route. The caller's stop signal rides in — a run
+   *  stopped during the hold is answered `stopped` at once, decided by the
+   *  signal before the error's name, and holds nothing further. Never throws. */
   static async awaitRestore(
     baseUrl: string,
     token: string,
     resource: string,
     timeoutMs: number,
     span?: Span,
+    signal?: AbortSignal,
   ): Promise<ResidentRestoreWait> {
     try {
       const res = await tracedFetch(
@@ -998,7 +1007,7 @@ export class ResidentExecutor implements Executor {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
           body: JSON.stringify({ resource }),
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: execDeadline(timeoutMs, signal),
         },
         { route: "/await-restore" },
       );
@@ -1010,6 +1019,7 @@ export class ResidentExecutor implements Executor {
       }
       return { kind: "status", state: residentState(data.state), reason: String(data.reason ?? "") };
     } catch (err) {
+      if (signal?.aborted) return { kind: "stopped" };
       return { kind: "unreachable", error: err instanceof Error ? err.message : String(err) };
     }
   }

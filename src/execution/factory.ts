@@ -239,6 +239,16 @@ function leaseClippedBudget(remainingMs: number | undefined): number {
   return Math.max(0, Math.min(FIRST_ATTACH_WAIT_MS, Math.trunc(remainingMs - RUN_DEADLINE_RESERVE_MS)));
 }
 
+/** How long a re-attach holds the /await-restore request (item 27 on the
+ *  re-attach): the restore ceiling, clipped to the run's lease less its
+ *  write-up reserve so no hold spends the run into the reserve — the lease is
+ *  read again after the hold, and its end is the run's end on its budget,
+ *  never a refusal. Without a lease (no run control yet), the ceiling alone. */
+function restoreHoldBudget(remainingMs: number | undefined): number {
+  if (remainingMs === undefined) return AWAIT_RESTORE_TIMEOUT_MS;
+  return Math.max(0, Math.min(AWAIT_RESTORE_TIMEOUT_MS, Math.trunc(remainingMs - RUN_DEADLINE_RESERVE_MS)));
+}
+
 /** Executor selection result. `note` is present when resident selection fell
  *  back to the per-thread backend — the NAMED reason (state + reason)
  *  the dispatcher surfaces on the status card — or when the resident was
@@ -394,7 +404,11 @@ export async function makeExecutor(
         resource,
         AWAIT_RESTORE_TIMEOUT_MS,
         span,
+        ctx.stopSignal,
       );
+      // The run's own stop ended the hold: the stop's typed shape, read by the
+      // dispatch as the stop it is — a stopped run is never provisioned cold.
+      if (wait.kind === "stopped") throw wakeStopped("/await-restore");
       if (wait.kind === "status") {
         waitedForRestore = true;
         // The state the restore landed on; the probe's seed handle (item 25)
@@ -648,10 +662,47 @@ async function reattachWorkspace(
   const spentProbing = leaseSpent();
   if (spentProbing) throw spentProbing;
   if (probe.kind === "unreachable") throw refuse(`resident unreachable (${probe.error})${waitedNote(probeWaitMs)}`);
-  if (!isServiceable(probe.state, probe.reason))
-    throw refuse(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""}${waitedNote(probeWaitMs)}`);
+  // A restoring resident is waited through, never refused at once (execution.md
+  // item 27 on the re-attach; issue 1364 part 1): the run's worktree lives on
+  // this resident or nowhere (run-history item 54), so a refusal here would
+  // close the run and dispatch its request again — the tree, the transcript and
+  // a coordinator child's round lost to a rehydrate that ends on its own. The
+  // one held /await-restore request, bounded by the restore ceiling clipped to
+  // the run's lease less its reserve; the run's stop ends the hold at once.
+  let landed = { state: probe.state, reason: probe.reason };
+  /** Set when the re-attach held the /await-restore request — the note names the wait. */
+  let waitedForRestore = false;
+  if (landed.state === "restoring") {
+    const wait = await ResidentExecutor.awaitRestore(
+      resident.baseUrl,
+      token.reveal(),
+      resource,
+      restoreHoldBudget(ctx.remainingMs?.()),
+      span,
+      ctx.stopSignal,
+    );
+    // The stop's typed shape, never a refusal that would restart the stopped
+    // run from its request; the lease spent under the hold is the run's end on
+    // its budget — both read before any refusal, as after the probe's wait.
+    if (wait.kind === "stopped") throw wakeStopped("/await-restore");
+    const spentHolding = leaseSpent();
+    if (spentHolding) throw spentHolding;
+    if (wait.kind === "unsupported")
+      throw refuse(
+        "resident restoring — this Worker has no /await-restore route, so waiting for the resident's restore is not possible",
+      );
+    if (wait.kind === "unreachable")
+      throw refuse(`resident restoring — waiting for the resident's restore failed (${wait.error})`);
+    waitedForRestore = true;
+    landed = { state: wait.state, reason: wait.reason };
+  }
+  const restoreNote = waitedForRestore ? " · after waiting for the resident's restore" : "";
+  if (!isServiceable(landed.state, landed.reason))
+    throw refuse(
+      `resident ${landed.state}${landed.reason ? ` (${landed.reason})` : ""}${waitedNote(probeWaitMs)}${restoreNote}`,
+    );
   const nonWarm =
-    probe.state === "warm" ? undefined : oneLine(`${probe.state}${probe.reason ? ` (${probe.reason})` : ""}`);
+    landed.state === "warm" ? undefined : oneLine(`${landed.state}${landed.reason ? ` (${landed.reason})` : ""}`);
   const executor = new ResidentExecutor({
     baseUrl: resident.baseUrl,
     token: token.reveal(),
@@ -688,7 +739,7 @@ async function reattachWorkspace(
       throw new WorkspaceReattachLeaseSpentError(recorded, err.leftMs, err.note);
     const spentWaking = leaseSpent();
     if (spentWaking) throw spentWaking;
-    throw refuse(err instanceof Error ? err.message : String(err));
+    throw refuse(`${err instanceof Error ? err.message : String(err)}${restoreNote}`);
   }
   // The tree the resident answered must be the run's: the same worktree, the
   // same pool user. Another (a rebinding since) is not the run's work.
@@ -713,8 +764,8 @@ async function reattachWorkspace(
     ...(binding.attachMs !== undefined ? { attachMs: binding.attachMs } : {}),
     binding,
     note: nonWarm
-      ? `resident ${nonWarm} · ${where} · re-attached to the run's worktree${woke}`
-      : `resident · ${where} · re-attached to the run's worktree${woke}`,
+      ? `resident ${nonWarm} · ${where} · re-attached to the run's worktree${woke}${restoreNote}`
+      : `resident · ${where} · re-attached to the run's worktree${woke}${restoreNote}`,
   };
 }
 
