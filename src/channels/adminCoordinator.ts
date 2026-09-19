@@ -455,29 +455,37 @@ export function parseSpawnStep(body: Record<string, unknown>): Parsed<SpawnStepR
   return { ok: true, value: { ...value, prompt: body.prompt } };
 }
 
-/** The unit row a body names, when it names one: `unit_not_found` when the
- *  instance has no such unit. Absent `unit` → undefined (the instance's own thread). */
+/** The unit row a body names, when it names one, beside the instance's rows —
+ *  their count decides the unit's thread (record 0055 item 3): `unit_not_found`
+ *  when the instance has no such unit. Absent `unit` → undefined row (the
+ *  instance's own thread). */
 async function unitRowOf(
   deps: AdminCoordinatorDeps,
   instance: CoordinatorInstance,
   unit: string | undefined,
-): Promise<{ ok: true; row: CoordinatorUnit | undefined } | { ok: false; response: IngressResponse }> {
-  if (unit === undefined) return { ok: true, row: undefined };
-  const row = (await deps.instances.listUnits(instance.id)).find((u) => u.unit === unit);
+): Promise<
+  | { ok: true; row: CoordinatorUnit | undefined; rows: readonly CoordinatorUnit[] }
+  | { ok: false; response: IngressResponse }
+> {
+  const rows = await deps.instances.listUnits(instance.id);
+  if (unit === undefined) return { ok: true, row: undefined, rows };
+  const row = rows.find((u) => u.unit === unit);
   if (!row) return { ok: false, response: json(404, { ok: false, error: "unit_not_found", unit }) };
-  return { ok: true, row };
+  return { ok: true, row, rows };
 }
 
 /** A generated plan's instance: `plan` without a `path` — the mark the hand-off
- *  writes for a task request, which keeps its one unit in the requesting
- *  thread (agent-ship item 16). */
+ *  writes for a task request, which means the task wording (no unit id on the
+ *  card and summary lines, no board issue); the unit's thread is the count's
+ *  to decide, not this mark's (agent-ship item 16). */
 const isGenerated = (instance: CoordinatorInstance): boolean => instance.plan?.path === undefined;
 
 /** The thread a unit's coding children run in, and where its findings are
- *  dispatched: the unit's own once opened, the requesting thread for a
- *  generated plan's unit — the thread every child of the unit runs in (record 0055). */
-function unitThread(instance: CoordinatorInstance, row: CoordinatorUnit | undefined) {
-  const threadKey = row?.threadKey ?? (row === undefined || isGenerated(instance) ? instance.threadKey : undefined);
+ *  dispatched: the unit's own once opened, the requesting thread for a one-unit
+ *  plan — whatever its source, keyed on the unit count (record 0055 item 3) —
+ *  the thread every child of the unit runs in (record 0055). */
+function unitThread(instance: CoordinatorInstance, row: CoordinatorUnit | undefined, unitCount: number) {
+  const threadKey = row?.threadKey ?? (row === undefined || unitCount === 1 ? instance.threadKey : undefined);
   const sourceUrl = row?.sourceUrl ?? (threadKey === instance.threadKey ? instance.sourceUrl : undefined);
   return { threadKey, sourceUrl };
 }
@@ -633,7 +641,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const at = (deps.clock ?? systemClock)();
   const unit = await unitRowOf(deps, instance, req.unit);
   if (!unit.ok) return unit.response;
-  const own = unitThread(instance, unit.row);
+  const own = unitThread(instance, unit.row, unit.rows.length);
   // A plan unit's thread is opened by `unit-start`; a spawn before it has no
   // thread to run in — a passing condition (the runner asks again), stamped
   // like every answer.
@@ -1328,7 +1336,9 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
   if (!unit.ok) return unit.response;
   let row = unit.row!;
   if (row.threadKey === undefined) {
-    if (isGenerated(instance)) {
+    // A one-unit plan — generated or checked-in — runs its unit where the
+    // request was made (record 0055 item 3): the count decides, not the source.
+    if (unit.rows.length === 1) {
       row = {
         ...row,
         threadKey: instance.threadKey,
@@ -1526,7 +1536,7 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   };
   await deps.instances.putUnits([updated]);
   if (host.kind === "host") {
-    const thread = unitThread(instance, updated);
+    const thread = unitThread(instance, updated, units.length);
     hostPublish(
       deps,
       instance,
@@ -1664,7 +1674,7 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         : { ending: { kind: ending.kind, report: ending.report, at } }),
   };
   await deps.instances.putUnits([updated]);
-  const thread = unitThread(instance, updated);
+  const thread = unitThread(instance, updated, units.length);
   if (host.kind === "host")
     hostPublish(
       deps,
@@ -2081,9 +2091,10 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
     deps.registry.finish(host.runId, body.outcome);
   }
   await drawCard(deps, instance, units, { icon: body.outcome === "completed" ? "✅" : "⚠️" }).catch(() => {});
-  // A generated plan's one unit ran in the requesting thread, so its report is
-  // already there — only a seeded plan's summary is posted back.
-  if (!isGenerated(instance)) {
+  // A one-unit plan's unit ran in the requesting thread, so its report is
+  // already there — only a plan of two or more units posts the summary back
+  // (record 0055 item 3: the count decides, not the source).
+  if (units.length >= 2) {
     const io = deps.ioFor({ threadKey: instance.threadKey, userId: instance.userId });
     await io?.reply(`Plan ${instance.plan?.id ?? ""} ended (${body.outcome}):\n${planSummary(units)}`).catch(() => {});
   }
