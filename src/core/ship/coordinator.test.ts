@@ -2661,6 +2661,165 @@ describe("the severity gate — an approve's findings held to the level in force
   });
 });
 
+// Feature: docs/reference/specs/agent-ship.md item 9 — the held ending (issue
+// 1990): when every finding the round would act on is human-gated — the
+// reviewer set the flag through submit_verdict; a receipt only a person can
+// produce — the runner opens no fix round that could change nothing: the unit
+// ends `held`, the report names the human-gated rows and the person's exact
+// next step, and a re-issue with the pull request resumes at the review round
+// (item 10's resume path) once the receipt is posted.
+describe("the held ending — every finding the round would act on is human-gated (issue 1990)", () => {
+  const HG: Finding = {
+    id: "F1",
+    severity: "minor",
+    file: "docs/replay.md",
+    title: "the entry replay receipt is human-gated",
+    humanGated: true,
+  };
+
+  it("a request_changes round whose only findings are human-gated ends held with no coding child spawned — the report names the row and the person's next step, and the round note stays the verdict's", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "only the replay receipt is missing", findings: [HG] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "held",
+        pr: { number: 7, url: PR_URL },
+        round: { index: 1, kind: "review" },
+        findings: [HG],
+        verdict: "request_changes",
+      },
+    });
+    expect(d.rounds()).toEqual([
+      "0 coding started",
+      "0 coding pr_opened",
+      "1 review started",
+      "1 review request_changes",
+    ]);
+    const report = renderUnitReport(d.state);
+    // The headline keys on the round's verdict: nothing was approved here.
+    expect(report).toContain("⏸️ Changes requested but held after 1 review round: " + PR_URL);
+    expect(report).not.toContain("Approved but held");
+    expect(report).toContain("F1 (minor) — the entry replay receipt is human-gated");
+    expect(report).toContain("No fix round was opened");
+    expect(report).toContain("Next step: produce the receipt each finding names and post it on the pull request.");
+    // Only the PR URL, never the task text: re-issuing with the task would
+    // adopt the pull request and run a coding round first (item 10) — the very
+    // round the held ending exists to avoid.
+    expect(report).toContain("re-issue `agent:ship` in this thread with only the PR URL (" + PR_URL + ")");
+    expect(report).not.toContain("with the same text");
+    expect(report).toContain("resumes at the review round");
+  });
+
+  it("a round mixing one human-gated and one actionable finding still opens the fix round for the actionable one — both ride the findings step", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    const a = runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "one of two is a person's", findings: [HG, FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(a).toMatchObject({ type: "spawn", round: { index: 1, kind: "findings" }, preset: "coding" });
+  });
+
+  it("a gated approve whose gated findings are all human-gated ends held too — the defense-in-depth gate never routes a person's receipt into a fix round", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "clean but for the receipt", findings: [HG] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "held", findings: [HG], verdict: "approve" } });
+    // An approve's held headline keeps the approve's own word.
+    expect(renderUnitReport(d.state)).toContain("⏸️ Approved but held after 1 review round");
+    // The gate still fired and says so — held changes the ending, not the detector.
+    expect(d.notes.find((n) => n.type === "round" && n.outcome === "approve")).toMatchObject({
+      gate: { level: "minor", findings: ["F1 (minor)"] },
+    });
+  });
+
+  it("held fires before the round cap: a human-gated-only round at the last allowed round ends held, never round_cap", () => {
+    const d = fresh(input({ merge: "person", generated: true, caps: { maxRounds: 1, maxMinutes: 120 } }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", findings: [HG] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "held" } });
+  });
+
+  it("held never idles: at idleDays 7 the ending stands as held — a fix round could change nothing, so there is nothing a reply could continue", () => {
+    const d = fresh(input({ merge: "person", generated: true, idleDays: 7 }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", findings: [HG] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "held" } });
+  });
+
+  it("a re-issue after the receipt is posted resumes at the review round: the pull request on the row opens the pipeline at review round 1 with no coding child", () => {
+    // The resume-at-review path (item 10): the held report told the person to
+    // re-issue with the pull request once the receipt stands — the resumed
+    // attempt's first action is the review spawn, never a coding round.
+    const d = new Driver(
+      openUnitPipeline(
+        input({
+          unit: { id: "task", branch: "ship/fix-abc123" },
+          merge: "person",
+          generated: true,
+          resume: { pr: 7, headSha: HEAD_B, url: PR_URL },
+        }),
+        T0,
+      ),
+    );
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      step: "task/1/review",
+      preset: "review",
+      brief: { kind: "review", pr: 7, headSha: HEAD_B },
+    });
+  });
+});
+
 // Feature: docs/reference/specs/agent-ship.md item 12 — the unit-end report
 // points at the child's write-up instead of repeating it (issue 1806): the
 // child's own message in the thread is the single copy of the detail, and the

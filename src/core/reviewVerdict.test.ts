@@ -6,6 +6,7 @@ import {
   CHANGES_TOKEN,
   FINDING_SEVERITIES,
   findingsAtOrAbove,
+  formatFinding,
   isFindingDispositionsShape,
   isReviewPostShape,
   isReviewVerdictShape,
@@ -290,6 +291,48 @@ describe("review verdict → post body", () => {
       expect(v.verdict).toBe("request_changes");
       expect(v.summary).toContain("F1");
       expect(buildReviewPostBody("prose", v).startsWith("LGTM")).toBe(false);
+    });
+
+    // Feature: docs/reference/specs/agent-review.md item 5 — the human-gated
+    // flag beside the severity (issue 1990): a reviewer marks a finding whose
+    // remedy is a receipt only a person can produce, and ship's coordinator
+    // reads that flag — never prose — so the flag must round-trip the parser,
+    // the stored shape, the redaction and the rendered surfaces.
+    it("humanGated round-trips: `true` survives the parse, the stored shape, the redaction, the compact line and the marker; anything else is dropped and the finding stands actionable", () => {
+      const v = parseVerdictInput({
+        verdict: "request_changes",
+        summary: "one receipt is a person's",
+        findings: [
+          { id: "F1", severity: "minor", file: "docs/replay.md", title: "entry replay receipt", humanGated: true },
+          { id: "F2", severity: "minor", file: "src/b.ts", title: "off by one", humanGated: "yes" },
+          { id: "F3", severity: "minor", file: "src/c.ts", title: "naming", humanGated: false },
+        ],
+      })!;
+      expect(v.findings).toEqual([
+        { id: "F1", severity: "minor", file: "docs/replay.md", title: "entry replay receipt", humanGated: true },
+        { id: "F2", severity: "minor", file: "src/b.ts", title: "off by one" },
+        { id: "F3", severity: "minor", file: "src/c.ts", title: "naming" },
+      ]);
+      expect(v.droppedFindings).toBeUndefined();
+      // The stored shape admits the flag (true or absent, nothing else).
+      expect(isReviewVerdictShape(v)).toBe(true);
+      expect(
+        isReviewVerdictShape({
+          verdict: "approve",
+          summary: "",
+          findings: [{ id: "F1", severity: "minor", file: "a", title: "t", humanGated: false }],
+        }),
+      ).toBe(false);
+      // Redaction keeps it — the coordinator reads the flag off the record.
+      expect(redactVerdict(v).findings![0]!.humanGated).toBe(true);
+      expect(redactVerdict(v).findings![1]!.humanGated).toBeUndefined();
+      // The compact line names it for the fix round's brief; the marker carries
+      // it for a scanner.
+      expect(formatFinding(v.findings![0]!)).toBe("[minor] F1 docs/replay.md — entry replay receipt (human-gated)");
+      expect(formatFinding(v.findings![1]!)).toBe("[minor] F2 src/b.ts — off by one");
+      const body = buildReviewPostBody("prose", v);
+      expect(body).toContain('"humanGated":true');
+      expect(body.match(/humanGated/g)).toHaveLength(1);
     });
 
     it("LGTM token contract holds with findings present: approve + findings below the level still starts with the exact token", () => {

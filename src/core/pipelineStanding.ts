@@ -111,6 +111,7 @@ export const ENDING_STAGE = {
   merged: "merged",
   already_landed: "merged",
   merge_ready: "merge-ready",
+  held: "ended",
   merge_refused: "ended",
   round_cap: "ended",
   wall_clock_cap: "ended",

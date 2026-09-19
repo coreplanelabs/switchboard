@@ -1861,6 +1861,19 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         ),
       );
   }
+  // A held ending's next step is a person's, at the pull request (issue 1990;
+  // agent-ship item 9): the report — the human-gated rows and the exact next
+  // step — lands there too, where the receipt's producer reads it beside the
+  // review that named them. Best effort, like the board's and the thread's.
+  if (ending.kind === "held" && updated.pr !== undefined) {
+    await deps.github
+      .commentIssue(instance.repo, updated.pr.number, `**Plan runner — ${row.unit} held**\n\n${ending.report}`)
+      .catch((err) =>
+        (deps.log ?? console.warn)(
+          `[coordinator] ${instance.id} ${row.unit}: the held report could not be posted on the pull request: ${describe(err)}`,
+        ),
+      );
+  }
   await drawCard(
     deps,
     instance,

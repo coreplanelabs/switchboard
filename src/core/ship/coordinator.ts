@@ -653,6 +653,20 @@ export type UnitEnding =
    *  The unit is done and its dependents start on a base that carries it. */
   | { kind: "already_landed"; landed: HandoffLanded[]; round: RoundRef; runId: string; reviewRounds: number }
   | { kind: "merge_ready"; pr: PrRef; reviewRounds: number }
+  /** Every finding the round would act on is human-gated — a receipt only a
+   *  person can produce (issue 1990; the reviewer set the flag through
+   *  `submit_verdict`, agent-review item 5) — so a fix round could change
+   *  nothing: the unit ends held for a person, the ending carrying the
+   *  human-gated rows, and a re-issue with the pull request resumes at the
+   *  review round once the receipt is posted (item 10's resume path). */
+  | {
+      kind: "held";
+      pr?: PrRef;
+      round: RoundRef;
+      findings: Finding[];
+      verdict: "approve" | "request_changes";
+      reviewRounds: number;
+    }
   | { kind: "merge_refused"; pr: PrRef; reason: string; reviewRounds: number }
   | { kind: "round_cap"; maxRounds: number; reviewRounds: number }
   | {
@@ -737,18 +751,24 @@ export type UnitEnding =
       reviewRounds: number;
     };
 
-/** The kinds that idle: every ending but the four ended ones — the unit is
+/** The kinds that idle: every ending but the ended ones — the unit is
  *  unfinished (a cap, a stop, an abort, a refused merge, a segment's end) and
- *  a reply could continue it. `merged`, `already_landed`, `merge_ready` and
- *  `refused` never idle: the first two are done, merge-ready waits only for a
- *  person's merge, and a refused child would be refused again. */
-export type IdleWhy = Exclude<UnitEnding["kind"], "idle" | "merged" | "already_landed" | "merge_ready" | "refused">;
+ *  a reply could continue it. `merged`, `already_landed`, `merge_ready`,
+ *  `held` and `refused` never idle: the first two are done, merge-ready waits
+ *  only for a person's merge, held waits only for a person's receipt (a fix
+ *  round could change nothing, so nothing here can continue it), and a
+ *  refused child would be refused again. */
+export type IdleWhy = Exclude<
+  UnitEnding["kind"],
+  "idle" | "merged" | "already_landed" | "merge_ready" | "held" | "refused"
+>;
 
 const NEVER_IDLES: ReadonlySet<UnitEnding["kind"]> = new Set([
   "idle",
   "merged",
   "already_landed",
   "merge_ready",
+  "held",
   "refused",
 ]);
 
@@ -1194,7 +1214,10 @@ function end(s: UnitPipelineState, ending: UnitEnding, notes: CoordinatorNote[] 
 function idleEnding(s: UnitPipelineState, ending: UnitEnding): Extract<UnitEnding, { kind: "idle" }> | undefined {
   if ((s.input.idleDays ?? 0) <= 0) return undefined;
   if (NEVER_IDLES.has(ending.kind)) return undefined;
-  const old = ending as Exclude<UnitEnding, { kind: "idle" | "merged" | "already_landed" | "merge_ready" | "refused" }>;
+  const old = ending as Exclude<
+    UnitEnding,
+    { kind: "idle" | "merged" | "already_landed" | "merge_ready" | "held" | "refused" }
+  >;
   const grant = s.input.grant ?? DEFAULT_GRANT;
   // Unspent: an idle spends no renewal — the wake's segment does (this plan's
   // fifth unit) — so the row says what the grant still holds.
@@ -1233,6 +1256,29 @@ function idleEnding(s: UnitPipelineState, ending: UnitEnding): Extract<UnitEndin
 
 /** A gated finding as the gate note names it: `F1 (minor)`. */
 const gateLabel = (f: Finding): string => `${f.id} (${f.severity})`;
+
+/** The held decision (issue 1990): the findings the round would act on — the
+ *  gated set on an approve, every finding on a request_changes — are all
+ *  human-gated, read off the reviewer's own flag and never prose. One
+ *  actionable finding beside a human-gated one keeps the fix round: the
+ *  dispositions cover the human-gated row like any other (declined, with the
+ *  person named). An empty set decides nothing. */
+const allHumanGated = (findings: readonly Finding[]): boolean =>
+  findings.length > 0 && findings.every((f) => f.humanGated === true);
+
+const heldEnding = (
+  s: UnitPipelineState,
+  round: RoundRef,
+  findings: Finding[],
+  verdict: "approve" | "request_changes",
+): UnitEnding => ({
+  kind: "held",
+  ...(s.pr !== undefined ? { pr: s.pr } : {}),
+  round,
+  findings,
+  verdict,
+  reviewRounds: s.reviewRounds,
+});
 
 const roundNote = (round: RoundRef, outcome: ShipRoundOutcome): RoundNote => ({
   type: "round",
@@ -1429,6 +1475,9 @@ function settleReview(
           },
           notes,
         );
+      // Every gated finding is human-gated (issue 1990): a fix round could
+      // change nothing, so the unit ends held for a person instead.
+      if (allHumanGated(gated)) return end(next, heldEnding(next, round, gated, "approve"), notes);
       if (next.reviewRounds >= next.input.caps.maxRounds)
         return end(
           next,
@@ -1457,6 +1506,11 @@ function settleReview(
       },
       notes,
     );
+  // Every finding of the round is human-gated (issue 1990): no fix round can
+  // change anything, so the unit ends held for a person's receipt instead of
+  // spending a coding child — or the round cap — on it.
+  if (allHumanGated(verdict.findings ?? []))
+    return end(next, heldEnding(next, round, verdict.findings ?? [], "request_changes"), notes);
   if (next.reviewRounds >= next.input.caps.maxRounds)
     return end(
       next,
@@ -2324,6 +2378,25 @@ export function renderUnitReport(
       ]
         .filter(Boolean)
         .join("\n");
+    case "held": {
+      // The person's next step is the report's whole point (issue 1990): the
+      // human-gated rows are named with the reviewer's own words, and the
+      // re-issue line says the attempt resumes at the review round — item 10's
+      // resume path — once the receipt stands on the pull request. That path
+      // fires only when the invocation carries NO new task text: re-issuing
+      // with the task would ADOPT the pull request and run a coding round
+      // first (item 10), the very round this ending exists to avoid — so the
+      // held case renders its own re-issue line instead of the shared one.
+      const rows = e.findings.map((f) => `${f.id} (${f.severity}) — ${f.title}`).join("; ");
+      const heldReissue = s.input.generated
+        ? `To continue, re-issue \`agent:ship\` in this thread with only the PR URL${e.pr !== undefined ? ` (${e.pr.url})` : ""} — no new task text.`
+        : reissue;
+      return join([
+        `⏸️ ${e.verdict === "approve" ? "Approved but held" : "Changes requested but held"} after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — every finding of review round ${e.round.index} is human-gated, a receipt only a person can produce: ${rows}. No fix round was opened: a coding child cannot produce the receipt.`,
+        aside(levelLine),
+        `Next step: produce the receipt each finding names and post it on the pull request. ${heldReissue} The re-issued attempt resumes at the review round — no coding round runs first.`,
+      ]);
+    }
     case "merge_refused":
       // The approved work is on the branch, so the remedy is a person's hand
       // merge, never a re-run: a seeded plan re-issued afterwards finds the
