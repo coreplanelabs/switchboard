@@ -49,6 +49,7 @@ import { CONFIRM_ORDER, effectiveConfirm, type ConfirmClass, type EffectiveConfi
 import type { RouteAnswerMode } from "../../config/validate.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import { parseModelRef, type Provider, type ToolDef } from "../provider.js";
+import type { ChatMessage } from "../chatMessage.js";
 import type { ProviderTable } from "../harness/piAi.js";
 import { oneLine, redactAndCap, redactSecrets } from "../redact.js";
 import { ROUTE_REASON_PREFIX } from "../statusCardFrame.js";
@@ -87,6 +88,7 @@ import {
   UNSHOWABLE_LINE,
   type Confirmation,
 } from "../confirmations.js";
+import { askStructured, attemptsOfThrow, type StructuredAttempt } from "./structured.js";
 import { repoFromThread } from "../repoContext.js";
 import type { ConversationReader } from "../references/types.js";
 import { quotableReferences } from "./references.js";
@@ -345,6 +347,12 @@ export interface RoutePrompt {
   /** The command tools offered beside `tool` (record 0036, unit 2); absent when
    *  no command is offered, and the model is then forced to call `tool`. */
   tools?: ToolDef[];
+  /** The re-asks so far (record 0067, `askStructured`): per violation, the
+   *  model's own answer and the re-ask's user turn naming the violation.
+   *  Rendered by `providerRouteModel` as an assistant turn and a user turn
+   *  after the first, so a re-ask hits the prompt cache for everything but
+   *  the two new turns. Absent — a first ask — the prompt is as ever. */
+  retries?: ReadonlyArray<{ answer: string; violation: string }>;
 }
 
 /** The output cap for one answer: the largest answer the parse accepts — every
@@ -451,8 +459,20 @@ export function routeTool(presets: readonly RoutablePreset[], compound?: Compoun
  *  `defaults.agent`). `compoundRejected` marks the one no-route the record
  *  keeps: a compound answer the parse refused. */
 export type RouteDecision =
-  | { preset: string; reason: string; parts?: RoutePart[]; collapsed?: CollapsedCompound }
-  | { preset: undefined; reason: string; compoundRejected?: true; command?: RouteCommandDecision };
+  | {
+      preset: string;
+      reason: string;
+      parts?: RoutePart[];
+      collapsed?: CollapsedCompound;
+      attempts?: StructuredAttempt[];
+    }
+  | {
+      preset: undefined;
+      reason: string;
+      compoundRejected?: true;
+      command?: RouteCommandDecision;
+      attempts?: StructuredAttempt[];
+    };
 
 /** A command the router called instead of routing (record 0036, unit 2): the
  *  command's id and the input the call bound, already in the registry's
@@ -734,10 +754,43 @@ function attachRule(attachers: readonly string[]): string {
 export const VERIFY_TOOL_NAME = "verify";
 
 /** The verifier's answer: whether the bound line does what the sentence
- *  asked, and why in one line. */
+ *  asked, and why in one line. `attempts` is the structured seam's list
+ *  (record 0067), set by `verifyOperatorBind` for the record. */
 export interface VerifierAnswer {
   agrees: boolean;
   reason: string;
+  attempts?: StructuredAttempt[];
+}
+
+// The shape sentences the strict parsers mint (record 0067): the structured
+// seam re-asks exactly these — prose that is not one JSON object, a wrong
+// tool, a missing or malformed field — and never a content refusal (a preset
+// outside the allowlist, a rejected compound, a model-authored disagreement),
+// which is a real answer the record keeps. Constants so the classifiers below
+// and the parsers can never drift apart.
+const NOT_ONE_JSON = "not a single JSON object";
+const MISSING_PRESET = "missing preset in the router's answer";
+const MISSING_REASON = "missing reason in the router's answer";
+const VERIFIER_WRONG_TOOL = 'verifier called tool "';
+const AGREES_NOT_BOOLEAN = "agrees is not a boolean in the verifier's answer";
+
+/** The route parse's SHAPE refusals as the seam's violations (record 0067):
+ *  a no-route whose reason is one of the parser's own shape sentences is
+ *  re-asked; every other decision — a route, a content refusal — is accepted. */
+export function routeViolationOf(decision: RouteDecision): string | undefined {
+  if (decision.preset !== undefined) return undefined;
+  const shape = [NOT_ONE_JSON, MISSING_PRESET, MISSING_REASON].some((s) => decision.reason.startsWith(s));
+  return shape ? decision.reason : undefined;
+}
+
+/** The verifier parse's SHAPE refusals as the seam's violations (record
+ *  0067): a disagreement whose reason is one of the parser's own shape
+ *  sentences is re-asked; a model-authored verdict — agree or disagree — is
+ *  accepted. */
+export function verifierViolationOf(answer: VerifierAnswer): string | undefined {
+  if (answer.agrees) return undefined;
+  const shape = [NOT_ONE_JSON, VERIFIER_WRONG_TOOL, AGREES_NOT_BOOLEAN].some((s) => answer.reason.startsWith(s));
+  return shape ? answer.reason : undefined;
 }
 
 /**
@@ -805,18 +858,17 @@ export function parseVerifierAnswer(answer: RouteToolCall | string): VerifierAns
     try {
       input = JSON.parse(trimmed);
     } catch {
-      return refused(`not a single JSON object: ${trimmed || "(empty)"}`);
+      return refused(`${NOT_ONE_JSON}: ${trimmed || "(empty)"}`);
     }
     if (typeof input !== "object" || input === null || Array.isArray(input))
-      return refused(`not a single JSON object: ${trimmed}`);
+      return refused(`${NOT_ONE_JSON}: ${trimmed}`);
   } else if (answer.tool !== VERIFY_TOOL_NAME) {
-    return refused(`verifier called tool "${answer.tool}", not ${VERIFY_TOOL_NAME}`);
+    return refused(`${VERIFIER_WRONG_TOOL}${answer.tool}", not ${VERIFY_TOOL_NAME}`);
   } else {
     input = answer.input;
   }
   const { agrees, reason } = (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
-  if (typeof agrees !== "boolean")
-    return refused(`agrees is not a boolean in the verifier's answer: ${JSON.stringify(input)}`);
+  if (typeof agrees !== "boolean") return refused(`${AGREES_NOT_BOOLEAN}: ${JSON.stringify(input)}`);
   return { agrees, reason: tidyReason(typeof reason === "string" ? reason : "") };
 }
 
@@ -845,10 +897,10 @@ export function parseRouteAnswer(raw: string, allowed: readonly string[], compou
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    return { preset: undefined, reason: `not a single JSON object: ${tidyReason(trimmed || "(empty)")}` };
+    return { preset: undefined, reason: `${NOT_ONE_JSON}: ${tidyReason(trimmed || "(empty)")}` };
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
-    return { preset: undefined, reason: `not a single JSON object: ${tidyReason(trimmed)}` };
+    return { preset: undefined, reason: `${NOT_ONE_JSON}: ${tidyReason(trimmed)}` };
   const { preset: named, reason, parts } = parsed as Record<string, unknown>;
   // Parts without a preset IS the compound form: under the forced tool call
   // the model fills `parts` and skips the required `preset` (Anthropic does not
@@ -859,8 +911,7 @@ export function parseRouteAnswer(raw: string, allowed: readonly string[], compou
   const inferred = typeof named !== "string" && preset === COMPOUND_PRESET;
   // The field named AND what came back: a record that says only "missing"
   // hides what the model did — the same courtesy the not-JSON case pays.
-  if (preset === undefined)
-    return { preset: undefined, reason: `missing preset in the router's answer: ${tidyReason(trimmed)}` };
+  if (preset === undefined) return { preset: undefined, reason: `${MISSING_PRESET}: ${tidyReason(trimmed)}` };
   // A compound that carries its parts but no reason is the compound form too:
   // the parts are the answer, and the same forced call skips that field (a
   // live probe answered the conductor with a `coding` part and no reason, and
@@ -869,7 +920,7 @@ export function parseRouteAnswer(raw: string, allowed: readonly string[], compou
   // says why.
   const partsAnswer = preset === COMPOUND_PRESET && Array.isArray(parts);
   if (typeof reason !== "string" && !partsAnswer)
-    return { preset: undefined, reason: `missing reason in the router's answer: ${tidyReason(trimmed)}` };
+    return { preset: undefined, reason: `${MISSING_REASON}: ${tidyReason(trimmed)}` };
   const tidy =
     typeof reason === "string" ? tidyReason(reason) : inferred ? "compound inferred from parts" : "no reason given";
   if (preset === COMPOUND_PRESET) return parseCompound(parts, tidy, allowed, compound);
@@ -950,33 +1001,59 @@ export async function route(
   // schema), and a compound answer is then refused as not offered.
   const compound = offer && partPresets(offered).length > 0 ? offer : undefined;
   const prompt = buildRoutePrompt({ ...rest, presets: offered, ...(compound ? { compound } : {}) });
-  let raw: string;
-  try {
-    const answer = await model(prompt, {
-      maxTokens: routeMaxOutputTokens(compound, prompt.tools),
-      signal: AbortSignal.timeout(opts.timeoutMs ?? ROUTE_TIMEOUT_MS),
-    });
-    if (typeof answer === "string") {
-      raw = answer;
-    } else if (answer.tool === ROUTE_TOOL_NAME) {
-      raw = JSON.stringify(answer.input);
-    } else {
-      // A call to an offered command is a command decision (record 0036, unit
-      // 2): the call's input bound to the registry's shape, no side effect here.
-      // A call to a name the menu did not offer is no route, said by name.
-      return commandDecision(answer.tool, answer.input, rest.commands ?? []);
+  const offeredNames = offered.map((p) => p.name);
+  // The parse under the seam's contract (record 0067): a call to an offered
+  // command is a command decision (record 0036, unit 2) — the call's input
+  // bound to the registry's shape, no side effect here — and a content refusal
+  // (a preset outside the allowlist, a rejected compound) is a real answer;
+  // only the shape refusals (`routeViolationOf`) and a call to a tool the menu
+  // did not offer are violations the seam re-asks.
+  const parse = (
+    answer: RouteToolCall | string,
+  ): { ok: true; value: RouteDecision } | { ok: false; violation: string } => {
+    if (typeof answer !== "string" && answer.tool !== ROUTE_TOOL_NAME) {
+      const offeredCommand = (rest.commands ?? []).some((c) => c.tool.name === answer.tool);
+      if (!offeredCommand)
+        return { ok: false, violation: tidyReason(`router called tool "${answer.tool}", which was not offered`) };
+      return { ok: true, value: commandDecision(answer.tool, answer.input, rest.commands ?? []) };
     }
+    const raw = typeof answer === "string" ? answer : JSON.stringify(answer.input);
+    const decision = parseRouteAnswer(raw, offeredNames, compound);
+    const violation = routeViolationOf(decision);
+    return violation !== undefined ? { ok: false, violation } : { ok: true, value: decision };
+  };
+  try {
+    // The structured seam (record 0067): a named violation is re-asked with
+    // the violation as a user turn, at most the bounded retries; the floor is
+    // no route with the last violation as the reason — the request then runs
+    // on `defaults.agent`, never a refusal shown to the person. The one
+    // timeout covers the whole loop.
+    const seam = await askStructured(
+      {
+        prompt,
+        parse,
+        noun: "a route",
+        tool: ROUTE_TOOL_NAME,
+        floor: (violation): RouteDecision => ({ preset: undefined, reason: violation }),
+      },
+      model,
+      {
+        maxTokens: routeMaxOutputTokens(compound, prompt.tools),
+        signal: AbortSignal.timeout(opts.timeoutMs ?? ROUTE_TIMEOUT_MS),
+      },
+    );
+    return { ...seam.value, attempts: seam.attempts };
   } catch (err) {
+    // A timeout or transport failure re-asks nothing (there is no answer to
+    // quote back): no route with the failure named, fail closed as ever — the
+    // attempts collected before a mid-loop throw kept for the event.
+    const attempts = attemptsOfThrow(err);
     return {
       preset: undefined,
       reason: `router failed: ${tidyReason(err instanceof Error ? err.message : String(err))}`,
+      ...(attempts ? { attempts } : {}),
     };
   }
-  return parseRouteAnswer(
-    raw,
-    offered.map((p) => p.name),
-    compound,
-  );
 }
 
 /** A command call as a decision: the tool name looked up among the offered
@@ -1054,10 +1131,20 @@ export function providerRouteModel(
     const tools = [prompt.tool, ...(prompt.tools ?? [])];
     const toolChoice =
       tools.length > 1 ? ({ type: "any" } as const) : ({ type: "tool", name: prompt.tool.name } as const);
+    // The re-asks so far (record 0067): each violation rides as the model's
+    // own answer and one user turn after the first, so a re-ask hits the
+    // prompt cache for everything but the two new turns.
+    const messages: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: prompt.user }] },
+      ...(prompt.retries ?? []).flatMap((r): ChatMessage[] => [
+        { role: "assistant", content: [{ type: "text", text: r.answer }] },
+        { role: "user", content: [{ type: "text", text: r.violation }] },
+      ]),
+    ];
     const result = await provider.complete({
       model,
       system: prompt.system,
-      messages: [{ role: "user", content: [{ type: "text", text: prompt.user }] }],
+      messages,
       maxTokens: call.maxTokens,
       signal: call.signal,
       ...(forced ? { tools, toolChoice } : {}),
@@ -1089,6 +1176,8 @@ export interface RouteDecided {
   model: string;
   parts?: RoutePart[];
   collapsed?: CollapsedCompound;
+  /** The structured seam's attempts (record 0067), for the `route` event. */
+  attempts?: StructuredAttempt[];
 }
 
 /** What the route stage reads off the dispatcher's dependencies. `CoreDeps`
@@ -1300,7 +1389,15 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
   if (decision.preset === undefined) {
     console.log(`[route] ${msg.threadKey} not routed (${decision.reason}) — running ${cfg.defaults.agent}`);
     return decision.compoundRejected
-      ? { kind: "unrouted", rejected: { preset: cfg.defaults.agent, reason: decision.reason, model: modelRef } }
+      ? {
+          kind: "unrouted",
+          rejected: {
+            preset: cfg.defaults.agent,
+            reason: decision.reason,
+            model: modelRef,
+            ...(decision.attempts ? { attempts: decision.attempts } : {}),
+          },
+        }
       : { kind: "unrouted" };
   }
   const resolved = resolveRouted(deps, msg, directives, sticky, decision.preset);
@@ -1319,6 +1416,7 @@ export async function routeRequest(deps: RouteDeps, ctx: RouteStageContext): Pro
       model: modelRef,
       ...(parts ? { parts } : {}),
       ...(collapsed ? { collapsed } : {}),
+      ...(decision.attempts ? { attempts: decision.attempts } : {}),
     },
   };
 }

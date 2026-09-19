@@ -138,6 +138,45 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
     }
   });
 
+  it("prose three times: the floor is silent/error with the last violation, three attempts on the decision, never a rendered refusal (record 0067)", async () => {
+    const model = scripted("the person seems to want the bot");
+    const decision = await decideIntake(input(), deps({ model }));
+    expect(model.prompts).toHaveLength(3);
+    expect(decision).toMatchObject({ verdict: "silent", source: "error" });
+    expect(decision.reason).toContain("not a single JSON object");
+    expect(decision.attempts).toHaveLength(3);
+    expect(decision.attempts!.every((a) => a.outcome === "violation")).toBe(true);
+  });
+
+  it("a wrong tool, then the right call: one re-ask whose user turn names the violation verbatim, two attempts, the verdict the second answer's (record 0067)", async () => {
+    const prompts: RoutePrompt[] = [];
+    const answers: (RouteToolCall | string)[] = [
+      { tool: "route", input: { preset: "general" } },
+      toolAnswer("addressed", "asks the bot"),
+    ];
+    const decision = await decideIntake(
+      input(),
+      deps({
+        model: async (p) => {
+          prompts.push(p);
+          return answers.shift()!;
+        },
+      }),
+    );
+    expect(decision).toMatchObject({ verdict: "addressed", source: "model" });
+    expect(decision.attempts).toEqual([
+      { outcome: "violation", violation: 'intake model called tool "route", not intake' },
+      { outcome: "accepted" },
+    ]);
+    expect(prompts[1]!.retries).toEqual([
+      {
+        answer: JSON.stringify({ tool: "route", input: { preset: "general" } }),
+        violation:
+          'your answer was not a verdict: intake model called tool "route", not intake; answer with the intake tool only',
+      },
+    ]);
+  });
+
   it("an existing receipt returns its stored verdict with receipt: existing and no model call", async () => {
     const model = scripted(toolAnswer("addressed"));
     const row: IntakeReceipt = {

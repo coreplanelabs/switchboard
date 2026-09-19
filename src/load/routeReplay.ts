@@ -1649,7 +1649,7 @@ function commandRows(score: CommandScore, bars: { command: number; input: number
 export interface ShadowRow {
   readers?: string;
   operator: {
-    outcome: "binds" | "question" | "refusal";
+    outcome: "binds" | "question" | "refusal" | "non_decision";
     binds?: readonly { line: string }[];
     latencyMs?: number;
     outputTokens?: number;

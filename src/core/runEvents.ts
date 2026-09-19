@@ -1019,6 +1019,10 @@ export type RunEvent =
       command?: string;
       input?: { readonly [key: string]: RouteInputValue };
       receipt?: string;
+      /** The structured seam's attempts ([record 0067](../../docs/decisions/0067-one-seam-for-a-structured-answer-a-violation-is-re-asked-with-the-violation-named-and-the-callers-declared-floor-holds-never-a-refusal-shown-to-the-person.md)):
+       *  what each answer violated, or that it was accepted, so a flaky model
+       *  is legible on the record as re-asks, not as silent floors. */
+      attempts?: ReadonlyArray<{ outcome: "accepted" | "violation"; violation?: string }>;
       outcome?: RouteOutcome;
       /** The refusal's code (src/core/refusal.ts) when `outcome` is `refused`
        *  (record 0054): a refusal after a command was bound is a run
@@ -1031,15 +1035,20 @@ export type RunEvent =
   /** The operator's decision beside the routed request ([record 0057](../../docs/decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat-input-and-deterministic-code-authorizes-fences-and-executes.md);
    *  the one-door plan's operator unit; run-history item 60): one per admitted chat
    *  event under `routing.operator: shadow` or `on`, published beside the
-   *  `route` event. The decision is binds, a question or a refusal; a bind's
-   *  `line` is redacted and cut like the receipt (`ROUTE_RECEIPT_CAP`), never
-   *  the message text; `intake` carries the intake gate's verdict when the
-   *  gate is present; `latencyMs` and `outputTokens` feed the replay's median
-   *  rows. Under `shadow` nothing runs from it. Additive: unknown → ignored. */
+   *  `route` event. The decision is binds, a question, a refusal or — the
+   *  structured seam's floor ([record 0067](../../docs/decisions/0067-one-seam-for-a-structured-answer-a-violation-is-re-asked-with-the-violation-named-and-the-callers-declared-floor-holds-never-a-refusal-shown-to-the-person.md)),
+   *  never the model's decision — `non_decision`: under `on` the dispatcher
+   *  falls back to the readers' route for that event, this event recorded on
+   *  the run that then runs; `attempts` lists what each answer violated or
+   *  that it was accepted. A bind's `line` is redacted and cut like the
+   *  receipt (`ROUTE_RECEIPT_CAP`), never the message text; `intake` carries
+   *  the intake gate's verdict when the gate is present; `latencyMs` and
+   *  `outputTokens` feed the replay's median rows. Under `shadow` nothing
+   *  runs from it. Additive: unknown → ignored. */
   | {
       type: "operator";
       mode: "shadow" | "on";
-      outcome: "binds" | "question" | "refusal";
+      outcome: "binds" | "question" | "refusal" | "non_decision";
       reason: string;
       binds?: ReadonlyArray<{ line: string; reason: string }>;
       question?: string;
@@ -1048,11 +1057,7 @@ export type RunEvent =
       proposal?: string;
       refusalCause?: string;
       refusalText?: string;
-      /** A refusal the seam itself produced (a non-decision answer, a wrong
-       *  tool, a transport failure) — never the model's decision: under `on`
-       *  the dispatcher falls back to the readers' route for that event, this
-       *  event recorded on the run that then runs. */
-      fallback?: true;
+      attempts?: ReadonlyArray<{ outcome: "accepted" | "violation"; violation?: string }>;
       intake?: { verdict: string; reason: string };
       latencyMs?: number;
       outputTokens?: number;
