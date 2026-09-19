@@ -34,6 +34,8 @@ import {
   rowBound,
   rowPace,
   rowStalled,
+  inheritedPace,
+  inheritedPaceTip,
 } from "../../lib/indexRow";
 
 // One runs-index row — the ONE renderer for seed rows and live feed repaints
@@ -49,6 +51,9 @@ const props = defineProps<{
   /** The head row this one nests under (live-view item 33): a pipeline's run
    *  indents below its parent's row instead of interleaving with the rest. */
   nestedUnder?: string;
+  /** The rows nested under this head (live-view item 32): a hosted head's pace
+   *  cell borrows its newest live child's pace from them. */
+  children?: IndexRow[];
 }>();
 
 const parts = computed(() => splitRunLabel(props.run.label || shortId(props.run.id)));
@@ -87,7 +92,17 @@ const stopBadge = computed(() =>
 // mark winning over the rate — and the `stalled` badge; live rows that carry
 // the fact only, so an older writer's row shows no signal, not a false stall.
 const bound = computed(() => rowBound(props.run, props.now));
-const pace = computed(() => bound.value ?? rowPace(props.run, props.now));
+// The borrowed pace (item 32): a live hosted head has no pace facts of its
+// own — a coordinator makes no tool calls — so the cell reads its newest live
+// child's pace, or `waiting on the runner` when no child on the page lends one.
+// The `children` prop arrives only on the head rendering; a nested hosted row
+// (children absent) shows no signal rather than a false `waiting`.
+const inherited = computed(() =>
+  props.run.hosted && props.children !== undefined
+    ? inheritedPace({ head: props.run, children: props.children }, props.now)
+    : undefined,
+);
+const pace = computed(() => bound.value ?? inherited.value?.text ?? rowPace(props.run, props.now));
 const stalled = computed(() => rowStalled(props.run, props.now));
 
 const disabled = reactive({ soft: false, hard: false });
@@ -296,10 +311,13 @@ function onRowClick(ev: MouseEvent): void {
            five minutes, `no tool call for N min` once stalled, or the
            bound-exceeded mark (`bash 2083s, bound 600s`) — live rows that
            carry the fact only, so a hung bash and a slow suite read apart. -->
-      <UTooltip v-if="pace" :text="paceTip(run, now)">
+      <!-- The tooltip mirrors the cell's priority: the bound-exceeded mark's
+           sentence wins over the borrowed pace's, exactly as the text does. -->
+      <UTooltip v-if="pace" :text="inherited && !bound ? inheritedPaceTip(inherited) : paceTip(run, now)">
         <span
           class="pace pointer-events-auto shrink-0 text-right font-mono text-xs tabular-nums max-sm:order-9"
           :class="bound ? 'text-bad font-medium' : stalled ? 'text-warn' : 'text-dimmed'"
+          :data-inherited="inherited && !bound ? (inherited.child ? 'child' : 'waiting') : undefined"
           >{{ pace }}</span
         >
       </UTooltip>

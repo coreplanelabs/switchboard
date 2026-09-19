@@ -27,6 +27,9 @@ import {
   rowBound,
   paceTip,
   groupRuns,
+  inheritedPace,
+  inheritedPaceTip,
+  WAITING_ON_RUNNER,
 } from "./indexRow";
 import { formatLocalIso } from "./format";
 
@@ -350,6 +353,41 @@ describe("the pipeline nesting (item 33)", () => {
     const stuck = at("c0", 2_000, { parentInstanceId: "wf-1", eventsLast5m: 0, lastToolCallAt: 16 * MIN });
     const fresh = at("solo", 9_000, { eventsLast5m: 2, lastToolCallAt: 59 * MIN });
     expect(groupRuns([fresh, ship, stuck], 60 * MIN).map((g) => g.head.id)).toEqual(["ship", "solo"]);
+  });
+});
+
+// Feature: docs/reference/specs/live-view.md item 32 — a live hosted head
+// makes no tool calls of its own, so its pace cell borrows the newest live
+// child's pace and reads `waiting on the runner` between children.
+describe("the hosted row's borrowed pace (item 32)", () => {
+  const MIN = 60_000;
+  const at = (id: string, startedAt: number, over: Partial<IndexRow> = {}): IndexRow => row({ id, startedAt, ...over });
+  const head = at("ship", 0, { hosted: true, instanceId: "wf-1" });
+
+  it("returns the newest live child's pace text, and the tooltip names the child", () => {
+    const older = at("c0", 1_000, { label: "older", eventsLast5m: 4, lastToolCallAt: 59 * MIN });
+    const newest = at("r1", 2_000, { label: "newest", eventsLast5m: 14, lastToolCallAt: 60 * MIN - 9_000 });
+    const p = inheritedPace({ head, children: [older, newest] }, 60 * MIN);
+    expect(p?.text).toBe("2.8/min");
+    expect(p?.child?.id).toBe("r1");
+    expect(inheritedPaceTip(p!)).toContain("newest");
+  });
+
+  it("reads `waiting on the runner` with no live child — finished children and pace-less live children lend nothing", () => {
+    const doneChild = at("c0", 1_000, { finished: true, finishedAt: 2_000, eventsLast5m: 9 });
+    const none = inheritedPace({ head, children: [doneChild] }, 60 * MIN);
+    expect(none?.text).toBe(WAITING_ON_RUNNER);
+    // A ledger child under another generation carries no pace fact: its own
+    // cell is empty, so the head reads `waiting` rather than borrowing nothing.
+    const factless = at("c1", 1_000);
+    expect(inheritedPace({ head, children: [factless] }, 60 * MIN)?.text).toBe(WAITING_ON_RUNNER);
+    expect(inheritedPaceTip(none!)).toBe("the runner is between children — the gap is not judged here");
+  });
+
+  it("returns nothing for a finished head", () => {
+    const gone = at("ship", 0, { hosted: true, finished: true, finishedAt: 9_000 });
+    const kid = at("c0", 1_000, { eventsLast5m: 4, lastToolCallAt: 59 * MIN });
+    expect(inheritedPace({ head: gone, children: [kid] }, 60 * MIN)).toBeUndefined();
   });
 });
 

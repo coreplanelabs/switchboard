@@ -315,6 +315,33 @@ describe("RunRow", () => {
     expect(w.find(".pace").classes()).toContain("text-bad");
   });
 
+  // Feature: docs/reference/specs/live-view.md item 32 — the borrowed pace is
+  // the head rendering's alone: only the head is handed `children`, so a nested
+  // hosted row shows no signal rather than a false `waiting on the runner`.
+  it("a nested live hosted row — no children handed down — shows no pace signal, never a false `waiting on the runner`", () => {
+    const w = mountApp(RunRow, {
+      props: { run: row({ hosted: true, instanceId: "wf-1" }), now: NOW, nestedUnder: "parent" },
+    });
+    expect(w.find(".pace").exists()).toBe(false);
+    expect(w.find(".stalled").exists()).toBe(false);
+  });
+
+  it("the bound-exceeded mark wins over the borrowed pace in the cell and its tooltip — data-inherited never claims a borrowed pace beside the mark", () => {
+    const w = mountApp(RunRow, {
+      props: {
+        run: row({
+          hosted: true,
+          instanceId: "wf-1",
+          inFlight: { tool: "bash", since: NOW - 2_083_000, boundMs: 600_000 },
+        }),
+        now: NOW,
+        children: [],
+      },
+    });
+    expect(w.find(".pace").text()).toBe("bash 2083s, bound 600s");
+    expect(w.find(".pace").attributes("data-inherited")).toBeUndefined();
+  });
+
   it("a finished row and a live row without the fact (an older writer's) show no pace and no badge", () => {
     expect(
       mountRow(finished("completed", { eventsLast5m: 0 }))

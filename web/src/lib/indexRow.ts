@@ -177,6 +177,43 @@ export function groupRuns(rows: IndexRow[], now: number): RunGroup[] {
   );
 }
 
+// The hosted head's borrowed pace (live-view item 32): a hosted ship parent
+// makes no tool calls, so its own pace facts are absent by design; the cell
+// borrows the newest live child's pace instead — the children ARE the
+// pipeline's work — and reads `waiting on the runner` between children.
+
+/** What the pace cell of a live hosted head reads between children. */
+export const WAITING_ON_RUNNER = "waiting on the runner";
+
+export interface InheritedPace {
+  text: string;
+  /** The child whose pace the cell borrowed; absent on `waiting on the runner`. */
+  child?: IndexRow;
+}
+
+/** The borrowed pace for a live hosted head: the newest live child on the
+ *  page that carries a pace of its own lends it; with none — no live child,
+ *  or only children without the fact (their own cells are empty) — the cell
+ *  reads `waiting on the runner`; a finished head shows nothing. */
+export function inheritedPace(group: RunGroup, now: number): InheritedPace | undefined {
+  if (group.head.finished) return undefined;
+  let lender: { child: IndexRow; text: string } | undefined;
+  for (const child of group.children) {
+    const text = rowPace(child, now);
+    if (text === "") continue;
+    if (!lender || child.startedAt >= lender.child.startedAt) lender = { child, text };
+  }
+  return lender ?? { text: WAITING_ON_RUNNER };
+}
+
+/** The borrowed cell's tooltip: the child the pace belongs to; on `waiting`,
+ *  that the runner is between children — the gap is nobody's stall to judge. */
+export function inheritedPaceTip(p: InheritedPace): string {
+  return p.child
+    ? `the newest live child's pace — ${p.child.label || shortId(p.child.id)}`
+    : "the runner is between children — the gap is not judged here";
+}
+
 /** The bound-exceeded mark — `bash 2083s, bound 600s` — for a live row whose
  *  in-flight call outran the bound it declared; undefined otherwise. */
 export function rowBound(run: IndexRow, now: number): string | undefined {

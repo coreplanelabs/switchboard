@@ -43,7 +43,7 @@
     "web/src/lib/format.ts": "c606fee13ee47cd493bc70bc5c8d70fe697bc1903afa8434261b48c29e682759",
     "web/src/lib/githubLinks.ts": "9b382f6de5837da30e9ec8895fae5f301907c50d63baca116f3b9eba0bbbbff9",
     "web/src/lib/homeModel.ts": "6d9f6550dc96f4aab68f4bf4c82ff9a145c06a8267754c40e84a73916195c6d5",
-    "web/src/lib/indexRow.ts": "d078e5795862a9d5f6aa25cf4a984050cdcf9dfe43f06f4f0835697cf89231f1",
+    "web/src/lib/indexRow.ts": "0abb02cca18b4ad5f9aa6febbe074d86e86f1cac6e7b0c566e982da9bac08666",
     "web/src/lib/markPulse.ts": "df29e8abee12f0827e8e1295f8fcb1184530240139790da7bffb5929fad8f647",
     "web/src/lib/navSections.ts": "596df9e16e734a4eee3f84fcd31effd1b8082383cfdaf7db7b3a69e25482adb1",
     "web/src/lib/railLive.ts": "2dff4438d1707f53cbdd1d21dd9d3f96e2a5e5fa76cae79d3049758384e00a56",
