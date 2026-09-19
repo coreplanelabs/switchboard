@@ -728,7 +728,7 @@ Checks: wrangler account = 00000000000000000000000000000000; clean tree; HEAD ==
 Images: registry (version 1.2.3) — not probed (the example profile) — bot: registry.cloudflare.com/00000000000000000000000000000000/switchboard:1.2.3
 WARNING profile: deploy/profile.bot-only.json is the EXAMPLE — this plan can be read, not deployed; write deploy/profile.json for a real installation
 Steps:
-  1. bot (switchboard) — deploy/cloudflare: npm run deploy — preflight (retry every 60s up to 10 min) — credential must pass \`wrangler containers list --json\` (Containers: Edit) — then wait until live (https://switchboard.example.com/healthz not draining + build.commit == HEAD)
+  1. bot (switchboard) — deploy/cloudflare: npm run deploy — preflight (retry every 60s up to 90 min) — credential must pass \`wrangler containers list --json\` (Containers: Edit) — then wait until live (https://switchboard.example.com/healthz not draining + build.commit == HEAD)
      container shim — preflight refuses while runs are in flight; done only when the new container is live. A rotated bot secret needs no build: \`wrangler secret put\` alone leaves the running container on its old env — \`deploy restart\` restarts it on the current env
 (dry run — nothing executed)"
 `;
@@ -742,7 +742,7 @@ WARNING profile: deploy/profile.example.json is the EXAMPLE — this plan can be
 Steps:
   1. memory (switchboard-memory) — deploy/cloudflare-memory: npm run deploy
      state Worker — DO migrations land before the bot writes to them
-  2. bot (switchboard) — deploy/cloudflare: npm run deploy — preflight (retry every 60s up to 10 min) — credential must pass \`wrangler containers list --json\` (Containers: Edit) — then wait until live (https://switchboard.example.com/healthz not draining + build.commit == HEAD)
+  2. bot (switchboard) — deploy/cloudflare: npm run deploy — preflight (retry every 60s up to 90 min) — credential must pass \`wrangler containers list --json\` (Containers: Edit) — then wait until live (https://switchboard.example.com/healthz not draining + build.commit == HEAD)
      container shim — preflight refuses while runs are in flight; done only when the new container is live. A rotated bot secret needs no build: \`wrangler secret put\` alone leaves the running container on its old env — \`deploy restart\` restarts it on the current env
   3. resident (switchboard-resident) — deploy/cloudflare-resident: npm run deploy — preflight (retry every 60s up to 30 min) — needs one of RESIDENT_ADMIN_TOKEN / RESIDENT_OPERATOR_TOKEN / RESIDENT_READ_TOKEN — credential must pass \`wrangler containers list --json\` (Containers: Edit) and \`wrangler r2 bucket list\` (Workers R2 Storage: Edit)
      per-repo DOs — the fleet is drained for the deploy when the drain bearer is present (new runs wait at their attach; the runs in flight finish), and the preflight refuses while a resident has a run in flight or is provisioning (a refresh or restore mid-cycle only warns: it resumes after the swap)

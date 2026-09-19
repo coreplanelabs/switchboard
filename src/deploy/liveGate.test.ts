@@ -53,6 +53,40 @@ describe("decideLive", () => {
     });
   });
 
+  it("the still-draining reason names what is actually held — the registry-active run ids and why — when /healthz carries `held`; the dispatcher's inFlight can read 0 while a ghost registry row holds the drain", () => {
+    const d = decideLive(
+      {
+        ok: true,
+        inFlight: 0,
+        draining: true,
+        drainStartedAt: "2026-08-30T05:05:39.817Z",
+        held: [{ id: "slack:C1:1.2", why: "not handed off" }],
+      },
+      HEAD,
+      60_000,
+    );
+    expect(d).toEqual({
+      kind: "waiting",
+      reason:
+        "old container still draining — holding 1 registry-active run(s): slack:C1:1.2 (not handed off) since 2026-08-30T05:05:39.817Z",
+    });
+  });
+
+  it("a malformed or empty `held` falls back to the in-flight count (an older container's body)", () => {
+    expect(decideLive({ ok: true, inFlight: 1, draining: true, held: "junk" }, HEAD, 0)).toEqual({
+      kind: "waiting",
+      reason: "old container still draining — 1 run(s) in flight",
+    });
+    expect(decideLive({ ok: true, inFlight: 1, draining: true, held: [] }, HEAD, 0)).toEqual({
+      kind: "waiting",
+      reason: "old container still draining — 1 run(s) in flight",
+    });
+    expect(decideLive({ ok: true, inFlight: 1, draining: true, held: [{ id: 7 }] }, HEAD, 0)).toEqual({
+      kind: "waiting",
+      reason: "old container still draining — 1 run(s) in flight",
+    });
+  });
+
   it("a draining container that serves the deployed commit is live only when its startedAt is later than the pre-upload reading — a same-commit rollout drains an old container that serves the commit too (run-history item 39; review F2)", () => {
     const draining = (startedAt?: string) => ({
       ok: true,

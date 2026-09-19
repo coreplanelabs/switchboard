@@ -1,4 +1,4 @@
-import { COLD_START_ALLOWANCE_MS, DRAIN_DEADLINE_MS } from "../core/drain.js";
+import { COLD_START_ALLOWANCE_MS, DRAIN_DEADLINE_MS, heldRunsText, type HeldRun } from "../core/drain.js";
 
 // "Deployed" is not "live". `wrangler deploy` uploads a Worker version and
 // starts a container rollout, but the OLD bot container keeps serving while it
@@ -17,6 +17,8 @@ export interface HealthzBody {
   inFlight?: unknown;
   draining?: unknown;
   drainStartedAt?: unknown;
+  /** While draining: the registry-active runs holding the drain (`HeldRun[]`). */
+  held?: unknown;
   build?: { commit?: unknown; builtAt?: unknown } | unknown;
   /** ISO process start — `deploy restart`'s identity (the image, hence `build.commit`, is unchanged). */
   startedAt?: unknown;
@@ -84,12 +86,33 @@ function decideReady<Identity>(
     const verdict = identify(body);
     if (verdict.live) return { kind: "live", ...verdict.identity };
     if (body.draining === true && !verdict.sameIdentity) {
-      const n = typeof body.inFlight === "number" ? body.inFlight : "?";
       const since = typeof body.drainStartedAt === "string" ? ` since ${body.drainStartedAt}` : "";
-      reason = `old container still draining — ${n} run(s) in flight${since}`;
+      // What is actually held, when the body says: the registry-active run ids
+      // and why. The dispatcher's `inFlight` can read 0 while a registry row
+      // holds the drain for its full deadline — a count that mystifies the
+      // operator watching the wait; the ids do not.
+      const held = heldRuns(body);
+      if (held.length > 0) {
+        reason = `old container still draining — holding ${held.length} registry-active run(s): ${heldRunsText(held)}${since}`;
+      } else {
+        const n = typeof body.inFlight === "number" ? body.inFlight : "?";
+        reason = `old container still draining — ${n} run(s) in flight${since}`;
+      }
     } else reason = verdict.reason;
   }
   return elapsedMs >= deadlineMs ? { kind: "timeout", reason } : { kind: "waiting", reason };
+}
+
+/** The `held` rows of a `/healthz` body (src/channels/health.ts): the
+ *  registry-active runs holding the drain. Rows that are not `{id, why}`
+ *  strings — an older container's body, or no drain — parse to none. */
+export function heldRuns(body: HealthzBody): HeldRun[] {
+  if (!Array.isArray(body.held)) return [];
+  return body.held.flatMap((r: unknown) => {
+    if (typeof r !== "object" || r === null) return [];
+    const { id, why } = r as { id?: unknown; why?: unknown };
+    return typeof id === "string" && typeof why === "string" ? [{ id, why }] : [];
+  });
 }
 
 /** Two commit identities name the same commit when one is a prefix of the other

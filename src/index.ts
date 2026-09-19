@@ -88,7 +88,7 @@ import { handleAdminTraceLog, TRACE_LOG_PATH } from "./channels/adminTraceLog.js
 import { createSpanLog } from "./core/trace/spanLog.js";
 import { handleAdminRestartAuthorize } from "./channels/adminRestartAuthorize.js";
 import { RESTART_AUTHORIZE_PATH } from "./deploy/restart.js";
-import { DRAIN_DEADLINE_MS, HANDOFF_BUDGET_MS } from "./core/drain.js";
+import { DRAIN_DEADLINE_MS, drainHoldLine, HANDOFF_BUDGET_MS, HELD_NOT_HANDED_OFF } from "./core/drain.js";
 import { MINUTE_MS } from "./core/budgets.js";
 import { startProcessRoot } from "./core/requestTrace.js";
 import { configureInternalHosts, internalHostsOf } from "./core/trace/internalHosts.js";
@@ -723,6 +723,19 @@ export async function runBot(): Promise<void> {
   const pendingHistoryWrites = () => runHistoryWriter.pending();
   const inFlight = () => activeRunCount() + pendingReflectionCount() + pendingHistoryWrites();
   let draining = false;
+  // The runs the drain's handoff marked for the next generation — they stop
+  // holding the drain the moment they are marked (run-history item 39).
+  const handedOff = new Set<string>();
+  // What actually holds the drain: the REGISTRY's live rows, not the
+  // dispatcher's count above — the two can disagree (a registry row whose
+  // dispatcher-side run is gone holds the drain while `inFlight` reads 0), so
+  // the drain waits on these and /healthz names them, id and why, for the
+  // deploy CLI's still-draining line (slack-channel.md item 8).
+  const heldRuns = () =>
+    defaultRunRegistry
+      .listActive()
+      .filter((r) => !r.finished && !handedOff.has(r.id))
+      .map((r) => ({ id: r.id, why: HELD_NOT_HANDED_OFF }));
   // Epoch ms when the HTTP server's listen() callback fired; undefined until
   // then (and forever when PORT is unset). Reported on /healthz.
   let httpListeningAt: number | undefined;
@@ -1227,6 +1240,7 @@ export async function runBot(): Promise<void> {
               inFlight: inFlight(),
               draining,
               drainStartedAt,
+              held: heldRuns(),
               catchUp: getCatchUpStatus(),
               slack: getSocketStatus(),
               build,
@@ -1436,14 +1450,18 @@ export async function runBot(): Promise<void> {
     // resume cannot continue (an untracked run) hold the drain, up to the old
     // deadline.
     const handoff = await runLedger.handoff();
-    const handed = new Set(handoff.marked);
+    for (const id of handoff.marked) handedOff.add(id);
+    const handed = handedOff;
     if (handoff.failed) console.warn(`[drain] handoff failed (${handoff.failed}) — waiting for the runs instead`);
     if (handed.size > 0)
       console.log(`[drain] handed ${handed.size} run(s) to the next generation: ${[...handed].join(", ")}`);
     // Counted by registry id, not by the write-through's live set: a handed run
     // that gets fenced mid-drain (the next generation took it) leaves that set
-    // but is still handed — it must not start holding the drain again.
-    const runsHeld = () => defaultRunRegistry.listActive().filter((r) => !r.finished && !handed.has(r.id)).length;
+    // but is still handed — it must not start holding the drain again. The hold
+    // line names each held run and why — never the dispatcher's in-flight count,
+    // which can read 0 while a registry row holds the drain.
+    const runsHeld = () => heldRuns().length;
+    if (runsHeld() > 0) console.log(drainHoldLine(heldRuns()));
     const stillHere = () => runsHeld() + pendingReflectionCount() + pendingHistoryWrites();
     const deadline = drainStartedAt + (runsHeld() > 0 ? DRAIN_DEADLINE_MS : HANDOFF_BUDGET_MS);
     // The hold names what it waits on: the registry runs still active and not
