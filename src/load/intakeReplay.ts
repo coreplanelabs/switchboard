@@ -103,18 +103,10 @@ export async function replayIntake(
   return results;
 }
 
-/** One conditional rate with its interval: `wrong` of `n`, quoted with the
- *  Wilson bounds at that `n` (NaN rate and bounds over `n = 0` — the
- *  rendering states the missing denominator instead). */
-export interface IntakeRate {
-  n: number;
-  wrong: number;
-  rate: number;
-  interval: { low: number; high: number };
-}
-
-/** The replay's score: the two conditional rates, the abstention shares'
- *  counts over all replies, and every miss with its coordinates. */
+/** The replay's score: the two conditional rates — each quoted with the
+ *  Wilson bounds at its `n` (NaN rate and bounds over `n = 0` — the rendering
+ *  states the missing denominator instead) — the abstention shares' counts
+ *  over all replies, and every miss with its coordinates. */
 export interface IntakeScore {
   total: number;
   /** Over the replies labelled `addressed`: the verdicts that fell silent. */
