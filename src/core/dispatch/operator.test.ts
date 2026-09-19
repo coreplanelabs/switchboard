@@ -333,6 +333,78 @@ describe("runOperator", () => {
   });
 });
 
+describe("the operator's violation set at the seam (record 0067, amended): an unparseable line, a preset bind without the request's words", () => {
+  const decide = (line: string): RouteToolCall => ({
+    tool: OPERATOR_TOOL_NAME,
+    input: { reason: "a coding ask", binds: [{ line, reason: "ship it" }] },
+  });
+
+  it("a flag-form ship line — flags in place of the person's text — is re-asked with the violation named, then the corrected line is accepted", async () => {
+    const prompts: RoutePrompt[] = [];
+    const answers = [
+      decide('ship --repo acme/repo --task "intake fix"'),
+      decide("ship fix the intake gate in acme/repo"),
+    ];
+    const answer = await runOperator(
+      input({ text: "fix the intake gate in acme/repo", projection: projectionOf(["general", "ship"]) }),
+      async (prompt) => {
+        prompts.push(prompt);
+        return answers.shift()!;
+      },
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ line: "ship fix the intake gate in acme/repo" }],
+    });
+    expect(answer.attempts).toEqual([
+      {
+        outcome: "violation",
+        violation:
+          'bind 1 names the preset "ship" but drops the request\'s own words; bind the preset on the request verbatim',
+      },
+      { outcome: "accepted" },
+    ]);
+    // The re-ask quotes the violation back with the operator's noun and tool.
+    expect(prompts[1]!.retries?.[0]?.violation).toContain("your answer was not a decision: bind 1 names the preset");
+  });
+
+  it("a bare ship line — the request's words dropped — is re-asked twice, then floored to non_decision, never a rendered refusal", async () => {
+    let calls = 0;
+    const answer = await runOperator(
+      input({ text: "fix the intake gate", projection: projectionOf(["general", "ship"]) }),
+      async () => {
+        calls++;
+        return decide("ship");
+      },
+    );
+    expect(calls).toBe(3);
+    expect(answer.decision).toMatchObject({ kind: "non_decision" });
+    expect(answer.decision.reason).toContain('names the preset "ship"');
+    expect(answer.attempts).toHaveLength(3);
+    expect(answer.attempts!.every((a) => a.outcome === "violation")).toBe(true);
+    expect(operatorEventOf("on", answer).outcome).toBe("non_decision");
+  });
+
+  it("a bound line the registry cannot parse is re-asked with the violation named, then floored when it persists", async () => {
+    let calls = 0;
+    const prompts: RoutePrompt[] = [];
+    const answer = await runOperator(input({ registryParses: () => false }), async (prompt) => {
+      prompts.push(prompt);
+      calls++;
+      return decide("please list the runs for me");
+    });
+    expect(calls).toBe(3);
+    expect(answer.decision).toMatchObject({ kind: "non_decision" });
+    expect(answer.decision.reason).toContain("the registry cannot parse");
+    expect(prompts[1]!.retries?.[0]?.violation).toContain("bind 1 is a line the registry cannot parse");
+  });
+
+  it("a process with no registry wired skips the cannot-parse check — the line stays the execute path's hand-back", async () => {
+    const answer = await runOperator(input(), async () => decide("please list the runs for me"));
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ line: "please list the runs for me" }] });
+  });
+});
+
 describe("the verifier's hold (the one-door plan; routing-and-config item 25)", () => {
   const def = (id: string) => ({ id }) as CommandDef<unknown>;
 
