@@ -1,7 +1,7 @@
 import { enableAutoUnmount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
-import type { HomeSeed, HomeTurnSeed } from "@core/channels/webSeed.js";
+import type { HomeParentTurnSeed, HomeSeed, HomeTurnSeed } from "@core/channels/webSeed.js";
 import HomePage from "./HomePage.vue";
 import AppShell from "../components/AppShell.vue";
 import ThreadTip from "../components/home/ThreadTip.vue";
@@ -754,6 +754,57 @@ describe("HomePage — silent receipts on the thread view (item 12)", () => {
     });
     expect(streams(created)).toEqual([]);
     expect(setTitle).toHaveBeenLastCalledWith("review https://github.com/acme/api/pull/1391");
+  });
+});
+
+describe("HomePage — the parent's word on a unit's thread (item 2)", () => {
+  const parentWord = (over: Partial<HomeParentTurnSeed> = {}): HomeParentTurnSeed => ({
+    kind: "parent",
+    runId: "parent-run",
+    unit: "U16",
+    state: "approve",
+    report: "round 1 approved — merge-ready",
+    pr: 7,
+    at: NOW - 500_000,
+    ...over,
+  });
+
+  it("a parent turn renders as a compact turn linked to the parent's run page, in order among the runs", () => {
+    const wrapper = mountApp(HomePage, {
+      seed: seed({
+        turns: [finished(), parentWord(), finished({ id: "r-2", request: "round 2?", answer: "Done." })],
+      }),
+    });
+    const rows = wrapper.findAll(".transcript li");
+    // person, assistant, the parent's word, person, assistant — the seed's order stands.
+    expect(rows).toHaveLength(5);
+    const parent = rows[2].find("[data-testid=parent-word]");
+    expect(parent.exists()).toBe(true);
+    expect(parent.text()).toContain("round 1 approved — merge-ready");
+    expect(parent.find("a").attributes("href")).toBe("/runs/parent-run");
+    expect(wrapper.findAll(".turn.assistant")).toHaveLength(2);
+  });
+
+  it("a live parent's link carries its capability token (`?t=…`), so the page reads while the pipeline runs", () => {
+    const wrapper = mountApp(HomePage, {
+      seed: seed({ turns: [finished(), parentWord({ token: "parent-tok" })] }),
+    });
+    const parent = wrapper.find("[data-testid=parent-word]");
+    expect(parent.find("a").attributes("href")).toBe("/runs/parent-run?t=parent-tok");
+  });
+
+  it("the composer's mode is unaffected by a parent turn: no stream opens for it and the composer reads send", async () => {
+    const { created, factory } = fakeEventSourceFactory();
+    const wrapper = mountApp(HomePage, {
+      seed: seed({ turns: [finished(), parentWord({ state: "started", report: undefined, lead: "↳ unit U16" })] }),
+      eventSource: factory,
+    });
+    expect(streams(created)).toEqual([]);
+    expect(wrapper.find("form.composer").attributes("data-mode")).toBe("send");
+    const word = wrapper.find("[data-testid=parent-word]");
+    expect(word.text()).toContain("↳ unit U16");
+    await type(wrapper, "more words");
+    expect(wrapper.find("form.composer").attributes("data-mode")).toBe("send");
   });
 });
 

@@ -6,6 +6,7 @@ import { makePageSender } from "../src/channels/webShell.js";
 import type { Actor } from "../src/core/authz/types.js";
 import type {
   HomeCommandSeed,
+  HomeParentTurnSeed,
   HomeReceiptTurnSeed,
   HomeSeed,
   HomeTurnSeed,
@@ -2117,22 +2118,37 @@ const homeTurn = (
     ...over,
   };
 };
-const HOME_TURNS: (HomeTurnSeed | HomeReceiptTurnSeed)[] = [
+// The ship request's and the receipt's stamps, hoisted so the parent's word
+// between them derives its own (the duration ratchet allows no new literal).
+const HOME_SHIP_AT = NOW - 31 * 60_000;
+const HOME_RECEIPT_AT = NOW - 18 * 60_000;
+const HOME_TURNS: (HomeTurnSeed | HomeReceiptTurnSeed | HomeParentTurnSeed)[] = [
   homeTurn("home-r1", NOW - 52 * 60_000, "review", {
     request: "review https://github.com/acme/api/pull/61 — the retry-queue change",
     route: { preset: "review", reason: "a pull request link" },
     answer:
       "**LGTM:** the retry queue is sound. Two nits, both in the tests: the backoff table asserts wall-clock seconds (use the fake timer), and the `describe` titles repeat the file name.\n\nBoth left inline on the pull request.",
   }),
-  homeTurn("home-r2", NOW - 31 * 60_000, "coding", {
+  homeTurn("home-r2", HOME_SHIP_AT, "coding", {
     request: "add retry logic to the webhook sender in acme/web, exponential backoff capped at five attempts",
     route: { preset: "ship", reason: "an imperative to change code in a named repository" },
     answer:
       "Opened [acme/web#88](https://github.com/acme/web/pull/88): `sendWebhook` retries on 5xx and network errors with 250 ms to 4 s backoff, five attempts, then surfaces the last error. Tests cover the cap and the jitter bounds. Review round 1 approved; a person merges.",
   }),
+  // The hosted ship parent's word (web-chat.md item 2; record 0060): the
+  // pipeline reported this unit merge-ready — one line linked to its run.
+  {
+    kind: "parent",
+    runId: "ship-1",
+    unit: "U13",
+    state: "merge_ready",
+    report: "✅ Merge-ready after 1 review round",
+    pr: 88,
+    at: (HOME_SHIP_AT + HOME_RECEIPT_AT) / 2,
+  },
   // A silent intake receipt (web-chat.md item 12): the gate read a thread reply
   // and answered nothing — the view says so where the run would have been.
-  { kind: "receipt", reason: "a reply to a teammate, not a request to Switchboard", decidedAt: NOW - 18 * 60_000 },
+  { kind: "receipt", reason: "a reply to a teammate, not a request to Switchboard", decidedAt: HOME_RECEIPT_AT },
   homeTurn("home-r3", NOW - 6 * 60_000, "review", {
     request: "what did the last deploy change?",
     agent: "general",
@@ -2256,7 +2272,10 @@ const HOME_COMMANDS: HomeCommandSeed[] = [
 ];
 /** The conversations this preview answered a `202` to: their next message is a steer (the fixture's one live run never ends). */
 const LIVE_CONVERSATIONS = new Set<string>();
-const homeSeed = (conversation: string, turns: (HomeTurnSeed | HomeReceiptTurnSeed)[]): HomeSeed => ({
+const homeSeed = (
+  conversation: string,
+  turns: (HomeTurnSeed | HomeReceiptTurnSeed | HomeParentTurnSeed)[],
+): HomeSeed => ({
   page: "home",
   conversation,
   turns,
