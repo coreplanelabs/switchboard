@@ -132,6 +132,10 @@ type Planned = {
   adopt?: { pr: number; url?: string };
   /** The entry's branch (an adopted or resumed pull request's head) overrides the graph's on the one generated unit. */
   entryBranch?: string;
+  /** An ambiguously bound base ref the preflight found missing on the
+   *  repository (agent-ship item 10, issue 1827): the entry fell back to the
+   *  default branch, and the reply's first line names the fallback. */
+  baseFallback?: { requested: string };
   /** The pull request's own auto-merge fact at entry (agent-ship item 9): named in the reply, never refused. */
   autoMergeEnabled?: boolean;
 };
@@ -216,6 +220,7 @@ async function plan(
         ...(entry.adopt !== undefined ? { adopt: entry.adopt } : {}),
         ...(entry.branch !== undefined ? { entryBranch: entry.branch } : {}),
         ...(entry.autoMergeEnabled !== undefined ? { autoMergeEnabled: entry.autoMergeEnabled } : {}),
+        ...(entry.baseFallback !== undefined ? { baseFallback: entry.baseFallback } : {}),
       },
     };
   }
@@ -266,7 +271,16 @@ async function plan(
   }
   return {
     ok: true,
-    planned: { planId, path: request.planPath, base, graph, selected, identity, merge: "runner" },
+    planned: {
+      planId,
+      path: request.planPath,
+      base,
+      graph,
+      selected,
+      identity,
+      merge: "runner",
+      ...(entry.baseFallback !== undefined ? { baseFallback: entry.baseFallback } : {}),
+    },
   };
 }
 
@@ -308,7 +322,14 @@ function planWhere(
   const at = p.path !== undefined ? ` (\`${p.path}\` at \`${p.base}\`)` : "";
   const count = `${units.length} unit${units.length === 1 ? "" : "s"}`;
   const left = mergedBefore.length > 0 ? ` left` : "";
-  const lines = [`${attempt !== undefined ? `attempt ${attempt} of ` : ""}plan \`${p.planId}\`${at}`];
+  // The base fallback is the FIRST line's fact (issue 1827): the person's
+  // "on <token>" bound a ref the repository does not have, and the card says
+  // so before anything else — the run is on the default branch, not on it.
+  const fellBack =
+    p.baseFallback !== undefined
+      ? ` — \`${p.baseFallback.requested}\` is not a branch of the repository, so the plan runs on the default branch \`${p.base}\``
+      : "";
+  const lines = [`${attempt !== undefined ? `attempt ${attempt} of ` : ""}plan \`${p.planId}\`${at}${fellBack}`];
   if (p.path !== undefined) {
     lines.push(`${count}${left} in dependency order: ${units.map((u) => u.unit).join(", ")}`);
     if (mergedBefore.length > 0) lines.push(`merged before: ${mergedBefore.join(", ")}`);

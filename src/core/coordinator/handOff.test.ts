@@ -232,6 +232,23 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(await wordy.instances.get("plan-make-the-runner-warm-the-eaaa45")).toMatchObject({ merge: "person" });
   });
 
+  it("a base the preflight fell back from (issue 1827) is named on the reply's FIRST plan line — the missing ref and the default branch the plan runs on", async () => {
+    const h = harness();
+    const out = await handOffToCoordinator(
+      h.deps,
+      input({
+        entry: { repo: "acme/api", base: "main", baseFallback: { requested: "web/src/pages/runPage.test.ts" } },
+        requestText: "in acme/api: warm the cache on wake",
+      }),
+    );
+    expect(out.status).toBe("completed");
+    const [headline, first] = out.reply.split("\n");
+    expect(headline).toBe("\ud83e\udded Handed to the plan runner.");
+    expect(first).toBe(
+      "\u2022 plan `warm-the-cache-on-wake-dfa06c` \u2014 `web/src/pages/runPage.test.ts` is not a branch of the repository, so the plan runs on the default branch `main`",
+    );
+  });
+
   it("a task's urls reach the unit: a Slack `<url|label>` link is unwrapped to its bare url and kept in the unit's title and id text, the `in <repo>:` prefix alone is dropped — the entry probe's stripped text is never the unit", async () => {
     const h = harness();
     const out = await handOffToCoordinator(

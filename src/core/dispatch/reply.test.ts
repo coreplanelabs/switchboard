@@ -407,7 +407,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       "pr_head_unknown",
       "branch_moved",
       // (record 0054): each producer's own test proves its sentences
-      // byte-identical — the ship preflight's nine (preflight.test.ts), the
+      // byte-identical — the ship preflight's ten (preflight.test.ts), the
       // plan hand-off's fifteen (handOff.test.ts), the resolve parser
       // (resolve's dispatcher coverage), the typed commands' `chatErrorLine`
       // (commandChat.test.ts), and the resident attach errors
@@ -421,6 +421,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       "ship_preflight_head_unknown",
       "ship_preflight_closed_resume",
       "ship_preflight_no_task",
+      "ship_preflight_base_missing",
       "plan_base_unknown",
       "plan_routed_seed",
       "plan_id_invalid",

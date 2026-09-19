@@ -96,6 +96,10 @@ function setup(
     clock: () => NOW,
     fetchRepoShipInfo: async () => ({ defaultBranch: "main" }),
     fetchPrFacts: async () => undefined,
+    // The base existence check (issue 1827): "could not ask" proceeds — the
+    // default keeps every entry unchanged; the check's own rows are
+    // preflight.test.ts's.
+    fetchRefExists: async () => undefined,
     coordinatorInstances: instances,
     createCoordinatorInstance: async (id) => {
       created.push(id);

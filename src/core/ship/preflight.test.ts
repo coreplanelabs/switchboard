@@ -1,7 +1,8 @@
 // The ship preflight's entry cases (docs/reference/specs/agent-ship.md items 9
-// and 10): adopt, resume, context, seeded — and the repository lookup that is
+// and 10): adopt, resume, context, seeded — the repository lookup that is
 // advisory only (no repository-level auto-merge check remains; the auto-merge
-// fact is the pull request's own, named, never refused).
+// fact is the pull request's own, named, never refused) — and the base ref
+// existence check that keeps a misbound ref from aborting round 0 (issue 1827).
 import { describe, expect, it, vi } from "vitest";
 import type { PullRequestFacts, RepoShipInfo } from "../../execution/githubPulls.js";
 import type { RefusalCause, RefusalCode } from "../refusal.js";
@@ -238,7 +239,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
     expect(throwing).toEqual({ ok: true, entry: { repo: "acme/api", base: undefined } });
   });
 
-  it("every gate's refusal carries its own `ship_preflight_*` code and the table's cause — nine codes, one per gate, the result carrying it (record 0054)", async () => {
+  it("every gate's refusal carries its own `ship_preflight_*` code and the table's cause — ten codes, one per gate, the result carrying it (record 0054)", async () => {
     const cases: Array<{ gate: string; code: RefusalCode; cause: RefusalCause; input: ShipPreflightInput }> = [
       {
         gate: "channel",
@@ -298,6 +299,16 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
         cause: "request",
         input: input({ requestText: "" }),
       },
+      {
+        gate: "base ref missing",
+        code: "ship_preflight_base_missing",
+        cause: "request",
+        input: input({
+          requestText: "in acme/api: fix it on branch feat/gone",
+          repoCtx: { repo: "acme/api", ref: "feat/gone" },
+          refExists: async () => false,
+        }),
+      },
     ];
     const codes = new Set<string>();
     for (const c of cases) {
@@ -311,7 +322,133 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
       expect(res.refusal.text, c.gate).toBe(res.reply);
       codes.add(res.refusal.code);
     }
-    expect(codes.size, "one code per gate, never a shared one").toBe(9);
+    expect(codes.size, "one code per gate, never a shared one").toBe(10);
+  });
+});
+
+describe("shipPreflight — the base ref existence check before the pipeline branch is cut (agent-ship item 10, issue 1827)", () => {
+  const FLAKE_TASK = "in acme/api: the ci job flakes on web/src/pages/runPage.test.ts — fix it";
+
+  it("an ambiguously bound ref that does not exist falls back to the default branch, the fallback named on the entry", async () => {
+    const refExists = vi.fn(async () => false);
+    const res = await shipPreflight(
+      input({
+        requestText: FLAKE_TASK,
+        repoCtx: { repo: "acme/api", ref: "web/src/pages/runPage.test.ts" },
+        refExists,
+      }),
+    );
+    expect(res).toEqual({
+      ok: true,
+      entry: { repo: "acme/api", base: "main", baseFallback: { requested: "web/src/pages/runPage.test.ts" } },
+    });
+    expect(refExists).toHaveBeenCalledWith("acme/api", "web/src/pages/runPage.test.ts");
+  });
+
+  it("an explicitly named ref (branch keyword) that does not exist is refused fail-closed naming the ref", async () => {
+    const res = await shipPreflight(
+      input({
+        requestText: "in acme/api: fix the login redirect on branch feat/gone",
+        repoCtx: { repo: "acme/api", ref: "feat/gone" },
+        refExists: async () => false,
+      }),
+    );
+    expect(res).toMatchObject({ ok: false, where: "base ref missing" });
+    if (res.ok) return;
+    expect(res.refusal.code).toBe("ship_preflight_base_missing");
+    expect(res.reply).toContain("`feat/gone`");
+    expect(res.reply).toContain("acme/api");
+  });
+
+  it("an explicitly named ref (tree URL) that does not exist is refused the same way — slashes in the ref included", async () => {
+    const res = await shipPreflight(
+      input({
+        requestText: "fix the login redirect on https://github.com/acme/api/tree/feat/gone",
+        repoCtx: { repo: "acme/api", ref: "feat/gone" },
+        refExists: async () => false,
+      }),
+    );
+    expect(res).toMatchObject({ ok: false, where: "base ref missing" });
+    if (!res.ok) expect(res.reply).toContain("`feat/gone`");
+  });
+
+  it("an existing ref is unchanged — the entry carries it as the base with no fallback", async () => {
+    const res = await shipPreflight(
+      input({
+        requestText: "in acme/api: fix the login redirect on branch feat/trunk",
+        repoCtx: { repo: "acme/api", ref: "feat/trunk" },
+        refExists: async () => true,
+      }),
+    );
+    expect(res).toEqual({ ok: true, entry: { repo: "acme/api", base: "feat/trunk" } });
+  });
+
+  it("an unanswerable lookup (undefined, or a throw) proceeds unchanged — advisory like the repository lookup, never a silent rebase", async () => {
+    const unknown = await shipPreflight(
+      input({
+        requestText: FLAKE_TASK,
+        repoCtx: { repo: "acme/api", ref: "feat/trunk" },
+        refExists: async () => undefined,
+      }),
+    );
+    expect(unknown).toEqual({ ok: true, entry: { repo: "acme/api", base: "feat/trunk" } });
+    const throwing = await shipPreflight(
+      input({
+        requestText: FLAKE_TASK,
+        repoCtx: { repo: "acme/api", ref: "feat/trunk" },
+        refExists: async () => {
+          throw new Error("boom");
+        },
+      }),
+    );
+    expect(throwing).toEqual({ ok: true, entry: { repo: "acme/api", base: "feat/trunk" } });
+  });
+
+  it("no seam given → no check (existing callers unchanged); no ref bound → the lookup is never spent", async () => {
+    const unchecked = await shipPreflight(
+      input({ requestText: FLAKE_TASK, repoCtx: { repo: "acme/api", ref: "web/src/pages/runPage.test.ts" } }),
+    );
+    expect(unchecked).toEqual({ ok: true, entry: { repo: "acme/api", base: "web/src/pages/runPage.test.ts" } });
+    const refExists = vi.fn(async () => false);
+    const noRef = await shipPreflight(input({ repoCtx: { repo: "acme/api" }, refExists }));
+    expect(noRef).toEqual({ ok: true, entry: { repo: "acme/api", base: "main" } });
+    expect(refExists).not.toHaveBeenCalled();
+  });
+
+  it("a pull request's own base that does not exist is refused fail-closed naming the ref — adopt and resume alike", async () => {
+    const adopt = await shipPreflight(
+      input({ repoCtx: { repo: "acme/api", pr: 7 }, prFacts: async () => openPr(), refExists: async () => false }),
+    );
+    expect(adopt).toMatchObject({ ok: false, where: "base ref missing" });
+    if (!adopt.ok) expect(adopt.reply).toContain("`release/1.x`");
+    const resume = await shipPreflight(
+      input({
+        requestText: PR_URL,
+        repoCtx: { repo: "acme/api", pr: 7 },
+        prFacts: async () => openPr(),
+        refExists: async () => false,
+      }),
+    );
+    expect(resume).toMatchObject({ ok: false, where: "base ref missing" });
+  });
+
+  it("a pull request's own base that exists leaves the adopt unchanged; a PR without its own base spends no lookup", async () => {
+    const refExists = vi.fn(async () => true);
+    const adopt = await shipPreflight(
+      input({ repoCtx: { repo: "acme/api", pr: 7 }, prFacts: async () => openPr(), refExists }),
+    );
+    expect(adopt).toMatchObject({ ok: true, entry: { branch: "feat/rate-limit", base: "release/1.x" } });
+    expect(refExists).toHaveBeenCalledWith("acme/api", "release/1.x");
+    const noBase = vi.fn(async () => false);
+    const fallback = await shipPreflight(
+      input({
+        repoCtx: { repo: "acme/api", pr: 7 },
+        prFacts: async () => openPr({ baseRef: undefined }),
+        refExists: noBase,
+      }),
+    );
+    expect(fallback).toMatchObject({ ok: true, entry: { base: "main" } });
+    expect(noBase).not.toHaveBeenCalled();
   });
 });
 

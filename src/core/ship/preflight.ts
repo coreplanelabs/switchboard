@@ -84,6 +84,11 @@ export interface ShipEntry {
   /** The pull request's own auto-merge fact, named at entry (spec item 9) —
    *  never refused. */
   autoMergeEnabled?: boolean;
+  /** Set when an ambiguously bound base ref (prose "on <token>", never a
+   *  branch keyword or a tree URL) did not exist on the repository and the
+   *  entry fell back to the default branch (issue 1827): the ref as bound,
+   *  for the hand-off's first line to name the fallback. */
+  baseFallback?: { requested: string };
 }
 
 export type ShipPreflightResult =
@@ -113,6 +118,12 @@ export interface ShipPreflightInput {
    *  guesses against when the request named a repository that is not one.
    *  Undefined or empty → the sentence stands without a guess. */
   repoCandidates?: readonly string[];
+  /** Whether a branch exists on the repository — one GET refs call, spent only
+   *  when a base candidate is bound (issue 1827). `false` is GitHub's own 404;
+   *  `undefined` (or a throw, or no seam) is "could not ask" and proceeds
+   *  unchanged — advisory like `repoInfo`, so a transient failure never
+   *  silently rebases explicitly named work. */
+  refExists?: (repo: string, ref: string) => Promise<boolean | undefined>;
 }
 
 const refuse = (code: RefusalCode, where: string, card: string, reply: string): ShipPreflightResult => ({
@@ -122,6 +133,25 @@ const refuse = (code: RefusalCode, where: string, card: string, reply: string): 
   reply,
   refusal: refusalOf(code, reply),
 });
+
+/**
+ * Whether the request text names `ref` EXPLICITLY — the branch keyword
+ * (`on [the] branch X`, `branch:X`/`branch=X`) or a `/tree/<ref>` URL, the two
+ * shapes a person spells a branch out in — as opposed to the ambiguous prose
+ * "on <token>" scan (repoContext.ts) that once bound a file path as the base
+ * (issue 1827). Deliberately mirrors repoContext's extraction (same regexes,
+ * same punctuation strip) rather than importing it: record 0057 deletes that
+ * scan, and this check — a preflight guard — survives it. An explicit
+ * nonexistent ref is refused fail-closed; an ambiguous one falls back.
+ */
+export function refNamedExplicitly(requestText: string, ref: string): boolean {
+  const text = requestText.replace(SLACK_LINK, " $1 ");
+  const strip = (s: string) => s.replace(/^[("'`<[{*]+/, "").replace(/[)"'`>\]}.,;:!?*]+$/, "");
+  const kw = /(?:^|\s)on\s+(?:the\s+)?branch\s+(\S+)/i.exec(text) ?? /(?:^|\s)branch[:=](\S+)/i.exec(text);
+  if (kw && strip(kw[1]) === ref) return true;
+  const treeUrl = /https?:\/\/(?:www\.)?github\.com\/[^/\s]+\/[^/\s#?]+\/tree\/([^\s?#]+)/i.exec(text);
+  return treeUrl !== undefined && treeUrl !== null && strip(treeUrl[1]) === ref;
+}
 
 /** An `owner/name` token in the request text — the shape a person names a
  *  repository in. Deliberately the same shape repoContext binds. */
@@ -259,7 +289,23 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
         // fact when the thread context resolved the PR; the default branch is
         // the last resort — an adopt still carries the PR's base when the
         // repository lookup failed.
-        const base = resolveBaseRef([facts.baseRef, repoCtx.baseRef], info?.defaultBranch);
+        const ownBase = facts.baseRef ?? repoCtx.baseRef;
+        // The base existence check (issue 1827): a pull request's own base that
+        // GitHub answers 404 for is refused fail-closed naming the ref — there
+        // is no ambiguity to fall back from, the pull request itself names it.
+        // Only a positive "does not exist" refuses; "could not ask" proceeds.
+        if (ownBase !== undefined && input.refExists) {
+          const exists = await input.refExists(repo, ownBase).catch(() => undefined);
+          if (exists === false) {
+            return refuse(
+              "ship_preflight_base_missing",
+              "base ref missing",
+              "not started (base ref missing)",
+              `🚫 ${where}'s base branch \`${ownBase}\` does not exist on \`${repo}\` — refusing fail-closed. Retarget the pull request at an existing branch first.`,
+            );
+          }
+        }
+        const base = resolveBaseRef([ownBase], info?.defaultBranch);
         const autoMerge = facts.autoMergeEnabled !== undefined ? { autoMergeEnabled: facts.autoMergeEnabled } : {};
         if (task) {
           // Adopt (spec item 10): a generated task in the thread of an open
@@ -331,6 +377,31 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
     repoCtx.ref && !repoCtx.refFromPr && !isUnitBranch(repoCtx.ref) && repoCtx.ref.toLowerCase() !== repo.toLowerCase()
       ? repoCtx.ref
       : undefined;
+  // The base existence check (issue 1827): one GET refs call, spent only when
+  // a ref survived the guards above — the same lookup createBranchRef would
+  // fail on AFTER the instance exists, asked here while refusing or falling
+  // back is still cheap. A ref a person spelled out (branch keyword, tree URL)
+  // that does not exist is refused naming it; a ref the ambiguous "on <token>"
+  // prose scan bound (a file path, issue 1827's shape) falls back to the
+  // default branch, the fallback named on the entry for the first card line.
+  // "Could not ask" (undefined, a throw, no seam) proceeds unchanged.
+  if (ref !== undefined && input.refExists) {
+    const exists = await input.refExists(repo, ref).catch(() => undefined);
+    if (exists === false) {
+      if (refNamedExplicitly(input.requestText, ref)) {
+        return refuse(
+          "ship_preflight_base_missing",
+          "base ref missing",
+          "not started (base ref missing)",
+          `🚫 The branch \`${ref}\` does not exist on \`${repo}\` — nothing was started. Name an existing branch, or drop it to run on the default branch.`,
+        );
+      }
+      return {
+        ok: true,
+        entry: { repo, base: info?.defaultBranch, baseFallback: { requested: ref } },
+      };
+    }
+  }
   return {
     ok: true,
     entry: { repo, base: resolveBaseRef([ref], info?.defaultBranch) },
