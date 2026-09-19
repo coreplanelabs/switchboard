@@ -167,6 +167,12 @@ defaults:
 #     verbosity: verbose          # hear every acknowledgement of what the bot does for you
 #     harness:
 #       coding: opencode
+#     # The person's GitHub author binding (record 0062; authorization.md item 18):
+#     # the login their commits are authored as. A bare login here is resolved to
+#     # { login, id } once at first use; `config set user --user <id> --github
+#     # <login>` (identity:write holders) stores the pair. Never set by the person
+#     # themselves; `config clear me` keeps it. One login/id binds one person.
+#     github: octocat
 
 # Authorization (docs/reference/specs/authorization.md item 9, docs/reference/authorization.md):
 # two blocks. `restrict` names what is CLOSED unless granted — an agent listed

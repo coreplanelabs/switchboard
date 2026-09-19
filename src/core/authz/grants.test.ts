@@ -356,3 +356,31 @@ describe("mayRunAgent / mayUseRepo — open unless restricted, then only for a h
     expect(covers(set("a"), "b")).toBe(false);
   });
 });
+
+// Feature: docs/reference/specs/authorization.md item 18 (record 0062) —
+// `identity:write` is never a baseline: no Slack user, no browser session and
+// no credential holds it unlisted. It is held by `all` and by a named grants
+// entry alone, and `grantsFor` is otherwise untouched by the binding.
+describe("identity:write is never a baseline (record 0062)", () => {
+  it("is absent from the chat baseline, the browser baseline and every unlisted lookup", () => {
+    expect(CHAT_OPEN_ACTIONS).not.toContain("identity:write");
+    expect(browserActions(["config", "runs", "identity"])).not.toContain("identity:write");
+    const table = grantsTable({ agentNames: AGENTS, commandGroups: ["config", "runs"] });
+    expect(grantsIn(table, "slack:UANY").actions).not.toBe("all");
+    expect((grantsIn(table, "slack:UANY").actions as Set<string>).has("identity:write")).toBe(false);
+    expect((grantsIn(table, "access:sub").actions as Set<string>).has("identity:write")).toBe(false);
+    expect(grantsIn(table, "http:tok")).toBe(NO_GRANTS);
+  });
+
+  it("is held by `all` and by a named grants entry", () => {
+    const table = grantsTable({
+      grants: parsed({
+        "slack:UADMIN": { actions: "all" },
+        "http:idp": { actions: ["identity:write"] },
+      }),
+      agentNames: AGENTS,
+    });
+    expect(grantsIn(table, "slack:UADMIN").actions).toBe("all");
+    expect((grantsIn(table, "http:idp").actions as Set<string>).has("identity:write")).toBe(true);
+  });
+});

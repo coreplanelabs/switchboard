@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { AppConfig, Scope } from "../config.js";
-import { boundaryProblem, validateBoundaries, validateProviders, validateSlack } from "./validate.js";
+import {
+  boundaryProblem,
+  validateBoundaries,
+  validateProviders,
+  validateScopeBlocks,
+  validateSlack,
+} from "./validate.js";
 import { wireOf, type ProviderConfig } from "../core/provider.js";
 
 const providers = (blocks: Record<string, unknown>): AppConfig => ({ providers: blocks }) as unknown as AppConfig;
@@ -205,5 +211,95 @@ describe("validateSlack — the relay apps", () => {
       'config.yaml: slack.relayApps[1] is "7" — a Slack bot id looks like B0ABC123',
     );
     expect(() => validateSlack({ relayApps: [""] })).toThrow('config.yaml: slack.relayApps[0] is ""');
+  });
+});
+
+// Feature: docs/reference/specs/routing-and-config.md item 30 / authorization.md
+// item 18 (record 0062) — `users.<id>.github` is the person's author binding,
+// validated at load in both layers: the login held to GitHub's rule, `[bot]`
+// refused, the id an integer, one login and one id under one person across
+// config.yaml and the runtime overrides together, and the key valid only
+// under `users`.
+describe("validateScopeBlocks — the github binding", () => {
+  const users = (github: unknown, id = "slack:UONE") => ({ users: { [id]: { github } as Scope } });
+
+  it("refuses a malformed login naming the user id and the rule", () => {
+    for (const login of ["ivy dev", "-ivy", "ivy-", "ivy--dev", "", "a".repeat(40)]) {
+      expect(() => validateScopeBlocks(users(login), "config.yaml")).toThrow(
+        /config\.yaml: users\.slack:UONE\.github .*1 to 39 characters, alphanumerics and single hyphens/,
+      );
+    }
+  });
+
+  it("refuses a login ending in [bot] — an app's login, never a person's", () => {
+    expect(() => validateScopeBlocks(users("ivy-dev[bot]"), "config.yaml")).toThrow(
+      /users\.slack:UONE\.github .*\[bot\]/,
+    );
+    expect(() => validateScopeBlocks(users({ login: "ivy-dev[bot]", id: 7 }), "config.yaml")).toThrow(/\[bot\]/);
+  });
+
+  it("refuses a non-integer id, an unknown field, a bad via, and a shape that is neither a login nor a pair", () => {
+    expect(() => validateScopeBlocks(users({ login: "ivy-dev", id: "4242" }), "config.yaml")).toThrow(
+      /users\.slack:UONE\.github\.id must be the account's integer id/,
+    );
+    expect(() => validateScopeBlocks(users({ login: "ivy-dev", id: 4.2 }), "config.yaml")).toThrow(/integer id/);
+    expect(() => validateScopeBlocks(users({ login: "ivy-dev", id: 7, extra: true }), "config.yaml")).toThrow(
+      /users\.slack:UONE\.github: unknown field extra/,
+    );
+    expect(() => validateScopeBlocks(users({ login: "ivy-dev", id: 7, via: "chat" }), "config.yaml")).toThrow(
+      /users\.slack:UONE\.github\.via must be "email"/,
+    );
+    expect(() => validateScopeBlocks(users(42), "config.yaml")).toThrow(
+      /users\.slack:UONE\.github must be a GitHub login or \{ login, id \}/,
+    );
+  });
+
+  it("accepts a bare login and a { login, id } pair, via included", () => {
+    expect(() => validateScopeBlocks(users("ivy-dev"), "config.yaml")).not.toThrow();
+    expect(() => validateScopeBlocks(users({ login: "ivy-dev", id: 4242 }), "config.yaml")).not.toThrow();
+    expect(() => validateScopeBlocks(users({ login: "a", id: 1, via: "email" }), "config.yaml")).not.toThrow();
+  });
+
+  it("refuses the key under a channel or a thread by name — a binding belongs to a person", () => {
+    expect(() => validateScopeBlocks({ channels: { C1: { github: "ivy-dev" } as Scope } }, "config.yaml")).toThrow(
+      /channels\.C1\.github is a users key/,
+    );
+    expect(() =>
+      validateScopeBlocks({ threads: { "slack:C1:1.0": { github: "ivy-dev" } as Scope } }, "overrides"),
+    ).toThrow(/threads\.slack:C1:1\.0\.github is a users key/);
+  });
+
+  it("refuses one login under two users ids, naming both — case-insensitively", () => {
+    expect(() =>
+      validateScopeBlocks(
+        { users: { "slack:UONE": { github: { login: "ivy-dev", id: 1 } }, "slack:UTWO": { github: "Ivy-Dev" } } },
+        "config.yaml",
+      ),
+    ).toThrow(/slack:UONE.*slack:UTWO.*ivy-dev|slack:UTWO.*slack:UONE.*ivy-dev/i);
+  });
+
+  it("refuses one id under two users ids, naming both", () => {
+    expect(() =>
+      validateScopeBlocks(
+        {
+          users: {
+            "slack:UONE": { github: { login: "ivy-dev", id: 4242 } },
+            "slack:UTWO": { github: { login: "other", id: 4242 } },
+          },
+        },
+        "config.yaml",
+      ),
+    ).toThrow(/slack:UONE.*slack:UTWO.*4242|slack:UTWO.*slack:UONE.*4242/);
+  });
+
+  it("refuses a duplicate across config.yaml and the runtime overrides together", () => {
+    const base = { users: { "slack:UONE": { github: "ivy-dev" } as Scope } };
+    expect(() =>
+      validateScopeBlocks({ users: { "slack:UTWO": { github: { login: "ivy-dev", id: 5 } } } }, "overrides", base),
+    ).toThrow(/slack:UONE.*slack:UTWO|slack:UTWO.*slack:UONE/);
+    // The SAME person in both layers is one binding, not a duplicate: the override wins.
+    expect(() =>
+      validateScopeBlocks({ users: { "slack:UONE": { github: { login: "ivy-dev", id: 5 } } } }, "overrides", base),
+    ).not.toThrow();
   });
 });

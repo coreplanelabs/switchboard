@@ -34,6 +34,7 @@ import { AGENTS } from "./agents/registry.js";
 import type { McpServerEntry } from "./mcp/registry.js";
 import {
   defaultIntakeMode,
+  githubBindingConflict,
   validateBoundaries,
   validateScopeBlocks,
   validateConfig,
@@ -141,6 +142,20 @@ export interface Scope {
    * Validated at load (`validateScopeBlocks`).
    */
   intake?: { threadReplies?: IntakeMode };
+  /**
+   * The person's GitHub author binding (docs/reference/specs/authorization.md
+   * item 18, record 0062): the login their commits are authored as, with the
+   * account's immutable numeric id. Valid only under `users`. Written by an
+   * `identity:write` holder through `config set user` — never by the person
+   * (`config set me --github` is refused at the registry door) — and kept by
+   * `config clear me` (`clearUserOverride` preserves the key). A bare string
+   * is a login a config.yaml author wrote, resolved to `{ login, id }` once at
+   * first use and cached for the process (`src/execution/authorBinding.ts`).
+   * Identity, never authority: no policy rule or grant reads it. Validated at
+   * load (`validateScopeBlocks`): GitHub's login rule, no `[bot]` login, an
+   * integer id, and one login and one id per person across both layers.
+   */
+  github?: { login: string; id: number; via?: "email" } | string;
   /**
    * Free-text custom instructions folded into the system prompt as ADVISORY
    * content only. Channel text applies to every run in the
@@ -900,8 +915,10 @@ export class ConfigStore {
     validateScopeEfforts(doc, `overrides (${this.backing.describe()})`);
     validateScopeVerbosity(doc, `overrides (${this.backing.describe()})`);
     validateBoundaries(doc, `overrides (${this.backing.describe()})`);
-    // A stored grant is held to the same rule as a static one (decision 0046).
-    validateScopeBlocks(doc, `overrides (${this.backing.describe()})`);
+    // A stored grant is held to the same rule as a static one (decision 0046);
+    // the static layer rides along so one GitHub login or id cannot end up
+    // under two people across config.yaml and the overrides together (record 0062).
+    validateScopeBlocks(doc, `overrides (${this.backing.describe()})`, this.config);
     validateHarnessWords(doc, `overrides (${this.backing.describe()})`);
     validateMcpServers(
       { channels: doc.channels, users: doc.users, defaults: doc.org },
@@ -1315,10 +1332,42 @@ export class ConfigStore {
     });
   }
 
+  /** Drops the user's runtime overrides but PRESERVES the author binding
+   *  (record 0062): `github` is an identity admin's write, not the person's own
+   *  setting, so "reset my settings" never severs it. */
   async clearUserOverride(userId: string): Promise<void> {
     await this.write((o) => {
-      delete o.users[userId];
+      const github = o.users[userId]?.github;
+      if (github === undefined) delete o.users[userId];
+      else o.users[userId] = { github };
     });
+  }
+
+  /** Removes the author binding alone (`config clear user`, the identity
+   *  admin's undo): every other setting of the person's scope stays. */
+  async clearUserGithub(userId: string): Promise<void> {
+    await this.write((o) => {
+      const scope = o.users[userId];
+      if (scope === undefined || scope.github === undefined) return;
+      const { github: _github, ...rest } = scope;
+      if (Object.keys(rest).length === 0) delete o.users[userId];
+      else o.users[userId] = rest;
+    });
+  }
+
+  /** The stored author binding of one person — the layered `users.<id>.github`
+   *  key and nothing else — what `bindingOf` reads (record 0062). */
+  userGithubBinding(userId: string): Scope["github"] {
+    return this.userScope(userId).github;
+  }
+
+  /** The load-time duplicate rule asked BEFORE a binding write (routing-and-config
+   *  item 30): the refusal — the validator's own words — when another person
+   *  already binds this login or id across config.yaml and the overrides
+   *  together, or undefined when the write may proceed. `config set user` asks
+   *  it so a duplicate is refused by name instead of stored. */
+  githubBindingConflict(userId: string, binding: { login: string; id: number }): string | undefined {
+    return githubBindingConflict(userId, binding, this.overrides, this.config);
   }
 
   async clearThreadOverride(threadKey: string): Promise<void> {
@@ -1349,6 +1398,12 @@ export class ConfigStore {
     for (let attempt = 0; ; attempt++) {
       const next = structuredClone(this.overrides);
       mutate(next);
+      // The loader's rules hold on write too: a mutation `checkedDocument` would
+      // refuse at the next restart (a duplicate GitHub binding that raced past
+      // the handler's check, a cap a future caller forgets to enforce) fails
+      // HERE, before the save — the store keeps its document and the caller
+      // sees the loader's own words, never a poisoned backing.
+      this.checkedDocument(next);
       try {
         await this.backing.save(next);
         this.overrides = next;
@@ -1522,6 +1577,7 @@ export function fmtScope(s: Scope): string {
   if (s.efforts && Object.keys(s.efforts).length > 0) parts.push(`efforts ${fmtModels(s.efforts)}`);
   if (s.verbosity) parts.push(`verbosity \`${s.verbosity}\``);
   if (s.harness && Object.keys(s.harness).length > 0) parts.push(`harness ${fmtModels(s.harness)}`);
+  if (s.github) parts.push(`github \`${typeof s.github === "string" ? s.github : s.github.login}\``);
   if (s.mcpServers && Object.keys(s.mcpServers).length > 0)
     parts.push(
       `mcp ${Object.keys(s.mcpServers)

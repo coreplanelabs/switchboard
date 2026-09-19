@@ -141,6 +141,14 @@ export const POLICY: readonly Rule[] = [
   { action: "config:write", resource: "config-scope", resourceKind: "thread", when: [grant("config:write")] },
   // A user edits only their own scope.
   { action: "config:write", resource: "config-scope", resourceKind: "user", when: [IS_SELF] },
+  // The author binding's one trusted write (record 0062, authorization.md item
+  // 18): `config set user --github` binds a person to a GitHub login, so it is
+  // its own action — `identity:write`, held by `all` and by a named grants
+  // entry, never a baseline — not the channel-config right: a `config:write`
+  // holder could otherwise author commits as any unbound person. The is-self
+  // row above does not carry it: a person never binds themself (`config set me
+  // --github` is refused at the registry door before this table is asked).
+  { action: "identity:write", resource: "config-scope", resourceKind: "user", when: [grant("identity:write")] },
 
   // ── agents ───────────────────────────────────────────────────────────────
   // `agent:run:*` covers every agent through wildcard coverage (grants.ts).

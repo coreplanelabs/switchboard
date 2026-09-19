@@ -5,7 +5,16 @@ import { describe, expect, it } from "vitest";
 import { ConfigStore } from "../../config.js";
 import { MAX_INSTRUCTIONS_LENGTH } from "../../config/validate.js";
 import { chatCallerFor } from "../commandChat.js";
-import { CommandRegistry, bindCommands, renderText, type Caller, type CommandInvoker } from "../commandRegistry.js";
+import {
+  CommandRegistry,
+  bindCommands,
+  renderText,
+  type AuditEntry,
+  type Caller,
+  type CommandInvoker,
+} from "../commandRegistry.js";
+import { chatActorOf } from "../authz/actor.js";
+import { effectiveGrants } from "../authz/authorize.js";
 import { callerWith } from "../testing/callers.js";
 import { EFFORT_LEVELS } from "../../effort.js";
 import { HARNESS_NAMES } from "../harness/roster.js";
@@ -13,6 +22,7 @@ import { helpRows, parseInvocation, tokenize } from "../commandSurface.js";
 import {
   configCommands,
   configSet,
+  ME_GITHUB_MESSAGE,
   ME_ON_SERVICE_TOKEN_MESSAGE,
   registerConfigCommands,
   type ConfigCommandDeps,
@@ -75,6 +85,8 @@ function configDeps(config: ConfigStore) {
       config.setThreadOverride(t, p),
     clearChannelOverride: (c: string) => config.clearChannelOverride(c),
     clearUserOverride: (u: string) => config.clearUserOverride(u),
+    clearUserGithub: (u: string) => config.clearUserGithub(u),
+    githubBindingConflict: async (u: string, b: { login: string; id: number }) => config.githubBindingConflict(u, b),
     clearThreadOverride: (t: string) => config.clearThreadOverride(t),
     channelsWithScope: async () => config.channelsWithScope(),
   };
@@ -498,7 +510,7 @@ describe("config set", () => {
       message: expect.stringMatching(/^nothing to set/),
     });
     expect(await commands.invoke("config.set", { args: ["everyone"], options: { agent: "review" } }, me)).toMatchObject(
-      { ok: false, error: "invalid_input", message: 'scope: expected one of "channel", "me", "thread"' },
+      { ok: false, error: "invalid_input", message: 'scope: expected one of "channel", "me", "thread", "user"' },
     );
     expect(
       JSON.stringify(await commands.invoke("config.set", { args: ["me"], options: { agent: "wizard" } }, me)),
@@ -1097,5 +1109,201 @@ describe("config set --review.addressSeverity", () => {
     const bad = await say(commands, "config set me --review.addressSeverity huge", chat(config, "slack:UX"));
     expect(bad.text).toMatch(/addressSeverity/);
     expect(config.scopes("slack:CX", "slack:UX").user.review).toEqual({ addressSeverity: "major" });
+  });
+});
+
+// Feature: docs/reference/specs/authorization.md item 18 / routing-and-config.md
+// item 30 (record 0062) — the author binding: `users.<id>.github` is written by
+// an `identity:write` holder through `config set user --user <id> --github
+// <login>`, refused on `me` at the registry door by one sentence on every
+// surface (reason `identity` on the audit line), preserved by `config clear
+// me`, and read by no grant.
+describe("config set user / config clear user — the author binding (record 0062)", () => {
+  const IDENTITY_YAML = YAML.replace("grants:\n", 'grants:\n  "slack:UIDP": { actions: [identity:write] }\n');
+  const pair = { login: "ivy-dev", id: 4242 };
+
+  function bindWithIdentity(config: ConfigStore, resolveLogin?: ConfigCommandDeps["identity"]) {
+    const audits: AuditEntry[] = [];
+    const registry = new CommandRegistry<ConfigCommandDeps>({ audit: (e) => audits.push(e) });
+    registerConfigCommands(registry);
+    const commands = bindCommands(registry, {
+      config: { ...configDeps(config), agentNames: () => ["general", "review", "coding"] },
+      ...(resolveLogin ? { identity: resolveLogin } : {}),
+    });
+    return { commands, audits };
+  }
+
+  it("`config set me --github <login>` is refused at the door on every surface — Slack, the CLI, the dashboard chat, an admin included — with the one sentence and reason `identity` on the audit line; the handler never runs", async () => {
+    const config = store();
+    const { commands, audits } = bindWithIdentity(config);
+    const callers = [
+      chat(config, "slack:UADMIN"),
+      callerWith("cli", "cli:local", "all"),
+      callerWith("access", "access:sub", ["config:write"]),
+    ];
+    for (const caller of callers) {
+      const res = await commands.invoke("config.set", { args: ["me"], options: { github: "ivy-dev" } }, caller);
+      expect(res).toMatchObject({
+        ok: false,
+        error: "unauthorized",
+        decidedBy: "registry",
+        message: ME_GITHUB_MESSAGE,
+      });
+      expect(audits.at(-1)).toMatchObject({ commandId: "config.set", outcome: "unauthorized", reason: "identity" });
+    }
+    // The chat grammar says the same words.
+    const { text } = await say(commands, "config set me --github ivy-dev", chat(config, "slack:UX"));
+    expect(text).toContain(ME_GITHUB_MESSAGE);
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({});
+  });
+
+  it("`config clear me` removes the other overrides and keeps the binding", async () => {
+    const config = store();
+    const { commands } = bindWithIdentity(config);
+    await config.setUserOverride("slack:UX", { models: { general: "anthropic/other" }, github: pair });
+    const { text } = await say(commands, "config clear me", chat(config, "slack:UX"));
+    expect(text).toBe("Cleared your overrides.");
+    expect(config.scopes("slack:CX", "slack:UX").user).toEqual({ github: pair });
+  });
+
+  it("`config set user --user <id> --github <login>` by an `identity:write` holder resolves the login (GET /users/<login>) and stores { login, id }; an admin's `all` holds it too", async () => {
+    const config = store(IDENTITY_YAML);
+    const resolved: string[] = [];
+    const { commands } = bindWithIdentity(config, {
+      resolveLogin: async (login) => {
+        resolved.push(login);
+        return login === "ivy-dev" ? pair : { login, id: 7 };
+      },
+    });
+    const res = await commands.invoke(
+      "config.set",
+      { args: ["user"], options: { user: "slack:UONE", github: "ivy-dev" } },
+      chat(config, "slack:UIDP"),
+    );
+    expect(res).toMatchObject({ ok: true });
+    expect(resolved).toEqual(["ivy-dev"]);
+    expect(config.scopes("slack:CX", "slack:UONE").user).toEqual({ github: pair });
+    const asAdmin = await commands.invoke(
+      "config.set",
+      { args: ["user"], options: { user: "slack:UTWO", github: "ivy-two" } },
+      chat(config, "slack:UADMIN"),
+    );
+    expect(asAdmin).toMatchObject({ ok: true });
+  });
+
+  it("a login GitHub answers 404 for is refused by name, and nothing is stored", async () => {
+    const config = store(IDENTITY_YAML);
+    const { commands } = bindWithIdentity(config, { resolveLogin: async () => undefined });
+    const res = await commands.invoke(
+      "config.set",
+      { args: ["user"], options: { user: "slack:UONE", github: "no-such-login" } },
+      chat(config, "slack:UIDP"),
+    );
+    expect(res).toMatchObject({ ok: false, error: "not_found", decidedBy: "handler" });
+    expect(res.ok ? "" : res.message).toContain("no-such-login");
+    expect(config.scopes("slack:CX", "slack:UONE").user).toEqual({});
+  });
+
+  it("a login or id already bound to another person is refused by the load-time validator's words — conflict, nothing stored — and rebinding the same person replaces", async () => {
+    const config = store(IDENTITY_YAML);
+    const { commands } = bindWithIdentity(config, {
+      resolveLogin: async (login) =>
+        login === "same-id" ? { login: "same-id", id: pair.id } : { login, id: login === "ivy-dev" ? pair.id : 9999 },
+    });
+    const idp = chat(config, "slack:UIDP");
+    await commands.invoke("config.set", { args: ["user"], options: { user: "slack:UONE", github: "ivy-dev" } }, idp);
+    const dupLogin = await commands.invoke(
+      "config.set",
+      { args: ["user"], options: { user: "slack:UTWO", github: "ivy-dev" } },
+      idp,
+    );
+    expect(dupLogin).toMatchObject({ ok: false, error: "conflict", decidedBy: "handler" });
+    expect(dupLogin.ok ? "" : dupLogin.message).toContain("one login binds one person");
+    const dupId = await commands.invoke(
+      "config.set",
+      { args: ["user"], options: { user: "slack:UTWO", github: "same-id" } },
+      idp,
+    );
+    expect(dupId).toMatchObject({ ok: false, error: "conflict" });
+    expect(dupId.ok ? "" : dupId.message).toContain("one account binds one person");
+    expect(config.scopes("slack:CX", "slack:UTWO").user).toEqual({});
+    // Rebinding the SAME person is a replacement, never a duplicate.
+    expect(
+      await commands.invoke("config.set", { args: ["user"], options: { user: "slack:UONE", github: "ivy-dev" } }, idp),
+    ).toMatchObject({ ok: true });
+  });
+
+  it("a binding config.yaml already holds for another person refuses the write too, naming both people", async () => {
+    const config = store(`${IDENTITY_YAML}users:\n  "slack:USTATIC":\n    github: ivy-dev\n`);
+    const { commands } = bindWithIdentity(config, { resolveLogin: async () => pair });
+    const res = await commands.invoke(
+      "config.set",
+      { args: ["user"], options: { user: "slack:UONE", github: "ivy-dev" } },
+      chat(config, "slack:UIDP"),
+    );
+    expect(res).toMatchObject({ ok: false, error: "conflict" });
+    expect(res.ok ? "" : res.message).toContain("slack:USTATIC");
+    expect(config.scopes("slack:CX", "slack:UONE").user).toEqual({});
+  });
+
+  it("a `config:write`-only actor is refused the user scope by the table, on set and on clear", async () => {
+    const config = store(OPEN_YAML);
+    const { commands } = bindWithIdentity(config, { resolveLogin: async () => pair });
+    const ux = chat(config, "slack:UX");
+    expect(
+      await commands.invoke("config.set", { args: ["user"], options: { user: "slack:UONE", github: "ivy-dev" } }, ux),
+    ).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "handler" });
+    expect(
+      await commands.invoke("config.clear", { args: ["user"], options: { user: "slack:UONE" } }, ux),
+    ).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "handler" });
+  });
+
+  it("the user scope carries the binding alone: another setting there, a missing --user, or --github under channel/thread are refused by name", async () => {
+    const config = store(IDENTITY_YAML);
+    const { commands } = bindWithIdentity(config, { resolveLogin: async () => pair });
+    const idp = chat(config, "slack:UIDP");
+    expect(
+      await commands.invoke(
+        "config.set",
+        { args: ["user"], options: { user: "slack:UONE", github: "ivy-dev", model: "anthropic/x" } },
+        idp,
+      ),
+    ).toMatchObject({ ok: false, error: "invalid_input" });
+    expect(await commands.invoke("config.set", { args: ["user"], options: { github: "ivy-dev" } }, idp)).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+    });
+    expect(
+      await commands.invoke(
+        "config.set",
+        { args: ["channel"], options: { github: "ivy-dev" } },
+        chat(config, "slack:UADMIN"),
+      ),
+    ).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+    });
+  });
+
+  it("`config clear user --user <id>` removes the binding and nothing else, for an `identity:write` holder", async () => {
+    const config = store(IDENTITY_YAML);
+    const { commands } = bindWithIdentity(config);
+    await config.setUserOverride("slack:UONE", { model: "anthropic/kept", github: pair });
+    const res = await commands.invoke(
+      "config.clear",
+      { args: ["user"], options: { user: "slack:UONE" } },
+      chat(config, "slack:UIDP"),
+    );
+    expect(res).toMatchObject({ ok: true });
+    expect(config.scopes("slack:CX", "slack:UONE").user).toEqual({ model: "anthropic/kept" });
+  });
+
+  it("no grant reads the binding: chatActorOf and effectiveGrants are identical with and without the key", () => {
+    const withKey = store(`${YAML}users:\n  "slack:UX":\n    github: ivy-dev\n`);
+    const without = store();
+    const msg = { userId: "slack:UX", channelId: "slack:CX", threadKey: "slack:CX:1.0" };
+    expect(chatActorOf(withKey, msg)).toEqual(chatActorOf(without, msg));
+    expect(effectiveGrants(chatActorOf(withKey, msg))).toEqual(effectiveGrants(chatActorOf(without, msg)));
+    expect(withKey.grantsFor("slack:UX")).toEqual(without.grantsFor("slack:UX"));
   });
 });

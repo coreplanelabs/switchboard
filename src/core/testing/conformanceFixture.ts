@@ -732,10 +732,15 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       setThreadOverride: (t, p) => s.config.setThreadOverride(t, p),
       clearChannelOverride: (c) => s.config.clearChannelOverride(c),
       clearUserOverride: (u) => s.config.clearUserOverride(u),
+      clearUserGithub: (u) => s.config.clearUserGithub(u),
+      githubBindingConflict: async (u, b) => s.config.githubBindingConflict(u, b),
       clearThreadOverride: (t) => s.config.clearThreadOverride(t),
       channelsWithScope: async () => s.config.channelsWithScope(),
       agentNames: () => Object.keys(AGENTS),
     },
+    // The `user` scope's binding write (record 0062): a deterministic resolve,
+    // never the network — every login answers the same fixture id.
+    identity: { resolveLogin: async (login) => ({ login, id: 424_242 }) },
     runs, // a live run's friction window ends at the pinned clock on every surface
     // The steer sender (record 0057): a recording stub — production wires the
     // dispatcher's admission inbox, which no fixture holds.

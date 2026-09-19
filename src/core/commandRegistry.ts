@@ -193,6 +193,14 @@ export interface CommandDef<
    *  a read and an exec-class write carry none — `blastRadius` never reads it
    *  for them. */
   annotations?: CommandAnnotations;
+  /** A refusal the definition decides at the registry door, before parse and
+   *  handler, from the RAW input (unvalidated — read it, never trust it): the
+   *  one sentence every surface answers and the reason the audit line carries
+   *  (the view-as refusal's shape, record 0053). For an input no other rule
+   *  should ever admit — `config set me --github` (record 0062) — so the
+   *  refusal cannot be reworded per surface or reached by a grant. Absent, or
+   *  answering undefined, admits nothing by itself: the table already decided. */
+  door?(input: RawInput, caller: Caller): { message: string; reason: string } | undefined;
   surfaces?: CommandSurfaces;
   /** The capability this command needs (src/core/capabilities.ts). Absent →
    *  always on. When the predicate is false for the process's capabilities the
@@ -444,8 +452,9 @@ export interface AuditEntry {
   asUser?: string;
   effect: CommandEffect;
   outcome: "ok" | InvokeErrorCode;
-  /** Why the policy table denied (`missing-grant`, `no-rule`, …) when the
-   *  registry refused — a machine token naming no resource; the reason lives
+  /** Why the policy table denied (`missing-grant`, `no-rule`, …) — or a
+   *  definition's door refusal's own word (`identity`, record 0062) — when the
+   *  registry refused; the reason lives
    *  here, on the audit line, never in the reply. A handler's
    *  own `unauthorized` carries none. */
   reason?: string;
@@ -573,6 +582,12 @@ export class CommandRegistry<D> {
     const decision = authorize(caller.actor, cmd.action, resourceOf(cmd, input, caller));
     if (!decision.allow)
       return done(fail("unauthorized", `${caller.id} is not allowed to run ${cmd.id}`), decision.reason);
+
+    // The definition's own door refusal (record 0062): decided on the raw
+    // input before parse, so every surface answers the definition's one
+    // sentence with its reason on the audit line — never a handler's rewording.
+    const refusedAtDoor = cmd.door?.(rawInput(input), caller);
+    if (refusedAtDoor) return done(fail("unauthorized", refusedAtDoor.message), refusedAtDoor.reason);
 
     const parsed = parseInput(cmd, input);
     if (!parsed.ok) return done(fail("invalid_input", parsed.message));

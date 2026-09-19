@@ -836,13 +836,95 @@ export function validateReview(review: ReviewConfig): void {
   if (problem) throw new Error(`config.yaml: ${problem}`);
 }
 
+/** GitHub's login rule: 1 to 39 characters, alphanumerics and single hyphens,
+ *  not leading or trailing (record 0062). Case-insensitive on GitHub's side. */
+const GITHUB_LOGIN_RE = /^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$/;
+const GITHUB_LOGIN_MAX = 39;
+const GITHUB_LOGIN_RULE = "1 to 39 characters, alphanumerics and single hyphens, not leading or trailing";
+
+/** The keys a `{ login, id }` binding may carry. */
+const GITHUB_BINDING_KEYS: Record<string, true> = { login: true, id: true, via: true };
+
+/** One `users.<id>.github` value held to its shape (authorization.md item 18):
+ *  a login string or `{ login, id, via? }`; the login GitHub's rule, never an
+ *  app's `[bot]` suffix; the id an integer. Every finding names the path. */
+function githubBindingProblem(path: string, raw: unknown): string | undefined {
+  const loginProblem = (login: unknown): string | undefined => {
+    if (typeof login !== "string") return `${path}.login must be a GitHub login`;
+    if (login.endsWith("[bot]"))
+      return `${path} names "${login}", which ends in [bot] — an app's login, never a person's`;
+    if (login.length === 0 || login.length > GITHUB_LOGIN_MAX || !GITHUB_LOGIN_RE.test(login))
+      return `${path} names "${login}", which is not a GitHub login (${GITHUB_LOGIN_RULE})`;
+    return undefined;
+  };
+  if (typeof raw === "string") return loginProblem(raw);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    return `${path} must be a GitHub login or { login, id }`;
+  for (const key of unknownKeys(raw, GITHUB_BINDING_KEYS)) return `${path}: unknown field ${key}`;
+  const b = raw as { login?: unknown; id?: unknown; via?: unknown };
+  const bad = loginProblem(b.login);
+  if (bad) return bad;
+  if (!Number.isInteger(b.id)) return `${path}.id must be the account's integer id`;
+  if (b.via !== undefined && b.via !== "email") return `${path}.via must be "email"`;
+  return undefined;
+}
+
+/** The github key of one users map, lowercased login and id per user id. */
+function githubBindingsOf(users: Record<string, Scope> | undefined): Map<string, { login?: string; id?: number }> {
+  const bindings = new Map<string, { login?: string; id?: number }>();
+  for (const [id, scope] of Object.entries(users ?? {})) {
+    const github = scope?.github;
+    if (github === undefined) continue;
+    if (typeof github === "string") bindings.set(id, { login: github.toLowerCase() });
+    else if (typeof github === "object" && github !== null)
+      bindings.set(id, {
+        ...(typeof github.login === "string" ? { login: github.login.toLowerCase() } : {}),
+        ...(Number.isInteger(github.id) ? { id: github.id } : {}),
+      });
+  }
+  return bindings;
+}
+
+/** The refusal a would-be binding write earns under the load-time duplicate rule
+ *  (routing-and-config item 30): one GitHub login and one id under ONE person
+ *  across the overrides `layer` and the static `base` together. The write path
+ *  asks this BEFORE storing (`ConfigStore.githubBindingConflict`), so `config
+ *  set user` refuses by the same words `validateScopeBlocks` would throw at the
+ *  next load instead of poisoning the stored document. Rebinding the same
+ *  person replaces, never duplicates; where a user is in both layers the
+ *  override wins, as `layerScope` reads it. */
+export function githubBindingConflict(
+  userId: string,
+  binding: { login: string; id: number },
+  layer: { users?: Record<string, Scope> },
+  base?: { users?: Record<string, Scope> },
+): string | undefined {
+  const combined = githubBindingsOf(base?.users);
+  for (const [id, b] of githubBindingsOf(layer.users)) combined.set(id, b);
+  combined.delete(userId);
+  const login = binding.login.toLowerCase();
+  for (const [other, b] of combined) {
+    if (b.login === login)
+      return `users ${other} and ${userId} both bind GitHub login "${binding.login}" — one login binds one person`;
+    if (b.id === binding.id)
+      return `users ${other} and ${userId} both bind GitHub id ${binding.id} — one account binds one person`;
+  }
+  return undefined;
+}
+
 /** Reject a malformed `review.addressSeverity` or `ship.grant` on a channel's or
  *  a user's scope, naming the path (docs/reference/specs/routing-and-config.md
  *  item 2); the org's ride `validateReview` and `validateShip`. A grant without
- *  `renewals` reads as zero at resolution. */
+ *  `renewals` reads as zero at resolution. The `github` author binding
+ *  (record 0062) is held here too: valid only under `users`, its shape
+ *  `githubBindingProblem`'s, and one login and one id under one person across
+ *  `layer` and `base` together — the static config when a stored overrides
+ *  document is validated, so the two layers cannot bind one GitHub account to
+ *  two people between them (a user present in both counts once: the override wins). */
 export function validateScopeBlocks(
   layer: { channels?: Record<string, Scope>; users?: Record<string, Scope>; threads?: Record<string, Scope> },
   source: string,
+  base?: { users?: Record<string, Scope> },
 ): void {
   for (const [kind, scopes] of [
     ["channels", layer.channels],
@@ -875,10 +957,43 @@ export function validateScopeBlocks(
         throw new Error(`${source}: ${ADDRESS_SEVERITY_MOVED(`${kind}.${id}.ship.addressSeverity`)}`);
       const idle = idleDaysProblem(`${kind}.${id}.ship.idleDays`, scope.ship?.idleDays);
       if (idle) throw new Error(`${source}: ${idle}`);
+      // The author binding is a users key: under a channel or a thread it
+      // would be read by nothing, so it is refused by name (record 0062).
+      if (scope.github !== undefined && kind !== "users")
+        throw new Error(`${source}: ${kind}.${id}.github is a users key — a GitHub binding belongs to a person`);
+      if (kind === "users" && scope.github !== undefined) {
+        const problem = githubBindingProblem(`${kind}.${id}.github`, scope.github);
+        if (problem) throw new Error(`${source}: ${problem}`);
+      }
       const grant = scope.ship?.grant;
       if (grant === undefined) continue;
       const problem = grantProblem(`${kind}.${id}.ship.grant`, grant);
       if (problem) throw new Error(`${source}: ${problem}`);
+    }
+  }
+  // One GitHub account binds one person, across both layers together: the
+  // base's bindings under this layer's (the same user id counts once — the
+  // override replaces the static value whole, as `layerScope` reads it).
+  const combined = githubBindingsOf(base?.users);
+  for (const [id, binding] of githubBindingsOf(layer.users)) combined.set(id, binding);
+  const byLogin = new Map<string, string>();
+  const byId = new Map<number, string>();
+  for (const [userId, binding] of combined) {
+    if (binding.login !== undefined) {
+      const other = byLogin.get(binding.login);
+      if (other !== undefined)
+        throw new Error(
+          `${source}: users ${other} and ${userId} both bind GitHub login "${binding.login}" — one login binds one person`,
+        );
+      byLogin.set(binding.login, userId);
+    }
+    if (binding.id !== undefined) {
+      const other = byId.get(binding.id);
+      if (other !== undefined)
+        throw new Error(
+          `${source}: users ${other} and ${userId} both bind GitHub id ${binding.id} — one account binds one person`,
+        );
+      byId.set(binding.id, userId);
     }
   }
 }

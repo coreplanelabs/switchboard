@@ -24,6 +24,7 @@ import { LocalOperations } from "../execution/executor.js";
 import { localWorkspaceDir } from "../execution/factory.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { resolveGithubIdentity } from "../execution/githubApp.js";
+import { resolveLogin } from "../execution/authorBinding.js";
 import { GithubDeliverySource } from "../execution/githubDelivery.js";
 import { ResidentOperations } from "../execution/resident.js";
 import { RestGithubApi } from "../execution/githubApi.js";
@@ -325,10 +326,15 @@ export function buildCoreCommands(
       setThreadOverride: async (t, p) => (await cfg()).setThreadOverride(t, p),
       clearChannelOverride: async (c) => (await cfg()).clearChannelOverride(c),
       clearUserOverride: async (u) => (await cfg()).clearUserOverride(u),
+      clearUserGithub: async (u) => (await cfg()).clearUserGithub(u),
+      githubBindingConflict: async (u, b) => (await cfg()).githubBindingConflict(u, b),
       clearThreadOverride: async (t) => (await cfg()).clearThreadOverride(t),
       channelsWithScope: async () => (await cfg()).channelsWithScope(),
       agentNames: () => Object.keys(AGENTS),
     },
+    // The `user` scope's binding write (record 0062): one GET /users/<login>
+    // over the read credential, in src/execution/authorBinding.ts.
+    identity: { resolveLogin },
     channelVisibility: (channelId) => {
       const channelDirectory = wiring.channelDirectory?.();
       return channelVisibilityOf(channelDirectory ? { channelDirectory } : {}, channelId);

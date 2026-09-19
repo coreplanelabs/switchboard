@@ -467,6 +467,8 @@ export const FIXTURE = {
   sessionKey: "slack:C1:unit:coding",
   /** The pull request that unit opened, reviewed and answered (`runs findings`), as a person spells it. */
   pullRequest: "acme/api#42",
+  /** The person whose GitHub binding `config set|clear user` targets (record 0062). */
+  boundUser: "slack:UBOUND",
 } as const;
 
 /** Hints by FIELD NAME: a value the fixture honors (an id that exists, a slug
@@ -511,10 +513,23 @@ export const FIELD_HINTS: SampleHints = {
  *  variant; `refusal` is a surface-bound refusal the data decides; `folds:
  *  "every-caller"` says the output legitimately names EVERY fixture caller (a
  *  list of every tier), so the cross-surface comparison folds every caller's id
- *  to the token, not only the asking caller's. Each entry says why the generic
- *  sample is not enough. */
+ *  to the token, not only the asking caller's; `variants` patches the named
+ *  input of a generated accepted variant BY NAME (`set` adds fields, `omit`
+ *  removes them) for a combination the schema alone cannot keep coherent —
+ *  `config set`'s `--github` belongs to the `user` scope alone (record 0062),
+ *  so the all-set grid would be refused by name. Each entry says why the
+ *  generic sample is not enough. */
 export const COMMAND_FIXTURES: Readonly<
-  Record<string, { hints?: SampleHints; baseline?: Named; folds?: "every-caller"; why: string }>
+  Record<
+    string,
+    {
+      hints?: SampleHints;
+      baseline?: Named;
+      folds?: "every-caller";
+      variants?: Record<string, { set?: Named; omit?: readonly string[] }>;
+      why: string;
+    }
+  >
 > = {
   "config.show": {
     baseline: { channel: FIXTURE.channel },
@@ -522,11 +537,24 @@ export const COMMAND_FIXTURES: Readonly<
   },
   "config.set": {
     baseline: { channel: FIXTURE.channel, thread: FIXTURE.thread, intake: { threadReplies: "classify" } },
-    why: "as config.show plus `--thread` (a machine caller has no origin thread), and at least one setting every scope takes (a bare `config set` is `nothing to set`; a thread scope carries only the intake gate's mode)",
+    hints: { github: "ivy-dev", user: FIXTURE.boundUser },
+    variants: {
+      // `--github` and `--user` belong to the `user` scope alone (record 0062):
+      // the all-set combination is refused by name, and the user scope carries
+      // the binding alone — so the grid's two incoherent cases are patched here.
+      "all-options-set": { omit: ["github", "user"] },
+      "scope=user": { set: { user: FIXTURE.boundUser, github: "ivy-dev" }, omit: ["intake"] },
+    },
+    why: "as config.show plus `--thread` (a machine caller has no origin thread), and at least one setting every scope takes (a bare `config set` is `nothing to set`; a thread scope carries only the intake gate's mode; the user scope carries the binding alone)",
   },
   "config.clear": {
     baseline: { channel: FIXTURE.channel, thread: FIXTURE.thread },
-    why: "as config.show, plus `--thread` for the thread scope on machine surfaces",
+    hints: { user: FIXTURE.boundUser },
+    variants: {
+      // `config clear user` names the person whose binding to remove.
+      "scope=user": { set: { user: FIXTURE.boundUser } },
+    },
+    why: "as config.show, plus `--thread` for the thread scope on machine surfaces and `--user` for the user scope's binding",
   },
   "config.instructions": { baseline: { channel: FIXTURE.channel }, why: "as config.show" },
   "repo.reconfigure": {
@@ -605,7 +633,14 @@ export function variantsOf(cmd: Pick<CommandDef<unknown>, "id" | "args" | "optio
 } {
   const entry = COMMAND_FIXTURES[cmd.id];
   const { variants, missingSamples } = exhaustiveVariants(cmd, { ...FIELD_HINTS, ...entry?.hints }, entry?.baseline);
-  return { variants: variants.filter((v) => SURFACE_METAS.some((s) => exposedOn(cmd, s, v))), missingSamples };
+  const patched = variants.map((v) => {
+    const patch = entry?.variants?.[v.name];
+    if (!patch) return v;
+    const named = { ...v.named, ...patch.set };
+    for (const field of patch.omit ?? []) delete named[field];
+    return { ...v, named };
+  });
+  return { variants: patched.filter((v) => SURFACE_METAS.some((s) => exposedOn(cmd, s, v))), missingSamples };
 }
 
 // ---- the surfaces, as data ---------------------------------------------------------------------------

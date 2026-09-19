@@ -1710,6 +1710,20 @@ describe("overrides backing (item 12: durable runtime overrides)", () => {
     });
   });
 
+  it("a write the loader would refuse fails BEFORE the save and keeps the document — a duplicate github binding never poisons the backing (record 0062)", async () => {
+    const { cfg } = cfgFile();
+    const backing = new InMemoryOverridesBacking({ channels: {}, users: {} });
+    const s = new ConfigStore(cfg, { backing, initial: await backing.load() });
+    await s.setUserOverride("slack:UONE", { github: { login: "ivy-dev", id: 4242 } });
+    await expect(s.setUserOverride("slack:UTWO", { github: { login: "Ivy-Dev", id: 9 } })).rejects.toThrow(
+      /one login binds one person/,
+    );
+    expect(backing.saves).toBe(1);
+    expect(s.userGithubBinding("slack:UTWO")).toBeUndefined();
+    // The stored document stayed loadable: a restart over it constructs clean.
+    expect(() => new ConfigStore(cfg, { backing, initial: backing.document })).not.toThrow();
+  });
+
   it("concurrent writes in one process are serialized: neither loses the other's change", async () => {
     const { cfg } = cfgFile();
     const backing = new InMemoryOverridesBacking();
