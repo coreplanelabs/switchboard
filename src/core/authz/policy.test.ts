@@ -173,6 +173,19 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.noGrants, command("costs.by")],
     ],
   },
+  // `metrics trend` is a read in the costs shape: a browser session's baseline holds it, a Slack user needs the grant.
+  "metrics:read command [has-grant(metrics:read)]": {
+    allow: [
+      [A.admin, command("metrics.trend")],
+      [A.browser, command("metrics.trend")],
+      [A.operator, command("metrics.trend")],
+    ],
+    deny: [
+      [A.member, command("metrics.trend")],
+      [A.chatUser, command("metrics.trend")],
+      [A.noGrants, command("metrics.trend")],
+    ],
+  },
   // `costs snapshot` replaces what every viewer of the costs page sees: the grant, never a baseline.
   "costs:write command [has-grant(costs:write)]": {
     allow: [[A.admin, command("costs.snapshot")]],

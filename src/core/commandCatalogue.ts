@@ -30,6 +30,8 @@ import { ResidentOperations } from "../execution/resident.js";
 import { RestGithubApi } from "../execution/githubApi.js";
 import { parseCostsConfig } from "./costs.js";
 import { costsFromConfig, NullCostsService, type CostsService } from "./costsService.js";
+import { AnalyticsEngineSqlSource, parseMetricsConfig } from "./metrics.js";
+import { createMetricsService, NullMetricsService, type MetricsService } from "./metricsService.js";
 import { createPlaneService, type PlaneService } from "./planeService.js";
 import { fetchCommitChecks, fetchPullRequestFacts, fetchPullRequestReviews } from "../execution/githubPulls.js";
 import { createDeliveryService, NullDeliveryService, parseDeliveryConfig, type DeliveryService } from "./delivery.js";
@@ -141,6 +143,10 @@ export interface CoreCommandWiring {
    *  page reads); default: both billing sources with the `costs:` config over the
    *  snapshot store the state Worker holds, or the Null Object when cost reporting is off. */
   costs?: () => CostsService;
+  /** The metrics service behind `metrics trend` (index.ts shares the one the `/metrics`
+   *  page will read); default: the Analytics Engine SQL API over the `metrics:` block and
+   *  the costs block's credential, or the Null Object when the reader is off. */
+  metrics?: () => MetricsService;
   /** The plane service behind `plane show` (index.ts shares the one the `/plane`
    *  panel reads); default: the runs service and the instance store above with
    *  the merge door's GitHub reads. */
@@ -300,6 +306,22 @@ export function buildCoreCommands(
       });
     return wired?.service ?? new NullCostsService();
   });
+  // ONE metrics service per binding: `metrics trend` reads the same dataset over
+  // the same credential everywhere — the SQL API on the costs block's analytics token.
+  const metrics = once(async (): Promise<MetricsService> => {
+    if (wiring.metrics) return wiring.metrics();
+    if (wiring.capabilities && !wiring.capabilities.metrics) return new NullMetricsService();
+    const config = (await cfg()).config;
+    const metricsCfg = parseMetricsConfig(config.metrics);
+    const costsCfg = parseCostsConfig(config.costs);
+    const token = costsCfg && wiring.secrets.named(costsCfg.cloudflareTokenEnv);
+    if (!metricsCfg || !costsCfg || !token) return new NullMetricsService();
+    return createMetricsService(
+      metricsCfg,
+      new AnalyticsEngineSqlSource({ accountId: costsCfg.cloudflareAccountId, token: token.reveal() }),
+      { ...(wiring.now ? { now: wiring.now } : {}) },
+    );
+  });
   // ONE plane service per binding: `plane show` and the `/plane` panel read the
   // same table over the same runs service and instance store.
   const plane = once(async (): Promise<PlaneService> => {
@@ -406,6 +428,7 @@ export function buildCoreCommands(
     contract: { readFile: readOptionalFile },
     delivery: { service: delivery },
     costs: { service: costs },
+    metrics: { service: metrics },
     plane: { service: plane },
     // `providers check`: the loaded blocks and refs, the installed pi registry
     // (the very catalog the dispatcher resolves cards against), the real fetch.

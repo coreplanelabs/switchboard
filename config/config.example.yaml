@@ -536,12 +536,13 @@ workspaceDir: ./workspaces
 # Run metrics (docs/reference/specs/run-metrics.md). Optional. The Analytics Engine
 # dataset every finished run's point lands in — the SAME name the deployment
 # profile's `metrics.dataset` binds on the state Worker as RUN_METRICS (the bot
-# warns at boot when the two differ; neither side refuses to start). The reader
-# over the dataset — `metrics trend` and the /metrics page, behind the `metrics`
-# capability — is later work of the same decision; until it lands, only `dataset`
-# is read, for that boot comparison.
+# warns at boot when the two differ; neither side refuses to start). With the
+# `costs` block's Cloudflare account and analytics token this turns the `metrics`
+# capability on: `metrics trend` reads the trend report from the dataset over the
+# Analytics Engine SQL API, weighted for sampling.
 # metrics:
 #   dataset: switchboard_runs
+#   days: 30                                  # optional: the default report range in whole UTC days, 1..90
 
 # Delivery indicators: GET /delivery and `delivery report` (docs/reference/specs/delivery.md).
 # Optional. Needs a GitHub credential (the App triple or GH_TOKEN); read-only on GitHub.

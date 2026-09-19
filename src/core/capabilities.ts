@@ -2,6 +2,7 @@ import type { AppConfig } from "../config.js";
 import { parseMcpSettings } from "../mcp/config.js";
 import { anthropicApiKey } from "./anthropicApiKey.js";
 import { parseCostsConfig } from "./costs.js";
+import { parseMetricsConfig } from "./metrics.js";
 import { resolveDashboardAuthMode, type DashboardAuthMode } from "./dashboardAuthConfig.js";
 import { parseIngressTokenMap } from "./ingressTokens.js";
 import type { EnvRecord, Secrets } from "../secrets.js";
@@ -38,6 +39,10 @@ export interface Capabilities {
   mcp: boolean;
   /** The spend dashboard: a `costs` block AND its Cloudflare analytics token in the env. */
   costs: boolean;
+  /** The run-metrics reader (`metrics trend`, the /metrics page): a `metrics` block naming
+   *  the dataset AND the `costs` block's account id with its analytics token in the env —
+   *  the reader queries the SQL API on the same credential the spend dashboard reads with. */
+  metrics: boolean;
   /** Scheduled firings recorded: `schedules.worker.baseUrl` with its bearer in the env. */
   schedules: boolean;
   /** A GitHub credential: the App triple (`GITHUB_APP_ID` + `GITHUB_APP_PRIVATE_KEY` + `GITHUB_APP_INSTALLATION_ID`) or the static `GH_TOKEN`. */
@@ -70,6 +75,7 @@ export const ALL_CAPABILITIES: Readonly<Capabilities> = Object.freeze({
   runLedger: true,
   mcp: true,
   costs: true,
+  metrics: true,
   schedules: true,
   github: true,
   ingress: true,
@@ -86,6 +92,7 @@ export const NO_CAPABILITIES: Readonly<Capabilities> = Object.freeze({
   runLedger: false,
   mcp: false,
   costs: false,
+  metrics: false,
   schedules: false,
   github: false,
   ingress: false,
@@ -115,7 +122,7 @@ function workerReachable(worker: { baseUrl?: string; tokenEnv?: string } | undef
 
 /**
  * The one computation. Throws exactly where the builders it mirrors throw — a
- * malformed `costs` or `mcp` block — so a bad config is a startup error here as
+ * malformed `costs`, `metrics` or `mcp` block — so a bad config is a startup error here as
  * it is there, never a capability silently read as off.
  */
 export function capabilitiesFrom(
@@ -128,6 +135,8 @@ export function capabilitiesFrom(
   const runHistoryOn =
     runHistory !== undefined && (runHistory.store === "file" || workerReachable(runHistory.worker, secrets));
   const costs = parseCostsConfig(config.costs);
+  const metrics = parseMetricsConfig(config.metrics);
+  const costsTokenSet = costs !== undefined && secrets.named(costs.cloudflareTokenEnv) !== undefined;
   const ingress = parseIngressTokenMap(secrets.get("SWITCHBOARD_INGRESS_TOKENS")?.reveal());
   const accessConfigured = present(env.ACCESS_TEAM_DOMAIN) && present(env.ACCESS_AUD);
   return {
@@ -137,7 +146,8 @@ export function capabilitiesFrom(
     runHistory: runHistoryOn,
     runLedger: runHistoryOn && runHistory?.store !== "file",
     mcp: parseMcpSettings(config.mcp) !== undefined,
-    costs: costs !== undefined && secrets.named(costs.cloudflareTokenEnv) !== undefined,
+    costs: costsTokenSet,
+    metrics: metrics !== undefined && costsTokenSet,
     schedules: workerReachable(config.schedules?.worker, secrets),
     github:
       (secrets.get("GITHUB_APP_ID") !== undefined &&

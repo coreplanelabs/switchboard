@@ -93,6 +93,15 @@ describe("capabilitiesFrom — every axis, on and off", () => {
     expect(() => caps({ costs: { groups: {} } })).toThrow(/cloudflareAccountId/);
   });
 
+  it("metrics: a metrics block naming the dataset AND the costs block with its token — either half missing is off; a malformed block throws", () => {
+    const metrics = { dataset: "switchboard_runs" };
+    expect(caps({ metrics, costs: COSTS }, { CF_ANALYTICS_TOKEN: "t" }).metrics).toBe(true);
+    expect(caps({ metrics, costs: COSTS }).metrics).toBe(false); // token unset
+    expect(caps({ metrics }, { CF_ANALYTICS_TOKEN: "t" }).metrics).toBe(false); // no costs block
+    expect(caps({ costs: COSTS }, { CF_ANALYTICS_TOKEN: "t" }).metrics).toBe(false); // no metrics block
+    expect(() => caps({ metrics: { dataset: "1bad" } })).toThrow(/metrics\.dataset/);
+  });
+
   it("schedules mirrors buildScheduleStore: the firing store's URL and its bearer", () => {
     const cases: Array<{ schedules: AppConfig["schedules"]; env: NodeJS.ProcessEnv }> = [
       { schedules: undefined, env: {} },
@@ -192,6 +201,7 @@ describe("capabilitiesFrom — every axis, on and off", () => {
         schedules: { worker: STATE },
         mcp: {},
         costs: COSTS,
+        metrics: { dataset: "switchboard_runs" },
       },
       FULL_ENV,
       secretsFrom(FULL_ENV),

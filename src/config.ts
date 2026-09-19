@@ -377,10 +377,10 @@ export interface AppConfig {
   /**
    * Run metrics (docs/reference/specs/run-metrics.md): the Analytics Engine
    * dataset every finished run's point lands in — the same name the deployment
-   * profile's `metrics.dataset` binds on the state Worker; the boot probe warns
-   * when the two differ. The reader over the dataset (its parser and the
-   * `metrics` capability) is later work of the same decision; until then only
-   * `dataset` is read, for that comparison.
+   * profile's `metrics.dataset` binds on the state Worker (the boot probe warns
+   * when the two differ) — and the reader's default range (`days`). Validated at
+   * startup by `parseMetricsConfig` (src/core/metrics.ts); with the costs block's
+   * analytics credential it turns the `metrics` capability on (`metrics trend`).
    */
   metrics?: unknown;
   /**

@@ -822,6 +822,18 @@ describe("runHistory config", () => {
   });
 });
 
+// Feature: run-metrics.md item 7 — the `metrics:` reader block is validated at
+// load by field: a bad dataset name or a range outside 1..90 is a startup
+// error, never a half-wired reader.
+describe("metrics config", () => {
+  it("loads a well-formed block and refuses a bad dataset name or days by field", () => {
+    const s = store(`${YAML_FIXTURE}\nmetrics:\n  dataset: switchboard_runs\n  days: 7\n`);
+    expect(s.config.metrics).toEqual({ dataset: "switchboard_runs", days: 7 });
+    expect(() => store(`${YAML_FIXTURE}\nmetrics:\n  dataset: 1bad\n`)).toThrow(/metrics\.dataset/);
+    expect(() => store(`${YAML_FIXTURE}\nmetrics:\n  dataset: runs\n  days: 91\n`)).toThrow(/metrics\.days/);
+  });
+});
+
 // Feature: self-improvement.md item 1 — the section is `repo`/`label`/`minRuns`/`top`;
 // the friction ledger is run history, so the section carries no ledger keys and
 // an unknown field is refused by name, never ignored as if it did something.

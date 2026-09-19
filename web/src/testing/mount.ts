@@ -24,6 +24,7 @@ export const ALL_ON: Capabilities = {
   runLedger: true,
   mcp: true,
   costs: true,
+  metrics: true,
   schedules: true,
   github: true,
   ingress: true,

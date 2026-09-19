@@ -91,6 +91,12 @@ export const POLICY: readonly Rule[] = [
   // `all` and a named `grants` entry hold it).
   { action: "costs:write", resource: "command", when: [grant("costs:write")] },
 
+  // ── metrics ──────────────────────────────────────────────────────────────
+  // `metrics trend` reads the run-metrics dataset's report: the `costs:read`
+  // shape — a browser session's baseline, a grant for a Slack user or a token,
+  // never a chat baseline.
+  { action: "metrics:read", resource: "command", when: [grant("metrics:read")] },
+
   // ── providers ────────────────────────────────────────────────────────────
   // `providers check` reads the provider's own endpoints on request: a browser
   // session's read baseline, a grant everywhere else — an on-request provider

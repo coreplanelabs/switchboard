@@ -30,6 +30,8 @@ import { NullDeliveryService, parseDeliveryConfig, SNAPSHOT_EVERY_MINUTES } from
 import { buildDeliverySnapshotStore } from "./core/deliverySnapshotStore.js";
 import { parseCostsConfig } from "./core/costs.js";
 import { costsFromConfig, NullCostsService } from "./core/costsService.js";
+import { AnalyticsEngineSqlSource, parseMetricsConfig } from "./core/metrics.js";
+import { createMetricsService, NullMetricsService } from "./core/metricsService.js";
 import { NullResidentAdminClient, residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
 import { httpJwksFetcher, JwksCache, parseAccessConfig, type VerifyDeps } from "./channels/accessAuth.js";
@@ -421,11 +423,7 @@ export async function runBot(): Promise<void> {
         // The name held on both sides (run-metrics.md item 6): the bot's configured
         // metrics.dataset against the dataset the Worker's deploy bound — one warning
         // when they disagree, advisory on both sides.
-        const metricsCfg = config.config.metrics as { dataset?: unknown } | undefined;
-        const datasetWarning = metricsDatasetWarning(
-          typeof metricsCfg?.dataset === "string" ? metricsCfg.dataset : undefined,
-          features,
-        );
+        const datasetWarning = metricsDatasetWarning(parseMetricsConfig(config.config.metrics)?.dataset, features);
         if (datasetWarning !== undefined) console.warn(datasetWarning);
       })
       .catch((err: unknown) =>
@@ -596,6 +594,18 @@ export async function runBot(): Promise<void> {
   const costsService = costs?.service ?? new NullCostsService();
   // A stale snapshot after a restart is refreshed at once; a young one is left alone.
   costs?.snapshots.startRefreshLoop();
+  // Run metrics reader (docs/reference/specs/run-metrics.md): `metrics trend` reads
+  // the dataset over the Analytics Engine SQL API with the SAME analytics token the
+  // costs sources hold — revealed into the source's constructor and held nowhere else.
+  const metricsCfg = parseMetricsConfig(config.config.metrics);
+  const metricsToken = costsCfg && processSecrets.named(costsCfg.cloudflareTokenEnv);
+  const metricsService =
+    capabilities.metrics && metricsCfg && costsCfg && metricsToken
+      ? createMetricsService(
+          metricsCfg,
+          new AnalyticsEngineSqlSource({ accountId: costsCfg.cloudflareAccountId, token: metricsToken.reveal() }),
+        )
+      : new NullMetricsService();
   const commands = buildCoreCommands(config, runStore, {
     registry: defaultRunRegistry,
     secrets: processSecrets,
@@ -605,6 +615,7 @@ export async function runBot(): Promise<void> {
     runs: runsService,
     delivery: () => deliveryService,
     costs: () => costsService,
+    metrics: () => metricsService,
     plane: () => planeService,
     abridger: () => abridger,
     frictionLedger,

@@ -170,6 +170,12 @@ One table per group, in registration order. "Surfaces" is where that command can
 | `costs by <user\|thread\|channel\|agent\|model> [--days <integer>] [--group <string>]` | What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written. | every surface |
 | `costs snapshot` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. | every surface |
 
+### `metrics`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `metrics trend [--days <integer>] [--agent <string>]` | The run trend from the metrics dataset: runs, failure rate, p50/p95 wall and dollars per day and per agent over the range, weighted for sampling — the /metrics page's report as text or JSON; nothing written. | every surface |
+
 ### `providers`
 
 | Command | What it does | Surfaces |

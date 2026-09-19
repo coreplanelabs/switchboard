@@ -142,6 +142,12 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 | `costs by <user\|thread\|channel\|agent\|model> [--days <integer>] [--group <string>]` | What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written. | admins |
 | `costs snapshot` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. | admins |
 
+### `metrics`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `metrics trend [--days <integer>] [--agent <string>]` | The run trend from the metrics dataset: runs, failure rate, p50/p95 wall and dollars per day and per agent over the range, weighted for sampling — the /metrics page's report as text or JSON; nothing written. | admins |
+
 ### `providers`
 
 | Command | What it does | Who can run it |
