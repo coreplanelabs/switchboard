@@ -30,6 +30,7 @@ import type {
 import { InMemoryGithubApi, type IssueSummary } from "../execution/githubApi.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import type { RunHistoryWriter } from "../core/runHistoryWriter.js";
+import { pipelineOfEvents } from "../core/pipelineStanding.js";
 import { parseModelPrices, type ModelPriceTable } from "../core/modelPricing.js";
 import {
   COORDINATOR_ADMIN_PREFIX,
@@ -151,10 +152,17 @@ function harness(
     merge?: MergeResult | Error;
     /** The runs page base the plan route answers (agent-ship item 12). */
     runPageBase?: string;
+    /** A tiny backlog for the trim tests (record 0065): the seal must not read the trimmed snapshot's standing. */
+    backlogLimit?: number;
   } = {},
 ) {
   let n = 0;
-  const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
+  const registry = new RunRegistry({
+    genId: () => `run-${++n}`,
+    genToken: () => `tok-${n}`,
+    now: () => NOW,
+    ...(over.backlogLimit !== undefined ? { backlogLimit: over.backlogLimit } : {}),
+  });
   const store = new InMemoryRunStore({ now: () => NOW });
   const ledger = new InMemoryRunLedger(() => NOW);
   const runs = createRunsService({
@@ -2356,6 +2364,28 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].rounds).toHaveLength(1); // nothing malformed was appended
   });
 
+  // Record 0065 / issue 1968: `ShipRoundOutcome` grew `continued` (decision 0046's
+  // renewal) and `idle` (record 0051) while the route's accepted list did not,
+  // so a renewed round 0 threw in the driver. The route now accepts the whole
+  // union, pinned by a type-level exhaustiveness check on `ROUND_OUTCOMES`.
+  it("the round route accepts continued and idle", async () => {
+    const h = await planHarness();
+    await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    const boundary = { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", index: 0, agent: "coding" };
+    expect(await call(h, "round", { ...boundary, outcome: "continued" })).toEqual({
+      status: 200,
+      body: { ok: true, at: NOW },
+    });
+    expect(await call(h, "round", { ...boundary, outcome: "idle" })).toEqual({
+      status: 200,
+      body: { ok: true, at: NOW },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].rounds).toEqual([
+      { index: 0, agent: "coding", outcome: "continued", at: NOW },
+      { index: 0, agent: "coding", outcome: "idle", at: NOW },
+    ]);
+  });
+
   it("round appends the boundary to the unit's row and redraws the card from the instance's card handle with one line per unit; a malformed boundary is 400", async () => {
     const frames: StatusUpdate[] = [];
     const h = await planHarness({
@@ -2890,6 +2920,34 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       text: "Plan fixture ended (completed):\n✅ U10 — merge_ready — https://github.com/acme/api/pull/7\n• U11 — not started",
     });
     expect((await call(h, "finish", { parentInstanceId: PLAN_INSTANCE.id, outcome: "won" })).status).toBe(400);
+  });
+
+  // Record 0065 — finish seals the record from `registry.snapshotById`, the
+  // TRIMMED backlog; the standing must come from the registry summary's own
+  // whole-list fold (`RunState.pipelineEvents`, kept beside the backlog for
+  // exactly this), or a long-lived parent's sealed record demotes a round or
+  // loses a unit's pull request while the live summary had it right.
+  it("finish seals the record with the registry's whole-list standing even when the backlog trimmed ship events out of the snapshot", async () => {
+    const h = await planHarness({ backlogLimit: 3 });
+    await hostParent(h);
+    const shipEvents = [
+      { type: "ship_unit", unit: "U10", state: "started", at: NOW - 9_000 },
+      { type: "ship_round", index: 0, agent: "coding", outcome: "started", at: NOW - 8_000 },
+      { type: "ship_unit", unit: "U10", state: "started", at: NOW - 8_000 },
+      { type: "ship_round", index: 0, agent: "coding", outcome: "pr_opened", at: NOW - 5_000 },
+      { type: "ship_unit", unit: "U10", state: "pr_opened", pr: 412, at: NOW - 5_000 },
+      { type: "ship_round", index: 1, agent: "review", outcome: "started", at: NOW - 4_000 },
+      { type: "ship_unit", unit: "U10", state: "started", at: NOW - 4_000 },
+    ] as const;
+    for (const e of shipEvents) h.registry.publish("run-parent", e as never);
+    const live = h.registry.getById("run-parent")!.pipeline;
+    expect(live?.current).toMatchObject([{ unit: "U10", stage: "review", round: 1, pr: 412 }]);
+    expect((await call(h, "finish", { parentInstanceId: PLAN_INSTANCE.id, outcome: "completed" })).status).toBe(200);
+    const rec = h.written[0];
+    // The guard is real: the trimmed events on the record fold to a DIFFERENT
+    // standing (the round demoted, the pull request gone) than the one sealed.
+    expect(pipelineOfEvents(rec.events)).not.toEqual(live);
+    expect(rec.pipeline).toEqual(live);
   });
 
   it("a generated instance (a `plan` with no `path`) carries the task wording: the card line and the record's summary name no unit id, and finish posts no summary reply — the unit's report already landed in the requesting thread", async () => {

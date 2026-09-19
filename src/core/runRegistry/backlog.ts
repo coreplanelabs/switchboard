@@ -1,3 +1,4 @@
+import { pipelineStandingOf, summaryOfStanding } from "../pipelineStanding.js";
 import { isHeadMaterial, serializedOnce, type RunEvent } from "../runEvents.js";
 import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "../runRecord.js";
 import { activityOf } from "./activity.js";
@@ -45,7 +46,15 @@ export interface BacklogBounds {
  *  total, the protected head, and the activity line refreshed per event. */
 export type BacklogState = Pick<
   RunState,
-  "backlog" | "backlogSizes" | "backlogBytes" | "headLen" | "headBytes" | "activity" | "instanceId"
+  | "backlog"
+  | "backlogSizes"
+  | "backlogBytes"
+  | "headLen"
+  | "headBytes"
+  | "activity"
+  | "instanceId"
+  | "pipelineEvents"
+  | "pipeline"
 >;
 
 /** Append one stamped event to the run's bounded backlog and refresh its
@@ -79,6 +88,14 @@ export function appendToBacklog(run: BacklogState, bounds: BacklogBounds, publis
   // live row must pick the id up from whichever event publishes first.
   if ((stamped.type === "ship_handoff" || stamped.type === "run_meta") && stamped.instanceId !== undefined)
     run.instanceId = stamped.instanceId;
+  // The pipeline's standing (record 0065): the fold runs here, beside the
+  // instance-id fold, so a fresh publish and the re-host replay carry one
+  // standing. The ship events are kept whole — the bounded backlog may trim
+  // them, and a refold over the kept list is cheap (a pipeline publishes few).
+  if (stamped.type === "ship_round" || stamped.type === "ship_unit") {
+    (run.pipelineEvents ??= []).push(stamped);
+    run.pipeline = summaryOfStanding(pipelineStandingOf(run.pipelineEvents));
+  }
   while (
     run.backlog.length > run.headLen + 1 &&
     (run.backlog.length > bounds.limit || run.backlogBytes > bounds.bytes)

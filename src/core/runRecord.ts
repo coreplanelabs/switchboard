@@ -14,6 +14,7 @@ import {
   type ReviewVerdict,
 } from "./reviewVerdict.js";
 import { IDEMPOTENCY_KEY_PATTERN, INSTANCE_ID_PATTERN } from "./coordinator/contract.js";
+import { isPipelineSummaryShape, type PipelineSummary } from "./pipelineStanding.js";
 import {
   FRICTION_CATEGORIES,
   type CategoryTotals,
@@ -215,6 +216,15 @@ export interface RunRecord {
    *  coordinator tag. Present only on a ship run whose hand-off succeeded;
    *  a record written before the event has none. */
   instanceId?: string;
+  /** The pipeline's standing (record 0065): the fold of the run's own
+   *  `ship_round`/`ship_unit` events, summarized at the seal so the stored row
+   *  reads it without the events. Present only on a run that published ship
+   *  facts; a record written before the field carries none and reads as today. */
+  pipeline?: PipelineSummary;
+  /** A ship pipeline's parent run (record 0060; record 0065): `RunMeta.hosted`
+   *  carried onto the record at the seal, so a history reader draws the run as
+   *  a pipeline. Absent on every other run and on older records. */
+  hosted?: true;
   /** Where the run's conversation started (item 52): `channel` — its own
    *  thread's history, as for every run a person, a schedule or a coordinator
    *  started — or `parent` — a spawned child seeded from its parent's text
@@ -985,6 +995,11 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // The instance a ship run's hand-off created (record 0051 R2; item 2).
   if (r.instanceId !== undefined && (typeof r.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(r.instanceId)))
     return false;
+  // The pipeline's standing and the hosted marker (record 0065): the summary
+  // is checked for shape — an older reader accepts a newer record — and the
+  // marker, like `provisional`, is the literal `true` or absent.
+  if (r.pipeline !== undefined && !isPipelineSummaryShape(r.pipeline)) return false;
+  if (r.hosted !== undefined && r.hosted !== true) return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   if (r.relayedBy !== undefined && typeof r.relayedBy !== "string") return false;
   if (r.authenticatedAs !== undefined && typeof r.authenticatedAs !== "string") return false;

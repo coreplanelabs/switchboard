@@ -1,5 +1,6 @@
 import type { ChannelVisibility } from "../authz/types.js";
 import { SPAN_SCHEMA } from "../normalizeSpans.js";
+import type { PipelineSummary } from "../pipelineStanding.js";
 import type { RunEvent, StopMode } from "../runEvents.js";
 import type { RunSeed, RunStatus } from "../runRecord.js";
 import { eventsInWindow, type InFlightCall } from "../runPace.js";
@@ -85,6 +86,10 @@ export interface RunSummary {
    *  published event naming one (`ship_handoff`, then the hosted `run_meta`) —
    *  what lets the index nest the instance's unit runs under this row live. */
   instanceId?: string;
+  /** The pipeline's standing (record 0065): the fold of this run's own
+   *  `ship_round`/`ship_unit` events, present only once one was published —
+   *  a hosted parent's row, never a model run's. */
+  pipeline?: PipelineSummary;
   /** Present only once a stop has been requested. */
   stop?: RunStopStatus;
   /** Present (true) once the history writer confirmed the run is in the durable
@@ -166,6 +171,7 @@ export function summaryOf(run: RunState, now: number): RunSummary {
     ...(m?.seed !== undefined ? { seed: m.seed } : {}),
     ...(m?.hosted ? { hosted: true as const } : {}),
     ...(run.instanceId !== undefined ? { instanceId: run.instanceId } : {}),
+    ...(run.pipeline !== undefined ? { pipeline: run.pipeline } : {}),
     finished: run.finished,
     startedAt: run.startedAt,
     ...(run.finishedAt !== undefined ? { finishedAt: run.finishedAt } : {}),

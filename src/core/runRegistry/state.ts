@@ -1,4 +1,5 @@
 import type { ChannelVisibility } from "../authz/types.js";
+import type { PipelineSummary } from "../pipelineStanding.js";
 import type { RunEvent } from "../runEvents.js";
 import type { InFlightCall } from "../runPace.js";
 import type { RunSeed, RunStatus } from "../runRecord.js";
@@ -131,6 +132,12 @@ export interface RunState {
    *  `run_meta` once hosted — set by `publish()` like `activity`, so the index
    *  can nest the instance's unit runs under this row while it is live. */
   instanceId?: string;
+  /** The hosted parent's `ship_round`/`ship_unit` events, kept whole beside
+   *  the bounded backlog (they are few and small), and the standing fold's
+   *  summary over them (record 0065) — refolded by `appendToBacklog` on each
+   *  ship event, so `publish()` and the re-host replay both carry it. */
+  pipelineEvents?: RunEvent[];
+  pipeline?: PipelineSummary;
   /** The stall signal's raw facts (docs/reference/specs/live-view.md item 32),
    *  set by `publish()`: the clock stamps of the content events still inside
    *  the pace window (ascending; pruned on publish), the newest `tool_call`'s
