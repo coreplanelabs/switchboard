@@ -16,7 +16,7 @@ import {
   SHIP_DEFAULT_MAX_MINUTES,
   type ShipConfig,
 } from "../core/shipPipeline.js";
-import { ALLOWANCES, ASKS, fit, GRANT_RENEWALS_MAX, type Grant } from "../core/budgets.js";
+import { ALLOWANCES, ASKS, fit, GRANT_RENEWALS_MAX, IDLE_DAYS_MAX, type Grant } from "../core/budgets.js";
 import type { SpawnConfig } from "../core/dispatch/spawn.js";
 import { validateDashboardConfig } from "../core/dashboardAuthConfig.js";
 import { validateArtifacts } from "../artifacts/config.js";
@@ -764,6 +764,7 @@ const SHIP_KEYS: Record<keyof ShipConfig, true> = {
   maxRounds: true,
   maxMinutes: true,
   grant: true,
+  idleDays: true,
 };
 
 /** The keys a grant may carry — held equal to `Grant` by the type checker. */
@@ -791,6 +792,17 @@ export function grantProblem(path: string, raw: unknown): string | undefined {
   )
     return `${path}.costCapUsd must be a positive number of dollars`;
   return undefined;
+}
+
+/** The idle flag, wherever config can carry it (the org's `ship.idleDays`, a
+ *  channel's or a user's): an integer count of days from 0 to `IDLE_DAYS_MAX`
+ *  (record 0051), refused naming the path — a typo never reads as "never
+ *  idles" or "idles a year". */
+export function idleDaysProblem(path: string, raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  return Number.isInteger(raw) && (raw as number) >= 0 && (raw as number) <= IDLE_DAYS_MAX
+    ? undefined
+    : `${path} must be an integer from 0 to ${IDLE_DAYS_MAX} (record 0051)`;
 }
 
 /** The lever's old home, refused by name wherever a config still carries it —
@@ -850,6 +862,8 @@ export function validateScopeBlocks(
       // is named, never silently ignored into "no gate".
       if (scope.ship !== undefined && "addressSeverity" in scope.ship)
         throw new Error(`${source}: ${ADDRESS_SEVERITY_MOVED(`${kind}.${id}.ship.addressSeverity`)}`);
+      const idle = idleDaysProblem(`${kind}.${id}.ship.idleDays`, scope.ship?.idleDays);
+      if (idle) throw new Error(`${source}: ${idle}`);
       const grant = scope.ship?.grant;
       if (grant === undefined) continue;
       const problem = grantProblem(`${kind}.${id}.ship.grant`, grant);
@@ -927,6 +941,9 @@ function validateShip(ship: ShipConfig): void {
     const problem = grantProblem("ship.grant", ship.grant);
     if (problem) throw new Error(`config.yaml: ${problem}`);
   }
+  // The idle flag (record 0051): a count of days within the module's bounds.
+  const idle = idleDaysProblem("ship.idleDays", ship.idleDays);
+  if (idle) throw new Error(`config.yaml: ${idle}`);
 }
 
 /** The `spawn` block's keys, held equal to `SpawnConfig` the way the top-level keys are. */

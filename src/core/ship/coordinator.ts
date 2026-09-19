@@ -696,7 +696,46 @@ export type UnitEnding =
     }
   | { kind: "no_verdict"; round: RoundRef; reviewRounds: number; finalReply?: string }
   | { kind: "interrupted"; round: RoundRef; runId: string; reviewRounds: number }
-  | { kind: "refused"; refusal: string; message?: string; round: RoundRef; reviewRounds: number };
+  | { kind: "refused"; refusal: string; message?: string; round: RoundRef; reviewRounds: number }
+  /** The unit idles instead of ending (record 0051): with the resolved
+   *  `ship.idleDays` above zero, `end()` wraps an idling kind — every kind but
+   *  the four ended ones (`merged`, `already_landed`, `merge_ready`,
+   *  `refused`) — in this ending: the old kind as `why`, the old kind's
+   *  report unchanged, and what a continuation needs (the renewals the grant
+   *  still holds — unspent: the wake spends one, this plan's fifth unit — the
+   *  head to continue from, the last coding child's run, the spend and its
+   *  handoff). `runId` is absent when the pipeline capped before any coding
+   *  child ran. */
+  | {
+      kind: "idle";
+      why: IdleWhy;
+      /** The ending the idle stands in for, whole: its report is rendered per
+       *  copy at that copy's level — the row's and the board's in full, the
+       *  thread's at the request's verbosity — never once at mapping time. */
+      idled: Exclude<UnitEnding, { kind: "idle" }>;
+      renewalsLeft: number;
+      from?: string;
+      runId?: string;
+      spendUsd: number | null;
+      handoff?: Handoff;
+      round?: RoundRef;
+      reviewRounds: number;
+    };
+
+/** The kinds that idle: every ending but the four ended ones — the unit is
+ *  unfinished (a cap, a stop, an abort, a refused merge, a segment's end) and
+ *  a reply could continue it. `merged`, `already_landed`, `merge_ready` and
+ *  `refused` never idle: the first two are done, merge-ready waits only for a
+ *  person's merge, and a refused child would be refused again. */
+export type IdleWhy = Exclude<UnitEnding["kind"], "idle" | "merged" | "already_landed" | "merge_ready" | "refused">;
+
+const NEVER_IDLES: ReadonlySet<UnitEnding["kind"]> = new Set([
+  "idle",
+  "merged",
+  "already_landed",
+  "merge_ready",
+  "refused",
+]);
 
 /** What a transition tells the driver beyond the next action: a round boundary
  *  the card draws (`shipRoundHeader`) and the run stream records, and the end. */
@@ -783,6 +822,11 @@ export interface UnitPipelineInput {
    *  `plan` with an id and no `path` — whose unit runs in the requesting
    *  thread and is re-issued with the request's own text, never a plan path. */
   generated: boolean;
+  /** The idle flag (record 0051; agent-ship item 8): `ship.idleDays` as the
+   *  ship fork resolved it onto the instance — above zero, an idling kind ends
+   *  `idle` instead; zero or absent is today's behavior byte for byte. The
+   *  wait itself lands with this plan's fifth unit. */
+  idleDays?: number;
   /** Resume at review: an open pull request of ship's own the requester named. */
   resume?: { pr: number; headSha?: string; url?: string };
   /** The head the previous attempt's coding child last pushed (a
@@ -876,6 +920,10 @@ export interface UnitPipelineState {
   readonly findingsRunByRound: Readonly<Record<number, string>>;
   /** The last coding run (round 0's child or a findings step's): its record carries the unit's handoff. */
   readonly lastCodingRunId?: string;
+  /** The head the last coding child left the branch at, and its handoff — the
+   *  continuation facts an `idle` ending carries (record 0051). */
+  readonly lastChildHead?: string;
+  readonly lastCodingHandoff?: Handoff;
   /** How the budget went so far, accrued as each answer moves the clock. */
   readonly spentMs: ShipBudgetSpent;
   /** The session's dollars so far: the input's from earlier segments plus each
@@ -1117,7 +1165,55 @@ function addSpend(sum: number | null, cost: number | null | undefined): number |
 }
 
 function end(s: UnitPipelineState, ending: UnitEnding, notes: CoordinatorNote[] = []): Transition {
-  return { state: { ...s, phase: ENDED, ending }, notes: [...notes, { type: "ended", ending }] };
+  const idled = idleEnding(s, ending);
+  const final = idled ?? ending;
+  return { state: { ...s, phase: ENDED, ending: final }, notes: [...notes, { type: "ended", ending: final }] };
+}
+
+/** The idle mapping (record 0051; agent-ship item 8): with the input's
+ *  `idleDays` above zero an idling kind ends `idle` — the old kind as `why`,
+ *  the old ending itself for the report, and the continuation facts off the state
+ *  (a `continued` ending's own where it carries them). At zero, undefined:
+ *  every ending is byte for byte today's. The round notes keep the old kind's
+ *  outcome — the row and the card say what happened. */
+function idleEnding(s: UnitPipelineState, ending: UnitEnding): Extract<UnitEnding, { kind: "idle" }> | undefined {
+  if ((s.input.idleDays ?? 0) <= 0) return undefined;
+  if (NEVER_IDLES.has(ending.kind)) return undefined;
+  const old = ending as Exclude<UnitEnding, { kind: "idle" | "merged" | "already_landed" | "merge_ready" | "refused" }>;
+  const grant = s.input.grant ?? DEFAULT_GRANT;
+  // Unspent: an idle spends no renewal — the wake's segment does (this plan's
+  // fifth unit) — so the row says what the grant still holds.
+  const renewalsLeft = Math.max(0, grant.renewals - (s.input.session?.renewalsSpent ?? 0));
+  // The head to continue from: a segment's own; a review_pending's reviewed
+  // head — the pull request's, known even when the coding record carried none,
+  // so the re-issue's resume-at-review fact survives the idle; else the last
+  // coding child's recorded head.
+  const from =
+    old.kind === "continued"
+      ? old.from
+      : old.kind === "review_pending"
+        ? (old.headSha ?? s.lastChildHead)
+        : s.lastChildHead;
+  // The last coding child's run: a segment's own, a dead coding child's own —
+  // a review child that died names nothing here, the coding run before it does.
+  const runId =
+    old.kind === "continued" || (old.kind === "interrupted" && old.round.kind !== "review")
+      ? old.runId
+      : s.lastCodingRunId;
+  const handoff = old.kind === "continued" ? old.handoff : s.lastCodingHandoff;
+  const round = "round" in old ? old.round : undefined;
+  return {
+    kind: "idle",
+    why: old.kind,
+    idled: old,
+    renewalsLeft,
+    ...(from !== undefined ? { from } : {}),
+    ...(runId !== undefined ? { runId } : {}),
+    spendUsd: s.spendUsd,
+    ...(handoff !== undefined ? { handoff } : {}),
+    ...(round !== undefined ? { round } : {}),
+    reviewRounds: s.reviewRounds,
+  };
 }
 
 /** A gated finding as the gate note names it: `F1 (minor)`. */
@@ -1190,6 +1286,9 @@ function settleCoding(
   let next: UnitPipelineState = {
     ...s,
     spendUsd: addSpend(s.spendUsd, facts.costUsd),
+    // The continuation facts an idle ending reads off the state (record 0051).
+    ...(facts.headSha !== undefined ? { lastChildHead: facts.headSha } : {}),
+    ...(facts.handoffLists !== undefined ? { lastCodingHandoff: facts.handoffLists } : {}),
     ...(facts.pr !== undefined ? { pr: { number: facts.pr.number, url: facts.pr.url } } : {}),
     ...(round.kind === "findings" && facts.dispositions !== undefined
       ? {
@@ -2242,5 +2341,9 @@ export function renderUnitReport(
         `🚫 The ${presetOf(e.round.kind)} child of round ${e.round.index} was refused by the authorize stage (${e.refusal})${e.message ? `: ${e.message}` : ""} — every child is authorized as the requesting user, so the pipeline ends here.`,
         reissue,
       ]);
+    case "idle":
+      // The old kind's sentence at this copy's level — the report is unchanged
+      // by the idle at every verbosity (record 0051).
+      return renderUnitReport({ ...s, ending: e.idled }, facts, verbosity);
   }
 }

@@ -43,7 +43,7 @@
 // The handler here is pure over a parsed request (`handleCoordinatorRequest`),
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
-import { DEFAULT_GRANT, HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "../core/budgets.js";
+import { DEFAULT_GRANT, HOSTED_DEADLINE_MARGIN_MINUTES, IDLE_DAYS_DEFAULT, minutesToMs } from "../core/budgets.js";
 import { DEFAULT_VERBOSITY } from "../core/verbosity.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { AGENTS } from "../agents/registry.js";
@@ -56,12 +56,14 @@ import {
   COORDINATOR_STEP_PATH_PREFIX,
   PLAN_MERGE_ACTION,
   idempotencyKeyFor,
+  IDLE_WHY_MAX,
   INSTANCE_ID_PATTERN,
   STEP_NAME_PATTERN,
   type CoordinatorInstance,
   type CoordinatorTag,
   type CoordinatorUnit,
   type ThreadEvent,
+  type UnitIdle,
 } from "../core/coordinator/contract.js";
 import { foldThreadAttachments, foldThreadEvents } from "../core/dispatch/admission.js";
 import { assembleRunRecord } from "../core/dispatch/record.js";
@@ -1280,6 +1282,8 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
     // The request's verbosity (routing-and-config item 28): what the runner
     // says in the unit threads; absent on the record, quiet.
     verbosity: instance.verbosity ?? DEFAULT_VERBOSITY,
+    // The idle flag beside them (record 0051): absent on the record, nothing idles.
+    idleDays: instance.idleDays ?? IDLE_DAYS_DEFAULT,
     // The mark (item 16): the machine's report keys its re-issue line on it.
     generated: isGenerated(instance),
     // The runs page base: the report's pointer at a child's write-up links its
@@ -1425,13 +1429,16 @@ function unitLines(
     const last = u.rounds.at(-1);
     const state = u.ending
       ? u.ending.kind
-      : last
-        ? `${shipRoundHeader({ index: last.index, agent: last.agent }, severity)} · ${last.outcome}${
-            last.gate ? ` · ⚠️ gate fired: ${last.gate.findings.join(", ")} at or above ${last.gate.level}` : ""
-          }`
-        : u.threadKey
-          ? "starting"
-          : "waiting";
+      : u.idle
+        ? // The idle line names the old kind (record 0051): `idle · wall_clock_cap`.
+          `idle · ${u.idle.why}`
+        : last
+          ? `${shipRoundHeader({ index: last.index, agent: last.agent }, severity)} · ${last.outcome}${
+              last.gate ? ` · ⚠️ gate fired: ${last.gate.findings.join(", ")} at or above ${last.gate.level}` : ""
+            }`
+          : u.threadKey
+            ? "starting"
+            : "waiting";
     // A renewed unit names its segment (decision 0046): `segment 2 · …`.
     const seg =
       u.ending === undefined && u.segments !== undefined && u.segments.length > 0
@@ -1558,6 +1565,28 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   return json(200, { ok: true, at });
 }
 
+/** The idle an `idle` ending writes on the row (record 0051; run-history item
+ *  50): the old kind as `why`, the renewals the grant still holds, the head a
+ *  continuation opens from, the coding run id the driver sends today
+ *  (`codingRunId`), the spend and the handoff — `wakes` starts at zero.
+ *  Undefined names a malformed one. */
+function parseIdle(ending: Record<string, unknown>, runId: unknown, at: number): UnitIdle | undefined {
+  if (typeof ending.why !== "string" || ending.why.length === 0 || ending.why.length > IDLE_WHY_MAX) return undefined;
+  if (typeof ending.renewalsLeft !== "number" || !Number.isInteger(ending.renewalsLeft) || ending.renewalsLeft < 0)
+    return undefined;
+  const from = normalizeHead(ending.from);
+  return {
+    why: ending.why,
+    at,
+    renewalsLeft: ending.renewalsLeft,
+    ...(from !== undefined ? { from } : {}),
+    ...(typeof runId === "string" && RUN_ID_PATTERN.test(runId) ? { runId } : {}),
+    spendUsd: typeof ending.spendUsd === "number" && Number.isFinite(ending.spendUsd) ? ending.spendUsd : null,
+    ...(isHandoffShape(ending.handoff) ? { handoff: ending.handoff } : {}),
+    wakes: 0,
+  };
+}
+
 /** The segment a continued ending opens, as the driver names it: its index (two up), the sha it continues from, the run whose write-up briefs it. */
 function parseSegment(raw: unknown): { index: number; from?: string; runId?: string } | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
@@ -1611,16 +1640,27 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   const segment = ending.kind === "continued" ? parseSegment(body.segment) : undefined;
   if (ending.kind === "continued" && segment === undefined)
     return json(400, { ok: false, error: "a continued ending must carry the segment it opens" });
+  // An idle ending is not the unit's end (record 0051): the row gets the idle
+  // — the old kind as `why` and the continuation facts — and no `ending`, so
+  // the unit stays unfinished and keeps owning its thread.
+  const idle = ending.kind === "idle" ? parseIdle(ending, body.codingRunId, at) : undefined;
+  if (ending.kind === "idle" && idle === undefined)
+    return json(400, { ok: false, error: "an idle ending must carry its why and the renewals left" });
   const segments = row.segments ?? [];
+  // A real ending is the unit's end: an idle the row carried from an earlier
+  // stop is dropped with it, so the row says one thing about how the unit stands.
+  const { idle: _idle, ...rowWithoutIdle } = row;
   const updated: CoordinatorUnit = {
-    ...row,
+    ...(idle !== undefined || segment !== undefined ? row : rowWithoutIdle),
     ...(pr && typeof pr.number === "number" && typeof pr.url === "string"
       ? { pr: { number: pr.number, url: pr.url } }
       : {}),
     ...(lastPush !== undefined ? { lastPush } : {}),
-    ...(segment !== undefined
-      ? { segments: segments.some((s) => s.index === segment.index) ? segments : [...segments, { ...segment, at }] }
-      : { ending: { kind: ending.kind, report: ending.report, at } }),
+    ...(idle !== undefined
+      ? { idle }
+      : segment !== undefined
+        ? { segments: segments.some((s) => s.index === segment.index) ? segments : [...segments, { ...segment, at }] }
+        : { ending: { kind: ending.kind, report: ending.report, at } }),
   };
   await deps.instances.putUnits([updated]);
   const thread = unitThread(instance, updated);
@@ -1653,7 +1693,9 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
   // as an unowned thread's message, never back onto this list. With no channel
   // handle to run the turn in, the events stay unconsumed on the ended row and
   // the log says so by count — a loss the operator can read, never a silent one.
-  if (segment === undefined) {
+  // An idle unit has not ended: its events wait for the fold or the wake
+  // (record 0051; the wait lands with this plan's fifth unit).
+  if (segment === undefined && idle === undefined) {
     const leftovers = await deps.instances
       .listEvents({ instanceId: instance.id, unit: row.unit }, true)
       .catch(() => [] as ThreadEvent[]);

@@ -2636,3 +2636,318 @@ describe("the unit report — the child's write-up is pointed at, never repeated
     expect(report).toContain("🔁 Segment 1 ended at its lease with the unit unfinished");
   });
 });
+
+// Feature: docs/reference/specs/agent-ship.md item 8 (record 0051): with the
+// resolved `ship.idleDays` above zero the machine ends an idling kind as
+// `idle` — the old kind as `why`, the old kind's report intact, and what a
+// continuation needs on the ending — while the four ended kinds (merged,
+// already_landed, merge_ready, refused) keep their endings; at zero every
+// ending is byte for byte today's.
+describe("the idle ending — an idling kind maps to `idle` when ship.idleDays is above zero (record 0051)", () => {
+  const HANDOFF = { deviations: [], followUps: [{ what: "tests", where: "src" }], unproven: [] };
+
+  it("a stopped child ends the unit `idle` with `why: stopped`, the stop report intact and the continuation facts filled: the renewals the grant still holds, the child's head, its run id, the spend and its handoff", () => {
+    const d = fresh(input({ merge: "person", idleDays: 7, grant: { renewals: 3 }, grantSource: "user" }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      d,
+      "run-c0",
+      finished({
+        status: "stopped_soft",
+        finalReply: "stopping",
+        headSha: HEAD_A,
+        costUsd: 4.5,
+        handoffLists: HANDOFF,
+      }),
+      T0 + 5 * MIN,
+    );
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "idle",
+        why: "stopped",
+        renewalsLeft: 3,
+        from: HEAD_A,
+        runId: "run-c0",
+        spendUsd: 4.5,
+        handoff: HANDOFF,
+        round: { index: 0, kind: "coding" },
+        reviewRounds: 0,
+      },
+    });
+    // The round boundary keeps the old kind's outcome — the row and the card say what happened.
+    expect(d.rounds()).toEqual(["0 coding started", "0 coding stopped"]);
+    // The report is the old kind's sentence, unchanged.
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("⏹ Ship stopped by operator (soft stop) after 0 review rounds.");
+    expect(d.notes.at(-1)).toMatchObject({ type: "ended", ending: { kind: "idle", why: "stopped" } });
+  });
+
+  it("a `continued` segment end maps to `idle` with `why: continued` and the renewal unspent: the wake spends it (this plan's fifth unit), so renewalsLeft is the grant's remainder and `from` and the handoff are the decision's", () => {
+    const d = fresh(input({ merge: "person", generated: true, idleDays: 7, grant: { renewals: 6, costCapUsd: 50 } }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    const branch = d.state.input.unit.branch;
+    runChild(
+      d,
+      "run-c0",
+      finished({
+        status: "completed",
+        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 40 * MIN }],
+        leaseStartedAt: T0,
+        costUsd: 12.5,
+        handoffLists: HANDOFF,
+      }),
+      T0 + 45 * MIN,
+    );
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "idle",
+        why: "continued",
+        renewalsLeft: 6,
+        from: HEAD_A,
+        runId: "run-c0",
+        spendUsd: 12.5,
+        handoff: HANDOFF,
+      },
+    });
+    expect(renderUnitReport(d.state)).toContain("🔁 Segment 1 ended at its lease with the unit unfinished");
+  });
+
+  it("every other idling kind maps to `idle` with itself as `why` and its report intact: the caps, review_pending, merge_refused, no_verdict, an abort and an interrupt", () => {
+    // wall_clock_cap: the findings step's carve is refused late on the clock.
+    const cap = fresh(input({ merge: "person", idleDays: 7 }));
+    cap.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      cap,
+      "run-c0",
+      finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }),
+      T0 + 150 * MIN,
+    );
+    cap.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+      at: T0 + 150 * MIN,
+    });
+    runChild(
+      cap,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "x", findings: [FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 190 * MIN,
+    );
+    expect(cap.action).toMatchObject({
+      type: "end",
+      ending: { kind: "idle", why: "wall_clock_cap", runId: "run-c0", spendUsd: null },
+    });
+    expect(renderUnitReport(cap.state)).toContain("🧢 Ship stopped at a cap: the remaining pipeline time");
+
+    // review_pending: the clock cannot hold the review round with the pull request standing.
+    const pending = fresh(input({ merge: "person", idleDays: 7 }));
+    pending.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      pending,
+      "run-c0",
+      finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }),
+      T0 + 180 * MIN,
+    );
+    pending.answer({
+      type: "pr-check",
+      pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+      at: T0 + 180 * MIN,
+    });
+    // The idle continues from the pending head — the review_pending ending's own
+    // `headSha` — even when the coding record carried none, so the re-issue's
+    // resume-at-review fact survives the idle.
+    expect(pending.action).toMatchObject({
+      type: "end",
+      ending: { kind: "idle", why: "review_pending", from: HEAD_A },
+    });
+    expect(renderUnitReport(pending.state)).toContain("⏳ Review pending");
+
+    // round_cap: no approval inside maxRounds.
+    const rounds = fresh(input({ merge: "person", idleDays: 7, caps: { maxRounds: 1, maxMinutes: 240 } }));
+    throughRoundZero(rounds);
+    runChild(
+      rounds,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", findings: [FINDING] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(rounds.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "round_cap" } });
+    expect(renderUnitReport(rounds.state)).toContain("🧢 Ship stopped at a cap: the 1-round cap");
+
+    // merge_refused: the remainder is under the merge wait's floor when the runner would merge.
+    const refusedMerge = fresh(input({ idleDays: 7 }));
+    throughRoundZero(refusedMerge);
+    runChild(
+      refusedMerge,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 239 * MIN,
+    );
+    // The checks at the approved head read green first (record 0055); the merge door then refuses on the remainder.
+    greenChecks(refusedMerge, T0 + 239 * MIN);
+    expect(refusedMerge.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "merge_refused" } });
+    expect(renderUnitReport(refusedMerge.state)).toContain("but the runner did not merge it");
+
+    // no_verdict: a review that ended without a submitted verdict.
+    const silent = fresh(input({ merge: "person", idleDays: 7 }));
+    throughRoundZero(silent);
+    runChild(silent, "run-r1", finished({ status: "completed" }), T0 + 20 * MIN);
+    expect(silent.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "no_verdict" } });
+
+    // aborted: round 0 without a pull request under a grant of zero.
+    const aborted = fresh(input({ merge: "person", idleDays: 7 }));
+    aborted.answer({ type: "branch", ok: true, at: T0 });
+    runChild(aborted, "run-c0", finished({ status: "completed" }), T0 + 5 * MIN);
+    aborted.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 5 * MIN });
+    expect(aborted.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "aborted" } });
+
+    // interrupted: a dead child whose branch carries nothing to recover.
+    const cut = fresh(input({ merge: "person", idleDays: 7 }));
+    cut.answer({ type: "branch", ok: true, at: T0 });
+    runChild(cut, "run-c0", finished({ status: "interrupted" }), T0 + 5 * MIN);
+    cut.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 5 * MIN });
+    expect(cut.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "interrupted", runId: "run-c0" } });
+  });
+
+  it("an idled ending's thread copy speaks at the request's level: at quiet the asides stay out, and every render at idleDays 7 is byte for byte the render at 0", () => {
+    // The same wall_clock_cap, once idling and once not.
+    const capped = (idleDays: number) => {
+      const d = fresh(input({ merge: "person", idleDays }));
+      d.answer({ type: "branch", ok: true, at: T0 });
+      runChild(
+        d,
+        "run-c0",
+        finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }),
+        T0 + 150 * MIN,
+      );
+      d.answer({
+        type: "pr-check",
+        pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A },
+        at: T0 + 150 * MIN,
+      });
+      runChild(
+        d,
+        "run-r1",
+        finished({
+          status: "completed",
+          verdict: { verdict: "request_changes", summary: "x", findings: [FINDING] },
+          reviewPosted: true,
+          reviewHead: HEAD_A,
+        }),
+        T0 + 190 * MIN,
+      );
+      return d;
+    };
+    const idle = capped(7);
+    const plain = capped(0);
+    expect(idle.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "wall_clock_cap" } });
+    expect(plain.action).toMatchObject({ type: "end", ending: { kind: "wall_clock_cap" } });
+    for (const level of ["quiet", "verbose", "debug"] as const)
+      expect(renderUnitReport(idle.state, undefined, level)).toBe(renderUnitReport(plain.state, undefined, level));
+    // The cap's aside — the budget split — is verbose material in the thread's copy.
+    expect(renderUnitReport(idle.state)).toContain("Budget split (240 min):");
+    const quiet = renderUnitReport(idle.state, undefined, "quiet");
+    expect(quiet).toContain("🧢 Ship stopped at a cap");
+    expect(quiet).not.toContain("Renewals:");
+    expect(quiet).not.toContain("Budget split");
+  });
+
+  it("an interrupted review child idles with the LAST CODING child's run id, never the review run's", () => {
+    const d = fresh(input({ merge: "person", idleDays: 7 }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      d,
+      "run-c0",
+      finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }),
+      T0 + 20 * MIN,
+    );
+    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 + 20 * MIN });
+    runChild(d, "run-r1", finished({ status: "interrupted" }), T0 + 30 * MIN);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "interrupted", runId: "run-c0" } });
+  });
+
+  it("the four ended kinds never map: merged, already_landed, merge_ready and refused keep their endings at idleDays 7", () => {
+    // merged (found merged by the pre-check).
+    const merged = new Driver(openUnitPipeline(input({ idleDays: 7 }), T0));
+    merged.answer({
+      type: "pr-check",
+      pr: { state: "merged", prNumber: 7, url: PR_URL, sha: HEAD_B, mergedAt: "2026-09-16T00:00:00Z" },
+      at: T0,
+    });
+    expect(merged.action).toMatchObject({ type: "end", ending: { kind: "merged", by: "other" } });
+
+    // already_landed: the handoff names where and the branch has no commits over the base.
+    const landed = fresh(input({ merge: "person", idleDays: 7 }));
+    landed.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      landed,
+      "run-c0",
+      finished({
+        status: "completed",
+        handoffLists: { deviations: [], followUps: [], unproven: [], landed: [{ what: "the fix", where: "#7" }] },
+      }),
+      T0 + 5 * MIN,
+    );
+    landed.answer({ type: "pr-check", pr: { state: "none", aheadOfBase: 0 }, at: T0 + 5 * MIN });
+    expect(landed.action).toMatchObject({ type: "end", ending: { kind: "already_landed" } });
+
+    // merge_ready under a person's merge.
+    const ready = fresh(input({ merge: "person", idleDays: 7 }));
+    throughRoundZero(ready);
+    runChild(
+      ready,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    greenChecks(ready, T0 + 20 * MIN);
+    expect(ready.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+
+    // refused: the authorize stage never started the child.
+    const refused = fresh(input({ merge: "person", idleDays: 7 }));
+    refused.answer({ type: "branch", ok: true, at: T0 });
+    refused.answer({ type: "spawn", outcome: "refused", refusal: "not allowed", at: T0 });
+    expect(refused.action).toMatchObject({ type: "end", ending: { kind: "refused", refusal: "not allowed" } });
+  });
+
+  it("at idleDays 0 (and absent) nothing maps: a stop ends `stopped` byte for byte as today", () => {
+    for (const idleDays of [0, undefined]) {
+      const d = fresh(input({ merge: "person", ...(idleDays !== undefined ? { idleDays } : {}) }));
+      d.answer({ type: "branch", ok: true, at: T0 });
+      runChild(d, "run-c0", finished({ status: "stopped_soft", finalReply: "stopping" }), T0 + 5 * MIN);
+      expect(d.action).toMatchObject({
+        type: "end",
+        ending: {
+          kind: "stopped",
+          mode: "soft",
+          round: { index: 0, kind: "coding" },
+          reviewRounds: 0,
+          finalReply: "stopping",
+        },
+      });
+    }
+  });
+});

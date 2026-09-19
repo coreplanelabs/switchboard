@@ -72,6 +72,8 @@ const standing = computed(() => {
     const ok = view.ending.kind === "merged" || view.ending.kind === "merge_ready" || view.ending.kind === "done";
     return { cls: ok ? "ok" : "grey", text: view.ending.kind, at: view.ending.at };
   }
+  // An idle unit (record 0051): not ended — the header names the old kind as its why.
+  if (view.idle) return { cls: "grey", text: `idle · ${view.idle.why}`, at: view.idle.at };
   const live = view.runs.find((r) => !r.finished);
   if (live) return { cls: "live", text: `round ${live.round} · ${live.thread} running` };
   const last = view.runs.at(-1);

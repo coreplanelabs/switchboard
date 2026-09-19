@@ -37,6 +37,11 @@ export interface UnitFacts {
   issue?: number;
   rounds: CoordinatorUnit["rounds"];
   ending?: CoordinatorUnit["ending"];
+  /** The unit idles (record 0051): the old kind as `why`, when, what the grant
+   *  still holds and the wakes answered — the page's `idle · <why>` fact. The
+   *  row's continuation facts (`from`, `runId`, the handoff) stay machine
+   *  fields and are not projected. */
+  idle?: { why: string; at: number; renewalsLeft: number; wakes: number };
   startedAt?: number;
 }
 
@@ -83,6 +88,16 @@ export function unitFactsOf(unit: CoordinatorUnit): UnitFacts {
     ...(unit.issue !== undefined ? { issue: unit.issue } : {}),
     rounds: unit.rounds,
     ...(unit.ending !== undefined ? { ending: unit.ending } : {}),
+    ...(unit.idle !== undefined
+      ? {
+          idle: {
+            why: unit.idle.why,
+            at: unit.idle.at,
+            renewalsLeft: unit.idle.renewalsLeft,
+            wakes: unit.idle.wakes,
+          },
+        }
+      : {}),
     ...(unit.startedAt !== undefined ? { startedAt: unit.startedAt } : {}),
   };
 }

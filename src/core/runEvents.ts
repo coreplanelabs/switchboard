@@ -405,7 +405,11 @@ export type ShipRoundOutcome =
   | "stopped"
   /** The coding round ended at its lease with the unit unfinished and the row
    *  showing progress, and the grant renewed: the next segment opens (decision 0046). */
-  | "continued";
+  | "continued"
+  /** The unit idles instead of ending (record 0051): emitted once the wake
+   *  lands (that plan's fifth unit); in the vocabulary now so rows written
+   *  then read beside today's — the old kinds stay for rows already written. */
+  | "idle";
 
 /**
  * One event in a run's stream. `seq` is stamped by `RunRegistry.publish` — a

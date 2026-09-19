@@ -388,6 +388,8 @@ workspaceDir: ./workspaces
 # ship:
 #   maxRounds: 3      # review rounds per unit
 #   maxMinutes: 240   # the ship preset's wall-clock budget in minutes (the registry's default)
+#   idleDays: 0       # days a ship unit idles instead of ending (record 0051): 0–365, 0 = today's
+#                     # endings; also per channel/user (`channels.<id>.ship.idleDays`), user > channel > org
 
 # Which harness each preset's runs are driven by, deployment-wide
 # (docs/reference/specs/harness.md item 8): a mapping of preset to a harness's

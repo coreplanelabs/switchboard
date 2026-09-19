@@ -33,7 +33,7 @@
 // plan's re-issue. A task string's ship branch waits for a person. Node-free:
 // the shim Worker imports this by relative path.
 
-import { DEFAULT_GRANT, GRANT_RENEWALS_MAX, type Grant, type GrantSource } from "../budgets.js";
+import { DEFAULT_GRANT, GRANT_RENEWALS_MAX, IDLE_DAYS_MAX, type Grant, type GrantSource } from "../budgets.js";
 import { DEFAULT_VERBOSITY, isVerbosity, type Verbosity } from "../verbosity.js";
 import {
   applyReturn,
@@ -191,6 +191,8 @@ interface PlanFacts {
   grantSource: GrantSource;
   /** The request's verbosity as the plan route answers it (routing-and-config item 28): what the unit threads hear. */
   verbosity: Verbosity;
+  /** The idle flag beside the grant (record 0051): above zero, an idling ending becomes `idle`. */
+  idleDays: number;
   /** The instance's mark as the plan route answers it: a generated one-unit plan (a `plan` with no `path`). */
   generated: boolean;
   /** The runs page base the bot answered: the report links a child's write-up to its run page with it. */
@@ -220,6 +222,12 @@ function readGrant(raw: unknown): Grant {
   return { renewals: raw.renewals, ...(typeof cap === "number" && cap > 0 ? { costCapUsd: cap } : {}) };
 }
 
+/** The idle flag as the plan route answers it (record 0051): an integer from 0
+ *  to the module's cap; anything unreadable is 0 — nothing idles on a guess. */
+function readIdleDays(raw: unknown): number {
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= IDLE_DAYS_MAX ? raw : 0;
+}
+
 function readPlan(a: BotAnswer): PlanFacts {
   const b = a.body;
   if (b.ok !== true) throw new UnreadableAnswer("plan", a, "not ok");
@@ -240,6 +248,7 @@ function readPlan(a: BotAnswer): PlanFacts {
     grantSource:
       b.grantSource === "run" || b.grantSource === "user" || b.grantSource === "channel" ? b.grantSource : "org",
     verbosity: isVerbosity(b.verbosity) ? b.verbosity : DEFAULT_VERBOSITY,
+    idleDays: readIdleDays(b.idleDays),
     generated: b.generated === true,
     ...(typeof b.runPageBase === "string" && b.runPageBase.length > 0 ? { runPageBase: b.runPageBase } : {}),
     repo: b.repo,
@@ -662,6 +671,7 @@ async function runUnit(
       grant: plan.grant,
       grantSource: plan.grantSource,
       verbosity: plan.verbosity,
+      idleDays: plan.idleDays,
       generated: plan.generated,
       ...(plan.runPageBase !== undefined ? { runPageBase: plan.runPageBase } : {}),
       ...(resume !== undefined ? { resume } : {}),
@@ -734,13 +744,28 @@ async function runUnit(
             kind: note.ending.kind,
             report: renderUnitReport(state, endFacts),
             threadReport: renderUnitReport(state, endFacts, state.input.verbosity ?? DEFAULT_VERBOSITY),
+            // An idle ending carries its continuation facts (record 0051): the
+            // bot writes them on the row's `idle` in place of an ending, with
+            // the coding run id it already receives below.
+            ...(note.ending.kind === "idle"
+              ? {
+                  why: note.ending.why,
+                  renewalsLeft: note.ending.renewalsLeft,
+                  ...(note.ending.from !== undefined ? { from: note.ending.from } : {}),
+                  spendUsd: note.ending.spendUsd,
+                  ...(note.ending.handoff !== undefined ? { handoff: note.ending.handoff } : {}),
+                }
+              : {}),
           },
           ...(state.pr !== undefined ? { pr: state.pr } : {}),
           // A review_pending ending names the child's own last push so the next
-          // attempt's pre-check can start at the review round (the row's lastPush).
+          // attempt's pre-check can start at the review round (the row's lastPush)
+          // — an idled one the same, off the idle's `from` (record 0051).
           ...(note.ending.kind === "review_pending" && note.ending.headSha !== undefined
             ? { headSha: note.ending.headSha }
-            : {}),
+            : note.ending.kind === "idle" && note.ending.why === "review_pending" && note.ending.from !== undefined
+              ? { headSha: note.ending.from }
+              : {}),
           ...(state.lastCodingRunId !== undefined ? { codingRunId: state.lastCodingRunId } : {}),
           // A continued ending is a segment's end, not the unit's: the bot
           // writes the renewal as a row keyed by the next segment's index
@@ -809,6 +834,9 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
     endings[next] = ending.kind;
     // A unit is done for its dependents when the base carries its scope: the
     // runner's merge, or a scope that had already landed before the attempt.
+    // An `idle` ending settles the unit `failed` for now: nothing waits yet —
+    // the indexed wait and the wake land with the fifth unit of record 0051's
+    // plan — so the walk is unchanged until then and the flag ships at zero.
     cursor = settleUnit(graph, cursor, next, isSettledDone(ending.kind) ? "done" : "failed");
   }
   // Blocked units, in the plan's order: each told its own ending, so the rows

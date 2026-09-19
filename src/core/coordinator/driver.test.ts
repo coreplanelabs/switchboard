@@ -401,6 +401,66 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(ends[1].ending.report).toContain("Renewals: 0 of 6 spent, cost cap $50 (granted by channel).");
   });
 
+  // record 0051: nothing waits yet — the indexed wait and the wake land with
+  // that plan's fifth unit — so an idle ending settles the walk as `failed`
+  // here; this test is replaced there.
+  it("an idle ending settles the unit failed in this unit: with the plan answering idleDays above zero, a segment's lease end maps to idle — the unit-end carries the why and the continuation facts, no segment row, no renewal — and the walk does not open a second segment", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const lists = { deviations: [], followUps: [{ what: "tests", where: "src" }], unproven: [] };
+    const b = bot({
+      plan: [
+        planAnswer([row("U10")], T0, "person", {
+          grant: { renewals: 6, costCapUsd: 50 },
+          grantSource: "channel",
+          idleDays: 7,
+        }),
+      ],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [
+        record(
+          {
+            id: "run-c0",
+            finished: true,
+            status: "completed",
+            finalReply: "Budget reached: the parser is pushed, tests are next.",
+            pushed: [{ ref: "plan/fixture/u10", sha: HEAD, at: T0 + 44 * MIN }],
+            leaseStartedAt: T0,
+            costUsd: 12.5,
+            handoffLists: lists,
+          },
+          T0 + 45 * MIN,
+        ),
+      ],
+      "pr-check": [prNone(), prNone(T0 + 45 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 45 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 45 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary).toEqual({ instance: INSTANCE, planId: "fixture", units: { U10: "idle" }, outcome: "failed" });
+    // No second segment opened: the renewal is the wake's to spend, and nothing wakes yet.
+    expect(s.names().some((n) => n.startsWith("U10/s2/"))).toBe(false);
+    const [end] = b.of("unit-end") as Array<{
+      ending: Record<string, unknown>;
+      segment?: unknown;
+      codingRunId?: string;
+    }>;
+    expect(end.ending).toMatchObject({
+      kind: "idle",
+      why: "continued",
+      renewalsLeft: 6,
+      from: HEAD,
+      spendUsd: 12.5,
+      handoff: lists,
+    });
+    expect(end.ending.report).toContain("🔁 Segment 1 ended at its lease with the unit unfinished");
+    // An idle ending writes no segment row: no renewal is spent.
+    expect(end.segment).toBeUndefined();
+    expect(end.codingRunId).toBe("run-c0");
+  });
+
   it("the grant rides the plan answer into the unit's report — spent of granted, the cap and the granter — and a count the route answers above the module's ceiling reads as the default, so nothing renews on a guess (decision 0046)", async () => {
     const run = async (extra: Record<string, unknown>) => {
       const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
@@ -1413,6 +1473,41 @@ describe("the plan runner's driver — a shipped pull request at the wall-clock 
     expect(end.headSha).toBe(HEAD);
     expect(end.ending.report).toContain("⏳ Review pending");
     expect(end.ending.report).toContain("Budget split (240 min):");
+  });
+
+  // record 0051: an idled review_pending keeps its resume-at-review fact — the
+  // pending head is the idle's `from` and still rides the body as `headSha`,
+  // so the row's lastPush is written as for the plain ending.
+  it("an idled review_pending continues from the pending head: the unit-end's idle carries it as `from` and the body still names it as headSha, so the row's lastPush survives the idle", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [
+        ok({
+          ok: true,
+          planId: "fixture",
+          merge: "person",
+          repo: "acme/api",
+          base: "main",
+          caps: { maxRounds: 2, maxMinutes: 240 },
+          units: [row("U10")],
+          idleDays: 7,
+        }),
+      ],
+      "unit-start": [ok({ ok: true, threadKey: "slack:C1:1.0" })],
+      branch: [ok({ ok: true })],
+      spawn: [spawned("run-c0")],
+      "read-record": [codingDone("run-c0", T0 + 205 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 205 * MIN)],
+      round: [acked(), acked()],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "idle" });
+    const [end] = b.of("unit-end") as Array<{ ending: Record<string, unknown>; pr: unknown; headSha?: string }>;
+    expect(end.ending).toMatchObject({ kind: "idle", why: "review_pending", from: HEAD });
+    expect(end.pr).toEqual({ number: 7, url: PR_URL });
+    expect(end.headSha).toBe(HEAD);
   });
 
   it("a unit row carrying lastPush starts the attempt at the review round when the pre-check finds the open pull request still at that head: no branch and no coding child run again on the shipped pull request", async () => {
