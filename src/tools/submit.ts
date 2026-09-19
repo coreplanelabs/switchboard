@@ -39,7 +39,9 @@ export const submitVerdictTool: RunnableTool = {
     "references findings by these ids, so never renumber them. Severity is exactly one of blocking|major|minor|nit; " +
     "the entry carries the file (plus line when it points at one) and a one-line title, while the full explanation " +
     "stays in your review text keyed by the same ids. An `approve` carrying a finding at or above the severity to address " +
-    "is downgraded to `request_changes` and the ack names the finding and the level — approve only when every finding sits below it.",
+    "is downgraded to `request_changes` and the ack names the finding and the level — approve only when every finding sits below it. " +
+    "Set `humanGated: true` on a finding ONLY when its remedy is a receipt no run can produce — a replay needing a credential " +
+    "no sandbox holds, a procedure a person runs live — so the ship loop can hold the unit for a person instead of opening a fix round that can change nothing.",
   inputSchema: {
     type: "object",
     properties: {
@@ -69,6 +71,11 @@ export const submitVerdictTool: RunnableTool = {
             title: {
               type: "string",
               description: "One line naming the issue (the full explanation goes in your review text)",
+            },
+            humanGated: {
+              type: "boolean",
+              description:
+                "true ONLY when the remedy is a receipt only a person can produce (a credential-gated replay, a live procedure) — never for work a fix round could do",
             },
           },
           required: ["id", "severity", "file", "title"],

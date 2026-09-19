@@ -3596,6 +3596,49 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
         })
       ).status,
     ).toBe(200);
+    // A held ending's report lands on the pull request too (issue 1990;
+    // agent-ship item 9): the next step is a person's, and they read it where
+    // the human-gated finding stands — beside the board's copy when the row
+    // names an issue. A pull request the comment cannot reach never fails the
+    // step; every other ending leaves the pull request alone (the `merged`
+    // and `merge_refused` calls above commented nowhere but the board).
+    const held = await mergeHarness({ issues: [] });
+    await held.github.createIssue("acme/api", { title: "U10: Warm the cache (unit)", body: "" });
+    await held.github.createIssue("acme/api", { title: "stand-in for pull request 2", body: "" });
+    const [board, prIssue] = (await held.github.listIssues("acme/api", { state: "open", limit: 10 })).sort(
+      (a, b) => a.number - b.number,
+    );
+    await held.instances.putUnits([row({ issue: board!.number })]);
+    const heldReport =
+      "⏸️ Approved but held after 1 review round — F1 (minor) — the entry replay receipt is human-gated";
+    expect(
+      (
+        await call(held, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "held", report: heldReport },
+          pr: { number: prIssue!.number, url: `https://github.com/acme/api/pull/${prIssue!.number}` },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await held.github.getIssue("acme/api", prIssue!.number)).comments.map((c) => c.body)).toEqual([
+      `**Plan runner — U10 held**\n\n${heldReport}`,
+    ]);
+    expect((await held.github.getIssue("acme/api", board!.number)).comments.map((c) => c.body)).toEqual([
+      `**Plan runner — U10 ended \`held\`** · https://github.com/acme/api/pull/${prIssue!.number}\n\n${heldReport}`,
+    ]);
+    const heldGone = await mergeHarness();
+    expect(
+      (
+        await call(heldGone, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "held", report: heldReport },
+          pr: { number: 4242, url: "https://github.com/acme/api/pull/4242" },
+        })
+      ).body,
+    ).toMatchObject({ ok: true });
+    expect(heldGone.logs.some((l) => l.includes("the held report could not be posted on the pull request"))).toBe(true);
     const gone = await mergeHarness();
     await gone.instances.putUnits([row({ issue: 4242 })]);
     expect(

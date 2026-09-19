@@ -40,6 +40,7 @@ function endingStageDecided(k: UnitEnding["kind"]): string {
     case "merged":
     case "already_landed":
     case "merge_ready":
+    case "held":
     case "merge_refused":
     case "round_cap":
     case "wall_clock_cap":
@@ -73,6 +74,7 @@ const UNIT_ENDING_WORDS = [
   "merged",
   "already_landed",
   "merge_ready",
+  "held",
   "merge_refused",
   "round_cap",
   "wall_clock_cap",

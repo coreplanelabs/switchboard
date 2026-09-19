@@ -108,6 +108,14 @@ export interface Finding {
   line?: number;
   /** One line naming the issue; the full explanation lives in the prose. */
   title: string;
+  /** The finding's remedy is a receipt only a person can produce — a replay
+   *  that needs a provider credential no sandbox holds, a procedure a person
+   *  runs live — so no fix round can address it. Set by the reviewer beside the
+   *  severity through `submit_verdict`; ship's coordinator reads this flag,
+   *  never prose, and a round whose actionable findings all carry it ends
+   *  `held` (docs/reference/specs/agent-ship.md item 9). Anything but the
+   *  literal `true` is dropped and the finding stands as actionable. */
+  humanGated?: true;
   /** Machine provenance: true only on a check finding the ship round's checks
    *  step itself appended (ship/coordinator.ts `checkFinding`) — never set from
    *  a reviewer's input, whatever id the reviewer chose. */
@@ -222,6 +230,9 @@ function parseFinding(
   // dropping the whole finding over a bad line would also drop the severity
   // that the approve→request_changes downgrade keys on.
   if (typeof r.line === "number" && Number.isInteger(r.line) && r.line >= 1) finding.line = r.line;
+  // Fail-open on the flag alone: a malformed humanGated never drops the
+  // finding — it stands as actionable, which is the conservative reading.
+  if (r.humanGated === true) finding.humanGated = true;
   return { finding };
 }
 
@@ -241,7 +252,7 @@ export function verdictLine(verdict: ReviewVerdict | undefined): string {
  *  the posted body's list (bulleted below) and ship's synthesized child turns. */
 export function formatFinding(f: Finding): string {
   const location = f.line !== undefined ? `${f.file}:${f.line}` : f.file;
-  return `[${f.severity}] ${f.id} ${location} — ${f.title}`;
+  return `[${f.severity}] ${f.id} ${location} — ${f.title}${f.humanGated ? " (human-gated)" : ""}`;
 }
 
 /** One compact disposition line — `id: fixed|declined[ — note]` — the coding
@@ -318,6 +329,7 @@ function verdictMarker(verdict: ReviewVerdict | undefined, target: ReviewBodyTar
             severity: f.severity,
             file: f.file,
             ...(f.line !== undefined ? { line: f.line } : {}),
+            ...(f.humanGated ? { humanGated: true } : {}),
           })),
         }
       : {}),
@@ -463,7 +475,8 @@ function isFindingShape(v: unknown): v is Finding {
     (FINDING_SEVERITIES as readonly string[]).includes(v.severity as string) &&
     typeof v.file === "string" &&
     typeof v.title === "string" &&
-    (v.line === undefined || typeof v.line === "number")
+    (v.line === undefined || typeof v.line === "number") &&
+    (v.humanGated === undefined || v.humanGated === true)
   );
 }
 
