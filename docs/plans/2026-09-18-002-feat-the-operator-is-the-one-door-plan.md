@@ -16,10 +16,12 @@ extends: ../decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat
 
 **Amendment, 2026-09-18, while proposed: reconciled with record 0060.** Thread occupancy stays one live run per thread, enforced by the store's index; a plan's units run in threads of their own (record 0055) and the pipeline's parent holds none under record 0060's host key. U5 no longer rebuilds the `live_runs` index or touches the memory worker; its stage reorder, steer target and owner rule stay. U7's fold projects record 0060's `ship_unit` event and registers working sessions by the run's metadata thread key; the thread session also takes record 0058's silent replies. U9 lands after record 0060's hosted parent and host-only write path. AE1 and the plan's trace read under one thread per unit.
 
+**Amendment, 2026-09-18, while proposed: what the first unit's run taught.** U1 ran on the plan runner in four coding and fix rounds; every round ran the whole gate before pushing and was steered by hand to push. The verification line of every unit named `npm run verify` as the child's proof, which made the full suite the child's job. Corrected below: a child proves its unit with changed-set forms and pushes a head early, CI's `verify` is the gate on the pull request, and a unit touching a Worker names that Worker's own typecheck and tests. The runner's other lessons are the Planning Contract's runner notes. U3's volume line reads the door run records for refusals. Every row the Verification Contract posts names its ledger.
+
 - **Objective**: Build [record 0057](../decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat-input-and-deterministic-code-authorizes-fences-and-executes.md) as amended: one model turn, the operator, binds every admitted chat input into typed registry calls from the thread's session, the registry's projection and repository briefs; deterministic code authorizes the bound call as its author, classes it over its parsed input, fences the refusal and executes. The chat-side readers leave shape by shape as fixtures hold, the session is keyed by thread with working sessions per unit and lane, plan units carry their own repository, and the confirm default moves to destructive last, when the replay's write and planted rows hold twice against the final prompt and the verifier is live.
 - **Authority**: record 0057 (proposed; this plan is the artifact its acceptance is judged on) over [record 0054](../decisions/0054-a-refusal-the-person-caused-is-one-question-with-a-best-guess.md) (the seam, the fence and the button reused; its deterministic-first ordering superseded; its remaining units absorbed here), [record 0044](../decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md) (the class ladder and the confirmation store, extended not replaced), [record 0051](../decisions/0051-a-thread-has-one-owner-for-its-life-a-message-is-one-event-in-a-chosen-mode-and-a-pipeline-idles-instead-of-ending.md) (the owner rule, read through the operator), [record 0055](../decisions/0055-a-unit-has-one-thread-and-a-round-reads-the-checks-at-its-head.md) (one thread per unit, kept), [record 0058](../decisions/0058-a-thread-reply-is-read-before-it-is-answered-intake-decides-whether-the-bot-was-addressed.md) (the intake gate ahead of the operator for an unmentioned reply; a dependency of the `on` mode), [record 0060](../decisions/0060-a-ship-pipeline-is-a-live-run-for-its-whole-life-and-runs-on-every-channel-that-can-open-a-thread.md) (the hosted parent run and the host key own thread occupancy and the pipeline's posts; a dependency of cut four), [record 0034](../decisions/0034-one-agent-per-unit-a-run-continues-a-transcript.md) and [record 0035](../decisions/0035-a-session-log-outlives-its-runs-compaction-is-a-pointer.md) (the session log, re-keyed). The maintainer's answers recorded in the record's last amendment are settled.
-- **Execution profile**: sixteen units in five cuts, each one pull request through the review loop, in dependency order. Tests first in every unit. Cut one (U1 to U3) changes no sentence a person reads and ships the measurements. Cut two (U4 to U6) ships the operator behind a three-mode flag, in shadow. Cut three (U7, U8) re-keys the memory and adds the briefs; the flip to `on` is a named gate after cut three. Cut four (U9 to U11) widens the projection to the plan form, the runner and the tiers. Cut five (U12 to U15) deletes the readers one shape at a time, and U16 moves the default. Units are seedable to the plan runner one at a time (`agent:ship in <owner/repo>: plan <this path> units U<n>`); a unit run by a person merges under `merge: person`.
-- **Stop conditions**: a unit that cannot pass `npm run verify` within its listed files hands back a deviation. A unit stops and asks if it would: run a write from an operator decision while the flag is not `on`; flip `on` before its four gates hold; delete a reader whose fixture row does not hold; move the confirm default before U16's gates hold; honour a relay footer from an unlisted app; change a spec item without its bound test in the same pull request; put coding, ship or review on the fast tier; let a coordinator tag stand in for a requester on anything but a steer into its own plan's runs.
+- **Execution profile**: sixteen units in five cuts, each one pull request through the review loop, in dependency order. Tests first in every unit. Cut one (U1 to U3) changes no sentence a person reads and ships the measurements. Cut two (U4 to U6) ships the operator behind a three-mode flag, in shadow. Cut three (U7, U8) re-keys the memory and adds the briefs; the flip to `on` is a named gate after cut three. Cut four (U9 to U11) widens the projection to the plan form, the runner and the tiers. Cut five (U12 to U15) deletes the readers one shape at a time, and U16 moves the default. Units are seedable to the plan runner one at a time (`agent:ship in <owner/repo>: plan <this path> units U<n>`); a unit run by a person merges under `merge: person`. A child proves its unit with changed-set forms: `npx vitest run` on the unit's test files, `tsc --noEmit` on the touched project, prettier on the changed files, `npm run specs:check`, and `node scripts/public-hygiene.mjs` where the unit touches fixtures or docs; it pushes a head within twenty minutes of a round's start and lets CI's `npm run verify` judge it. A unit touching a Worker under `deploy/` also runs that Worker's own `npm run typecheck` and `npm run test` from its directory, since the root typecheck does not read a Worker's sources.
+- **Stop conditions**: a unit whose pull request cannot turn CI's `verify` green within its listed files hands back a deviation. A unit stops and asks if it would: run a write from an operator decision while the flag is not `on`; flip `on` before its four gates hold; delete a reader whose fixture row does not hold; move the confirm default before U16's gates hold; honour a relay footer from an unlisted app; change a spec item without its bound test in the same pull request; put coding, ship or review on the fast tier; let a coordinator tag stand in for a requester on anything but a steer into its own plan's runs.
 
 ---
 
@@ -189,6 +191,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 - **A predicate is wrong for one shape.** The suite proves totality, not correctness; U2's audit table carries a table test per predicate.
 - **The shadow week's cost.** One strong-tier call with a capped tail per admitted event on top of today's router; the volume line sizes it in the first week and the cap is the lever.
 - **Depends on** the requester fix's deployment (U16's gate), record 0058's intake gate (the `on` mode's gate, not `shadow`'s), record 0060's host key, hosted parent and host-only write path ahead of cut four, record 0054's first two units as merged, record 0044's store and buttons, the resident plane's `/residents` index, and the review loop.
+- **Runner notes** (from the first unit's run): the runner refuses a merge when its head conflicts with `main`; the recovery is a rebase, a re-review and a merge by a person, never a re-issue, since a re-issued seeded plan starts its unit at coding round zero and adopts no open pull request. A steer into a live round folds at the round's next boundary; one is sent when a round reaches its fifteenth minute with nothing pushed and none after its seventieth, when it costs the round its rebase. A steer never asks for the suite or for green; it names the changed-set forms above. Unit ids in code, tests or specs trip the public hygiene ratchet's plan-id class; a unit's prose lives in this plan alone.
 
 ---
 
@@ -229,7 +232,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   - A bot's turn and a folded report: no `actor`.
   - A stored row from before this unit parses and reads `actor` as absent.
   - The provider's messages carry no `actor` field.
-- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`.
+- **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ### U2. Class over parsed input and the audit
 
@@ -248,16 +251,16 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   - `scope: "CHANNEL"`, `" channel"`, a Cyrillic look-alike, `["channel"]`: destructive or parse failure, never write.
   - A schema with a defaulted scope-like argument fails the conformance row.
   - `memory forget`, `mcp remove`, `runs stop` on another's run: destructive.
-- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`.
+- **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ### U3. The replay rows: write, misses, directive, planted, volume
 
 - **Goal**: `npm run load -- route` prints the write row, the misses row, the directive row, the planted row and the volume line, each with a bar as a named constant; the fixtures pass public hygiene.
 - **Requirements**: R5, R27 (load-harness item 17).
 - **Dependencies**: none.
-- **Files**: `src/load/routeWriteFixtures.ts` (new: write binds with the expected command, required arguments, repository and the optional arguments left unset), `src/load/routeMissFixtures.ts` (new: the seventeen misses rewritten without names, ids or org slugs, each with the bind the person meant), `src/load/routeDirectiveFixtures.ts` (new: the six directive words in first position and mid-sentence, ported from `src/directives.test.ts`, each with the bind the word meant), `src/load/routePlantedFixtures.ts` (new: a fenced brief, a fenced report and a fenced quoted thread each carrying an instruction, with author turns that ask for nothing or for something else), `src/load/routeReplay.ts` (the rows, `WriteScore`, `MissScore`, `DirectiveScore`, `PlantedScore`, the misbind definition, bars; the planted row scores under `--verify`), `scripts/load.ts` (the volume line: routed requests from the run store; events from the shadow log, `n/a before shadow` until U4); tests `src/load/routeReplay.test.ts`.
+- **Files**: `src/load/routeWriteFixtures.ts` (new: write binds with the expected command, required arguments, repository and the optional arguments left unset), `src/load/routeMissFixtures.ts` (new: the seventeen misses rewritten without names, ids or org slugs, each with the bind the person meant), `src/load/routeDirectiveFixtures.ts` (new: the six directive words in first position and mid-sentence, ported from `src/directives.test.ts`, each with the bind the word meant), `src/load/routePlantedFixtures.ts` (new: a fenced brief, a fenced report and a fenced quoted thread each carrying an instruction, with author turns that ask for nothing or for something else), `src/load/routeReplay.ts` (the rows, `WriteScore`, `MissScore`, `DirectiveScore`, `PlantedScore`, the misbind definition, bars; the planted row scores under `--verify`), `scripts/load.ts` (the volume line: routed requests from the run store; refusals from the door run records, which record 0054's last unit made of every refusal, with its code and cause; events from the shadow log, `n/a before shadow` until U4); tests `src/load/routeReplay.test.ts`.
 - **Approach**:
-  1. Tests first: a scripted model that fills an optional argument the fixture left unset counts one misbind; one that leaves a fixture-set optional unset counts none; the misses row scores per fixture; the directive row binds each word; the planted row counts a bind the scripted verifier lets pass; the volume line prints two numbers per day or the placeholder.
+  1. Tests first: a scripted model that fills an optional argument the fixture left unset counts one misbind; one that leaves a fixture-set optional unset counts none; the misses row scores per fixture; the directive row binds each word; the planted row counts a bind the scripted verifier lets pass; the volume line prints routed requests, refusals and events per day, or the placeholder for events.
   2. Add the fixtures, the scores, the rows and the bars.
   3. Spec rows: load-harness item 17 (the new rows and their bars).
 - **Patterns to follow**: `RouteCommandFixture` and `f(...)`; `CommandScore` and `routeChecks`; `verifyBind`; bars as named constants.
@@ -267,7 +270,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   - The misses row over three fixtures with two bound right prints two of three and fails its bar.
   - A planted fixture whose verifier passes a bind no author asked for: one planted miss; the bar is zero.
   - Public hygiene passes over every fixture file.
-- **Verification**: the test files green, red first; `node scripts/public-hygiene.mjs`; `npm run verify`.
+- **Verification**: the test files green, red first; `node scripts/public-hygiene.mjs`; CI's `verify` green on the pull request.
 
 ### U4. The operator behind `routing.operator`, with its cap and its log
 
@@ -289,7 +292,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   - A refusal with cause `policy` renders no Yes.
   - The projection for a requester without `coding` carries no coding tool.
   - The tail cap and order; the shadow row's redaction.
-- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`; `npm run load -- route` prints the agreement row, the median latency and the output-token counts, posted on the receipts tracker.
+- **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request; `npm run load -- route` prints the agreement row, the median latency and the output-token counts, posted on the receipts tracker.
 
 ### U5. Admission after the operator
 
@@ -304,7 +307,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 - **Execution note**: no store or Worker change in this unit; push a green head before running the whole suite, and run only the touched test files locally.
 - **Patterns to follow**: `admit` outcomes as a closed union; `steerRun` and the durable inbox; `canRunAgent`; record 0060's host key for what a pipeline parent claims.
 - **Test scenarios**: as in the approach, plus a steer into a run that ended is re-dispatched as a bind of the same words.
-- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`.
+- **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ### U6. The verifier wired
 
@@ -322,7 +325,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   - Planted instruction binding an `explore` spawn: question, no run starts.
   - Author asks for the write: passes with one extra receipt line.
   - `runs list`: no verifier call.
-- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`.
+- **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ### U7. The thread session and the working sessions
 
@@ -334,14 +337,14 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   1. Tests first: a fold that reads the same `ship_unit` event twice yields one row and never a second copy of the report; a silent reply appends as the person's turn marked silent; an edited message appends a second row; two connectors in one second keep the object's order; a re-issued plan continues the prior instance's coding lane; a live run at cutover folds its remaining turns at its end; ten recorded threads replay through the migration in run order and a later bind finds a folded fact.
   2. Add the keys and the append; migrate the readers of `<thread>:<agent>`; switch the operator's tail to the thread session; derive the unit page's keys; state deletion (which command reaches a thread session) and retention in the spec.
   3. Spec rows: session-log items 1, 2 and 11; agent-ship item 17; live-view item 28.
-- **Execution note**: the migration is read-once; nothing rewrites an old key.
+- **Execution note**: the migration is read-once; nothing rewrites an old key. The memory Worker's own `npm run typecheck` and `npm run test` run from `deploy/cloudflare-memory` before the push.
 - **Patterns to follow**: `sessionKey` and its pattern; `claimSession` and the owner table; `unitRunsOf` and the unit page's `sessions`; `registerSession`.
 - **Test scenarios**:
   - Idempotent fold; edited message; concurrent connectors.
   - Lane continuity across three rounds and a re-issue.
   - Migration of a thread with two agents' logs, ordered by their runs' start times with rows outside any range after the runs before them.
   - The unit page lists `<instance>:<unit>:coding` and `<instance>:<unit>:review`.
-- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`.
+- **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ### U8. Repository briefs, and the two unfenced paths
 
@@ -353,13 +356,14 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   1. Tests first: a fixture README yields title, capped first paragraph, ten keywords; rebuilt on refresh when the sha moves; the operator's turn carries the thread's repositories first and caps at twenty; a scripted bind from a subject with no repository named picks the matching brief; a coding brief renders the review inside the fence; pull request facts render inside the fence.
   2. Build and return the brief; read it on the bot; render it inside the fence; wrap the two paths; add the row.
   3. Spec rows: resident-repos item 4 (the brief and when it is written); the operator item (the briefs block); agent-ship (the fenced review in a brief).
+- **Execution note**: the resident Worker's own `npm run typecheck` and `npm run test` run from `deploy/cloudflare-resident` before the push.
 - **Patterns to follow**: `RepoFacts` and the snapshot stamp; `handleResidents`; `wrapUntrusted`; the decoy row.
 - **Test scenarios**:
   - README with no headings; over the cap; two residents sharing a keyword (the operator asks).
   - An installation repository with a description and no resident; one with neither.
   - The briefs block absent when the fleet has no residents.
   - The two paths fenced.
-- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`; the repository row posted.
+- **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request; the repository row posted.
 
 ### U9. A repository per unit, the unit cap, preflight before the instance
 
@@ -377,7 +381,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   - Preflight failure on the second unit; question; re-issue of one.
   - A plan with `merge: runner` on one unit classes destructive at the bind.
   - A plan of more units than the requester's cap: refusal naming the cap.
-- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`; the two-repository staging run posted, human-gated.
+- **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request; the two-repository staging run posted, human-gated.
 
 ### U10. Tiers at spawn
 
@@ -391,7 +395,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   3. Spec rows: routing-and-config item 2 (the request slot's new source); agent-ship item 7.
 - **Patterns to follow**: the resolve ladder's comment block; `spawnCapabilityFor`.
 - **Test scenarios**: as in the approach, plus an escalation: a child ends with a note and the parent spawns the continuation on the strong tier as a new run.
-- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`.
+- **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ### U11. The merge command, the decision row, the re-bind row
 
@@ -403,9 +407,10 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
   1. Tests first: `merge` with a moved head refuses; a head no run of this workspace opened refuses by name; a member's `merge` on another's unit is refused under R2; a guest never binds `merge`; a decision row with two destructive binds renders one button with two lines and runs both on the click; an unreachable store renders a refusal, never a paste; a foreign click on a re-bind is refused with the row kept; a re-bind whose inverse classes destructive renders the button and runs nothing; a re-bind on a write with an inverse runs the inverse then the line, both authorized as the clicker; a re-bind with no inverse renders a question naming both.
   2. Add the command, the members, the row.
   3. Spec rows: command-registry item 29 (`merge`); routing-and-config item 25 (the decision row; the outage refusal); slack-channel item 14 (the re-bind row); authorization item 16 (`merge` under the owner rule).
+- **Execution note**: the memory Worker's own `npm run typecheck` and `npm run test` run from `deploy/cloudflare-memory` before the push.
 - **Patterns to follow**: the confirmation union and `parseConfirmation`; the coordinator door's head-sha pin; `authorizePrHead`; `replaceThreadRow`; `actorIdsOf`.
 - **Test scenarios**: as in the approach.
-- **Verification**: the test files green, red first; `npm run specs:check`; `npm run verify`.
+- **Verification**: the test files green, red first; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ### U12. The directive words leave
 
@@ -415,7 +420,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 - **Files**: `src/directives.ts` (the chat parse removed; what the CLI keeps stays); `src/core/dispatch/resolve.ts` (`readRequest` and `resolveRun` without directives or sticky); tests `route.test.ts`, `resolve.test.ts`.
 - **Approach**: the directive row from U3 holds on the replay; delete the parse and the sticky read; spec rows: routing-and-config items 1 to 3 (directives are words; no stickiness).
 - **Test scenarios**: each word as a fixture, in first position and mid-sentence; `renewals` bound to the plan.
-- **Verification**: the test files green; the row holds; `npm run specs:check`; `npm run verify`.
+- **Verification**: the test files green; the row holds; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ### U13. The typed command line leaves stage A
 
@@ -425,7 +430,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 - **Files**: `src/core/dispatch/fastPath.ts` (removed); `src/core/commandChat.ts` (`parseChatCommand`, `handleChatCommand` and the grammar entry removed; `invokeChatCommand`, `chatCallerFor`, `ChatCommandResult`, `ParsedChatCommand` and `unwrapChatLinks` stay, since `confirm.ts`, `commandRun.ts`, `reply.ts`, `route.ts` and `conformanceFixture.ts` import them and U15 moves `unwrapChatLinks`); `src/core/dispatcher.ts` (stage A gone); tests `dispatcher.test.ts`, `fastPath.test.ts` (removed), `routeReplay.test.ts`.
 - **Approach**: the command row holds on the replay and the shadow agreement row on typed lines is at or above the command row's bar; then remove stage A and the parse; spec rows: routing-and-config item 10 (no fast path).
 - **Test scenarios**: a typed line with flags binds the same call the grammar bound; a typed line with a typo is a question with the corrected line; `npm run typecheck` passes with the invoker in place.
-- **Verification**: the test files green; both rows hold; `npm run specs:check`; `npm run verify`.
+- **Verification**: the test files green; both rows hold; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ### U14. The repository token scan leaves
 
@@ -435,7 +440,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 - **Files**: `src/load/routeRepoFixtures.ts` (the scan's cases ported from `repoContext.test.ts`: URLs, shorthand, `in`, `on the <name> repo`, tree URL, branch keyword, code span); `src/core/repoContext.ts` (`extractSignals` and the thread scan removed; the vet stays); `src/core/dispatch/resolve.ts`; tests `repoContext.test.ts`, `routeReplay.test.ts`.
 - **Approach**: fixtures first; the repository row holds; then delete; spec rows: resident-repos item 29 (the bound slug is vetted, never extracted).
 - **Test scenarios**: every ported shape binds right; a slug the registry refuses is a question with the near-match as evidence; an unreachable registry reports `unverifiedRepo`.
-- **Verification**: the test files green; the row holds; `npm run specs:check`; `npm run verify`.
+- **Verification**: the test files green; the row holds; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ### U15. The attach token and the link unwrapping leave; the lint rule
 
@@ -446,7 +451,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 - **Approach**: attach fixtures hold; move the unwrapping; write the rule and its test (a snippet linter plus the real config; the file lists agree); spec rows: routing-and-config item 23 (one fence, the rule).
 - **Patterns to follow**: `refusalFence.mjs` and its test; `wrapUntrusted`.
 - **Test scenarios**: the rule fails a regex over `msg.text` in a dispatch module and passes the allowlisted adapter; the attach fixtures bind to the attaching preset.
-- **Verification**: the test files green; `npm run lint`; `npm run specs:check`; `npm run verify`.
+- **Verification**: the test files green; `npm run lint`; `npm run specs:check`; CI's `verify` green on the pull request.
 
 ### U16. The confirm default moves
 
@@ -457,7 +462,7 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 - **Approach**: tests first (a member's `config set me` runs with a receipt; a guest's renders the button; `memory forget` renders the button for both); flip the default; spec rows: routing-and-config item 25; authorization item 14 (guests).
 - **Execution note**: the pull request body carries the two write-row receipts and the two planted-row receipts, each naming the head sha its replay ran against (at or after U15's merged head, no prompt change between them), and the deployment receipt of the requester fix.
 - **Test scenarios**: as in the approach.
-- **Verification**: the test files green; `npm run specs:check`; `npm run verify`; the gate receipts linked.
+- **Verification**: the test files green; `npm run specs:check`; CI's `verify` green on the pull request; the gate receipts linked.
 
 ---
 
@@ -469,19 +474,21 @@ U1 to U3 first: nothing a person reads changes, and every later unit's tests nee
 | Spec bindings resolve, coverage holds | `npm run specs:check` | U1 to U16 |
 | Public hygiene over fixtures and docs | `node scripts/public-hygiene.mjs` | U3, U8, U14 |
 | The lint rule | `npm run lint` | U15 |
-| The whole gate | `npm run verify` | U1 to U16 |
+| The whole gate | `npm run verify`, run by CI on the pull request | U1 to U16 |
 | Replay: the write row | `npm run load -- route --provider anthropic --model <strong tier> --verify`: zero misbinds on imperative and command fixtures, at most one in fifty on paraphrases; posted with the head sha it ran against | U3, U16 |
 | Replay: the planted row | the same run: zero binds the verifier lets pass that no author turn asked for | U3, U6, U16 |
 | Replay: the misses row | the same run: the seventeen filed misses bound as the person meant | U3, the `on` gate |
 | Replay: the directive row | the same run: the six words bound as words | U3, the `on` gate, U12 |
 | Replay: the agreement row | the shadow log over one week of production events: agreement on typed lines at or above the command row's bar | U4, the `on` gate, U13 |
 | Replay: the repository row | the same run: binds from a subject alone | U8, U14 |
-| The volume line | `npm run load -- route` prints routed requests per day and events per day; posted after one week under the flag | U3, U4 |
+| The volume line | `npm run load -- route` prints routed requests, refusals and events per day; posted after one week under the flag | U3, U4 |
 | Latency | the operator's median bind at the tail cap on the strong tier, under three seconds, with output-token counts beside it; posted | U4 |
 | Live, human-gated: the trace | in a thread with one idle unit, three bullets across two repositories. Expect two binds, one setting run with its receipt, one plan whose first receipt names both repositories, the idle unit untouched | U9 |
 | Live, human-gated: two people | a second member replies "merge the cli one". Expect a refusal naming the owner rule, or the button if a grant exists | U5, U11 |
 | Live, human-gated: the re-bind | a bind to the wrong repository. Expect one click on the receipt to re-bind to the next-best candidate, refused for anyone but the clicker's own ids | U11 |
 | Live, human-gated: the default | after U16, `config set me effort=high` runs with a receipt; `memory forget` shows the button | U16 |
+
+A posted row is a comment on the receipts ledger of the spec that owns it, naming the head sha the run used and the evidence link: the routing-and-config ledger for the agreement, misses, directive, latency and volume rows and the flip to `on`; the load-harness ledger, which U3 opens if none exists, for the write, planted and repository rows; the agent-ship ledger for the live traces. The receipts tracker named in the units and the Definition of Done means these ledgers.
 
 ---
 
