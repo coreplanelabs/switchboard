@@ -299,15 +299,19 @@ grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
 restrict:
   agents: [coding]
-# The router is on by default; these tests prove the paths under it, so the
-# scripted provider is never asked to route — the router's own suite turns it on.
-routing: { auto: false }
+# The router and the operator are each on by default; these tests prove the
+# reader paths under them, so both are turned off here — the router's and the
+# operator's own suites turn each back on (or leave the config silent).
+routing: { auto: false, operator: off }
 workspaceDir: __WORKDIR__
 `;
 
 /** The same fixture with the router on: the door's suites script `deps.routeModel`
  *  and prove what a plain message reaches through it. */
-const ROUTING_ON_YAML = YAML_FIXTURE.replace("routing: { auto: false }\n", "routing: { auto: true }\n");
+const ROUTING_ON_YAML = YAML_FIXTURE.replace(
+  "routing: { auto: false, operator: off }\n",
+  "routing: { auto: true, operator: off }\n",
+);
 
 /** The thread's newest run, finished with a session log: what a follow-up
  *  continues (routing-and-config item 3, by transcript — never an `agent:`
@@ -1125,7 +1129,7 @@ grants:
 restrict:
   agents: [coding]
   repos: ["acme/api"]
-routing: { auto: false }
+routing: { auto: false, operator: off }
 workspaceDir: __WORKDIR__
 `;
 
@@ -9168,7 +9172,7 @@ grants:
 restrict:
   agents: [coding]
   repos: ["acme/api"]
-routing: { auto: false }
+routing: { auto: false, operator: off }
 workspaceDir: __WORKDIR__
 `;
 
@@ -9534,7 +9538,10 @@ workspaceDir: __WORKDIR__
   // The routed door (routing-and-config item 21; agent-ship item 16): ship is
   // in the router's table, a routed ship runs the request as a generated plan
   // whose merge is a person's, and the seeded form stays behind the directive.
-  const SHIP_ROUTED_YAML = SHIP_YAML.replace("routing: { auto: false }", "routing: { auto: true }");
+  const SHIP_ROUTED_YAML = SHIP_YAML.replace(
+    "routing: { auto: false, operator: off }",
+    "routing: { auto: true, operator: off }",
+  );
   const shipRouter = () => vi.fn(async () => JSON.stringify({ preset: "ship", reason: "a change to land" }));
 
   it("a routed ship on a task hands off merge: person — the card's route note (`route reason:` at debug) and the instance is the generated plan's", async () => {
@@ -11046,7 +11053,10 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     };
     const { deps, writer } = wired(provider, {
       ledger,
-      yaml: YAML_FIXTURE.replace("routing: { auto: false }\n", "routing: { auto: true }\n"),
+      yaml: YAML_FIXTURE.replace(
+        "routing: { auto: false, operator: off }\n",
+        "routing: { auto: true, operator: off }\n",
+      ),
     });
     deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "review", reason: "a review ask" }));
     const { io } = ioWithCard();
@@ -13829,7 +13839,7 @@ channels:
       machines: [none]
 grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
-routing: { auto: false }
+routing: { auto: false, operator: off }
 workspaceDir: __WORKDIR__
 `;
   const inChannel = (channel: string, text: string, user = "slack:UADMIN") => ({
@@ -14031,7 +14041,7 @@ channels:
       maxMinutes: 45
 grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
-routing: { auto: false }
+routing: { auto: false, operator: off }
 workspaceDir: __WORKDIR__
 `;
   const inChannel = (channel: string, text: string) => ({
@@ -14246,7 +14256,7 @@ grants:
   "slack:UADMIN": { actions: all, channels: all, repos: all }
 restrict:
   agents: [explore]
-routing: { auto: false }
+routing: { auto: false, operator: off }
 workspaceDir: __WORKDIR__
 `;
   const PARENT_THREAD = "slack:CX:1.0";
@@ -15211,11 +15221,13 @@ describe("the model proxy's run bearer through dispatch()", () => {
 // message runs as the routed preset with the reason on the card and the
 // `route` event on the record; every routed preset dispatches at once.
 describe("the request router (docs/reference/specs/routing-and-config.md item 21)", () => {
-  const ROUTING_OFF = "routing: { auto: false }\n";
+  const ROUTING_OFF = "routing: { auto: false, operator: off }\n";
   /** The fixture with the router turned on by name. */
-  const routingOn = (yaml: string) => yaml.replace(ROUTING_OFF, "routing: { auto: true }\n");
-  /** The fixture with no `routing` block at all: the default — on. */
-  const routingUnset = (yaml: string) => yaml.replace(ROUTING_OFF, "");
+  const routingOn = (yaml: string) => yaml.replace(ROUTING_OFF, "routing: { auto: true, operator: off }\n");
+  /** The fixture with `auto` unset — the router's default, on. The operator
+   *  stays off by name: its own default (also on) is item 29's suite, and a
+   *  block naming only `operator` leaves `auto` at its default like no block. */
+  const routingUnset = (yaml: string) => yaml.replace(ROUTING_OFF, "routing: { operator: off }\n");
   const ROUTED_YAML = routingOn(YAML_FIXTURE);
   /** A scripted router: a change to make is coding, a review ask is review, anything else general. */
   const router = () =>
@@ -15251,12 +15263,12 @@ describe("the request router (docs/reference/specs/routing-and-config.md item 21
     expect(statuses.every((s) => !s.title.includes("route reason:"))).toBe(true);
   });
 
-  it("on by default: with no `routing` block a plain message routes — to review on its own model, the route note on the card at debug, the route event on the record", async () => {
+  it("on by default: with `auto` unset a plain message routes — to review on its own model, the route note on the card at debug, the route event on the record", async () => {
     let ids = 0;
     const registry = new RunRegistry({ genId: () => `r${++ids}`, genToken: () => "t" });
     const provider = capturingProvider();
     const deps = makeDeps(routingUnset(YAML_FIXTURE), provider);
-    expect(deps.config.config.routing).toBeUndefined();
+    expect(deps.config.config.routing?.auto).toBeUndefined();
     deps.runRegistry = registry;
     deps.routeModel = router();
     const { io, statuses, replies } = fakeIO();
@@ -17707,10 +17719,13 @@ describe("every refusal is a run record (record 0054, as amended)", () => {
 
 describe("the operator behind routing.operator (record 0057; routing-and-config item 29)", () => {
   const SHADOW_YAML = YAML_FIXTURE.replace(
-    "routing: { auto: false }\n",
+    "routing: { auto: false, operator: off }\n",
     "routing: { auto: false, operator: shadow }\n",
   );
-  const ON_YAML = YAML_FIXTURE.replace("routing: { auto: false }\n", "routing: { auto: false, operator: on }\n");
+  const ON_YAML = YAML_FIXTURE.replace(
+    "routing: { auto: false, operator: off }\n",
+    "routing: { auto: false, operator: on }\n",
+  );
 
   /** A scripted operator: one forced call to `decide`, the input the answer. */
   const decides = (input: unknown) => vi.fn<RouteModel>(async () => ({ tool: "decide", input }));
@@ -18150,7 +18165,19 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(verifier).not.toHaveBeenCalled();
   });
 
-  it("off (the default) never calls the operator and the route stage is untouched", async () => {
+  it("the default is on: a config that never names routing.operator runs the operator's decision, not the readers'", async () => {
+    const SILENT_YAML = YAML_FIXTURE.replace("routing: { auto: false, operator: off }\n", "routing: { auto: false }\n");
+    const { deps, provider } = operatorDeps(SILENT_YAML);
+    deps.operatorModel = decides({ reason: "one listing", binds: [{ line: "config show", reason: "the scopes" }] });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("show me the config", "slack:UADMIN"), io);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(deps.invoked).toEqual(["config.show"]);
+    // The decision is what runs: no route model, no agent run, no model turn.
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("off is the rollback lever: `routing.operator: off` never calls the operator and the route stage is untouched", async () => {
     const provider = capturingProvider();
     const deps = makeDeps(YAML_FIXTURE, provider);
     deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });

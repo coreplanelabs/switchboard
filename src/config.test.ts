@@ -13,6 +13,7 @@ import {
   intakeModelRef,
   loadAppConfigFrom,
   openConfigStore,
+  operatorModeOf,
   OverridesConflictError,
   overridesBackingFor,
   planeAdmissionOf,
@@ -876,6 +877,17 @@ describe("routing block (routing.auto, routing.model)", () => {
     expect(routingOn(store(YAML_FIXTURE + "routing:\n  model: anthropic/fast-model\n").config)).toBe(true);
     expect(routingOn(store(YAML_FIXTURE + "routing:\n  auto: true\n").config)).toBe(true);
     expect(routingOn(store(YAML_FIXTURE + "routing:\n  auto: false\n").config)).toBe(false);
+  });
+
+  it("the operator is on by default (routing-and-config item 29): a silent config resolves `on`; `off` is the rollback lever, `shadow` stays shadow, anything else is refused by name", () => {
+    expect(operatorModeOf(store().config)).toBe("on");
+    expect(operatorModeOf(store(YAML_FIXTURE + "routing:\n  model: anthropic/fast-model\n").config)).toBe("on");
+    expect(operatorModeOf(store(YAML_FIXTURE + "routing:\n  operator: off\n").config)).toBe("off");
+    expect(operatorModeOf(store(YAML_FIXTURE + "routing:\n  operator: shadow\n").config)).toBe("shadow");
+    expect(operatorModeOf(store(YAML_FIXTURE + "routing:\n  operator: on\n").config)).toBe("on");
+    expect(() => store(YAML_FIXTURE + "routing:\n  operator: sometimes\n")).toThrow(
+      /routing\.operator must be off, shadow, on/,
+    );
   });
 
   it("refuses a non-boolean auto by name, whatever it spells", () => {
