@@ -247,11 +247,13 @@ function reveal(anchor: string): void {
 }
 
 // ---- stop control -----------------------------------------------------------
-const actionsHidden = ref(isHistory);
+// No control without a stop URL: a hosted ship parent's seed carries none
+// (record 0060) — its units run elsewhere, so a stop here could only fail.
+const actionsHidden = ref(isHistory || seed?.mode !== "live" || seed.stopUrl === undefined);
 const stopDisabled = ref(false);
 
 function requestStop(mode: "soft" | "hard"): void {
-  if (seed?.mode !== "live") return;
+  if (seed?.mode !== "live" || seed.stopUrl === undefined) return;
   if (mode === "hard" && !browser.confirm("Hard stop: abort the run now with no summary and free its sandbox?")) return;
   stopDisabled.value = true;
   fetch(`${seed.stopUrl}&mode=${encodeURIComponent(mode)}`, { method: "POST", credentials: "same-origin" })

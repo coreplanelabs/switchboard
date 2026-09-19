@@ -316,6 +316,12 @@ function stopDecision(actor: Actor, view: RunView): Decision {
 }
 
 const NOT_FOUND = "run not found";
+/** A stop refused on a hosted ship parent (record 0060; items 10 and 16): the
+ *  409 body both stop routes write — the token route for both modes (the
+ *  capability stops nothing on it), the tokenless route for soft (the escape
+ *  is `mode=hard`, which seals the run failed and releases its thread). */
+const HOSTED_STOP =
+  "this run hosts a ship pipeline — its units run elsewhere, so a stop here ends nothing; an operator's hard stop seals it failed and releases the thread";
 const TEXT = { "content-type": "text/plain; charset=utf-8" };
 const JSON_NO_STORE = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 
@@ -681,6 +687,7 @@ export function createLiveViewHandler(
     if (access) {
       if (route.kind === "page") {
         const snap = access.snapshot();
+        const summary = index.listActive().find((s) => s.id === route.id);
         // A live conductor's children (item 28) from the registry alone — the
         // live path never reads the store — in start order, live rows with
         // their tokens: the token that opened the parent's page opens no child,
@@ -697,14 +704,15 @@ export function createLiveViewHandler(
           page: "run",
           mode: "live",
           id: route.id,
-          ...(() => {
-            const key = index.listActive().find((s) => s.id === route.id)?.threadKey;
-            return key !== undefined ? { threadKey: key } : {};
-          })(),
+          ...(summary?.threadKey !== undefined ? { threadKey: summary.threadKey } : {}),
           ...(children.length > 0 ? { children } : {}),
           // Stop control: same token, POST-only; `&mode=` is appended client-side.
+          // A hosted parent (record 0060) gets none: the token stops nothing on
+          // it, so the page draws no control that could only fail.
           eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
-          stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}`,
+          ...(summary?.hosted
+            ? {}
+            : { stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}` }),
           // The files' URL base with the same token (item 26): the page appends each key.
           ...artifactsSeed(route.id, token),
           // The stamps the header's one duration reads (docs/reference/specs/tracing.md).
@@ -759,6 +767,7 @@ export function createLiveViewHandler(
         const result = access.requestStop(mode);
         if (!result.ok) {
           if (result.reason === "finished") text(res, 409, "run already finished");
+          else if (result.reason === "hosted") text(res, 409, HOSTED_STOP);
           else text(res, 404, NOT_FOUND);
           return true;
         }
@@ -789,6 +798,10 @@ export function createLiveViewHandler(
     // stops it through the ledger.
     const actor = ctx.actor;
     const servable = (view: RunView): boolean => view.finished || view.ownerGen !== undefined;
+    // The one tokenless reach into a live run of THIS process: the hosted
+    // parent's stop (record 0060) — soft is refused below, hard is the
+    // operator's escape. Every read route keeps requiring the token on it.
+    const stoppable = (view: RunView): boolean => servable(view) || view.hosted === true;
     if (route.kind === "stop") {
       if (ctx.actor.viewingAs) return refuseWhileViewing(res, ctx.actor.viewingAs);
       const mode = parseStopMode(url.searchParams.get("mode"));
@@ -801,7 +814,7 @@ export function createLiveViewHandler(
         // may read the run is told. A run live elsewhere is stopped through the
         // ledger (the owner reads the stop on its next heartbeat).
         const found = await service.getRun(route.id);
-        if (!found.ok || !servable(found.value) || !readable(actor, found.value, "stop")) {
+        if (!found.ok || !stoppable(found.value) || !readable(actor, found.value, "stop")) {
           text(res, 404, NOT_FOUND);
           return;
         }
@@ -811,7 +824,8 @@ export function createLiveViewHandler(
         }
         const stopped = await service.stopRun(route.id, mode, { kind: "access", id: actor.id });
         if (!stopped.ok) {
-          if (stopped.error === "conflict") text(res, 409, "run already finished");
+          if (stopped.error === "hosted") text(res, 409, HOSTED_STOP);
+          else if (stopped.error === "conflict") text(res, 409, "run already finished");
           else text(res, 404, NOT_FOUND);
           return;
         }

@@ -1,6 +1,6 @@
 import { matchesPredicate } from "./authz/predicate.js";
 import type { ChannelVisibility, Predicate, Resource } from "./authz/types.js";
-import type { RunActor, RunEvent, StopMode } from "./runEvents.js";
+import { sanitizeActor, type RunActor, type RunEvent, type StopMode } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { analyzeRunFriction, type FrictionOptions, type FrictionDiagnosis } from "./runFriction.js";
@@ -25,7 +25,8 @@ import type { RunLedger } from "./runLedger/ledger.js";
 import type { LiveRunRow } from "./runLedger/types.js";
 import { snippetOf } from "./runLedger/sessionLog.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
-import { parseUnitKey, unitKeyOf } from "./coordinator/contract.js";
+import { parseUnitKey, unitKeyOf, type CoordinatorUnit } from "./coordinator/contract.js";
+import { assembleRunRecord } from "./dispatch/record.js";
 import { NO_PRICES, runCostOf, type ModelPriceTable, type RunCost } from "./modelPricing.js";
 import type { RunUsage } from "./runUsage.js";
 import type { CoordinatorInstanceStore } from "./coordinator/instanceStore.js";
@@ -56,7 +57,10 @@ export const LEDGER_LIST_TTL_MS = 2_000;
 
 export type { RunActor } from "./runEvents.js";
 
-export type Result<T> = { ok: true; value: T } | { ok: false; error: "not_found" | "conflict" };
+/** `hosted` is a ship pipeline's parent refused a soft stop (record 0060;
+ *  live-view items 10 and 16): the units run elsewhere, so a soft stop would
+ *  end nothing — the surfaces answer 409 naming the hard escape. */
+export type Result<T> = { ok: true; value: T } | { ok: false; error: "not_found" | "conflict" | "hosted" };
 
 /**
  * One run as every surface sees it — live or persisted, the same shape. A
@@ -413,9 +417,11 @@ export interface RunsServiceDeps {
   /** The clock a live run's friction window ends at; `systemClock` by default. */
   clock?: () => number;
   /** The run ledger (run-history item 41): its live rows that are not in this
-   *  process's registry list, read, page, diagnose and stop like any run. Null or
-   *  absent when the ledger is off. */
-  ledger?: Pick<RunLedger, "listLive" | "readEvents" | "requestStop"> | null;
+   *  process's registry list, read, page, diagnose and stop like any run — and
+   *  `finish`, the one-transaction seal a hard stop gives a hosted parent this
+   *  process hosts (record 0060), which releases the host key with the row.
+   *  Null or absent when the ledger is off. */
+  ledger?: Pick<RunLedger, "listLive" | "readEvents" | "requestStop" | "finish"> | null;
   /** The session logs' search (session-log item 8) — the same ledger object in
    *  the bot. A process that reads history without driving runs (the CLI)
    *  hands the ledger here alone, so its run listing stays the store's. Null
@@ -537,6 +543,21 @@ function newestFinished(a: RunView, b: RunView): number {
 
 const notFound = { ok: false, error: "not_found" } as const;
 const conflict = { ok: false, error: "conflict" } as const;
+const hostedRefused = { ok: false, error: "hosted" } as const;
+
+/** The hosted parent's last word (record 0060): the units' state as its
+ *  answer, in the plan summary's own vocabulary — an ending's kind, else
+ *  `unfinished` for a unit whose thread opened, else `not started`. */
+function hostedSealAnswer(units: readonly CoordinatorUnit[]): string {
+  const lines = units.map((u) => {
+    const how = u.ending ? u.ending.kind : u.threadKey !== undefined ? "unfinished" : "not started";
+    return `${u.unit} — ${how}${u.pr ? ` — ${u.pr.url}` : ""}`;
+  });
+  return [
+    "⏹ Hard stop: the pipeline's parent run was sealed `failed` and its host key released. The units stood at:",
+    ...(lines.length > 0 ? lines : ["(no unit rows recorded)"]),
+  ].join("\n");
+}
 
 /** The ledger's order: oldest finished first, then started, then id — `ledgerOf`'s own. */
 function oldestFinished(a: RunView, b: RunView): number {
@@ -703,6 +724,83 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     threadKey === undefined
       ? []
       : (await service.listRuns({ status: "all", visibleTo, threadKey, limit: RUN_LIST_MAX_LIMIT })).runs;
+
+  /** The hard stop's seal for a hosted parent this process hosts (record 0060;
+   *  live-view items 10 and 16): who asked enters the stream, the units' state
+   *  becomes the answer (the instance is the LAST `run_meta` carrying one), the
+   *  run finishes `failed` and seals, and the record replaces the ledger's live
+   *  row in one transaction — releasing the host key, so a later ship request
+   *  on the thread claims it. A ledger failure is a warning: the registry row
+   *  is sealed either way, and the reclaim's deadline closes the row later. */
+  const sealHosted = async (id: string, actor: RunActor): Promise<Result<StopRunView>> => {
+    const at = clock();
+    registry.publish(id, {
+      type: "run_note",
+      kind: "stop_requested",
+      mode: "hard",
+      actor: sanitizeActor(actor),
+      summary: "hard stop requested — sealing the hosted pipeline",
+      at,
+    });
+    const instanceId = (registry.snapshotById(id)?.events ?? []).reduce<string | undefined>(
+      (found, e) => (e.type === "run_meta" && e.instanceId !== undefined ? e.instanceId : found),
+      undefined,
+    );
+    let unitRows: CoordinatorUnit[] = [];
+    if (units && instanceId !== undefined) {
+      try {
+        unitRows = await units.listUnits(instanceId);
+      } catch (err) {
+        warn(`[runs] unit rows unavailable for the hard stop of ${id}: ${describe(err)}`);
+      }
+    }
+    // The answer before finish() — a publish on a finished run is a no-op — so
+    // the record's last content event is the units' state.
+    registry.publish(id, { type: "answer", text: hostedSealAnswer(unitRows), at: clock() });
+    registry.finish(id, "failed");
+    const snap = registry.snapshotById(id);
+    const seal = registry.seal(id);
+    const summary = registry.getById(id);
+    if (ledger) {
+      try {
+        // Fresh, never the TTL cache: the row's ownerGen fences the finish.
+        const row = (await ledger.listLive()).find((r) => r.runId === id);
+        if (row) {
+          const finishedAt = snap?.finishedAt ?? at;
+          const m = row.meta;
+          const record = assembleRunRecord({
+            run: { id, ...(summary?.label !== undefined ? { label: summary.label } : {}) },
+            snap,
+            agent: m.agent ?? "ship",
+            ...(m.model !== undefined ? { model: m.model } : {}),
+            msg: {
+              channelId: m.channelId,
+              userId: m.userId,
+              threadKey: m.threadKey,
+              ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
+              ...(m.userName !== undefined ? { userName: m.userName } : {}),
+              ...(m.authenticatedAs !== undefined ? { authenticatedAs: m.authenticatedAs } : {}),
+            },
+            channelVisibility: m.channelVisibility ?? "unknown",
+            ...(m.repo !== undefined ? { repo: m.repo } : {}),
+            finishedAt,
+            status: "failed",
+            diagnosis: analyze(snap?.events ?? [], {
+              finished: true,
+              truncated: snap?.truncated ?? false,
+              window: { start: snap?.receivedAt ?? snap?.startedAt ?? at, end: finishedAt },
+            }),
+            seal,
+          });
+          const done = await ledger.finish(id, row.ownerGen, record);
+          if (!done.ok) warn(`[runs] run ledger finish refused for ${id} (${done.reason ?? "unknown"})`);
+        }
+      } catch (err) {
+        warn(`[runs] run ledger finish failed for ${id}: ${describe(err)}`);
+      }
+    }
+    return { ok: true, value: { id, mode: "hard", state: "stopping" } };
+  };
 
   const service: RunsService = {
     async listRuns(opts) {
@@ -913,13 +1011,29 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     },
 
     async stopRun(id, mode, actor) {
+      // A hosted parent this process hosts (record 0060; live-view items 10 and
+      // 16): no run loop observes its control, so a soft stop would end nothing
+      // — refused, pointing at the hard escape — and a hard stop is the
+      // maintainer's escape for an orphaned pipeline: seal it, not signal it.
+      const here = registry.getById(id);
+      if (here && !here.finished && here.hosted) {
+        if (mode === "soft") return hostedRefused;
+        return sealHosted(here.id, actor);
+      }
       const res = registry.requestStopById(id, mode, actor);
       if (res.ok) return { ok: true, value: { id, mode: res.mode, state: "stopping" } };
       if (res.reason === "finished") return conflict;
+      if (res.reason === "hosted") return hostedRefused;
       // Live on the ledger under another generation (item 41): the stop rides the
-      // row; the owner reads it on its next heartbeat.
+      // row; the owner reads it on its next heartbeat. A foreign HOSTED row
+      // refuses the soft stop before the ledger is written — its owner would
+      // refuse it the same way — while a hard stop rides the row like any other.
       if (ledger && RUN_ID_PATTERN.test(id)) {
         try {
+          if (mode === "soft") {
+            const row = (await liveRows()!).find((r) => r.runId === id);
+            if (row?.meta.hosted) return hostedRefused;
+          }
           const r = await ledger.requestStop(id, mode);
           if (r.ok) return { ok: true, value: { id, mode, state: "stopping" } };
         } catch (err) {

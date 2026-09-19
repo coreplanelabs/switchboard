@@ -81,11 +81,14 @@ for (const t of seed?.turns ?? []) {
   items.push({ key: key("a"), kind: "assistant", turn: t, live, ended: t.finished });
 }
 
-/** The assistant turn whose run is live in this conversation, if any (one live run per thread). */
+/** The assistant turn whose run is live in this conversation, if any (one live
+ *  run per thread). A hosted ship parent (record 0060) is skipped: it occupies
+ *  no thread — its units run elsewhere — so the composer keeps reading `send`
+ *  while its turn still streams. */
 const liveItem = computed(() => {
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i];
-    if (it.kind === "assistant" && it.live && !it.ended) return it;
+    if (it.kind === "assistant" && it.live && !it.ended && it.turn.hosted !== true) return it;
   }
   return null;
 });

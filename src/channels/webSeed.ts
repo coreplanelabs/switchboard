@@ -99,7 +99,10 @@ export interface RunLiveSeed {
    *  it on `/threads/<key>` (web-chat.md item 4); absent when the registry row is gone. */
   threadKey?: string;
   eventsUrl: string;
-  stopUrl: string;
+  /** The stop control's route with the same token. Absent on a hosted ship
+   *  parent (record 0060): the token stops nothing on it, so the page draws no
+   *  stop control. */
+  stopUrl?: string;
   artifacts?: ArtifactsSeed;
   /** The server clock when the seed was built: the page projects it forward
    *  arrival-relative (`serverNow` + time since the seed arrived), so a live

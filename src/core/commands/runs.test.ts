@@ -717,6 +717,30 @@ describe("runs.stop", () => {
     expect(note.actor).toEqual({ kind: "mcp", id: "mcp:reader" });
   });
 
+  // Feature: docs/reference/specs/live-view.md items 10 and 16 (record 0060) — a
+  // hosted parent takes no soft stop; `--mode hard` is the maintainer's escape.
+  it("a hosted parent refuses the soft stop as a 409 naming the hard escape; --mode hard seals it failed", async () => {
+    const { reg, registry, deps } = await setup();
+    const { id } = reg.create("ship · acme/api", {
+      agent: "ship",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:t",
+      hosted: true,
+    });
+    const soft = await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, reader, deps);
+    expect(soft).toMatchObject({
+      ok: false,
+      error: "conflict",
+      status: 409,
+      message: expect.stringContaining("--mode hard"),
+    });
+    expect(reg.getById(id)!.finished).toBe(false);
+    const hard = await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps);
+    expect(hard).toEqual({ ok: true, value: { id, mode: "hard", state: "stopping" } });
+    expect(reg.getById(id)!).toMatchObject({ finished: true, status: "failed" });
+  });
+
   it("stopping needs runs:write AND visibility: a reader without the write grant is refused by the registry, a writer outside the channel gets not_found", async () => {
     const { reg, registry, deps } = await setup();
     const { id } = reg.create("x", {
