@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDef } from "../agents/registry.js";
+import { adoptLiveCard, isLiveCard, liveCardKey, liveCards } from "../channels/slack/statusCard.js";
+import { findOrphanedCards, type SlackHistoryMessage } from "../channels/slackCatchUp.js";
 import type { ChatMessage } from "./chatMessage.js";
 import type { ResumableRun, ResumeRun } from "./boot.js";
 import type { CoreDeps, DispatchOptions } from "./dispatcher.js";
@@ -435,6 +437,7 @@ describe("launchResumes — the rehost branch (record 0060)", () => {
     const dispatched: unknown[] = [];
     const done: string[] = [];
     const logs: string[] = [];
+    const kept: { channel: string; ts: string }[] = [];
     const rehost: ResumableRun = { kind: "rehost", row: hostedRow(), reclaimedFrom: "handoff", hosting, events };
     const outcome = await launchResumes(deps, [rehost], {
       ioFor: () => undefined, // the rehost needs no channel handle…
@@ -444,10 +447,12 @@ describe("launchResumes — the rehost branch (record 0060)", () => {
       agentFor: () => undefined, // …and no agent of this build
       dispatchFn: async () => void dispatched.push(1),
       onDone: (id) => done.push(id),
+      keepCardLive: (c) => kept.push(c),
       log: (l) => logs.push(l),
     });
     expect(outcome).toEqual({ launched: ["r-ship"], closed: [] });
     expect(dispatched).toEqual([]);
+    expect(kept).toEqual([]); // a row without a card claims none
     expect(done).toEqual(["r-ship"]);
     const summary = registry.getById("r-ship");
     expect(summary).toMatchObject({
@@ -476,5 +481,57 @@ describe("launchResumes — the rehost branch (record 0060)", () => {
     registry.publish("r-ship", { type: "ship_handoff", instanceId: "i7", at: 3 });
     expect(mirrored).toEqual([{ type: "ship_handoff", seq: 3 }]);
     expect(logs[0]).toMatch(/r-ship web:s:c9: re-hosted \(instance i7; 2 event\(s\) replayed\)/);
+  });
+
+  // Regression: a restart used to close the hosted parent's card as
+  // "interrupted … re-send your request" while the runner and its children
+  // kept running — the rehost recreated the registry row but never claimed the
+  // card, so the connect's orphan sweep two seconds after boot saw an unowned
+  // live glyph. Wired as index.ts wires it (keepCardLive: adoptLiveCard), the
+  // sweep leaves the card to the runner's redraws and terminal frame.
+  it("rehosting a row that has a card claims it in the live-card set, so the orphan sweep leaves it untouched", async () => {
+    const registry = new RunRegistry();
+    const runLedger = { adopt: () => ({ event: () => {} }) };
+    const deps = { runRegistry: registry, runLedger } as unknown as CoreDeps;
+    const cardTs = "100.000100";
+    const rehost: ResumableRun = {
+      kind: "rehost",
+      row: { ...hostedRow(), card: { channel: "C9", ts: cardTs } },
+      reclaimedFrom: "handoff",
+      hosting,
+      events,
+    };
+    try {
+      const outcome = await launchResumes(deps, [rehost], {
+        ioFor: () => undefined,
+        close: async () => {
+          throw new Error("a rehost is never closed here");
+        },
+        agentFor: () => undefined,
+        dispatchFn: async () => {},
+        keepCardLive: adoptLiveCard,
+      });
+      expect(outcome.launched).toEqual(["r-ship"]);
+      const card: SlackHistoryMessage = {
+        type: "message",
+        user: "BBOT",
+        bot_id: "B1",
+        text: "◐ *ship* · plan fix · 120s",
+        ts: cardTs,
+        thread_ts: "90.000000",
+      };
+      // A control card no process owns, in the same thread: still swept.
+      const orphan: SlackHistoryMessage = { ...card, ts: "100.000200" };
+      const out = findOrphanedCards({
+        channel: "C9",
+        botUserId: "BBOT",
+        cutoffMs: 0,
+        threads: new Map([["90.000000", [card, orphan]]]),
+        isLive: isLiveCard,
+      });
+      expect(out).toEqual([{ channel: "C9", ts: orphan.ts, text: orphan.text }]);
+    } finally {
+      liveCards.delete(liveCardKey("C9", cardTs));
+    }
   });
 });

@@ -18,6 +18,15 @@ export const liveCardKey = (channel: string, ts: string) => `${channel}:${ts}`;
 export function ownsLiveCard(channel: string, ts: string): boolean {
   return liveCards.has(liveCardKey(channel, ts));
 }
+/** Claim a card this process now drives without posting or editing it: the
+ *  re-hosted ship parent's (run-history item 38, record 0060). Its ledger row
+ *  is adopted at boot with no dispatch, so nothing else registers its card,
+ *  and the reconnect sweep moments later would close a live pipeline's card
+ *  as interrupted. The coordinator's later redraws edit the same message and
+ *  its terminal frame removes the key like any run's close. */
+export function adoptLiveCard(card: { channel: string; ts: string }): void {
+  liveCards.add(liveCardKey(card.channel, card.ts));
+}
 // Cards of runs another generation still holds a current lease on (the boot
 // reclaim's `liveElsewhere`, docs/reference/specs/run-history.md item 36): a rollout
 // overlap, or a container that kept running. The orphan sweep must not close

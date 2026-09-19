@@ -14,7 +14,7 @@ import type { RepoContext } from "./repoContext.js";
 import type { ResumableRun } from "./boot.js";
 import { messageFromInbox } from "./runLedger/inboxMessage.js";
 import { planResume, type KnownTool } from "./runLedger/resume.js";
-import type { LiveRunRow } from "./runLedger/types.js";
+import type { CardHandle, LiveRunRow } from "./runLedger/types.js";
 import { defaultRunRegistry, REPLAY_EVERYTHING } from "./runRegistry.js";
 import type { RunMeta } from "./runRegistry/state.js";
 import { TOOLSETS } from "../tools/toolsets.js";
@@ -126,6 +126,12 @@ export interface LaunchResumesOptions {
   /** Close a run the plan refuses, with the reason (the boot reclaim's closer). */
   close: (run: ResumableRun, why: string) => Promise<void>;
   agentFor: (name: string | undefined) => AgentDef | undefined;
+  /** Claim a re-hosted parent's card as this process's own (the Slack
+   *  adapter's live-card set): the rehost dispatches nothing, so no `status()`
+   *  registers the card, and without the claim the reconnect sweep closes a
+   *  live pipeline's card as interrupted seconds after boot. The
+   *  write-through's terminal frame closes it later. */
+  keepCardLive?: (card: CardHandle) => void;
   /** Injectable for tests; default the real `dispatch`. */
   dispatchFn?: (deps: CoreDeps, msg: IncomingMessage, io: ChannelIO, opts: DispatchOptions) => Promise<void>;
   /** Told, once per run, when its resume is over: the dispatch settled (the
@@ -192,6 +198,9 @@ export async function launchResumes(
         afterSeq: lastSeq,
         ...REPLAY_EVERYTHING,
       });
+      // The parent's card survives the roll: owned again by this generation,
+      // so the orphan sweep leaves it to the runner's redraws and close.
+      if (row.card) opts.keepCardLive?.(row.card);
       log(
         `[resume] ${row.runId} ${row.meta.threadKey}: re-hosted (instance ${run.hosting.instanceId}; ${run.events.length} event(s) replayed)`,
       );
