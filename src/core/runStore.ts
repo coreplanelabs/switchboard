@@ -37,6 +37,7 @@ import {
   type StoredRunEvent,
 } from "./runRecord.js";
 import { DEFAULT_RUN_STORE_TOKEN_ENV, RUN_STORE_KEY, WorkerRunStore } from "./runStoreWorker.js";
+import type { ModelPriceTable } from "./modelPricing.js";
 
 // Run history (docs/decisions/0006-runs-have-two-lives.md): the store seam behind every `runs.*` read and the
 // dispatcher's write at run finish. Three implementations (AGENTS.md invariant
@@ -536,6 +537,10 @@ export function retentionPolicyOf(cfg: RunHistoryConfig): RetentionPolicy {
 export interface BuildRunStoreDeps {
   dataDir: string;
   warn: (message: string) => void;
+  /** The price table the Worker store's metrics points are computed through
+   *  (docs/reference/specs/run-metrics.md) — the same table `RunsService`
+   *  prices with. The local stores ignore it (they send no point). */
+  prices?: ModelPriceTable;
   /** Injectable clock (epoch ms); also stamps `policyUpdatedAt` for the Worker store. */
   now?: () => number;
   /** Injectable timer for the file store's 6 h sweep. */
@@ -585,6 +590,7 @@ export function buildRunStore(
     storeKey: RUN_STORE_KEY,
     policy,
     policyUpdatedAt: now(),
+    ...(deps.prices ? { prices: deps.prices } : {}),
   });
 }
 

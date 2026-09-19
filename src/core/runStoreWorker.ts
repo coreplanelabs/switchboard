@@ -13,6 +13,8 @@ import {
   type StoredRunEvent,
 } from "./runRecord.js";
 import type { PutResult, RunEventsOptions, RunEventsPage, RunStore } from "./runStore.js";
+import { pointOf } from "./runMetrics.js";
+import type { ModelPriceTable } from "./modelPricing.js";
 import { isRunUsageRows, reportOfUsageRows, type RunUsageQuery, type RunUsageReport } from "./runUsage.js";
 
 // The DURABLE RunStore (docs/decisions/0006-runs-have-two-lives.md): an HTTPS client to the RunHistoryDO on the
@@ -25,7 +27,7 @@ import { isRunUsageRows, reportOfUsageRows, type RunUsageQuery, type RunUsageRep
 // exactly as the memory/friction/schedule clients do; a hand-set header was
 // the one difference between this client and those three, and the only one
 // whose fetches failed from the production container):
-//   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?} → {ok, retained, stored, rewritten}
+//   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?, point?} → {ok, retained, stored, rewritten}
 //   POST /runs/get    {storeKey, id}                                → {record: RunRecord | null}
 //   POST /runs/summary {storeKey, id}                               → {summary: RunListItem | null}
 //   POST /runs/list   {storeKey, limit?, before?, beforeId?, sinceMs?, agent?, channel?, threadKey?, parentRunId?, pr?}
@@ -82,6 +84,10 @@ export interface WorkerRunStoreOptions {
   policy?: RetentionPolicy;
   /** When the proposal was made (epoch ms) — the bot's config load time. */
   policyUpdatedAt?: number;
+  /** The price table every point's dollars are computed through (`pointOf`,
+   *  docs/reference/specs/run-metrics.md) — the same table `RunsService`
+   *  prices with. Absent: the list prices alone. */
+  prices?: ModelPriceTable;
   /** Injectable for tests; defaults to global fetch. */
   fetch?: typeof fetch;
 }
@@ -106,6 +112,11 @@ export class WorkerRunStore implements RunStore {
     if (!RUN_ID_PATTERN.test(record.id))
       throw new PermanentStoreError(`run store: refusing to put malformed id ${JSON.stringify(record.id)}`);
     const body: Record<string, unknown> = { storeKey: this.opts.storeKey, record };
+    // The record's metrics point rides beside it (run-metrics.md): computed for
+    // every final record, absent for a provisional one — the object decides
+    // whether the row turned final and whether to write it.
+    const point = pointOf(record, this.opts.prices);
+    if (point !== undefined) body.point = point;
     if (this.opts.policy) {
       body.policy = this.opts.policy;
       if (this.opts.policyUpdatedAt !== undefined) body.policyUpdatedAt = this.opts.policyUpdatedAt;

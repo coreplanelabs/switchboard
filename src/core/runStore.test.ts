@@ -559,11 +559,17 @@ describe("buildRunStore", () => {
     expect(timers).toEqual([]);
   });
 
-  it("worker with its bearer → WorkerRunStore (default env MEMORY_TOKEN), no timer", () => {
+  it("worker with its bearer → WorkerRunStore (default env MEMORY_TOKEN), no timer, carrying the price table for its points", () => {
     const d = deps();
-    expect(
-      buildRunStore({ worker: { baseUrl: "https://state.example" } }, secretsFrom({ MEMORY_TOKEN: "tok" }), d),
-    ).toBeInstanceOf(WorkerRunStore);
+    const prices = { "anthropic/m": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } };
+    const store = buildRunStore(
+      { worker: { baseUrl: "https://state.example" } },
+      secretsFrom({ MEMORY_TOKEN: "tok" }),
+      { ...d, prices },
+    );
+    expect(store).toBeInstanceOf(WorkerRunStore);
+    // The table reaches the client whole — what every point's dollars are priced through (run-metrics.md).
+    expect((store as unknown as { opts: { prices?: unknown } }).opts.prices).toEqual(prices);
     expect(warnings).toEqual([]);
     expect(timers).toEqual([]);
   });

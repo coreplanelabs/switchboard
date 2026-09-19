@@ -119,6 +119,8 @@ import {
   type McpTicketState,
   type SealedCredential,
 } from "../../src/mcp/registry.ts";
+import { isRunMetricsPoint, pointTurnsFinal, type RunMetricsPoint } from "../../src/core/runMetrics.ts";
+import { AnalyticsEngineSink, NullSink, type RunMetricsSink } from "./runMetricsSink.ts";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.ts";
 import { systemClock } from "../../src/core/trace/clock.ts";
 import { createTracer } from "../../src/core/trace/tracer.ts";
@@ -161,7 +163,7 @@ const traceSinks = [workerLogSink((line) => console.log(line))];
 // store key, owning the retention policy. Same bearer; /runs/put has its own 2 MiB
 // body fence (a record is budgeted to 1.5 MiB upstream), every other route
 // keeps the 512 KB one.
-//   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?} → {ok, retained, stored, rewritten}
+//   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?, point?} → {ok, retained, stored, rewritten}
 //   POST /runs/get    {storeKey, id} → {record: RunRecord | null}      (unknown/expired: null, 200)
 //   POST /runs/list   {storeKey, limit?, before?, beforeId?, sinceMs?, agent?, channel?, threadKey?, parentRunId?}
 //                       → {items: RunListItem[], nextBefore?: {finishedAt, id}}   (cursor = the last row's list key)
@@ -198,6 +200,14 @@ export interface Env {
    *  binding is a cross-script one, and the class must exist on the bot before
    *  the state Worker may name it), and a finish then commits with no event. */
   SHIP_COORDINATOR?: Workflow;
+  /** The run-metrics dataset (docs/reference/specs/run-metrics.md): where the
+   *  RunHistoryDO writes one point per run whose row turned final. Optional
+   *  like SHIP_COORDINATOR: this Worker deploys without it and every answer is
+   *  byte-identical — the NullSink swallows the points. */
+  RUN_METRICS?: AnalyticsEngineDataset;
+  /** The dataset's name, rendered beside the binding, so `/healthz` can answer
+   *  `runMetrics:<dataset>` and the bot's boot probe can compare names. */
+  RUN_METRICS_DATASET?: string;
   MEMORY_TOKEN?: string;
 }
 
@@ -1508,10 +1518,15 @@ type HeartbeatAnswer = FenceResult & { stop?: StopMode | null; phase?: LivePhase
 
 export class RunHistoryDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
+  /** Where a turned-final run's point goes (run-metrics.md): the Analytics
+   *  Engine dataset when the deploy bound one, the NullSink otherwise —
+   *  selected once at construction, the `SHIP_COORDINATOR?` shape. */
+  private readonly metrics: RunMetricsSink;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.metrics = env.RUN_METRICS !== undefined ? new AnalyticsEngineSink(env.RUN_METRICS) : new NullSink();
     // Idempotent schema. `runs` carries the listing columns plus the record
     // minus its events as JSON (`summary_json`, what `list` returns); events
     // live one per row keyed (run_id, seq) so a 5000-event run is paged, never
@@ -2086,8 +2101,10 @@ export class RunHistoryDO extends DurableObject<Env> {
     gen: string,
     record: RunRecord,
     proposal?: RunPolicyProposal,
+    point?: RunMetricsPoint,
   ): Promise<FenceResult & { stored?: boolean; event?: RunFinishedSend["kind"] }> {
     let out: FenceResult & { stored?: boolean } = { ok: true };
+    let turnedFinal = false;
     this.ctx.storage.transactionSync(() => {
       const fence = checkFence(this.liveRow(runId), gen);
       if (!fence.ok) {
@@ -2096,9 +2113,14 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
       const put = this.upsertInTransaction(record, proposal);
       this.deleteLiveRows([runId]);
+      turnedFinal = put.turnedFinal;
       out = { ok: true, stored: put.stored };
     });
     if (!out.ok) return out;
+    // The point after the commit, never inside it (`sendRunFinished`'s placement):
+    // the finish usually replaces the start tombstone, so this is where most
+    // runs are counted (run-metrics.md item 2).
+    this.writeMetricsPoint(runId, point, turnedFinal && out.stored === true);
     if ((await this.ctx.storage.getAlarm()) === null)
       await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
     await this.refreshSessionBytes(record.session?.key);
@@ -2361,15 +2383,21 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  when the stored version changed (`event_count`, `finished_at`, `bytes`) —
    *  an identical retry is a no-op on `run_events`. `stored: false` when the
    *  record itself fell outside the (possibly just-updated) policy: it was
-   *  written and deleted in the same transaction, so nothing of it remains. */
+   *  written and deleted in the same transaction, so nothing of it remains.
+   *  `point` is the record's metrics point, computed by the client
+   *  (run-metrics.md): written to the sink AFTER the commit, only when the row
+   *  turned final and the record was stored — `turnedFinal` stays internal (the
+   *  route strips it), so the wire answer is exactly the shape it always was. */
   async put(
     record: RunRecord,
     proposal?: RunPolicyProposal,
-  ): Promise<{ ok: true; retained: number; stored: boolean; rewritten: boolean }> {
-    let result = { ok: true as const, retained: 0, stored: false, rewritten: false };
+    point?: RunMetricsPoint,
+  ): Promise<{ ok: true; retained: number; stored: boolean; rewritten: boolean; turnedFinal: boolean }> {
+    let result = { ok: true as const, retained: 0, stored: false, rewritten: false, turnedFinal: false };
     this.ctx.storage.transactionSync(() => {
       result = this.upsertInTransaction(record, proposal);
     });
+    this.writeMetricsPoint(record.id, point, result.turnedFinal && result.stored);
     // A coordinator child closed OUTSIDE the ledger's finish — the run loop or
     // a reclaim writing an `interrupted` record, the pi harness's typed restart,
     // a resume abandoning a lost workspace — still wakes its parent's wait at
@@ -2393,7 +2421,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   private upsertInTransaction(
     record: RunRecord,
     proposal?: RunPolicyProposal,
-  ): { ok: true; retained: number; stored: boolean; rewritten: boolean } {
+  ): { ok: true; retained: number; stored: boolean; rewritten: boolean; turnedFinal: boolean } {
     {
       const now = systemClock();
       const policy = proposal ? this.applyProposal(proposal, now).policy : this.policyState().policy;
@@ -2410,11 +2438,29 @@ export class RunHistoryDO extends DurableObject<Env> {
       const { events, ...summary } = stored;
       const bytes = utf8ByteLength(JSON.stringify(stored));
       const existing = this.sql
-        .exec<{ event_count: number; finished_at: number; bytes: number }>(
-          `SELECT event_count, finished_at, bytes FROM runs WHERE run_id = ?`,
+        .exec<{ event_count: number; finished_at: number; bytes: number; summary_json: string }>(
+          `SELECT event_count, finished_at, bytes, summary_json FROM runs WHERE run_id = ?`,
           record.id,
         )
         .toArray()[0];
+      // The one field of the stored summary the emission rule reads (run-metrics.md
+      // item 2): the row's `provisional`, parsed alone — never deserialized whole.
+      const existingProvisional = existing !== undefined && summaryIsProvisional(existing.summary_json);
+      const turnedFinal = pointTurnsFinal(
+        existing !== undefined ? { provisional: existingProvisional } : undefined,
+        stored,
+      );
+      // A provisional record never overwrites a final row (run-history.md item 27;
+      // run-metrics.md item 3): a start tombstone sitting in retry backoff or a
+      // drain upgrade racing a fast finish would otherwise land after the finish
+      // record, overwrite it with `interrupted` — and let the run's point be
+      // written twice when a later final write turned the row "final" again.
+      // Answered as stored, with nothing written: the row, its events and the
+      // sessions table stay exactly as the final write left them.
+      if (stored.provisional === true && existing !== undefined && !existingProvisional) {
+        const retained = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs`).one().n;
+        return { ok: true as const, retained, stored: true, rewritten: false, turnedFinal: false };
+      }
       const unchanged =
         existing !== undefined &&
         sameStoredVersion(
@@ -2494,7 +2540,22 @@ export class RunHistoryDO extends DurableObject<Env> {
         retained: kept.size,
         stored: kept.has(record.id),
         rewritten: existing !== undefined && !unchanged,
+        turnedFinal,
       };
+    }
+  }
+
+  /** One point per run whose row turned final, AFTER the commit (run-metrics.md
+   *  item 2) — advisory: a throwing sink leaves the answer exactly as a
+   *  recording one would, and says so in one warn line with the run id and the
+   *  error's constructor name, never the point's contents. */
+  private writeMetricsPoint(runId: string, point: RunMetricsPoint | undefined, turnedFinal: boolean): void {
+    if (point === undefined || !turnedFinal) return;
+    try {
+      this.metrics.write(point);
+    } catch (err) {
+      const kind = err instanceof Error ? err.constructor.name : "Error";
+      console.warn(`[runs/metrics] ${runId} point not written: ${kind}`);
     }
   }
 
@@ -2947,6 +3008,17 @@ function parseSummary(row: RunRow): Omit<RunRecord, "events"> | null {
   }
 }
 
+/** The one field of a stored row's summary the emission rule reads: whether the
+ *  row is a provisional tombstone. Deliberately not a full `RunRecord` parse
+ *  (run-metrics.md item 2) — this runs inside every upsert's transaction. */
+function summaryIsProvisional(summaryJson: string): boolean {
+  try {
+    return (JSON.parse(summaryJson) as { provisional?: unknown }).provisional === true;
+  } catch {
+    return false;
+  }
+}
+
 function parseRunId(v: unknown): Validated<string> {
   if (typeof v !== "string" || !RUN_ID_PATTERN.test(v)) return invalid("id must match ^[A-Za-z0-9_-]{1,64}$");
   return { ok: true, value: v };
@@ -2962,16 +3034,24 @@ function parsePositiveInt(v: unknown, name: string, max: number): Validated<numb
   return { ok: true, value: v };
 }
 
-function parseRunPut(body: unknown): Validated<{ storeKey: string; record: RunRecord; proposal?: RunPolicyProposal }> {
+function parseRunPut(
+  body: unknown,
+): Validated<{ storeKey: string; record: RunRecord; proposal?: RunPolicyProposal; point?: RunMetricsPoint }> {
   if (typeof body !== "object" || body === null) return invalid("body must be a JSON object");
   const b = body as Record<string, unknown>;
   const key = parseStoreKey(b);
   if (!key.ok) return key;
   if (!isRunRecord(b.record)) return invalid("record must be a RunRecord");
-  const out: { storeKey: string; record: RunRecord; proposal?: RunPolicyProposal } = {
+  const out: { storeKey: string; record: RunRecord; proposal?: RunPolicyProposal; point?: RunMetricsPoint } = {
     storeKey: key.value,
     record: b.record,
   };
+  // The record's metrics point (run-metrics.md item 1), validated at the door
+  // like everything else that reaches storage.
+  if (b.point !== undefined) {
+    if (!isRunMetricsPoint(b.point)) return invalid("point must be a RunMetricsPoint");
+    out.point = b.point;
+  }
   if (b.policy !== undefined) {
     if (typeof b.policy !== "object" || b.policy === null) return invalid("policy must be an object");
     const p = b.policy as Record<string, unknown>;
@@ -4330,7 +4410,7 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     const parsed = parseRunPut({ ...b, storeKey: key.value });
     if (!parsed.ok) return json({ error: parsed.error }, 400);
     if (parsed.value.record.id !== runId.value) return json({ error: "record.id must equal runId" }, 400);
-    const r = await stub.finish(runId.value, g.value, parsed.value.record, parsed.value.proposal);
+    const r = await stub.finish(runId.value, g.value, parsed.value.record, parsed.value.proposal, parsed.value.point);
     console.log(
       `[runs/finish] ${key.value} ${runId.value} ok=${r.ok}${r.ok ? ` stored=${r.stored} event=${r.event}` : ` ${r.reason}`}`,
     );
@@ -4347,8 +4427,10 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
   if (pathname === "/runs/put") {
     const parsed = parseRunPut(body);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
-    const { storeKey, record, proposal } = parsed.value;
-    const result = await stub(storeKey).put(record, proposal);
+    const { storeKey, record, proposal, point } = parsed.value;
+    // `turnedFinal` stays internal: the wire answer is exactly the shape it
+    // always was, binding or no binding (run-metrics.md item 4).
+    const { turnedFinal: _turnedFinal, ...result } = await stub(storeKey).put(record, proposal, point);
     console.log(
       `[runs/put] ${storeKey} <- ${record.id} (${record.storedEventCount} events, stored=${result.stored}, ${result.retained} retained)`,
     );
@@ -4432,11 +4514,21 @@ interface Admission {
   authorized: boolean;
 }
 
+/** What this deploy carries, for the bot's boot probe: the fixed route set,
+ *  plus `runMetrics:<dataset>` when the deploy bound the Analytics Engine
+ *  dataset (run-metrics.md item 5) — the name from the `RUN_METRICS_DATASET`
+ *  var rendered beside the binding, so the probe can compare it to the bot's. */
+export function featuresOf(env: Pick<Env, "RUN_METRICS" | "RUN_METRICS_DATASET">): string[] {
+  const features = ["memory", "schedules", "runs", "config", "delivery", "costs"];
+  if (env.RUN_METRICS !== undefined) features.push(`runMetrics:${env.RUN_METRICS_DATASET ?? "unknown"}`);
+  return features;
+}
+
 /** Every request, once `fetch` has decided whether it gets a root. */
 async function handleRequest(request: Request, env: Env, admission: Admission): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === "/healthz" && request.method === "GET")
-    return json({ ok: true, build: BUILD, features: ["memory", "schedules", "runs", "config", "delivery", "costs"] });
+    return json({ ok: true, build: BUILD, features: featuresOf(env) });
   if (!admission.known) return json({ error: "not found" }, 404);
   if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
   if (!admission.authorized) return json({ error: "unauthorized" }, 401);

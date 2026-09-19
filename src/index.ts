@@ -310,10 +310,16 @@ export async function runBot(): Promise<void> {
   console.log(
     `[trace] internal hosts (trace context travels to these only): ${hosts.hosts.length > 0 ? hosts.hosts.join(", ") : "none"}`,
   );
+  // The `costs:` block, parsed once and early: the price table every finished
+  // run is priced through (costs.md item 4c) — the run store's and the
+  // ledger's metrics points (run-metrics.md), `RunsService` and the costs
+  // service below all read the same table.
+  const costsCfg = parseCostsConfig(config.config.costs);
   const runStore =
     buildRunStore(runHistoryCfg, processSecrets, {
       dataDir: DATA_DIR,
       warn: (m) => console.warn(`[run-history] ${m}`),
+      ...(costsCfg?.prices ? { prices: costsCfg.prices } : {}),
     }) ?? new NullRunStore();
   // The ONE abridger of this process (docs/reference/specs/reading-diff.md item 5): meat
   // on this host over the stored record. `review abridge` (the catalogue below)
@@ -357,7 +363,11 @@ export async function runBot(): Promise<void> {
   // pick it up. Worker-backed history only: a file store has no ledger, and a
   // process without one carries the null write-through (nothing claimed).
   const generation = mintGeneration();
-  const ledgerClient = capabilities.runLedger ? buildRunLedger(runHistoryCfg, processSecrets) : null;
+  const ledgerClient = capabilities.runLedger
+    ? buildRunLedger(runHistoryCfg, processSecrets, {
+        ...(costsCfg?.prices ? { prices: costsCfg.prices } : {}),
+      })
+    : null;
   // The coordinator's parent records (run-history item 49) live beside the
   // ledger on the state Worker; without one, the null store knows no instance
   // and the coordinator routes refuse every step by name.
@@ -501,9 +511,6 @@ export async function runBot(): Promise<void> {
   // resident admin client the config names. ---
   // One RunsService for every surface: the command registry (HTTP/MCP/chat), the
   // /runs pages, and the run tools a spawning run holds (the dispatcher's `runs`).
-  // The `costs:` block, parsed once: the price table every finished run is priced through (costs.md
-  // item 4c) and, below, the service the costs page reads.
-  const costsCfg = parseCostsConfig(config.config.costs);
   const runsService = createRunsService({
     registry: defaultRunRegistry,
     store: runStore,
