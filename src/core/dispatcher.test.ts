@@ -26,7 +26,7 @@ import { InMemoryArtifactStore } from "../artifacts/store.js";
 import { ExecInfraError, ExecSandboxRestartedError } from "../execution/executor.js";
 import { classifyError } from "./trace/classify.js";
 import { ResidentNeedsRefError } from "../execution/resident.js";
-import type { ChannelIO, HistoryItem, RunReceipt, StatusUpdate } from "./types.js";
+import type { ChannelIO, HistoryItem, IncomingMessage, RunReceipt, StatusUpdate } from "./types.js";
 import { activeRunCount, dispatch, dispatchClick, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
 import { CONFIRMATION_TTL_MS } from "./budgets.js";
 import type { AuditEntry } from "./commandRegistry.js";
@@ -45,10 +45,16 @@ import {
   OFFER_USED_LINE,
 } from "./dispatch/confirm.js";
 import { setShutdownNotice } from "./dispatch/run.js";
-import { durableInboxMessage, type DispatchFollowUp } from "./dispatch/admission.js";
+import {
+  createSteerSender,
+  defaultAdmission,
+  durableInboxMessage,
+  STEER_OWNER_REFUSED,
+  type DispatchFollowUp,
+} from "./dispatch/admission.js";
 import { CUSTOM_INSTRUCTIONS_HEADER } from "./customInstructions.js";
 import { TITLE_GATE_REPOSITORY } from "./prDescription.js";
-import { RunRegistry } from "./runRegistry.js";
+import { defaultRunRegistry, RunRegistry } from "./runRegistry.js";
 import { activityOfEvents } from "./runRegistry/activity.js";
 import { activityText } from "./statusCardFrame.js";
 import type { IndexEvent } from "./runRegistry/indexFeed.js";
@@ -118,6 +124,8 @@ type TestDeps = CoreDeps & {
   residentAdmin?: ResidentAdminClient;
   operations?: Operations;
   invoked: string[];
+  /** What the steer sender re-dispatched (a steer into a run that ended). */
+  redispatched?: IncomingMessage[];
   /** The friction ledger the catalogue's `friction.*` commands read (wiring, not a CoreDeps slice since the dispatcher stopped writing one). */
   frictionLedger?: FrictionLedger;
 };
@@ -143,6 +151,18 @@ function wireCommands(deps: TestDeps): { invoked: string[] } {
     // Never the network: an onboard here falls back to the npm table (and says so).
     repoInspector: async () => ({ ok: false, reason: "not inspected in tests" }),
     operations: (caller) => deps.operations ?? defaultOperations(deps.config, processSecrets, caller),
+    // `steer.run`'s wired sender, over whatever admission map and registry the
+    // test set AFTER wiring — every read deferred to the invoke, as in index.ts.
+    steer: () =>
+      createSteerSender({
+        config: deps.config,
+        runLedger: deps.runLedger,
+        runs: { getById: (id) => (deps.runRegistry ?? defaultRunRegistry).getById(id) },
+        admission: { get: (k) => (deps.admission ?? defaultAdmission).get(k) },
+        redispatch: async (m) => {
+          (deps.redispatched ??= []).push(m);
+        },
+      }),
   });
   deps.invoked = [];
   const invoked = deps.invoked;
@@ -17865,6 +17885,110 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     await dispatch(fresh, msg("no, the runs one", "slack:UADMIN"), fakeIO().io, { thread: pendingThread });
     expect(fresh.operatorModel).toHaveBeenCalledTimes(1);
     expect(fresh.invoked).toEqual(["help.show"]);
+  });
+
+  it("on: a bind of `steer` names a run and folds into it at that run's next boundary, whichever thread holds it — no hand-back for the write class, and the plan thread starts no rival run", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps); // rebind the catalogue over the test's own registry and admission map
+    // Two units live in two unit threads (record 0055); the reply lands in the
+    // plan thread and NAMES the second unit's run.
+    const u1 = registry.create("unit one", {
+      agent: "general",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:21.0",
+    });
+    const u2 = registry.create("unit two", {
+      agent: "general",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:22.0",
+    });
+    const slot1 = deps.admission!.claim("slack:CX:21.0", { agent: "general" });
+    slot1.live.runId = u1.id;
+    const slot2 = deps.admission!.claim("slack:CX:22.0", { agent: "general" });
+    slot2.live.runId = u2.id;
+    deps.operatorModel = decides({
+      reason: "a nudge into the second unit",
+      binds: [{ line: `steer run ${u2.id} also cover the docs`, reason: "names the second unit's run" }],
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("tell the second unit to also cover the docs", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["steer.run"]);
+    // The fold landed in the SECOND unit's thread, not the plan thread's slot and not the first unit's.
+    const [item] = slot2.live.inbox.drain();
+    expect(item).toMatchObject({ text: "also cover the docs", userId: "slack:UADMIN" });
+    expect(slot1.live.inbox.size).toBe(0);
+    expect(deps.admission!.get("slack:CX:1.0")).toBeUndefined(); // the plan thread stays free: no rival run
+    // The write class hands nothing back: a steer bind is admission's, not the paste ladder's.
+    expect(replies.some((r) => r.includes(`Folded into the *general* run ${u2.id}`))).toBe(true);
+    expect(replies.some((r) => r.includes("To run this:"))).toBe(false);
+  });
+
+  it("on: admission runs after the operator — a reply into a thread whose run is live executes the decision instead of folding, and the live run's inbox stays empty", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const live = registry.create("live run", {
+      agent: "general",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "general" });
+    slot.live.runId = live.id;
+    deps.operatorModel = decides({
+      reason: "new work beside the live run",
+      binds: [{ line: "config show", reason: "the scopes" }],
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("show me the config", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["config.show"]);
+    expect(slot.live.inbox.size).toBe(0); // nothing folded: the decision, not the slot, said what this event is
+    expect(replies.some((r) => r.includes("bound: `config show`"))).toBe(true);
+    expect(replies.some((r) => r.includes("Folded into"))).toBe(false);
+  });
+
+  it("on: a member's steer bind into the requester's run is refused with the owner rule's reason, and nothing is folded in", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const run = registry.create("the requester's run", {
+      agent: "general",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:22.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:22.0", { agent: "general" });
+    slot.live.runId = run.id;
+    deps.operatorModel = decides({
+      reason: "a member's nudge",
+      binds: [{ line: `steer run ${run.id} stop doing that`, reason: "names the run" }],
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("tell that run to stop doing that", "slack:UOTHER"), io);
+    expect(slot.live.inbox.size).toBe(0);
+    expect(replies.some((r) => r.includes(STEER_OWNER_REFUSED))).toBe(true);
+  });
+
+  it("on: a steer into a run that ended is re-dispatched as a bind of the same words in the run's own thread", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const run = registry.create("an ended run", {
+      agent: "general",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:23.0",
+    });
+    registry.finish(run.id, "completed");
+    deps.operatorModel = decides({
+      reason: "a nudge into ended work",
+      binds: [{ line: `steer run ${run.id} and check the migration`, reason: "names the run" }],
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("tell it to also check the migration", "slack:UADMIN"), io);
+    expect(deps.redispatched).toEqual([
+      expect.objectContaining({ threadKey: "slack:CX:23.0", userId: "slack:UADMIN", text: "and check the migration" }),
+    ]);
+    expect(replies.some((r) => r.includes("ran as a fresh request"))).toBe(true);
   });
 
   it("off (the default) never calls the operator and the route stage is untouched", async () => {

@@ -146,6 +146,16 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.noGrants, command("runs.stop")],
     ],
   },
+  // `steer.run`: the door admits every chat user (`steer:write` rides
+  // CHAT_OPEN_ACTIONS) because the fence is the steer owner rule at the wired
+  // sender, decided against the NAMED run (authorization item 16a); a token
+  // still needs the grant, and no baseline hands it one.
+  ...commandRow(
+    "steer:write",
+    "steer.run",
+    [A.chatUser, A.chatUserGated, A.admin],
+    [A.token, A.noGrants, A.dispatchOnly],
+  ),
   // `review abridge` spends an Opus call: admins and holders of the grant by name; never a chat baseline.
   ...commandRow(
     "review:write",

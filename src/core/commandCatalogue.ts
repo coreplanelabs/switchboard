@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { AGENTS, presetDoor } from "../agents/registry.js";
 import { bootstrapOnHost } from "../agentEnv/host.js";
 import type { ConfigStore } from "../config.js";
+import type { SteerCommandDeps } from "./commands/steer.js";
 import type { AffectedReport } from "../deploy/affected.js";
 import { cliVersionOnHost } from "../deploy/host.js";
 import { systemClock } from "./trace/clock.js";
@@ -159,6 +160,10 @@ export interface CoreCommandWiring {
   channelDirectory?: () => ChannelDirectory | undefined;
   /** Display names for `config channels` (src/core/names.ts); a getter for the same reason. */
   names?: () => NameDirectory | undefined;
+  /** The sender behind `steer.run` (`createSteerSender`, src/core/dispatch/admission.ts):
+   *  the fold by run id under the steer owner rule. A getter, because the bot
+   *  wires it beside the dispatcher; absent → the command answers `unavailable`. */
+  steer?: () => SteerCommandDeps["steer"];
 }
 
 /** The snapshot of a process nobody stamped: a checkout's CLI, a test. */
@@ -430,6 +435,7 @@ export function buildCoreCommands(
     costs: { service: costs },
     metrics: { service: metrics },
     plane: { service: plane },
+    ...(wiring.steer ? { steer: wiring.steer() } : {}),
     // `providers check`: the loaded blocks and refs, the installed pi registry
     // (the very catalog the dispatcher resolves cards against), the real fetch.
     providers: {

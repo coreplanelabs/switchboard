@@ -1752,7 +1752,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
-    "action": "runs:write",
+    "action": "steer:write",
     "args": [
       {
         "name": "id",

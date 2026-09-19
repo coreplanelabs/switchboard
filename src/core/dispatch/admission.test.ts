@@ -29,9 +29,12 @@ import {
   DURABLE_INBOX_MAX_BYTES,
   durableInboxMessage,
   foldCarriedInbox,
+  createSteerSender,
   foldThreadAttachments,
   followUpFromInbox,
+  STEER_OWNER_REFUSED,
   steerRun,
+  type SteerableRun,
   type AdmissionContext,
   type AdmissionDeps,
   type DispatchFollowUp,
@@ -813,7 +816,9 @@ describe("steerRun — a run steers a live run through the inbox a thread reply 
     sourceUrl: "https://acme.slack.com/archives/CX/p10",
     from: { runId: "run-parent" },
   };
-  const target = { runId: "run-child", threadKey: CHILD_THREAD, agent: "general" };
+  // The child's lineage names the sender (authorization item 16a's own-child
+  // arm): `send_to_run` passes it off the run's own row.
+  const target = { runId: "run-child", threadKey: CHILD_THREAD, agent: "general", parentRunId: "run-parent" };
 
   it("into a child live here: the durable copy first (its seq rides the item), then the child's inbox — the requester as the sender, the parent run as `from`, the parent's thread as the link, no handle — and no reply anywhere", async () => {
     const admission = new ThreadAdmission<DispatchFollowUp>();
@@ -911,7 +916,12 @@ describe("steerRun — a run steers a live run through the inbox a thread reply 
     const open = admission.claim("slack:CX:10.0", { agent: "general" });
     open.live.runId = "run-open";
     expect(
-      await steerRun(deps, relayed, { runId: "run-open", threadKey: "slack:CX:10.0", agent: "general" }, "go on"),
+      await steerRun(
+        deps,
+        relayed,
+        { runId: "run-open", threadKey: "slack:CX:10.0", agent: "general", parentRunId: "run-parent" },
+        "go on",
+      ),
     ).toMatchObject({ kind: "steered", where: "here" });
     expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UADMIN", postedBy: "slack:bot:B0CLAUDE" });
     // The credential and the relay ride the in-memory item too (record 0062):
@@ -955,5 +965,221 @@ describe("foldThreadAttachments — the stored attachments as one message's imag
       documents: [{ mediaType: "text/plain", data: "bm90ZQ==" }],
     });
     expect(foldThreadAttachments([{ text: "x" } as { attachments?: never }])).toEqual({});
+  });
+});
+
+describe("steerRun — the owner rule for a run's steer (authorization item 16a; the one-door plan's admission unit)", () => {
+  const UNIT_THREAD = "slack:CX:20.0";
+
+  it("the runner's steer into a run of its own plan instance passes — another thread of the same plan — and one outside its instance is refused with nothing pushed", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = admission.claim(UNIT_THREAD, { agent: "general" });
+    claim.live.runId = "run-u2";
+    const ledger = new RecordingLedger({ pushSeq: () => 21 });
+    const deps = { config: configStore(), runLedger: ledger, clock: () => NOW, admission };
+    const runner = {
+      userId: "slack:UREQ",
+      channelId: "slack:CX",
+      from: { runId: "run-host", instanceId: "plan-a-1" },
+    };
+    const own = await steerRun(
+      deps,
+      runner,
+      { runId: "run-u2", threadKey: UNIT_THREAD, agent: "general", parentInstanceId: "plan-a-1" },
+      "also cover the docs",
+    );
+    expect(own).toMatchObject({ kind: "steered", where: "here" });
+    expect(claim.live.inbox.size).toBe(1);
+    const foreign = await steerRun(
+      deps,
+      runner,
+      { runId: "run-u2", threadKey: UNIT_THREAD, agent: "general", parentInstanceId: "plan-b-9" },
+      "also cover the docs",
+    );
+    expect(foreign).toEqual({ kind: "refused", reason: "steer_owner" });
+    expect(ledger.pushes).toHaveLength(1); // the refused steer made no durable push
+    expect(claim.live.inbox.size).toBe(1);
+  });
+
+  it("a run's steer into a run its lineage does not name at all — no shared parent, child or instance — is refused fail-closed", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const ledger = new RecordingLedger({ pushSeq: () => 22 });
+    const deps = { config: configStore(), runLedger: ledger, clock: () => NOW, admission };
+    const out = await steerRun(
+      deps,
+      { userId: "slack:UREQ", channelId: "slack:CX", from: { runId: "run-a" } },
+      { runId: "run-b", threadKey: UNIT_THREAD, agent: "general", requesterId: "slack:UREQ" },
+      "words",
+    );
+    expect(out).toEqual({ kind: "refused", reason: "steer_owner" });
+    expect(ledger.pushes).toEqual([]);
+  });
+});
+
+describe("createSteerSender — the wired sender behind `steer.run` (the one-door plan's admission unit)", () => {
+  const PLAN_THREAD = "slack:CX:30.0";
+  const U2_THREAD = "slack:CX:31.0";
+  const rows: Record<string, SteerableRun> = {
+    "run-u1": {
+      id: "run-u1",
+      finished: false,
+      agent: "coding",
+      threadKey: "slack:CX:32.0",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      parentInstanceId: "plan-a-1",
+    },
+    "run-u2": {
+      id: "run-u2",
+      finished: false,
+      agent: "general",
+      threadKey: U2_THREAD,
+      channelId: "slack:CX",
+      userId: "slack:UREQ",
+      parentInstanceId: "plan-a-1",
+    },
+    "run-done": {
+      id: "run-done",
+      finished: true,
+      agent: "general",
+      threadKey: U2_THREAD,
+      channelId: "slack:CX",
+      userId: "slack:UREQ",
+    },
+  };
+  const runs = { getById: (id: string) => rows[id] ?? null };
+  const requester = {
+    kind: "chat",
+    id: "slack:UREQ",
+    actor: {
+      kind: "user" as const,
+      id: "slack:UREQ",
+      grants: { actions: new Set<string>(), channels: new Set<string>(), repos: new Set<string>() },
+    },
+    origin: { channelId: "slack:CX", threadKey: PLAN_THREAD },
+  };
+
+  function senderDeps() {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const ledger = new RecordingLedger({ pushSeq: () => 31 });
+    const redispatched: IncomingMessage[] = [];
+    const sender = createSteerSender({
+      config: configStore(),
+      runLedger: ledger,
+      runs,
+      admission,
+      clock: () => NOW,
+      redispatch: async (m) => {
+        redispatched.push(m);
+      },
+    });
+    return { admission, ledger, sender, redispatched };
+  }
+
+  it("two units live in two unit threads: a steer typed in the plan thread names the second and folds into ITS thread's run, whichever thread holds it", async () => {
+    const { admission, ledger, sender } = senderDeps();
+    const u2 = admission.claim(U2_THREAD, { agent: "general" });
+    u2.live.runId = "run-u2";
+    const receipt = await sender.send("run-u2", "also cover the docs", requester);
+    expect(receipt).toContain("Folded into the *general* run run-u2");
+    expect(ledger.pushes).toHaveLength(1);
+    expect(ledger.pushes[0]).toMatchObject({ runId: "run-u2" });
+    const [item] = u2.live.inbox.drain();
+    expect(item).toMatchObject({ text: "also cover the docs", userId: "slack:UREQ", ledgerSeq: 31 });
+    expect(item.from).toBeUndefined(); // a person's steer, not a run's
+  });
+
+  it("a caller behind a bound credential (authorization item 15) rides authenticatedAs onto the fold, the durable row and the ended-run redispatch", async () => {
+    const { admission, ledger, sender, redispatched } = senderDeps();
+    const u2 = admission.claim(U2_THREAD, { agent: "general" });
+    u2.live.runId = "run-u2";
+    // The actor IS the credential, the person its `self` and `asUser` (record 0042).
+    const bound = {
+      ...requester,
+      actor: {
+        ...requester.actor,
+        id: "http:t1",
+        self: ["http:t1", "slack:UREQ"],
+        asUser: { id: "slack:UREQ" },
+      },
+    };
+    await sender.send("run-u2", "also cover the docs", bound);
+    expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "http:t1" });
+    const [item] = u2.live.inbox.drain();
+    expect(item).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "http:t1" });
+    await sender.send("run-done", "and check the migration", bound);
+    expect(redispatched[0]).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "http:t1" });
+  });
+
+  it("a relay's caller (the app acting onBehalfOf the person, item 14) rides postedBy onto the fold and the redispatch", async () => {
+    const { admission, ledger, sender, redispatched } = senderDeps();
+    const u2 = admission.claim(U2_THREAD, { agent: "general" });
+    u2.live.runId = "run-u2";
+    const writeGrants = { actions: new Set(["runs:write"]), channels: new Set<string>(), repos: new Set<string>() };
+    const relayed = {
+      ...requester,
+      actor: {
+        kind: "agent" as const,
+        id: "slack:bot:B0CLAUDE",
+        grants: writeGrants,
+        onBehalfOf: { kind: "user" as const, id: "slack:UREQ", grants: writeGrants },
+      },
+    };
+    await sender.send("run-u2", "go on", relayed);
+    expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UREQ", postedBy: "slack:bot:B0CLAUDE" });
+    const [item] = u2.live.inbox.drain();
+    expect(item).toMatchObject({ userId: "slack:UREQ", postedBy: "slack:bot:B0CLAUDE" });
+    await sender.send("run-done", "and check the migration", relayed);
+    expect(redispatched[0]).toMatchObject({ userId: "slack:UREQ", postedBy: "slack:bot:B0CLAUDE" });
+  });
+
+  it("a member's steer into the requester's run is refused with the owner rule's reason, and nothing is pushed anywhere", async () => {
+    const { admission, ledger, sender } = senderDeps();
+    const u2 = admission.claim(U2_THREAD, { agent: "general" });
+    u2.live.runId = "run-u2";
+    const member = { ...requester, id: "slack:UOTHER", actor: { ...requester.actor, id: "slack:UOTHER" } };
+    await expect(sender.send("run-u2", "stop doing that", member)).rejects.toThrow(STEER_OWNER_REFUSED);
+    expect(ledger.pushes).toEqual([]);
+    expect(u2.live.inbox.size).toBe(0);
+  });
+
+  it("a `runs:write` grant admits a non-requester's steer", async () => {
+    const { admission, sender } = senderDeps();
+    const u2 = admission.claim(U2_THREAD, { agent: "general" });
+    u2.live.runId = "run-u2";
+    const granted = {
+      ...requester,
+      id: "slack:UOPS",
+      actor: {
+        ...requester.actor,
+        id: "slack:UOPS",
+        grants: { actions: new Set(["runs:write"]), channels: new Set<string>(), repos: new Set<string>() },
+      },
+    };
+    await expect(granted && sender.send("run-u2", "narrow it", granted)).resolves.toContain("Folded into");
+  });
+
+  it("a steer into a run that ended is re-dispatched as a bind of the same words — a fresh request in the run's own thread under the caller's identity", async () => {
+    const { sender, redispatched, ledger } = senderDeps();
+    const receipt = await sender.send("run-done", "and check the migration", requester);
+    expect(receipt).toContain("ran as a fresh request");
+    expect(redispatched).toEqual([
+      {
+        channelId: "slack:CX",
+        userId: "slack:UREQ",
+        threadKey: U2_THREAD,
+        text: "and check the migration",
+        receivedAt: NOW,
+      },
+    ]);
+    expect(ledger.pushes).toEqual([]);
+  });
+
+  it("an unknown run id is refused by name, and a run the process knows but nobody may steer never reaches the redispatch", async () => {
+    const { sender, redispatched } = senderDeps();
+    await expect(sender.send("run-nope", "words", requester)).rejects.toThrow("run run-nope is not known here");
+    const member = { ...requester, id: "slack:UOTHER", actor: { ...requester.actor, id: "slack:UOTHER" } };
+    await expect(sender.send("run-done", "words", member)).rejects.toThrow(STEER_OWNER_REFUSED);
+    expect(redispatched).toEqual([]);
   });
 });

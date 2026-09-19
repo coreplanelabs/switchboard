@@ -71,7 +71,7 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `steer run <id> <words…>` | Fold words into a live run at its next step boundary, by run id. | admins |
+| `steer run <id> <words…>` | Fold words into a live run at its next step boundary, by run id. | anyone |
 
 ### `review`
 

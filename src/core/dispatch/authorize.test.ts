@@ -19,6 +19,7 @@ import {
   authorizePrHead,
   authorizeProfile,
   authorizeRepo,
+  authorizeSteerOwner,
   type AuthorizeDeps,
   type GateCard,
   type GateContext,
@@ -762,5 +763,86 @@ describe("authorizeProfile — the profile gate, before the thread is claimed", 
       "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary and your own boundary allow only `none`, `blank`. Run it in a channel that allows `repo-resident`, or ask <@slack:UADMIN> to raise this channel's boundary; raise your own boundary with `config set me --boundary.machines <classes including repo-resident>`, or drop your overrides with `config clear me`.",
     ]);
     expect(two.refusals).toEqual(["profile_bounded"]);
+  });
+});
+
+describe("authorizeSteerOwner — the steer owner rule (docs/reference/specs/authorization.md item 16a)", () => {
+  const noGrants = { actions: new Set<string>(), channels: new Set<string>(), repos: new Set<string>() };
+  const writeGrant = { ...noGrants, actions: new Set(["runs:write"]) };
+  const target = { runId: "run-u2", requesterId: "slack:UREQ", parentInstanceId: "plan-a-1" };
+
+  it("the requester steers their own run; any id their identity record links counts as them", () => {
+    expect(authorizeSteerOwner({ caller: { ids: ["slack:UREQ"], grants: noGrants }, target })).toEqual({
+      kind: "allowed",
+    });
+    // A dashboard session linked to the requester (record 0042's self set).
+    expect(authorizeSteerOwner({ caller: { ids: ["access:sub", "slack:UREQ"], grants: noGrants }, target })).toEqual({
+      kind: "allowed",
+    });
+  });
+
+  it("a member who is not the requester is refused without the grant, and admitted with `runs:write`", () => {
+    expect(authorizeSteerOwner({ caller: { ids: ["slack:UOTHER"], grants: noGrants }, target })).toEqual({
+      kind: "refused",
+      reason: "steer_not_requester",
+    });
+    expect(authorizeSteerOwner({ caller: { ids: ["slack:UOTHER"], grants: writeGrant }, target })).toEqual({
+      kind: "allowed",
+    });
+  });
+
+  it("fail closed: a target with no requester on record admits nobody but a grant holder", () => {
+    const orphan = { runId: "run-x" };
+    expect(authorizeSteerOwner({ caller: { ids: ["slack:UREQ"], grants: noGrants }, target: orphan })).toEqual({
+      kind: "refused",
+      reason: "steer_not_requester",
+    });
+    expect(authorizeSteerOwner({ caller: { ids: ["slack:UREQ"], grants: writeGrant }, target: orphan })).toEqual({
+      kind: "allowed",
+    });
+  });
+
+  it("the runner's stand-in reaches only its own lineage: its instance's run, its own child, its own parent — a run outside them is refused", () => {
+    const from = { runId: "run-parent", instanceId: "plan-a-1" };
+    // A run of the runner's own plan instance, whichever thread holds it.
+    expect(authorizeSteerOwner({ caller: { ids: [], grants: noGrants }, target, from })).toEqual({
+      kind: "allowed",
+    });
+    // Its own spawned child (send_to_run's not_child gate proves parentRunId).
+    expect(
+      authorizeSteerOwner({
+        caller: { ids: [], grants: noGrants },
+        target: { runId: "run-kid", parentRunId: "run-parent" },
+        from: { runId: "run-parent" },
+      }),
+    ).toEqual({ kind: "allowed" });
+    // A child telling its own parent (lineage's tell).
+    expect(
+      authorizeSteerOwner({
+        caller: { ids: [], grants: noGrants },
+        target: { runId: "run-parent" },
+        from: { runId: "run-kid", parentRunId: "run-parent" },
+      }),
+    ).toEqual({ kind: "allowed" });
+    // A run outside the instance — a person's run of another plan — is refused,
+    // and the borrowed requester's ids or grants lend the run's steer nothing.
+    expect(
+      authorizeSteerOwner({
+        caller: { ids: ["slack:UREQ"], grants: writeGrant },
+        target: { runId: "run-foreign", requesterId: "slack:UREQ", parentInstanceId: "plan-b-1" },
+        from,
+      }),
+    ).toEqual({ kind: "refused", reason: "steer_outside_instance" });
+  });
+
+  it("the stand-in reaches no destructive bind: a runner's destructive bind on a person's run is authorized as the runner itself and refused", () => {
+    expect(
+      authorizeSteerOwner({
+        caller: { ids: [], grants: noGrants },
+        target,
+        from: { runId: "run-parent", instanceId: "plan-a-1" },
+        bind: "destructive",
+      }),
+    ).toEqual({ kind: "refused", reason: "steer_not_requester" });
   });
 });

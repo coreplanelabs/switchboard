@@ -58,6 +58,11 @@ export const POLICY: readonly Rule[] = [
   // List-shaped `runs.*`: the grant admits the command; the store predicate narrows the rows.
   { action: "runs:read", resource: "command", when: [grant("runs:read")] },
   { action: "runs:write", resource: "command", when: [grant("runs:write")] },
+  // `steer.run`: every chat user holds the grant (CHAT_OPEN_ACTIONS) because
+  // the fence is the steer owner rule at the wired sender, decided against the
+  // NAMED run (`authorizeSteerOwner`, authorization item 16a) — the requester,
+  // a linked id, or `runs:write` — which no command-door row can see.
+  { action: "steer:write", resource: "command", when: [grant("steer:write")] },
 
   // ── conversations ────────────────────────────────────────────────────────
   // Who may point the bot at another thread (record 0037). Asked for a

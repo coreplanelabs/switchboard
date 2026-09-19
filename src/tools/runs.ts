@@ -261,7 +261,20 @@ export const sendToRunTool: RunnableTool = {
       return `not_live: ${id} already ended (${view.status ?? "finished"}) — nothing was sent; get_run_status has its reply`;
     if (view.threadKey === undefined || view.agent === undefined)
       return `not_live: ${id} has no thread or agent on its row — nothing was sent`;
-    const out = await ctx.steer.steer({ runId: id, threadKey: view.threadKey, agent: view.agent }, text);
+    // The lineage rides the target (authorization item 16a): `parentRunId` is
+    // this run — the not_child gate above proved it — so the owner rule's
+    // own-child arm admits the steer.
+    const out = await ctx.steer.steer(
+      {
+        runId: id,
+        threadKey: view.threadKey,
+        agent: view.agent,
+        parentRunId: view.parentRunId,
+        ...(view.userId !== undefined ? { requesterId: view.userId } : {}),
+        ...(view.parentInstanceId !== undefined ? { parentInstanceId: view.parentInstanceId } : {}),
+      },
+      text,
+    );
     switch (out.kind) {
       case "steered":
         return (
@@ -270,7 +283,9 @@ export const sendToRunTool: RunnableTool = {
           " — it reads it at its next step; a child that finishes before then never reads it."
         );
       case "refused":
-        return `refused (${out.reason}): the requester may not run the ${view.agent} agent, so its run cannot hear them`;
+        return out.reason === "steer_owner"
+          ? `refused (${out.reason}): ${id} is outside this run's own lineage, so it cannot be steered from here`
+          : `refused (${out.reason}): the requester may not run the ${view.agent} agent, so its run cannot hear them`;
       case "not_live":
         return `not_live: ${id} ended during the send — nothing was sent; get_run_status has its reply`;
     }

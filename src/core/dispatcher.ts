@@ -596,11 +596,19 @@ export async function dispatch(
           ...(opts.intake ? { intake: opts.intake } : {}),
         }),
       );
-      // A reply into a thread a run holds is a follow-up admission steers, not
-      // a request of its own: the decision is written beside the fold, onto
-      // the live run's record, and the reply goes on to admission unchanged.
+      // Under `shadow`, a reply into a thread a run holds is a follow-up
+      // admission steers, not a request of its own: the decision is written
+      // beside the fold, onto the live run's record, and the reply goes on to
+      // admission unchanged. Under `on`, admission runs AFTER the operator
+      // (the one-door plan's admission unit): the decision — not the
+      // thread's live slot — says what this event is. A bind of `steer` names
+      // its run and folds into it at that run's next boundary, whichever
+      // thread holds it (the wired `steer.run` sender, under the owner rule of
+      // authorization item 16a); every other bind runs as its own work beside
+      // the live run. Thread occupancy itself is untouched: one live run per
+      // thread, and nothing here starts a rival in an occupied one.
       const live = operatorEvent ? admission.get(msg.threadKey) : undefined;
-      if (operatorEvent && live?.runId !== undefined) {
+      if (operatorMode === "shadow" && operatorEvent && live?.runId !== undefined) {
         registry.publish(live.runId, { type: "operator", ...operatorEvent, at: clock() });
         operatorEvent = undefined;
       } else if (operatorMode === "on" && operatorEvent) {
