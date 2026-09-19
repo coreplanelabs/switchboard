@@ -451,16 +451,16 @@ export const TIMEOUT_ON_LONG_COMMANDS =
  *  exit line goes into the PR description's validation table as the row's proof
  *  (the handoff has no verified list; parseHandoff carries deviations, followUps,
  *  unproven and landed), and a gate the child could not run goes under the
- *  handoff's unproven list, never claimed clean. The tests compare against the
- *  pull request's own base — `origin/<base>` — which the render substitutes
- *  from the rebase's `onto` when the contract knows it. */
-/** The changed-set test command as the contract renders it before the base is
- *  known; the render substitutes the unit's base for `<base>` (`renderFirstInstruction`). */
-export const CHANGED_SET_TEST_PLACEHOLDER = "`npx vitest run --changed origin/<base>`";
+ *  handoff's unproven list, never claimed clean. The test gate is the touched
+ *  files by name, never a changed-set or directory run. */
+/** The test command the contract hands a child: the touched files by name, once.
+ *  Never `--changed`: against a base that moves, it selects most of the suite, and on the
+ *  shared resident that is the memory incident the coding contract exists to prevent. */
+export const TOUCHED_TESTS_COMMAND = "`npx vitest run` on the test files you touched, by name,";
 
 export const FAST_GATES_BEFORE_PUSH =
   "The fast gates, before every push — each scoped to the changed set, never the whole project: " +
-  `${CHANGED_SET_TEST_PLACEHOLDER} (the pull request's base; or the touched test files), ` +
+  `${TOUCHED_TESTS_COMMAND} once (never \`--changed\`, never a directory: on a moving base that is most of the suite), ` +
   "`tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`, " +
   "`npx prettier --check` on the changed files, `npm run hygiene:check` and `npm run specs:check` — " +
   "then your judgement on what else this change needs, not a longer checklist. Every CI pipeline runs the " +
@@ -474,14 +474,7 @@ export const FAST_GATES_BEFORE_PUSH =
 function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
   const branch = rebase.branch ? `\`${rebase.branch}\`` : "the unit's branch";
   const onto = rebase.onto ? `\`${rebase.onto}\`` : "the merged parent";
-  // the changed-set test run compares against the unit's own base, which the
-  // contract knows as the rebase target; unknown, the placeholder stands
-  // split/join, never String.replace: a `$` in a branch name is literal text here
-  const gates = rebase.onto
-    ? FAST_GATES_BEFORE_PUSH.split(`${CHANGED_SET_TEST_PLACEHOLDER} (the pull request's base; or`).join(
-        `\`npx vitest run --changed origin/${rebase.onto}\` (or`,
-      )
-    : FAST_GATES_BEFORE_PUSH;
+  const gates = FAST_GATES_BEFORE_PUSH;
   return (
     `Rebase ${branch} onto ${onto} before any other work — the parent unit has merged and the base has moved; ` +
     `the only writes are your own on that branch. A conflict ends the unit: report it as the handoff and stop. ` +

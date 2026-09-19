@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  CHANGED_SET_TEST_PLACEHOLDER,
+  TOUCHED_TESTS_COMMAND,
   CONTRACT_HEADING,
   CONTRACT_SECTION_HEADINGS,
   DEFAULT_CONTRACT_MAX_CHARS,
@@ -373,10 +373,7 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     // the first instruction orders the push once the fast gates pass, hands the full verification
     // to CI (agent-coding item 13: an unpushed tree does not survive the run's end) and carries the
     // pre-push re-fetch, so the pull request is not born conflicting when main moved while the child worked
-    const gatesForMain = FAST_GATES_BEFORE_PUSH.replace(
-      `${CHANGED_SET_TEST_PLACEHOLDER} (the pull request's base; or`,
-      "`npx vitest run --changed origin/main` (or",
-    );
+    const gatesForMain = FAST_GATES_BEFORE_PUSH;
     expect(text).toContain(
       "Push the branch as soon as the change exists and the fast gates pass — the project's full verification " +
         "is CI's gate, run there after the push with any fix as a further commit; an unpushed tree does not " +
@@ -409,10 +406,11 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
   it("the first instruction names the fast gates a child runs before every push — the changed-set forms, never the whole suite — and routes each exit line to the description's validation table, an unrun gate to the handoff's unproven", () => {
     const { text } = renderContract(u10(), {});
     // the five gates by name, each a command a child can run verbatim, each scoped to the changed set;
-    // the test run compares against the pull request's own base — the placeholder in the constant,
-    // the known rebase target in the render
-    expect(FAST_GATES_BEFORE_PUSH).toContain(CHANGED_SET_TEST_PLACEHOLDER);
-    expect(text).toContain("`npx vitest run --changed origin/main`");
+    // the test gate is the touched files by name — never a changed-set run, which on a moving base
+    // is most of the suite
+    expect(FAST_GATES_BEFORE_PUSH).toContain(TOUCHED_TESTS_COMMAND);
+    expect(text).toContain(TOUCHED_TESTS_COMMAND);
+    expect(text).not.toContain("--changed origin");
     expect(text).not.toContain("origin/<base>");
     expect(FAST_GATES_BEFORE_PUSH).toContain(
       "`tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`",
@@ -435,9 +433,10 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect(FAST_GATES_BEFORE_PUSH).toContain("judgement");
     expect(FAST_GATES_BEFORE_PUSH).not.toContain("`npm test`");
     expect(FAST_GATES_BEFORE_PUSH).not.toContain("`npm run verify`");
-    // a contract that does not know its base keeps the placeholder rather than inventing a ref
+    // a contract that does not know its base renders the same gate: the touched files need no base
     const unknown = renderContract({ ...u10(), rebase: { branch: undefined, onto: undefined } }, {});
-    expect(unknown.text).toContain(`${CHANGED_SET_TEST_PLACEHOLDER} (the pull request's base; or`);
+    expect(unknown.text).toContain(TOUCHED_TESTS_COMMAND);
+    expect(unknown.text).not.toContain("--changed origin");
     // the receipts point at what exists: the exit line is the proof column of the PR description's
     // validation table (the handoff has no verified list); a gate the child could not run goes under
     // the handoff's unproven list and is never claimed clean
@@ -449,10 +448,7 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     );
     expect(FAST_GATES_BEFORE_PUSH).not.toContain("verified list");
     // the rendered first instruction carries the gates (base substituted) and no longer the vague phrase
-    const gates = FAST_GATES_BEFORE_PUSH.replace(
-      `${CHANGED_SET_TEST_PLACEHOLDER} (the pull request's base; or`,
-      "`npx vitest run --changed origin/main` (or",
-    );
+    const gates = FAST_GATES_BEFORE_PUSH;
     expect(text).toContain(gates);
     expect(text).not.toContain("cheapest proving checks");
     // the gates sit between the push order and the pre-push re-fetch

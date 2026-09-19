@@ -53,7 +53,7 @@ You should see `switchboard running (providers: anthropic; default agent: genera
 ## Change something and check it
 
 ```bash
-npx vitest run --changed origin/main   # the tests your change touches
+npx vitest run src/path/to/touched.test.ts   # the files you touched, by name; never --changed
 npm run fix                            # regenerate, lint, format
 npm run verify                         # everything CI runs, ~4 min
 ```
