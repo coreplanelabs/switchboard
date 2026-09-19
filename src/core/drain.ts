@@ -50,6 +50,30 @@ export function drainHoldLine(held: readonly HeldRun[]): string {
  *  reflections, then exits — the next generation takes the runs. */
 export const HANDOFF_BUDGET_MS = 6_000;
 
+/**
+ * The drain's wait bound, re-read on every poll of the drain loop
+ * (`src/index.ts`). While a run still holds the drain (registry-active, not
+ * handed off) the bound is the full DRAIN_DEADLINE_MS from the signal — the
+ * deadline is the bound for a run that will not end, never the schedule. The
+ * moment the held count reaches zero the bound collapses to HANDOFF_BUDGET_MS
+ * from that instant (never past the full deadline) — the same grace a drain
+ * that started with nothing held gets — so pending reflections and history
+ * writes, including the steady stream a handed-off run still executing here
+ * produces, get seconds to settle, not the deploy's remaining minutes. Once
+ * collapsed the bound never grows back: the socket is closed, so no new run
+ * can arrive to hold the drain again.
+ */
+export function createDrainDeadline(drainStartedAt: number): (now: number, runsHeld: number) => number {
+  const full = drainStartedAt + DRAIN_DEADLINE_MS;
+  let collapsed: number | undefined;
+  return (now, runsHeld) => {
+    if (collapsed !== undefined) return collapsed;
+    if (runsHeld > 0) return full;
+    collapsed = Math.min(full, now + HANDOFF_BUDGET_MS);
+    return collapsed;
+  };
+}
+
 /** Time budgeted for the replacement container to boot and reach Socket Mode
  *  `connected` (image pull + Node start + Bolt handshake), when the catch-up
  *  scan runs. */

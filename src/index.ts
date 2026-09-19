@@ -94,7 +94,13 @@ import { handleAdminTraceLog, TRACE_LOG_PATH } from "./channels/adminTraceLog.js
 import { createSpanLog } from "./core/trace/spanLog.js";
 import { handleAdminRestartAuthorize } from "./channels/adminRestartAuthorize.js";
 import { RESTART_AUTHORIZE_PATH } from "./deploy/restart.js";
-import { DRAIN_DEADLINE_MS, drainHoldLine, HANDOFF_BUDGET_MS, HELD_NOT_HANDED_OFF } from "./core/drain.js";
+import {
+  DRAIN_DEADLINE_MS,
+  drainHoldLine,
+  HANDOFF_BUDGET_MS,
+  HELD_NOT_HANDED_OFF,
+  createDrainDeadline,
+} from "./core/drain.js";
 import { MINUTE_MS } from "./core/budgets.js";
 import { startProcessRoot } from "./core/requestTrace.js";
 import { configureInternalHosts, internalHostsOf } from "./core/trace/internalHosts.js";
@@ -1482,7 +1488,11 @@ export async function runBot(): Promise<void> {
     const runsHeld = () => heldRuns().length;
     if (runsHeld() > 0) console.log(drainHoldLine(heldRuns()));
     const stillHere = () => runsHeld() + pendingReflectionCount() + pendingHistoryWrites();
-    const deadline = drainStartedAt + (runsHeld() > 0 ? DRAIN_DEADLINE_MS : HANDOFF_BUDGET_MS);
+    // The bound is re-read each poll: full deadline while a run holds the
+    // drain, collapsing to the handoff grace the moment the last one ends —
+    // the deadline is the bound for a run that will not end, never the
+    // schedule (src/core/drain.ts, createDrainDeadline).
+    const deadlineAt = createDrainDeadline(drainStartedAt);
     // The hold names what it waits on: the registry runs still active and not
     // handed off — not the dispatcher's `inFlight` counter, which a run whose
     // dispatch returned has already left — so a drain that runs to its deadline
@@ -1496,8 +1506,15 @@ export async function runBot(): Promise<void> {
         `[drain] waiting up to ${Math.round(DRAIN_DEADLINE_MS / MINUTE_MS)} min for ${held.length} run(s) still active and not handed off: ${held.join(", ")}`,
       );
     }
-    while (stillHere() > 0 && systemClock() < deadline) {
+    let wasHeld = runsHeld() > 0;
+    while (stillHere() > 0 && systemClock() < deadlineAt(systemClock(), runsHeld())) {
       await new Promise((r) => setTimeout(r, 500));
+      if (wasHeld && runsHeld() === 0) {
+        wasHeld = false;
+        console.log(
+          `[drain] last held run ended — exiting within the ${HANDOFF_BUDGET_MS} ms handoff grace, not at the deadline`,
+        );
+      }
     }
     // Every finished run whose reply never settled is sealed now, with no
     // `replyOk` (docs/reference/specs/tracing.md): its viewers get their `end` frame, and
