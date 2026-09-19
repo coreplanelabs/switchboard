@@ -66,6 +66,18 @@
       "script_name": "{{bot.script}}"
     }
   ],
+  // {{#if metrics}}
+  // The run-metrics dataset (docs/reference/specs/run-metrics.md): where RunHistoryDO
+  // writes a turned-final run's point, bound only when the deployment profile names a
+  // dataset (`metrics.dataset`) — nothing is created ahead of the deploy; the platform
+  // creates the dataset on first write. Without it the Worker deploys without the
+  // binding and writes no points.
+  "analytics_engine_datasets": [{ "binding": "RUN_METRICS", "dataset": "{{metrics.dataset}}" }],
+  // The dataset's name beside its binding (rendered together): /healthz `features`
+  // says `runMetrics:<dataset>` from it, so the bot's boot probe can compare the
+  // name its own config carries with the one this deploy bound.
+  "vars": { "RUN_METRICS_DATASET": "{{metrics.dataset}}" },
+  // {{/if}}
   // SQLite-backed DOs (durable across restarts — AGENTS.md invariant 6).
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["MemoryDO"] },

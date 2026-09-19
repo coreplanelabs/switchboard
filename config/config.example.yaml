@@ -521,6 +521,16 @@ workspaceDir: ./workspaces
 #       cacheRead: 0.125                       #   never $0, on the costs page and on a run's own page
 #       cacheWrite: 0
 
+# Run metrics (docs/reference/specs/run-metrics.md). Optional. The Analytics Engine
+# dataset every finished run's point lands in — the SAME name the deployment
+# profile's `metrics.dataset` binds on the state Worker as RUN_METRICS (the bot
+# warns at boot when the two differ; neither side refuses to start). The reader
+# over the dataset — `metrics trend` and the /metrics page, behind the `metrics`
+# capability — is later work of the same decision; until it lands, only `dataset`
+# is read, for that boot comparison.
+# metrics:
+#   dataset: switchboard_runs
+
 # Delivery indicators: GET /delivery and `delivery report` (docs/reference/specs/delivery.md).
 # Optional. Needs a GitHub credential (the App triple or GH_TOKEN); read-only on GitHub.
 # delivery:

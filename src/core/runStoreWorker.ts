@@ -73,6 +73,28 @@ export function describeError(err: unknown, depth = 0): string {
   return cause !== undefined && depth < 4 ? `${head} (cause: ${describeError(cause, depth + 1)})` : head;
 }
 
+/** The /healthz `features` entry the state Worker carries when its deploy bound the dataset
+ *  (`featuresOf` in deploy/cloudflare-memory/worker.ts): `runMetrics:<dataset>`. */
+const RUN_METRICS_FEATURE_PREFIX = "runMetrics:";
+
+/** Pure: the one `[runs]` boot warning when the bot's configured `metrics.dataset` and the
+ *  dataset the state Worker's /healthz `features` names disagree — the two differ, or only one
+ *  side names one — and `undefined` when both agree or both are absent
+ *  (docs/reference/specs/run-metrics.md item 6). Advisory: neither side refuses to start. */
+export function metricsDatasetWarning(
+  configured: string | undefined,
+  features: readonly unknown[],
+): string | undefined {
+  const entry = features.find((f): f is string => typeof f === "string" && f.startsWith(RUN_METRICS_FEATURE_PREFIX));
+  const bound = entry?.slice(RUN_METRICS_FEATURE_PREFIX.length);
+  if (configured === bound) return undefined;
+  if (bound === undefined)
+    return `[runs] metrics dataset mismatch: this bot's config names metrics.dataset "${configured}" but the state Worker has no RUN_METRICS binding — no point is written until the deployment profile names the dataset and the state Worker redeploys`;
+  if (configured === undefined)
+    return `[runs] metrics dataset mismatch: the state Worker binds RUN_METRICS to "${bound}" but this bot's config names no metrics.dataset — points are written, and the reader stays off until the config names the same dataset`;
+  return `[runs] metrics dataset mismatch: this bot's config names metrics.dataset "${configured}" but the state Worker binds "${bound}" — the reader would query a dataset the points do not land in`;
+}
+
 export interface WorkerRunStoreOptions {
   /** Base URL of the state Worker (e.g. https://switchboard-memory.example.com). */
   baseUrl: string;

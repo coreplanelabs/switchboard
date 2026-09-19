@@ -177,4 +177,19 @@ describe("the profile's image mode", () => {
     const example = parseProfile(read(PROFILE_EXAMPLE_PATH));
     expect(example.ok && example.profile.artifacts).toBeUndefined();
   });
+
+  // docs/reference/specs/run-metrics.md item 6 — the run-metrics dataset is optional and strict:
+  // Analytics Engine's dataset-name rule, refused by field; the committed example names none (opt-in).
+  it("`metrics.dataset` is optional, kept when valid, and refused by field when it breaks the dataset-name rule", () => {
+    const without = parseProfile(TEST_PROFILE);
+    expect(without.ok && without.profile.metrics).toBeUndefined();
+    const named = parseProfile({ ...TEST_PROFILE, metrics: { dataset: "switchboard_runs" } });
+    expect(named.ok && named.profile.metrics).toEqual({ dataset: "switchboard_runs" });
+    for (const dataset of ["1leading", "has-hyphen", "has space", "", `x${"y".repeat(64)}`]) {
+      const bad = parseProfile({ ...TEST_PROFILE, metrics: { dataset } });
+      expect(bad.ok ? [] : bad.problems, dataset).toEqual([expect.stringMatching(/^metrics\.dataset: /)]);
+    }
+    const example = parseProfile(read(PROFILE_EXAMPLE_PATH));
+    expect(example.ok && example.profile.metrics).toBeUndefined();
+  });
 });

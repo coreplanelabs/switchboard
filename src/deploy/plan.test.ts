@@ -253,6 +253,21 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
 });
 
 describe("planDeploy", () => {
+  // docs/reference/specs/run-metrics.md item 6 — the plan says where a run's points will land
+  // exactly when the profile names a dataset; an installation without one reads nothing new.
+  it("the memory step names the RUN_METRICS binding exactly when the profile names a metrics dataset", () => {
+    const memoryWhy = plan().steps.find((s) => s.name === "memory")!.why;
+    expect(memoryWhy).not.toContain("RUN_METRICS");
+    const withDataset = plan({}, installed, {
+      ...LOADED,
+      profile: { ...LOADED.profile, metrics: { dataset: "switchboard_runs" } },
+    });
+    const why = withDataset.steps.find((s) => s.name === "memory")!.why;
+    expect(why).toContain("binds RUN_METRICS to Analytics Engine dataset switchboard_runs");
+    expect(why).toContain("created by the platform on first write");
+    expect(formatPlan(withDataset)).toContain("binds RUN_METRICS to Analytics Engine dataset switchboard_runs");
+  });
+
   it("keeps the canonical order whatever order --only names them in", () => {
     expect(plan({ only: ["sandbox", "memory"] }).steps.map((s) => s.name)).toEqual(["memory", "sandbox"]);
     expect(plan({ only: ["resident", "bot"] }).steps.map((s) => s.name)).toEqual(["bot", "resident"]);

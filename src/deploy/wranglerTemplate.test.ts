@@ -275,6 +275,40 @@ describe("templateView / renderTemplate for a bot-only profile", () => {
     expect(botOnlyBucket.ok && botOnlyBucket.text).not.toContain("STATE_WORKER_URL");
     expect(botOnlyBucket.ok && botOnlyBucket.text).toContain('"ARTIFACTS_BUCKET_NAME": "switchboard-artifacts"');
   });
+
+  // docs/reference/specs/run-metrics.md item 6 — the Analytics Engine binding and its name var are
+  // rendered together, only when the profile names a dataset; every comment of the block sits inside
+  // it, so a profile without one renders exactly the file it rendered before the block existed.
+  it("the committed state Worker template binds the run-metrics dataset (analytics_engine_datasets + RUN_METRICS_DATASET) exactly when the profile names one", () => {
+    const template = readFileSync(new URL(`../../deploy/cloudflare-memory/${TEMPLATE_FILE}`, import.meta.url), "utf8");
+    const view = templateView(TEST_PROFILE, "memory", TEST_PUBLISHED_IMAGES)!;
+    expect(view.metrics).toBeUndefined();
+    const without = renderTemplate(template, view);
+    expect(without.ok ? "" : without.problems.join("\n")).toBe("");
+    expect(without.ok && without.text).not.toContain("analytics_engine_datasets");
+    expect(without.ok && without.text).not.toContain("RUN_METRICS");
+    // Byte for byte what the template renders with the whole block cut out — today's file.
+    let inBlock = false;
+    const pruned = template
+      .split("\n")
+      .filter((line) => {
+        if (/^\s*\/\/ \{\{#if metrics\}\}\s*$/.test(line)) inBlock = true;
+        const drop = inBlock;
+        if (inBlock && /^\s*\/\/ \{\{\/if\}\}\s*$/.test(line)) inBlock = false;
+        return !drop;
+      })
+      .join("\n");
+    const today = renderTemplate(pruned, view);
+    expect(without.ok && today.ok && without.text).toBe(today.ok && today.text);
+    const named = { ...TEST_PROFILE, metrics: { dataset: "switchboard_runs" } };
+    expect(templateView(named, "memory", TEST_PUBLISHED_IMAGES)?.metrics).toEqual({ dataset: "switchboard_runs" });
+    const withDataset = renderTemplate(template, templateView(named, "memory", TEST_PUBLISHED_IMAGES)!);
+    expect(withDataset.ok ? "" : withDataset.problems.join("\n")).toBe("");
+    expect(withDataset.ok && withDataset.text).toContain(
+      '"analytics_engine_datasets": [{ "binding": "RUN_METRICS", "dataset": "switchboard_runs" }],',
+    );
+    expect(withDataset.ok && withDataset.text).toContain('"RUN_METRICS_DATASET": "switchboard_runs"');
+  });
 });
 
 // Feature: docs/reference/specs/execution.md item 16 — the cold per-thread

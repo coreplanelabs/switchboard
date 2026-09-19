@@ -342,6 +342,15 @@ export interface AppConfig {
    */
   costs?: unknown;
   /**
+   * Run metrics (docs/reference/specs/run-metrics.md): the Analytics Engine
+   * dataset every finished run's point lands in — the same name the deployment
+   * profile's `metrics.dataset` binds on the state Worker; the boot probe warns
+   * when the two differ. The reader over the dataset (its parser and the
+   * `metrics` capability) is later work of the same decision; until then only
+   * `dataset` is read, for that comparison.
+   */
+  metrics?: unknown;
+  /**
    * Delivery indicators (`GET /delivery`, `delivery report`): the repositories
    * the page serves and the identities the indicators judge by (the review
    * agent's login, agent logins, agent co-author names). Validated at startup by
