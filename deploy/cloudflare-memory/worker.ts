@@ -79,6 +79,18 @@ import {
 } from "../../src/core/runLedger/decisions.ts";
 import { intakeReceiptRetentionMs } from "../../src/core/budgets.ts";
 import {
+  decide,
+  planeAskWordOf,
+  type PlaneAckOutcome,
+  type PlaneEffect,
+  type PlaneEvent,
+  type PlaneOutcomePost,
+  type PlaneQueueRow,
+  type PlaneStage,
+  type PlaneState,
+  type PlaneWrite,
+} from "../../src/core/plane/decide.ts";
+import {
   IDEMPOTENCY_KEY_PATTERN,
   capThreadEvent,
   INSTANCE_ID_PATTERN,
@@ -1514,7 +1526,20 @@ function rowToLive(r: LiveRow): LiveRunRow {
   };
 }
 
-type HeartbeatAnswer = FenceResult & { stop?: StopMode | null; phase?: LivePhase };
+type HeartbeatAnswer = FenceResult & { stop?: StopMode | null; phase?: LivePhase; effects?: PlaneEffect[] };
+
+/** Whether the bot's outcome and the decider's word agree (orchestration-plane item 8): `proceeded`
+ *  beside `proceed`, and a thread-live refusal beside `queued` — the refusal
+ *  IS the queue position the plane would hold. `null` for a pair the decider
+ *  does not model yet: logged, never counted. */
+function planeAgreementOf(outcome: string, decider: "proceed" | "queued"): boolean | null {
+  if (outcome === "proceeded") return decider === "proceed";
+  if (outcome === "refused:thread-live") return decider === "queued";
+  return null;
+}
+
+/** The most effects one answer carries (record 0064; orchestration-plane item 7): the rest ride the next heartbeat. */
+const PLANE_EFFECTS_PER_ANSWER = 32;
 
 export class RunHistoryDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
@@ -1681,6 +1706,215 @@ export class RunHistoryDO extends DurableObject<Env> {
         PRIMARY KEY (instance_id, unit, seq)
       );
     `);
+    // The orchestration plane's tables (record 0064; orchestration-plane.md item 7):
+    // the queue with its conditions, the reservations, the quiet and pressure
+    // windows, the watches' findings, the offered effects and the residents'
+    // levels. This unit opens them all so a later Worker and an earlier one agree on
+    // the schema; only the queue and the effects are written yet.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS plane_queue (
+        run_id TEXT PRIMARY KEY,
+        requester TEXT NOT NULL,
+        thread_key TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        conditions_json TEXT NOT NULL,
+        position_at INTEGER NOT NULL,
+        queued_at INTEGER NOT NULL,
+        state TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS plane_queue_waiting ON plane_queue(state, queued_at);
+      CREATE TABLE IF NOT EXISTS plane_reservations (
+        kind TEXT NOT NULL,
+        key TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        PRIMARY KEY (kind, key)
+      );
+      CREATE TABLE IF NOT EXISTS plane_windows (
+        kind TEXT NOT NULL,
+        key TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        opened_at INTEGER NOT NULL,
+        reason_json TEXT NOT NULL,
+        PRIMARY KEY (kind, key)
+      );
+      CREATE TABLE IF NOT EXISTS plane_findings (
+        id TEXT PRIMARY KEY,
+        watch TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        timeline_json TEXT NOT NULL,
+        filed_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS plane_effects (
+        id TEXT PRIMARY KEY,
+        body_json TEXT NOT NULL,
+        offered_at INTEGER NOT NULL,
+        acked_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS plane_effects_open ON plane_effects(acked_at, offered_at);
+      CREATE TABLE IF NOT EXISTS plane_levels (
+        resident TEXT NOT NULL,
+        name TEXT NOT NULL,
+        side TEXT NOT NULL,
+        reported_at INTEGER NOT NULL,
+        generation TEXT NOT NULL,
+        PRIMARY KEY (resident, name)
+      );
+    `);
+  }
+
+  // ---- the orchestration plane (record 0064; orchestration-plane.md) ----------
+
+  /** The decider's state, read inside the caller's `transactionSync`: the
+   *  queue oldest first and the threads a live row holds. `excludeRunId` drops
+   *  that run's own live row from the view — a shadow post judged after the
+   *  dispatch it describes claimed the thread must not read its own claim as
+   *  "thread live" (orchestration-plane item 8). */
+  private planeState(excludeRunId?: string): PlaneState {
+    const queue = this.sql
+      .exec<{
+        run_id: string;
+        requester: string;
+        thread_key: string;
+        stage: string;
+        request_json: string;
+        conditions_json: string;
+        position_at: number;
+        queued_at: number;
+        state: string;
+      }>(`SELECT * FROM plane_queue ORDER BY queued_at ASC, run_id ASC`)
+      .toArray()
+      .map((r): PlaneQueueRow => ({
+        runId: r.run_id,
+        requester: r.requester,
+        threadKey: r.thread_key,
+        stage: r.stage as PlaneStage,
+        request: JSON.parse(r.request_json) as Record<string, unknown>,
+        conditions: JSON.parse(r.conditions_json) as PlaneQueueRow["conditions"],
+        position: r.position_at,
+        queuedAt: r.queued_at,
+        state: r.state as PlaneQueueRow["state"],
+      }));
+    const liveThreads = this.sql
+      .exec<{ thread_key: string }>(`SELECT thread_key FROM live_runs WHERE run_id IS NOT ?`, excludeRunId ?? null)
+      .toArray()
+      .map((r) => r.thread_key);
+    return { queue, liveThreads };
+  }
+
+  /** The decider's writes, applied inside the same `transactionSync` that read
+   *  the state — the decision and its consequences land together (orchestration-plane item 6). */
+  private applyPlaneWrites(writes: PlaneWrite[]): void {
+    for (const w of writes) {
+      if (w.table === "plane_queue" && w.op === "put") {
+        this.sql.exec(
+          `INSERT OR REPLACE INTO plane_queue
+             (run_id, requester, thread_key, stage, request_json, conditions_json, position_at, queued_at, state)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          w.row.runId,
+          w.row.requester,
+          w.row.threadKey,
+          w.row.stage,
+          JSON.stringify(w.row.request),
+          JSON.stringify(w.row.conditions),
+          w.row.position,
+          w.row.queuedAt,
+          w.row.state,
+        );
+      } else if (w.table === "plane_queue" && w.op === "state") {
+        this.sql.exec(`UPDATE plane_queue SET state = ? WHERE run_id = ?`, w.state, w.runId);
+      } else {
+        // An offer keeps its first `offered_at`: a re-decided admit after a
+        // roll is the same effect, not a younger one.
+        this.sql.exec(
+          `INSERT OR IGNORE INTO plane_effects (id, body_json, offered_at, acked_at) VALUES (?, ?, ?, NULL)`,
+          w.effect.id,
+          JSON.stringify(w.effect),
+          w.at,
+        );
+      }
+    }
+  }
+
+  /** Apply one plane event: state read, decider, writes and effects in ONE
+   *  `transactionSync` (orchestration-plane item 6). The transport unit's routes feed it; the tests pin the atomicity. */
+  planeApply(event: PlaneEvent): { effects: PlaneEffect[] } {
+    let effects: PlaneEffect[] = [];
+    this.ctx.storage.transactionSync(() => {
+      const decision = decide(this.planeState(), event);
+      this.applyPlaneWrites(decision.writes);
+      effects = decision.effects;
+    });
+    return { effects };
+  }
+
+  /** The unacknowledged effects, oldest first, at most `PLANE_EFFECTS_PER_ANSWER`
+   *  (orchestration-plane item 7) — what every heartbeat and reclaim answer carries. Public: the
+   *  reclaim route composes it beside the runs it took. */
+  openPlaneEffects(): PlaneEffect[] {
+    return this.sql
+      .exec<{ body_json: string }>(
+        `SELECT body_json FROM plane_effects WHERE acked_at IS NULL ORDER BY offered_at ASC, id ASC LIMIT ?`,
+        PLANE_EFFECTS_PER_ANSWER,
+      )
+      .toArray()
+      .map((r) => JSON.parse(r.body_json) as PlaneEffect);
+  }
+
+  /** Shadow (orchestration-plane item 8): the bot's own outcome for one dispatch, judged beside the
+   *  decider's word for the same ask. Nothing runs and nothing queues from
+   *  the decider here — the comparison is logged, and a disagreement bumps a
+   *  per-condition counter in `meta` for the `plane disagreements` line. An
+   *  outcome the decider does not model yet (an allowlist refusal, a cold
+   *  fall) is logged uncounted. The post is fired without an await, so it can
+   *  arrive AFTER the dispatch it describes claimed this thread's `live_runs`
+   *  row; a post carrying the run's own id excludes that row from the live
+   *  view so the run's own claim never reads as a false disagreement. */
+  planeOutcome(
+    post: PlaneOutcomePost,
+    now: number,
+  ): { ok: true; decider: "proceed" | "queued"; agreed: boolean | null } {
+    let decider: "proceed" | "queued" = "proceed";
+    let agreed: boolean | null = null;
+    this.ctx.storage.transactionSync(() => {
+      const ask: PlaneEvent = {
+        kind: "ask",
+        at: now,
+        runId: post.runId ?? `ask:${post.threadKey}:${now}`,
+        requester: post.requester,
+        threadKey: post.threadKey,
+        stage: post.stage,
+        request: {},
+      };
+      decider = planeAskWordOf(decide(this.planeState(post.runId), ask), ask.runId);
+      agreed = planeAgreementOf(post.outcome, decider);
+      if (agreed === false) this.bumpPlaneDisagreement("thread_free");
+    });
+    console.log(
+      `[plane/outcome] ${post.threadKey} ${post.stage} bot=${post.outcome} decider=${decider} agreed=${agreed ?? "uncompared"}`,
+    );
+    return { ok: true, decider, agreed };
+  }
+
+  /** The per-condition disagreement counts (orchestration-plane item 8), kept in `meta` so the table's
+   *  later `plane disagreements` line can read them. */
+  private bumpPlaneDisagreement(condition: string): void {
+    const row = this.sql
+      .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'plane_disagreements'`)
+      .toArray()[0];
+    const counts = row ? (JSON.parse(row.value) as Record<string, number>) : {};
+    counts[condition] = (counts[condition] ?? 0) + 1;
+    this.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_disagreements', ?)`, JSON.stringify(counts));
+  }
+
+  /** An effect's acknowledgement by id (orchestration-plane item 7): `done` and `skipped` close it,
+   *  `deferred` leaves it offered for the next answer. An unknown id is a
+   *  no-op — the bot may ack an effect an older table never held. */
+  planeAck(id: string, outcome: PlaneAckOutcome, now: number): { ok: true } {
+    if (outcome !== "deferred")
+      this.sql.exec(`UPDATE plane_effects SET acked_at = ? WHERE id = ? AND acked_at IS NULL`, now, id);
+    return { ok: true };
   }
 
   // ---- the coordinator's parent records (run-history item 49) -----------------
@@ -1969,7 +2203,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         return;
       }
       this.sql.exec(`UPDATE live_runs SET lease_until = ? WHERE run_id = ?`, now + leaseMs, runId);
-      out = { ok: true, stop: row.stop, phase: row.phase };
+      // The plane's open effects ride every owner's heartbeat answer (record
+      // 0064; orchestration-plane item 7) — empty until a unit writes them, but always present, so the
+      // client's ack loop needs no version probe.
+      out = { ok: true, stop: row.stop, phase: row.phase, effects: this.openPlaneEffects() };
     });
     return out;
   }
@@ -3931,6 +4168,60 @@ const LEDGER_ROUTES = new Set([
   "/runs/session/notepad/write",
 ]);
 
+/** The plane's routes (record 0064; orchestration-plane items 7 and 8): the shadow outcome post and the
+ *  effect acknowledgement. Both land on the ledger object of the given store
+ *  key, like every `/runs/*` route. */
+const PLANE_ROUTES = new Set(["/plane/outcome", "/plane/ack"]);
+
+const PLANE_STAGES = new Set(["admission", "runner", "resident"]);
+const PLANE_OUTCOME = /^(proceeded|refused:[a-z0-9-]+|fell_cold:[a-z0-9_-]+)$/;
+const PLANE_ACK_OUTCOMES = new Set(["done", "skipped", "deferred"]);
+
+/** The `/plane/*` routes: validated before any object call, ids and words
+ *  only on the log lines. */
+async function handlePlane(pathname: string, body: unknown, env: Env): Promise<Response> {
+  if (typeof body !== "object" || body === null) return json({ error: "body must be a JSON object" }, 400);
+  const b = body as Record<string, unknown>;
+  const key = parseStoreKey(b);
+  if (!key.ok) return json({ error: key.error }, 400);
+  const stub = env.RUNS.get(env.RUNS.idFromName(key.value));
+  const now = systemClock();
+  if (pathname === "/plane/outcome") {
+    if (typeof b.threadKey !== "string" || b.threadKey.length === 0)
+      return json({ error: "threadKey must be a non-empty string" }, 400);
+    if (typeof b.requester !== "string" || b.requester.length === 0)
+      return json({ error: "requester must be a non-empty string" }, 400);
+    if (typeof b.stage !== "string" || !PLANE_STAGES.has(b.stage))
+      return json({ error: "stage must be admission, runner or resident" }, 400);
+    if (typeof b.outcome !== "string" || !PLANE_OUTCOME.test(b.outcome))
+      return json({ error: "outcome must be proceeded, refused:<code> or fell_cold:<token>" }, 400);
+    let runId: string | undefined;
+    if (b.runId !== undefined) {
+      const parsed = parseRunId(b.runId);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      runId = parsed.value;
+    }
+    const r = await stub.planeOutcome(
+      {
+        ...(runId !== undefined ? { runId } : {}),
+        requester: b.requester,
+        threadKey: b.threadKey,
+        stage: b.stage as PlaneStage,
+        outcome: b.outcome,
+      },
+      now,
+    );
+    return json(r);
+  }
+  if (pathname === "/plane/ack") {
+    if (typeof b.id !== "string" || b.id.length === 0) return json({ error: "id must be a non-empty string" }, 400);
+    if (typeof b.outcome !== "string" || !PLANE_ACK_OUTCOMES.has(b.outcome))
+      return json({ error: "outcome must be done, skipped or deferred" }, 400);
+    return json(await stub.planeAck(b.id, b.outcome as PlaneAckOutcome, now));
+  }
+  return json({ error: "not found" }, 404);
+}
+
 /** Routes whose bodies may carry a record, a transcript chunk, or an event batch. */
 const WIDE_BODY_ROUTES = new Set([
   "/runs/put",
@@ -4237,7 +4528,9 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     // declared shape.
     const runs = (await stub.reclaim(g.value, at, lease.value)) as unknown as ReclaimedRun[];
     console.log(`[runs/reclaim] ${key.value} ${g.value} took ${runs.length} run(s)`);
-    return json({ runs });
+    // The reclaim sweep's answer carries the plane's open effects like every
+    // heartbeat answer does (record 0064; orchestration-plane item 7) — empty until a unit writes them.
+    return json({ runs, effects: await stub.openPlaneEffects() });
   }
   if (pathname === "/runs/handoff") {
     const g = gen(b.gen);
@@ -4372,7 +4665,10 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
   if (pathname === "/runs/heartbeat") {
     const lease = parseLeaseMs(b.leaseMs);
     if (!lease.ok) return json({ error: lease.error }, 400);
-    const r = await stub.heartbeat(runId.value, g.value, lease.value, now);
+    // The RPC type mapping reads the effects' open-ended `request` JSON as
+    // unserializable; the values are plain JSON, so the cast only restores the
+    // declared shape (as the reclaim route's does).
+    const r = (await stub.heartbeat(runId.value, g.value, lease.value, now)) as unknown as HeartbeatAnswer;
     return r.ok ? json(r) : json(r, 409);
   }
   if (pathname === "/runs/append") {
@@ -4504,6 +4800,7 @@ const ROUTES = new Set([
   "/runs/usage",
   "/runs/delete",
   ...LEDGER_ROUTES,
+  ...PLANE_ROUTES,
 ]);
 
 /** The two decisions `fetch` makes once and hands down: is the path one of
@@ -4519,7 +4816,7 @@ interface Admission {
  *  dataset (run-metrics.md item 5) — the name from the `RUN_METRICS_DATASET`
  *  var rendered beside the binding, so the probe can compare it to the bot's. */
 export function featuresOf(env: Pick<Env, "RUN_METRICS" | "RUN_METRICS_DATASET">): string[] {
-  const features = ["memory", "schedules", "runs", "config", "delivery", "costs"];
+  const features = ["memory", "schedules", "runs", "config", "delivery", "costs", "plane"];
   if (env.RUN_METRICS !== undefined) features.push(`runMetrics:${env.RUN_METRICS_DATASET ?? "unknown"}`);
   return features;
 }
@@ -4578,6 +4875,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
     return json({ firings });
   }
   if (url.pathname.startsWith("/runs/")) return handleRuns(url.pathname, body, env);
+  if (url.pathname.startsWith("/plane/")) return handlePlane(url.pathname, body, env);
   if (url.pathname.startsWith("/config/")) return handleConfig(url.pathname, body, env);
   if (url.pathname.startsWith("/delivery/")) return handleDelivery(url.pathname, body, env);
   if (url.pathname.startsWith("/costs/")) return handleCosts(url.pathname, body, env);

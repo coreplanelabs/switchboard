@@ -6,6 +6,7 @@
 // means the transcript is complete up to it.
 
 import type { RunRecord } from "../runRecord.js";
+import type { PlaneAckOutcome, PlaneEffect, PlaneOutcomePost } from "../plane/decide.js";
 import type { AssembledTranscript } from "./transcript.js";
 import type { Notepad, SessionHit } from "./types.js";
 import type {
@@ -32,6 +33,10 @@ export interface HeartbeatResult {
   /** What another generation asked for since the last heartbeat. */
   stop?: StopMode | null;
   phase?: LivePhase;
+  /** The plane's open effects (docs/reference/specs/orchestration-plane.md,
+   *  record 0064; orchestration-plane item 7), riding every owner's heartbeat answer, at most 32;
+   *  absent from an older state Worker without the plane's tables. */
+  effects?: PlaneEffect[];
 }
 
 export interface FinishResult {
@@ -119,6 +124,14 @@ export interface RunLedger {
    *  what the live false-silence ratio reads. */
   listIntake(query: IntakeQuery): Promise<IntakeReceipt[]>;
   readTranscript(runId: string): Promise<AssembledTranscript>;
+  /** The shadow outcome post (orchestration-plane; record 0064; orchestration-plane item 8): the bot's
+   *  own word for one dispatch, judged beside the decider's on the object.
+   *  Best-effort by contract — the caller fires and forgets; a missing route
+   *  (an older state Worker) throws like every other missing route. */
+  planeOutcome(post: PlaneOutcomePost): Promise<{ ok: boolean; decider?: string; agreed?: boolean | null }>;
+  /** One effect's acknowledgement by id (orchestration-plane item 7): `done` and `skipped` close it,
+   *  `deferred` leaves it offered. An unknown id is the object's no-op. */
+  planeAck(id: string, outcome: PlaneAckOutcome): Promise<void>;
   /** The events appended so far for a LIVE run, in `seq` order — what a
    *  reclaim closes an unresumable run's record with (the finished-runs routes
    *  never see a live run). Empty for an unknown run. */

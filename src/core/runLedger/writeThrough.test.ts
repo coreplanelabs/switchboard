@@ -1112,6 +1112,51 @@ describe("events, state, heartbeat", () => {
     expect(ledger.finished.has("r1")).toBe(true);
   });
 
+  it("plane effects on a heartbeat answer are each acked deferred — this generation executes none yet (orchestration-plane item 7)", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const effect = { id: "admit:q1", kind: "admit" as const, runId: "q1", threadKey: "slack:C1:9.0", request: {} };
+    const ledger = overriding(inner, {
+      heartbeat: async (runId, gen, leaseMs) => {
+        const r = await inner.heartbeat(runId, gen, leaseMs);
+        return r.ok ? { ...r, effects: [effect] } : r;
+      },
+    });
+    const { wt, t, warnings } = harness({ ledger });
+    await openRun(wt, openReq());
+    await t.beat();
+    expect(inner.planeAcks).toEqual([{ id: "admit:q1", outcome: "deferred" }]);
+    expect(warnings).toEqual([]);
+    // The second beat carries the same offer again — deferred anew each time
+    // until a generation executes it (the field-less older-Worker answer is
+    // runLedgerWorker.test.ts's to prove).
+    await t.beat();
+    expect(inner.planeAcks).toHaveLength(2);
+  });
+
+  it("planeOutcome fires the post and swallows a failure with one warning — the dispatch never waits on the plane (orchestration-plane item 8)", async () => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const { wt } = harness({ ledger: inner });
+    const post = {
+      requester: "slack:UX",
+      threadKey: "slack:C1:1.0",
+      stage: "admission" as const,
+      outcome: "proceeded",
+    };
+    wt.planeOutcome(post);
+    await new Promise((r) => setImmediate(r));
+    expect(inner.planeOutcomes).toEqual([post]);
+    const failing = overriding(inner, {
+      planeOutcome: async () => {
+        throw new TransientStoreError("HTTP 503");
+      },
+    });
+    const h = harness({ ledger: failing });
+    h.wt.planeOutcome(post);
+    await new Promise((r) => setImmediate(r));
+    expect(h.warnings).toHaveLength(1);
+    expect(h.warnings[0]).toMatch(/plane outcome post failed .* shadow loses one comparison/);
+  });
+
   it("a transient state failure is retried after a backoff; when the retry fails too the state stays dirty and the next patch carries it", async () => {
     const inner = new InMemoryRunLedger(() => 10_000);
     let failures = 0;

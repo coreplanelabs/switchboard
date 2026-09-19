@@ -761,7 +761,7 @@ describe("run history routes", () => {
     expect(await res.json()).toEqual({
       ok: true,
       build: { commit: "unknown" },
-      features: ["memory", "schedules", "runs", "config", "delivery", "costs"],
+      features: ["memory", "schedules", "runs", "config", "delivery", "costs", "plane"],
     });
   });
 
@@ -1336,6 +1336,213 @@ describe("run history routes", () => {
   });
 });
 
+// docs/reference/specs/orchestration-plane.md — the decider inside the object
+// (record 0064; orchestration-plane items 6–8): the tables exist, `transactionSync` commits state and
+// effects together, the shadow outcome post is logged beside the decider's
+// decision, every heartbeat and reclaim answer carries `effects`, and an ack
+// of an unknown id is a no-op.
+describe("orchestration plane — the tables, the decider, shadow and the effects", () => {
+  const claimBody = (key: string, runId: string, threadKey: string, gen = "g1") => ({
+    storeKey: key,
+    run: {
+      runId,
+      threadKey,
+      gen,
+      leaseMs: LEASE_MS,
+      startedAt: 1_000,
+      meta: { agent: "review", channelId: "slack:C1", userId: "slack:UALICE", threadKey },
+      card: null,
+      system: "you review",
+      tools: [],
+    },
+  });
+
+  const ask = (runId: string, threadKey: string) =>
+    ({
+      kind: "ask",
+      at: 1_000,
+      runId,
+      requester: "slack:UBOB",
+      threadKey,
+      stage: "admission",
+      request: { text: "next" },
+    }) as const;
+
+  it("a fresh object holds the plane's six tables", async () => {
+    const key = storeKey();
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      const names = state.storage.sql
+        .exec<{ name: string }>(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'plane_%' ORDER BY name`,
+        )
+        .toArray()
+        .map((r) => r.name);
+      expect(names).toEqual([
+        "plane_effects",
+        "plane_findings",
+        "plane_levels",
+        "plane_queue",
+        "plane_reservations",
+        "plane_windows",
+      ]);
+    });
+  });
+
+  it("planeApply commits the queue row, then the seal's admitted state and its effect, together in transactionSync", async () => {
+    const key = storeKey();
+    expect((await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"))).status).toBe(200);
+    await runInDurableObject(stubOf(key), async (inst: RunHistoryDO, state) => {
+      // The claim's live row makes the thread live: the ask queues, no effect.
+      const queued = inst.planeApply(ask("q1", "slack:C1:1.0"));
+      expect(queued.effects).toEqual([]);
+      const rows = () =>
+        state.storage.sql.exec<{ run_id: string; state: string }>(`SELECT run_id, state FROM plane_queue`).toArray();
+      expect(rows()).toEqual([{ run_id: "q1", state: "waiting" }]);
+      // The seal admits the oldest waiting row; its state flip and the offered
+      // effect land in the same transaction, so both are visible together.
+      const sealed = inst.planeApply({ kind: "sealed", at: 2_000, threadKey: "slack:C1:1.0" });
+      expect(sealed.effects).toEqual([
+        { id: "admit:q1", kind: "admit", runId: "q1", threadKey: "slack:C1:1.0", request: { text: "next" } },
+      ]);
+      expect(rows()).toEqual([{ run_id: "q1", state: "admitted" }]);
+      const offered = state.storage.sql
+        .exec<{ id: string; acked_at: number | null }>(`SELECT id, acked_at FROM plane_effects`)
+        .toArray();
+      expect(offered).toEqual([{ id: "admit:q1", acked_at: null }]);
+    });
+  });
+
+  it("shadow logs refused:thread-live beside queued for a second ask on a live thread, and persists nothing", async () => {
+    const key = storeKey();
+    expect((await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"))).status).toBe(200);
+    const r = await post("/plane/outcome", {
+      storeKey: key,
+      requester: "slack:UBOB",
+      threadKey: "slack:C1:1.0",
+      stage: "admission",
+      outcome: "refused:thread-live",
+    });
+    expect(r).toEqual({ status: 200, data: { ok: true, decider: "queued", agreed: true } });
+    // Nothing runs — and nothing queues — from the decider under shadow (orchestration-plane item 8).
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      expect(state.storage.sql.exec(`SELECT run_id FROM plane_queue`).toArray()).toEqual([]);
+    });
+  });
+
+  it("an agreeing proceeded post counts nothing; a proceeded post on a live thread bumps the per-condition disagreement count", async () => {
+    const key = storeKey();
+    const agreed = await post("/plane/outcome", {
+      storeKey: key,
+      requester: "slack:UBOB",
+      threadKey: "slack:C9:9.0",
+      stage: "admission",
+      outcome: "proceeded",
+    });
+    expect(agreed.data).toEqual({ ok: true, decider: "proceed", agreed: true });
+    expect((await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"))).status).toBe(200);
+    const disagreed = await post("/plane/outcome", {
+      storeKey: key,
+      requester: "slack:UBOB",
+      threadKey: "slack:C1:1.0",
+      stage: "admission",
+      outcome: "proceeded",
+    });
+    expect(disagreed.data).toEqual({ ok: true, decider: "queued", agreed: false });
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      const row = state.storage.sql
+        .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'plane_disagreements'`)
+        .toArray()[0]!;
+      expect(JSON.parse(row.value)).toEqual({ thread_free: 1 });
+    });
+  });
+
+  it("a proceeded post naming its own run id is judged with that live row excluded — no false disagreement", async () => {
+    // The post is fired without an await, so it can arrive after the dispatch
+    // it describes claimed the thread; the run's own claim must not read as
+    // "thread live" when the post carries the run's id.
+    const key = storeKey();
+    expect((await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"))).status).toBe(200);
+    const late = await post("/plane/outcome", {
+      storeKey: key,
+      runId: "r1",
+      requester: "slack:UBOB",
+      threadKey: "slack:C1:1.0",
+      stage: "admission",
+      outcome: "proceeded",
+    });
+    expect(late.data).toEqual({ ok: true, decider: "proceed", agreed: true });
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      const row = state.storage.sql
+        .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'plane_disagreements'`)
+        .toArray();
+      expect(row).toEqual([]);
+    });
+  });
+
+  it("a heartbeat answer and a reclaim answer carry effects: [], present even with nothing offered", async () => {
+    const key = storeKey();
+    expect((await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"))).status).toBe(200);
+    const beat = await post("/runs/heartbeat", { storeKey: key, runId: "r1", gen: "g1", leaseMs: LEASE_MS });
+    expect(beat.status).toBe(200);
+    expect(beat.data.effects).toEqual([]);
+    const swept = await post("/runs/reclaim", {
+      storeKey: key,
+      gen: "g2",
+      leaseMs: LEASE_MS,
+      now: Date.now() + 2 * LEASE_MS,
+    });
+    expect(swept.status).toBe(200);
+    expect(swept.data.effects).toEqual([]);
+  });
+
+  it("an offered effect rides the heartbeat answer; deferred leaves it offered, done closes it, an unknown id is a no-op", async () => {
+    const key = storeKey();
+    expect((await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"))).status).toBe(200);
+    await runInDurableObject(stubOf(key), async (inst: RunHistoryDO) => {
+      inst.planeApply(ask("q1", "slack:C1:1.0"));
+      inst.planeApply({ kind: "sealed", at: 2_000, threadKey: "slack:C1:1.0" });
+    });
+    const beat = () => post("/runs/heartbeat", { storeKey: key, runId: "r1", gen: "g1", leaseMs: LEASE_MS });
+    expect((await beat()).data.effects).toMatchObject([{ id: "admit:q1", kind: "admit" }]);
+    // deferred: still offered on the next answer.
+    expect((await post("/plane/ack", { storeKey: key, id: "admit:q1", outcome: "deferred" })).data).toEqual({
+      ok: true,
+    });
+    expect((await beat()).data.effects).toMatchObject([{ id: "admit:q1" }]);
+    // an unknown id is a no-op, never an error.
+    expect((await post("/plane/ack", { storeKey: key, id: "admit:zz", outcome: "done" })).data).toEqual({ ok: true });
+    expect((await beat()).data.effects).toMatchObject([{ id: "admit:q1" }]);
+    // done closes it.
+    expect((await post("/plane/ack", { storeKey: key, id: "admit:q1", outcome: "done" })).data).toEqual({ ok: true });
+    expect((await beat()).data.effects).toEqual([]);
+  });
+
+  it("a bad stage, outcome word or ack word is 400 before any object call", async () => {
+    const key = storeKey();
+    const bad = await post("/plane/outcome", {
+      storeKey: key,
+      requester: "slack:UBOB",
+      threadKey: "slack:C1:1.0",
+      stage: "kitchen",
+      outcome: "proceeded",
+    });
+    expect(bad).toEqual({ status: 400, data: { error: "stage must be admission, runner or resident" } });
+    const word = await post("/plane/outcome", {
+      storeKey: key,
+      requester: "slack:UBOB",
+      threadKey: "slack:C1:1.0",
+      stage: "admission",
+      outcome: "shrugged",
+    });
+    expect(word).toEqual({
+      status: 400,
+      data: { error: "outcome must be proceeded, refused:<code> or fell_cold:<token>" },
+    });
+    const ackWord = await post("/plane/ack", { storeKey: key, id: "admit:q1", outcome: "maybe" });
+    expect(ackWord).toEqual({ status: 400, data: { error: "outcome must be done, skipped or deferred" } });
+  });
+});
+
 // docs/reference/specs/run-metrics.md items 2–5: the state Worker writes one
 // metrics point per run, after the commit, only when the row turned final —
 // and behaves byte-identically without the binding, with no point, and when
@@ -1521,9 +1728,9 @@ describe("run metrics — the point, the guard and the emission rule", () => {
   });
 
   it("features names the dataset only when the binding is present", () => {
-    expect(featuresOf({})).toEqual(["memory", "schedules", "runs", "config", "delivery", "costs"]);
+    expect(featuresOf({})).toEqual(["memory", "schedules", "runs", "config", "delivery", "costs", "plane"]);
     expect(
       featuresOf({ RUN_METRICS: { writeDataPoint() {} } as AnalyticsEngineDataset, RUN_METRICS_DATASET: "swb_runs" }),
-    ).toEqual(["memory", "schedules", "runs", "config", "delivery", "costs", "runMetrics:swb_runs"]);
+    ).toEqual(["memory", "schedules", "runs", "config", "delivery", "costs", "plane", "runMetrics:swb_runs"]);
   });
 });

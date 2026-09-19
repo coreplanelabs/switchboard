@@ -132,7 +132,13 @@ describe("WorkerRunLedger", () => {
 
   it("heartbeat returns the stop and phase the Worker answers; a 409 is fenced or unknown-run by the Worker's reason", async () => {
     const w = stubWorker(() => ({ status: 200, data: { ok: true, stop: "soft", phase: "live" } }));
-    expect(await w.ledger.heartbeat("r1", "g1", LEASE_MS)).toEqual({ ok: true, stop: "soft", phase: "live" });
+    // An older Worker's answer has no effects field: read as none offered (orchestration-plane item 7).
+    expect(await w.ledger.heartbeat("r1", "g1", LEASE_MS)).toEqual({
+      ok: true,
+      stop: "soft",
+      phase: "live",
+      effects: [],
+    });
     const unknown = stubWorker(() => ({ status: 409, data: { ok: false, reason: "unknown-run" } }));
     expect(await unknown.ledger.heartbeat("r1", "g1", LEASE_MS)).toEqual({ ok: false, reason: "unknown-run" });
   });

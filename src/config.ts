@@ -47,6 +47,7 @@ import {
   validateScopeVerbosity,
   type IntakeMode,
   type OperatorMode,
+  type PlaneAdmissionMode,
   type RouteAnswerMode,
 } from "./config/validate.js";
 export type { IntakeMode } from "./config/validate.js";
@@ -194,7 +195,7 @@ export interface IntakeConfig {
  *  checks the card under them at load, so the load-time check and the runtime
  *  call cannot drift; re-exported here for every other caller. */
 export { defaultIntakeMode, intakeModelRef } from "./config/validate.js";
-export type { OperatorMode } from "./config/validate.js";
+export type { OperatorMode, PlaneAdmissionMode } from "./config/validate.js";
 
 /** The `routing` block (`AppConfig.routing`). */
 export interface RoutingConfig {
@@ -262,6 +263,31 @@ export function routingOn(config: AppConfig): boolean {
  *  own switch: the shadow week must see what the readers see). */
 export function operatorModeOf(config: AppConfig): OperatorMode {
   return config.routing?.operator ?? "off";
+}
+
+/** The `plane` block (`AppConfig.plane`; record 0064): the orchestration
+ *  plane's switches. `admission` gates the queue decider (`off` — the plane
+ *  never hears of a dispatch; `shadow` — the bot posts its own outcome per
+ *  dispatch and the ledger object logs the decider's decision beside it,
+ *  nothing runs from the decider; `on` — a later unit's flip). `reaskMinutes`
+ *  is the one re-ask cadence, used only while something waits on a reporter
+ *  that fell silent; nothing reads it yet — the resident-conditions unit does. */
+export interface PlaneConfig {
+  admission?: PlaneAdmissionMode;
+  reaskMinutes?: number;
+}
+
+/** The plane's admission mode (record 0064; routing-and-config item 31):
+ *  `plane.admission` where the block sets it, else `off` — a deployment that
+ *  never heard of the plane dispatches exactly as before. The one place the
+ *  default lives: the callers ask this, never the field. */
+export function planeAdmissionOf(config: AppConfig): PlaneAdmissionMode {
+  return config.plane?.admission ?? "off";
+}
+
+/** The plane's re-ask cadence in minutes (record 0064): `plane.reaskMinutes`, else 2. */
+export function planeReaskMinutesOf(config: AppConfig): number {
+  return config.plane?.reaskMinutes ?? 2;
 }
 
 /** The `references` block (`AppConfig.references`; record 0037): the
@@ -453,6 +479,14 @@ export interface AppConfig {
    * that sets nothing here behaves exactly as before the resolver.
    */
   references?: ReferencesConfig;
+  /**
+   * The orchestration plane (record 0064; docs/reference/specs/orchestration-plane.md):
+   * `admission: off | shadow | on` (default off — `planeAdmissionOf`) gates the
+   * ledger object's queue decider, and `reaskMinutes` (default 2 —
+   * `planeReaskMinutesOf`) is the one re-ask cadence a later unit reads.
+   * Absent → the plane decides nothing and no outcome is posted.
+   */
+  plane?: PlaneConfig;
   /**
    * Which harness each preset's runs are driven by, deployment-wide
    * (docs/reference/specs/harness.md item 8): a mapping of preset to a

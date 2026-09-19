@@ -13,6 +13,7 @@ import {
   selectReclaim,
 } from "./decisions.js";
 import type { FinishResult, HeartbeatResult, RunLedger } from "./ledger.js";
+import type { PlaneAckOutcome, PlaneOutcomePost } from "../plane/decide.js";
 import {
   attachmentRefsOf,
   DEFAULT_SESSION_LOG_MAX_BYTES,
@@ -218,7 +219,22 @@ export class InMemoryRunLedger implements RunLedger {
     const fence = checkFence(row, gen);
     if (!fence.ok || !row) return fence;
     row.leaseUntil = this.now() + leaseMs;
-    return { ok: true, stop: row.stop, phase: row.phase };
+    // The in-memory ledger offers no plane effects; the field is present like
+    // the Worker's answer (orchestration-plane; record 0064; orchestration-plane item 7).
+    return { ok: true, stop: row.stop, phase: row.phase, effects: [] };
+  }
+
+  /** The shadow posts and the acks, kept for assertions (orchestration-plane items 7 and 8). */
+  readonly planeOutcomes: PlaneOutcomePost[] = [];
+  readonly planeAcks: Array<{ id: string; outcome: PlaneAckOutcome }> = [];
+
+  async planeOutcome(post: PlaneOutcomePost): Promise<{ ok: boolean; decider?: string; agreed?: boolean | null }> {
+    this.planeOutcomes.push(post);
+    return { ok: true };
+  }
+
+  async planeAck(id: string, outcome: PlaneAckOutcome): Promise<void> {
+    this.planeAcks.push({ id, outcome });
   }
 
   async append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult> {

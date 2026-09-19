@@ -9,7 +9,7 @@
 // thread slot, a ledger row, a reservation — is handed back to `dispatch()`
 // before the next step that can throw, so its outer `finally` releases
 // exactly what the inline code used to.
-import type { ConfigStore } from "../../config.js";
+import { planeAdmissionOf, type ConfigStore } from "../../config.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
@@ -291,12 +291,57 @@ export type AdmissionOutcome =
   /** A resume or restart found a newer run on the thread: its row was closed `interrupted`, nothing said. */
   | { kind: "superseded"; of: "resume" | "restart" };
 
+/** The plane's word for one admission outcome (orchestration-plane; record
+ *  0064; orchestration-plane item 8): `proceeded` for a claim, `refused:<code>` for a refusal —
+ *  `thread-live` for every thread-in-flight refusal, `allowlist` for the agent
+ *  gate's. A steer, a supersede and a redispatch are not asks for a new run,
+ *  so the plane is not told of them. */
+function planeWordOf(outcome: AdmissionOutcome): string | undefined {
+  if (outcome.kind === "proceed") return "proceeded";
+  if (outcome.kind !== "refused") return undefined;
+  switch (outcome.reason) {
+    case "follow_up_refused":
+    case "elsewhere_follow_up_refused":
+    case "coordinator_thread_live":
+      return "refused:thread-live";
+    case "live_agent_allowlist":
+    case "elsewhere_agent_allowlist":
+      return "refused:allowlist";
+  }
+}
+
 /**
  * Thread admission (docs/reference/specs/thread-admission.md item 1): ONE live run per
  * thread. Claimed after the agent gate and before anything slow, so no window
  * exists in which two runs can attach the same per-thread workspace.
+ *
+ * Under `plane.admission: shadow` (orchestration-plane; record 0064; orchestration-plane item 8) the
+ * outcome is also posted to the ledger object, which logs its decider's
+ * decision beside it — fire and forget, so the dispatch never waits on the
+ * plane and nothing runs from the decider. `off` posts nothing. Because the
+ * post is not awaited, a `proceeded` post can land AFTER this dispatch claims
+ * the thread's `live_runs` row on the same object and be judged `queued`
+ * against the run's own claim — a false `plane_disagreements` bump. The object
+ * guards the case where the post names a run id (it drops that run's own live
+ * row from the view); this post has none — the run's id is minted after
+ * admission — so a rare late post can still overcount. Shadow's counters are
+ * read with that in mind before any flip to `on`.
  */
 export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise<AdmissionOutcome> {
+  const outcome = await claimThread(deps, ctx);
+  const word = planeWordOf(outcome);
+  if (word !== undefined && planeAdmissionOf(deps.config.config) === "shadow") {
+    deps.runLedger.planeOutcome({
+      requester: ctx.msg.userId,
+      threadKey: ctx.msg.threadKey,
+      stage: "admission",
+      outcome: word,
+    });
+  }
+  return outcome;
+}
+
+async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<AdmissionOutcome> {
   const {
     msg,
     io,

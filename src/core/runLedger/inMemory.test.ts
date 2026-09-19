@@ -135,7 +135,13 @@ describe("InMemoryRunLedger", () => {
     await ledger.claim(claimReq("r1", "slack:C1:1.0"));
     expect(await ledger.requestStop("r1", "soft")).toEqual({ ok: true, ownerLive: true });
     t = 5_000;
-    expect(await ledger.heartbeat("r1", "g1", LEASE_MS)).toEqual({ ok: true, stop: "soft", phase: "live" });
+    // `effects` is always present, like the Worker's answer (orchestration-plane item 7).
+    expect(await ledger.heartbeat("r1", "g1", LEASE_MS)).toEqual({
+      ok: true,
+      stop: "soft",
+      phase: "live",
+      effects: [],
+    });
     expect((await ledger.listLive())[0].leaseUntil).toBe(5_000 + LEASE_MS);
     t = 100_000;
     expect(await ledger.requestStop("r1", "hard")).toEqual({ ok: true, ownerLive: false });
