@@ -34,7 +34,14 @@ import {
   turnOf,
   WebIO,
 } from "./web.js";
-import { SEED_ELEMENT_ID, type HomeSeed, type RunNotFoundSeed } from "./webSeed.js";
+import {
+  SEED_ELEMENT_ID,
+  type HomeReceiptTurnSeed,
+  type HomeSeed,
+  type HomeTurnSeed,
+  type RunNotFoundSeed,
+} from "./webSeed.js";
+import type { IntakeReceipt } from "../core/runLedger/types.js";
 import { makePageSender } from "./webShell.js";
 
 // Feature: docs/reference/specs/web-chat.md item 11 (record 0043) — the web
@@ -102,7 +109,15 @@ const COMMANDS = [
   { id: "deploy.all", action: "deploy:write", describe: "Deploy", effect: "write" },
 ] as unknown as CommandDef<unknown>[];
 
-function setup(opts: { dispatch?: DispatchFn; now?: number; channelNames?: Record<string, string> } = {}) {
+function setup(
+  opts: {
+    dispatch?: DispatchFn;
+    now?: number;
+    channelNames?: Record<string, string>;
+    /** The thread view's receipt read; defaults to an empty ledger, `null` is a ledger that is off. */
+    intake?: { listIntake: (query: { threadKey?: string; since?: number }) => Promise<IntakeReceipt[]> } | null;
+  } = {},
+) {
   let n = 0;
   const registry = new RunRegistry({ genId: () => `id-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
   const store = new InMemoryRunStore({ now: () => NOW });
@@ -123,6 +138,7 @@ function setup(opts: { dispatch?: DispatchFn; now?: number; channelNames?: Recor
     page: makePageSender({ js: "/assets/main-test.js", css: [] }, ALL_CAPABILITIES),
     capabilities: ALL_CAPABILITIES,
     retention: { retentionDays: 30 },
+    intake: opts.intake !== undefined ? opts.intake : { listIntake: async () => [] },
     publicBaseUrl: "https://bot.example.test",
     ...(opts.channelNames
       ? {
@@ -256,6 +272,15 @@ describe("the projections — requester, turn, history, threads, title, palette,
     expect(bare.request).toBe("");
     expect(bare).not.toHaveProperty("answer");
     expect(bare).not.toHaveProperty("route");
+  });
+
+  it("historyOf: a receipt turn is no one's line — the history a run reads carries the runs alone", () => {
+    const done = turnOf(view(record("r-1", NOW - 5_000)));
+    const receipt: HomeReceiptTurnSeed = { kind: "receipt", reason: "a question to another person", decidedAt: NOW };
+    expect(historyOf([done, receipt])).toEqual([
+      { role: "user", text: "request of r-1", at: NOW - 15_000 },
+      { role: "assistant", text: "answer of r-1", at: NOW - 5_000 },
+    ]);
   });
 
   it("historyOf: a finished turn is the person's line then the agent's, stamped; a live turn is the person's alone", () => {
@@ -657,7 +682,8 @@ describe("GET /threads and /threads/<id> — the seed from the runs service (ite
     const seed = seedOf<HomeSeed>(res.body);
     expect(seed.conversation).toBe("conv-1");
     expect(seed.viewer).toEqual({ name: "alice" });
-    expect(seed.turns.map((t) => [t.id, t.request, t.answer, t.route?.preset, t.finished, t.token])).toEqual([
+    const runTurns = seed.turns.filter((t): t is HomeTurnSeed => !("kind" in t));
+    expect(runTurns.map((t) => [t.id, t.request, t.answer, t.route?.preset, t.finished, t.token])).toEqual([
       ["r-1", "request of r-1", "answer of r-1", "review", true, undefined],
       ["r-2", "request of r-2", "answer of r-2", "review", true, undefined],
       [live.id, "re-review after the repush", undefined, undefined, false, live.token],
@@ -759,7 +785,7 @@ describe("GET /threads and /threads/<id> — the seed from the runs service (ite
     expect(res.status).toBe(200);
     const seed = seedOf<HomeSeed>(res.body);
     expect(seed.elsewhere).toEqual({ surface: "slack", url: "https://slack.example/archives/C1/p171234" });
-    expect(seed.turns.map((t) => t.id)).toEqual(["s-1"]);
+    expect(seed.turns.map((t) => ("kind" in t ? t.kind : t.id))).toEqual(["s-1"]);
     const sent = await request(handler, {
       url: "/threads/slack:C1:1712.34/send",
       method: "POST",
@@ -773,5 +799,80 @@ describe("GET /threads and /threads/<id> — the seed from the runs service (ite
     const { handler } = setup();
     expect((await request(handler, { url: "/threads/conv-1/x" })).handled).toBe(false);
     expect((await request(handler, { url: "/threads", method: "POST", body: "{}" })).status).toBe(405);
+  });
+});
+
+// ---- silent intake receipts on the thread view --------------------------------------
+
+describe("GET /threads/<id> — silent intake receipts on the thread view (item 12)", () => {
+  const THREAD = "slack:C1:1712.34";
+  const receipt = (decidedAt: number, reason: string, verdict: IntakeReceipt["verdict"] = "silent"): IntakeReceipt => ({
+    verdict,
+    reason,
+    source: "model",
+    mode: "classify",
+    model: "anthropic/fast",
+    gen: 1,
+    threadKey: THREAD,
+    decidedAt,
+  });
+  const slackRun = (id: string, finishedAt: number) =>
+    record(id, finishedAt, {
+      threadKey: THREAD,
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      channelVisibility: "unknown",
+    });
+  const shapeOf = (t: HomeTurnSeed | HomeReceiptTurnSeed) => ("kind" in t ? [t.kind, t.reason, t.decidedAt] : t.id);
+
+  it("two silent receipts seed two read-not-answered turns with their reasons, interleaved among the runs by decidedAt; an addressed receipt seeds nothing", async () => {
+    const rows = [
+      // Deliberately unsorted: the seed orders by decidedAt, not by the read's order.
+      receipt(NOW - 80_000, "smalltalk between people"),
+      receipt(NOW - 40_000, "handled by its person", "addressed"),
+      receipt(NOW - 150_000, "a question to another person"),
+    ];
+    const listIntake = vi.fn(async (q: { threadKey?: string }) => rows.filter((r) => r.threadKey === q.threadKey));
+    const { handler, store } = setup({ intake: { listIntake } });
+    await store.put(slackRun("s-a", NOW - 200_000));
+    await store.put(slackRun("s-b", NOW - 60_000));
+    const res = await request(handler, { url: `/threads/${THREAD}`, actor: linked });
+    expect(res.status).toBe(200);
+    const seed = seedOf<HomeSeed>(res.body);
+    expect(seed.turns.map(shapeOf)).toEqual([
+      "s-a",
+      ["receipt", "a question to another person", NOW - 150_000],
+      ["receipt", "smalltalk between people", NOW - 80_000],
+      "s-b",
+    ]);
+    expect(listIntake).toHaveBeenCalledWith({ threadKey: THREAD });
+  });
+
+  it("zero receipts, a null ledger and a failing one all seed the runs alone", async () => {
+    for (const intake of [
+      { listIntake: async () => [] },
+      null,
+      {
+        listIntake: async () => {
+          throw new Error("the ledger is down");
+        },
+      },
+    ]) {
+      const { handler, store } = setup({ intake });
+      await store.put(slackRun("s-a", NOW - 200_000));
+      const res = await request(handler, { url: `/threads/${THREAD}`, actor: linked });
+      expect(res.status).toBe(200);
+      expect(seedOf<HomeSeed>(res.body).turns.map(shapeOf)).toEqual(["s-a"]);
+    }
+  });
+
+  it("a thread the viewer may see nothing of seeds no receipt: the 404 stands and the ledger is never asked", async () => {
+    const listIntake = vi.fn(async () => [receipt(NOW - 80_000, "smalltalk between people")]);
+    const { handler, store } = setup({ intake: { listIntake } });
+    await store.put(record("x-1", NOW, { threadKey: THREAD, channelId: "slack:C1", userId: "slack:UBOB" }));
+    const res = await request(handler, { url: `/threads/${THREAD}` });
+    expect(res.status).toBe(404);
+    expect(res.body).not.toContain("smalltalk");
+    expect(listIntake).not.toHaveBeenCalled();
   });
 });

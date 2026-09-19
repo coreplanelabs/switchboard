@@ -908,6 +908,9 @@ export async function runBot(): Promise<void> {
         capabilities.runHistory && runHistoryCfg
           ? { retentionDays: retentionPolicyOf(runHistoryCfg).retentionDays }
           : null,
+      // The thread view's silent receipts (web-chat item 12): the ledger's own
+      // read — no write-through, a failing read seeds the runs alone.
+      intake: ledgerClient ? { listIntake: (query) => ledgerClient.listIntake(query) } : null,
       publicBaseUrl: process.env.PUBLIC_BASE_URL,
     });
     const deliveryState = !capabilities.github
