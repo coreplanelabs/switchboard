@@ -1157,6 +1157,121 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
     ]);
   });
 
+  // harness-pi item 7 and run-history item 2: a failed compaction is a
+  // checkpoint signal — the run loop commits and pushes the tree's tracked
+  // work to the run's own branch the moment the harness reports the failure,
+  // in the push-before-abort's shape, and the loop goes on.
+  it("a coding child whose compaction fails for good checkpoints its tree: a tracked worktree is committed and pushed to the unit's branch with a pushed_head (by: salvage) and the run continues; a clean tree yields the note alone; a context that no longer fits ends the round with the push already made", async () => {
+    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const BRANCH = "plan/p/u1";
+    const REFUSAL =
+      "Auto-compaction failed: Turn prefix summarization failed: refused under the provider's usage policy";
+    const compacted = async (opts: { dirty: boolean; thenOverflow?: boolean }) => {
+      const registry = new HarnessRegistry();
+      const container = new FakeHarnessContainer();
+      const commands: string[] = [];
+      container.onStdin = (line, c) => {
+        const cmd = JSON.parse(line) as Record<string, unknown>;
+        if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+          c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+        if (cmd.type !== "prompt") return;
+        c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+        // The provider's classifier refuses pi's turn-prefix summary for good.
+        c.emit({
+          type: "compaction_end",
+          reason: "threshold",
+          result: undefined,
+          aborted: false,
+          errorMessage: REFUSAL,
+        });
+        if (opts.thenOverflow) {
+          // The context no longer fits: the next model call fails and the round ends.
+          c.emit(
+            {
+              type: "message_end",
+              message: {
+                role: "assistant",
+                content: [],
+                stopReason: "error",
+                errorMessage: "input is over the model's context window",
+              },
+            },
+            { type: "agent_settled" },
+          );
+          return;
+        }
+        const done = { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" };
+        c.emit(
+          { type: "message_end", message: done },
+          { type: "turn_end", message: done, toolResults: [] },
+          { type: "agent_settled" },
+        );
+      };
+      const s = setup("", {
+        agent: "coding",
+        yaml: PI_YAML,
+        coding: true,
+        repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+        binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+        coordinator: { parentInstanceId: "coord-c", idempotencyKey: "coord-c:compacted/0/coding", base: "feat/trunk" },
+        harness: {
+          harnesses: roster(),
+          registry,
+          harnessUrl: "https://bot.example.com",
+          containerFor: () => container,
+          pollMs: 1,
+          tickMs: 5,
+        },
+        bearer: "sbr_run-l.s3cret",
+        executor: {
+          exec: async (cmd: string) => {
+            commands.push(cmd);
+            if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+            if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+            if (/status --porcelain -uno/.test(cmd)) return opts.dirty ? " M src/a.ts\n" : "";
+            if (/rev-list --count/.test(cmd)) return "0\n";
+            return "";
+          },
+        },
+      });
+      const out = await runLoop(s.deps, s.ctx).then(
+        (r) => ({ answer: answered(r).answer, failed: undefined as string | undefined }),
+        (err: unknown) => ({ answer: undefined, failed: err instanceof Error ? err.message : String(err) }),
+      );
+      s.ending.drain(out.failed === undefined ? true : undefined);
+      await s.writer.settled();
+      const rec = (await s.store.get("run-l"))!;
+      const notes = rec.events.filter(
+        (e) => e.type === "run_note" && (e as { kind: string }).kind === "compaction_salvage",
+      ) as { summary: string }[];
+      const pushed = rec.events.filter((e) => e.type === "pushed_head" && (e as { by: string }).by === "salvage");
+      return { out, commands, notes, pushed };
+    };
+    const tracked = await compacted({ dirty: true });
+    // The run continued past the failed compaction and answered.
+    expect(tracked.out.answer).toBe("done");
+    expect(tracked.commands).toContain("git add -u");
+    expect(tracked.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(tracked.notes.map((n) => n.summary)).toEqual([
+      `the compaction failed (${REFUSAL}); the failed compaction left work in the tree — committed the uncommitted work and pushed to \`${BRANCH}\` (${HEAD.slice(0, 7)})`,
+    ]);
+    expect(tracked.pushed).toEqual([expect.objectContaining({ ref: BRANCH, sha: HEAD, by: "salvage" })]);
+    // Nothing to commit: the note alone, no push and no pushed_head.
+    const clean = await compacted({ dirty: false });
+    expect(clean.out.answer).toBe("done");
+    expect(clean.commands.some((c) => c.startsWith("git push") || c.startsWith("git commit"))).toBe(false);
+    expect(clean.notes.map((n) => n.summary)).toEqual([
+      `the compaction failed (${REFUSAL}); the compaction checkpoint found nothing to push: the tree is clean and \`${BRANCH}\` holds no unpushed commits`,
+    ]);
+    expect(clean.pushed).toEqual([]);
+    // The context no longer fits: the round ends with the push already made.
+    const overflowed = await compacted({ dirty: true, thenOverflow: true });
+    expect(overflowed.out.failed).toContain("the model call failed");
+    expect(overflowed.commands).toContain(`git push origin 'HEAD:refs/heads/${BRANCH}'`);
+    expect(overflowed.pushed).toEqual([expect.objectContaining({ ref: BRANCH, sha: HEAD, by: "salvage" })]);
+    expect(overflowed.notes).toHaveLength(1);
+  });
+
   // harness-pi item 6: the finale answer reads what the ending established.
   // The loop's answer is composed AFTER the salvage, the description turn and
   // the PR post-step, from the ending the harness handed over: a clean tree

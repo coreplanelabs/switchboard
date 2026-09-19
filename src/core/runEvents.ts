@@ -275,6 +275,14 @@ export type RunNoteKind =
    *  there was nothing to push), so a re-issue starts from the partial work
    *  (docs/reference/specs/agent-ship.md item 8). */
   | "budget_salvage"
+  /** A pi run's compaction failed for good — the provider refused the summary
+   *  (harness-pi.md item 7) — and the run loop treated it as a checkpoint
+   *  signal: the tracked changes were committed and pushed to the run's own
+   *  branch (a `pushed_head` event, `by: "salvage"`), or the note says plainly
+   *  that the tree held nothing, so a context that overflows before the
+   *  wind-down loses no work. The summary names the compaction failure.
+   *  Published by the run loop's hook, which the pi harness awaits. */
+  | "compaction_salvage"
   /** The loop's end found a tool call in flight and ended it, so the write-up
    *  keeps its allowance (decision 0046, unit seven; harness-pi item 6). The
    *  summary names the tools. Published by the harness beside the budget note. */
@@ -333,6 +341,7 @@ export const RUN_NOTE_KINDS = [
   "tool_unnamed",
   "directory_reached",
   "budget_salvage",
+  "compaction_salvage",
   "stuck_loop",
   "decline_cascade",
 ] as const satisfies readonly RunNoteKind[];

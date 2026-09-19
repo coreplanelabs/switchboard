@@ -275,15 +275,33 @@ export function salvageWorkOf(
  *  starts from the partial work instead of zero — or says plainly that it had
  *  nothing. Mechanical, in the run loop after the model is done: the model can
  *  make no more tool calls at the wind-down, so nothing else can push.
- *  Best-effort: a failed step reports itself and never fails the run. */
+ *  Best-effort: a failed step reports itself and never fails the run.
+ *  The same push, worded for its cue, is the compaction checkpoint's
+ *  (docs/reference/specs/harness-pi.md item 7): a compaction the provider
+ *  refused for good may end the run at the context's overflow before any
+ *  wind-down, so the tree is pushed the moment the failure is known. */
 export async function salvageBudgetPush(
   executor: { exec: (cmd: string, opts?: ExecTraceOptions) => Promise<string> },
-  opts: { branch: string },
+  opts: { branch: string; cue?: "budget" | "compaction" },
   span?: Span,
 ): Promise<{ pushed: boolean; summary: string; head?: string }> {
   const trace = span ? { span } : undefined;
   const run = (cmd: string) => executor.exec(cmd, trace);
   const probe = (cmd: string) => run(cmd).catch(() => "");
+  const words =
+    opts.cue === "compaction"
+      ? {
+          commit: "wip: committed at the compaction checkpoint — work in progress, not reviewed",
+          nothing: `the compaction checkpoint found nothing to push: the tree is clean and \`${opts.branch}\` holds no unpushed commits`,
+          pushedLead: "the failed compaction left work in the tree",
+          failedLead: `the compaction checkpoint push to \`${opts.branch}\` failed`,
+        }
+      : {
+          commit: "wip: committed at the budget wind-down — work in progress, not reviewed",
+          nothing: nothingToSalvageNote(opts.branch),
+          pushedLead: "the budget ended with work in the tree",
+          failedLead: `the budget-end salvage push to \`${opts.branch}\` failed`,
+        };
   try {
     // Tracked changes only, the clean-tree rule's own measure (resident-repos
     // item 17): untracked scratch is the run's own noise. The two measures are
@@ -292,25 +310,23 @@ export async function salvageBudgetPush(
     const dirty = (await run("git status --porcelain -uno")).trim() !== "";
     if (dirty) {
       await run("git add -u");
-      await run(
-        `git commit -m ${shellQuote("wip: committed at the budget wind-down — work in progress, not reviewed")}`,
-      );
+      await run(`git commit -m ${shellQuote(words.commit)}`);
     }
     const unpushed = parseCountOutput(await run("git rev-list --count HEAD --not --remotes")) ?? 0;
-    if (!dirty && unpushed === 0) return { pushed: false, summary: nothingToSalvageNote(opts.branch) };
+    if (!dirty && unpushed === 0) return { pushed: false, summary: words.nothing };
     await run(`git push origin ${shellQuote(`HEAD:refs/heads/${opts.branch}`)}`);
     const head = parseRevParseOutput(await probe("git rev-parse HEAD"));
     return {
       pushed: true,
       ...(head !== undefined ? { head } : {}),
-      summary: `the budget ended with work in the tree — ${
+      summary: `${words.pushedLead} — ${
         dirty ? "committed the uncommitted work and pushed" : "pushed the unpushed commits"
       } to \`${opts.branch}\`${head !== undefined ? ` (${head.slice(0, 7)})` : ""}`,
     };
   } catch (err) {
     return {
       pushed: false,
-      summary: `the budget-end salvage push to \`${opts.branch}\` failed: ${err instanceof Error ? err.message : String(err)} — partial work may sit unpushed in the workspace`,
+      summary: `${words.failedLead}: ${err instanceof Error ? err.message : String(err)} — partial work may sit unpushed in the workspace`,
     };
   }
 }

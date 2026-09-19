@@ -1697,8 +1697,24 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // again, so the try after this one is written without a model call. A
       // transient failure — an overload, a cut stream — arms nothing: pi's
       // next try is the retry.
-      if (obs.compactionFailed !== undefined && !isTransientProviderError(obs.compactionFailed))
+      if (obs.compactionFailed !== undefined && !isTransientProviderError(obs.compactionFailed)) {
         compactionFailure = obs.compactionFailed;
+        // … and is a checkpoint signal (item 7): the window may overflow before
+        // the run's own wind-down, so the run loop pushes the tree's work now.
+        // Awaited, so a context that no longer fits ends the round with the
+        // push already made; never on a re-attach's catch-up (the failure is
+        // history, its checkpoint ran then) and never a reason to fail the run.
+        if (!catchingUp && run.onCompactionFailed) {
+          try {
+            await run.onCompactionFailed(obs.compactionFailed);
+          } catch (err) {
+            note(
+              "harness_error",
+              `the compaction checkpoint failed (${err instanceof Error ? err.message : String(err)}); the run continues`,
+            );
+          }
+        }
+      }
       if (obs.compaction) {
         compactionFailure = undefined;
         if (await mirror.onCompaction(obs.compaction, bridge.turns)) held();
