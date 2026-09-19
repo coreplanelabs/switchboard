@@ -7,7 +7,7 @@
   "deploy/cloudflare/preflight.mjs": 1,
   "deploy/cloudflare/worker.ts": 1,
   "scripts/load.ts": 6,
-  "scripts/web-preview.ts": 73,
+  "scripts/web-preview.ts": 75,
   "src/agents/registry.ts": 1,
   "src/artifacts/config.ts": 1,
   "src/channels/indexFormat.ts": 1,

@@ -7,7 +7,7 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "8d507868382af4fdd9ebbad5a93fbd47db331dd9d303aad0c6f1fc651f153b2f",
-    "scripts/web-preview.ts": "0e84c51f61bde3e23a403cf0c2b0eb0688c8a89f83f660356e483dd5fe883934",
+    "scripts/web-preview.ts": "a7d56ae5f213c91bd16cbf2bd1e8377f250002323199d48fcbcf4bdeec627d3b",
     "src/channels/webShell.ts": "c3f74aeb04010dd88204b86e7a782f5a45f6731bf6f0f29cc8a4b5039df8f090",
     "src/docs/screenshotManifest.ts": "af734f26c25e8ff0d55c887a21cceef839e766785e97d0f52c134cb0a3d072d7",
     "web/src/App.vue": "4f602098f253ba82425491f6665f6ce8647e559703d3da8efe18ed6cc66c72f6",
@@ -40,7 +40,7 @@
     "web/src/lib/filePreview.ts": "5c88224bfdd06300f492a1ef07f5fbbed7d2cb39f51a027b5b12c3319627dc15",
     "web/src/lib/format.ts": "c606fee13ee47cd493bc70bc5c8d70fe697bc1903afa8434261b48c29e682759",
     "web/src/lib/githubLinks.ts": "9b382f6de5837da30e9ec8895fae5f301907c50d63baca116f3b9eba0bbbbff9",
-    "web/src/lib/indexRow.ts": "aed574f60a8aa306a2af4d5204685a438a3965bcc3a387055eb1ea29dd253430",
+    "web/src/lib/indexRow.ts": "e26c640aee8998df23ba39735baa60db4b74906fe608cbbcf251da08f4b193dd",
     "web/src/lib/markPulse.ts": "df29e8abee12f0827e8e1295f8fcb1184530240139790da7bffb5929fad8f647",
     "web/src/lib/navSections.ts": "dd842db8c9b0fc1d7cc592f145803622047d03131d876e7681710c28f4f348db",
     "web/src/lib/runPageModel.ts": "2d24ef43640ec1da84a27675cdedbf6204082630e955a9a66f07793c6c4a79e2",

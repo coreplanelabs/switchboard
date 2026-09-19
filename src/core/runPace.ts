@@ -1,6 +1,6 @@
 import { MINUTE_MS, minutesToMs, PACE_WINDOW_MINUTES } from "./budgets.js";
 
-// The stall signal (docs/reference/specs/live-view.md item 32; issue #1836): a
+// The stall signal (docs/reference/specs/live-view.md item 32; the stall-signal ask): a
 // hung bash call and a slow suite must read apart. One pure rule for the run's
 // pace — events per minute over the last five minutes, or "no tool call for N
 // min" once nothing has landed for a window — and for a tool call past its

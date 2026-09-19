@@ -101,7 +101,7 @@ describe("RunsService.getRun", () => {
     expectNoToken(withMessages);
   });
 
-  // Feature: docs/reference/specs/live-view.md item 32 (issue #1836) — the live
+  // Feature: docs/reference/specs/live-view.md item 32 — the live
   // view carries the registry's pace facts, so the index row can tell a hung
   // bash from a slow suite; a persisted row never carries them.
   it("a live view carries the stall signal's pace facts — eventsLast5m, lastToolCallAt, inFlight with its bound; a persisted row none", async () => {

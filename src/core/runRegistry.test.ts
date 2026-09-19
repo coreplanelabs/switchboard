@@ -464,7 +464,7 @@ describe("RunRegistry.listActive", () => {
   });
 });
 
-// Feature: docs/reference/specs/live-view.md item 32 (issue #1836) — the stall
+// Feature: docs/reference/specs/live-view.md item 32 — the stall
 // signal's pace facts on the live summary: events per minute are countable from
 // `eventsLast5m`, the stall from `lastToolCallAt`, the bound-exceeded mark from
 // `inFlight`. Live rows only — a finished row has no pace to misread.

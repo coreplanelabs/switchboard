@@ -101,7 +101,7 @@ export function countTip(run: Pick<IndexRow, "stepCount">): string {
     : "events published, span records included";
 }
 
-// The stall signal (live-view item 32; issue #1836): the pace cell, the stall
+// The stall signal (live-view item 32): the pace cell, the stall
 // predicate the sort and the badge share, and the bound-exceeded mark — the
 // core's one rule (`runPace.ts`, the words the status card uses), gated here
 // on LIVE rows that carry the fact: a persisted row, and a live row an older

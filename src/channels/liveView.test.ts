@@ -787,7 +787,7 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.body()).toContain("<title>(1) Live runs</title>"); // item 21: the tab carries the live count
   });
 
-  // Feature: docs/reference/specs/live-view.md item 32 (issue #1836) — the index
+  // Feature: docs/reference/specs/live-view.md item 32 — the index
   // row seed carries the stall signal's pace facts, so the row can tell a hung
   // bash from a slow suite without opening the run.
   it("a live index row's seed carries the pace facts — eventsLast5m, lastToolCallAt, and the in-flight call with its bound", async () => {

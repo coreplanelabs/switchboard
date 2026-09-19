@@ -9,7 +9,15 @@ import { useSeed } from "../lib/seed";
 import { useWallClock } from "../lib/wallClock";
 import { browser } from "../lib/browser";
 import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from "../lib/eventSource";
-import { expiresAt, feedAction, LEAVING_WINDOW_MS, mergeRow, rowStalled, RUNS_PREF, type IndexRow } from "../lib/indexRow";
+import {
+  expiresAt,
+  feedAction,
+  LEAVING_WINDOW_MS,
+  mergeRow,
+  rowStalled,
+  RUNS_PREF,
+  type IndexRow,
+} from "../lib/indexRow";
 import { formatDateTime } from "../lib/format";
 import { retentionSentence } from "@core/channels/webSeed.js";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";

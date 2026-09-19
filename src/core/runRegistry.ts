@@ -322,7 +322,11 @@ export class RunRegistry {
       }
       if (event.type === "tool_call") {
         run.lastToolCallAt = at;
-        run.inFlight = { tool: event.tool, since: at, ...(event.boundMs !== undefined ? { boundMs: event.boundMs } : {}) };
+        run.inFlight = {
+          tool: event.tool,
+          since: at,
+          ...(event.boundMs !== undefined ? { boundMs: event.boundMs } : {}),
+        };
       } else if (event.type === "tool_result") {
         run.inFlight = undefined;
       }

@@ -103,7 +103,7 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
     expect(wrapper.find("h1 .title").text()).toBe("Live runs");
   });
 
-  // Feature: docs/reference/specs/live-view.md item 32 (issue #1836) — stalled
+  // Feature: docs/reference/specs/live-view.md item 32 — stalled
   // runs sort first: a live row with no tool call for the whole pace window
   // rises above newer healthy rows, so the stall is the first thing seen.
   it("sorts stalled live rows first, newest-first within each group", () => {

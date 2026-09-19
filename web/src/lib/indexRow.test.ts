@@ -264,7 +264,7 @@ describe("feed reconciliation", () => {
   });
 });
 
-// Feature: docs/reference/specs/live-view.md item 32 (issue #1836) — the stall
+// Feature: docs/reference/specs/live-view.md item 32 — the stall
 // signal on the row: events per minute over the last five minutes, or "no tool
 // call for N min"; a call past its declared bound named with the bound; only a
 // row that carries the fact can stall (an older writer's row has no signal).
@@ -304,9 +304,9 @@ describe("the stall signal (item 32)", () => {
     expect(paceTip(live({ eventsLast5m: 0, lastToolCallAt: 16 * MIN }), 60 * MIN)).toBe(
       "time since the run's last tool call",
     );
-    expect(
-      paceTip(live({ eventsLast5m: 0, inFlight: { tool: "bash", since: 0, boundMs: 600_000 } }), 2_083_000),
-    ).toBe("this call ran past the bound it declared — it should have been cut");
+    expect(paceTip(live({ eventsLast5m: 0, inFlight: { tool: "bash", since: 0, boundMs: 600_000 } }), 2_083_000)).toBe(
+      "this call ran past the bound it declared — it should have been cut",
+    );
   });
 });
 

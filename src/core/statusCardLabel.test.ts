@@ -23,7 +23,7 @@ describe("quietSuffix", () => {
     expect(quietSuffix(25_400, { tool: "read_file" })).toBe(" — running read_file (25s)");
   });
 
-  // Feature: docs/reference/specs/live-view.md item 32 (issue #1836) — a bash
+  // Feature: docs/reference/specs/live-view.md item 32 — a bash
   // call past its declared bound is marked, never shown as ordinary progress:
   // the bound that should have ended it is named beside the elapsed.
   it("a call past its declared bound is marked with the bound it outran — `bash 2083s, bound 600s`", () => {
