@@ -98,4 +98,26 @@ describe("timed", () => {
     expect(bad.ok).toBe(false);
     expect(!bad.ok && bad.error.message).toBe("boom");
   });
+
+  it("a synchronously throwing function yields ok:false with the error and a measured ms", async () => {
+    let t = 0;
+    const now = () => t;
+    const result = await timed(() => {
+      t = 100;
+      throw new Error("sync-throw");
+    }, now);
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.error.message).toBe("sync-throw");
+    expect(result.ms).toBe(100);
+  });
+
+  it("a rejection with a non-Error string is wrapped into an Error whose message is the string", async () => {
+    const result = await timed(async () => {
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      throw "string rejection";
+    });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.error).toBeInstanceOf(Error);
+    expect(!result.ok && result.error.message).toBe("string rejection");
+  });
 });
