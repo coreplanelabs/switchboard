@@ -1072,6 +1072,31 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "metrics:read",
+    "args": [],
+    "effect": "read",
+    "id": "metrics.trend",
+    "options": [
+      {
+        "name": "days",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "agent",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "runs:read",
     "args": [],
     "effect": "read",

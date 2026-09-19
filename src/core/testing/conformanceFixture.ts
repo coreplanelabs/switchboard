@@ -47,6 +47,9 @@ import { EMPTY_USAGE, MAX_DAYS, parseCostsConfig, resolveRange } from "../costs.
 import { CostsSnapshotter } from "../costsSnapshot.js";
 import { InMemoryCostsSnapshotStore } from "../costsSnapshotStore.js";
 import { createCostsService } from "../costsService.js";
+import { InMemoryMetricsSource, parseMetricsConfig } from "../metrics.js";
+import { createMetricsService } from "../metricsService.js";
+import { pointOf } from "../runMetrics.js";
 import { createDeliveryService, InMemoryDeliverySource, type PullRequestFacts } from "../delivery.js";
 import { invokeChatCommand, parseChatCommand } from "../commandChat.js";
 import { ReviewAbridger } from "../reviewAbridge.js";
@@ -622,6 +625,17 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       { everyHours: 24, now: () => new Date(NOW) },
     ),
   );
+  // `metrics trend`: the real service over the in-memory source, holding the
+  // two finished fixture runs' own points — the report is arithmetic over them.
+  const metrics = createMetricsService(
+    parseMetricsConfig({ dataset: "fixture_runs" })!,
+    new InMemoryMetricsSource(
+      [pointOf(record(FIXTURE.persistedRun, NOW - 1000)), pointOf(record("fin-2", NOW - 2000))].filter(
+        (p) => p !== undefined,
+      ),
+    ),
+    { now: () => NOW },
+  );
   // `delivery report`: one merged pull request of the fixture repo, reviewed
   // twice by a bot the fixture names, merged in the week of the pinned clock —
   // read from memory, never from GitHub (`fetch` is disarmed here).
@@ -678,6 +692,7 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   return {
     delivery: { service: async () => delivery },
     costs: { service: async () => costs },
+    metrics: { service: async () => metrics },
     // `plane show`: the table over the same registry, store and unit rows the runs
     // fixtures seed; no GitHub reader, so every pull request reads `unknown`.
     plane: { service: async () => createPlaneService({ runs: await runs(), instances: s.units, clock: () => NOW }) },

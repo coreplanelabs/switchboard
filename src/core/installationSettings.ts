@@ -73,6 +73,7 @@ const CAPABILITY_HOW: Readonly<Record<keyof Capabilities, string>> = {
   runLedger: "run history on the state Worker (worker, not file)",
   mcp: "an mcp block with its credential key in the environment",
   costs: "a costs block with the Cloudflare analytics key in the environment; optionally the Anthropic admin key",
+  metrics: "a metrics block naming the dataset, beside the costs block and its Cloudflare analytics key",
   schedules: "schedules.worker.baseUrl with the state Worker's bearer, and the cron identity among the ingress bearers",
   github: "the GitHub App triple in the environment, or a personal GitHub key",
   ingress: "at least one ingress bearer in the environment, each granted under grants",

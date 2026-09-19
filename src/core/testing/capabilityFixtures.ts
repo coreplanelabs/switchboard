@@ -83,6 +83,7 @@ mcp:
     runLedger: false,
     mcp: true,
     costs: false,
+    metrics: false,
     schedules: false,
     github: true,
     ingress: true,
@@ -94,7 +95,7 @@ mcp:
 export const CLOUD_FULL: CapabilityFixture = {
   name: "cloud-full",
   summary:
-    "Everything on: the four Workers, tools in a Cloudflare sandbox, resident repos, memory, run history and the ledger on the state Worker, MCP, costs, schedules, the GitHub App, bearer ingress, Access in front of the dashboards.",
+    "Everything on: the four Workers, tools in a Cloudflare sandbox, resident repos, memory, run history and the ledger on the state Worker, MCP, costs, run metrics, schedules, the GitHub App, bearer ingress, Access in front of the dashboards.",
   yaml: `${BASE_YAML}execution:
   type: cloudflare
   url: https://switchboard-sandbox.example.test
@@ -124,6 +125,8 @@ costs:
     switchboard:
       label: Switchboard
       workers: [switchboard, switchboard-memory, switchboard-resident, switchboard-sandbox]
+metrics:
+  dataset: switchboard_runs
 `,
   env: {
     ANTHROPIC_API_KEY: "sk-ant-placeholder",

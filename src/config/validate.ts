@@ -19,6 +19,7 @@ import {
 import { ALLOWANCES, ASKS, fit, GRANT_RENEWALS_MAX, IDLE_DAYS_MAX, type Grant } from "../core/budgets.js";
 import type { SpawnConfig } from "../core/dispatch/spawn.js";
 import { validateDashboardConfig } from "../core/dashboardAuthConfig.js";
+import { parseMetricsConfig } from "../core/metrics.js";
 import { validateArtifacts } from "../artifacts/config.js";
 import { parseGrantsConfig, parseRestrictConfig, type Restriction } from "../core/authz/grants.js";
 import type { Grants } from "../core/authz/types.js";
@@ -338,6 +339,9 @@ export function validateConfig(cfg: AppConfig): void {
   validateGrants(cfg.grants);
   validateRestrict(cfg.restrict);
   validateSelfImprovement(cfg.selfImprovement);
+  // The `metrics:` reader block (docs/reference/specs/run-metrics.md): refused by
+  // field at load, like the costs block its credential rides with.
+  parseMetricsConfig(cfg.metrics);
   if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory);
   if (cfg.tracing !== undefined) validateTracing(cfg.tracing);
   validateRuntimeOverrides(cfg.runtimeOverrides);

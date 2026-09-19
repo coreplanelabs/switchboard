@@ -44,6 +44,9 @@ exports[`capability axis — a capability turning on changes exactly the command
   "memory.sweep": [
     "memory",
   ],
+  "metrics.trend": [
+    "metrics",
+  ],
   "repo.build": [
     "execution",
     "residents",
@@ -141,6 +144,7 @@ commands:
   delivery report      — Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written.
   costs by             — What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written.
   costs snapshot       — Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on.
+  metrics trend        — The run trend from the metrics dataset: runs, failure rate, p50/p95 wall and dollars per day and per agent over the range, weighted for sampling — the /metrics page's report as text or JSON; nothing written.
   providers check      — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each.
   artifacts lifecycle  — Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after \`artifacts.retentionDays\` (default 30), incomplete multipart uploads abort after one day — and read them back; \`--dry-run\` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token.
   artifacts check      — Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token.
@@ -172,6 +176,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "memory.forget",
   "memory.list",
   "memory.sweep",
+  "metrics.trend",
   "plane.show",
   "providers.check",
   "repo.build",
@@ -222,6 +227,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "memory_forget",
   "memory_list",
   "memory_sweep",
+  "metrics_trend",
   "plane_show",
   "providers_check",
   "repo_build",
@@ -304,6 +310,8 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 *costs*
 • \`costs by\` — What the runs cost by user, thread, channel, agent or model over the range — LLM from their tokens through the price table, cloud allocated by run wall-clock — the costs page's tabs as text or JSON, from the snapshot; nothing written.
 • \`costs snapshot\` — Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on.
+*metrics*
+• \`metrics trend\` — The run trend from the metrics dataset: runs, failure rate, p50/p95 wall and dollars per day and per agent over the range, weighted for sampling — the /metrics page's report as text or JSON; nothing written.
 *providers*
 • \`providers check\` — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each.
 *plane*
@@ -328,6 +336,7 @@ exports[`capability surfaces — cloud-full > web seeds: /runs (capabilities, re
     "ingress": true,
     "mcp": true,
     "memory": true,
+    "metrics": true,
     "readingDiffAbridge": true,
     "residents": true,
     "runHistory": true,
@@ -558,6 +567,7 @@ exports[`capability surfaces — local-full > web seeds: /runs (capabilities, re
     "ingress": true,
     "mcp": true,
     "memory": true,
+    "metrics": false,
     "readingDiffAbridge": false,
     "residents": false,
     "runHistory": true,
@@ -732,6 +742,7 @@ exports[`capability surfaces — minimal > web seeds: /runs (capabilities, reten
     "ingress": false,
     "mcp": false,
     "memory": false,
+    "metrics": false,
     "readingDiffAbridge": false,
     "residents": false,
     "runHistory": false,

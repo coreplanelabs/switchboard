@@ -22,6 +22,7 @@ export const COMMAND_GROUPS = [
   "contract",
   "delivery",
   "costs",
+  "metrics",
   "providers",
 ] as const;
 
