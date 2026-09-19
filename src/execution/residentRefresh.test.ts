@@ -14,6 +14,9 @@ import {
   RUNTIME_REPLACEMENT_WORDING,
   STOPPED_CONTAINER_WORDING,
   checkoutUpdateCommand,
+  CHECKOUT_FETCH_COMMAND,
+  stageCheckoutScript,
+  swapCheckoutScript,
   classifyRefreshFailure,
   fetchFailureIsMirrors,
   restoreFailureDisposition,
@@ -179,6 +182,13 @@ describe("checkoutUpdateCommand", () => {
     expect(cmd).toContain("git clean -fdx -e node_modules");
   });
 
+  it("never fetches — the mirror read is CHECKOUT_FETCH_COMMAND, under the stage lock; the rest runs outside it", () => {
+    for (const scope of ["keep-deps", "all"] as const) {
+      expect(checkoutUpdateCommand(NEW, scope)).not.toContain("git fetch");
+    }
+    expect(CHECKOUT_FETCH_COMMAND).toBe("git fetch --quiet origin");
+  });
+
   it("keep-deps: sweeps the build-written caches inside node_modules at any depth (they open+truncate hardlinked inodes)", () => {
     const cmd = checkoutUpdateCommand(NEW, "keep-deps");
     expect(cmd).toContain(
@@ -194,6 +204,53 @@ describe("checkoutUpdateCommand", () => {
     expect(cmd).toMatch(/git clean -fdx$/);
     expect(cmd).not.toContain("-e node_modules");
     expect(cmd).not.toContain("find .");
+  });
+});
+
+const SWAP_DIRS = {
+  checkout: "/workspace/checkout",
+  staging: "/workspace/checkout.staging",
+  retired: "/workspace/checkout.retired",
+};
+
+describe("stageCheckoutScript (the staging seed — the one hardlink copy the mirror lock still covers)", () => {
+  const script = stageCheckoutScript(SWAP_DIRS);
+
+  it("self-heals a swap the container died inside: a missing checkout is restored from the retired tree first", () => {
+    const heal =
+      "if [ ! -d /workspace/checkout/.git ] && [ -d /workspace/checkout.retired/.git ]; then mv /workspace/checkout.retired /workspace/checkout; fi";
+    expect(script).toContain(heal);
+    expect(script.indexOf(heal), "the heal runs before anything is removed").toBeLessThan(script.indexOf("rm -rf"));
+  });
+
+  it("drops a previous attempt's staging and retired trees before the copy", () => {
+    expect(script).toContain("rm -rf /workspace/checkout.staging /workspace/checkout.retired");
+    expect(script.indexOf("rm -rf")).toBeLessThan(script.indexOf("cp -al"));
+  });
+
+  it("hardlink-copies the warm checkout into the staging tree (cp -al — seconds, never a byte copy)", () => {
+    expect(script).toContain("cp -al /workspace/checkout /workspace/checkout.staging");
+  });
+});
+
+describe("swapCheckoutScript (two renames under the lock — milliseconds, never a build or a large rm)", () => {
+  const script = swapCheckoutScript(SWAP_DIRS);
+
+  it("retires the warm checkout, then moves the staged tree into its place", () => {
+    const retire = script.indexOf("mv /workspace/checkout /workspace/checkout.retired");
+    const swapIn = script.indexOf("mv /workspace/checkout.staging /workspace/checkout");
+    expect(retire).toBeGreaterThan(-1);
+    expect(swapIn).toBeGreaterThan(retire);
+  });
+
+  it("a failed second rename puts the retired tree back and fails the step — the checkout path is never left empty", () => {
+    expect(script).toContain(
+      "|| { if [ ! -d /workspace/checkout ] && [ -d /workspace/checkout.retired/.git ]; then mv /workspace/checkout.retired /workspace/checkout; fi; exit 1; }",
+    );
+  });
+
+  it("never removes the retired tree itself — that rm runs after the lock is released", () => {
+    expect(script).not.toContain("rm");
   });
 });
 

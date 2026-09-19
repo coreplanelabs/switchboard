@@ -93,15 +93,67 @@ export function planRefresh(input: {
  *  through shared inodes (review 1b). Pruned at any depth (workspaces). */
 export const NODE_MODULES_CACHE_DIRS = [".cache", ".vite"] as const;
 
-/** The checkout-update shell for the build user (runs inside the checkout):
- *  fetch from the local mirror, hard-reset to `sha`, then the `-x` clean.
+/** The one command of the rebuild that READS THE MIRROR — run as the build
+ *  user in the staging tree, inside the stage lock (`stageCheckoutScript`'s
+ *  lease): an attach's `fetch --prune` into the mirror could otherwise delete
+ *  a ref out from under this fetch's negotiation. Everything after it (reset,
+ *  clean, build) touches only the staging tree and runs outside the lock. */
+export const CHECKOUT_FETCH_COMMAND = "git fetch --quiet origin";
+
+/** The directories of the staged rebuild (resident-repos.md item 47): the
+ *  warm checkout, the staging tree the rebuild happens in, and the retired
+ *  path the replaced checkout waits at between the swap's rename and its
+ *  removal. All on one filesystem, so every move below is a rename. */
+export interface CheckoutSwapDirs {
+  checkout: string;
+  staging: string;
+  retired: string;
+}
+
+/** Root shell that seeds the staging tree, under the mirror lock — the one
+ *  hardlink copy of the checkout the lock still covers, exactly
+ *  materializeThreadDeps' consistency guarantee. First the self-heal: a
+ *  container killed between the swap's two renames leaves no checkout and a
+ *  complete retired tree, which is moved back before anything else reads the
+ *  checkout path. Then a previous attempt's leftovers go — the caller already
+ *  dropped the staging tree OFF the lock (a failed build leaves hundreds of
+ *  thousands of inodes; the tree is private, so its removal needs no lock),
+ *  leaving this `rm` a near-instant residual guard; the retired tree's
+ *  heal-then-remove ordering is what needs the lock. Last, `cp -al` takes
+ *  the copy (hardlinks — seconds, never a byte copy; run by root, ownership
+ *  preserved). */
+export function stageCheckoutScript(dirs: CheckoutSwapDirs): string {
+  const { checkout, staging, retired } = dirs;
+  return (
+    `if [ ! -d ${checkout}/.git ] && [ -d ${retired}/.git ]; then mv ${retired} ${checkout}; fi && ` +
+    `rm -rf ${staging} ${retired} && cp -al ${checkout} ${staging}`
+  );
+}
+
+/** Root shell that swaps the built staging tree into the checkout path, under
+ *  the mirror lock: two renames — milliseconds, so an attach's 60 s wait is
+ *  never spent on a build. If the second rename fails the retired tree is put
+ *  back (the checkout path is never left empty for a copier) and the step
+ *  fails; the retired tree itself is removed by the caller AFTER the lock is
+ *  released, so the lock is never held for a large `rm`. */
+export function swapCheckoutScript(dirs: CheckoutSwapDirs): string {
+  const { checkout, staging, retired } = dirs;
+  return (
+    `mv ${checkout} ${retired} && mv ${staging} ${checkout} || ` +
+    `{ if [ ! -d ${checkout} ] && [ -d ${retired}/.git ]; then mv ${retired} ${checkout}; fi; exit 1; }`
+  );
+}
+
+/** The checkout-update shell for the build user (runs inside the staging
+ *  tree, OUTSIDE the mirror lock — the fetch is `CHECKOUT_FETCH_COMMAND`,
+ *  under the stage lock): hard-reset to `sha`, then the `-x` clean.
  *  `-e node_modules` is a git exclude pattern (matches at any depth, so
  *  workspace packages keep theirs too) that survives `-x`; everything else
  *  gitignored — build output above all — is still removed so the build
  *  allocates fresh inodes (review 1b). Keep-deps additionally sweeps the
  *  build-written caches inside node_modules (NODE_MODULES_CACHE_DIRS). */
 export function checkoutUpdateCommand(sha: string, clean: CleanScope): string {
-  const base = `git fetch --quiet origin && git reset --hard --quiet ${sha}`;
+  const base = `git reset --hard --quiet ${sha}`;
   if (clean === "all") return `${base} && git clean -fdx`;
   const names = NODE_MODULES_CACHE_DIRS.map((d) => `-name ${d}`).join(" -o ");
   const sweep = `find . -path '*/node_modules/*' -type d \\( ${names} \\) -prune -exec rm -rf {} +`;
