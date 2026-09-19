@@ -2358,6 +2358,37 @@ describe("the round verdict — the checks step at the reviewed head (record 005
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
   });
 
+  it("a red check with another still pending is the round's finding at once — no wait on the pending one — and a green head with one pending waits as today (issue 1991)", () => {
+    // A failed check is the round's answer as soon as it is read, whatever
+    // else is still pending: the finding is written and the findings step
+    // entered — never a chunked wait for the pending check to settle.
+    const red = approved({ merge: "person", generated: true });
+    red.answer({
+      type: "checks",
+      checks: {
+        total: 3,
+        pending: ["security / trivy"],
+        failed: [{ name: "ci / bot", conclusion: "failure", url: "https://github.com/acme/api/runs/1" }],
+      },
+      at: T0 + 21 * MIN,
+    });
+    expect(red.rounds()).toContain("1 review checks_failed");
+    expect(red.state.findingsByRound[1]).toMatchObject([{ id: "check:ci / bot", severity: "blocking" }]);
+    expect(red.action).toMatchObject({ type: "spawn", round: { index: 1, kind: "findings" } });
+
+    // Only a head with no failed check waits on the pending ones.
+    const green = approved({ merge: "person", generated: true });
+    green.answer({
+      type: "checks",
+      checks: { total: 3, pending: ["security / trivy"], failed: [] },
+      at: T0 + 21 * MIN,
+    });
+    expect(green.action).toMatchObject({ type: "wait-checks", step: "U10/1/review/checks/wait/1", headSha: HEAD_A });
+    green.answer({ type: "wait-checks", outcome: "event" });
+    greenChecks(green, T0 + 25 * MIN, 3);
+    expect(green.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+  });
+
   it("an untouched-shard timeout re-runs once through the CI retry before it becomes a finding — a second failure is the finding, and a real failure beside a suspect never spends the re-run", () => {
     const d = approved({ merge: "person", generated: true });
     const flaky = { name: "test 2 of 4", conclusion: "timed_out", flakeSuspect: true };
