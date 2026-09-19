@@ -575,6 +575,58 @@ describe("RunPage — history mode", () => {
     expect(plain.find("#units").exists()).toBe(false);
   });
 
+  // Feature: docs/reference/specs/live-view.md item 33 — a spawned run's page
+  // names the way up: the pipeline (or parent) run and, for a ship unit's
+  // thread run, the unit it belongs to.
+  it("a spawned run's page links the way up: a ship child links its pipeline run and its unit with the thread named, a conductor's child its parent run alone, a run spawned by nobody draws no lineage; a live seed's parent links too", () => {
+    const shipChild = mountApp(RunPage, {
+      seed: historySeed([input] as LiveFrame[], {
+        status: "completed",
+        lineage: {
+          parent: { id: "ship-parent" },
+          unit: { key: "plan-p-1:U16", id: "U16", title: "The unit page", thread: "coding" },
+        },
+      }),
+    });
+    const strip = shipChild.find("#lineage");
+    expect(strip.exists()).toBe(true);
+    const parentLink = strip.find('[data-testid="lineage-parent"]');
+    expect(parentLink.text()).toContain("pipeline run");
+    expect(parentLink.attributes("href")).toBe("/runs/ship-parent");
+    const unitLink = strip.find('[data-testid="lineage-unit"]');
+    expect(unitLink.text()).toContain("unit U16 · The unit page");
+    expect(unitLink.attributes("href")).toBe("/runs/unit/plan-p-1%3AU16");
+    expect(strip.find(".threadkind").text()).toBe("coding thread");
+
+    const kid = mountApp(RunPage, {
+      seed: historySeed([input] as LiveFrame[], { status: "completed", lineage: { parent: { id: "cond" } } }),
+    });
+    const kidStrip = kid.find("#lineage");
+    expect(kidStrip.find('[data-testid="lineage-parent"]').text()).toContain("parent run");
+    expect(kidStrip.find('[data-testid="lineage-parent"]').attributes("href")).toBe("/runs/cond");
+    expect(kidStrip.find('[data-testid="lineage-unit"]').exists()).toBe(false);
+
+    const plain = mountApp(RunPage, { seed: historySeed([input] as LiveFrame[], { status: "completed" }) });
+    expect(plain.find("#lineage").exists()).toBe(false);
+
+    const { factory } = fakeEventSourceFactory();
+    const liveChild = mountApp(RunPage, {
+      seed: { ...liveSeed, lineage: { parent: { id: "host-1" } } },
+      eventSource: factory,
+    });
+    expect(liveChild.find('#lineage [data-testid="lineage-parent"]').attributes("href")).toBe("/runs/host-1");
+
+    // A LIVE parent's link keeps its capability token: a hosted ship parent
+    // stays live for the pipeline's whole life, so a tokenless link would 404.
+    const tokened = mountApp(RunPage, {
+      seed: historySeed([input] as LiveFrame[], {
+        status: "completed",
+        lineage: { parent: { id: "host-1", token: "tok-9" } },
+      }),
+    });
+    expect(tokened.find('#lineage [data-testid="lineage-parent"]').attributes("href")).toBe("/runs/host-1?t=tok-9");
+  });
+
   it("heads with the outcome chip + duration (item 22): ✓ for success, red failed/killed, amber stopped early, grey ended for a status-less record", () => {
     const ok = mountApp(RunPage, { seed: historySeed([], { status: "completed", durationMs: 147_000 }) });
     expect(ok.find(".conn .ok").attributes("aria-label")).toBe("succeeded");

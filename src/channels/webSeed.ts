@@ -120,6 +120,27 @@ export interface RunLiveSeed {
    *  11) — the live path reads no store — oldest started first, each live child
    *  with its own token. Present only when there are any. */
   children?: UnitRunRowSeed[];
+  /** The way up from a spawned run (live-view item 33), from the registry's
+   *  rows alone: the parent run — `parentRunId`, or the hosted parent whose
+   *  `instanceId` this run's `parentInstanceId` names. No unit here: the live
+   *  path reads no store. */
+  lineage?: RunLineageSeed;
+}
+
+/** How a pipeline's run navigates up (live-view item 33): the run that spawned
+ *  this one — a conductor's child names its parent run, a ship unit's thread
+ *  run the pipeline's hosted parent — and, for a ship unit's run, the unit the
+ *  thread belongs to, each opening its own page. Absent fields were unknown or
+ *  outside the viewer's predicate; the page draws only what is here. */
+export interface RunLineageSeed {
+  /** The parent run's id — and, when that run is LIVE in this process's
+   *  registry, its capability token, so the link opens the live page instead
+   *  of a 404 (a hosted ship parent is live for the pipeline's whole life;
+   *  record 0060). The history seed hands it only to a viewer whose predicate
+   *  admits the parent's row; the live seed mirrors how a parent's page hands
+   *  each live child its token. A finished parent never carries one. */
+  parent?: { id: string; token?: string };
+  unit?: { key: string; id: string; title?: string; thread?: "coding" | "review" };
 }
 
 /** The history run page: the stored events (with AE11 omission markers already
@@ -171,6 +192,10 @@ export interface RunHistorySeed {
    *  Present only when the record names a pull request, the viewer may read
    *  its ledger and a unit row names it. */
   findingsLedger?: { unit: string; rows: number };
+  /** The way up from a spawned run (live-view item 33): the record's
+   *  `parentRunId`, or its instance's parent record and unit through
+   *  `RunsService.unitLineage` under the viewer's predicate. */
+  lineage?: RunLineageSeed;
 }
 
 export interface RunNotFoundSeed {

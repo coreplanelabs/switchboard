@@ -7,7 +7,7 @@
   "now": 1788877800000,
   "inputs": {
     "scripts/screenshots.mts": "8d507868382af4fdd9ebbad5a93fbd47db331dd9d303aad0c6f1fc651f153b2f",
-    "scripts/web-preview.ts": "69e48fca7d35f91712fbea29f87842529319c1c3683bf77783dc26428ed8954b",
+    "scripts/web-preview.ts": "c7d906e72eba221d03374eb83055156138fe9314b6e78ac19858c25d40f46774",
     "src/channels/webShell.ts": "c3f74aeb04010dd88204b86e7a782f5a45f6731bf6f0f29cc8a4b5039df8f090",
     "src/docs/screenshotManifest.ts": "5b576b3c8519a2cf32bbfb260b0f55f763501a95507ce11598325be5fd43dec9",
     "web/src/App.vue": "4f602098f253ba82425491f6665f6ce8647e559703d3da8efe18ed6cc66c72f6",
@@ -25,7 +25,7 @@
     "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",
     "web/src/lib/eventSource.ts": "56cee4056941a052433f8b19d2ce2f8eaf43ba483080d0e836afa19794900f9c",
     "web/src/lib/format.ts": "c606fee13ee47cd493bc70bc5c8d70fe697bc1903afa8434261b48c29e682759",
-    "web/src/lib/indexRow.ts": "e26c640aee8998df23ba39735baa60db4b74906fe608cbbcf251da08f4b193dd",
+    "web/src/lib/indexRow.ts": "d078e5795862a9d5f6aa25cf4a984050cdcf9dfe43f06f4f0835697cf89231f1",
     "web/src/lib/markPulse.ts": "df29e8abee12f0827e8e1295f8fcb1184530240139790da7bffb5929fad8f647",
     "web/src/lib/navSections.ts": "596df9e16e734a4eee3f84fcd31effd1b8082383cfdaf7db7b3a69e25482adb1",
     "web/src/lib/seed.ts": "b7ac1e0780a5f69b2ef2d5d0c40e41119a015fd29fb63c4026d4425b02d53661",

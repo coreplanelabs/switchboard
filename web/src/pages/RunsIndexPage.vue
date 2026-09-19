@@ -12,9 +12,9 @@ import { EVENT_SOURCE_CLOSED, useEventSourceFactory, type EventSourceLike } from
 import {
   expiresAt,
   feedAction,
+  groupRuns,
   LEAVING_WINDOW_MS,
   mergeRow,
-  rowStalled,
   RUNS_PREF,
   type IndexRow,
 } from "../lib/indexRow";
@@ -63,30 +63,29 @@ for (const r of seed?.rows ?? []) rows.set(r.id, r);
 const now = useWallClock(seed?.now);
 const conn = ref<{ tone: "green" | "amber" | "red"; text: string }>({ tone: "amber", text: "connecting…" });
 
-// Stalled live rows first (live-view item 32) — a run with no tool call for
-// the whole pace window is the row to look at, so it never hides below newer
-// healthy ones — then newest-first by start stamp (immutable; the sort is
-// stable, so a repaint only reorders when a row's stall state changes).
-const ordered = computed(() =>
-  [...rows.values()].sort(
-    (a, b) => Number(rowStalled(b, now.value)) - Number(rowStalled(a, now.value)) || b.startedAt - a.startedAt,
-  ),
-);
-const liveCount = computed(() => ordered.value.filter((r) => !r.finished).length);
+// The index's order (live-view items 32 and 33): a pipeline's runs nest under
+// their parent's row (`groupRuns`); stalled groups first — a run with no tool
+// call for the whole pace window is the row to look at, so it never hides
+// below newer healthy ones — then newest-first by the head's start stamp
+// (immutable; the sort is stable, so a repaint only reorders when a row's
+// stall state changes).
+const groups = computed(() => groupRuns([...rows.values()], now.value));
+const liveCount = computed(() => [...rows.values()].filter((r) => !r.finished).length);
 
-// The expiry cut (item 20): one divider before the first row leaving within a
-// day — rows are newest-first, so everything under it leaves too.
+// The expiry cut (item 20): one divider before the first group whose HEAD
+// leaves within a day — heads are newest-first, so every head under it leaves
+// too; a nested row leaving on its own schedule wears its own `gone …` cell.
 const dividerIndex = computed(() => {
   if (retentionMs === undefined) return -1;
-  return ordered.value.findIndex((r) => {
-    const e = expiresAt(r, retentionMs);
+  return groups.value.findIndex((g) => {
+    const e = expiresAt(g.head, retentionMs);
     return e !== undefined && e - now.value <= LEAVING_WINDOW_MS;
   });
 });
 const beforeDivider = computed(() =>
-  dividerIndex.value === -1 ? ordered.value : ordered.value.slice(0, dividerIndex.value),
+  dividerIndex.value === -1 ? groups.value : groups.value.slice(0, dividerIndex.value),
 );
-const afterDivider = computed(() => (dividerIndex.value === -1 ? [] : ordered.value.slice(dividerIndex.value)));
+const afterDivider = computed(() => (dividerIndex.value === -1 ? [] : groups.value.slice(dividerIndex.value)));
 
 // The tab bar carries the live count too (item 21): "(n) <title>" and the
 // green/idle dot favicon, from the same count the toolbar shows.
@@ -222,7 +221,17 @@ onUnmounted(() => {
     </p>
 
     <ul id="runs" class="m-0 list-none border-t border-muted p-0">
-      <RunRow v-for="run in beforeDivider" :key="run.id" :run="run" :now="now" :retention-ms="retentionMs" />
+      <template v-for="g in beforeDivider" :key="g.head.id">
+        <RunRow :run="g.head" :now="now" :retention-ms="retentionMs" />
+        <RunRow
+          v-for="child in g.children"
+          :key="child.id"
+          :run="child"
+          :now="now"
+          :retention-ms="retentionMs"
+          :nested-under="g.head.id"
+        />
+      </template>
       <li
         v-if="afterDivider.length > 0"
         id="leaving"
@@ -233,8 +242,18 @@ onUnmounted(() => {
         <span class="whitespace-nowrap">Leaving within a day</span>
         <span class="normal-case tracking-normal text-dimmed max-sm:hidden">— each row says when it is removed</span>
       </li>
-      <RunRow v-for="run in afterDivider" :key="run.id" :run="run" :now="now" :retention-ms="retentionMs" />
-      <li v-if="ordered.length === 0" id="empty" class="empty px-2 py-2 text-muted">
+      <template v-for="g in afterDivider" :key="g.head.id">
+        <RunRow :run="g.head" :now="now" :retention-ms="retentionMs" />
+        <RunRow
+          v-for="child in g.children"
+          :key="child.id"
+          :run="child"
+          :now="now"
+          :retention-ms="retentionMs"
+          :nested-under="g.head.id"
+        />
+      </template>
+      <li v-if="groups.length === 0" id="empty" class="empty px-2 py-2 text-muted">
         {{
           showMine
             ? showAll

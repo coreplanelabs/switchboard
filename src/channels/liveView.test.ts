@@ -3046,5 +3046,92 @@ describe("the unit page and what a run is the parent of (item 28)", () => {
     expect(seed.children?.map((c) => [c.id, c.parentRunId, c.token])).toEqual([[kid.id, parent.id, kid.token]]);
     const kidPage = runSeedOf((await h.get(`/runs/${kid.id}?t=${kid.token}`)).body()) as RunLiveSeed;
     expect(kidPage.children).toBeUndefined();
+    // The child's own page names the way up (item 33), from the registry
+    // alone — with the live parent's token, so the up-link opens its page.
+    expect(kidPage.lineage).toEqual({ parent: { id: parent.id, token: parent.token } });
+  });
+
+  it("a spawned run's page names the way up (item 33): a ship child's history seed carries the pipeline's record and its unit, a conductor child's its parent alone, a live unit run its hosted parent; a run spawned by nobody carries none", async () => {
+    const h = await harness();
+    // A ship unit's thread run: the instance's parent record and the unit — the
+    // coding and the review threads each name theirs.
+    await h.store.put(
+      record("c0", {
+        threadKey: "slack:C1:u1",
+        startedAt: T0 + 1_000,
+        parentInstanceId: "plan-p-1",
+        idempotencyKey: "plan-p-1:U16/0/coding",
+      }),
+    );
+    expect((runSeedOf((await h.get("/runs/c0")).body()) as RunHistorySeed).lineage).toEqual({
+      parent: { id: "ship-parent" },
+      unit: { key: "plan-p-1:U16", id: "U16", title: "The unit page", thread: "coding" },
+    });
+    await h.store.put(
+      record("r1", {
+        threadKey: "slack:C1:u1r",
+        agent: "review",
+        startedAt: T0 + 12_000,
+        parentInstanceId: "plan-p-1",
+        idempotencyKey: "plan-p-1:U16/1/review",
+      }),
+    );
+    expect((runSeedOf((await h.get("/runs/r1")).body()) as RunHistorySeed).lineage?.unit?.thread).toBe("review");
+    // A conductor's child: the parent run alone — no instance, no unit.
+    await h.store.put(record("kid", { parentRunId: "conductor", threadKey: "slack:C1:k1" }));
+    await h.store.put(record("conductor", { agent: "conductor", threadKey: "slack:C1:cond" }));
+    expect((runSeedOf((await h.get("/runs/kid")).body()) as RunHistorySeed).lineage).toEqual({
+      parent: { id: "conductor" },
+    });
+    // A run spawned by nobody seeds no lineage key.
+    await h.store.put(record("solo", { threadKey: "slack:C1:solo" }));
+    expect((runSeedOf((await h.get("/runs/solo")).body()) as RunHistorySeed).lineage).toBeUndefined();
+    // A LIVE unit run: the hosted parent whose published instance its spawn
+    // named, from the registry alone (the live path reads no store).
+    const host = h.registry.create("ship · acme/api", {
+      agent: "ship",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:parent",
+      hosted: true,
+    });
+    h.registry.publish(host.id, { type: "ship_handoff", instanceId: "plan-p-1" });
+    const liveKid = h.registry.create("coding · u1", {
+      agent: "coding",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:u1",
+      parentInstanceId: "plan-p-1",
+      idempotencyKey: "plan-p-1:U16/1/coding",
+    });
+    const liveSeed = runSeedOf((await h.get(`/runs/${liveKid.id}?t=${liveKid.token}`)).body()) as RunLiveSeed;
+    expect(liveSeed.lineage).toEqual({ parent: { id: host.id, token: host.token } });
+    // A finished child's HISTORY page: the still-live hosted parent's token
+    // rides the lineage too — a tokenless link could only 404 while the
+    // pipeline lives — but only for a viewer whose predicate admits the parent.
+    await h.store.put(record("done-kid", { parentRunId: host.id, threadKey: "slack:C1:u1" }));
+    expect((runSeedOf((await h.get("/runs/done-kid")).body()) as RunHistorySeed).lineage).toEqual({
+      parent: { id: host.id, token: host.token },
+    });
+    const eve: LiveViewContext = {
+      actor: accessActor({ sub: "eve" }, (id) =>
+        grantsFor(id, {
+          grants: new Map([
+            ["access:eve", { actions: new Set(["runs:read"]), channels: new Set(["slack:C9"]), repos: new Set() }],
+          ]),
+          commandGroups: ["runs"],
+        }),
+      ),
+    };
+    // Eve may not see the parent's row: the id still names the way up (the
+    // page she reads already names it), but no capability rides out to her.
+    await h.store.put(record("eve-kid", { parentRunId: host.id, threadKey: "slack:C9:k", channelId: "slack:C9" }));
+    expect((runSeedOf((await h.get("/runs/eve-kid", eve)).body()) as RunHistorySeed).lineage).toEqual({
+      parent: { id: host.id },
+    });
+    // The hosted parent's own live page names no parent.
+    expect(
+      (runSeedOf((await h.get(`/runs/${host.id}?t=${host.token}`)).body()) as RunLiveSeed).lineage,
+    ).toBeUndefined();
   });
 });

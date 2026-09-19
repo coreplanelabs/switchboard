@@ -441,6 +441,27 @@ describe("RunRegistry.listActive", () => {
     expect(reg.getById(chat.id)).not.toHaveProperty("agent");
   });
 
+  it("carries the hosted instance id once a ship_handoff or a run_meta names one — the last event naming one wins (live-view item 33)", () => {
+    const { reg } = testRegistry();
+    const { id } = reg.create("ship · acme/x", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:1",
+      hosted: true,
+    });
+    expect(reg.listActive()[0].instanceId).toBeUndefined();
+    reg.publish(id, { type: "ship_handoff", instanceId: "wf-1" });
+    expect(reg.listActive()[0].instanceId).toBe("wf-1");
+    // The hosted second run_meta re-names the instance: the LAST one wins.
+    // (Record readers — `instanceIdOfEvents` — fold `ship_handoff` alone; both
+    // events name the same instance at the hand-off, so the ids agree.)
+    reg.publish(id, { type: "run_meta", agent: "ship", instanceId: "wf-2" });
+    expect(reg.listActive()[0].instanceId).toBe("wf-2");
+    // A run_meta without one (the first, ordinary one) changes nothing.
+    reg.publish(id, { type: "run_meta", agent: "ship" });
+    expect(reg.listActive()[0].instanceId).toBe("wf-2");
+  });
+
   it("includes a recently-finished run (until TTL) marked finished, then excludes it once evicted", () => {
     const { reg, tick } = testRegistry({ ttlMs: 60_000 });
     const { id } = reg.create("done-soon");

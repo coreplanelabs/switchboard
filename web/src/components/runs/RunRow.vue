@@ -46,6 +46,9 @@ const props = defineProps<{
   run: IndexRow;
   now: number;
   retentionMs?: number;
+  /** The head row this one nests under (live-view item 33): a pipeline's run
+   *  indents below its parent's row instead of interleaving with the rest. */
+  nestedUnder?: string;
 }>();
 
 const parts = computed(() => splitRunLabel(props.run.label || shortId(props.run.id)));
@@ -149,8 +152,13 @@ function onRowClick(ev: MouseEvent): void {
 <template>
   <li
     class="run group relative isolate rounded-md border-b border-muted hover:bg-(--ui-bg-muted) focus-within:bg-(--ui-bg-muted)"
-    :class="[run.finished ? 'finished' : 'live', leaving ? 'leaving' : '']"
+    :class="[
+      run.finished ? 'finished' : 'live',
+      leaving ? 'leaving' : '',
+      nestedUnder ? 'nested ml-4 border-l-2 border-accented sm:ml-6' : '',
+    ]"
     :data-run-id="run.id"
+    :data-parent-id="nestedUnder"
     :data-started-at="String(run.startedAt)"
     :data-persisted="run.persisted ? '1' : undefined"
     :data-stalled="stalled ? '1' : undefined"

@@ -1108,6 +1108,38 @@ describe("RunsService with the run ledger — one registry across generations (r
     expect(near.runs[0]).toMatchObject({ hosted: true, label: "ship · acme/api" });
   });
 
+  // live-view item 33: the index nests a pipeline's unit runs under its hosted
+  // parent, so both live views carry the instance the parent hosts — the
+  // registry row from its published events, the ledger row from its mirror.
+  it("carries the hosted instance id on both live views — a registry row from its ship_handoff, a ledger row from its mirrored events", async () => {
+    const { svc, reg, ledger } = ledgerSetup();
+    await ledger.claim({
+      runId: "host-2",
+      threadKey: "web:s:c9#host",
+      gen: "g-OTHER",
+      leaseMs: 30_000,
+      startedAt: NOW - 5_000,
+      meta: { channelId: "web:s", userId: "access:u1", threadKey: "web:s:c9", agent: "ship", hosted: true },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    await ledger.append("host-2", "g-OTHER", [{ type: "ship_handoff", instanceId: "wf-10", seq: 1, at: NOW }]);
+    const far = await svc.listRuns({ visibleTo: ALL, status: "active", threadKey: "web:s:c9" });
+    expect(far.runs[0]).toMatchObject({ id: "host-2", instanceId: "wf-10" });
+
+    const { id } = reg.create("ship · acme/api", {
+      agent: "ship",
+      channelId: "web:s",
+      userId: "access:u1",
+      threadKey: "web:s:c8",
+      hosted: true,
+    });
+    reg.publish(id, { type: "ship_handoff", instanceId: "wf-9", at: NOW });
+    const near = await svc.listRuns({ visibleTo: ALL, status: "active", threadKey: "web:s:c8" });
+    expect(near.runs[0]).toMatchObject({ id, instanceId: "wf-9" });
+  });
+
   it("one ledger listing serves every read within the TTL — a page view's run, events and friction reads cost one listLive; the events of several rows are read in parallel; a failed listing is not kept", async () => {
     let clock = NOW;
     const base = setup();
@@ -1669,6 +1701,68 @@ describe("RunsService.listUnitRuns — a unit's runs in round order", () => {
     expect(await svc.listInstanceUnits("plan-p-9", ALL)).toEqual([]);
     const { reg } = testRegistry();
     expect(await createRunsService({ registry: reg, store }).listInstanceUnits("plan-p-1", ALL)).toEqual([]);
+  });
+});
+
+describe("RunsService.unitLineage — a pipeline child's way up (live-view item 33)", () => {
+  const T0 = NOW - 100_000;
+  const instance: CoordinatorInstance = {
+    id: "plan-p-1",
+    kind: "ship",
+    userId: "slack:UALICE",
+    channelId: "slack:C1",
+    threadKey: "slack:C1:parent",
+    repo: "acme/api",
+    branch: "plan/p/u1",
+    createdAt: T0 - 1_000,
+    runId: "ship-run",
+  };
+  const u1: CoordinatorUnit = {
+    instanceId: "plan-p-1",
+    unit: "U16",
+    slug: "u1",
+    title: "The first unit",
+    branch: "plan/p/u1",
+    dependsOn: [],
+    threadKey: "slack:C1:u1",
+    reviewThread: { threadKey: "slack:C1:u1r" },
+    rounds: [],
+  };
+
+  async function world() {
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put(instance);
+    await instances.putUnits([u1]);
+    const { reg } = testRegistry({ now: () => NOW });
+    const store = new InMemoryRunStore({ now: () => NOW });
+    return { svc: createRunsService({ registry: reg, store, units: instances }), reg, store };
+  }
+
+  it("names the instance's parent record and the unit whose thread the key names — the coding and review threads apart; a thread no unit names keeps the record alone", async () => {
+    const { svc } = await world();
+    expect(await svc.unitLineage("plan-p-1", "slack:C1:u1", ALL)).toEqual({
+      runId: "ship-run",
+      unit: { key: "plan-p-1:U16", id: "U16", title: "The first unit", thread: "coding" },
+    });
+    expect(await svc.unitLineage("plan-p-1", "slack:C1:u1r", ALL)).toEqual({
+      runId: "ship-run",
+      unit: { key: "plan-p-1:U16", id: "U16", title: "The first unit", thread: "review" },
+    });
+    expect(await svc.unitLineage("plan-p-1", "slack:C1:elsewhere", ALL)).toEqual({ runId: "ship-run" });
+    expect(await svc.unitLineage("plan-p-1", undefined, ALL)).toEqual({ runId: "ship-run" });
+  });
+
+  it("an unknown instance, a reader outside the instance's channel, a `none` predicate and a process without the coordinator's records are one null", async () => {
+    const { svc, reg, store } = await world();
+    expect(await svc.unitLineage("plan-p-9", "slack:C1:u1", ALL)).toBeNull();
+    expect(
+      await svc.unitLineage("plan-p-1", "slack:C1:u1", {
+        kind: "channels-in",
+        channelIds: new Set(["slack:C2"]),
+      }),
+    ).toBeNull();
+    expect(await svc.unitLineage("plan-p-1", "slack:C1:u1", { kind: "none" })).toBeNull();
+    expect(await createRunsService({ registry: reg, store }).unitLineage("plan-p-1", "slack:C1:u1", ALL)).toBeNull();
   });
 });
 
