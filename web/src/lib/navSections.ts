@@ -10,7 +10,7 @@ import type { Capabilities } from "@core/core/capabilities.js";
 
 // `home` is the threads page at `/threads` (docs/reference/specs/web-chat.md): the first
 // section, always on — the dashboard's front door — and the brand mark's target.
-export type NavSection = "home" | "runs" | "plane" | "residents" | "costs" | "delivery" | "settings";
+export type NavSection = "home" | "runs" | "plane" | "residents" | "costs" | "metrics" | "delivery" | "settings";
 
 export interface NavItem {
   id: NavSection;
@@ -28,6 +28,8 @@ const SECTIONS: ReadonlyArray<NavItem> = [
   { id: "plane", label: "Plane", href: "/plane", icon: "i-lucide-radar", on: (c) => c.runLedger },
   { id: "residents", label: "Residents", href: "/residents", icon: "i-lucide-server", on: (c) => c.residents },
   { id: "costs", label: "Costs", href: "/costs", icon: "i-lucide-circle-dollar-sign", on: (c) => c.costs },
+  // The run trend over the metrics dataset (run-metrics.md item 10): the section exists where the reader does.
+  { id: "metrics", label: "Metrics", href: "/metrics", icon: "i-lucide-trending-up", on: (c) => c.metrics },
   // The delivery indicators read GitHub with the App's token: the page exists where a credential does.
   { id: "delivery", label: "Delivery", href: "/delivery", icon: "i-lucide-git-merge", on: (c) => c.github },
   // Settings is chrome, not a section: the cog in the header (SettingsLink.vue)

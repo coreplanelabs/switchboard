@@ -5,6 +5,7 @@ import type { CostReport } from "../core/costs.js";
 import type { CostsByReport } from "../core/costsBy.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import type { PlaneTable } from "../core/plane/table.js";
+import type { MetricsReport } from "../core/metrics.js";
 import type { CostsView } from "./costsView.js";
 import type { RunCost } from "../core/modelPricing.js";
 import type { DeliveryReport } from "../core/delivery.js";
@@ -398,6 +399,15 @@ export interface CostsSeed {
   canSnapshot: boolean;
 }
 
+/** The run-metrics page (docs/reference/specs/run-metrics.md item 10): the
+ *  trend report exactly as the service built it — the JSON twin answers the
+ *  same object. The range, the footer's provenance sentences and the dataset
+ *  name all ride the report; the page adds nothing the twin does not carry. */
+export interface MetricsSeed {
+  page: "metrics";
+  report: MetricsReport;
+}
+
 /** The plane's table (docs/reference/specs/orchestration-plane.md item 5;
  *  docs/decisions/0064): every live and recently ended run, every unit and
  *  every tracked pull request with its owner and health, as `plane show`
@@ -510,6 +520,7 @@ export type PageSeed =
   | ResidentsIndexSeed
   | ResidentDetailSeed
   | CostsSeed
+  | MetricsSeed
   | PlaneSeed
   | DeliverySeed
   | SettingsSeed

@@ -66,6 +66,23 @@ describe("installSeedRouting", () => {
     expect(leave).not.toHaveBeenCalled();
   });
 
+  // run-metrics.md item 10: /metrics is a page of the app — an in-app navigation
+  // to it resolves with its seed like every other section, never a full load.
+  it("an in-app navigation to /metrics resolves with its seed", async () => {
+    const r = router();
+    const { load, release } = manualLoad();
+    const leave = vi.fn();
+    const routing = installSeedRouting(r, { island: ISLAND, load, leave });
+    await r.push("/runs");
+    const nav = r.push("/metrics?days=7");
+    await vi.waitFor(() => expect(load).toHaveBeenCalledWith("/metrics?days=7"));
+    release("/metrics?days=7", seedFor("Run metrics"));
+    await nav;
+    expect(r.currentRoute.value.fullPath).toBe("/metrics?days=7");
+    expect(routing.seedAt("/metrics?days=7")?.title).toBe("Run metrics");
+    expect(leave).not.toHaveBeenCalled();
+  });
+
   it("a hash move stays on the page: nothing is loaded, the seed stays", async () => {
     const r = router();
     const load = vi.fn(async () => seedFor("run"));

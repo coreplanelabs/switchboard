@@ -21,6 +21,7 @@ import { makePageSender } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createWebChatHandler, resumeWebIO } from "./channels/web.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
+import { createMetricsViewHandler } from "./channels/metricsView.js";
 import { createPlaneViewHandler } from "./channels/planeView.js";
 import { createDeliveryViewHandler } from "./channels/deliveryView.js";
 import { createSettingsViewHandler } from "./channels/settingsView.js";
@@ -1005,6 +1006,16 @@ export async function runBot(): Promise<void> {
       : costsCfg
         ? `GET /costs (503 — ${costsCfg.cloudflareTokenEnv} not set)`
         : "GET /costs (503 — no costs config)";
+    // Run metrics page (run-metrics.md item 10): GET /metrics (+ .json twin) over
+    // the reader built above; gated below alongside /runs, /residents and /costs.
+    // The line names the dataset the page reads, or the reason the reader is off.
+    const metricsView = createMetricsViewHandler(metricsService, page);
+    const metricsState =
+      metricsService instanceof NullMetricsService
+        ? metricsCfg
+          ? `GET /metrics (503 — ${costsCfg ? `${costsCfg.cloudflareTokenEnv} not set` : "no costs config"})`
+          : "GET /metrics (503 — no metrics config)"
+        : `GET /metrics (${metricsCfg?.dataset})`;
     // Delivery page: GET /delivery (first repository) + /delivery/<owner>/<name>
     // (+ .json twin). Reads GitHub and the viewer's own runs live per request;
     // gated below alongside /runs, /residents and /costs.
@@ -1262,6 +1273,8 @@ export async function runBot(): Promise<void> {
         path === "/costs" ||
         path === "/costs.json" ||
         path.startsWith("/costs/") ||
+        path === "/metrics" ||
+        path === "/metrics.json" ||
         path === "/plane" ||
         path === "/plane.json" ||
         path === "/delivery" ||
@@ -1313,6 +1326,7 @@ export async function runBot(): Promise<void> {
             if (mcpConnectView(req, res, gate.identity)) return;
             if (residentsView(req, res, { actor })) return;
             if (costsView(req, res, { identity, actor })) return;
+            if (metricsView(req, res, { actor })) return;
             if (planeView(req, res, { actor })) return;
             if (deliveryView(req, res, { actor })) return;
             if (settingsView(req, res, { identity })) return;
@@ -1394,7 +1408,7 @@ export async function runBot(): Promise<void> {
       // (~seconds) for an external prober to land inside the window itself.
       httpListeningAt = systemClock();
       console.log(
-        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + model proxy (POST ${ANTHROPIC_MESSAGES_PATH}, POST ${OPENAI_CHAT_COMPLETIONS_PATH}, POST ${OPENAI_RESPONSES_PATH}) + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${deliveryState} + GET /settings + GET /threads (+ POST /threads/<id>/send) + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
+        `http server on :${process.env.PORT} (health + POST /ingress + POST /mcp + model proxy (POST ${ANTHROPIC_MESSAGES_PATH}, POST ${OPENAI_CHAT_COMPLETIONS_PATH}, POST ${OPENAI_RESPONSES_PATH}) + ${liveViewState} + ${schedulesState} + ${residentsState} + ${costsState} + ${metricsState} + ${deliveryState} + GET /settings + GET /threads (+ POST /threads/<id>/send) + ${commandHttpState} + /docs → ${PROJECT_DOCS_URL}; ` +
           `${tokenCount > 0 ? `${tokenCount} ingress token(s)` : "ingress + MCP DISABLED — no tokens configured"}; ${accessState})`,
       );
     });

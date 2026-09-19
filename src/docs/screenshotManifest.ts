@@ -83,6 +83,12 @@ export const SURFACES = [
     what: "the spend page's By user tab",
   },
   {
+    name: "metrics",
+    path: "/metrics",
+    page: "web/src/pages/MetricsPage.vue",
+    what: "the run metrics page: the trend tiles, the three day charts and the by-agent table",
+  },
+  {
     name: "costs-models",
     path: "/costs?view=models",
     page: "web/src/pages/CostsPage.vue",

@@ -13,6 +13,7 @@ import { postCommand } from "../lib/settingsApi";
 import { useWallClock } from "../lib/wallClock";
 import {
   accountLabelOf,
+  chartModelOf,
   DO_LABEL,
   linksOf,
   LLM_LABEL,
@@ -168,6 +169,7 @@ function hrefOf(group: string, days: number, v: CostsView): string {
   return `/costs/${group}?${q.join("&")}`;
 }
 const series = computed(() => (report.value ? seriesOf(report.value) : []));
+const chartModel = computed(() => (report.value ? chartModelOf(report.value, series.value) : null));
 const tiles = computed(() => (report.value ? tilesOf(report.value) : null));
 const split = computed(() => (report.value ? resourceSplitOf(report.value) : []));
 const links = computed(() => (report.value ? linksOf(report.value) : null));
@@ -404,7 +406,7 @@ function monthDay(date: string): string {
           </a>
         </div>
       </div>
-      <CostChart :report="report" :series="series" />
+      <CostChart v-if="chartModel" :model="chartModel" label="Daily cost, stacked by component" />
       <!-- The billing-method prose lives in the collapsed footer; only an
            actionable gap stays on the card. -->
       <p v-if="!report.llmAvailable" class="text-xs text-warn">
