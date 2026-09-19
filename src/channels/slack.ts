@@ -241,7 +241,7 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
                       text: stripMention(m.text, id),
                       ts: m.ts,
                       threadTs: m.threadTs,
-                      files: m.files as SlackFile[] | undefined,
+                      files: m.files,
                       botUserId: id,
                       caughtUp: true,
                       // Truthful label: the scan replays mentions AND plain
@@ -454,7 +454,11 @@ export async function actOnMissedMessage(
   if (!mention && opts.intake) {
     const intake = opts.intake;
     const threadKey = `${PLATFORM}:${m.channel}:${m.threadTs}`;
-    const mode = intake.intakeModeFor(threadKey, `${PLATFORM}:${m.user}`, `${PLATFORM}:${m.channel}`);
+    const mode = intake.intakeModeFor(
+      threadKey,
+      m.user !== undefined ? `${PLATFORM}:${m.user}` : undefined,
+      `${PLATFORM}:${m.channel}`,
+    );
     if (mode !== "always") {
       const key = `${m.channel}:${m.ts}`;
       let row: IntakeReceipt | undefined;
@@ -468,7 +472,7 @@ export async function actOnMissedMessage(
         silent = row.verdict === "silent";
         if (silent) log(`[catch-up] ${key}: silenced by its stored receipt (${row.source}): ${row.reason}`);
       } else {
-        const page = m.thread as SlackThreadMessage[];
+        const page = m.thread;
         const { turns, facts } = await intakeEvidence(
           intake,
           threadKey,

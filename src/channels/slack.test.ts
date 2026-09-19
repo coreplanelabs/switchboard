@@ -1747,6 +1747,20 @@ describe("the catch-up reads the receipt — onMissed's act (docs/reference/spec
     expect(dispatched).toEqual([{ trigger: "thread-follow-up", intakeDecided: true }]);
   });
 
+  it("a userless candidate resolves the intake mode with no user scope: intakeModeFor is handed undefined, never a made-up id", async () => {
+    const { gate } = catchGate({ ledger: receiptLedger() });
+    const modeFor = vi.fn(() => "classify" as const);
+    gate.intakeModeFor = modeFor;
+    await actOnMissedMessage(missedOf({ user: undefined }), {
+      botUserId: BOT,
+      intake: gate,
+      seen: seenSet(),
+      log: () => {},
+      dispatch: () => {},
+    });
+    expect(modeFor).toHaveBeenCalledWith("slack:CCU:100.000000", undefined, "slack:CCU");
+  });
+
   it("a fresh silent verdict silences the candidate: no dispatch, the pair marked seen", async () => {
     const { gate, decide } = catchGate({ ledger: receiptLedger(), decide: verdictOf("silent") });
     const seen = seenSet();

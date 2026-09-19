@@ -6,6 +6,8 @@ import { mapLimit } from "../core/mapLimit.js";
 import type { StatusUpdate } from "../core/types.js";
 import { recordCatchUpOutcome, type CatchUpOutcome } from "./slackCatchUpStatus.js";
 import { classifyMessage, threadIncludesBot } from "./slackTriggers.js";
+import type { SlackFile } from "./slack/attachments.js";
+import type { SlackThreadMessage } from "./slack/threadTurns.js";
 
 // Reconnect catch-up (docs/decisions/0012-reconnect-catch-up-as-recovery.md).
 // Socket Mode does not queue events while the app is disconnected, so every
@@ -75,30 +77,32 @@ const CATCH_UP_THREAD_CONCURRENCY = 4;
 const REPLIES_LIMIT = 200;
 const MAX_REPLIES_PAGES = 5;
 
-export interface SlackHistoryMessage {
+/** Extends the thread-turn message shape so a scanned page IS a
+ *  `SlackThreadMessage[]` — the act phase's intake verdict reads it with no
+ *  cast — plus the history-only fields the scan itself needs. */
+export interface SlackHistoryMessage extends SlackThreadMessage {
   type?: string;
   subtype?: string;
-  user?: string;
-  bot_id?: string;
-  text?: string;
   /** Optional in Slack's response types; a message without one is skipped. */
   ts?: string;
   thread_ts?: string;
   reply_count?: number;
   latest_reply?: string;
-  files?: unknown[];
   reactions?: Array<{ name?: string; users?: string[]; count?: number }>;
 }
 
 /** A message the bot never saw live; shaped for the adapter's `handle()`. */
 export interface MissedMessage {
   channel: string;
-  user: string;
+  /** The sender; absent when Slack's history row carried no user (an app's
+   *  post) — downstream scopes (the intake mode's user scope) then get none,
+   *  never a made-up id. */
+  user: string | undefined;
   /** Raw text, mention included — the caller strips it like the live path. */
   text: string;
   ts: string;
   threadTs: string;
-  files: unknown[] | undefined;
+  files: SlackFile[] | undefined;
   /** The message's whole thread as the scan paged it (parent first; empty for
    *  a top-level message without replies) — the tail the act phase's intake
    *  verdict judges over (slack-channel.md item 7), so it re-fetches nothing. */
@@ -193,7 +197,7 @@ export function findMissed(input: FindMissedInput): MissedMessage[] {
   const handled = (m: SlackHistoryMessage & { ts: string }, thread: SlackHistoryMessage[]) =>
     botRepliedAfter(thread, m, botUserId) || (isAckedByBot(m, botUserId) && nowMs - tsMs(m.ts) < ACK_GRACE_MS);
   const push = (m: SlackHistoryMessage & { ts: string }, threadTs: string, thread: SlackHistoryMessage[]) =>
-    out.push({ channel, user: m.user ?? "unknown", text: m.text ?? "", ts: m.ts, threadTs, files: m.files, thread });
+    out.push({ channel, user: m.user, text: m.text ?? "", ts: m.ts, threadTs, files: m.files, thread });
 
   for (const p of input.parents) {
     if (!p.ts || (p.thread_ts && p.thread_ts !== p.ts)) continue; // a broadcast reply; handled via its thread
