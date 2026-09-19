@@ -199,10 +199,32 @@ describe("HarnessContainerReplacedError — the condition's tag and the words it
     expect(byIdentity).toBeInstanceOf(HarnessInterruptedError);
   });
 
-  it("the invariant is refused at construction: a verdict tagged `word` with no words, or tagged `identity` with words no command returned, is a harness bug named as such", () => {
-    expect(() => new HarnessContainerReplacedError("replaced", undefined, "vm-a", "vm-b", record, "word")).toThrow(
-      "a replaced verdict by the executor's word carries no words",
+  it("a verdict by the standing transport failure on a resident-backed run carries the failing command's words and is tagged `transport` — the same interruption the run loop relaunches on", () => {
+    const byTransport = new HarnessContainerReplacedError(
+      "stopped answering",
+      "resident /exec: Peer closed WebSocket: 1006",
+      "vm-a",
+      undefined,
+      record,
+      "transport",
     );
+    expect(byTransport).toMatchObject({
+      said: "resident /exec: Peer closed WebSocket: 1006",
+      condition: "transport",
+      was: "vm-a",
+      now: undefined,
+      reason: "container replaced under the run",
+    });
+    expect(byTransport).toBeInstanceOf(HarnessInterruptedError);
+  });
+
+  it("the invariant is refused at construction: a verdict tagged `word` or `transport` with no words, or tagged `identity` with words no command returned, is a harness bug named as such", () => {
+    expect(() => new HarnessContainerReplacedError("replaced", undefined, "vm-a", "vm-b", record, "word")).toThrow(
+      "a replaced verdict by the executor's word or the transport carries no words",
+    );
+    expect(
+      () => new HarnessContainerReplacedError("replaced", undefined, "vm-a", undefined, record, "transport"),
+    ).toThrow("a replaced verdict by the executor's word or the transport carries no words");
     expect(() => new HarnessContainerReplacedError("replaced", "said", "vm-a", "vm-b", record, "identity")).toThrow(
       "a replaced verdict by the changed identity carries words no command returned",
     );

@@ -327,17 +327,18 @@ export class HarnessContainerReplacedError extends HarnessInterruptedError {
     readonly now: string | undefined,
     readonly record: HarnessRecord,
     /** What the verdict rests on, as a tag: the executor's word (the usual
-     *  case, and the default), or the container's changed identity on the one
-     *  more command a wordless death takes. */
+     *  case, and the default), the container's changed identity on the one
+     *  more command a wordless death takes, or the standing transport failure
+     *  itself on a resident-backed run, which resumes instead of ending. */
     readonly condition: ReplacedCondition = "word",
   ) {
     super(message, "container replaced under the run", "container_replaced");
     this.name = "HarnessContainerReplacedError";
-    if ((condition === "word") !== (said !== undefined))
+    if ((condition !== "identity") !== (said !== undefined))
       throw new Error(
-        condition === "word"
-          ? "a replaced verdict by the executor's word carries no words"
-          : "a replaced verdict by the changed identity carries words no command returned",
+        condition === "identity"
+          ? "a replaced verdict by the changed identity carries words no command returned"
+          : "a replaced verdict by the executor's word or the transport carries no words",
       );
   }
 }

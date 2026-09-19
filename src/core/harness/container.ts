@@ -662,8 +662,13 @@ export function saysContainerReplaced(err: unknown): boolean {
  *  record compares — never a sentence to parse: `word`, the executor's word on
  *  a failing container command (the condition as it always was, `said`
  *  present); `identity`, the container's changed identity on the one more
- *  command a wordless death takes (`said` absent, no command returned it). */
-export type ReplacedCondition = "word" | "identity";
+ *  command a wordless death takes (`said` absent, no command returned it);
+ *  `transport`, the standing transport failure itself on a resident-backed run
+ *  (`said` is the failing command's words) — a run registered on its resident
+ *  from attach to release resumes through a re-attach and a restore rather
+ *  than ending, so a container the resident restarted under it (a deploy's
+ *  image reconcile) costs the run a relaunch, never its life. */
+export type ReplacedCondition = "word" | "identity" | "transport";
 
 /** How a process found dead without the executor's word was judged replaced
  *  after all (`replacedVerdict`): `word` — the one more command failed with
@@ -851,6 +856,8 @@ export function identityChangedCondition(): string {
  *  (`said`, folded and capped), the changed identity's sentence for `identity`. */
 export function replacedBecause(condition: ReplacedCondition, said: string | undefined): string {
   if (condition === "identity") return identityChangedCondition();
+  if (condition === "transport")
+    return `a container command failed on its transport (${redactAndCap((said ?? "").replace(/\s+/g, " ").trim(), 240)}) and the one more command named no replacement; the run is registered on its resident, so it resumes through a re-attach instead of ending`;
   return `the executor said: ${redactAndCap((said ?? "").replace(/\s+/g, " ").trim(), 240)}`;
 }
 

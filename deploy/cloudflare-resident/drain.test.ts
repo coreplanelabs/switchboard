@@ -155,4 +155,41 @@ describe("the Worker's wiring (by scan)", () => {
     );
     expect(residents).toMatch(/draining: liveDrain\(await registryStub\(env\)\.getDrain\(\), systemClock\(\)\)/);
   });
+
+  it("the reconcile route is a drain-scope POST dispatched to its handler, which asks every resident's Durable Object to reconcile its container onto the current image — the deploy runner posts it after its Worker deploy landed and before its lift, so a stale container restarts inside the drain window, never under a run the reopened fleet admits", () => {
+    expect(source).toMatch(/"\/reconcile": \{ scope: "drain", method: "POST" \}/);
+    expect(source).toMatch(/case "\/reconcile":\s*\n\s*return await handleReconcile\(env\);/);
+    const handler = source.slice(
+      source.indexOf("async function handleReconcile("),
+      source.indexOf("async function handleResidents("),
+    );
+    expect(handler).toMatch(/registryStub\(env\)\.list\(\)/);
+    expect(handler).toMatch(/residentStub\(env, record\.resource\)\.reconcileForDeploy\(\)/);
+    // A failing resident degrades to its own error row, never its neighbors'.
+    expect(handler).toMatch(/Promise\.allSettled/);
+    expect(handler).toMatch(/result: "error" as const, error: errMsg\(s\.reason\)/);
+    // The DO method is the one image reconcile, under the deploy's own name.
+    expect(source).toMatch(
+      /async reconcileForDeploy\(\): Promise<\{ result: ImageReconcileResult \}> \{\s*\n\s*return \{ result: await this\.reconcileImage\("deploy"\) \};/,
+    );
+  });
+
+  it("the image reconcile defers while a run registration is live on the resident — a harness run's process lives in the container between the bot's operator calls, so the op counters alone would restart the container under it — and answers a word, so the deploy's pass can say what each resident decided", () => {
+    const reconcile = source.slice(
+      source.indexOf("private async reconcileImage("),
+      source.indexOf("async reconcileForDeploy("),
+    );
+    expect(reconcile).toMatch(/Promise<ImageReconcileResult>/);
+    expect(reconcile).toMatch(/const registered = await this\.registeredRunsBeyondOps\(\);/);
+    expect(reconcile).toMatch(/run registration\(s\) live — deferring restart until the resident is quiet/);
+    expect(reconcile).toMatch(/return "deferred";[\s\S]*return "restarted";/);
+    // The registration read sits between the op-counter check and the stop, so
+    // a busy container is still named by its operations first.
+    expect(reconcile.indexOf("this.inFlightCount()")).toBeLessThan(reconcile.indexOf("registeredRunsBeyondOps"));
+    expect(reconcile.indexOf("registeredRunsBeyondOps")).toBeLessThan(reconcile.indexOf("this.swapIncarnation()"));
+    // The call sites act only on a stop (`restarted`): a deferral never
+    // answers `image-stale` to an attach and never restarts a refresh cycle.
+    expect(source).toMatch(/\(await this\.reconcileImage\("refresh"\)\) === "restarted"/);
+    expect(source).toMatch(/\(await this\.reconcileImage\("attach"\)\) === "restarted"/);
+  });
 });
