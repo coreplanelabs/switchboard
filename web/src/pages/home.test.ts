@@ -612,6 +612,19 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     expect(wrapper.findAll(".turn.person")).toHaveLength(1);
   });
 
+  it("a hand-back's second line shows beside the composer, never inside the box (issue 1938)", async () => {
+    const note = "(the confirmation store could not be reached, so there is no button to press)";
+    fakeFetch({
+      status: 200,
+      body: { reply: `To run this: config set me --agent review\n${note}` },
+    });
+    const wrapper = mountApp(HomePage, { seed: seed() });
+    await send(wrapper, "switch me to the review agent");
+    expect((wrapper.find("textarea.box").element as HTMLTextAreaElement).value).toBe("config set me --agent review");
+    expect(wrapper.find("p.hint").text()).toBe(note);
+    expect(wrapper.findAll(".turn.assistant")).toHaveLength(0);
+  });
+
   it("an inline reply is painted once as an inline turn", async () => {
     fakeFetch({ status: 200, body: { reply: "🚫 You're not on the allowlist for the `coding` agent." } });
     const wrapper = mountApp(HomePage, { seed: seed() });
