@@ -33,7 +33,7 @@
     "$comment": "What each root npm script does and when to run it — the source of the Commands table in AGENTS.md (npm run agents:gen). A script without an entry fails agents:check, so a new script cannot ship undocumented.",
     "verify": {
       "does": "The whole gate: every root check, every workspace's verify, the site check — exactly what CI runs.",
-      "when": "Before requesting review. ~4 min."
+      "when": "Local sessions, before requesting review. ~4 min. A pipeline agent leaves it to CI."
     },
     "verify:root": {
       "does": "The bot package's gate: consistency checks, typecheck, lint, format, tests, dist.",
@@ -45,11 +45,11 @@
     },
     "test": {
       "does": "The whole vitest suite (bot, web, the plain-Node Worker tests) from one entry, after `deploy:gen`.",
-      "when": "Before pushing."
+      "when": "Local sessions, before pushing; a pipeline agent runs the changed set — the full suite is CI's."
     },
     "typecheck": {
       "does": "TypeScript over the bot and its scripts, no emit.",
-      "when": "After type-level changes; `verify:root` runs it."
+      "when": "After type-level changes; `verify:root` runs it. A pipeline agent scopes it to the touched tsconfig."
     },
     "lint": {
       "does": "ESLint over the whole tree.",

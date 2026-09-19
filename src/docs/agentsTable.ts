@@ -9,8 +9,10 @@
 // too big) are unit-tested without touching the tree.
 
 /** AGENTS.md is loaded into every agent's context on every task; past this it
- *  stops being an index and starts crowding out the work. */
-export const AGENTS_BUDGET_BYTES = 15 * 1024;
+ *  stops being an index and starts crowding out the work. (16 KiB since the
+ *  test/verify rows learned to tell a pipeline agent apart from a local
+ *  session — the changed-set forms next to the full ones.) */
+export const AGENTS_BUDGET_BYTES = 16 * 1024;
 
 /** The generated region's name in AGENTS.md, and the note its opening marker carries. */
 export const REGION = "commands";

@@ -55,7 +55,7 @@ describe("commandDocProblems", () => {
 describe("budgetProblem", () => {
   it("passes at the budget and names the overage past it", () => {
     expect(budgetProblem("x".repeat(AGENTS_BUDGET_BYTES))).toBeNull();
-    expect(budgetProblem("x".repeat(AGENTS_BUDGET_BYTES + 1))).toMatch(/over its 15360-byte budget/);
+    expect(budgetProblem("x".repeat(AGENTS_BUDGET_BYTES + 1))).toMatch(/over its 16384-byte budget/);
     expect(budgetProblem("é".repeat(10), 10)).toMatch(/20 bytes/);
   });
 });

@@ -475,11 +475,28 @@ describe("coding prompts: checks by cost — push before the expensive ones (age
     for (const sys of codingPrompts()) expect(sys).toContain(CHECKS_BY_COST);
   });
 
-  it("every coding prompt's workflow proves the change with the cheapest checks, pushes, and only then runs the expensive checks — the push step comes before the full-verification step", () => {
+  it("the rule says the two things the shared resident needs: the full suite and full typecheck are not the run's criteria — CI's gate, the only place they run — and every check is scoped to the changed set", () => {
+    expect(CHECKS_BY_COST).toContain("Passing the full test suite and the full typecheck is NOT part of your criteria");
+    expect(CHECKS_BY_COST).toContain("CI is that gate and the only place they run");
+    // the principle, stated plainly: CI runs everything on the push; the run validates its own
+    // change before pushing, at the changed-set scope
+    expect(CHECKS_BY_COST).toContain(
+      "Every CI pipeline runs the tests, the types, the formatting and the full verification on your push",
+    );
+    expect(CHECKS_BY_COST).toContain("at the changed-set scope");
+    expect(CHECKS_BY_COST).toMatch(/changed set/);
+    // judgement beyond the named checks, never a longer checklist
+    expect(CHECKS_BY_COST).toMatch(/judgement/);
+  });
+
+  it("every coding prompt's workflow proves the change with the cheapest checks, pushes, and hands the full suite to CI — the push step comes before the CI step, and no step tells the run to run the expensive checks itself", () => {
     for (const sys of codingPrompts()) {
       const cheap = sys.search(/Prove the change with the cheapest checks that can/);
       const push = sys.search(/push the branch[^\n]*— before any full suite, build or full verification/);
-      const expensive = sys.search(/run the project's expensive checks once and fix forward/);
+      const expensive = sys.search(
+        /CI runs the full suite, the typecheck and the full verification on that push — you never run them yourself/,
+      );
+      expect(sys).not.toMatch(/run the project's expensive checks/);
       expect(cheap).toBeGreaterThan(0);
       expect(push).toBeGreaterThan(cheap);
       expect(expensive).toBeGreaterThan(push);
