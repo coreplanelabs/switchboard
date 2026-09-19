@@ -1343,13 +1343,13 @@ async function routeReplay(f: Flags): Promise<boolean> {
   // The write, misses and directive rows (load-harness item 17): the write
   // set's misbinds, the filed misses bound as the person meant, and the six
   // directive words read as words — each with its bar a named constant.
-  const writeResults = await replayWrites(
+  const writeRows = await replayWrites(
     ROUTE_WRITE_FIXTURES,
     decideCommand,
     { concurrency, now: systemClock },
     menu.map((c) => c.def),
   );
-  const write = writeScore(writeResults);
+  const write = writeScore(writeRows);
   const missResults = await replayMisses(
     ROUTE_MISS_FIXTURES,
     decideCommand,
@@ -1411,7 +1411,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
     })),
     ...(
       [
-        ["route-write", writeResults],
+        ["route-write", writeRows],
         ["route-miss", missResults],
         ["route-planted", plantedResults],
       ] as const
@@ -1573,7 +1573,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
       imperative: { ...imperative, misses: imperative.misses.map(redacted), results: imperativeResults.map(redacted) },
       command: { ...command, misses: command.misses.map(redacted), results: commandResults.map(redacted) },
       ...(verifier === undefined ? {} : { verifier: { ...verifier, rejected: verifier.rejected.map(redacted) } }),
-      write: { ...write, misses: write.misses.map(redacted), results: writeResults.map(redacted) },
+      write: { ...write, misses: write.misses.map(redacted), results: writeRows.map(redacted) },
       miss: { ...miss, misses: miss.misses.map(redacted), results: missResults.map(redacted) },
       directive: { ...directive, misses: directive.misses.map(redacted), results: directiveResults.map(redacted) },
       ...(planted === undefined
