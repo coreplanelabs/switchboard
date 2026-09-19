@@ -2301,10 +2301,29 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(frames).toHaveLength(1);
     expect((frames[0] as { cardTs?: string }).cardTs).toBe("1.5");
     const text = JSON.stringify(frames[0]);
-    // The round header names the severity in force and its source (agent-ship
-    // item 6): this instance carries none, so the org default shows.
-    expect(text).toContain("U10 · Round 0 — coding · addressing minor+ (org) · started");
+    // A quiet instance's row keeps the round, the phase and the outcome alone
+    // (routing-and-config item 28): the severity note is verbose material.
+    expect(text).toContain("U10 · Round 0 — coding · started");
+    expect(text).not.toContain("addressing");
     expect(text).toContain("U11 · waiting");
+    // A verbose instance's round header names the severity in force and its
+    // source (agent-ship item 6): this instance carries none, so the org
+    // default shows.
+    await h.instances.replace({ ...PLAN_INSTANCE, verbosity: "verbose" });
+    await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    frames.length = 0;
+    expect(
+      (
+        await call(h, "round", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          index: 1,
+          agent: "review",
+          outcome: "started",
+        })
+      ).status,
+    ).toBe(200);
+    expect(JSON.stringify(frames[0])).toContain("U10 · Round 1 — review · addressing minor+ (org) · started");
     expect(
       (
         await call(h, "round", {

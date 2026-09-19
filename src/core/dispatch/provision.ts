@@ -216,12 +216,15 @@ export async function openAckCard(deps: ProvisionDeps, ctx: AckCardContext): Pro
   // One builder for every paint of this card (statusCardFrame.ts): the ack,
   // the spinner frames, the closes before the run starts, the done frame. The
   // card speaks at the request's verbosity (routing-and-config item 28): the
-  // label is `*review* on `m`` for everyone; a routed run's reason is a `debug`
-  // note on it (`· route reason: <reason>`, the collapse of a compound answer
-  // named after it), and a routed compound lists its parts under the label,
-  // `<preset>: <text>`, at every level — they say what was asked.
+  // label is `*review*` for everyone and the model joins at `verbose` — the
+  // agent is what the person waits on, the model is instrumentation; a routed
+  // run's reason is a `debug` note on it (`· route reason: <reason>`, the
+  // collapse of a compound answer named after it), and a routed compound lists
+  // its parts under the label, `<preset>: <text>`, at every level — they say
+  // what was asked.
   const shell = createCardShell({
-    label: `*${agent.name}* on \`${resolved.modelRef}\``,
+    label: `*${agent.name}*`,
+    model: resolved.modelRef,
     startedAt,
     now: clock,
     verbosity: resolved.verbosity,

@@ -353,7 +353,8 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
     });
     clearInterval(q.heartbeat);
     expect(quietly.verbosity).toBe("quiet");
-    expect(quiet.statuses[0].title).toBe(`👀 *${agent.name}* on \`${quietly.modelRef}\` · preparing workspace…`);
+    // A quiet card names the agent alone — the model is verbose material (item 28).
+    expect(quiet.statuses[0].title).toBe(`👀 *${agent.name}* · preparing workspace…`);
     expect(quiet.statuses[0].detail).toBe(
       "review: review https://github.com/acme/api/pull/7\nresearch: why did the staging resident go down last night",
     );
@@ -380,8 +381,10 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
     const ack = await openAckCard(d, { io, agent, resolved, startedAt: NOW, clock: () => NOW, root, trace });
     clearInterval(ack.heartbeat);
     expect(statuses).toHaveLength(1);
-    expect(statuses[0].title).toContain("*general* on `anthropic/general-model`");
-    expect(ack.shell.label).toBe("*general* on `anthropic/general-model`");
+    // The default request is quiet: the agent alone, the model at verbose (item 28).
+    expect(statuses[0].title).toContain("*general*");
+    expect(statuses[0].title).not.toContain("anthropic/general-model");
+    expect(ack.shell.label).toBe("*general*");
     ack.card.update(ack.shell.live());
     expect(statuses).toHaveLength(2);
     expect(trace.spansSoFar().map((s) => s.name)).toContain("dispatch.ack_card");

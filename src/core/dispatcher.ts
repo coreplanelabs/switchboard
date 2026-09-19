@@ -983,7 +983,7 @@ export async function dispatch(
     // (dispatch/provision.ts). Before the ship fork: a ship pipeline's wall
     // clock is its clipped budget too, and its card says so.
     const clip = budgetClipLabel(agent, profile, directives.budget, { coordinator: opts.coordinator !== undefined });
-    if (clip) shell.note("verbose", clip);
+    if (clip) shell.note("debug", clip);
 
     // agent:ship fork (docs/reference/specs/agent-ship.md): after agent resolution and the
     // repo gates above, BEFORE the top-level attach — ship attaches nothing
@@ -1523,8 +1523,8 @@ export async function dispatch(
     // attach; the head settle (item 12) advances it after the model turn.
     const reviewHead = prompt.reviewHead;
 
-    // The workspace the run is on — `verbose` material (routing-and-config item 28).
-    if (note) shell.note("verbose", oneLine(note));
+    // The workspace the run is on — `debug` material (routing-and-config item 28).
+    if (note) shell.note("debug", oneLine(note));
     // A run that went to a cold sandbox says why on its stream too (resident-
     // repos item 24): the card is not the only witness — the run page would
     // otherwise show resident steps grafted under an attach that ended on the

@@ -124,7 +124,8 @@ describe("the CLI process running `ask` against a provider", () => {
     expect(r.code, r.stderr).toBe(0);
     expect(r.stdout.trim()).toBe("four");
     expect(r.stdout).not.toMatch(PROCESS_LOG_LINE);
-    expect(r.stderr).toMatch(/✅ \*general\* on `fake\/m`/);
+    // At the default (quiet) verbosity the card label is the bare agent name; the model ref joins at verbose.
+    expect(r.stderr).toMatch(/✅ \*general\* ·/);
     expect(r.stderr).toMatch(/^\[run\] cli:\d+ user=cli:local agent=general model=fake\/m$/m);
     // The CLI is a channel like any other: with no `routing` block the router
     // ran here too, on `defaults.models.general` — and the fake's prose
@@ -140,6 +141,6 @@ describe("the CLI process running `ask` against a provider", () => {
     expect(r.stdout).toContain("⚠️ the model call failed: 401");
     expect(r.stdout).toContain("invalid api key");
     expect(r.stdout).not.toMatch(PROCESS_LOG_LINE);
-    expect(r.stderr).toMatch(/❌ \*general\* on `fake\/m`/);
+    expect(r.stderr).toMatch(/❌ \*general\* ·/);
   }, 60_000);
 });

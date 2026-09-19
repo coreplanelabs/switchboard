@@ -44,7 +44,7 @@
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
 import { DEFAULT_GRANT, HOSTED_DEADLINE_MARGIN_MINUTES, IDLE_DAYS_DEFAULT, minutesToMs } from "../core/budgets.js";
-import { DEFAULT_VERBOSITY } from "../core/verbosity.js";
+import { DEFAULT_VERBOSITY, shows } from "../core/verbosity.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { AGENTS } from "../agents/registry.js";
 import { authorize } from "../core/authz/authorize.js";
@@ -1430,11 +1430,13 @@ const ROUND_OUTCOMES: readonly ShipRoundOutcome[] = [
 /** One line per unit on the parent's card: the round in flight or how the unit
  *  ended — the task wording (no unit id) for a generated plan's one unit. The
  *  round header names the severity in force and its source (agent-ship item
- *  6), the instance's value beside `merge`. */
+ *  6) — the instance's value beside `merge` — at `verbose` and above; a quiet
+ *  card's rows keep the round, the phase and the outcome alone (routing-and-
+ *  config item 28). */
 function unitLines(
   units: readonly CoordinatorUnit[],
   generated: boolean,
-  severity: { level: AddressSeverity; source: AddressSeveritySource },
+  severity: { level: AddressSeverity; source: AddressSeveritySource } | undefined,
 ): string[] {
   return units.map((u) => {
     const last = u.rounds.at(-1);
@@ -1473,10 +1475,16 @@ async function drawCard(
   if (!io) return;
   const clock = deps.clock ?? systemClock;
   const shell = createCardShell({ label: instance.label ?? "*ship*", startedAt: instance.createdAt, now: clock });
-  const detail = unitLines(units, isGenerated(instance), {
-    level: instance.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY,
-    source: instance.addressSeveritySource ?? "org",
-  });
+  const detail = unitLines(
+    units,
+    isGenerated(instance),
+    shows(instance.verbosity ?? DEFAULT_VERBOSITY, "verbose")
+      ? {
+          level: instance.addressSeverity ?? DEFAULT_ADDRESS_SEVERITY,
+          source: instance.addressSeveritySource ?? "org",
+        }
+      : undefined,
+  );
   if (!close) {
     await io.status(shell.live({ detail }));
     return;

@@ -114,6 +114,27 @@ describe("createCardShell — every paint comes from one builder", () => {
     expect(bare.label).toBe(LABEL);
   });
 
+  it("the model joins the label at verbose and above; a quiet card names the agent alone (routing-and-config item 28)", () => {
+    const at = (verbosity?: Verbosity) =>
+      createCardShell({
+        label: "*review*",
+        model: "anthropic/claude-fable-5",
+        startedAt: 1_000_000,
+        now: () => 1_000_000,
+        ...(verbosity !== undefined ? { verbosity } : {}),
+      });
+    expect(at().label).toBe("*review*"); // unlevelled: quiet
+    expect(at("quiet").label).toBe("*review*");
+    expect(at("verbose").label).toBe("*review* on `anthropic/claude-fable-5`");
+    expect(at("debug").label).toBe("*review* on `anthropic/claude-fable-5`");
+    expect(at("quiet").ack().title).toBe("👀 *review* · preparing workspace…");
+    expect(at("verbose").live().title).toBe("◐ *review* on `anthropic/claude-fable-5` · 0s");
+    // A shell built without a model (the ship parent's stored label) is the label verbatim at every level.
+    expect(
+      createCardShell({ label: LABEL, startedAt: 1_000_000, now: () => 1_000_000, verbosity: "quiet" }).label,
+    ).toBe(LABEL);
+  });
+
   it("no close carries an override footer: a routed card's close is its own lines and nothing after them", () => {
     const shell = shellAt(5_000, "debug");
     shell.note("debug", "route reason: a review by link");
@@ -194,7 +215,7 @@ describe("createCardShell — every paint comes from one builder", () => {
     expect(shell.live().title).toBe(`◑ ${LABEL} · 12s`);
   });
 
-  it("a close's shape and queued lines lead its detail, in that order, on runless closes and done closes alike — at verbose and above; a quiet close drops both (item 28)", () => {
+  it("a close's shape and queued lines lead its detail, in that order, on runless closes and done closes alike — at debug alone; a quiet or verbose close drops both (item 28)", () => {
     const quiet = shellAt(184_000);
     expect(
       quiet.close({
@@ -207,7 +228,11 @@ describe("createCardShell — every paint comes from one builder", () => {
     expect(
       quiet.close({ kind: "done", icon: "✅", detail: "✓ done", shape: "2m 30s thinking · 34s in tools" }).detail,
     ).toBe("✓ done");
-    const shell = shellAt(184_000, "verbose");
+    const verbose = shellAt(184_000, "verbose");
+    expect(
+      verbose.close({ kind: "done", icon: "✅", detail: "✓ done", shape: "2m 30s thinking · 34s in tools" }).detail,
+    ).toBe("✓ done");
+    const shell = shellAt(184_000, "debug");
     expect(
       shell.close({
         kind: "setup_failed",

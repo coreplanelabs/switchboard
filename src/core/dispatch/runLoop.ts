@@ -362,12 +362,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // The shutdown notice rides on the LIVE frame only: the closed card is
   // built from `shell.close` and never mentions the restart.
   // The quiet-wait suffix and the running command's code block are for
-  // someone watching the machinery (routing-and-config item 28): at quiet the
-  // card keeps the checklist and a caption naming the tool, nothing more.
-  const chatty = shows(resolved.verbosity, "verbose");
+  // someone debugging the machinery (routing-and-config item 28): below
+  // `debug` the card keeps the checklist and a caption naming the tool,
+  // nothing more.
+  const chatty = shows(resolved.verbosity, "debug");
+  // The update_status round trip is bookkeeping: the checklist itself just
+  // repainted the card, so below `verbose` its call/result pair never rides
+  // as activity — the card shows the fresh checklist alone instead of a meta
+  // line restating that it was updated (routing-and-config item 28).
+  const showBookkeeping = shows(resolved.verbosity, "verbose");
   const currentFrame = () =>
     shell.live({
-      // the pace mark rides every level (the stall signal is a fact, not chatter); the quiet suffix is verbose-and-above's
+      // the pace mark rides every level (the stall signal is a fact, not chatter); the quiet suffix is debug's
       suffix: chatty ? `${quietSuffix(clock() - lastActivityAt, inFlightTool)}${cardPace()}` : cardPace(),
       notice: shutdownNotice(),
       detail: [checklist],
@@ -433,8 +439,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     lastActivityAt = clock();
     paceEventAts.push(lastActivityAt);
     if (e.type === "tool_call") lastToolCallAt = lastActivityAt;
-    lastActivity = cardActivity(e);
-    console.log(`[tool] ${msg.threadKey} ${activityText(lastActivity)}`);
+    const bookkeeping = (e.type === "tool_call" || e.type === "tool_result") && e.tool === "update_status";
+    // The operator log keeps every event; only the card's activity is gated.
+    console.log(`[tool] ${msg.threadKey} ${activityText(cardActivity(e))}`);
+    lastActivity = bookkeeping && !showBookkeeping ? undefined : cardActivity(e);
     card.update(currentFrame());
   };
   // A configured MCP server that did not answer discovery is a fact of the
@@ -1227,13 +1235,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         },
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
         fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
-        // What the run did about a moved head is `verbose` material
-        // (routing-and-config item 28): the re-review's note and the card's
-        // word. The verdict that follows is the reply everyone gets.
+        // What the run did about a moved head: the re-review's note is an
+        // acknowledgement (`verbose`), the card's word is `debug` material
+        // (routing-and-config item 28). The verdict that follows is the reply
+        // everyone gets.
         notify: {
           reply: (text) => replyAck(io, resolved.verbosity, text),
           headMoved: (suffix) => {
-            shell.note("verbose", suffix);
+            shell.note("debug", suffix);
             card.update(currentFrame());
           },
         },
