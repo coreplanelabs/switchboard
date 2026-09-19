@@ -1337,7 +1337,7 @@ describe("the verifier on the command replay — one more call on every write-cl
   const allowed = presets.map((p) => p.name);
   const byText = new Map(ROUTE_COMMAND_EXAMPLES.map((e) => [e.text, e]));
   const textOf = (prompt: { user: string }) => /<request>\n([\s\S]*)\n<\/request>/.exec(prompt.user)![1]!;
-  const lineOf = (prompt: { user: string }) => /^The line the router bound it to: (.*)$/m.exec(prompt.user)![1]!;
+  const lineOf = (prompt: { user: string }) => /^The line bound to them: (.*)$/m.exec(prompt.user)![1]!;
   const pick = (...ids: string[]) => ids.map((id) => ROUTE_COMMAND_EXAMPLES.find((e) => e.id === id)!);
   const fixture = (id: string) => ROUTE_COMMAND_FIXTURES.find((f) => f.id === id)!;
   const now = () => 0;
@@ -1550,7 +1550,7 @@ describe("the verifier on the command replay — one more call on every write-cl
     expect(requests[0]!.toolChoice).toEqual({ type: "tool", name: VERIFY_TOOL_NAME });
     expect(requests[0]!.system).toMatch(/^You check one binding\./);
     expect(requests[0]!.messages[0]!.content).toEqual([
-      { type: "text", text: `<request>\n${set.text}\n</request>\n\nThe line the router bound it to: ${lineOfSet()}` },
+      { type: "text", text: `<request>\n${set.text}\n</request>\n\nThe line bound to them: ${lineOfSet()}` },
     ]);
     expect(counters).toMatchObject({ calls: 1, inputTokens: 10 });
     function lineOfSet() {

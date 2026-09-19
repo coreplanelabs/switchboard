@@ -29,7 +29,7 @@ import type { AssembledTranscript } from "../runLedger/transcript.js";
 import { sessionKey } from "../runLedger/sessionLog.js";
 import { chatActorOf } from "../authz/actor.js";
 import { effectiveConfirm } from "../../config/profile.js";
-import { boundBlastRadius, type CommandDef } from "../commandRegistry.js";
+import { boundBlastRadius, type BlastRadius, type CommandDef } from "../commandRegistry.js";
 import { parseChatCommand, type ChatCommands } from "../commandChat.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RunEnding } from "../runEnding.js";
@@ -37,22 +37,27 @@ import type { RequestTrace } from "../requestTrace.js";
 import { HAND_BACK_PREFIX } from "./handBack.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { recordOperatorDecision, runChatCommand, type OperatorEventFields } from "./commandRun.js";
-import { renderOperatorReceipt } from "./reply.js";
+import { renderOperatorReceipt, renderVerifierHandBack, renderVerifierLine } from "./reply.js";
 import { OPERATOR_TAIL_BYTES, operatorTail, type OperatorTailTurn } from "./seed.js";
 import {
+  parseVerifierAnswer,
   providerRouteModel,
   quoteRequest,
   renderPresetTable,
   routableCommands,
   routablePresets,
   routedRunsAtOnce,
+  ROUTE_MIN_OUTPUT_TOKENS,
   ROUTE_REASON_CAP,
   ROUTE_RECEIPT_CAP,
+  ROUTE_TIMEOUT_MS,
+  verifierPrompt,
   type RoutableCommand,
   type RoutablePreset,
   type RouteModel,
   type RoutePrompt,
   type RouteToolCall,
+  type VerifierAnswer,
 } from "./route.js";
 
 export type { OperatorEventFields } from "./commandRun.js";
@@ -446,12 +451,16 @@ export async function operatorThreadTail(
   for (const agent of agents) {
     try {
       const { transcript } = await ledger.readSessionTail(sessionKey(threadKey, agent), OPERATOR_TAIL_BYTES);
-      for (const message of transcript.messages) {
+      for (const [i, message] of transcript.messages.entries()) {
         const text = message.content
           .map((p) => ("text" in p && typeof p.text === "string" ? p.text : ""))
           .join(" ")
           .trim();
-        if (text.length > 0) turns.push({ text: `${message.role}: ${text}` });
+        // The row's author rides beside its text (record 0057): the verifier
+        // selects the author's own turns by it.
+        const actor = transcript.actors?.[i];
+        if (text.length > 0)
+          turns.push({ text: `${message.role}: ${text}`, ...(actor !== undefined ? { actor } : {}) });
       }
     } catch {
       // A log that cannot be read costs the tail its turns, never the dispatch.
@@ -522,6 +531,74 @@ export async function operatorStage(
   return operatorEventOf(mode, answer, ctx.intake);
 }
 
+// ————— The verifier: the hold on a bind that starts, steers or writes. —————
+
+/** The author's own turns for the verifier (the one-door plan's verifier hold): the
+ *  tail's rows whose actor is the author, oldest first, then the request
+ *  itself — never another member's words and never a machine turn, whose rows
+ *  carry no actor, so a brief or a folded report can plant nothing here. */
+export function operatorAuthorTurns(tail: readonly OperatorTailTurn[], author: string, requestText: string): string[] {
+  return [...tail.filter((t) => t.actor === author).map((t) => t.text), requestText];
+}
+
+/** Whether the verifier holds a bind (routing-and-config item 25): any
+ *  bind that starts a run (an `agent:<preset>` line, whatever the preset's
+ *  identity), any bind of `steer`, and any bind of class write or above. A
+ *  registry read — `runs list` carries no free text to plant through — and an
+ *  exec bind run without it, and an unparseable line that starts no run is
+ *  handed back and runs nothing, so there is nothing to hold. */
+export function verifierHolds(line: string, bound?: { def: CommandDef<unknown>; radius: BlastRadius }): boolean {
+  if (/^agent:\S/.test(line.trim())) return true;
+  if (!bound) return false;
+  return bound.def.id === "steer.run" || bound.radius === "write" || bound.radius === "destructive";
+}
+
+/**
+ * One verifier call (the one-door plan): the author's own turns and the bound line through
+ * the route stage's seam, the forced `verify` tool read by
+ * `parseVerifierAnswer`. Fail closed: a model that throws or times out is a
+ * disagreement naming the failure — never a silent agreement, so a broken
+ * verifier hands back instead of waving a planted bind through.
+ */
+export async function verifyOperatorBind(
+  turns: readonly string[],
+  line: string,
+  model: RouteModel,
+  opts: { timeoutMs?: number } = {},
+): Promise<VerifierAnswer> {
+  try {
+    const answer = await model(verifierPrompt({ turns, line }), {
+      maxTokens: ROUTE_MIN_OUTPUT_TOKENS,
+      signal: AbortSignal.timeout(opts.timeoutMs ?? ROUTE_TIMEOUT_MS),
+    });
+    return parseVerifierAnswer(answer);
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    return { agrees: false, reason: oneLine(redactAndCap(`verifier failed: ${why}`, ROUTE_REASON_CAP)) };
+  }
+}
+
+/** The verifier's model: the FAST tier — `routing.model`, else the provider
+ *  behind `defaults.models.general` (the plan's tier rule: the verifier is a
+ *  cheap second look, never the operator's strong turn) — or a scripted one in
+ *  tests (`verifierModel`). Undefined when no provider can serve it. */
+function verifierModelOf(deps: {
+  config: ConfigStore;
+  completions?: ProviderTable;
+  verifierModel?: RouteModel;
+}): RouteModel | undefined {
+  if (deps.verifierModel) return deps.verifierModel;
+  const cfg = deps.config.config;
+  const modelRef = cfg.routing?.model ?? cfg.defaults.models["general"];
+  if (!modelRef || !deps.completions) return undefined;
+  try {
+    const ref = parseModelRef(modelRef);
+    return providerRouteModel(deps.completions.get(ref.provider), ref.model, {});
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Under `on` the decision is what runs. A question renders with record 0054's
  * marker (the next turn's "yes" binds the proposal); a refusal renders its
@@ -532,20 +609,42 @@ export async function operatorStage(
  * own (`routedRunsAtOnce` under the path's confirm class), so a bind at or
  * after the confirm class is handed back as the line to paste, never run —
  * the operator outranks no guard. A bind that is not a registered command
- * line is handed back too. Answers true: the dispatch is answered here.
+ * line is handed back too. Before any of that, THE VERIFIER holds the binds a
+ * planted instruction could fill (routing-and-config item 25): for a
+ * bind that starts a run (`agent:<preset>`, any identity), a bind of `steer`
+ * and a bind of class write or above, one more model call on the fast tier
+ * reads the author's own turns (`operatorAuthorTurns` — the tail's rows
+ * selected by `actor`, then the request) and the bound line, and answers
+ * whether the line does what those turns asked; a disagreement hands the
+ * line back to type (`renderVerifierHandBack` — never record 0054's marker,
+ * whose "yes" would answer a question this decision never recorded) and the
+ * bind runs nothing, an agreement adds one receipt line
+ * (`renderVerifierLine`) that rides every reply of its bind — the hand-back
+ * of an unparseable run-starting line included, so the spent call stays
+ * legible — and the ladder proceeds unchanged: the verifier
+ * weakens no guard and outranks none. A registry read runs without the call.
+ * Answers true: the dispatch is answered here.
  * Every decision leaves its `operator` event on a record (run-history item
  * 60): a bind that runs carries it on its command run; a question, a refusal
  * and a decision whose every bind was handed back write a door record of
  * their own (`recordOperatorDecision`), the person's reply unchanged.
  */
 export async function executeOperatorDecision(
-  deps: FastPathDeps & { commands?: ChatCommands },
+  deps: FastPathDeps & {
+    commands?: ChatCommands;
+    completions?: ProviderTable;
+    verifierModel?: RouteModel;
+    runLedger?: OperatorStageDeps["runLedger"];
+  },
   ctx: {
     msg: IncomingMessage;
     io: ChannelIO;
     ending: RunEnding;
     trace: RequestTrace;
     event: OperatorEventFields;
+    /** The thread's runs, newest first (the dispatcher's one read): the
+     *  agents whose session tails hold the author's turns. */
+    thread?: readonly { agent?: string }[];
   },
 ): Promise<boolean> {
   const { event, io, msg } = ctx;
@@ -561,17 +660,47 @@ export async function executeOperatorDecision(
   }
   const commands = deps.commands;
   const confirm = effectiveConfirm(deps.config.boundaryLayers(msg.channelId, msg.userId));
+  // The author's turns, read once per decision and only when a bind is held:
+  // the verifier compares the line with what THIS author asked, never with the
+  // tail's other rows, where a brief or another member's words could plant.
+  let authorTurns: Promise<string[]> | undefined;
+  const authorTurnsOnce = () =>
+    (authorTurns ??= operatorThreadTail(deps.runLedger, ctx.thread, msg.threadKey).then((tail) =>
+      operatorAuthorTurns(tail, msg.userId, msg.text),
+    ));
   // The event rides the FIRST bind that runs — not blindly the first bind, or
   // a decision whose first bind is handed back would lose its record.
   let carried = false;
   for (const bind of event.binds ?? []) {
     const parsed = commands ? parseChatCommand(bind.line, commands) : null;
     const def = parsed?.kind === "invoke" ? commands?.list().find((c) => c.id === parsed.id) : undefined;
-    if (!parsed || parsed.kind !== "invoke" || !def) {
-      await io.reply(`${HAND_BACK_PREFIX}\n\`${bind.line}\``);
+    const bound =
+      parsed?.kind === "invoke" && def
+        ? { def: def as CommandDef<unknown>, radius: boundBlastRadius(def as CommandDef<unknown>, parsed.input) }
+        : undefined;
+    // The verifier's hold (the one-door plan): a disagreement — a failure and a timeout
+    // count as one, and so does a process with no model to verify on — hands
+    // the line back to type (never a question), and the bind runs nothing.
+    let verified: string | undefined;
+    if (verifierHolds(bind.line, bound)) {
+      const model = verifierModelOf(deps);
+      const verdict = model
+        ? await verifyOperatorBind(await authorTurnsOnce(), bind.line, model)
+        : { agrees: false, reason: "no model to verify on" };
+      if (!verdict.agrees) {
+        await io.reply(renderVerifierHandBack(bind.line, verdict.reason));
+        continue;
+      }
+      verified = renderVerifierLine(verdict.reason);
+    }
+    if (!parsed || parsed.kind !== "invoke" || !def || !bound) {
+      // An agreeing verifier's line rides this hand-back too (an `agent:<preset>`
+      // bind never parses as a registry command): the call was spent, so its
+      // receipt reaches the person instead of being dropped with the parse.
+      await io.reply(`${verified ? `${verified}\n` : ""}${HAND_BACK_PREFIX}\n\`${bind.line}\``);
       continue;
     }
-    const radius = boundBlastRadius(def as CommandDef<unknown>, parsed.input);
+    const radius = bound.radius;
     // A bind of `steer` is admission's, not the paste ladder's (the one-door
     // plan's admission unit; thread-admission item 1): the fold is the act a
     // thread reply performs with no confirmation, and its fence is the owner
@@ -579,11 +708,12 @@ export async function executeOperatorDecision(
     // 16a) plus the live agent's allowlist — so the write class that hands any
     // other bind back does not queue a person's own words behind a paste.
     const runsNow = def.id === "steer.run" || routedRunsAtOnce(def as CommandDef<unknown>, confirm.value, parsed.input);
+    const receipt = `${renderOperatorReceipt(bind.line, radius, bind.reason)}${verified ? `\n${verified}` : ""}`;
     if (!runsNow) {
-      await io.reply(`${renderOperatorReceipt(bind.line, radius, bind.reason)}\n${HAND_BACK_PREFIX}\n\`${bind.line}\``);
+      await io.reply(`${receipt}\n${HAND_BACK_PREFIX}\n\`${bind.line}\``);
       continue;
     }
-    await io.reply(renderOperatorReceipt(bind.line, radius, bind.reason));
+    await io.reply(receipt);
     const res = await runChatCommand(deps, msg, io, parsed, ctx.ending, ctx.trace, carried ? {} : { operator: event });
     carried = true;
     if (res.text.length > 0) await io.reply(res.text);

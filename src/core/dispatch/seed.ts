@@ -311,6 +311,10 @@ export const OPERATOR_TAIL_BYTES = OPERATOR_TAIL_TOKENS * 4;
 export interface OperatorTailTurn {
   text: string;
   folded?: boolean;
+  /** The platform-namespaced author of the turn (record 0057); absent for
+   *  machine turns and rows from before the actor stamp — the verifier selects
+   *  the author's own turns by it (`operatorAuthorTurns`). */
+  actor?: string;
 }
 
 /**

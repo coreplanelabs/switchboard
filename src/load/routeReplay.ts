@@ -814,7 +814,8 @@ export async function verifyBind(
 ): Promise<VerifierAnswer & { line: string }> {
   const line = chatInvocation(def, input);
   try {
-    const answer = await model(verifierPrompt({ text, line }), {
+    // The replay's sentence is the author's one turn (the fixture has no thread).
+    const answer = await model(verifierPrompt({ turns: [text], line }), {
       maxTokens: ROUTE_MIN_OUTPUT_TOKENS,
       signal: AbortSignal.timeout(opts.timeoutMs ?? ROUTE_TIMEOUT_MS),
     });

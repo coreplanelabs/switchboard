@@ -137,6 +137,11 @@ export interface CoreDeps
    *  Default: the provider behind `defaults.models.general` — the strong
    *  tier, never `routing.model`'s fast one. Tests script one. */
   operatorModel?: RouteModel;
+  /** The verifier's model call (the one-door plan's verifier hold; routing-and-config
+   *  item 25): the hold on a run-starting, steer or write-class bind under
+   *  `routing.operator: on`. Default: the FAST tier — `routing.model`, else
+   *  the provider behind `defaults.models.general`. Tests script one. */
+  verifierModel?: RouteModel;
   /** The one runs service (`RunDeps.runs`): the run tools, the thread read and stage A's paste check
    *  (record 0044) all read it — declared here so the two bases that name it agree. */
   runs?: RunsService;
@@ -613,7 +618,14 @@ export async function dispatch(
         operatorEvent = undefined;
       } else if (operatorMode === "on" && operatorEvent) {
         await root.span("dispatch.operator_decision", () =>
-          executeOperatorDecision(deps, { msg, io, ending, trace, event: operatorEvent! }),
+          executeOperatorDecision(deps, {
+            msg,
+            io,
+            ending,
+            trace,
+            event: operatorEvent!,
+            ...(operatorThread ? { thread: operatorThread } : {}),
+          }),
         );
         return ended;
       }
