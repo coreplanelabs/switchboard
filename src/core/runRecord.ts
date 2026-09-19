@@ -184,6 +184,13 @@ export interface RunRecord {
    *  reading the events. Absent for a preset a person, a scope or the default
    *  chose, and on records written before it existed. */
   route?: RunRouteDecision;
+  /** The operator's shadow decision beside the routed request (record 0057;
+   *  the one-door plan's operator unit; run-history item 60): what the operator
+   *  bound for the same event, redacted like the receipt — never the message
+   *  text — with the intake gate's verdict when the gate was present. The
+   *  agreement row reads it from here; it follows the record's retention.
+   *  Absent under `routing.operator: off` and on records written before it. */
+  operator?: RunOperatorDecision;
   /** The effective profile the run was admitted with (docs/decisions/0026-capability-profiles-and-request-routing.md):
    *  the preset, its machine class and identity, the minutes it ran on and —
    *  when a boundary clipped the budget — the scope that did, so a reader can
@@ -401,6 +408,45 @@ export function routeOfEvents(events: readonly RunEvent[]): RunRouteDecision | u
     model: r.model,
     ...(r.parts ? { parts: r.parts.map((p) => ({ preset: p.preset, text: p.text })) } : {}),
     ...(r.collapsed ? { collapsed: { presets: [...r.collapsed.presets] } } : {}),
+  };
+}
+
+/** The operator's decision as a record carries it — the `operator` event's
+ *  fields less the stream bookkeeping (record 0057; run-history item 60). */
+export interface RunOperatorDecision {
+  mode: "shadow" | "on";
+  outcome: "binds" | "question" | "refusal";
+  reason: string;
+  binds?: { line: string; reason: string }[];
+  question?: string;
+  /** A question's proposed line — what the next turn's "yes" binds. */
+  proposal?: string;
+  refusalCause?: string;
+  refusalText?: string;
+  intake?: { verdict: string; reason: string };
+  latencyMs?: number;
+  outputTokens?: number;
+}
+
+/** The operator's decision the run's events carry: the one `operator` event
+ *  (record 0057), whatever the run's own agent source — the shadow decision
+ *  rides routed and unrouted runs alike, or there would be no disagreement to
+ *  count. Undefined on a run the operator never saw. */
+export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecision | undefined {
+  const e = events.find((e) => e.type === "operator");
+  if (e?.type !== "operator") return undefined;
+  return {
+    mode: e.mode,
+    outcome: e.outcome,
+    reason: e.reason,
+    ...(e.binds ? { binds: e.binds.map((b) => ({ line: b.line, reason: b.reason })) } : {}),
+    ...(e.question !== undefined ? { question: e.question } : {}),
+    ...(e.proposal !== undefined ? { proposal: e.proposal } : {}),
+    ...(e.refusalCause !== undefined ? { refusalCause: e.refusalCause } : {}),
+    ...(e.refusalText !== undefined ? { refusalText: e.refusalText } : {}),
+    ...(e.intake ? { intake: { verdict: e.intake.verdict, reason: e.intake.reason } } : {}),
+    ...(e.latencyMs !== undefined ? { latencyMs: e.latencyMs } : {}),
+    ...(e.outputTokens !== undefined ? { outputTokens: e.outputTokens } : {}),
   };
 }
 

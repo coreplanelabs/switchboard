@@ -200,6 +200,15 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
   f("c35p", "paraphrase", "break the run spend down by agent", "costs.by", { args: ["agent"], options: {} }),
   f("c37h", "happy", "check our aggregator models against the provider's endpoints", "providers.check"),
   f("c37p", "paraphrase", "does the model registry still match what openrouter actually serves?", "providers.check"),
+  // The steer (record 0057): words into a live run, by run id.
+  f("c38h", "happy", "steer run run-8f2 to also update the changelog", "steer.run", {
+    args: ["run-8f2", "also update the changelog"],
+    options: {},
+  }),
+  f("c38p", "paraphrase", "tell the run run-8f2 that it should also update the changelog", "steer.run", {
+    args: ["run-8f2", "it should also update the changelog"],
+    options: {},
+  }),
 ];
 
 const d = (id: string, text: string, command: string, allow?: readonly string[]): RouteCommandDecoy => ({
@@ -222,6 +231,8 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c05d", "why does this channel behave differently from the others?", "config.overrides"),
   d("c36d", "which channel would be the best home for the review bot?", "config.channels"),
   d("c39d", "what happened to the release last night and who dropped the ball?", "plane.show"),
+  // Asks what a run is doing, not for words to be folded into it.
+  d("c38d", "what is run run-8f2 doing right now?", "steer.run", ["runs.get", "runs.list"]),
   d("c06d", "what would be a good model for coding work here?", "config.set"),
   d("c07d", "did anyone change the settings here recently?", "config.clear"),
   d("c08d", "are my instructions actually being followed?", "config.instructions", ["config.instructions"]),

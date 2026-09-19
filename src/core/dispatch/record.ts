@@ -16,6 +16,7 @@ import {
   leaseOfEvents,
   prOfEvents,
   pushedHeadsOf,
+  operatorOfEvents,
   routeOfEvents,
   type RunFailure,
   type RunProfileRecord,
@@ -358,6 +359,10 @@ export function assembleRunRecord(input: {
   // The route the run ran under: the caller's (a sticky-carried decision has
   // no `route` event), else what the events say.
   const route = input.route ?? routeOfEvents(events);
+  // The operator's shadow decision beside the routed request (record 0057;
+  // run-history item 60): the `operator` event, already redacted at publish —
+  // the bound line like the receipt, never the message text.
+  const operator = operatorOfEvents(events);
   // The plan runner instance a ship run's hand-off created (record 0051 R2):
   // its `ship_handoff` event, projected like the coordinator tag.
   const instanceId = instanceIdOfEvents(events);
@@ -401,6 +406,7 @@ export function assembleRunRecord(input: {
     ...(input.dispositions !== undefined ? { dispositions: redactDispositions(input.dispositions) } : {}),
     ...(input.reviewPost !== undefined ? { reviewPost: redactReviewPost(input.reviewPost) } : {}),
     ...(route !== undefined ? { route } : {}),
+    ...(operator !== undefined ? { operator } : {}),
     ...(input.profile !== undefined ? { profile: input.profile } : {}),
     ...(input.parentRunId !== undefined ? { parentRunId: input.parentRunId } : {}),
     ...coordinatorFields(input.coordinator),

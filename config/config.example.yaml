@@ -456,10 +456,16 @@ workspaceDir: ./workspaces
 # `tool` (default) forces a call to the router's `route` tool, whose schema is
 # the answer, so prose cannot occur; `text` is the one-JSON-object text contract
 # alone — set it for a provider or model that cannot take a forced tool call.
+# `operator` is the one door's flag (routing-and-config item 29): `off`
+# (default) — the operator never runs; `shadow` — one operator turn per
+# admitted chat event, ahead of stage A, its decision written beside the
+# routed request in the run store and nothing run from it; `on` — the
+# operator's decision is what runs. `shadow` runs even under `auto: false`.
 # routing:
 #   auto: false
 #   model: anthropic/claude-haiku-4-5
 #   answer: text
+#   operator: shadow
 
 # The thread-reply intake gate (docs/decisions/0058-a-thread-reply-is-read-before-it-is-answered-intake-decides-whether-the-bot-was-addressed.md;
 # docs/reference/specs/routing-and-config.md item 27). How an unmentioned reply

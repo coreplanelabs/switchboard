@@ -81,7 +81,7 @@ import { InMemoryFrictionLedger, RunStoreFrictionLedger, type FrictionLedger } f
 import { analyzeRunFriction } from "./runFriction.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
-import { createRunsService } from "./runsService.js";
+import { createRunsService, type RunView } from "./runsService.js";
 import type { RepoContext } from "./repoContext.js";
 import { isRunRecord, type RunRecord } from "./runRecord.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./runHistoryWriter.js";
@@ -17643,5 +17643,228 @@ describe("every refusal is a run record (record 0054, as amended)", () => {
       text: "history exploded",
     });
     expect(await store.get("r2")).toBeNull();
+  });
+});
+
+describe("the operator behind routing.operator (record 0057; routing-and-config item 29)", () => {
+  const SHADOW_YAML = YAML_FIXTURE.replace(
+    "routing: { auto: false }\n",
+    "routing: { auto: false, operator: shadow }\n",
+  );
+  const ON_YAML = YAML_FIXTURE.replace("routing: { auto: false }\n", "routing: { auto: false, operator: on }\n");
+
+  /** A scripted operator: one forced call to `decide`, the input the answer. */
+  const decides = (input: unknown) => vi.fn<RouteModel>(async () => ({ tool: "decide", input }));
+
+  function operatorDeps(yaml: string) {
+    const provider = capturingProvider();
+    const deps = makeDeps(yaml, provider);
+    let n = 0;
+    const registry = new RunRegistry({ genId: () => `r${++n}`, genToken: () => "t" });
+    deps.runRegistry = registry;
+    deps.admission = new ThreadAdmission();
+    return { deps, provider, registry };
+  }
+
+  it("shadow: readers and operator disagree on a typed line — the row holds both and nothing runs from the operator", async () => {
+    const { deps, registry } = operatorDeps(SHADOW_YAML);
+    deps.operatorModel = decides({
+      reason: "the runs page answers this",
+      binds: [{ line: "runs list --status all", reason: "a listing" }],
+    });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("config show", "slack:UADMIN"), io);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    // The readers ran the typed line; the operator's disagreeing bind ran nothing.
+    expect(deps.invoked).toEqual(["config.show"]);
+    const snap = registry.snapshotById("r1")!;
+    const operator = snap.events.find((e) => e.type === "operator");
+    expect(operator).toMatchObject({
+      type: "operator",
+      mode: "shadow",
+      outcome: "binds",
+      binds: [{ line: "runs list --status all", reason: "a listing" }],
+    });
+    // The row holds both: stage A's input beside the operator's decision.
+    expect(snap.events.find((e) => e.type === "input")).toMatchObject({ text: "config show" });
+  });
+
+  it("shadow on a reply into a live thread: the operator's decision is written beside the fold", async () => {
+    const { deps, registry } = operatorDeps(SHADOW_YAML);
+    deps.operatorModel = decides({
+      reason: "a steer into the live run",
+      binds: [{ line: "steer run r-live keep going", reason: "the thread's run" }],
+    });
+    const run = registry.create("live · #CX", {
+      agent: "general",
+      channelId: "slack:CX",
+      userId: "slack:UX",
+      threadKey: "slack:CX:1.0",
+      channelVisibility: "public",
+      receivedAt: 0,
+    });
+    const claim = (deps.admission as ThreadAdmission).claim("slack:CX:1.0", { agent: "general" });
+    if (claim.kind === "start") claim.live.runId = run.id;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("keep going"), io);
+    const snap = registry.snapshotById(run.id)!;
+    expect(snap.events.filter((e) => e.type === "operator")).toEqual([
+      expect.objectContaining({ mode: "shadow", outcome: "binds" }),
+    ]);
+  });
+
+  it("shadow: the row carries the intake gate's verdict when the gate is present, and never the message text", async () => {
+    const { deps, registry } = operatorDeps(SHADOW_YAML);
+    deps.operatorModel = decides({
+      reason: "one listing",
+      binds: [{ line: "config show", reason: "the scopes" }],
+    });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("config show", "slack:UADMIN"), io, {
+      intake: { verdict: "addressed", reason: "a direct ask" },
+    });
+    const operator = registry.snapshotById("r1")!.events.find((e) => e.type === "operator");
+    expect(operator).toMatchObject({ intake: { verdict: "addressed", reason: "a direct ask" } });
+    expect(JSON.stringify(operator)).not.toContain('"text"');
+  });
+
+  it("on: two binds run in order with receipts naming line, class and reason; no reader is consulted", async () => {
+    const { deps, provider } = operatorDeps(ON_YAML);
+    deps.operatorModel = decides({
+      reason: "two asks",
+      binds: [
+        { line: "config show", reason: "the scopes" },
+        { line: "help", reason: "the menu" },
+      ],
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("show me the config, then the help", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["config.show", "help.show"]);
+    const first = replies.findIndex((r) => r.includes("bound: `config show` — read — the scopes"));
+    const second = replies.findIndex((r) => r.includes("bound: `help` — read — the menu"));
+    expect(first).toBeGreaterThanOrEqual(0);
+    expect(second).toBeGreaterThan(first);
+    // The decision is what runs: no route model, no agent run, no model turn.
+    expect(provider.requests).toHaveLength(0);
+  });
+
+  it("on: a question renders with the marker and a policy refusal renders no Yes", async () => {
+    const { deps } = operatorDeps(ON_YAML);
+    deps.operatorModel = decides({
+      reason: "ambiguous",
+      question: { text: "Which listing?", proposal: "runs list --status all" },
+    });
+    const q = fakeIO();
+    await dispatch(deps, msg("list them", "slack:UADMIN"), q.io);
+    expect(q.replies).toHaveLength(1);
+    expect(q.replies[0]).toContain("Did you mean:");
+    expect(q.replies[0]).toContain("`runs list --status all`");
+
+    const { deps: refusing } = operatorDeps(ON_YAML);
+    refusing.operatorModel = decides({
+      reason: "a rule forbids it",
+      refusal: { cause: "policy", text: "guests may not steer runs" },
+    });
+    const r = fakeIO();
+    await dispatch(refusing, msg("steer that run", "slack:UADMIN"), r.io);
+    expect(r.replies).toEqual(["guests may not steer runs"]);
+  });
+
+  it("on: a question and a refusal each leave a door record carrying the decision as its operator event", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    deps.operatorModel = decides({
+      reason: "ambiguous",
+      question: { text: "Which listing?", proposal: "runs list --status all" },
+    });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("list them", "slack:UADMIN"), io);
+    const question = registry.snapshotById("r1")!;
+    expect(question.events.find((e) => e.type === "input")).toMatchObject({ text: "list them" });
+    expect(question.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "question",
+      proposal: "runs list --status all",
+    });
+
+    const { deps: refusing, registry: refusingRegistry } = operatorDeps(ON_YAML);
+    refusing.operatorModel = decides({
+      reason: "a rule forbids it",
+      refusal: { cause: "policy", text: "guests may not steer runs" },
+    });
+    await dispatch(refusing, msg("steer that run", "slack:UADMIN"), fakeIO().io);
+    expect(refusingRegistry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      outcome: "refusal",
+      refusalCause: "policy",
+      refusalText: "guests may not steer runs",
+    });
+  });
+
+  it("on: the event rides the first bind that RUNS; a decision whose every bind is handed back records on a door record", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    deps.operatorModel = decides({
+      reason: "a hand-back then a read",
+      binds: [
+        { line: "not a command at all", reason: "unparseable" },
+        { line: "config show", reason: "the scopes" },
+      ],
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("do both", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["config.show"]);
+    expect(replies.some((r) => r.includes("`not a command at all`"))).toBe(true);
+    // The first bind ran nothing: the event rides the run of the bind that ran.
+    const ran = registry.snapshotById("r1")!;
+    expect(ran.events.find((e) => e.type === "operator")).toMatchObject({ outcome: "binds" });
+
+    const { deps: handed, registry: handedRegistry } = operatorDeps(ON_YAML);
+    handed.operatorModel = decides({
+      reason: "nothing parses",
+      binds: [{ line: "still not a command", reason: "unparseable" }],
+    });
+    await dispatch(handed, msg("try it", "slack:UADMIN"), fakeIO().io);
+    expect(handed.invoked).toEqual([]);
+    const record = handedRegistry.snapshotById("r1")!;
+    expect(record.events.find((e) => e.type === "operator")).toMatchObject({ outcome: "binds" });
+    expect(record.events.find((e) => e.type === "input")).toMatchObject({ text: "try it" });
+  });
+
+  it("on: the next turn's \"yes\" binds the pending question's proposal with no model call; another answer binds fresh", async () => {
+    const pendingThread = [
+      {
+        id: "prev",
+        startedAt: 0,
+        finished: true,
+        eventCount: 2,
+        operator: { mode: "on", outcome: "question", reason: "ambiguous", proposal: "config show" },
+      },
+    ] as RunView[];
+    const { deps, registry } = operatorDeps(ON_YAML);
+    deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread: pendingThread });
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(deps.invoked).toEqual(["config.show"]);
+    expect(replies.some((r) => r.includes("bound: `config show`"))).toBe(true);
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      outcome: "binds",
+      binds: [{ line: "config show", reason: "yes to the pending question's proposal" }],
+    });
+
+    // Anything but "yes" is a fresh decision: the model runs, the marker in view.
+    const { deps: fresh } = operatorDeps(ON_YAML);
+    fresh.operatorModel = decides({ reason: "fresh", binds: [{ line: "help", reason: "the menu" }] });
+    await dispatch(fresh, msg("no, the runs one", "slack:UADMIN"), fakeIO().io, { thread: pendingThread });
+    expect(fresh.operatorModel).toHaveBeenCalledTimes(1);
+    expect(fresh.invoked).toEqual(["help.show"]);
+  });
+
+  it("off (the default) never calls the operator and the route stage is untouched", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("config show", "slack:UADMIN"), io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(deps.invoked).toEqual(["config.show"]);
   });
 });

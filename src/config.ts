@@ -45,6 +45,7 @@ import {
   validateScopeEfforts,
   validateScopeVerbosity,
   type IntakeMode,
+  type OperatorMode,
   type RouteAnswerMode,
 } from "./config/validate.js";
 export type { IntakeMode } from "./config/validate.js";
@@ -178,6 +179,7 @@ export interface IntakeConfig {
  *  checks the card under them at load, so the load-time check and the runtime
  *  call cannot drift; re-exported here for every other caller. */
 export { defaultIntakeMode, intakeModelRef } from "./config/validate.js";
+export type { OperatorMode } from "./config/validate.js";
 
 /** The `routing` block (`AppConfig.routing`). */
 export interface RoutingConfig {
@@ -191,6 +193,13 @@ export interface RoutingConfig {
    *  `text`: the one-JSON-object text contract alone — the escape hatch for a
    *  provider or model that cannot take a forced tool call. */
   answer?: RouteAnswerMode;
+  /** The operator (record 0057; routing-and-config item 29): `off` (default)
+   *  — never runs; `shadow` — called once per admitted chat event ahead of
+   *  stage A, its decision written beside the routed request in the run
+   *  store, nothing a person reads changes; `on` — its decision is what
+   *  runs. The one place the default lives: `operatorModeOf`, never the
+   *  field. */
+  operator?: OperatorMode;
 }
 
 /** pi's compaction thresholds, in tokens, as pi's own `settings.json` names
@@ -229,6 +238,15 @@ export interface OpenCodeConfig {
  *  default lives: the stage asks this, never the field. */
 export function routingOn(config: AppConfig): boolean {
   return config.routing?.auto ?? true;
+}
+
+/** The operator's mode (record 0057; routing-and-config item 29):
+ *  `routing.operator` where the block sets it, else `off` — a deployment that
+ *  never heard of the operator runs exactly as before, and `shadow` runs even
+ *  where `routing.auto` is off (the flag is independent of the route stage's
+ *  own switch: the shadow week must see what the readers see). */
+export function operatorModeOf(config: AppConfig): OperatorMode {
+  return config.routing?.operator ?? "off";
 }
 
 /** The `references` block (`AppConfig.references`; record 0037): the

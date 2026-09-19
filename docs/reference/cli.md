@@ -70,6 +70,12 @@ One table per group, in registration order. "Surfaces" is where that command can
 | `runs findings <pr>` | A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone. | every surface |
 | `runs search <session> <query…> [--limit <integer>]` | Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content. | CLI · HTTP · MCP |
 
+### `steer`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `steer run <id> <words…>` | Fold words into a live run at its next step boundary, by run id. | Slack only |
+
 ### `review`
 
 | Command | What it does | Surfaces |

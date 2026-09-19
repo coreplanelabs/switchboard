@@ -431,6 +431,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       ev.type === "ship_round" ||
       ev.type === "ship_unit" ||
       ev.type === "route" ||
+      ev.type === "operator" ||
       ev.type === "refusal" ||
       ev.type === "reference" ||
       ev.type === "lease" ||

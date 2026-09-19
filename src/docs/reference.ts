@@ -192,7 +192,9 @@ function surfaceList(cmd: DocCommand): string {
 /** docs/reference/cli.md — every registered command, whatever surface it serves,
  *  in the CLI's own invocation form. The canonical "everything there is" table. */
 export function renderCliCommands(cmds: readonly DocCommand[]): string {
-  const sections = byGroup(cmds.filter((c) => c.surfaces.includes("cli"))).map(({ group, commands }) => {
+  // No surface filter: the Surfaces column says where each runs, and a
+  // chat-only command (`steer run`) still belongs in the canonical table.
+  const sections = byGroup(cmds).map(({ group, commands }) => {
     const rows = commands.map((c) => [code(c.usage), cell(c.describe), cell(surfaceList(c))]);
     return `### \`${group}\`\n\n${table(["Command", "What it does", "Surfaces"], rows)}`;
   });

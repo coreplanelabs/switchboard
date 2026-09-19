@@ -737,6 +737,14 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
       agentNames: () => Object.keys(AGENTS),
     },
     runs, // a live run's friction window ends at the pinned clock on every surface
+    // The steer sender (record 0057): a recording stub — production wires the
+    // dispatcher's admission inbox, which no fixture holds.
+    steer: {
+      send: async (runId: string, words: string) => {
+        s.executed.push(`steer ${runId}: ${words}`);
+        return `↪ folded into run ${runId} at its next boundary`;
+      },
+    },
     review: { abridger: async () => s.abridger, runs },
     friction: {
       ledger: async () => new RunStoreFrictionLedger(s.store),
@@ -1399,6 +1407,10 @@ export function runOn(
 
 /** The reference caller: the local CLI's every-grant actor, so the reference JSON is the unrestricted view. */
 export const powerCaller: Caller = callerWith("cli", "cli:reference", "all");
+
+/** The chat reference caller, for a command chat alone exposes (`steer.run`):
+ *  the same every-grant view through the one surface the command lives on. */
+export const chatPowerCaller: Caller = callerWith("chat", "slack:UREFERENCE", "all");
 
 /** `invoke` with the by-name input split by the definition, as this caller. */
 export async function reference(

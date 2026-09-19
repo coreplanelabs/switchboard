@@ -39,12 +39,21 @@ import type { FastPathDeps } from "./fastPath.js";
  *  (docs/reference/specs/run-history.md item 2): published right after `run_meta`. */
 export type RouteEventFields = Omit<Extract<RunEvent, { type: "route" }>, "type" | "seq" | "at">;
 
+/** The `operator` event a command run rides when the operator saw the same
+ *  event (record 0057; run-history item 60): published right after `run_meta`,
+ *  beside the `route` event when one rides too — the shadow decision beside
+ *  stage A's result for a typed line. */
+export type OperatorEventFields = Omit<Extract<RunEvent, { type: "operator" }>, "type" | "seq" | "at">;
+
 /** What a command run may carry beyond the command: the router's decision, when
  *  the command came through its door, and the door's mark for the audit line —
  *  `route` for a command the router bound and ran, `confirm` for a stored
  *  input run at a confirmation's click (record 0044). */
 export interface CommandRunOptions {
   route?: RouteEventFields;
+  /** The operator's decision for the same event (record 0057): written beside
+   *  the run's `route` event, never acted on here. */
+  operator?: OperatorEventFields;
   source?: "route" | "confirm";
 }
 
@@ -111,7 +120,10 @@ export async function runChatCommand(
     });
   if (parsed.kind === "invoke") {
     const inline = isInlineRunCommand(parsed.id);
-    if (inline || opts.route?.outcome !== undefined)
+    // An operator shadow decision needs a record to ride (record 0057): a
+    // typed line the operator also read is recorded — announced to no surface
+    // beyond what it was — so the agreement row can compare the two doors.
+    if (inline || opts.route?.outcome !== undefined || opts.operator !== undefined)
       return runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending, trace, {
         ...opts,
         announce: inline,
@@ -245,6 +257,87 @@ export async function recordRefusal(
 }
 
 /**
+ * An `on`-mode operator decision that started no run, as a run record (record
+ * 0057; run-history item 60: every admitted chat event's decision is one
+ * `operator` event on the run that carries the request). A question, a refusal
+ * and a decision whose every bind was handed back answer the person and run
+ * nothing — so the record is written here, the way a door refusal's is: agent
+ * `door`, status `completed`, no surface told of the run, no thread claimed;
+ * the redacted request as its `input` event and the decision as its one
+ * `operator` event, every line already redacted and cut by the parse.
+ */
+export async function recordOperatorDecision(
+  deps: FastPathDeps,
+  msg: IncomingMessage,
+  event: OperatorEventFields,
+  ending: RunEnding,
+  trace: RequestTrace,
+): Promise<void> {
+  const registry = deps.runRegistry ?? defaultRunRegistry;
+  const root = trace.root;
+  const clock = deps.clock ?? systemClock;
+  const threadKey = msg.threadKey || msg.channelId;
+  const channelVisibility = await channelVisibilityOf(deps, msg.channelId);
+  const run = registry.create(
+    composeRunLabel({
+      agent: `operator_${event.outcome}`,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      channelName: msg.channelName,
+      userName: msg.userName,
+      text: msg.text,
+    }),
+    {
+      agent: DOOR_RUN_AGENT,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      threadKey,
+      channelVisibility,
+      receivedAt: trace.receivedAt,
+      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+    },
+  );
+  registry.publish(run.id, {
+    type: "input",
+    text: redactSecrets(msg.text),
+    messageId: messageIdOf(msg, run.id),
+    at: clock(),
+  });
+  registry.publish(run.id, { type: "operator", ...event, at: clock() });
+  const status: RunStatus = "completed";
+  registry.finish(run.id, status);
+  ending.finished(run.id);
+  const snap = registry.snapshot(run.id, run.token);
+  const finishedAt = snap?.finishedAt ?? clock();
+  const diagnosis = analyzeRunFriction(snap?.events ?? [], {
+    finished: true,
+    truncated: snap?.truncated ?? false,
+    owner: "command",
+    window: { start: trace.receivedAt, end: finishedAt },
+  });
+  ending.register({
+    runId: run.id,
+    flipOnPostFinishFailure: false,
+    write: (seal) =>
+      deps.runHistoryWriter.write(
+        assembleRunRecord({
+          run,
+          snap,
+          agent: DOOR_RUN_AGENT,
+          msg: { ...msg, threadKey },
+          channelVisibility,
+          finishedAt,
+          status,
+          diagnosis,
+          seal,
+        }),
+        { span: root },
+      ),
+  });
+}
+
+/**
  * A command with a deferred outcome (`CommandDef.settle` — `repo onboard` /
  * `repo rebuild`, whose provisioning settles minutes after the 202) gets a
  * SECOND reply in the thread when it does: awaited off the request path, so the
@@ -336,6 +429,7 @@ export async function runInlineCommandRun<
   // reply led with — redacted and capped by the caller — right after `run_meta`,
   // where a routed agent run carries the same event.
   if (opts.route) registry.publish(run.id, { type: "route", ...opts.route, at: clock() });
+  if (opts.operator) registry.publish(run.id, { type: "operator", ...opts.operator, at: clock() });
   let result: T | undefined;
   try {
     // The command's deterministic body is the run's one counted step (`tools`

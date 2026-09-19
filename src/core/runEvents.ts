@@ -1007,6 +1007,32 @@ export type RunEvent =
       seq?: number;
       at?: number;
     }
+  /** The operator's decision beside the routed request ([record 0057](../../docs/decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat-input-and-deterministic-code-authorizes-fences-and-executes.md);
+   *  the one-door plan's operator unit; run-history item 60): one per admitted chat
+   *  event under `routing.operator: shadow` or `on`, published beside the
+   *  `route` event. The decision is binds, a question or a refusal; a bind's
+   *  `line` is redacted and cut like the receipt (`ROUTE_RECEIPT_CAP`), never
+   *  the message text; `intake` carries the intake gate's verdict when the
+   *  gate is present; `latencyMs` and `outputTokens` feed the replay's median
+   *  rows. Under `shadow` nothing runs from it. Additive: unknown → ignored. */
+  | {
+      type: "operator";
+      mode: "shadow" | "on";
+      outcome: "binds" | "question" | "refusal";
+      reason: string;
+      binds?: ReadonlyArray<{ line: string; reason: string }>;
+      question?: string;
+      /** A question's proposed line, redacted and cut like the receipt — what
+       *  the next turn's "yes" binds (`bindFromAnswer`). */
+      proposal?: string;
+      refusalCause?: string;
+      refusalText?: string;
+      intake?: { verdict: string; reason: string };
+      latencyMs?: number;
+      outputTokens?: number;
+      seq?: number;
+      at?: number;
+    }
   /** A refusal the door made ([record 0054](../../docs/decisions/0054-a-refusal-the-person-caused-is-one-question-with-a-best-guess.md),
    *  as amended: every refusal is a run record; run-history.md item 2): the
    *  code, its one cause, and the sentence the person read — redacted and

@@ -497,6 +497,14 @@ function validateOpenCode(opencode: unknown): void {
 export const ROUTE_ANSWER_MODES = ["tool", "text"] as const;
 export type RouteAnswerMode = (typeof ROUTE_ANSWER_MODES)[number];
 
+/** The operator's three modes (`routing.operator`; record 0057, plan
+ *  the one-door plan's operator unit; routing-and-config item 29): `off` (the default) —
+ *  the operator never runs; `shadow` — it runs once per admitted chat event
+ *  ahead of stage A, its decision is written beside the routed request and
+ *  nothing runs from it; `on` — its decision is what runs. */
+export const OPERATOR_MODES = ["off", "shadow", "on"] as const;
+export type OperatorMode = (typeof OPERATOR_MODES)[number];
+
 /** The `references` block's keys, held equal to `ReferencesConfig` the way the top-level keys are. */
 const REFERENCES_KEYS: Record<keyof ReferencesConfig, true> = { enabled: true };
 
@@ -651,7 +659,7 @@ export function validateProviders(cfg: AppConfig, source: string): void {
 }
 
 /** The `routing` block's keys, held equal to `RoutingConfig` the way the top-level keys are. */
-const ROUTING_KEYS: Record<keyof RoutingConfig, true> = { auto: true, model: true, answer: true };
+const ROUTING_KEYS: Record<keyof RoutingConfig, true> = { auto: true, model: true, answer: true, operator: true };
 
 /** `routing` (docs/reference/specs/routing-and-config.md item 21): `auto` is a
  *  boolean and nothing else — a `"yes"` or a `1` is refused by name, never read
@@ -667,6 +675,8 @@ function validateRouting(routing: RoutingConfig, providers: Record<string, unkno
     throw new Error("config.yaml: routing.auto must be true or false");
   if (routing.answer !== undefined && !(ROUTE_ANSWER_MODES as readonly unknown[]).includes(routing.answer))
     throw new Error(`config.yaml: routing.answer must be ${ROUTE_ANSWER_MODES.join(" or ")}`);
+  if (routing.operator !== undefined && !(OPERATOR_MODES as readonly unknown[]).includes(routing.operator))
+    throw new Error(`config.yaml: routing.operator must be ${OPERATOR_MODES.join(", ")}`);
   if (routing.model !== undefined) {
     if (typeof routing.model !== "string" || !routing.model.includes("/"))
       throw new Error("config.yaml: routing.model must be a <provider>/<model> ref");

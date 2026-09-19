@@ -363,6 +363,41 @@ describe("assembleRunRecord — the handoff on the record", () => {
     expect("lease" in assembleRunRecord(base())).toBe(false);
   });
 
+  // docs/reference/specs/run-history.md item 60: the operator's shadow decision
+  // rides the record beside the routed request, off its `operator` event
+  // (record 0057) — the bound line redacted at publish, never the message text,
+  // with the intake gate's verdict when the gate was present.
+  it("carries the operator's shadow decision off its operator event with the intake verdict, and the record still validates; none → no key", () => {
+    const events = [
+      { type: "input" as const, text: "list the runs", seq: 1 },
+      {
+        type: "operator" as const,
+        mode: "shadow" as const,
+        outcome: "binds" as const,
+        reason: "one ask",
+        binds: [{ line: "runs list --status all", reason: "the listing" }],
+        intake: { verdict: "addressed", reason: "a direct ask" },
+        latencyMs: 120,
+        outputTokens: 40,
+        seq: 2,
+        at: 5,
+      },
+    ];
+    const record = assembleRunRecord({
+      ...base(),
+      snap: { events, startedAt: 1, eventCount: 2, stepCount: 0 } as never,
+    });
+    expect(record.operator).toMatchObject({
+      mode: "shadow",
+      outcome: "binds",
+      binds: [{ line: "runs list --status all", reason: "the listing" }],
+      intake: { verdict: "addressed", reason: "a direct ask" },
+    });
+    expect(isRunRecord(record)).toBe(true);
+    expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
+    expect("operator" in assembleRunRecord(base())).toBe(false);
+  });
+
   // docs/reference/specs/run-history.md item 2: the pushed heads ride the record off their events (decision 0046).
   it("carries the run's pushed heads off its pushed_head events, and the record still validates; none → no key", () => {
     const events = [

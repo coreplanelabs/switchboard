@@ -488,8 +488,10 @@ export type RouteModel = (
 ) => Promise<RouteToolCall | string>;
 
 /** The request text quoted as data: a tag the text carries is bent so it
- *  cannot close the quote, and the text is cut at the cap with a note. */
-function quoteRequest(text: string): string {
+ *  cannot close the quote, and the text is cut at the cap with a note.
+ *  Exported for the operator's prompt (operator.ts), which quotes the same
+ *  way behind the same tags. */
+export function quoteRequest(text: string): string {
   const bent = text.replace(/<(\/?)request>/gi, "‹$1request›");
   if (bent.length <= ROUTE_TEXT_CAP) return bent;
   return `${bent.slice(0, ROUTE_TEXT_CAP)}\n…[truncated: ${bent.length - ROUTE_TEXT_CAP} more characters]`;

@@ -153,6 +153,7 @@ import {
   NOBODY,
   NOW,
   PLANTED_ENV_SECRET,
+  chatPowerCaller,
   powerCaller,
   presenceOf,
   ADAPTER_CALLER_KIND,
@@ -265,7 +266,7 @@ describe("command conformance — catalogue fences", () => {
     expect(blastRadiusGaps(CATALOGUE)).toEqual([]);
     const fenced = CATALOGUE.filter((c) => c.surfaces?.chat !== false && c.effect === "write");
     expect(fenced.filter((c) => c.action.endsWith(":exec")).map((c) => c.id)).toEqual(["repo.test", "repo.build"]);
-    expect(fenced.filter((c) => !c.action.endsWith(":exec"))).toHaveLength(17);
+    expect(fenced.filter((c) => !c.action.endsWith(":exec"))).toHaveLength(18);
   });
 
   it("blast radius: a write missing `destructive` or `risk`, or whose risk line is empty, is named with the field; an exec-class write, a read and a chat-hidden write are exempt", () => {
@@ -647,7 +648,10 @@ async function conformanceFailures(build: () => Promise<Fixture>): Promise<strin
       continue;
     }
     const happy = variants.find((v) => v.name === "required-only")!;
-    const res = await reference(f, cmd, happy.named, powerCaller);
+    // A command chat alone exposes (`steer.run`) does not exist for the CLI
+    // reference caller: its happy path runs as the chat one.
+    const caller = CommandRegistry.exposedTo(cmd, powerCaller.kind) ? powerCaller : chatPowerCaller;
+    const res = await reference(f, cmd, happy.named, caller);
     if (!res.ok)
       failures.push(
         `${cmd.id}: happy path ${JSON.stringify(happy.named)} failed: ${res.error} — ${res.message}; add a COMMAND_FIXTURES entry (hints/baseline) or fake its dependency in fakeDeps`,
@@ -898,11 +902,12 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
       }
     }
     // A credential holding no grant at all is refused whatever the surface (fail-closed) — driven as a CLI
-    // caller, the one surface every command is exposed on.
+    // caller where the command is exposed there, else as the chat kind (`steer.run` is chat-only).
+    const bareKind = CommandRegistry.exposedTo(cmd, "cli") ? ("cli" as const) : ("chat" as const);
     const bare = await reference(await fixture(), cmd, happy.named, {
-      kind: "cli",
-      id: "cli:nothing",
-      actor: { kind: "service", id: "cli:nothing", grants: NO_GRANTS },
+      kind: bareKind,
+      id: `${bareKind}:nothing`,
+      actor: { kind: bareKind === "cli" ? "service" : "user", id: `${bareKind}:nothing`, grants: NO_GRANTS },
     });
     expect(bare).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
     if (cmd.surfaces?.http !== false) {
@@ -968,7 +973,9 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         );
       f.recorded.length = 0;
       f.executed.length = 0;
-      const res = await reference(f, cmd, happy.named, powerCaller);
+      // A chat-only command (`steer.run`) is driven as the chat reference caller.
+      const capsCaller = CommandRegistry.exposedTo(cmd, powerCaller.kind) ? powerCaller : chatPowerCaller;
+      const res = await reference(f, cmd, happy.named, capsCaller);
       if (enabled) expect(res.ok, `${where}: ${JSON.stringify(res)}`).toBe(true);
       else {
         expect(res, where).toMatchObject({ ok: false, error: "not_found" });

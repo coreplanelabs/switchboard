@@ -83,6 +83,10 @@ import {
   renderMisses,
   renderPlanted,
   renderVolume,
+  renderAgreement,
+  agreementScore,
+  median,
+  type ShadowRow,
   renderWrite,
   replayDirectives,
   replayMisses,
@@ -91,6 +95,7 @@ import {
   verifyPlanted,
   VOLUME_PLACEHOLDER,
   volumeByDay,
+  doorRefusalAt,
   writeScore,
   WRITE_MISBIND_BAR,
 } from "./routeReplay.js";
@@ -1207,7 +1212,7 @@ describe("the checked-in command set through route() over a scripted model", () 
     expect(score.inputRate).toBe(1);
     expect(score.misses).toEqual([]);
     expect(invoke).not.toHaveBeenCalled();
-    expect(renderCommands(score)[0]).toContain("bound right 80/80");
+    expect(renderCommands(score)[0]).toContain(`bound right ${score.fixtures}/${score.fixtures}`);
   });
 
   it("one wrong command fails the command row (bar 1.0); the miss carries the bound and the expected input", async () => {
@@ -1995,8 +2000,8 @@ describe("the volume line — routed requests per day and shadow events per day"
       { startedAt: day + 2, routed: true },
     ]);
     expect(points).toEqual([
-      { day: "1970-01-01", routed: 1, shadowEvents: undefined },
-      { day: "1970-01-02", routed: 2, shadowEvents: undefined },
+      { day: "1970-01-01", routed: 1, shadowEvents: undefined, refusals: undefined },
+      { day: "1970-01-02", routed: 2, shadowEvents: undefined, refusals: undefined },
     ]);
     const line = renderVolume(points);
     expect(line).toContain("1970-01-01 1 routed");
@@ -2007,12 +2012,31 @@ describe("the volume line — routed requests per day and shadow events per day"
   it("with a shadow log the line prints two numbers per day", () => {
     const points = volumeByDay([{ startedAt: 0, routed: true }], [10, 20, day + 5]);
     expect(points).toEqual([
-      { day: "1970-01-01", routed: 1, shadowEvents: 2 },
-      { day: "1970-01-02", routed: 0, shadowEvents: 1 },
+      { day: "1970-01-01", routed: 1, shadowEvents: 2, refusals: undefined },
+      { day: "1970-01-02", routed: 0, shadowEvents: 1, refusals: undefined },
     ]);
     const line = renderVolume(points);
     expect(line).not.toContain(VOLUME_PLACEHOLDER);
     expect(line).toContain("2 shadow event(s)");
+  });
+
+  it("a door record with a refusal event counts; a run record of another agent counts none, whatever its events", () => {
+    const refusal = { type: "refusal" } as const;
+    expect(doorRefusalAt({ agent: "door", startedAt: 42, events: [{ type: "input" }, refusal] })).toBe(42);
+    expect(doorRefusalAt({ agent: "door", startedAt: 42, events: [{ type: "input" }] })).toBeUndefined();
+    expect(doorRefusalAt({ agent: "general", startedAt: 42, events: [refusal] })).toBeUndefined();
+    expect(doorRefusalAt({ startedAt: 42, events: [refusal] })).toBeUndefined();
+  });
+
+  it("refusals per day, counted from the door run records, print beside routed requests and shadow events", () => {
+    const points = volumeByDay([{ startedAt: 0, routed: true }], [10], [20, 30, day + 5]);
+    expect(points).toEqual([
+      { day: "1970-01-01", routed: 1, shadowEvents: 1, refusals: 2 },
+      { day: "1970-01-02", routed: 0, shadowEvents: 0, refusals: 1 },
+    ]);
+    const line = renderVolume(points);
+    expect(line).toContain("1970-01-01 1 routed, 1 shadow event(s), 2 refusal(s)");
+    expect(line).toContain("1970-01-02 0 routed, 0 shadow event(s), 1 refusal(s)");
   });
 
   it("no routed request in the window still prints a line with the placeholder", () => {
@@ -2034,5 +2058,46 @@ describe("public hygiene over every replay fixture file", () => {
       const { counts } = scanText(path, readFileSync(new URL(`./${file}`, import.meta.url), "utf8"), new Set());
       expect(counts, path).toEqual({});
     }
+  });
+});
+
+describe("the agreement row over the shadow log (load-harness item 17)", () => {
+  it("counts single-bind agreement against the readers' line and the medians over every decision", () => {
+    const rows: ShadowRow[] = [
+      // Agrees: the operator's one bind is the readers' receipt, whitespace apart.
+      {
+        readers: "runs list --status all",
+        operator: { outcome: "binds", binds: [{ line: "runs  list --status all" }], latencyMs: 100, outputTokens: 30 },
+      },
+      // Disagrees on a typed line: the row holds both, nothing ran from the operator.
+      {
+        readers: "runs list --status all",
+        operator: { outcome: "binds", binds: [{ line: "runs get r1" }], latencyMs: 300, outputTokens: 50 },
+      },
+      // A question and a multi-bind are decisions but not single-bind rows.
+      { readers: "config show", operator: { outcome: "question", latencyMs: 200 } },
+      {
+        operator: { outcome: "binds", binds: [{ line: "a b" }, { line: "c d" }], outputTokens: 10 },
+      },
+    ];
+    const score = agreementScore(rows);
+    expect(score).toEqual({
+      decisions: 4,
+      singleBinds: 2,
+      agreements: 1,
+      medianLatencyMs: 200,
+      medianOutputTokens: 30,
+    });
+    const line = renderAgreement(score);
+    expect(line).toContain("1/2 agree over 4 decision(s)");
+    expect(line).toContain("median bind latency 200 ms");
+    expect(line).toContain("median output 30 token(s)");
+  });
+
+  it("an empty window says so, and an even count of latencies takes the middle pair's mean", () => {
+    expect(renderAgreement(agreementScore([]))).toContain("no shadow decision in the window");
+    expect(median([])).toBeUndefined();
+    expect(median([1, 3])).toBe(2);
+    expect(median([1, 2, 9])).toBe(2);
   });
 });

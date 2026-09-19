@@ -17,6 +17,7 @@ import { registerReviewCommands, type ReviewCommandDeps } from "./review.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./runs.js";
 import { registerScheduleCommands, type ScheduleCommandDeps } from "./schedule.js";
 import { registerSetupCommands, type SetupCommandDeps } from "./setup.js";
+import { registerSteerCommands, type SteerCommandDeps } from "./steer.js";
 import { registerStatusCommands, type StatusCommandDeps } from "./status.js";
 
 // Every command the bot registers, and the deps object they are bound to.
@@ -45,13 +46,15 @@ export type CoreCommandDeps = HelpCommandDeps &
   CostsCommandDeps &
   ProvidersCommandDeps &
   ArtifactsCommandDeps &
-  PlaneCommandDeps;
+  PlaneCommandDeps &
+  SteerCommandDeps;
 
 export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>): void {
   registerHelpCommands(registry);
   registerStatusCommands(registry);
   registerConfigCommands(registry);
   registerRunsCommands(registry);
+  registerSteerCommands(registry);
   registerReviewCommands(registry);
   registerFrictionCommands(registry);
   registerRepoCommands(registry);

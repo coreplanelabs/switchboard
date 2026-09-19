@@ -295,3 +295,50 @@ function withoutThinking(message: ChatMessage): ChatMessage {
   if (content.length === message.content.length) return message;
   return { ...message, content: content.length ? content : [{ type: "text", text: "(reasoning omitted)" }] };
 }
+
+/** The operator's tail cap (the one-door plan's cap rule): 12,000 tokens at
+ *  the same four characters a token the seed budget assumes — a fifth of the
+ *  run seed's 60,000, because the cost arm found the tail, not the projection,
+ *  is the operator's whole cost and latency. The cap ships with the flag so
+ *  the shadow week measures the operator that will go live; the first replay
+ *  with the tail attached may move it. */
+export const OPERATOR_TAIL_TOKENS = 12_000;
+export const OPERATOR_TAIL_BYTES = OPERATOR_TAIL_TOKENS * 4;
+
+/** One turn of the operator's tail: rendered text and whether it is a folded
+ *  report — a child's report folded into the thread — which the cap keeps
+ *  whole ahead of older turns instead of cutting like ordinary history. */
+export interface OperatorTailTurn {
+  text: string;
+  folded?: boolean;
+}
+
+/**
+ * The operator's tail: the thread's turns cut to the cap, oldest first
+ * as the prompt reads them. Until the plan's memory unit re-keys the session log the turns are
+ * the thread's existing per-agent logs read in the order of their runs,
+ * read-only; this function only decides what survives the cap. Folded reports
+ * ride whole ahead of older turns: each is admitted newest-first, whole or
+ * not at all — a report is evidence the operator steers by, and half a report
+ * misleads — then ordinary turns fill what remains, newest-first until one no
+ * longer fits (the tail is the newest contiguous stretch). The kept turns
+ * come back in their original run order.
+ */
+export function operatorTail(turns: readonly OperatorTailTurn[], capBytes = OPERATOR_TAIL_BYTES): OperatorTailTurn[] {
+  let budget = capBytes;
+  const kept = new Set<number>();
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i];
+    if (!t.folded || t.text.length > budget) continue;
+    kept.add(i);
+    budget -= t.text.length;
+  }
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i];
+    if (t.folded) continue;
+    if (t.text.length > budget) break;
+    kept.add(i);
+    budget -= t.text.length;
+  }
+  return turns.filter((_, i) => kept.has(i));
+}
