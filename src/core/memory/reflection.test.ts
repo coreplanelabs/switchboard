@@ -618,6 +618,9 @@ describe("reflect (one extractor call → store.write)", () => {
       async forget(): Promise<boolean> {
         return false;
       },
+      async sweep() {
+        return { ok: true as const, swept: 0, ids: [] };
+      },
     };
     const provider = fakeProvider(goodReply);
     await reflect({ ...base, answer: "x".repeat(10_000), provider, store });

@@ -36,6 +36,10 @@ describe("NullMemoryStore", () => {
     expect(await store.list("org:acme", 10)).toEqual([]);
     expect(await store.forget("org:acme", "mem:org:acme:0")).toBe(false);
   });
+
+  it("sweep answers zero and no ids (nothing stored, nothing to retire)", async () => {
+    expect(await new NullMemoryStore().sweep("org:acme")).toEqual({ ok: true, swept: 0, ids: [] });
+  });
 });
 
 // Feature: docs/reference/specs/memory.md §24 — human controls: list a scope's active
@@ -129,6 +133,86 @@ describe("InMemoryMemoryStore.list / forget", () => {
     const ids = (await store.list("org:acme", 10)).map((r) => r.id);
     expect(ids).toHaveLength(3);
     expect(ids).not.toContain("b");
+  });
+});
+
+// Feature: docs/reference/specs/memory.md item 27 — the sweep: the write
+// gate (`rejectionMarkers`) retires the status rows already stored, once,
+// auditably; `swept` rows are treated exactly as `forgotten` everywhere.
+describe("InMemoryMemoryStore.sweep / swept invisibility", () => {
+  // Six active facts — four carrying markers (paraphrases of the calibration
+  // dry run's rejected side), two lessons — and two summaries (one with a
+  // marked text, to prove summaries are never gated).
+  const seedSweep = () =>
+    new InMemoryMemoryStore(
+      [
+        rec({ id: "m1", createdAt: NOW - 8, text: "pull request 41 was pushed with all 12 tests passing" }),
+        rec({ id: "m2", createdAt: NOW - 7, text: "issue 170 is fixed and pushed on branch plan/some-unit" }),
+        rec({ id: "m3", createdAt: NOW - 6, text: "spec rows now document the idle ending" }),
+        rec({ id: "m4", createdAt: NOW - 5, text: "the change was implemented and is ready for review" }),
+        rec({
+          id: "l1",
+          createdAt: NOW - 4,
+          text: "the license check fails on a tree whose nested node_modules were dropped",
+          keywords: ["license"],
+        }),
+        rec({ id: "l2", createdAt: NOW - 3, text: "npm ci must run before the license check after a version bump" }),
+        rec({ id: "s1", createdAt: NOW - 2, kind: "summary", text: "a thread about the license check" }),
+        rec({ id: "s2", createdAt: NOW - 1, kind: "summary", text: "issue 170 is fixed and pushed" }),
+      ],
+      { now: () => NOW },
+    );
+
+  it("flips exactly the marked active facts to `swept`, leaves lessons and summaries alone, and is idempotent", async () => {
+    const store = seedSweep();
+    expect(await store.sweep("org:acme")).toEqual({ ok: true, swept: 4, ids: ["m1", "m2", "m3", "m4"] });
+    expect((await store.list("org:acme", 10)).map((r) => r.id)).toEqual(["s2", "s1", "l2", "l1"]);
+    expect(await store.sweep("org:acme")).toEqual({ ok: true, swept: 0, ids: [] });
+  });
+
+  it("dryRun answers the marked ids and flips nothing", async () => {
+    const store = seedSweep();
+    expect(await store.sweep("org:acme", { dryRun: true })).toEqual({
+      ok: true,
+      swept: 4,
+      ids: ["m1", "m2", "m3", "m4"],
+    });
+    expect(await store.list("org:acme", 10)).toHaveLength(8);
+  });
+
+  it("a swept row is invisible to retrieve, list, and dedup, and `forget` on it answers false", async () => {
+    const store = seedSweep();
+    await store.sweep("org:acme");
+    expect((await store.list("org:acme", 10)).map((r) => r.id)).not.toContain("m1");
+    expect(
+      (await store.retrieve({ scopeKey: "org:acme", query: "pull request tests passing", limit: 10 })).map((r) => r.id),
+    ).not.toContain("m1");
+    // Not a dedup target: restating a swept text inserts a fresh active record.
+    await expect(
+      store.write("org:acme", [
+        { kind: "fact", text: "spec rows now document the idle ending", sourceThreadKey: "slack:C1:2.0" },
+      ]),
+    ).resolves.toMatchObject({ inserted: 1, deduped: 0 });
+    expect(await store.forget("org:acme", "m1")).toBe(false);
+  });
+
+  it("a swept row does not consume the per-scope cap", async () => {
+    const store = new InMemoryMemoryStore(
+      [
+        rec({ id: "m1", createdAt: NOW - 3, text: "pull request 41 was pushed with all 12 tests passing" }),
+        rec({ id: "m2", createdAt: NOW - 2, text: "spec rows now document the idle ending" }),
+        rec({ id: "l1", createdAt: NOW - 1, text: "npm ci must run before the license check" }),
+      ],
+      { now: () => NOW, cap: 2 },
+    );
+    await store.sweep("org:acme");
+    // A new fact lands beside the one live lesson without tripping the cap of
+    // 2 — the two swept rows neither count nor get evicted.
+    const counts = await store.write("org:acme", [
+      { kind: "fact", text: "a fresh lesson about the deploy command", sourceThreadKey: "slack:C1:2.0" },
+    ]);
+    expect(counts.evicted).toBe(0);
+    expect(await store.list("org:acme", 10)).toHaveLength(2);
   });
 });
 

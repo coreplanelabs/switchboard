@@ -11,6 +11,7 @@ import { callerWith } from "../testing/callers.js";
 import { InMemoryMemoryStore } from "../memory/stores.js";
 import type { MemoryConfig, MemoryRecord, MemoryStore } from "../memory/types.js";
 import { MEMORY_OFF_MESSAGE, registerMemoryCommands, scopeKeyOfMemoryId, type MemoryCommandDeps } from "./memory.js";
+import type { SweepOutcome } from "../memory/types.js";
 
 // Feature: docs/reference/specs/memory.md §24–26 / docs/reference/specs/command-registry.md
 // (phase 4b): `memory list` / `memory forget` as registry commands — deterministic
@@ -245,6 +246,155 @@ describe("memory.list", () => {
       error: "unavailable",
       message: "memory worker 503",
     });
+  });
+});
+
+// Feature: docs/reference/specs/memory.md item 28 — `memory sweep`: the stored
+// status rows retired from a registry command, under `forget`'s scope gate,
+// as one inline run with a per-scope receipt.
+describe("memory.sweep", () => {
+  /** The base seed plus one MARKED record per scope (a status line the write
+   *  gate rejects today); the base records are lessons and stay. */
+  const marked = (scopeKey: string, n: number) =>
+    rec({ id: `mem:${scopeKey}:${n}`, scopeKey, text: "pull request 41 was pushed with all 12 tests passing" });
+  const sweepSeeded = () =>
+    new InMemoryMemoryStore(
+      [
+        ORG(),
+        MINE(),
+        THEIRS(),
+        REPO(),
+        CHAN(),
+        marked("org:acme", 1),
+        marked("user:slack:UALICE", 1),
+        marked("repo:acme/api", 1),
+        marked("channel:slack:C1", 1),
+      ],
+      { now: () => NOW },
+    );
+
+  it("an admin sweeps a shared scope and gets per-scope counts; the lessons stay", async () => {
+    const store = sweepSeeded();
+    const commands = bind(store);
+    const res = await commands.invoke(
+      "memory.sweep",
+      { options: { scope: "repo", repo: "acme/api" } },
+      chat("slack:UADMIN", { admin: true }),
+    );
+    expect(res).toMatchObject({
+      ok: true,
+      value: { dryRun: false, scopes: [{ key: "repo:acme/api", label: "this repo's records", swept: 1 }] },
+    });
+    expect(renderText(commands.get("memory.sweep")!, res.ok ? res.value : null)).toBe(
+      "🧹 Swept 1 status record(s); the rows are kept for provenance.\n• *this repo's records* (`repo:acme/api`): 1",
+    );
+    expect((await store.list("repo:acme/api", 10)).map((r) => r.id)).toEqual(["mem:repo:acme/api:0"]);
+    // Idempotent: a second sweep answers 0.
+    const again = await commands.invoke(
+      "memory.sweep",
+      { options: { scope: "repo", repo: "acme/api" } },
+      chat("slack:UADMIN", { admin: true }),
+    );
+    expect(again).toMatchObject({ ok: true, value: { scopes: [{ swept: 0 }] } });
+  });
+
+  it("`--scope all` sweeps every scope the request has, org last, with one count per scope", async () => {
+    const store = sweepSeeded();
+    const res = await bind(store).invoke(
+      "memory.sweep",
+      { options: { scope: "all" } },
+      chat("slack:UADMIN", { admin: true, repo: "acme/api" }),
+    );
+    expect(res).toMatchObject({
+      ok: true,
+      value: {
+        scopes: [
+          { key: "user:slack:UADMIN", swept: 0 },
+          { key: "repo:acme/api", swept: 1 },
+          { key: "channel:slack:C1", swept: 1 },
+          { key: "org:acme", swept: 1 },
+        ],
+      },
+    });
+  });
+
+  it("a shared scope (org, repo, channel, all) is refused for a non-admin exactly as `forget` is; nothing is swept", async () => {
+    for (const options of [
+      { scope: "org" },
+      { scope: "repo", repo: "acme/api" },
+      { scope: "channel" },
+      { scope: "all" },
+    ]) {
+      const store = sweepSeeded();
+      const res = await bind(store).invoke("memory.sweep", { options }, chat("slack:UALICE"));
+      expect(res, options.scope).toMatchObject({
+        ok: false,
+        error: "unauthorized",
+        decidedBy: "handler",
+        message: expect.stringContaining("repo-management rights"),
+      });
+      expect(await store.list("org:acme", 10), options.scope).toHaveLength(2);
+      expect(await store.list("user:slack:UALICE", 10), options.scope).toHaveLength(2);
+    }
+    // The CLI holds every grant, like `forget`.
+    const store = sweepSeeded();
+    expect((await bind(store).invoke("memory.sweep", { options: { scope: "org" } }, cli)).ok).toBe(true);
+  });
+
+  it("`--scope me` is always allowed and sweeps only the caller's own marked records", async () => {
+    const store = sweepSeeded();
+    const res = await bind(store).invoke("memory.sweep", { options: { scope: "me" } }, chat("slack:UALICE"));
+    expect(res).toMatchObject({ ok: true, value: { scopes: [{ key: "user:slack:UALICE", swept: 1 }] } });
+    expect((await store.list("user:slack:UALICE", 10)).map((r) => r.id)).toEqual(["mem:user:slack:UALICE:0"]);
+    expect(await store.list("org:acme", 10)).toHaveLength(2); // untouched
+  });
+
+  it("`--dry-run` reports the marked ids and changes nothing", async () => {
+    const store = sweepSeeded();
+    const commands = bind(store);
+    const res = await commands.invoke(
+      "memory.sweep",
+      { options: { scope: "org", dryRun: "true" } },
+      chat("slack:UADMIN", { admin: true }),
+    );
+    expect(res).toMatchObject({
+      ok: true,
+      value: { dryRun: true, scopes: [{ key: "org:acme", swept: 1, ids: ["mem:org:acme:1"] }] },
+    });
+    expect(renderText(commands.get("memory.sweep")!, res.ok ? res.value : null)).toBe(
+      "🧹 Dry run — 1 status record(s) would be swept; nothing changed.\n• *shared org records* (`org:acme`): 1 — `mem:org:acme:1`",
+    );
+    expect(await store.list("org:acme", 10)).toHaveLength(2);
+  });
+
+  it("memory disabled → says so and touches no store; a machine caller needs memory:write", async () => {
+    const store = sweepSeeded();
+    store.sweep = async () => {
+      throw new Error("must not be called");
+    };
+    expect(
+      await bind(store, { enabled: false }).invoke("memory.sweep", { options: { scope: "me" } }, chat("slack:UALICE")),
+    ).toMatchObject({ ok: false, error: "unavailable", message: MEMORY_OFF_MESSAGE });
+    expect(
+      await bind(sweepSeeded()).invoke("memory.sweep", { options: { scope: "me" } }, mcp("memory:read")),
+    ).toMatchObject({ ok: false, error: "unauthorized" });
+  });
+
+  it("a store failure — the reported `{ok: false}` of an older Worker's 404, or a throw — is `unavailable`, never a crash", async () => {
+    const store = sweepSeeded();
+    store.sweep = async (): Promise<SweepOutcome> => ({ ok: false, error: "memory worker /sweep HTTP 404: not found" });
+    expect(await bind(store).invoke("memory.sweep", { options: { scope: "me" } }, chat("slack:UALICE"))).toMatchObject({
+      ok: false,
+      error: "unavailable",
+      message: "memory worker /sweep HTTP 404: not found",
+    });
+    const thrower = sweepSeeded();
+    thrower.sweep = async () => {
+      throw new Error("memory worker down");
+    };
+    expect(
+      await bind(thrower).invoke("memory.sweep", { options: { scope: "me" } }, chat("slack:UALICE")),
+    ).toMatchObject({ ok: false, error: "unavailable", message: "memory worker down" });
   });
 });
 

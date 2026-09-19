@@ -5,9 +5,10 @@ import type {
   MemoryQuery,
   MemoryRecord,
   MemoryStore,
+  SweepOutcome,
   WriteCounts,
 } from "./types.js";
-import { DEFAULT_SCOPE_CAP, mintRecord, planEviction, planWrite, rankRecords } from "./engine.js";
+import { DEFAULT_SCOPE_CAP, mintRecord, planEviction, planWrite, rankRecords, rejectionMarkers } from "./engine.js";
 import { keywordMatch, tokenize } from "./scorer.js";
 
 // Three implementations of the MemoryStore seam (AGENTS.md invariant 2): the
@@ -33,6 +34,9 @@ export class NullMemoryStore implements MemoryStore {
   }
   async forget(_scopeKey: string, _id: string): Promise<boolean> {
     return false;
+  }
+  async sweep(_scopeKey: string, _opts?: { dryRun?: boolean }): Promise<SweepOutcome> {
+    return { ok: true, swept: 0, ids: [] }; // intentionally nothing
   }
 }
 
@@ -127,6 +131,18 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (!target) return false;
     target.status = "forgotten"; // soft delete: provenance stays auditable
     return true;
+  }
+
+  async sweep(scopeKey: string, opts: { dryRun?: boolean } = {}): Promise<SweepOutcome> {
+    // The same gate the write path runs (rejectionMarkers): every ACTIVE fact
+    // carrying a marker is retired; summaries are never gated, so never swept.
+    const marked = this.bucket(scopeKey).filter(
+      (r) => r.status === "active" && r.kind === "fact" && rejectionMarkers(r.text).length > 0,
+    );
+    if (opts.dryRun !== true) {
+      for (const r of marked) r.status = "swept"; // soft delete: provenance stays auditable
+    }
+    return { ok: true, swept: marked.length, ids: marked.map((r) => r.id) };
   }
 }
 

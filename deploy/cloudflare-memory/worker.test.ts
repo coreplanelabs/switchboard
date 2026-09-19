@@ -385,6 +385,73 @@ describe("list / forget (human controls)", () => {
   });
 });
 
+// Feature: docs/reference/specs/memory.md item 27 — `/sweep`: the write gate
+// (`rejectionMarkers`, the shared engine the Worker bundles) retires the
+// status rows already stored, in one transaction, idempotently.
+describe("sweep (status-row retirement)", () => {
+  /** Six facts — four marked (paraphrases of the dry run's rejected side), two
+   *  lessons — and two summaries (one with marked text: summaries are never gated). */
+  const seed = (s: string) =>
+    post("/write", {
+      scopeKey: s,
+      records: [
+        cand("pull request 41 was pushed with all 12 tests passing"),
+        cand("issue 170 is fixed and pushed on branch plan/some-unit"),
+        cand("spec rows now document the idle ending"),
+        cand("the change was implemented and is ready for review"),
+        cand("the license check fails on a tree whose nested node_modules were dropped"),
+        cand("npm ci must run before the license check after a version bump"),
+        cand("a thread about the license check", { kind: "summary" }),
+        cand("issue 170 is fixed and pushed", { kind: "summary" }),
+      ],
+    });
+
+  it("flips exactly the marked active facts to `swept`, answers the count, leaves lessons and summaries alone, and a second call answers 0", async () => {
+    const s = scope();
+    await seed(s);
+    const first = await post("/sweep", { scopeKey: s });
+    expect(first.status).toBe(200);
+    expect(first.data).toEqual({ ok: true, swept: 4 });
+    const left = (await post("/list", { scopeKey: s, limit: 10 })).data.records as Array<Record<string, unknown>>;
+    expect(left.map((r) => r.text)).toEqual([
+      "issue 170 is fixed and pushed",
+      "a thread about the license check",
+      "npm ci must run before the license check after a version bump",
+      "the license check fails on a tree whose nested node_modules were dropped",
+    ]);
+    expect((await post("/sweep", { scopeKey: s })).data).toEqual({ ok: true, swept: 0 });
+  });
+
+  it("dryRun answers the marked ids and flips nothing", async () => {
+    const s = scope();
+    await seed(s);
+    const dry = await post("/sweep", { scopeKey: s, dryRun: true });
+    expect(dry.data).toEqual({ ok: true, swept: 4, ids: [`mem:${s}:0`, `mem:${s}:1`, `mem:${s}:2`, `mem:${s}:3`] });
+    expect(((await post("/list", { scopeKey: s, limit: 10 })).data.records as unknown[]).length).toBe(8);
+  });
+
+  it("a swept row is invisible to /retrieve, /list and dedup, and /forget on it answers false", async () => {
+    const s = scope();
+    await seed(s);
+    await post("/sweep", { scopeKey: s });
+    // "passing" is a token only the swept pull-request record carries.
+    expect(
+      ((await post("/retrieve", { scopeKey: s, query: "passing", limit: 8 })).data.records as unknown[]).length,
+    ).toBe(0);
+    // Not a dedup target any more: restating the swept text inserts fresh.
+    expect(
+      (await post("/write", { scopeKey: s, records: [cand("spec rows now document the idle ending")] })).data,
+    ).toMatchObject({ inserted: 1, deduped: 0 });
+    expect((await post("/forget", { scopeKey: s, id: `mem:${s}:0` })).data).toEqual({ ok: true, forgotten: false });
+  });
+
+  it("validates the body (bad scopeKey / non-boolean dryRun → 400) and requires the bearer", async () => {
+    expect((await post("/sweep", { scopeKey: "has space" })).status).toBe(400);
+    expect((await post("/sweep", { scopeKey: scope(), dryRun: "yes" })).status).toBe(400);
+    expect((await post("/sweep", { scopeKey: scope() }, { "content-type": "application/json" })).status).toBe(401);
+  });
+});
+
 describe("dedup / supersede (shared engine rules)", () => {
   it("dedups identical normalized text: bumps useCount, inserts nothing", async () => {
     const s = scope();
