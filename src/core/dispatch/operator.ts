@@ -148,6 +148,11 @@ export interface OperatorInput {
   /** The pending question of the thread's last turn, when one is open: its
    *  proposed line, so "yes" binds it (`bindFromAnswer`). */
   pendingQuestion?: { proposal: string };
+  /** Whether the registry parses a line into an invocation — the seam's bind
+   *  guard reads it (record 0067, amended: a bound line the registry cannot
+   *  parse is a violation, re-asked, never a dead hand-back). Absent (no
+   *  registry wired) skips that check. */
+  registryParses?: (line: string) => boolean;
 }
 
 /**
@@ -263,15 +268,54 @@ export function quoteTurn(text: string): string {
   return text.replace(/<(\/?)turn>/gi, "\u2039$1turn\u203a");
 }
 
+/** The seam's bind guard (record 0067, amended on issue 1993's production
+ *  evidence): the person's request, the projection's preset names and the
+ *  registry's parse — so a bound line the registry cannot parse and a preset
+ *  bind that drops the request's own words (a paraphrase or flags in place of
+ *  the person's text) are violations the seam re-asks and then floors to
+ *  `non_decision`, never dead hand-backs the person must retype. Judged over
+ *  the RAW line, before the receipt cut, so a long request still matches. */
+export interface OperatorBindGuard {
+  requestText: string;
+  presets: readonly string[];
+  /** Whether the registry parses the line into an invocation; absent (no
+   *  registry wired) skips the cannot-parse check. */
+  parses?: (line: string) => boolean;
+}
+
+/** One bind's violation under the guard, or none: a preset bind must carry
+ *  the request's own words verbatim (the route runs the preset on those
+ *  words — a paraphrase or flags drop the task), and any other line must be
+ *  one the registry parses (when a registry is wired to ask). */
+function bindViolationOf(line: string, ordinal: number, guard: OperatorBindGuard): string | undefined {
+  // The registry is read first, mirroring the execute path: a command whose
+  // group shares a preset's name (`review abridge <run>`) is that command.
+  if (guard.parses?.(line)) return undefined;
+  const preset = presetBindOf(line, guard.presets);
+  if (preset !== undefined) {
+    const words = oneLine(guard.requestText).trim();
+    if (words.length > 0 && !oneLine(line).includes(words))
+      return `bind ${ordinal} names the preset "${preset}" but drops the request's own words; bind the preset on the request verbatim`;
+    return undefined;
+  }
+  if (guard.parses)
+    return `bind ${ordinal} is a line the registry cannot parse; bind a listed command, a preset on the request, or steer`;
+  return undefined;
+}
+
 /**
  * The seam's answer as a decision. Fail closed: a decision that mixes binds
  * with a question or a refusal is a `non_decision` — nothing runs from a
  * shape the schema forbade — and so is another tool, prose that is not one
  * JSON object, or an empty decision; each names what came back, so the
  * structured seam can quote the violation back (record 0067) and a broken
- * operator is legible on the record as re-asks.
+ * operator is legible on the record as re-asks. Under a guard, so is a bound
+ * line the registry cannot parse and a preset bind that drops the request's
+ * own words (`bindViolationOf` — issue 1993's production evidence: every
+ * plain-words coding ask bound to a ship line without the person's words,
+ * each handed back dead).
  */
-export function parseOperatorDecision(answer: RouteToolCall | string): OperatorDecision {
+export function parseOperatorDecision(answer: RouteToolCall | string, guard?: OperatorBindGuard): OperatorDecision {
   const refused = (why: string): OperatorDecision => ({ kind: "non_decision", reason: tidy(why) });
   let input: unknown;
   if (typeof answer === "string") {
@@ -297,6 +341,10 @@ export function parseOperatorDecision(answer: RouteToolCall | string): OperatorD
     for (const [i, b] of binds.entries()) {
       const { line, reason: why } = (typeof b === "object" && b !== null ? b : {}) as Record<string, unknown>;
       if (typeof line !== "string" || line.trim().length === 0) return refused(`bind ${i + 1} has no line`);
+      if (guard) {
+        const violation = bindViolationOf(line, i + 1, guard);
+        if (violation !== undefined) return refused(violation);
+      }
       out.push({ line: operatorLine(line), reason: tidy(why) });
     }
     return { kind: "binds", binds: out, reason: tidy(reason) };
@@ -379,11 +427,16 @@ export async function runOperator(
   // The answers' size, summed over the attempts: the replay's token rows read
   // the whole turn's estimate (three characters a token, as ever).
   let chars = 0;
+  const guard: OperatorBindGuard = {
+    requestText: input.text,
+    presets: input.projection.presets.map((p) => p.name),
+    ...(input.registryParses ? { parses: input.registryParses } : {}),
+  };
   const parse = (
     answer: RouteToolCall | string,
   ): { ok: true; value: OperatorDecision } | { ok: false; violation: string } => {
     chars += (typeof answer === "string" ? answer : JSON.stringify(answer.input)).length;
-    const decision = parseOperatorDecision(answer);
+    const decision = parseOperatorDecision(answer, guard);
     return decision.kind === "non_decision" ? { ok: false, violation: decision.reason } : { ok: true, value: decision };
   };
   try {
@@ -567,9 +620,21 @@ export async function operatorStage(
       ? { proposal: newest.operator.proposal }
       : undefined;
   const yes = pending ? bindFromAnswer(msg.text, pending) : undefined;
+  const commands = deps.commands;
   const answer: OperatorAnswer = yes
     ? { decision: { kind: "binds", binds: [yes], reason: yes.reason }, latencyMs: 0, outputTokens: 0 }
-    : await runOperator({ text: msg.text, projection, tail, ...(pending ? { pendingQuestion: pending } : {}) }, model);
+    : await runOperator(
+        {
+          text: msg.text,
+          projection,
+          tail,
+          ...(pending ? { pendingQuestion: pending } : {}),
+          ...(commands
+            ? { registryParses: (line: string) => parseChatCommand(line, commands)?.kind === "invoke" }
+            : {}),
+        },
+        model,
+      );
   return operatorEventOf(mode, answer, ctx.intake);
 }
 

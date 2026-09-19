@@ -9593,10 +9593,12 @@ workspaceDir: __WORKDIR__
     "routing: { auto: false, operator: off }",
     "routing: { auto: false, operator: on }",
   );
-  const shipOperator = () =>
+  // The bound line carries the request's own words: a bare `ship` is the
+  // seam's violation now (record 0067 as amended), never a decision.
+  const shipOperator = (line: string) =>
     vi.fn<RouteModel>(async () => ({
       tool: "decide",
-      input: { reason: "a change to land", binds: [{ line: "ship", reason: "the ask" }] },
+      input: { reason: "a change to land", binds: [{ line, reason: "the ask" }] },
     }));
   const shipVerifierAgrees = () =>
     vi.fn<RouteModel>(async () => ({ tool: "verify", input: { agrees: true, reason: "the author asked" } }));
@@ -9606,7 +9608,7 @@ workspaceDir: __WORKDIR__
     deps.githubApi = new InMemoryGithubApi({
       "acme/api": { files: { "docs/plans/fixture.md": "### U10. First unit\n- **Dependencies**: none\n" } },
     });
-    deps.operatorModel = shipOperator();
+    deps.operatorModel = shipOperator("ship plan docs/plans/fixture.md");
     deps.verifierModel = shipVerifierAgrees();
     const registry = new RunRegistry({ genId: () => "run-shipopseed", genToken: () => "tok" });
     deps.runRegistry = registry;
@@ -9622,7 +9624,7 @@ workspaceDir: __WORKDIR__
 
   it("an operator-bound ship on a task hands off merge: person, the run's run_meta reads agentSource operator and the decision's event rides the ship run", async () => {
     const { deps, instances, created } = shipDeps(SHIP_OPERATOR_YAML);
-    deps.operatorModel = shipOperator();
+    deps.operatorModel = shipOperator("ship fix the login redirect");
     deps.verifierModel = shipVerifierAgrees();
     const registry = new RunRegistry({ genId: () => "run-shipop", genToken: () => "tok" });
     deps.runRegistry = registry;
@@ -9641,7 +9643,7 @@ workspaceDir: __WORKDIR__
     expect(events.find((e) => e.type === "operator")).toMatchObject({
       mode: "on",
       outcome: "binds",
-      binds: [{ line: "ship", reason: "the ask" }],
+      binds: [{ line: "ship fix the login redirect", reason: "the ask" }],
     });
   });
 
@@ -17939,23 +17941,28 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     deps.operatorModel = decides({
       reason: "a hand-back then a read",
       binds: [
-        { line: "not a command at all", reason: "unparseable" },
+        { line: "config set me --agent review", reason: "a write the ladder holds" },
         { line: "config show", reason: "the scopes" },
       ],
     });
+    deps.verifierModel = vi.fn<RouteModel>(async () => ({ tool: "verify", input: { agrees: true, reason: "asked" } }));
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("do both", "slack:UADMIN"), io);
     expect(deps.invoked).toEqual(["config.show"]);
-    expect(replies.some((r) => r.includes("`not a command at all`"))).toBe(true);
+    expect(replies.some((r) => r.includes("`config set me --agent review`"))).toBe(true);
     // The first bind ran nothing: the event rides the run of the bind that ran.
     const ran = registry.snapshotById("r1")!;
     expect(ran.events.find((e) => e.type === "operator")).toMatchObject({ outcome: "binds" });
 
     const { deps: handed, registry: handedRegistry } = operatorDeps(ON_YAML);
     handed.operatorModel = decides({
-      reason: "nothing parses",
-      binds: [{ line: "still not a command", reason: "unparseable" }],
+      reason: "one held write",
+      binds: [{ line: "config set me --agent review", reason: "a write the ladder holds" }],
     });
+    handed.verifierModel = vi.fn<RouteModel>(async () => ({
+      tool: "verify",
+      input: { agrees: true, reason: "asked" },
+    }));
     await dispatch(handed, msg("try it", "slack:UADMIN"), fakeIO().io);
     expect(handed.invoked).toEqual([]);
     const record = handedRegistry.snapshotById("r1")!;
@@ -18163,7 +18170,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     wireCommands(deps);
     deps.operatorModel = decides({
       reason: "the brief asks for an investigation",
-      binds: [{ line: "agent:explore investigate the flaky suite", reason: "the brief asks" }],
+      binds: [{ line: "agent:explore what changed this week?", reason: "the brief asks" }],
     });
     deps.verifierModel = disagrees("no author turn asked for an investigation");
     const { io, replies } = fakeIO();
@@ -18171,7 +18178,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(deps.invoked).toEqual([]);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("To run it, type the line yourself:");
-    expect(replies[0]).toContain("`agent:explore investigate the flaky suite`");
+    expect(replies[0]).toContain("`agent:explore what changed this week?`");
     expect(replies[0]).not.toContain("Did you mean:");
     expect(replies[0]).not.toContain(HAND_BACK_PREFIX);
     // No run started: the door record alone.
@@ -18196,7 +18203,10 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   });
 
   it("on: a bind naming a preset — `agent:<preset>` or the bare name — starts that preset's run on the person's own words, never the line's paraphrase; the receipt carries the verifier's line, the run carries the decision and agentSource operator", async () => {
-    for (const line of ["agent:general what changed", "general"]) {
+    for (const line of [
+      "agent:general what changed this week in acme/repo?",
+      "general what changed this week in acme/repo?",
+    ]) {
       const { deps, registry, provider } = operatorDeps(ON_YAML);
       wireCommands(deps);
       deps.operatorModel = decides({ reason: "a question for the assistant", binds: [{ line, reason: "the ask" }] });
@@ -18236,7 +18246,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     deps.operatorModel = decides({
       reason: "the assistant, then a listing",
       binds: [
-        { line: "general", reason: "the question" },
+        { line: "general what changed, and list the runs", reason: "the question" },
         { line: "runs list", reason: "the listing" },
       ],
     });
@@ -18256,7 +18266,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       reason: "a listing, then the assistant",
       binds: [
         { line: "runs list", reason: "the listing" },
-        { line: "general", reason: "the question" },
+        { line: "general list the runs, then what changed", reason: "the question" },
       ],
     });
     deps.verifierModel = agrees("asked");
