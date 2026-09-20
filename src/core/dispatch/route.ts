@@ -87,6 +87,7 @@ import {
   STORE_UNREACHABLE_NOTE,
   UNSHOWABLE_LINE,
   type Confirmation,
+  type ConfirmationStore,
 } from "../confirmations.js";
 import { askStructured, attemptsOfThrow, type StructuredAttempt } from "./structured.js";
 import { repoFromThread } from "../repoContext.js";
@@ -1553,6 +1554,67 @@ async function answerCommand(
  * expiry; a store that cannot be reached costs the button and nothing else:
  * the hand-back goes out with one sentence saying so, recorded as a hand-back.
  */
+/** How record 0044's mint answered: the offer to show, or why the text
+ *  hand-back stands instead — no click to show (`no_click`: the channel has no
+ *  `offer`, or the process no store), a line redaction would alter
+ *  (`unshowable`: nothing is minted), or a store unreachable at the mint
+ *  (`store_unreachable`: the button is lost and nothing else). */
+export type ConfirmationMint =
+  | { kind: "offered"; shown: ConfirmationOffer }
+  | { kind: "no_click" }
+  | { kind: "unshowable" }
+  | { kind: "store_unreachable" };
+
+/**
+ * Record 0044's mint for a bound command the door will not run (routing-and-config
+ * item 25): when the channel can show a click and the process holds the
+ * confirmation store, the row — `{ kind: "run", … }` with the connect ticket's
+ * ten-minute ttl — and the offer showing the FULL chat form (uncapped: a line
+ * the person cannot read in full is not a confirmation; the record keeps the
+ * capped receipt). The ONE road for a bound write the door holds — the routed
+ * write's (`answerHandBack`) and the operator's write bind's
+ * (`executeOperatorDecision`, item 29) — so the same row, the same Yes handler
+ * and the same expiry answer both, and the plain `To run this:` text remains
+ * only where no channel can show a click.
+ */
+export async function mintConfirmationOffer(args: {
+  io: ChannelIO;
+  store: ConfirmationStore | undefined;
+  msg: IncomingMessage;
+  def: CommandDef<unknown>;
+  input: CommandInput;
+  receipt: string;
+  model: string;
+}): Promise<ConfirmationMint> {
+  const { io, store, msg, def, input, receipt, model } = args;
+  if (!io.offer || !store) return { kind: "no_click" };
+  const line = chatInvocation(def, input);
+  if (redactSecrets(line) !== line) return { kind: "unshowable" };
+  const risk = def.annotations?.risk?.(input) ?? "";
+  let row: Confirmation;
+  try {
+    row = await store.put(
+      {
+        kind: "run",
+        id: newConfirmationId(),
+        message: confirmationMessageOf(msg),
+        command: def.id,
+        input,
+        receipt,
+        risk,
+        model,
+      },
+      CONFIRMATION_TTL_MS,
+    );
+  } catch (err) {
+    console.warn(
+      `[route] ${msg.threadKey} confirmation store unreachable at mint, handing back: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { kind: "store_unreachable" };
+  }
+  return { kind: "offered", shown: { id: row.id, line, risk, expiresAt: row.expiresAt } };
+}
+
 async function answerHandBack(
   branch: CommandBranchContext,
   msg: IncomingMessage,
@@ -1581,36 +1643,24 @@ async function answerHandBack(
   // never is): the hand-back gains the cut note as a second line.
   const cut = receipt.length > ROUTE_RECEIPT_CAP;
   const handBack = cut ? `${HAND_BACK_PREFIX} ${receipt}\n${HAND_BACK_CUT_NOTE}` : `${HAND_BACK_PREFIX} ${receipt}`;
-  const store = deps.confirmations;
-  if (!io.offer || !store) return answer(handBack, "hand_back", () => io.reply(handBack));
-  const line = chatInvocation(def, input);
-  if (redactSecrets(line) !== line) return answer(UNSHOWABLE_LINE, "hand_back", () => io.reply(UNSHOWABLE_LINE));
-  const risk = def.annotations?.risk?.(input) ?? "";
-  let row: Confirmation;
-  try {
-    row = await store.put(
-      {
-        kind: "run",
-        id: newConfirmationId(),
-        message: confirmationMessageOf(msg),
-        command: def.id,
-        input,
-        receipt,
-        risk,
-        model: route.model,
-      },
-      CONFIRMATION_TTL_MS,
-    );
-  } catch (err) {
-    console.warn(
-      `[route] ${msg.threadKey} confirmation store unreachable at mint, handing back: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  const mint = await mintConfirmationOffer({
+    io,
+    store: deps.confirmations,
+    msg,
+    def,
+    input,
+    receipt,
+    model: route.model,
+  });
+  if (mint.kind === "no_click") return answer(handBack, "hand_back", () => io.reply(handBack));
+  if (mint.kind === "unshowable") return answer(UNSHOWABLE_LINE, "hand_back", () => io.reply(UNSHOWABLE_LINE));
+  if (mint.kind === "store_unreachable") {
     const text = `${handBack}\n${STORE_UNREACHABLE_NOTE}`;
     return answer(text, "hand_back", () => io.reply(text));
   }
-  const shown: ConfirmationOffer = { id: row.id, line, risk, expiresAt: row.expiresAt };
+  const shown = mint.shown;
   console.log(
-    `[route] ${msg.threadKey} offered ${def.id} as confirmation ${row.id} (confirm asked by ${confirm.scope})`,
+    `[route] ${msg.threadKey} offered ${def.id} as confirmation ${shown.id} (confirm asked by ${confirm.scope})`,
   );
   // The Block Kit goes out through the reply stage's one offer renderer
   // (record 0054): the same shape as before, one seam for the unit that gives
