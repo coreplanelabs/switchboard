@@ -186,7 +186,10 @@ export interface WeekRow extends DeliveryIndicators {
   prs: number[];
 }
 
-export interface UnitRow extends DeliveryIndicators {
+/** One row per board issue the pull requests link — the report's "Issues:"
+ *  block and the Delivery page's table. The JSON field stays `units` (a served
+ *  shape older readers hold); only the words are the issue's. */
+export interface IssueRow extends DeliveryIndicators {
   /** The board issue, or null for the pull requests no issue claims. */
   issue: number | null;
   title: string;
@@ -198,7 +201,7 @@ export interface DeliveryReport {
   repo: string;
   range: DeliveryRange;
   weeks: WeekRow[];
-  units: UnitRow[];
+  units: IssueRow[];
   prs: PullRequestRow[];
   totals: DeliveryIndicators;
   identities: DeliveryIdentities;
@@ -448,7 +451,7 @@ export function buildDeliveryReport(input: DeliveryInput): DeliveryReport {
     const key = p.issue?.number ?? null;
     byIssue.set(key, [...(byIssue.get(key) ?? []), p]);
   }
-  const units: UnitRow[] = [...byIssue.entries()]
+  const units: IssueRow[] = [...byIssue.entries()]
     .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : a - b))
     .map(([issue, rows]) => {
       const first = rows.find((r) => r.issue !== undefined)?.issue;
@@ -572,7 +575,7 @@ function coverage(report: DeliveryReport): string {
   return `the newest ${report.totals.prsMerged} pull requests only${from}`;
 }
 
-/** One block per week, then the units — single-spaced lines, so chat carries them as they are. */
+/** One block per week, then the issues — single-spaced lines, so chat carries them as they are. */
 export function renderDeliveryReport(report: DeliveryReport, nowMs: number = systemClock()): string {
   const lines: string[] = [
     [
@@ -597,7 +600,7 @@ export function renderDeliveryReport(report: DeliveryReport, nowMs: number = sys
     );
   }
   if (report.units.length > 0) {
-    lines.push("", "Units:");
+    lines.push("", "Issues:");
     for (const u of report.units) {
       const prs = `${u.prs.length === 1 ? "PR" : "PRs"} ${u.prs.join(", ")}`;
       const who = u.issue === null ? "(no issue)" : `${u.issue} ${u.title}`;

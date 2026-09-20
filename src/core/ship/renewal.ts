@@ -66,12 +66,12 @@ export function progressOf(input: ProgressInput): Progress {
     const moved = startHead === undefined || !sameSha(last.sha, startHead);
     if (newerThanLease && moved) return { progressed: true, by: "push", sha: last.sha };
   }
-  const pushWhy = `no head newer than the lease's start was pushed to \`${input.branch}\``;
+  const pushWhy = `no head newer than the budget's start was pushed to \`${input.branch}\``;
   if (input.handoff === undefined) return { progressed: false, why: pushWhy };
   const { previous, current } = input.handoff;
   if (current.followUps.length < previous.followUps.length || current.deviations.length > previous.deviations.length)
     return { progressed: true, by: "handoff" };
-  return { progressed: false, why: `${pushWhy} and the handoff is unchanged` };
+  return { progressed: false, why: `${pushWhy} and the write-up is unchanged` };
 }
 
 export interface RenewalInput {
@@ -104,8 +104,10 @@ export function renewalDecision(input: RenewalInput): RenewalDecision {
   if (renewalsLeft === 0) {
     const detail =
       input.grant.renewals === 0
-        ? "the grant holds no renewals"
-        : `the grant's ${input.grant.renewals} renewal${input.grant.renewals === 1 ? " is" : "s are"} spent`;
+        ? "no renewals were granted"
+        : input.grant.renewals === 1
+          ? "the 1 renewal granted is spent"
+          : `all ${input.grant.renewals} renewals granted are spent`;
     return { renew: false, why: "grant_exhausted", detail, renewalsLeft };
   }
   const cap = input.grant.costCapUsd;
@@ -114,14 +116,14 @@ export function renewalDecision(input: RenewalInput): RenewalDecision {
       return {
         renew: false,
         why: "cost_cap",
-        detail: `spend is unknown (a model had no price) under the grant's cap of $${cap}`,
+        detail: `spend is unknown (a model had no price) under the budget's cost cap of $${cap}`,
         renewalsLeft,
       };
     if (input.spendUsd >= cap)
       return {
         renew: false,
         why: "cost_cap",
-        detail: `spend ${usd(input.spendUsd)} reached the grant's cap of $${cap}`,
+        detail: `spend ${usd(input.spendUsd)} reached the budget's cost cap of $${cap}`,
         renewalsLeft,
       };
   }
@@ -130,7 +132,7 @@ export function renewalDecision(input: RenewalInput): RenewalDecision {
     return {
       renew: false,
       why: "unfit",
-      detail: `a ${held.have}-minute segment cannot hold the ship loop (${input.pipeline.maxRounds} review rounds need ${held.need} min)`,
+      detail: `a ${held.have}-minute budget cannot hold the ship loop (${input.pipeline.maxRounds} review rounds need ${held.need} min)`,
       renewalsLeft,
     };
   return {
@@ -141,23 +143,23 @@ export function renewalDecision(input: RenewalInput): RenewalDecision {
   };
 }
 
-/** The card's words (the record's trace, steps 4 and 9): a renewal names its
- *  number of the grant's and the sha it continues from; a stop names the
- *  clause and, when renewals remain, what actually spends one — a segment's
- *  progress — and the honest recourse (re-issue the request). It teaches no
- *  keyword: the router has none (routing-and-config item 3). */
+/** The card's words in the budget noun's (record 0066, "Records this design
+ *  amends"): a renewal reads `budget renewed, N of M, continues <sha>`; a stop
+ *  names the clause and, when renewals remain, what actually spends one — a
+ *  budget that made progress — and the honest recourse (re-issue the request).
+ *  It teaches no keyword: the router has none (routing-and-config item 3). */
 export function renderRenewal(decision: RenewalDecision, grant: Grant): string {
   if (decision.renew)
-    return `renewal ${decision.segment - 1} of ${grant.renewals}, continues ${decision.from !== undefined ? decision.from.slice(0, 7) : "the branch's head"}`;
+    return `budget renewed, ${decision.segment - 1} of ${grant.renewals}, continues ${decision.from !== undefined ? decision.from.slice(0, 7) : "the branch's head"}`;
   const holds =
     decision.renewalsLeft > 0
-      ? `grant holds ${decision.renewalsLeft} renewal${decision.renewalsLeft === 1 ? "" : "s"}`
-      : "the grant holds no renewals";
+      ? `${decision.renewalsLeft} renewal${decision.renewalsLeft === 1 ? "" : "s"} left`
+      : "no renewals left";
   switch (decision.why) {
     case "no_progress":
       return decision.renewalsLeft > 0
-        ? `no progress in the last lease; ${holds} unspent — a renewal is spent only by a segment that pushed to the unit's branch or moved its handoff; re-issue the request to try again`
-        : `no progress in the last lease; ${holds}`;
+        ? `no progress on the last budget; ${holds} unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; re-issue the request to try again`
+        : `no progress on the last budget; ${holds}`;
     case "cost_cap":
       return decision.renewalsLeft > 0 ? `${decision.detail}; ${holds} unspent` : decision.detail;
     case "grant_exhausted":

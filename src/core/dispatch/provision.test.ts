@@ -789,7 +789,7 @@ describe("budgetClipLabel — the card's budget line", () => {
     const coding = getAgent("coding");
     const clipped = { ...declaredProfile(coding), minutes: 45, boundedBy: "directive" as const };
     expect(budgetClipLabel(coding, clipped, 45, { coordinator: true })).toBe(
-      "budget 45 min (carved by the plan runner from the pipeline's remaining clock; preset asks 90)",
+      "budget 45 min (carved from the pipeline's remaining clock; preset asks 90)",
     );
     expect(budgetClipLabel(coding, clipped, 45, { coordinator: false })).toBe(
       "budget 45 min (budget directive; preset asks 90)",

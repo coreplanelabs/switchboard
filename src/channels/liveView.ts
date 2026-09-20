@@ -321,7 +321,7 @@ const NOT_FOUND = "run not found";
  *  capability stops nothing on it), the tokenless route for soft (the escape
  *  is `mode=hard`, which seals the run failed and releases its thread). */
 const HOSTED_STOP =
-  "this run hosts a ship pipeline — its units run elsewhere, so a stop here ends nothing; an operator's hard stop seals it failed and releases the thread";
+  "this run is a pipeline; its units run in their own threads, so a stop here ends nothing; an operator's hard stop seals it failed and releases the thread";
 const TEXT = { "content-type": "text/plain; charset=utf-8" };
 const JSON_NO_STORE = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 

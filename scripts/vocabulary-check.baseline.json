@@ -87,7 +87,6 @@
   },
   "docs/reference/cli.md": {
     "intake": 1,
-    "hosted": 1,
     "session": 1,
     "tier": 2
   },
@@ -111,8 +110,7 @@
     "instance": 1,
     "admission": 1,
     "tier": 5,
-    "intake": 1,
-    "hosted": 1
+    "intake": 1
   },
   "docs/reference/migrations.md": {
     "instance": 2,
@@ -127,7 +125,6 @@
   "docs/reference/slack-commands.md": {
     "session": 1,
     "intake": 1,
-    "hosted": 1,
     "tier": 2
   },
   "src/core/commands/config.ts": {
@@ -137,17 +134,11 @@
     "tier": 2
   },
   "src/core/commands/runs.ts": {
-    "hosted": 1,
-    "instance": 1,
-    "attempt": 1,
     "session": 2
   },
   "src/core/dispatch/admission.ts": {
     "admission": 5,
     "coordinator": 2
-  },
-  "src/core/dispatch/provision.ts": {
-    "runner": 1
   },
   "src/core/dispatch/relaunch.ts": {
     "session": 1
@@ -187,20 +178,11 @@
     "handoff": 2,
     "wind-down": 1
   },
-  "src/core/ship/coordinator.ts": {
-    "instance": 2,
-    "attempt": 4,
-    "runner": 1,
-    "segment": 3,
-    "lease": 2
-  },
   "src/core/ship/handoff.ts": {
     "handoff": 3
   },
   "src/core/ship/renewal.ts": {
-    "handoff": 4,
-    "lease": 3,
-    "segment": 2
+    "handoff": 2
   },
   "web/src/components/settings/McpServersPanel.vue": {
     "tier": 3

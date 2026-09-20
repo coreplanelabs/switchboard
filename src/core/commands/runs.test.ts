@@ -20,7 +20,14 @@ import type { RunRecord } from "../runRecord.js";
 import { RunRegistry } from "../runRegistry.js";
 import { InMemoryRunStore } from "../runStore.js";
 import { createRunsService } from "../runsService.js";
-import { registerRunsCommands, runsCommands, type RunReadDenied, type RunsCommandDeps, wrapEvent } from "./runs.js";
+import {
+  HOSTED_STOP_REFUSAL,
+  registerRunsCommands,
+  runsCommands,
+  type RunReadDenied,
+  type RunsCommandDeps,
+  wrapEvent,
+} from "./runs.js";
 
 // Feature: docs/reference/specs/command-registry.md — the `runs.*` registrations — and
 // docs/reference/specs/authorization.md items 5–7: what a caller
@@ -771,6 +778,14 @@ describe("runs.stop", () => {
       status: 409,
       message: expect.stringContaining("--mode hard"),
     });
+    // Record 0066: the refusal speaks the pipeline noun — no "hosted" —
+    // with the `--mode hard` escape wording intact.
+    expect(soft.ok ? undefined : soft.message).toBe(HOSTED_STOP_REFUSAL);
+    expect(HOSTED_STOP_REFUSAL).toContain("this run is a pipeline");
+    expect(HOSTED_STOP_REFUSAL).toContain(
+      "`--mode hard` is the escape: it seals the run failed and releases the thread",
+    );
+    expect(HOSTED_STOP_REFUSAL).not.toMatch(/hosted/i);
     expect(reg.getById(id)!.finished).toBe(false);
     const hard = await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps);
     expect(hard).toEqual({ ok: true, value: { id, mode: "hard", state: "stopping" } });
@@ -909,6 +924,18 @@ describe("runs unit / runs children / runs search — the unit is the reading un
     expect(renderText(cmd, { unit: "plan-p-1:U17", instanceId: "plan-p-1", threads: {}, rounds: [], runs: [] })).toBe(
       "unit plan-p-1:U17 — thread not opened yet\n(none)",
     );
+  });
+
+  it("the `runs unit` summary names one thread and the unit-key text phrases the ordinal without `attempt` or `instance` (record 0066)", async () => {
+    const { registry } = await world();
+    const cmd = registry.get("runs.unit")!;
+    expect(cmd.describe).toBe(
+      "A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.",
+    );
+    expect(cmd.describe).not.toMatch(/coding thread|review thread/);
+    const unitArg = cmd.args?.find((a) => a.name === "unit");
+    expect(unitArg?.describe).toContain("nth pipeline");
+    expect(unitArg?.describe).not.toMatch(/attempt|instance/i);
   });
 
   it("an unknown unit is not_found (`unit not found`), a malformed key is invalid_input naming `unit`, a reader outside the predicate is told not_found exactly as for an unknown unit, and chat is a surface for the listing", async () => {

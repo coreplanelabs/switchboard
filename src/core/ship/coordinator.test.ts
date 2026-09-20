@@ -421,7 +421,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(report).toContain("Declined findings: none");
     expect(report).toContain("a person's merge");
     // The gate is the instance's field, not a branch-name derivation.
-    expect(report).toContain("the runner merges only when the instance's `merge` field says runner");
+    expect(report).toContain("the pipeline merges only when the plan's `merge` setting says so");
     // The pull request's own auto-merge fact at the approved head (agent-ship
     // item 9): when the facts carry it, the report names it in place of the
     // pending-person gate; without it (or with it off) the report is unchanged.
@@ -438,7 +438,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     });
     expect(merged).toContain("✅ Merge-ready after 1 review round");
     expect(merged).toContain(
-      "Already merged: https://github.com/acme/api/pull/7 (merge commit `abcdef0`, merged 2026-09-16T00:46:19Z) — auto-merge or a person merged it after the approval; the runner merged nothing.",
+      "Already merged: https://github.com/acme/api/pull/7 (merge commit `abcdef0`, merged 2026-09-16T00:46:19Z) — auto-merge or a person merged it after the approval; the pipeline merged nothing.",
     );
     expect(merged).not.toContain("Remaining gate");
     expect(merged).not.toContain("Auto-merge is on");
@@ -882,7 +882,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     const report = renderUnitReport(d.state);
     expect(report).toContain(`⏳ Review pending: the coding child shipped ${PR_URL}`);
     expect(report).toContain("cannot hold the review round");
-    expect(report).toContain("The next attempt starts at the review round");
+    expect(report).toContain("The next pipeline starts at the review round");
     expect(report).toContain("Budget split (240 min): coding 180 min, review 0 min, waiting 0 min.");
   });
 
@@ -1030,13 +1030,13 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         spendUsd: 12.5,
         handoff: { followUps: [{ what: "tests", where: "src" }] },
         finalReply: "Budget reached: pushed the parser, the tests are next.",
-        line: `renewal 1 of 6, continues ${HEAD_A.slice(0, 7)}`,
+        line: `budget renewed, 1 of 6, continues ${HEAD_A.slice(0, 7)}`,
       },
     });
     expect(d.rounds()).toEqual(["0 coding started", "0 coding continued"]);
     const report = renderUnitReport(d.state);
     expect(report).toContain(
-      `🔁 Segment 1 ended at its lease with the unit unfinished — renewal 1 of 6, continues ${HEAD_A.slice(0, 7)}. Segment 2 opens in this thread from \`${HEAD_A.slice(0, 7)}\` under a fresh 240-minute lease`,
+      `🔁 The unit's budget ran out with the unit unfinished — budget renewed, 1 of 6, continues ${HEAD_A.slice(0, 7)}. A fresh 240-minute budget opens in this thread from \`${HEAD_A.slice(0, 7)}\``,
     );
     expect(report).toContain("5 renewals remain, $12.50 spent so far.");
   });
@@ -1090,7 +1090,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         segment: 3,
         renewalsLeft: 4,
         spendUsd: 45,
-        line: "renewal 2 of 6, continues the branch's head",
+        line: "budget renewed, 2 of 6, continues the branch's head",
       },
     });
     expect((d.action as { ending: { from?: string } }).ending.from).toBeUndefined();
@@ -1114,13 +1114,13 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         kind: "aborted",
         renewal: {
           decision: { renew: false, why: "no_progress", renewalsLeft: 6 },
-          line: "no progress in the last lease; grant holds 6 renewals unspent — a renewal is spent only by a segment that pushed to the unit's branch or moved its handoff; re-issue the request to try again",
+          line: "no progress on the last budget; 6 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; re-issue the request to try again",
         },
       },
     });
     expect(stuck.rounds()).toEqual(["0 coding started", "0 coding aborted"]);
     expect(renderUnitReport(stuck.state)).toContain(
-      "🔁 Not renewed: no progress in the last lease; grant holds 6 renewals unspent — a renewal is spent only by a segment that pushed to the unit's branch or moved its handoff; re-issue the request to try again.",
+      "🔁 Not renewed: no progress on the last budget; 6 renewals left unspent — a renewal is spent only by a budget that pushed to the unit's branch or moved its write-up; re-issue the request to try again.",
     );
 
     // The cap: progress, but the session's spend reached it.
@@ -1139,7 +1139,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
         kind: "aborted",
         renewal: {
           decision: { why: "cost_cap" },
-          line: "spend $20.00 reached the grant's cap of $20; grant holds 6 renewals unspent",
+          line: "spend $20.00 reached the budget's cost cap of $20; 6 renewals left unspent",
         },
       },
     });
@@ -1169,7 +1169,7 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
       type: "end",
       ending: {
         kind: "aborted",
-        renewal: { decision: { why: "grant_exhausted" }, line: "the grant holds no renewals" },
+        renewal: { decision: { why: "grant_exhausted" }, line: "no renewals were granted" },
       },
     });
 
@@ -2205,10 +2205,10 @@ describe("the unit pipeline — a pull request already merged: a re-issued plan,
     expect(report).toContain(
       `✅ Already merged: ${PR_URL} (merge commit \`${HEAD_B.slice(0, 7)}\`, merged ${MERGED_AT})`,
     );
-    expect(report).toContain("before this attempt reached it");
+    expect(report).toContain("before this pipeline reached it");
     expect(report).toContain("its dependents start on a base that carries it");
     expect(report).not.toContain("plan:merge");
-    expect(report).not.toContain("merged by the plan runner");
+    expect(report).not.toContain("merged by the pipeline");
     // The same return again: the machine has left the step, and nothing changes.
     const ended = d.state;
     const again = applyReturn(ended, { type: "pr-check", step: "U10/pr-check", pr: merged(HEAD_B), at: T0 + 2 * MIN });
@@ -3180,7 +3180,7 @@ describe("the unit report — the child's write-up is pointed at, never repeated
     const report = renderUnitReport(d.state);
     expect(report).not.toContain("Budget reached: pushed the parser");
     expect(report).toContain(`${BASE}/run-c0`);
-    expect(report).toContain("🔁 Segment 1 ended at its lease with the unit unfinished");
+    expect(report).toContain("🔁 The unit's budget ran out with the unit unfinished");
   });
 });
 
@@ -3259,7 +3259,7 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
         handoff: HANDOFF,
       },
     });
-    expect(renderUnitReport(d.state)).toContain("🔁 Segment 1 ended at its lease with the unit unfinished");
+    expect(renderUnitReport(d.state)).toContain("🔁 The unit's budget ran out with the unit unfinished");
   });
 
   it("every other idling kind maps to `idle` with itself as `why` and its report intact: the caps, review_pending, merge_refused, no_verdict, an abort and an interrupt", () => {
@@ -3351,7 +3351,7 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
     // The checks at the approved head read green first (record 0055); the merge door then refuses on the remainder.
     greenChecks(refusedMerge, T0 + 239 * MIN);
     expect(refusedMerge.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "merge_refused" } });
-    expect(renderUnitReport(refusedMerge.state)).toContain("but the runner did not merge it");
+    expect(renderUnitReport(refusedMerge.state)).toContain("but the pipeline did not merge it");
 
     // no_verdict: a review that ended without a submitted verdict.
     const silent = fresh(input({ merge: "person", idleDays: 7 }));

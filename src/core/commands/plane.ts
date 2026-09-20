@@ -30,6 +30,15 @@ const defineCommand = commandDefiner<PlaneCommandDeps>();
 
 const shortId = (id: string) => id.slice(0, 8);
 
+/** A row's health in the user's words (record 0066, "The collapse"): the
+ *  `owner-gap` flag reads "unmerged" beside the `merge-ready` it always rides
+ *  with — so the line says "merge-ready, unmerged" — and the flags are joined
+ *  as a phrase, never the raw flag join. Every other flag is an outcome value
+ *  and prints as it is. */
+function healthWords(health: readonly string[]): string {
+  return health.map((h) => (h === "owner-gap" ? "unmerged" : h)).join(", ");
+}
+
 function ownerText(row: PlaneRunRow): string {
   const who = row.owner.name ?? row.owner.id;
   if (who !== undefined) return row.owner.generation ? `${who} (on ${row.owner.generation})` : who;
@@ -42,7 +51,7 @@ function runLine(row: PlaneRunRow, now: number, surface: "chat" | "text"): strin
   const ms = runDurationMs({ startedAt: r.startedAt, receivedAt: r.receivedAt, finishedAt: r.finishedAt }, now);
   const duration = formatDuration(ms, "clock");
   const unit = row.unit ? row.unit.key : "";
-  const health = row.health.join(",");
+  const health = healthWords(row.health);
   if (surface === "chat") {
     const tail = [ownerText(row), unit, health].filter((s) => s !== "").join(" · ");
     return `• \`${shortId(r.id)}\` — ${r.agent ?? "-"} · ${status} · ${duration}${tail ? ` · ${tail}` : ""}`;
@@ -53,7 +62,7 @@ function runLine(row: PlaneRunRow, now: number, surface: "chat" | "text"): strin
 function prLine(row: PlanePullRequestRow, surface: "chat" | "text"): string {
   const name = `${row.pr.repo}#${row.pr.number}`;
   const owner = row.owner.unitKey ?? (row.owner.runId ? `run ${shortId(row.owner.runId)}` : "a person");
-  const health = row.health.join(",") || "-";
+  const health = healthWords(row.health) || "-";
   if (surface === "chat") return `• ${name} — ${health} · ${owner}`;
   return `${name.padEnd(32)}  ${health.padEnd(24)}  ${owner}`.trimEnd();
 }
@@ -61,7 +70,7 @@ function prLine(row: PlanePullRequestRow, surface: "chat" | "text"): string {
 function unitLine(row: PlaneUnitRow, surface: "chat" | "text"): string {
   const title = row.unit.title ?? row.unit.id;
   const pr = row.unit.pr ? `#${row.unit.pr.number}` : "-";
-  const health = row.health.join(",");
+  const health = healthWords(row.health);
   if (surface === "chat") return `• ${row.unit.unit} — ${title} · ${health} · ${pr}`;
   return `${row.unit.unit.padEnd(40)}  ${health.padEnd(20)}  ${pr.padEnd(8)}  ${title}`.trimEnd();
 }
