@@ -328,6 +328,12 @@ export function provisionalBearerExpiresAt(now: number, leaseMinutes: number): n
   return now + (ALLOWANCES.provision + leaseMinutes + ALLOWANCES.bearerGrace) * MINUTE_MS;
 }
 
+/** The e2b credential-write exec's own timeout: the store-file write is one
+ *  `printf` plus a `git config` reset, so a minute is generous headroom while
+ *  still failing fast when the micro-VM is wedged
+ *  (docs/reference/specs/execution.md item 5). */
+export const SANDBOX_CREDENTIAL_WRITE_TIMEOUT_MS = MINUTE_MS;
+
 /** The per-command bash budget's rows: the default when a call names none, the
  *  ceiling a call may raise it to, and the floor under which a number is a
  *  typo (docs/reference/specs/execution.md item 11). */

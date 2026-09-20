@@ -113,7 +113,6 @@ describe("timed", () => {
 
   it("a rejection with a non-Error string is wrapped into an Error whose message is the string", async () => {
     const result = await timed(async () => {
-      // eslint-disable-next-line @typescript-eslint/only-throw-error
       throw "string rejection";
     });
     expect(result.ok).toBe(false);

@@ -34,7 +34,13 @@ import {
 } from "./resident.js";
 import { repoResourceId } from "../core/residentAdmin.js";
 import { nearMatch } from "../core/nearMatch.js";
-import { resolveGithubIdentity, resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
+import {
+  resolveGithubCredential,
+  resolveGithubIdentity,
+  resolveGithubToken,
+  type GithubTokenScope,
+} from "./githubApp.js";
+import type { SandboxCredentialSource } from "./sandboxCredentials.js";
 import { bindingOf, type BindingSource } from "./authorBinding.js";
 import { pairOfBinding, requesterPairFor } from "./identityRewrite.js";
 import { isServiceable } from "./residentState.js";
@@ -1107,6 +1113,10 @@ interface PerThreadInputs {
   ref?: string;
   /** the sandbox env, resolved per command (docs/reference/specs/execution.md item 5) */
   resolveEnvs: () => Promise<Record<string, string>>;
+  /** the run's GitHub credential with its expiry, for the sandbox executor's
+   *  per-exec credential-file refresh (src/execution/sandboxCredentials.ts);
+   *  absent for a run that holds none (blank class, the empty-env paths) */
+  credential?: SandboxCredentialSource;
 }
 
 /** The per-thread inputs of a class that carries the checkout: the resolved
@@ -1118,6 +1128,7 @@ function perThreadCheckout(opts: ExecutorFactoryOptions, ctx: ExecutorContext): 
     repo: ctx.repo,
     ref: ctx.ref,
     resolveEnvs: () => githubEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
+    credential: (o) => resolveGithubCredential(githubTokenScopeFor(ctx.profile.identity), o),
   };
 }
 
@@ -1142,6 +1153,7 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, input: PerThr
       timeoutMs: (opts.execution?.timeoutMinutes ?? 30) * 60_000,
       statePath: resolve(opts.dataDir, "sandboxes.json"),
       resolveEnvs: input.resolveEnvs,
+      ...(input.credential !== undefined ? { credential: input.credential } : {}),
       repo: input.repo,
       ref: input.ref,
     });
@@ -1159,6 +1171,7 @@ async function makePerThreadExecutor(opts: ExecutorFactoryOptions, input: PerThr
       token: token.reveal(),
       threadKey,
       resolveEnvs: input.resolveEnvs,
+      ...(input.credential !== undefined ? { credential: input.credential } : {}),
       repo: input.repo,
       ref: input.ref,
     });

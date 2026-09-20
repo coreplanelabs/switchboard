@@ -243,3 +243,42 @@ describe("resolveGithubToken", () => {
     expect(mod.githubAppConfigured()).toBe(true);
   });
 });
+
+// Feature: docs/reference/specs/execution.md item 5 — the credential WITH its
+// expiry, for the sandbox executor's credential-file refresher (issue 1915).
+describe("resolveGithubCredential", () => {
+  it("answers the minted token with its expiry; `fresh` drops the cache slot so a refused token is never re-served", async () => {
+    configureApp();
+    const expiresInMs = 60 * 60_000;
+    let n = 0;
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ token: `ghs_${++n}`, expires_at: new Date(Date.now() + expiresInMs).toISOString() }),
+          { status: 201 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await freshModule();
+
+    const first = await mod.resolveGithubCredential("write");
+    expect(first?.token).toBe("ghs_1");
+    expect(first?.expiresAtMs).toBeGreaterThan(Date.now());
+    // Cache hit: the same token, one mint.
+    expect((await mod.resolveGithubCredential("write"))?.token).toBe("ghs_1");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Fresh: the slot is dropped and a new token minted.
+    expect((await mod.resolveGithubCredential("write", { fresh: true }))?.token).toBe("ghs_2");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("a static GH_TOKEN carries no expiry; no scope (a `none` identity) and no credential answer null", async () => {
+    process.env.GH_TOKEN = "ghp_static";
+    const mod = await freshModule();
+    expect(await mod.resolveGithubCredential("write")).toEqual({ token: "ghp_static", expiresAtMs: null });
+    expect(await mod.resolveGithubCredential(undefined)).toBeNull();
+    delete process.env.GH_TOKEN;
+    const bare = await freshModule();
+    expect(await bare.resolveGithubCredential("write")).toBeNull();
+  });
+});

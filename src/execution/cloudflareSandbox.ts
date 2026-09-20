@@ -28,6 +28,14 @@ import {
   type WaitReason,
 } from "./sandboxErrors.js";
 import { SEED_BUDGET_MS, type SandboxSeed, type SeedAnswer } from "./seedPlan.js";
+import {
+  SandboxCredentialRefresher,
+  SandboxCredentialRefreshError,
+  isGitCredentialRefusal,
+  isGitPushCommand,
+  type SandboxCredentialSource,
+} from "./sandboxCredentials.js";
+import { systemClock } from "../core/trace/clock.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
 import type { Span } from "../core/trace/types.js";
 
@@ -50,6 +58,13 @@ export interface CloudflareSandboxOptions {
    *  that expires under a 20-minute first command would leave every later
    *  command carrying it dead). */
   resolveEnvs: () => Promise<Record<string, string>>;
+  /** The run's GitHub credential with its expiry, for the executor-side
+   *  refresher (src/execution/sandboxCredentials.ts): before each exec the
+   *  credential FILE in the sandbox is (re)written when the token it holds
+   *  nears expiry, so the run's own `git push` never dies on the token the
+   *  harness process inherited at its start (execution.md item 5). Absent for
+   *  a run without a GitHub credential (blank class): no file, no refresh. */
+  credential?: SandboxCredentialSource;
   /** resident repo/ref context — reserved for resident environments (not yet used) */
   repo?: string;
   ref?: string;
@@ -155,7 +170,44 @@ function waitForSlot(ms: number, waitedMs: number, signal?: AbortSignal): Promis
 }
 
 export class CloudflareSandboxExecutor implements Executor {
+  /** The one refresher for this executor's thread (null until first needed). */
+  private refresher: SandboxCredentialRefresher | null = null;
+
   constructor(private opts: CloudflareSandboxOptions) {}
+
+  /** Land the credential file in the sandbox when the refresher says a write
+   *  is due (before every exec; `fresh` on the 401-retry path). Answers whether
+   *  a write ran. A due refresh that cannot mint is the run's legible end —
+   *  `ExecInfraError`/`refused`, no wait clears it — so the run's post-step
+   *  reports the branch state (the unpushed commits named) instead of the
+   *  model sleeping against a wall of 401s. */
+  private async refreshCredential(opts?: { fresh?: boolean; signal?: AbortSignal; span?: Span }): Promise<boolean> {
+    const source = this.opts.credential;
+    if (source === undefined) return false;
+    this.refresher ??= new SandboxCredentialRefresher(source, systemClock);
+    let write;
+    try {
+      write = await this.refresher.dueWrite(opts?.fresh ? { fresh: true } : undefined);
+    } catch (err) {
+      if (err instanceof SandboxCredentialRefreshError) throw new ExecInfraError(err.message, "refused");
+      throw err;
+    }
+    if (write === null) return false;
+    // The write is its own exec — never through exec(), which would re-enter
+    // this refresh. The credential line rides the body's env beside the
+    // resolved credential map, never the command text.
+    const r = await this.call("/exec", { command: write.script, env: write.env }, opts?.signal, undefined, opts?.span);
+    if (Number(r.exitCode ?? 0) !== 0) {
+      throw new ExecInfraError(
+        `sandbox git credential write failed (exit ${Number(r.exitCode ?? 0)}): ${String(r.stderr ?? "").slice(0, 200)}`,
+        "refused",
+      );
+    }
+    // Recorded only now: a write exec that failed above is re-planned on the
+    // next exec instead of believed fresh until the margin.
+    write.confirm();
+    return true;
+  }
 
   /** One request to the Worker, with the transport-level retries, and the
    *  wait around it for a named condition — a full fleet (item 14), a
@@ -369,13 +421,28 @@ export class CloudflareSandboxExecutor implements Executor {
     // joins the sandbox's own credential in the body's one env map (`call`
     // merges them, the credential winning a clash).
     if (opts?.env !== undefined) body.env = opts.env;
+    // The credential file first, when the token it holds nears expiry — so
+    // this exec (and the harness children that outlive the env they inherited)
+    // never runs against a dying token (execution.md item 5).
+    await this.refreshCredential({ signal: opts?.signal, span: opts?.span });
     // The fleet wait may spend up to the command's own budget (item 14) — a
     // command the run gave 60 s should not wait five minutes for a slot.
-    const r = await this.call("/exec", body, opts?.signal, clampBashTimeout(opts?.timeoutMs), opts?.span);
-    const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
-    const exitCode = Number(r.exitCode ?? 0);
-    if (exitCode !== 0) return truncate(`exit ${exitCode}:\n${parts}`);
-    return truncate(parts || "(no output)");
+    const run = async () => {
+      const r = await this.call("/exec", body, opts?.signal, clampBashTimeout(opts?.timeoutMs), opts?.span);
+      const parts = [r.stdout, r.stderr].filter(Boolean).join("\n--- stderr ---\n");
+      const exitCode = Number(r.exitCode ?? 0);
+      return exitCode !== 0 ? `exit ${exitCode}:\n${parts}` : parts || "(no output)";
+    };
+    let out = await run();
+    // A push the remote refused for its credential is a credential fault, not
+    // the command's: ONE fresh mint + rewrite, ONE re-send (a push is
+    // idempotent at the same tip) — never a backoff loop. A failed fresh mint
+    // throws above, ending the run with the branch state for the post-step.
+    if (isGitPushCommand(command) && isGitCredentialRefusal(out)) {
+      const rewrote = await this.refreshCredential({ fresh: true, signal: opts?.signal, span: opts?.span });
+      if (rewrote) out = await run();
+    }
+    return truncate(out);
   }
 
   /** `POST /seed` (docs/reference/specs/execution.md item 25): the resident's

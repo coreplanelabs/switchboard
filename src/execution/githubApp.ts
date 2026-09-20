@@ -117,6 +117,27 @@ export async function resolveGithubToken(scope: GithubTokenScope = "write", span
   return processSecrets.get("GH_TOKEN")?.reveal() ?? null;
 }
 
+/** The credential WITH its expiry, for the executor-side refresher
+ *  (src/execution/sandboxCredentials.ts): a minted installation token and when
+ *  it dies, or the static GH_TOKEN with no expiry (a PAT never needs the
+ *  margin path), or null when the run holds no scope / no credential exists.
+ *  `fresh` drops the scope's cache slot first — the 401-retry path, where
+ *  re-serving a token GitHub just refused buys nothing. */
+export async function resolveGithubCredential(
+  scope: GithubTokenScope | undefined,
+  opts?: { fresh?: boolean },
+): Promise<{ token: string; expiresAtMs: number | null } | null> {
+  if (scope === undefined) return null;
+  if (githubAppConfigured()) {
+    if (opts?.fresh) cache.delete(scope);
+    const token = await mintInstallationToken(scope);
+    const entry = cache.get(scope);
+    return { token, expiresAtMs: entry !== undefined && entry.token === token ? entry.expiresAtMs : null };
+  }
+  const staticToken = processSecrets.get("GH_TOKEN")?.reveal();
+  return staticToken ? { token: staticToken, expiresAtMs: null } : null;
+}
+
 /** The GitHub user this process acts as: what its commits, PRs and comments are attributed to. */
 export interface GithubIdentity {
   /** `<app-slug>[bot]` for a GitHub App; the account's login for a static token. */
