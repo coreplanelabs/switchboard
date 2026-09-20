@@ -152,7 +152,8 @@ commands:
   pulls rebase         — Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request.
   artifacts lifecycle  — Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after \`artifacts.retentionDays\` (default 30), incomplete multipart uploads abort after one day — and read them back; \`--dry-run\` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token.
   artifacts check      — Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token.
-  plane show           — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written."
+  plane show           — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written.
+  plane stop           — Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads."
 `;
 
 exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `
@@ -182,6 +183,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "memory.sweep",
   "metrics.trend",
   "plane.show",
+  "plane.stop",
   "providers.check",
   "pulls.rebase",
   "repo.build",
@@ -234,6 +236,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "memory_sweep",
   "metrics_trend",
   "plane_show",
+  "plane_stop",
   "providers_check",
   "pulls_rebase",
   "repo_build",
@@ -323,7 +326,8 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 *pulls*
 • \`pulls rebase\` — Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request.
 *plane*
-• \`plane show\` — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written."
+• \`plane show\` — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written.
+• \`plane stop\` — Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads."
 `;
 
 exports[`capability surfaces — cloud-full > self-description block (the resident cap is the Worker's answer — 6 where there is a fleet) 1`] = `
@@ -422,7 +426,8 @@ commands:
   pulls rebase         — Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request.
   artifacts lifecycle  — Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after \`artifacts.retentionDays\` (default 30), incomplete multipart uploads abort after one day — and read them back; \`--dry-run\` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token.
   artifacts check      — Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token.
-  plane show           — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written."
+  plane show           — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written.
+  plane stop           — Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads."
 `;
 
 exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `
@@ -449,6 +454,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "memory.list",
   "memory.sweep",
   "plane.show",
+  "plane.stop",
   "providers.check",
   "pulls.rebase",
   "repo.build",
@@ -491,6 +497,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "memory_list",
   "memory_sweep",
   "plane_show",
+  "plane_stop",
   "providers_check",
   "pulls_rebase",
   "repo_build",
@@ -559,7 +566,8 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 *pulls*
 • \`pulls rebase\` — Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request.
 *plane*
-• \`plane show\` — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written."
+• \`plane show\` — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written.
+• \`plane stop\` — Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads."
 `;
 
 exports[`capability surfaces — local-full > self-description block (the resident cap is the Worker's answer — 6 where there is a fleet) 1`] = `
@@ -644,7 +652,8 @@ commands:
   providers check      — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each.
   artifacts lifecycle  — Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after \`artifacts.retentionDays\` (default 30), incomplete multipart uploads abort after one day — and read them back; \`--dry-run\` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token.
   artifacts check      — Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token.
-  plane show           — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written."
+  plane show           — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written.
+  plane stop           — Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads."
 `;
 
 exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes that answer an admin 1`] = `
@@ -659,6 +668,7 @@ exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes 
   "help.commands",
   "help.show",
   "plane.show",
+  "plane.stop",
   "providers.check",
   "repo.build",
   "repo.test",
@@ -687,6 +697,7 @@ exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
   "help_commands",
   "help_show",
   "plane_show",
+  "plane_stop",
   "providers_check",
   "repo_build",
   "repo_test",
@@ -734,7 +745,8 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 *providers*
 • \`providers check\` — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each.
 *plane*
-• \`plane show\` — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written."
+• \`plane show\` — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written.
+• \`plane stop\` — Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads."
 `;
 
 exports[`capability surfaces — minimal > self-description block (the resident cap is the Worker's answer — 6 where there is a fleet) 1`] = `

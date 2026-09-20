@@ -200,6 +200,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 | Command | What it does | Surfaces |
 |---|---|---|
 | `plane show` | What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written. | every surface |
+| `plane stop <pipeline>` | Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads. | every surface |
 
 <!-- /generated:cli-commands -->
 

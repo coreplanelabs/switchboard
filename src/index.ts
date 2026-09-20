@@ -133,6 +133,7 @@ import { classifyRoundChecks } from "./core/ship/checkFindings.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
 import {
   branchHasMergeQueue,
+  branchHeadSubject,
   commitsOverBase,
   createBranchRef,
   enqueuePullRequest,
@@ -1092,6 +1093,9 @@ export async function runBot(): Promise<void> {
       // then died has its pull request opened from the branch itself — after
       // the identity rewrite verified or rewrote its commits (record 0062).
       openPullRequest,
+      // The recover open's preferred title (record 0064's `unit_title` move):
+      // the head commit's subject, when it passes the title rule.
+      branchHeadSubject,
       rewriteIdentities: (args) => dispatchIdentityRewrite(config).rewrite(args),
       // The round-0 fact (agent-ship item 12): a branch with no commits over
       // the base, beside a handoff naming where the scope landed, ends the

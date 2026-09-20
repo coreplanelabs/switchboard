@@ -4,7 +4,13 @@ import type { PlaneService } from "../planeService.js";
 import type { PlaneTable } from "../plane/table.js";
 import type { RunView } from "../runsService.js";
 import { callerWith } from "../testing/callers.js";
-import { planeCommands, registerPlaneCommands, renderPlaneTable, type PlaneCommandDeps } from "./plane.js";
+import {
+  planeCommands,
+  registerPlaneCommands,
+  renderPlaneStop,
+  renderPlaneTable,
+  type PlaneCommandDeps,
+} from "./plane.js";
 
 // Feature: docs/reference/specs/orchestration-plane.md item 4 — `plane show` is one
 // typed read over the plane service, under the caller's own `runs:read`
@@ -80,6 +86,7 @@ function setup(table: PlaneTable = TABLE) {
       asked.push(visibleTo);
       return table;
     },
+    stop: async () => ({ kind: "unavailable", reason: "not wired in this test" }),
   };
   const registry = new CommandRegistry<PlaneCommandDeps>({ audit: () => {} });
   registerPlaneCommands(registry);
@@ -88,10 +95,14 @@ function setup(table: PlaneTable = TABLE) {
 }
 
 describe("plane.show", () => {
-  it("registers one read under runs:read on every surface", () => {
-    expect(planeCommands.map((c) => c.id)).toEqual(["plane.show"]);
+  it("registers the read under runs:read and the stop under runs:write on every surface", () => {
+    expect(planeCommands.map((c) => c.id)).toEqual(["plane.show", "plane.stop"]);
     expect(planeCommands[0]).toMatchObject({ action: "runs:read", effect: "read" });
     expect(planeCommands[0].surfaces).toBeUndefined();
+    // `plane stop` is destructive (record 0064's runner_stop move): it
+    // ends a whole pipeline and its live children, and nothing restarts them.
+    expect(planeCommands[1]).toMatchObject({ action: "runs:write", effect: "write" });
+    expect(planeCommands[1]!.annotations?.destructive).toBe(true);
   });
 
   it("answers the table under the caller's own predicate: an all-channels reader gets every row", async () => {
@@ -165,5 +176,87 @@ describe("plane.show", () => {
       "Pull requests",
       "(none)",
     ]);
+  });
+});
+
+describe("plane.stop — the runner_stop move in one command (record 0064)", () => {
+  function stopSetup(report: Awaited<ReturnType<PlaneService["stop"]>>) {
+    const asked: Array<{ instanceId: string; actor: unknown; predicate: unknown }> = [];
+    const service: PlaneService = {
+      table: async () => TABLE,
+      stop: async (instanceId, actor, predicate) => {
+        asked.push({ instanceId, actor, predicate });
+        return report;
+      },
+    };
+    const registry = new CommandRegistry<PlaneCommandDeps>({ audit: () => {} });
+    registerPlaneCommands(registry);
+    const deps: PlaneCommandDeps = { plane: { service: async () => service } };
+    return { registry, deps, asked };
+  }
+
+  it("stops the instance under the caller's own runs:write predicate, recording the caller as the actor, and renders one line per thing stopped", async () => {
+    const report = {
+      kind: "stopped" as const,
+      instanceId: "plan-x",
+      runnerStopped: true,
+      parent: { id: "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa", outcome: "stopping" },
+      children: [{ id: "22222222-bbbb-4bbb-8bbb-bbbbbbbbbbbb", outcome: "stopping" }],
+    };
+    const { registry, deps, asked } = stopSetup(report);
+    const res = await registry.invoke(
+      "plane.stop",
+      { args: ["plan-x"], options: {} },
+      callerWith("cli", "cli:local", "all"),
+      deps,
+    );
+    expect(res).toMatchObject({ ok: true });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ instanceId: "plan-x", actor: { kind: "cli", id: "cli:local" } });
+    const text = renderPlaneStop(report as unknown as Parameters<typeof renderPlaneStop>[0]);
+    expect(text).toContain("pipeline plan-x stopped — it starts no more units");
+    expect(text).toContain("pipeline run 11111111 — stopping");
+    expect(text).toContain("child run 22222222 — stopping");
+  });
+
+  it("an unknown instance is not_found; a process without the stores is unavailable by reason; a caller without runs:write is refused before the service is asked", async () => {
+    const unknown = stopSetup({ kind: "unknown_instance", instanceId: "plan-x" });
+    const notFound = await unknown.registry.invoke(
+      "plane.stop",
+      { args: ["plan-x"], options: {} },
+      callerWith("cli", "cli:local", "all"),
+      unknown.deps,
+    );
+    expect(notFound).toMatchObject({ ok: false, error: "not_found" });
+
+    const bare = stopSetup({ kind: "unavailable", reason: "this process holds no run-history store" });
+    const unavailable = await bare.registry.invoke(
+      "plane.stop",
+      { args: ["plan-x"], options: {} },
+      callerWith("cli", "cli:local", "all"),
+      bare.deps,
+    );
+    expect(unavailable).toMatchObject({ ok: false, error: "unavailable" });
+
+    const refusedSetup = stopSetup({ kind: "unknown_instance", instanceId: "plan-x" });
+    const refused = await refusedSetup.registry.invoke(
+      "plane.stop",
+      { args: ["plan-x"], options: {} },
+      callerWith("mcp", "mcp:agent", ["dispatch"]),
+      refusedSetup.deps,
+    );
+    expect(refused).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(refusedSetup.asked).toEqual([]);
+  });
+
+  it("a stop mark that could not be written renders the runner-may-still-be-walking line and no false 'no live child' claim beside real children", () => {
+    const text = renderPlaneStop({
+      kind: "stopped",
+      instanceId: "plan-x",
+      runnerStopped: false,
+      children: [],
+    } as unknown as Parameters<typeof renderPlaneStop>[0]);
+    expect(text).toContain("the stop mark could not be written");
+    expect(text).toContain("no live child was running");
   });
 });

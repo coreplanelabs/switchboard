@@ -1126,6 +1126,26 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "runs:write",
+    "args": [
+      {
+        "name": "pipeline",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "plane.stop",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "providers:read",
     "args": [],
     "effect": "read",

@@ -219,3 +219,94 @@ describe("createPlaneService — the table over the stores that exist", () => {
     expect(gh.asked.filter((a) => a.startsWith("facts"))).toHaveLength(3);
   });
 });
+
+describe("plane stop — the runner_stop move (record 0064; issue 1924)", () => {
+  function stopHarness(over: { markFails?: boolean; liveByThread?: Record<string, RunView[]> } = {}) {
+    const store = new InMemoryCoordinatorInstanceStore();
+    const stops: Array<{ id: string; mode: string; actor: { kind: string; id: string } }> = [];
+    const marks: string[] = [];
+    const instances = {
+      get: (id: string) => store.get(id),
+      listUnits: (id: string) => store.listUnits(id),
+      markStopped: async (id: string, at: number) => {
+        marks.push(`${id}@${at}`);
+        if (over.markFails) return { ok: false as const, reason: "unknown_instance" as const };
+        return store.markStopped(id, at);
+      },
+    };
+    const runs = {
+      listRuns: async (opts: ListRunsOptions): Promise<ListRunsResult> => ({
+        runs: opts.threadKey !== undefined ? (over.liveByThread?.[opts.threadKey] ?? []) : [],
+      }),
+      listInstanceUnits: async () => [],
+      stopRun: async (id: string, mode: "soft" | "hard", actor: { kind: string; id: string }) => {
+        stops.push({ id, mode, actor });
+        return { ok: true as const, value: { id, mode, state: "stopping" } };
+      },
+    };
+    const service = createPlaneService({
+      runs: runs as unknown as Parameters<typeof createPlaneService>[0]["runs"],
+      instances,
+      clock: () => NOW,
+    });
+    return { service, store, stops, marks };
+  }
+  const actor = { kind: "chat", id: "slack:U_ALICE" } as const;
+
+  it("terminates the instance and ends its live children in one move: the stop mark first, the hosted parent hard-stopped, then every live child in a unit thread — never the parent twice", async () => {
+    const h = stopHarness({
+      liveByThread: {
+        "slack:C_PUB:2.0": [view({ id: "child-1" })],
+        "slack:C_PUB:3.0": [view({ id: "child-2" })],
+      },
+    });
+    await h.store.put(INSTANCE);
+    await h.store.putUnits([
+      unit("U12", { threadKey: "slack:C_PUB:2.0", reviewThread: { threadKey: "slack:C_PUB:3.0" } }),
+    ]);
+    const report = await h.service.stop(INSTANCE.id, actor, ALL);
+    expect(report).toEqual({
+      kind: "stopped",
+      instanceId: INSTANCE.id,
+      runnerStopped: true,
+      parent: { id: "parent-1", outcome: "stopping" },
+      children: [
+        { id: "child-1", outcome: "stopping" },
+        { id: "child-2", outcome: "stopping" },
+      ],
+    });
+    expect(h.marks).toEqual([`${INSTANCE.id}@${NOW}`]);
+    expect(h.stops.map((s) => [s.id, s.mode])).toEqual([
+      ["parent-1", "hard"],
+      ["child-1", "hard"],
+      ["child-2", "hard"],
+    ]);
+    expect(h.stops.every((s) => s.actor.id === "slack:U_ALICE")).toBe(true);
+  });
+
+  it("a stop mark that could not be written still ends the runs and says so; an instance the viewer's predicate does not admit is unknown, and an unknown id stops nothing", async () => {
+    const h = stopHarness({ markFails: true });
+    await h.store.put(INSTANCE);
+    const report = await h.service.stop(INSTANCE.id, actor, ALL);
+    expect(report).toMatchObject({ kind: "stopped", runnerStopped: false, parent: { id: "parent-1" } });
+
+    const foreign = await h.service.stop(INSTANCE.id, actor, { kind: "user-is", userId: "slack:U_OTHER" });
+    expect(foreign).toEqual({ kind: "unknown_instance", instanceId: INSTANCE.id });
+
+    const none = await h.service.stop("plan-nope", actor, ALL);
+    expect(none).toEqual({ kind: "unknown_instance", instanceId: "plan-nope" });
+    // The predicate-refused and unknown stops wrote no mark and stopped no run beyond the first call's.
+    expect(h.marks).toHaveLength(1);
+    expect(h.stops.map((s) => s.id)).toEqual(["parent-1"]);
+  });
+
+  it("a process without the run-history stores refuses by name instead of half-stopping", async () => {
+    const service = createPlaneService({
+      runs: { listRuns: async () => ({ runs: [] }), listInstanceUnits: async () => [] },
+      instances: { get: async () => null },
+      clock: () => NOW,
+    });
+    const report = await service.stop("plan-x", actor, ALL);
+    expect(report).toMatchObject({ kind: "unavailable" });
+  });
+});

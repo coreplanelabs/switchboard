@@ -141,6 +141,10 @@ function harness(
     ioFor?: (thread: { threadKey: string; userId: string; cardTs?: string }) => ChannelIO | undefined;
     /** The recover path's open-or-edit: the opened pull request, or the refusal (nothing pushed). */
     openPr?: { number: number; htmlUrl: string; created: boolean } | Error;
+    /** The branch head commit's subject (record 0064's `unit_title` move): a
+     *  subject, `null` = wired but unreadable, Error = the read throws; absent,
+     *  the dep is absent too and the fallback title stands. */
+    headSubject?: string | null | Error;
     /** The branch's commits over the base (githubPulls.commitsOverBase): a count, or unread. */
     ahead?: number | Error;
     /** The merge step's GitHub: the pull request's facts, the checks at the head, the squash's answer. */
@@ -254,6 +258,14 @@ function harness(
       if (over.openPr instanceof Error) throw over.openPr;
       return over.openPr ?? { number: 77, htmlUrl: "https://github.com/acme/api/pull/77", created: true };
     },
+    ...(over.headSubject !== undefined
+      ? {
+          branchHeadSubject: async (): Promise<string | undefined> => {
+            if (over.headSubject instanceof Error) throw over.headSubject;
+            return over.headSubject ?? undefined;
+          },
+        }
+      : {}),
     commitsOverBase: async (repo, base, branch) => {
       compares.push([repo, base, branch]);
       if (over.ahead instanceof Error) throw over.ahead;
@@ -1248,6 +1260,67 @@ describe("POST /admin/coordinator/pr-check — the open pull request heading the
     // prefix of the source title, and no dangling punctuation survives.
     expect(`${long} `.startsWith(`${cut.slice("chore: ".length)} `)).toBe(true);
     expect(checkPrTitle(cut, PR_TITLE_VOCABULARY).ok).toBe(true);
+  });
+
+  it("the recovered pull request's title (record 0064's unit_title move): without a submitted description the head commit's subject is used when it passes the title rule; a failing or unreadable subject falls to the conventional fallback, and a submitted description still wins", async () => {
+    const RUN = "11111111-1111-4111-8111-111111111111";
+    const row: CoordinatorUnit = {
+      instanceId: INSTANCE.id,
+      unit: "U12",
+      slug: "u12",
+      title: "Warm the cache on wake",
+      branch: INSTANCE.branch,
+      dependsOn: [],
+      rounds: [],
+    };
+    const recoverCheck = (deps: AdminCoordinatorDeps) =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}pr-check`, {
+          parentInstanceId: INSTANCE.id,
+          unit: "U12",
+          recover: { runId: RUN },
+        }),
+        deps,
+      );
+
+    // The head commit's subject passes the rule: the open takes it, so the
+    // required title check passes first time.
+    const passing = harness({ headSubject: "fix(ship): warm the cache on wake" });
+    await passing.instances.put(INSTANCE);
+    await passing.instances.putUnits([row]);
+    await recoverCheck(passing.deps);
+    expect(passing.opens[0]!.title).toBe("fix(ship): warm the cache on wake");
+
+    // A subject the rule refuses, an unreadable one, and a throwing read all
+    // fall to the conventional fallback from the unit's title.
+    for (const headSubject of ["WIP stuff", null, new Error("boom")] as const) {
+      const h = harness({ headSubject });
+      await h.instances.put(INSTANCE);
+      await h.instances.putUnits([row]);
+      await recoverCheck(h.deps);
+      expect(h.opens[0]!.title).toBe("chore: Warm the cache on wake");
+    }
+
+    // A submitted description's title still wins over a passing subject.
+    const described = harness({ headSubject: "fix(ship): warm the cache on wake" });
+    await described.instances.put(INSTANCE);
+    await described.instances.putUnits([row]);
+    await described.store.put(
+      record(RUN, {
+        agent: "coding",
+        threadKey: "slack:C1:2.0",
+        parentInstanceId: INSTANCE.id,
+        events: [
+          {
+            type: "pr_description",
+            description: { title: "fix(ship): the submitted title wins", tldr: "T." },
+            seq: 1,
+          } as unknown as RunRecord["events"][number],
+        ],
+      }),
+    );
+    await recoverCheck(described.deps);
+    expect(described.opens[0]!.title).toBe("fix(ship): the submitted title wins");
   });
 });
 

@@ -51,6 +51,7 @@ function fakeService(table: PlaneTable = TABLE) {
       asked.push(visibleTo);
       return table;
     },
+    stop: async () => ({ kind: "unavailable", reason: "not wired in this test" }),
   };
   return { service, asked };
 }
@@ -148,7 +149,10 @@ describe("createPlaneViewHandler", () => {
   });
 
   it("a table that cannot be built is a 502 with the reason, never a 500", async () => {
-    const service: PlaneService = { table: async () => Promise.reject(new Error("store unreachable")) };
+    const service: PlaneService = {
+      table: async () => Promise.reject(new Error("store unreachable")),
+      stop: async () => ({ kind: "unavailable", reason: "not wired in this test" }),
+    };
     const handler = createPlaneViewHandler(service, sendPage);
     const r = fakeRes();
     handler(req("/plane"), r.res, { actor: ACTORS.operator });

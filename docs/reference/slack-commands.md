@@ -165,6 +165,7 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 | Command | What it does | Who can run it |
 |---|---|---|
 | `plane show` | What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written. | admins |
+| `plane stop <pipeline>` | Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads. | admins |
 
 <!-- /generated:chat-commands -->
 

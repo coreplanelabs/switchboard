@@ -624,3 +624,156 @@ describe("endings and their causes", () => {
     expect(endingCauseWords("runner_gone")).toBe("the runner instance driving it is gone");
   });
 });
+
+describe("the moves (record 0064, 'Endings and the watches')", () => {
+  it("unit_title: a tracked pull request whose title fails the rule gets one `retitle` effect under the pull request's own id; a passing title is a no-op", () => {
+    const failed = decide(emptyPlaneState(), {
+      kind: "pr_tracked",
+      at: 1_000,
+      repo: "acme/api",
+      number: 7,
+      titleOk: false,
+    });
+    expect(failed.effects).toEqual([{ id: "retitle:acme/api#7", kind: "retitle", repo: "acme/api", number: 7 }]);
+    expect(failed.writes).toEqual([{ table: "plane_effects", op: "offer", effect: failed.effects[0], at: 1_000 }]);
+    const passed = decide(emptyPlaneState(), {
+      kind: "pr_tracked",
+      at: 1_000,
+      repo: "acme/api",
+      number: 7,
+      titleOk: true,
+    });
+    expect(passed.effects).toEqual([]);
+    expect(passed.writes).toEqual([]);
+  });
+
+  it("orphaned_child: a child sealed with a pushed branch, no pull request and no live runner gets a `pr_open` effect from the branch", () => {
+    const out = decide(emptyPlaneState(), {
+      kind: "child_sealed",
+      at: 2_000,
+      runId: "run-dead",
+      runnerLive: false,
+      repo: "acme/api",
+      branch: "plan/x/u1",
+    });
+    expect(out.effects).toEqual([
+      { id: "pr_open:acme/api#plan/x/u1", kind: "pr_open", repo: "acme/api", branch: "plan/x/u1", runId: "run-dead" },
+    ]);
+    expect(out.writes).toEqual([{ table: "plane_effects", op: "offer", effect: out.effects[0], at: 2_000 }]);
+  });
+
+  it("orphaned_child: a seal with a pull request, a live runner, or no pushed branch is a no-op — the watch's precondition is not met", () => {
+    const base = { kind: "child_sealed" as const, at: 2_000, runId: "run-x", repo: "acme/api", branch: "b" };
+    expect(decide(emptyPlaneState(), { ...base, runnerLive: true }).effects).toEqual([]);
+    expect(decide(emptyPlaneState(), { ...base, runnerLive: false, prNumber: 9 }).effects).toEqual([]);
+    expect(decide(emptyPlaneState(), { ...base, branch: undefined, runnerLive: false }).effects).toEqual([]);
+  });
+
+  it("orphaned_child: a pushed branch whose repository the seal could not name degrades to a finding carrying the watch and the timeline, never a guessed move", () => {
+    const out = decide(emptyPlaneState(), {
+      kind: "child_sealed",
+      at: 3_000,
+      runId: "run-dead",
+      runnerLive: false,
+      branch: "plan/x/u1",
+    });
+    expect(out.effects).toEqual([]);
+    expect(out.writes).toHaveLength(1);
+    const write = out.writes[0]!;
+    if (write.table !== "plane_findings") throw new Error("expected a finding write");
+    expect(write.finding.watch).toBe("orphaned_child");
+    expect(write.finding.subject).toBe("run-dead");
+    expect(write.finding.timeline).toHaveLength(1);
+    expect(write.finding.timeline[0]!.what).toContain("plan/x/u1");
+  });
+
+  it("dirty_at_approval: mergeableState `dirty` on an approved head opens a rebase round briefed to rebase onto the base and push, keyed by the head; any other state is a no-op", () => {
+    const dirty = decide(emptyPlaneState(), {
+      kind: "approval",
+      at: 4_000,
+      repo: "acme/api",
+      number: 12,
+      headSha: "abc123",
+      mergeableState: "dirty",
+    });
+    expect(dirty.effects).toEqual([
+      {
+        id: "rebase_round:acme/api#12@abc123",
+        kind: "rebase_round",
+        repo: "acme/api",
+        number: 12,
+        headSha: "abc123",
+        brief: "rebase onto the base and push",
+      },
+    ]);
+    for (const mergeableState of ["clean", "unknown", undefined])
+      expect(
+        decide(emptyPlaneState(), {
+          kind: "approval",
+          at: 4_000,
+          repo: "acme/api",
+          number: 12,
+          headSha: "abc123",
+          mergeableState,
+        }).effects,
+      ).toEqual([]);
+  });
+
+  it("runner_gone: an errored or terminated instance with units unfinished emits one `reissue` keyed by the attempt number — the same status read twice is the same effect id", () => {
+    for (const status of ["errored", "terminated"]) {
+      const out = decide(emptyPlaneState(), {
+        kind: "runner_status",
+        at: 5_000,
+        instanceId: "plan-x",
+        status,
+        unfinishedUnits: ["U12", "U13"],
+        attempt: 2,
+      });
+      expect(out.effects).toEqual([
+        { id: "reissue:plan-x#2", kind: "reissue", instanceId: "plan-x", attempt: 2, units: ["U12", "U13"] },
+      ]);
+    }
+  });
+
+  it("runner_gone: the hosting deadline passed on an instance not `waiting` reissues; a `waiting` instance at its deadline does nothing (an idle unit is alive), and a plan with nothing unfinished has no move — the precondition is gone", () => {
+    const overdue = decide(emptyPlaneState(), {
+      kind: "runner_status",
+      at: 6_000,
+      instanceId: "plan-x",
+      status: "running",
+      unfinishedUnits: ["U12"],
+      attempt: 1,
+      deadlinePassed: true,
+    });
+    expect(overdue.effects.map((e) => e.kind)).toEqual(["reissue"]);
+    const waiting = decide(emptyPlaneState(), {
+      kind: "runner_status",
+      at: 6_000,
+      instanceId: "plan-x",
+      status: "waiting",
+      unfinishedUnits: ["U12"],
+      attempt: 1,
+      deadlinePassed: true,
+    });
+    expect(waiting.effects).toEqual([]);
+    const done = decide(emptyPlaneState(), {
+      kind: "runner_status",
+      at: 6_000,
+      instanceId: "plan-x",
+      status: "errored",
+      unfinishedUnits: [],
+      attempt: 1,
+    });
+    expect(done.effects).toEqual([]);
+    expect(
+      decide(emptyPlaneState(), {
+        kind: "runner_status",
+        at: 6_000,
+        instanceId: "plan-x",
+        status: "running",
+        unfinishedUnits: ["U12"],
+        attempt: 1,
+      }).effects,
+    ).toEqual([]);
+  });
+});

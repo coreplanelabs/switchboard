@@ -101,6 +101,7 @@ import {
   type PlaneState,
   type PlaneWrite,
 } from "../../src/core/plane/decide.ts";
+import { mergePlaneFindings, planeFindingKey, type PlaneFinding } from "../../src/core/plane/findings.ts";
 import {
   IDEMPOTENCY_KEY_PATTERN,
   capThreadEvent,
@@ -1929,6 +1930,38 @@ export class RunHistoryDO extends DurableObject<Env> {
           w.row.side,
           w.row.reportedAt,
           w.row.generation,
+        );
+      } else if (w.table === "plane_findings") {
+        // A finding (record 0064, "Endings and the watches"): keyed by watch
+        // and subject, so two findings on one subject are ONE row — an
+        // existing row absorbs the timeline through the same merge the
+        // decider's module defines, its first-seen stamp kept.
+        const key = planeFindingKey(w.finding);
+        const prior = this.sql
+          .exec<{ timeline_json: string; filed_at: number }>(
+            `SELECT timeline_json, filed_at FROM plane_findings WHERE id = ?`,
+            key,
+          )
+          .toArray()[0];
+        const existing = prior
+          ? [
+              {
+                watch: w.finding.watch,
+                subject: w.finding.subject,
+                timeline: JSON.parse(prior.timeline_json) as PlaneFinding["timeline"],
+                firstAt: Number(prior.filed_at),
+                lastAt: w.finding.lastAt,
+              },
+            ]
+          : [];
+        const merged = mergePlaneFindings(existing, w.finding)[0]!;
+        this.sql.exec(
+          `INSERT OR REPLACE INTO plane_findings (id, watch, subject, timeline_json, filed_at) VALUES (?, ?, ?, ?, ?)`,
+          key,
+          merged.watch,
+          merged.subject,
+          JSON.stringify(merged.timeline),
+          merged.firstAt,
         );
       } else {
         // The effect bounds (record 0064): an offer past the per-run or total

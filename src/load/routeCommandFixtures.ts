@@ -65,6 +65,17 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
     "give me the table: every live run, unit and pull request with its owner and health",
     "plane.show",
   ),
+  f("c41h", "happy", "plane stop plan-checkout-fix", "plane.stop", {
+    args: ["plan-checkout-fix"],
+    options: {},
+  }),
+  f(
+    "c41p",
+    "paraphrase",
+    "terminate the runner instance plan-checkout-fix and end everything it is running",
+    "plane.stop",
+    { args: ["plan-checkout-fix"], options: {} },
+  ),
   f("c06h", "happy", "use anthropic/claude-opus-5 for coding in this channel", "config.set", {
     args: ["channel"],
     options: { models: { coding: "anthropic/claude-opus-5" } },
@@ -248,6 +259,8 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c05d", "why does this channel behave differently from the others?", "config.overrides"),
   d("c36d", "which channel would be the best home for the review bot?", "config.channels"),
   d("c39d", "what happened to the release last night and who dropped the ball?", "plane.show"),
+  // Asks to stop ONE run, not a runner instance and its children.
+  d("c41d", "stop the run that is rebuilding the docs site", "plane.stop", ["runs.stop", "runs.list"]),
   // Asks what a run is doing, not for words to be folded into it.
   d("c38d", "what is run run-8f2 doing right now?", "steer.run", ["runs.get", "runs.list"]),
   d("c06d", "what would be a good model for coding work here?", "config.set"),

@@ -10,6 +10,7 @@
 // literal where `clock:check` expects it.)
 
 import { PLANE, minutesToMs } from "../budgets.js";
+import type { PlaneFinding } from "./findings.js";
 
 // ---- endings and their causes (record 0064, "Endings and the watches") ------------------------
 
@@ -268,6 +269,12 @@ export function reissueSteerSentence(provider: string): string {
  *  no-bound line) and a coding round with no pushed head past `noPushMinutes`. */
 export type SteerCause = "long_call" | "no_push";
 
+/** The `dirty_at_approval` move's one brief (record 0064, "Endings and the
+ *  watches"): what the fix round on the unit's coding lane is told — the
+ *  reviewed-head gate voids the approval at the new head, and re-review
+ *  follows, so the brief asks only for the rebase and the push. */
+export const REBASE_ROUND_BRIEF = "rebase onto the base and push";
+
 export type PlaneEvent =
   | PlaneAskEvent
   | { kind: "sealed"; at: number; threadKey: string }
@@ -304,7 +311,43 @@ export type PlaneEvent =
    *  waits on a resident that has said nothing within the cadence, one
    *  `probe(resident)` effect is emitted — a silent resident is probed, never
    *  waited on forever. */
-  | { kind: "reask"; at: number; cadenceMs: number };
+  | { kind: "reask"; at: number; cadenceMs: number }
+  /** A tracked pull request's title as the bot read it (`pr_opened`; the
+   *  adoption read), already judged against the title rule (`check:pr-title`)
+   *  by the caller — the decider is node-free and holds no vocabulary. A
+   *  failing title is the `unit_title` watch (record 0064): the move is one
+   *  `retitle` effect under the same rule. */
+  | { kind: "pr_tracked"; at: number; repo: string; number: number; titleOk: boolean }
+  /** A child's seal, with the facts the `orphaned_child` watch reads (record
+   *  0064): the branch its newest `pushed_head` named, the pull request its
+   *  record holds, and whether a runner instance is live over it. */
+  | {
+      kind: "child_sealed";
+      at: number;
+      runId: string;
+      runnerLive: boolean;
+      repo?: string;
+      branch?: string;
+      prNumber?: number;
+    }
+  /** An approval as the merge door's pr-check read it (record 0064): the
+   *  `dirty_at_approval` watch fires on `mergeableState: dirty` at an approved
+   *  head — the move is a `rebase_round` effect on the unit's coding lane. */
+  | { kind: "approval"; at: number; repo: string; number: number; headSha: string; mergeableState?: string }
+  /** The engine's status for a runner instance (record 0064): read at the
+   *  bot's status report, the re-ask while a seed waits, and the deadline
+   *  alarm. `runner_gone` — `errored` or `terminated` with units unfinished,
+   *  or the hosting deadline passed on an instance not `waiting` — emits one
+   *  `reissue` keyed by the attempt number. */
+  | {
+      kind: "runner_status";
+      at: number;
+      instanceId: string;
+      status: string;
+      unfinishedUnits: string[];
+      attempt: number;
+      deadlinePassed?: boolean;
+    };
 
 /** The closed effect union: what the bot is asked to do, offered on its
  *  heartbeat and reclaim answers and acknowledged by id (`/plane/ack`). The
@@ -321,7 +364,24 @@ export type PlaneEffect =
   /** Ask the bot to probe the resident's `/status` and forward its levels
    *  (record 0064): the id is `probe:<resident>`, so the object holds at most one
    *  open probe per resident and a duplicate offer is the same effect. */
-  | { id: string; kind: "probe"; resident: string };
+  | { id: string; kind: "probe"; resident: string }
+  /** The `unit_title` move (record 0064): retitle the pull request under the
+   *  title rule — the bot re-reads the title before acting, so a person's own
+   *  retitle first makes this a `skipped`. Id `retitle:<repo>#<number>`. */
+  | { id: string; kind: "retitle"; repo: string; number: number }
+  /** The `orphaned_child` move (record 0064): open the pull request from the
+   *  pushed branch — the same open-or-edit the recover pr-check uses, titled
+   *  by the head commit's subject when it passes the title rule. A pull
+   *  request already heading the branch makes this a `skipped`. */
+  | { id: string; kind: "pr_open"; repo: string; branch: string; runId: string }
+  /** The `dirty_at_approval` move (record 0064): a fix round on the unit's
+   *  coding lane briefed `REBASE_ROUND_BRIEF`; the reviewed-head gate voids
+   *  the approval at the new head and re-review follows. */
+  | { id: string; kind: "rebase_round"; repo: string; number: number; headSha: string; brief: string }
+  /** The `runner_gone` move (record 0064): re-issue the plan's remaining
+   *  units as the next attempt — the id carries the attempt number, so a
+   *  status read twice offers the same effect once. */
+  | { id: string; kind: "reissue"; instanceId: string; attempt: number; units: string[] };
 
 /** What the object must persist beside the returned state — the decider names
  *  the rows, the object owns the SQL, both inside one `transactionSync`. */
@@ -337,7 +397,11 @@ export type PlaneWrite =
   /** A steer into a live run's durable inbox (run-history item 40), written in
    *  the decider's transaction: the row's sender is `plane` (record 0057's
    *  amendment), and the run reads it at its next boundary like any follow-up. */
-  | { table: "run_inbox"; op: "push"; runId: string; message: Record<string, unknown> };
+  | { table: "run_inbox"; op: "push"; runId: string; message: Record<string, unknown> }
+  /** A finding (record 0064): filed when no move applies, keyed by watch and
+   *  subject — the object folds it with `mergePlaneFindings`, so two findings
+   *  on one subject are one row with a merged timeline. */
+  | { table: "plane_findings"; op: "put"; finding: PlaneFinding };
 
 /** The bot's own outcome for one dispatch, posted to `POST /plane/outcome`
  *  under `plane.admission: shadow` (orchestration-plane item 8): `proceeded`, `refused:<code>` or
@@ -403,7 +467,127 @@ export function decide(state: PlaneState, event: PlaneEvent): PlaneDecision {
       return onProviderLevel(state, event);
     case "park":
       return onPark(state, event);
+    case "pr_tracked":
+      return onPrTracked(state, event);
+    case "child_sealed":
+      return onChildSealed(state, event);
+    case "approval":
+      return onApproval(state, event);
+    case "runner_status":
+      return onRunnerStatus(state, event);
   }
+}
+
+/** One finding as the moves shape it: the watch, the subject, one event —
+ *  the object folds it by `planeFindingKey` (watch and subject), so the same
+ *  incident observed twice is one finding with a merged timeline. */
+function findingOf(watch: string, subject: string, at: number, what: string): PlaneFinding {
+  return { watch, subject, timeline: [{ at, what }], firstAt: at, lastAt: at };
+}
+
+/** `unit_title` (record 0064): a tracked pull request whose title fails the
+ *  rule gets one `retitle` effect under the same rule; a passing title is a
+ *  no-op. The id is the pull request's, so a re-read offers the same effect. */
+function onPrTracked(
+  state: PlaneState,
+  event: { kind: "pr_tracked"; at: number; repo: string; number: number; titleOk: boolean },
+): PlaneDecision {
+  if (event.titleOk) return { state, effects: [], writes: [] };
+  const effect: PlaneEffect = {
+    id: `retitle:${event.repo}#${event.number}`,
+    kind: "retitle",
+    repo: event.repo,
+    number: event.number,
+  };
+  return { state, effects: [effect], writes: [{ table: "plane_effects", op: "offer", effect, at: event.at }] };
+}
+
+/** `orphaned_child` (record 0064): a child that ends with a pushed branch, no
+ *  pull request and no live runner gets a `pr_open` effect from the branch. A
+ *  seal with a pull request, a live runner or no pushed branch is a no-op; a
+ *  pushed branch whose repository the seal could not name is a finding — the
+ *  move needs a fact the plane lacks, so it degrades instead of guessing. */
+function onChildSealed(
+  state: PlaneState,
+  event: {
+    kind: "child_sealed";
+    at: number;
+    runId: string;
+    runnerLive: boolean;
+    repo?: string;
+    branch?: string;
+    prNumber?: number;
+  },
+): PlaneDecision {
+  if (event.runnerLive || event.prNumber !== undefined || event.branch === undefined)
+    return { state, effects: [], writes: [] };
+  if (event.repo === undefined) {
+    const finding = findingOf(
+      "orphaned_child",
+      event.runId,
+      event.at,
+      `the run sealed with pushed branch ${event.branch}, no pull request and no live runner, and no repository is known to open one on`,
+    );
+    return { state, effects: [], writes: [{ table: "plane_findings", op: "put", finding }] };
+  }
+  const effect: PlaneEffect = {
+    id: `pr_open:${event.repo}#${event.branch}`,
+    kind: "pr_open",
+    repo: event.repo,
+    branch: event.branch,
+    runId: event.runId,
+  };
+  return { state, effects: [effect], writes: [{ table: "plane_effects", op: "offer", effect, at: event.at }] };
+}
+
+/** `dirty_at_approval` (record 0064): `mergeableState: dirty` on an approved
+ *  head opens a fix round on the unit's coding lane briefed to rebase and
+ *  push; any other mergeable state — clean, unknown, unread — is a no-op. The
+ *  id carries the head, so the same dirty head offers one round. */
+function onApproval(
+  state: PlaneState,
+  event: { kind: "approval"; at: number; repo: string; number: number; headSha: string; mergeableState?: string },
+): PlaneDecision {
+  if (event.mergeableState !== "dirty") return { state, effects: [], writes: [] };
+  const effect: PlaneEffect = {
+    id: `rebase_round:${event.repo}#${event.number}@${event.headSha}`,
+    kind: "rebase_round",
+    repo: event.repo,
+    number: event.number,
+    headSha: event.headSha,
+    brief: REBASE_ROUND_BRIEF,
+  };
+  return { state, effects: [effect], writes: [{ table: "plane_effects", op: "offer", effect, at: event.at }] };
+}
+
+/** `runner_gone` (record 0064): the engine reports `errored` or `terminated`
+ *  with units unfinished, or the hosting deadline passed on an instance the
+ *  engine does not report `waiting` — one `reissue(plan, remaining units)`
+ *  keyed by the attempt number, so a status read twice is the same effect. A
+ *  plan with nothing unfinished has no move — the precondition is gone. */
+function onRunnerStatus(
+  state: PlaneState,
+  event: {
+    kind: "runner_status";
+    at: number;
+    instanceId: string;
+    status: string;
+    unfinishedUnits: string[];
+    attempt: number;
+    deadlinePassed?: boolean;
+  },
+): PlaneDecision {
+  const ended = event.status === "errored" || event.status === "terminated";
+  const overdue = event.deadlinePassed === true && event.status !== "waiting";
+  if ((!ended && !overdue) || event.unfinishedUnits.length === 0) return { state, effects: [], writes: [] };
+  const effect: PlaneEffect = {
+    id: `reissue:${event.instanceId}#${event.attempt}`,
+    kind: "reissue",
+    instanceId: event.instanceId,
+    attempt: event.attempt,
+    units: event.unfinishedUnits,
+  };
+  return { state, effects: [effect], writes: [{ table: "plane_effects", op: "offer", effect, at: event.at }] };
 }
 
 /** The inbox row a plane steer writes: sender `plane` (record 0064), the sentence as
