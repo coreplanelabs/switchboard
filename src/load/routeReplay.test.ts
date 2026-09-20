@@ -2141,6 +2141,9 @@ describe("the door row scores the defect fixtures", () => {
         text: `the App is not installed on this repository — ${e.naming} it first`,
         reason: "policy row",
       };
+    // The click unit's kinds (E3): the decision binds the expected line whole
+    // — the registry line the click shows, or the pasted line that now runs.
+    if (e.kind === "click" || e.kind === "run") return binds(e.line);
     return { kind: "non_decision", reason: "not observable over the text seam" };
   };
   const byText = new Map(ROUTE_DOOR_FIXTURES.map((f) => [f.text, f]));
@@ -2161,8 +2164,7 @@ describe("the door row scores the defect fixtures", () => {
   });
 
   it("a fixture whose unit is unmerged scores pending, never fails: with no unit merged the whole set is pending and the check row passes", () => {
-    const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, DOOR_MERGED_UNITS);
-    expect(DOOR_MERGED_UNITS).toEqual([]);
+    const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, []);
     expect(split.scored).toEqual([]);
     expect(split.pending).toHaveLength(18);
     const score = doorFixtureScore([], split.pending);
@@ -2198,6 +2200,32 @@ describe("the door row scores the defect fixtures", () => {
     expect(split.scored).toHaveLength(16);
   });
 
+  it("E3 is merged (the click unit): its two fixtures — D3's run and D13's click — are scored at head and the E2 set stays pending", async () => {
+    expect(DOOR_MERGED_UNITS).toEqual(["E3"]);
+    const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, DOOR_MERGED_UNITS);
+    expect(split.scored.map((f) => f.defect).sort()).toEqual(["D13", "D3"]);
+    expect(split.pending).toHaveLength(16);
+    const results = await replayDoorFixtures(split.scored, operate, { now: () => 0 });
+    expect(results.every((r) => r.hit)).toBe(true);
+  });
+
+  it("a click expectation hits when the decision binds the offered registry line whole — the table's chat cell for a held write is the click — and misses on another line or the incident's refusal", () => {
+    const d13 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "D13")!;
+    expect(d13.expected.kind).toBe("click");
+    const line = (d13.expected as { kind: "click"; line: string }).line;
+    expect(judgeDoorFixture(binds(line), d13).hit).toBe(true);
+    expect(judgeDoorFixture(binds("config set channel --models.coding acme/other-9"), d13).hit).toBe(false);
+    expect(judgeDoorFixture(refusal, d13).hit).toBe(false);
+  });
+
+  it("a run expectation hits when the decision binds a line carrying the pasted words — the paste starts a run instead of dying — and misses on a question or a line without them", () => {
+    const d03 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "D3")!;
+    expect(judgeDoorFixture(binds("ship"), d03).hit).toBe(true);
+    expect(judgeDoorFixture(binds("agent:ship"), d03).hit).toBe(true);
+    expect(judgeDoorFixture({ kind: "question", text: "ship what?", reason: "unsure" }, d03).hit).toBe(false);
+    expect(judgeDoorFixture(binds("agent:review"), d03).hit).toBe(false);
+  });
+
   it("a bind expectation hits when the first bind names the preset and carries the words, and misses on a dropped task text, a doubled head or another preset", () => {
     const d01 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "D1")!;
     expect(judgeDoorFixture(binds(`agent:ship ${d01.text}`), d01).hit).toBe(true);
@@ -2224,11 +2252,11 @@ describe("the door row scores the defect fixtures", () => {
   });
 
   it("an outcome the text seam cannot observe misses by name, so a unit that merges such a fixture must extend the judge", () => {
-    const d08 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "D8")!;
-    const judged = judgeDoorFixture(binds(d08.text), d08);
+    const d07 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "D7")!;
+    const judged = judgeDoorFixture(binds(d07.text), d07);
     expect(judged.hit).toBe(false);
-    expect(judged.reason).toContain("cannot observe a `run` outcome");
-    expect(judged.reason).toContain(`unit ${d08.unit}`);
+    expect(judged.reason).toContain("cannot observe a `fold` outcome");
+    expect(judged.reason).toContain(`unit ${d07.unit}`);
   });
 
   it("a scored replay over the bind fixtures is green when each bind carries the words, and the check row passes with the pending count beside it", async () => {

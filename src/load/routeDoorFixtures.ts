@@ -19,7 +19,7 @@ export type DoorUnit = "E2" | "E3";
  *  is not on this list is printed as pending, never replayed and never a
  *  failure. The unit that lands appends itself here in its own pull request,
  *  turning its fixtures from pending to scored. */
-export const DOOR_MERGED_UNITS: readonly DoorUnit[] = [];
+export const DOOR_MERGED_UNITS: readonly DoorUnit[] = ["E3"];
 
 /** The amended table's expected outcome for one fixture — what the door must
  *  do with the message once the fixture's unit is merged.

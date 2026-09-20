@@ -117,14 +117,29 @@ export function newConfirmationId(): string {
 
 // ---- the offer's words -------------------------------------------------------
 
-/** The reply when the bound line would be altered by redaction — an argument
- *  looks like a secret — so no offer is minted: a line the person cannot read
- *  in full is not a confirmation. */
-export const UNSHOWABLE_LINE = "this command carries a value that cannot be shown; type the line yourself";
+/** The refusal when the bound line would be altered by redaction — an
+ *  argument looks like a secret — so no offer is minted: a line the person
+ *  cannot read in full is not a confirmation (record 0069's table: a chat
+ *  surface's mint failure is a refusal naming why, never a line to retype). */
+export const UNSHOWABLE_LINE =
+  "this command carries a value that cannot be shown, so no confirmation can be offered; nothing ran";
 
-/** The sentence appended to the hand-back when the store could not be reached
- *  at mint time: the person loses the button and nothing else. */
-export const STORE_UNREACHABLE_NOTE = "(the confirmation store could not be reached, so there is no button to press)";
+/** The refusal when the confirmation store cannot mint the click — the store
+ *  threw, or the process holds none — on a chat surface, where the click is
+ *  the only way a held write runs (record 0069's table): the refusal names
+ *  why and the person's next message re-asks the door; never the line to
+ *  retype. */
+export const STORE_UNREACHABLE_LINE =
+  "this command needs a confirmation click, and the confirmation store could not be reached; nothing ran — ask again for the button";
+
+/** The refusal for a write bind whose thread already holds a pending
+ *  confirmation from the same decision (record 0044's one-row-per-thread
+ *  invariant; the one-execution-path plan's click unit): the first write
+ *  bind minted, and this one is refused naming the pending row — minting it
+ *  would silently replace the row the person is looking at. */
+export function pendingRowLine(line: string): string {
+  return `a confirmation is already pending on this thread (\`${line}\`); click or cancel it first — one write is offered at a time`;
+}
 
 /** The offer as text — the line, the risk when the command declares one:
  *  what the record's `answer` keeps, and what a channel shows around its
