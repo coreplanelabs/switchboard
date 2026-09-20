@@ -119,6 +119,41 @@ describe("resolveRun — the (agent, model, effort) triple", () => {
     expect(resolved.effort).toBe("low"); // no effort on this message: the thread's sticky effort still applies
   });
 
+  // The plain-words model unit: a model the operator resolved from a plain-
+  // words name ("with astra, …") is the directive's equal — the same ref
+  // enters the resolution at the request layer, so the applied model equals
+  // the directive path's result for the same ref.
+  it("the operator's plain-words model resolves exactly as model:<ref> does for the same ref; a typed directive still outranks it and it outranks the thread's sticky model", () => {
+    const ref = "anthropic/astra-model";
+    const byDirective = resolveRun(deps(), {
+      msg: msg(`model:${ref} with astra, fix issue 42`),
+      directives: { model: ref, text: "with astra, fix issue 42" },
+      history: [],
+    });
+    const byOperator = resolveRun(deps(), {
+      msg: msg("with astra, fix issue 42"),
+      directives: { text: "with astra, fix issue 42" },
+      history: [],
+      operatorModel: ref,
+    });
+    expect(byOperator.resolved.modelRef).toBe(ref);
+    expect(byOperator.resolved.modelRef).toBe(byDirective.resolved.modelRef);
+    const typed = resolveRun(deps(), {
+      msg: msg("model:anthropic/general-model with astra, fix it"),
+      directives: { model: "anthropic/general-model", text: "with astra, fix it" },
+      history: [],
+      operatorModel: ref,
+    });
+    expect(typed.resolved.modelRef).toBe("anthropic/general-model");
+    const overSticky = resolveRun(deps(), {
+      msg: msg("continue"),
+      directives: { text: "continue" },
+      history: [{ role: "user", text: "model:anthropic/coding-model start the work" }],
+      operatorModel: ref,
+    });
+    expect(overSticky.resolved.modelRef).toBe(ref);
+  });
+
   it("a follow-up without directives runs on the agent the thread established — the caller's read of the thread's transcript; an agent: token in the history alone establishes nothing", () => {
     const history: HistoryItem[] = [{ role: "user", text: "agent:coding start the work" }];
     const byTranscript = resolveRun(deps(), {

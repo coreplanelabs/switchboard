@@ -1096,8 +1096,11 @@ export type RunEvent =
       /** A bind marked `confirmed` is a pending question's confirmed proposal
        *  (`bindFromAnswer`): the line itself carries the task — the person's
        *  message was the word "yes" — so a confirmed preset line routes its
-       *  own tail as the request. Additive: unknown → a fresh bind. */
-      binds?: ReadonlyArray<{ line: string; reason: string; confirmed?: true }>;
+       *  own tail as the request. Additive: unknown → a fresh bind. A bind's
+       *  `model` is the ref the run uses, resolved from a model the person
+       *  named in plain words (the plain-words model unit) — applied at
+       *  directive precedence. Additive: unknown → no model. */
+      binds?: ReadonlyArray<{ line: string; reason: string; model?: string; confirmed?: true }>;
       question?: string;
       /** A question's proposed line, redacted and cut like the receipt — what
        *  the next turn's "yes" binds (`bindFromAnswer`). */

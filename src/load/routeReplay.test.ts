@@ -2129,10 +2129,15 @@ describe("the door row scores the defect fixtures", () => {
     if (e.kind === "bind") {
       // A text already opening with the directive head passes through once
       // (D4, D12); words the thread's context supplies (N3's pull request
-      // URL) ride the bound line beside the reply's own text.
+      // URL) ride the bound line beside the reply's own text; a plain-words
+      // model (the M set) rides the bind's `model` as the resolved ref.
       const head = fixture.text.startsWith(`agent:${e.preset}`) ? fixture.text : `agent:${e.preset} ${fixture.text}`;
       const line = e.carries !== undefined && !head.includes(e.carries) ? `${head} ${e.carries}` : head;
-      return binds(line);
+      return {
+        kind: "binds",
+        binds: [{ line, reason: "the table's cell", ...(e.model !== undefined ? { model: e.model } : {}) }],
+        reason: "the table's cell for this shape",
+      };
     }
     if (e.kind === "refusal")
       return {
@@ -2150,12 +2155,17 @@ describe("the door row scores the defect fixtures", () => {
     if (e.kind === "route") return { kind: "non_decision", reason: "the turn ended with no tool call" };
     if (e.kind === "fold") return binds("steer run r-0001 the reply's words");
     // The write-intent cell (issue 2088): one question whose proposal is the
-    // write line built from the providers that exist.
+    // write line built from the providers that exist. The plain-words model
+    // unit's ambiguous word (M6): one question naming the catalogue's
+    // candidate refs, never a guess.
     if (e.kind === "question")
       return {
         kind: "question",
-        text: "`openai` names no model provider this deployment has",
-        proposal: `${e.proposes} --models.coding openrouter/<model>`,
+        text:
+          e.names !== undefined
+            ? `\`gpt\` matches several refs: \`${e.names}-6-astra\`, \`${e.names}-5.6-sol\` — which one?`
+            : "`openai` names no model provider this deployment has",
+        ...(e.proposes !== undefined ? { proposal: `${e.proposes} --models.coding openrouter/<model>` } : {}),
         reason: "a write the deployment cannot run as typed",
       };
     return binds(`agent:ship ${e.carries}`);
@@ -2172,15 +2182,23 @@ describe("the door row scores the defect fixtures", () => {
   const operate = async (text: string): Promise<OperatorDecision> => asExpected(byText.get(text)!);
   const bindFixtures = ROUTE_DOOR_FIXTURES.filter((f) => f.expected.kind === "bind");
 
-  it("the set is the nineteen defects — D1 to D14 and N1 to N5, each exactly once, ids unique, each tagged with the unit that turns it green", () => {
-    expect(ROUTE_DOOR_FIXTURES).toHaveLength(19);
-    expect(new Set(ROUTE_DOOR_FIXTURES.map((f) => f.id)).size).toBe(19);
+  it("the set is the twenty-five defects — D1 to D14, N1 to N5 and the plain-words model set M1 to M6, each exactly once, ids unique, each tagged with the unit that turns it green", () => {
+    expect(ROUTE_DOOR_FIXTURES).toHaveLength(25);
+    expect(new Set(ROUTE_DOOR_FIXTURES.map((f) => f.id)).size).toBe(25);
     const defects = ROUTE_DOOR_FIXTURES.map((f) => f.defect);
     expect([...defects].sort()).toEqual(
-      [...Array.from({ length: 14 }, (_, i) => `D${i + 1}`), "N1", "N2", "N3", "N4", "N5"].sort(),
+      [
+        ...Array.from({ length: 14 }, (_, i) => `D${i + 1}`),
+        ...Array.from({ length: 6 }, (_, i) => `M${i + 1}`),
+        "N1",
+        "N2",
+        "N3",
+        "N4",
+        "N5",
+      ].sort(),
     );
     for (const f of ROUTE_DOOR_FIXTURES) {
-      expect(["E2", "E3", "W1"], f.id).toContain(f.unit);
+      expect(["E2", "E3", "W1", "MW1"], f.id).toContain(f.unit);
       expect(f.text.length, f.id).toBeGreaterThan(0);
     }
   });
@@ -2188,12 +2206,12 @@ describe("the door row scores the defect fixtures", () => {
   it("a fixture whose unit is unmerged scores pending, never fails: with no unit merged the whole set is pending and the check row passes", () => {
     const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, []);
     expect(split.scored).toEqual([]);
-    expect(split.pending).toHaveLength(19);
+    expect(split.pending).toHaveLength(25);
     const score = doorFixtureScore([], split.pending);
     expect(score).toMatchObject({ fixtures: 0, hits: 0, refusals: 0, misses: [] });
     expect(Number.isNaN(score.hitRate)).toBe(true);
     const lines = renderDoorFixtures(score);
-    expect(lines[0]).toContain("no fixture's unit is merged yet — 19 pending");
+    expect(lines[0]).toContain("no fixture's unit is merged yet — 25 pending");
     expect(lines[1]).toContain("D3 (unit E3)");
     expect(lines[1]).toContain("D13 (unit E3)");
     expect(lines).toContain("misses: none");
@@ -2209,12 +2227,12 @@ describe("the door row scores the defect fixtures", () => {
       door: score,
     }).find((c) => c.name.includes("door fixture"))!;
     expect(row.pass).toBe(true);
-    expect(row.actual).toContain("19 pending");
+    expect(row.actual).toContain("25 pending");
   });
 
-  it("partitioning splits by the unit tag: with E2 merged, E3's fixtures — D3's typed hand-back line expecting a run once E3 lands, and D13's click — stay pending, and so does W1's N5", () => {
+  it("partitioning splits by the unit tag: with E2 merged, E3's fixtures — D3's typed hand-back line expecting a run once E3 lands, and D13's click — stay pending, and so do W1's N5 and MW1's model set", () => {
     const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, ["E2"]);
-    expect(split.pending.map((f) => f.defect).sort()).toEqual(["D13", "D3", "N5"]);
+    expect(split.pending.map((f) => f.defect).sort()).toEqual(["D13", "D3", "M1", "M2", "M3", "M4", "M5", "M6", "N5"]);
     const d03 = split.pending.find((f) => f.defect === "D3")!;
     expect(d03.expected).toEqual({ kind: "run", line: d03.text });
     const d13 = split.pending.find((f) => f.defect === "D13")!;
@@ -2222,10 +2240,10 @@ describe("the door row scores the defect fixtures", () => {
     expect(split.scored).toHaveLength(16);
   });
 
-  it("E2, E3 and W1 are merged: all nineteen fixtures are scored at head and none is pending", async () => {
-    expect(DOOR_MERGED_UNITS).toEqual(["E2", "E3", "W1"]);
+  it("E2, E3, W1 and MW1 are merged: all twenty-five fixtures are scored at head and none is pending", async () => {
+    expect(DOOR_MERGED_UNITS).toEqual(["E2", "E3", "W1", "MW1"]);
     const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, DOOR_MERGED_UNITS);
-    expect(split.scored).toHaveLength(19);
+    expect(split.scored).toHaveLength(25);
     expect(split.pending).toEqual([]);
     const results = await replayDoorFixtures(split.scored, operate, { now: () => 0 });
     expect(results.filter((r) => !r.hit)).toEqual([]);
@@ -2297,6 +2315,54 @@ describe("the door row scores the defect fixtures", () => {
     ).toBe(false);
     // A question with no proposal proposes no line that would do the work.
     expect(judgeDoorFixture({ kind: "question", text: "which models?", reason: "r" }, n5).hit).toBe(false);
+  });
+
+  it("the plain-words model unit (MW1): a bind expectation with a model hits only when the first bind carries exactly that ref — another ref, a missing one and the incident's guess all miss", () => {
+    const m01 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "M1")!;
+    expect(judgeDoorFixture(asExpected(m01), m01).hit).toBe(true);
+    const withModel = (model?: string): OperatorDecision => ({
+      kind: "binds",
+      binds: [{ line: `agent:ship ${m01.text}`, reason: "r", ...(model !== undefined ? { model } : {}) }],
+      reason: "r",
+    });
+    // The model word resolved to another ref: a guess, never the person's word.
+    expect(judgeDoorFixture(withModel("openrouter/openai/gpt-5.6-sol"), m01).hit).toBe(false);
+    // The model word dropped: the bind carries no ref at all.
+    expect(judgeDoorFixture(withModel(undefined), m01).hit).toBe(false);
+  });
+
+  it("the plain-words model unit (MW1): a noModel expectation holds a request naming no model to binding with none — a silent default is the miss", () => {
+    const m05 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "M5")!;
+    expect(judgeDoorFixture(asExpected(m05), m05).hit).toBe(true);
+    expect(
+      judgeDoorFixture(
+        {
+          kind: "binds",
+          binds: [{ line: `agent:ship ${m05.text}`, reason: "r", model: "openrouter/openai/gpt-6-astra" }],
+          reason: "r",
+        },
+        m05,
+      ).hit,
+    ).toBe(false);
+  });
+
+  it("the plain-words model unit (MW1): an ambiguous model word is one question naming the catalogue's candidates — a bind on a guessed ref and a question naming none both miss", () => {
+    const m06 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "M6")!;
+    expect(m06.expected.kind).toBe("question");
+    expect(judgeDoorFixture(asExpected(m06), m06).hit).toBe(true);
+    // The guess: one of the matching refs bound as if the person named it.
+    expect(
+      judgeDoorFixture(
+        {
+          kind: "binds",
+          binds: [{ line: `agent:ship ${m06.text}`, reason: "r", model: "openrouter/openai/gpt-6-astra" }],
+          reason: "r",
+        },
+        m06,
+      ).hit,
+    ).toBe(false);
+    // A question that names no candidate leaves the person nothing to pick.
+    expect(judgeDoorFixture({ kind: "question", text: "which model?", reason: "r" }, m06).hit).toBe(false);
   });
 
   it("a scored replay over the bind fixtures is green when each bind carries the words, and the check row passes with the pending count beside it", async () => {

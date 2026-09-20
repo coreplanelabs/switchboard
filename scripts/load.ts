@@ -1380,13 +1380,20 @@ async function routeReplay(f: Flags): Promise<boolean> {
             // must be built from these.
             providers: ["anthropic", "openrouter"],
             // A canned catalogue (the replay stays off the network): the refs
-            // the write proposal may name, `openai` resolving to openrouter's.
+            // the write proposal may name, `openai` resolving to openrouter's,
+            // and the plain-words model set's words (the plain-words model
+            // unit: astra, sol, luna, codex — "gpt" matches several, so M6's
+            // question must name the candidates).
             providerModels: {
               read: async (filter?: string) => {
                 const refs = [
                   "anthropic/claude-opus-5",
                   "openrouter/openai/gpt-5.2",
                   "openrouter/openai/gpt-5.2-mini",
+                  "openrouter/openai/gpt-6-astra",
+                  "openrouter/openai/gpt-5.6-sol",
+                  "openrouter/openai/codex-2",
+                  "openrouter/mistralai/luna-2",
                   "openrouter/meta-llama/llama-4",
                 ];
                 const needle = filter?.trim().toLowerCase();
@@ -1613,7 +1620,7 @@ async function routeReplay(f: Flags): Promise<boolean> {
     `the directive words (${directive.fixtures} fixtures: each word in first position and mid-sentence):`,
     ...renderDirectives(directive),
     "",
-    `the door row (${ROUTE_DOOR_FIXTURES.length} defect fixtures — record 0069's D1–D14 and the night's N1–N4; ${door.fixtures} scored over the operator itself, ${door.pending.length} pending their unit):`,
+    `the door row (${ROUTE_DOOR_FIXTURES.length} defect fixtures — record 0069's D1–D14, the night's N1–N5 and the plain-words model set M1–M6; ${door.fixtures} scored over the operator itself, ${door.pending.length} pending their unit):`,
     ...renderDoorFixtures(door),
     ...(planted === undefined
       ? [

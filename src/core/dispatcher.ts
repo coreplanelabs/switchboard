@@ -648,6 +648,10 @@ export async function dispatch(
     // proposal's own tail (`presetRequestOf`) — the person's message was the
     // word "yes", which routes nothing. Absent for every fresh bind.
     let operatorRequest: string | undefined;
+    // The model ref a bind resolved from a model the person named in plain
+    // words (the plain-words model unit): applied at directive precedence
+    // (`resolveRun`'s `operatorModel`), exactly as `model:<ref>` would.
+    let operatorModel: string | undefined;
     // The thread page the operator reads (newest first): the tail's session
     // keys and, on the newest record, an `on` question still pending — whose
     // "yes" this event may be (routing-and-config item 29). Read here once and
@@ -757,6 +761,7 @@ export async function dispatch(
         if (execution.kind === "route") {
           operatorPreset = execution.preset;
           operatorRequest = execution.request;
+          operatorModel = execution.model;
         }
         // `kind: "fold"` (issue 2027; thread-admission item 9): the decision was
         // neither steers-and-reads nor a question in an owned thread, so the
@@ -851,6 +856,7 @@ export async function dispatch(
       history,
       ...(stickyAgent !== undefined ? { stickyAgent } : {}),
       ...(operatorPreset !== undefined ? { operatorPreset } : {}),
+      ...(operatorModel !== undefined ? { operatorModel } : {}),
     });
     const { sticky } = settled;
     let { resolved, agentSource } = settled;
