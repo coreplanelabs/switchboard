@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import RunPage from "./RunPage.vue";
+import { flushPromises } from "@vue/test-utils";
 import { ALL_ON, mountApp, type MountAppOptions } from "../testing/mount";
 import { loadDiffs } from "../modules/pr-review/diffsLibrary";
 import { browser } from "../lib/browser";
@@ -1579,7 +1580,11 @@ describe("RunPage — live mode", () => {
       method: "POST",
       credentials: "same-origin",
     });
-    await vi.waitFor(() => expect(wrapper.find("#actions").exists()).toBe(false)); // one request is enough
+    // The stop's outcome settles in microtasks (the mocked fetch, then the
+    // handler, then the render): flushPromises awaits exactly that, where a
+    // time-bounded wait flaked on saturated CI shards.
+    await flushPromises();
+    expect(wrapper.find("#actions").exists()).toBe(false); // one request is enough
     expect(wrapper.find("#state").text()).toBe("stopping (soft)");
     es().emitNamed("end");
     await wrapper.vm.$nextTick();
@@ -1611,7 +1616,8 @@ describe("RunPage — live mode", () => {
       method: "POST",
       credentials: "same-origin",
     });
-    await vi.waitFor(() => expect(wrapper.find("#actions").exists()).toBe(false));
+    await flushPromises();
+    expect(wrapper.find("#actions").exists()).toBe(false);
     es().emitNamed("end");
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".conn .chip").text()).toBe("killed");
@@ -1622,7 +1628,8 @@ describe("RunPage — live mode", () => {
     const { wrapper, es } = mountLive();
     es().emitOpen();
     await wrapper.findAll("#actions button")[0].trigger("click");
-    await vi.waitFor(() => expect(wrapper.find("#state").text()).toContain("stop failed"));
+    await flushPromises();
+    expect(wrapper.find("#state").text()).toContain("stop failed");
     expect(wrapper.find("#actions").exists()).toBe(true);
     expect((wrapper.findAll("#actions button")[0].element as HTMLButtonElement).disabled).toBe(false);
   });
@@ -1640,10 +1647,9 @@ describe("RunPage — live mode", () => {
     const { wrapper, es } = mountLive();
     es().emitOpen();
     await wrapper.findAll("#actions button")[0].trigger("click");
-    await vi.waitFor(() =>
-      expect(wrapper.find("#state").text()).toBe(
-        "stop failed: You are viewing as ivy; writes are your own to make — exit view-as to write.",
-      ),
+    await flushPromises();
+    expect(wrapper.find("#state").text()).toBe(
+      "stop failed: You are viewing as ivy; writes are your own to make — exit view-as to write.",
     );
     expect(wrapper.find("#actions").exists()).toBe(true);
   });
