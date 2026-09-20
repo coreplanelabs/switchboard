@@ -6,15 +6,17 @@ const A = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 const B = "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1";
 const T0 = 1_700_000_000_000;
 const BRANCH = "plan/fixture/u1";
-const handoff = (followUps: number, deviations = 0): Handoff => ({
-  deviations: Array.from({ length: deviations }, (_, i) => ({ from: `f${i}`, to: `t${i}`, why: "w" })),
+const handoff = (followUps: number): Handoff => ({
+  deviations: [],
   followUps: Array.from({ length: followUps }, (_, i) => ({ what: `w${i}`, where: "x" })),
   unproven: [],
 });
 
 // Decision 0046, Renewal: progress is a fact the row records and the runner
 // reads without a model — a pushed sha that differs from the head the lease
-// started at, or a handoff whose follow-ups shrank or whose deviations grew.
+// started at, or a checkpoint handoff whose follow-ups shrank. A handoff
+// carrying deviations is the round's own ending (issue 2086) and never
+// reaches this decision.
 describe("progressOf — progress is read off the row, never asked of the model", () => {
   it("a head pushed to the unit's branch after the lease began, differing from the segment's start, is progress", () => {
     expect(
@@ -84,14 +86,8 @@ describe("progressOf — progress is read off the row, never asked of the model"
     });
   });
 
-  it("with no push, a handoff whose follow-ups shrank or whose deviations grew is progress; an unchanged or grown one is not", () => {
+  it("with no push, a checkpoint handoff whose follow-ups shrank is progress; an unchanged or grown one is not", () => {
     expect(progressOf({ branch: BRANCH, pushed: [], handoff: { previous: handoff(3), current: handoff(2) } })).toEqual({
-      progressed: true,
-      by: "handoff",
-    });
-    expect(
-      progressOf({ branch: BRANCH, pushed: [], handoff: { previous: handoff(2, 0), current: handoff(2, 1) } }),
-    ).toEqual({
       progressed: true,
       by: "handoff",
     });

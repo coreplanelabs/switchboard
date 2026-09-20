@@ -32,6 +32,7 @@ function roundStageDecided(o: ShipRoundOutcome): string {
     case "dequeued":
     case "aborted":
     case "stopped":
+    case "held":
     case "continued":
     case "idle":
       return ROUND_STAGE[o];
@@ -75,6 +76,7 @@ const ROUND_OUTCOME_WORDS = [
   "dequeued",
   "aborted",
   "stopped",
+  "held",
   "continued",
   "idle",
 ] as const satisfies readonly ShipRoundOutcome[];

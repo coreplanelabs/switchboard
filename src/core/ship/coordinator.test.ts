@@ -1182,6 +1182,131 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(renderUnitReport(plain.state)).not.toContain("Not renewed");
   });
 
+  // Issue 2086; decision 0046, amended: a child that submitted a handoff
+  // recording a deviation has concluded its round — the runner reads that
+  // ending before any renewal, so blocked ends the unit held with the reason
+  // and no second segment opens; renewal stays only for a child that stopped
+  // without an ending (a lease end).
+  it("a blocked handoff ends the unit `held: blocked` with the deviations as the reason and no second child: no renewal is judged even under a grant with renewals and a pushed head, the round is noted `held`, and the report names the reason, the write-up and the person's next word", () => {
+    const d = fresh(
+      input({ merge: "person", generated: true, grant: { renewals: 6, costCapUsd: 50 }, grantSource: "channel" }),
+    );
+    d.answer({ type: "branch", ok: true, at: T0 });
+    const branch = d.state.input.unit.branch;
+    runChild(
+      d,
+      "run-c0",
+      finished({
+        status: "completed",
+        finalReply: "The unit is blocked and I stopped without pushing, per the plan's own stop condition.",
+        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 3 * MIN }],
+        leaseStartedAt: T0,
+        costUsd: 8,
+        handoffLists: {
+          deviations: [
+            { from: "implement the unit", to: "stopped without pushing", why: "the plan's stop condition holds" },
+          ],
+          followUps: [{ what: "decide the precondition", where: "the plan" }],
+          unproven: [],
+        },
+      }),
+      T0 + 4 * MIN,
+    );
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 4 * MIN });
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "held",
+        cause: "blocked",
+        round: { index: 0, kind: "coding" },
+        runId: "run-c0",
+        reason: "implement the unit → stopped without pushing — the plan's stop condition holds",
+      },
+    });
+    expect(d.rounds()).toEqual(["0 coding started", "0 coding held"]);
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("concluded its round blocked instead of opening a pull request");
+    expect(report).toContain("the plan's stop condition holds");
+    expect(report).toContain("No renewal was spent and no second coding child ran");
+    expect(renderUnitReport(d.state, undefined, "quiet")).toBe(
+      "⏸️ Held: blocked — implement the unit → stopped without pushing — the plan's stop condition holds",
+    );
+    // The same return applied twice changes nothing.
+    d.answer({ type: "pr-check", step: "U10/0/coding/pr-check", pr: { state: "none" }, at: T0 + 5 * MIN });
+    expect(d.state.ending).toMatchObject({ kind: "held", cause: "blocked" });
+  });
+
+  it("a lease end without a handoff is renewed as today: the child stopped without an ending of its own, so the grant decides and the next segment opens from the pushed head", () => {
+    const d = fresh(input({ merge: "person", generated: true, grant: { renewals: 6 }, grantSource: "channel" }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    const branch = d.state.input.unit.branch;
+    runChild(
+      d,
+      "run-c0",
+      finished({
+        status: "completed",
+        pushed: [{ ref: branch, sha: HEAD_A, at: T0 + 40 * MIN }],
+        leaseStartedAt: T0,
+      }),
+      T0 + 45 * MIN,
+    );
+    d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 45 * MIN });
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: { kind: "continued", segment: 2, from: HEAD_A, renewalsLeft: 5 },
+    });
+    expect(d.rounds()).toEqual(["0 coding started", "0 coding continued"]);
+  });
+
+  it("a blocked hold idles for the person's word when the flag is on — `idle` with `why: held`, the handoff and the run carried — while a gated hold still never idles", () => {
+    const blocked = fresh(input({ merge: "person", generated: true, idleDays: 7, grant: { renewals: 3 } }));
+    blocked.answer({ type: "branch", ok: true, at: T0 });
+    runChild(
+      blocked,
+      "run-c0",
+      finished({
+        status: "completed",
+        handoffLists: {
+          deviations: [{ from: "the unit", to: "stopped", why: "blocked" }],
+          followUps: [],
+          unproven: [],
+        },
+      }),
+      T0 + 4 * MIN,
+    );
+    blocked.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 4 * MIN });
+    expect(blocked.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "idle",
+        why: "held",
+        idled: { kind: "held", cause: "blocked", runId: "run-c0" },
+        renewalsLeft: 3,
+        runId: "run-c0",
+        handoff: { deviations: [{ from: "the unit", to: "stopped", why: "blocked" }] },
+      },
+    });
+
+    const gated = fresh(input({ merge: "person", idleDays: 7 }));
+    throughRoundZero(gated);
+    runChild(
+      gated,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: {
+          verdict: "request_changes",
+          summary: "x",
+          findings: [{ ...FINDING, humanGated: true }],
+        },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(gated.action).toMatchObject({ type: "end", ending: { kind: "held", verdict: "request_changes" } });
+  });
+
   it("row 10 — unit end: a round-0 child whose record names a pull request it updated on ANOTHER branch (the thread's own, adopted late) runs the review round on it at the head the child pushed — never 'no pull request' over work that stands (issue 1799)", () => {
     // The pr-check reads the UNIT's branch, which nothing heads: the child
     // worked on the pull request's own head branch. Its record carries the
