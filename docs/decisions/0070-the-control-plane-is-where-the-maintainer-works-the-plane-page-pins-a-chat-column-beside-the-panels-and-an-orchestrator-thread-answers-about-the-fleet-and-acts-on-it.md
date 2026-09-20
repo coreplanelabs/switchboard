@@ -1,11 +1,13 @@
 ---
 title: The control plane is where the maintainer works — the /plane page pins a chat column beside the panels, and an orchestrator thread the person keeps talking to answers questions about the fleet and acts on it
-status: proposed
+status: accepted
 date: 2026-09-19
 pattern: ChatOps over one command registry — the chat is a surface, never a second write path; one long-lived conversation per person as the working context; every read answered from one projection (the plane's tables), every write through the one fenced door; two deciders split by input kind — rules to the machine, a person's words to the thread
 ---
 
 # The control plane is where the maintainer works: the /plane page pins a chat column beside the panels, and an orchestrator thread the person keeps talking to answers questions about the fleet and acts on it
+
+**Accepted 2026-09-19, 21:05 PDT**, with three layout decisions the maintainer took at acceptance, closing the two questions the plan left to the check-in. The chat column defaults to 400 px wide. The person can drag the divider to resize it, and the chosen width is remembered per person in the browser's localStorage — a per-viewer convenience, never shared state, and the page renders correctly when storage is empty or blocked. Below the wide breakpoint the chat folds behind a floating button like the one the app already shows. The re-evaluation: the record was accepted to put the maintainer's conversation beside the tables it acts on — the existing web chat through the one fenced door under the person's own grants — and the three decisions are layout only, changing no thread, no preset and no fence, so that reasoning stands as written; what could regress is the difficulty map's fifth entry, the column starving the panels, watched at unit one's screenshots and revisable by amendment as What would change our mind already allows. Acceptance comes at the layout check-in ahead of unit five, so unit five's cost receipt and the unit-one screenshots land on this record as a dated amendment rather than at the flip.
 
 **The ask.** Decide (the maintainer, before the plan's first unit is seeded): the `/plane` page becomes two columns — the panels on one side, a pinned chat on the other — and the chat is one long-lived **orchestrator thread per person**: a web thread bound to an `orchestrator` preset that holds the operator's projection plus the fleet's read commands, the plan seed, the merge and stop acts under the person's own grants, and the receipts and issue tools — so that every orchestration act a maintainer does today from a terminal is a sentence typed there, answered with the same cards the Slack door shows. Written for an engineer who knows the plane's tables, the operator door and the web chat. Success criteria:
 
