@@ -17599,6 +17599,38 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.provider.requests[0]!.model).toBe("review-model");
   });
 
+  it("a directive reply in a live pipeline's seed thread is refused naming the unit thread — never a rival run beside the runner (issue 2010)", async () => {
+    const provider = capturingProvider();
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.putUnits([unitRow({ threadKey: "slack:CX:99.0" })]);
+    deps.coordinatorInstances = instances;
+    // The seed thread's page: the ship runner is live and hosted — it holds no
+    // admission slot, so `threadLive` is false — and names its instance.
+    const thread = [
+      { id: "ship-1", startedAt: 0, finished: false, eventCount: 1, agent: "ship", instanceId: INSTANCE },
+    ] as RunView[];
+    const { io, replies } = fakeIO();
+    const ended = await dispatch(deps, msg("agent:coding steer the child about the overlap", "slack:UADMIN"), io, {
+      thread,
+    });
+    expect(ended).toMatchObject({ status: "refused", refusal: "pipeline_thread_owned" });
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("*ship* pipeline");
+    expect(replies[0]).toContain("U12");
+    expect(replies[0]).toContain("slack:CX:99.0");
+    // No rival run: no model turn, no event appended anywhere.
+    expect(provider.requests).toHaveLength(0);
+    expect(await instances.listEvents({ instanceId: INSTANCE, unit: "U12" })).toEqual([]);
+
+    // A plain reply there is the same refusal: the runner takes no inbox here.
+    const plain = fakeIO();
+    const plainEnded = await dispatch(deps, msg("what about the tests", "slack:UADMIN"), plain.io, { thread });
+    expect(plainEnded).toMatchObject({ status: "refused", refusal: "pipeline_thread_owned" });
+    expect(plain.replies[0]).toContain("slack:CX:99.0");
+    expect(provider.requests).toHaveLength(0);
+  });
+
   it("a sender who may not run the coding agent is refused by the allowlist before anything is appended — no event, no nudge, no run", async () => {
     const s = await unitOwnedSetup();
     const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
@@ -18295,6 +18327,309 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(registry.getById("r1")?.agent).not.toBe("review");
     expect(replies.some((r) => r.includes("`review abridge r-live`"))).toBe(true);
     expect(replies.some((r) => r.includes("bound: `agent:review"))).toBe(false);
+  });
+
+  it("on: a preset bind into a live thread folds into the run in flight — the owner rule reads typed intent, never an agent_mismatch refusal", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const live = registry.create("live run", {
+      agent: "general",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "general" });
+    slot.live.runId = live.id;
+    // The bound preset (explore) differs from the live agent (general): the
+    // preset rides the resolution as its own field, never `directives.agent`,
+    // so admission reads no typed agent and folds instead of refusing.
+    deps.operatorModel = decides({
+      reason: "an investigation",
+      binds: [{ line: "agent:explore also cover the docs", reason: "the ask" }],
+    });
+    deps.verifierModel = agrees("asked");
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("also cover the docs", "slack:UADMIN"), io);
+    const [item] = slot.live.inbox.drain();
+    expect(item).toMatchObject({ text: "also cover the docs", userId: "slack:UADMIN" });
+    expect(replies.some((r) => r.includes("Folded into"))).toBe(true);
+    expect(replies.some((r) => r.includes("cannot start beside it"))).toBe(false);
+    // No rival run started, and the decision's event rides the live run's record.
+    expect(registry.snapshotById("r2")).toBeNull();
+    expect(registry.snapshotById(live.id)!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "binds",
+    });
+  });
+
+  it("on: a fold into a run live on another generation has no local slot — the decision lands on a door record, not dropped (item 29's ledger promise)", async () => {
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    await ledger.claim({
+      runId: "run-far",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0", agent: "general" },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    deps.runLedger = createLedgerWriteThrough({
+      ledger,
+      gen: "gen-NEW",
+      fallback: { put: async () => {}, abandoned: () => {} },
+      warn: () => {},
+    });
+    const elsewhere = new ThreadsElsewhere();
+    elsewhere.replace([{ threadKey: "slack:CX:1.0", runId: "run-far", startedAt: 5_000, meta: { agent: "general" } }]);
+    deps.threadsElsewhere = elsewhere;
+    deps.operatorModel = decides({
+      reason: "an investigation",
+      binds: [{ line: "agent:explore also cover the docs", reason: "the ask" }],
+    });
+    deps.verifierModel = agrees("asked");
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("also cover the docs", "slack:UADMIN"), io);
+    // Folded into the other generation's run: no local slot, no run here.
+    expect(replies.some((r) => r.includes("Folded into"))).toBe(true);
+    expect(ledger.inbox.get("run-far")!.map((i) => i.message.text)).toEqual(["also cover the docs"]);
+    expect(provider.requests).toHaveLength(0);
+    // The decision's event lands on a door record of its own — no ledger hole.
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "binds",
+    });
+    expect(registry.snapshotById("r2")).toBeNull();
+  });
+
+  it("on: a fold into a slot whose run is still in setup (no runId yet) lands the decision on a door record, under shadow too", async () => {
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    // The slot is claimed but its run has no id yet: the run is in setup.
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "general" });
+    deps.operatorModel = decides({
+      reason: "an investigation",
+      binds: [{ line: "agent:explore also cover the docs", reason: "the ask" }],
+    });
+    deps.verifierModel = agrees("asked");
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("also cover the docs", "slack:UADMIN"), io);
+    const [item] = slot.live.inbox.drain();
+    expect(item).toMatchObject({ text: "also cover the docs" });
+    expect(replies.some((r) => r.startsWith("↪"))).toBe(true);
+    expect(provider.requests).toHaveLength(0);
+    // No run record to ride: the door record keeps the event.
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "binds",
+    });
+
+    // The shadow row those folds leave no live slot for lands the same way.
+    const shadow = operatorDeps(SHADOW_YAML);
+    wireCommands(shadow.deps);
+    shadow.deps.admission!.claim("slack:CX:1.0", { agent: "general" });
+    shadow.deps.operatorModel = decides({
+      reason: "an investigation",
+      binds: [{ line: "agent:explore also cover the docs", reason: "the ask" }],
+    });
+    await dispatch(shadow.deps, msg("also cover the docs", "slack:UADMIN"), fakeIO().io);
+    expect(shadow.registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "shadow",
+      outcome: "binds",
+    });
+  });
+
+  it("on: a preset bind into a unit-owned idle thread is one unit event and zero runs — the owner rule reads typed intent, not the operator's preset", async () => {
+    const INSTANCE = "plan-fix-the-login-6435ec";
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.putUnits([
+      {
+        instanceId: INSTANCE,
+        unit: "U12",
+        slug: "u12",
+        branch: "plan/fix-the-login-6435ec/u12",
+        dependsOn: [],
+        rounds: [],
+        threadKey: "slack:CX:1.0",
+      },
+    ]);
+    deps.coordinatorInstances = instances;
+    const sends: string[] = [];
+    deps.workflow = { get: async (id) => ({ sendEvent: async () => void sends.push(id) }) };
+    const thread = [
+      { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: INSTANCE },
+    ] as RunView[];
+    deps.operatorModel = decides({
+      reason: "an investigation",
+      binds: [{ line: "agent:explore also update the readme", reason: "the ask" }],
+    });
+    deps.verifierModel = agrees("asked");
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("also update the readme", "slack:UADMIN"), io, { thread });
+    const events = await instances.listEvents({ instanceId: INSTANCE, unit: "U12" });
+    expect(events).toEqual([
+      expect.objectContaining({ sender: "slack:UADMIN", text: "also update the readme", mode: "steer" }),
+    ]);
+    expect(sends).toEqual([INSTANCE]);
+    expect(replies.some((r) => r.includes("Noted for unit U12"))).toBe(true);
+    // Zero agent runs: no model turn and no rival — the unit event is the whole
+    // outcome, and the decision itself lands on a door record (item 29's ledger
+    // promise: no terminal path drops a pending operator event).
+    expect(provider.requests).toHaveLength(0);
+    const door = registry.snapshotById("r1")!;
+    expect(door.events.find((e) => e.type === "operator")).toMatchObject({ mode: "on", outcome: "binds" });
+    expect(door.events.find((e) => e.type === "input")).toMatchObject({ text: "also update the readme" });
+    expect(registry.snapshotById("r2")).toBeNull();
+  });
+
+  it("on: a preset bind into a live pipeline's seed thread is refused by the owner rule — the decision still lands on a door record, under shadow too", async () => {
+    const INSTANCE = "plan-fix-the-login-6435ec";
+    const seedThread = () =>
+      [
+        { id: "ship-1", startedAt: 0, finished: false, eventCount: 1, agent: "ship", instanceId: INSTANCE },
+      ] as RunView[];
+    const units = [
+      {
+        instanceId: INSTANCE,
+        unit: "U12",
+        slug: "u12",
+        branch: "plan/fix-the-login-6435ec/u12",
+        dependsOn: [],
+        rounds: [],
+        threadKey: "slack:CX:99.0",
+      },
+    ];
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.putUnits(units);
+    deps.coordinatorInstances = instances;
+    deps.operatorModel = decides({
+      reason: "an investigation",
+      binds: [{ line: "agent:explore also cover the docs", reason: "the ask" }],
+    });
+    deps.verifierModel = agrees("asked");
+    const { io, replies } = fakeIO();
+    const ended = await dispatch(deps, msg("also cover the docs", "slack:UADMIN"), io, { thread: seedThread() });
+    expect(ended).toMatchObject({ status: "refused", refusal: "pipeline_thread_owned" });
+    expect(replies.some((r) => r.includes("slack:CX:99.0"))).toBe(true);
+    // No rival run beside the pipeline, and no ledger hole: the refusal's door
+    // record and the decision's own ride the registry side by side (item 29).
+    expect(provider.requests).toHaveLength(0);
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "refusal")).toMatchObject({
+      code: "pipeline_thread_owned",
+    });
+    expect(registry.snapshotById("r2")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "binds",
+    });
+
+    // Under shadow the same exit has no live slot to land the row on: the door
+    // record keeps it, so the shadow ledger has no hole either.
+    const shadow = operatorDeps(SHADOW_YAML);
+    wireCommands(shadow.deps);
+    const shadowInstances = new InMemoryCoordinatorInstanceStore();
+    await shadowInstances.putUnits(units);
+    shadow.deps.coordinatorInstances = shadowInstances;
+    shadow.deps.operatorModel = decides({
+      reason: "an investigation",
+      binds: [{ line: "agent:explore also cover the docs", reason: "the ask" }],
+    });
+    const shadowEnded = await dispatch(shadow.deps, msg("also cover the docs", "slack:UADMIN"), fakeIO().io, {
+      thread: seedThread(),
+    });
+    expect(shadowEnded).toMatchObject({ status: "refused", refusal: "pipeline_thread_owned" });
+    expect(shadow.registry.snapshotById("r2")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "shadow",
+      outcome: "binds",
+    });
+  });
+
+  it("on: yes to a pending question whose proposal is a preset line routes the proposal's tail as the request, not the word yes", async () => {
+    const pendingThread = [
+      {
+        id: "prev",
+        startedAt: 0,
+        finished: true,
+        eventCount: 2,
+        operator: {
+          mode: "on",
+          outcome: "question",
+          reason: "ambiguous",
+          proposal: "agent:general summarize acme/repo",
+        },
+      },
+    ] as RunView[];
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+    const verifier = agrees("the author confirmed the proposal");
+    deps.verifierModel = verifier;
+    const { io } = fakeIO();
+    await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread: pendingThread });
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    // The verifier judged the confirmed proposal itself — never `agent:general yes`.
+    const verifierPrompt: RoutePrompt = verifier.mock.calls[0]![0];
+    expect(verifierPrompt.user).toContain("agent:general summarize acme/repo");
+    expect(verifierPrompt.user).not.toContain("agent:general yes");
+    // One agent run on the preset, fed the proposal's tail as the request.
+    expect(registry.getById("r1")).toMatchObject({ agent: "general" });
+    expect(provider.requests).toHaveLength(1);
+    expect(JSON.stringify(provider.requests[0])).toContain("summarize acme/repo");
+    const events = registry.snapshotById("r1")!.events;
+    expect(events.find((e) => e.type === "run_meta")).toMatchObject({ agent: "general", agentSource: "operator" });
+    expect(events.find((e) => e.type === "operator")).toMatchObject({
+      outcome: "binds",
+      binds: [
+        {
+          line: "agent:general summarize acme/repo",
+          reason: "yes to the pending question's proposal",
+          confirmed: true,
+        },
+      ],
+    });
+  });
+
+  it("on: a typed registry command line runs as typed, ahead of the operator — and a plain-words ask still reaches it", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const runaway = registry.create("a runaway run", {
+      agent: "coding",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:9.0",
+    });
+    deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+    const { io } = fakeIO();
+    await dispatch(deps, msg(`runs stop ${runaway.id} --mode hard`, "slack:UADMIN"), io);
+    // The typed line is the person's decision: stage A runs it — no operator
+    // turn to re-bind it into a spelling the chat grammar does not parse.
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(deps.invoked).toEqual(["runs.stop"]);
+    // A plain-words ask is no command line: the operator still decides it.
+    await dispatch(deps, msg("please stop that runaway run", "slack:UADMIN"), fakeIO().io);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(1);
+    expect(deps.invoked).toEqual(["runs.stop", "help.show"]);
+  });
+
+  it("on: a recognized command with a malformed tail is stage A's usage reply — never the operator's turn to re-bind", async () => {
+    const { deps } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+    const { io, replies } = fakeIO();
+    // The typo variant of the incident this gate exists for: a recognized form
+    // with a malformed tail (an unknown flag parses to kind "reply", not
+    // "invoke") is item 10's immediate usage reply, not a model turn that
+    // could re-bind the line under `on`.
+    await dispatch(deps, msg("runs stop r9 --modee hard", "slack:UADMIN"), io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(deps.invoked).toEqual([]);
+    expect(replies.some((r) => r.includes("\u26a0\ufe0f"))).toBe(true);
   });
 
   it("on: a message that opens with a directive skips the operator — the directive is the person's typed decision — and routes as under off", async () => {

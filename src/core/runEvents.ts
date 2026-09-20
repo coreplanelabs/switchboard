@@ -1054,7 +1054,11 @@ export type RunEvent =
       mode: "shadow" | "on";
       outcome: "binds" | "question" | "refusal" | "non_decision";
       reason: string;
-      binds?: ReadonlyArray<{ line: string; reason: string }>;
+      /** A bind marked `confirmed` is a pending question's confirmed proposal
+       *  (`bindFromAnswer`): the line itself carries the task — the person's
+       *  message was the word "yes" — so a confirmed preset line routes its
+       *  own tail as the request. Additive: unknown → a fresh bind. */
+      binds?: ReadonlyArray<{ line: string; reason: string; confirmed?: true }>;
       question?: string;
       /** A question's proposed line, redacted and cut like the receipt — what
        *  the next turn's "yes" binds (`bindFromAnswer`). */

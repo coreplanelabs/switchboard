@@ -567,6 +567,13 @@ export const REFUSAL_SENTENCES = {
   ship_thread_live: () =>
     "🚫 A pipeline is already running in this thread — one pipeline per thread. " +
     "Follow the one in flight here, or start this one in a thread of its own.",
+  pipeline_thread_owned: (p: { agent: string; units: ReadonlyArray<{ unit: string; threadKey?: string }> }) =>
+    `🚦 This thread belongs to the live *${p.agent}* pipeline runner — nothing runs beside it here. ` +
+    (p.units.length > 0
+      ? `Reply in the unit's own thread instead: ${p.units
+          .map((u) => `${u.unit}${u.threadKey !== undefined ? ` (\`${u.threadKey}\`)` : ""}`)
+          .join(", ")}.`
+      : "Reply in the unit's own thread instead."),
   ship_budget: (p: { maxMinutes: number; maxRounds: number; need: number; provision: number; coding: number }) =>
     `🚫 Ship cannot start under a ${p.maxMinutes}-minute budget: the loop it allows (${p.maxRounds} review rounds) needs ${p.need} minutes — ` +
     `${p.provision} to provision, the coding child's ${p.coding}, and the reserve for the rounds after it at their floors. ` +

@@ -11,7 +11,7 @@ import { redactSecrets, type StopMode } from "./runEvents.js";
 import { oneLine, redactAndCap, stripAnsi } from "./redact.js";
 import type { LiveThread } from "./threadAdmission.js";
 import type { RecordDeps } from "./dispatch/record.js";
-import { cardLines, errorReply, renderRefusal, replyAck } from "./dispatch/reply.js";
+import { cardLines, errorReply, renderRefusal, replyAck, REFUSAL_SENTENCES } from "./dispatch/reply.js";
 import type { Verbosity } from "./verbosity.js";
 import { causeOf, refusalOf, RefusalError, type Refusal, type RefusalCause, type RefusalCode } from "./refusal.js";
 import {
@@ -28,7 +28,12 @@ import {
 } from "./dispatch/admission.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
 import { actorIdsOf, cancelPending, consumeAndRun, REFUSED_REASON } from "./dispatch/confirm.js";
-import { postSettledOutcome, recordRefusal, recordRoutedDecision } from "./dispatch/commandRun.js";
+import {
+  postSettledOutcome,
+  recordOperatorDecision,
+  recordRefusal,
+  recordRoutedDecision,
+} from "./dispatch/commandRun.js";
 import { COMMAND_RUN_AGENT } from "./runOwner.js";
 import { redactedInput } from "./dispatch/route.js";
 import type { Actor } from "./authz/types.js";
@@ -41,6 +46,7 @@ import {
 } from "./dispatch/references.js";
 import { resolveChatActor } from "./authz/actor.js";
 import { operatorModeOf, referencesOn } from "../config.js";
+import { parseChatCommand } from "./commandChat.js";
 import { parseDirectives } from "../directives.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
 import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps, type RouteModel } from "./dispatch/route.js";
@@ -590,14 +596,28 @@ export async function dispatch(
     // `agent:<preset>` is the person's typed decision and stays stage A's and
     // the route stage's under `on`: the operator's re-reading of a seed bound a
     // line no registry parses and handed the seed back, on its first day on.
-    // Shadow still records its decision beside the directive's run.
-    const operatorMode =
-      configuredOperator === "on" && parseDirectives(msg.text).agent !== undefined ? "off" : configuredOperator;
+    // The same gate covers a message the registry's chat grammar parses, until
+    // the typed-line unit (plan 002 U13) lands: the operator's re-reading of a
+    // typed `runs stop <id> --mode hard` re-bound it into a tool spelling the
+    // grammar does not parse and handed it back, so a runaway run could not be
+    // stopped from chat. ANY non-null parse is typed — a recognized form with
+    // a malformed tail (an unknown flag, a stray positional) is stage A's
+    // immediate usage reply (routing-and-config item 10), never a model turn
+    // that could re-bind the typo. Shadow still records its decision beside
+    // either.
+    const typedDecision =
+      parseDirectives(msg.text).agent !== undefined ||
+      (deps.commands !== undefined && parseChatCommand(msg.text, deps.commands) !== null);
+    const operatorMode = configuredOperator === "on" && typedDecision ? "off" : configuredOperator;
     let operatorEvent: OperatorEventFields | undefined;
     // The preset an `on` decision routes the request through (a preset bind,
     // `presetBindOf`): the route stage runs it on the person's own words with
     // the decision's event on the run.
     let operatorPreset: string | undefined;
+    // The request the route runs instead of the person's message: a confirmed
+    // proposal's own tail (`presetRequestOf`) — the person's message was the
+    // word "yes", which routes nothing. Absent for every fresh bind.
+    let operatorRequest: string | undefined;
     // The thread page the operator reads (newest first): the tail's session
     // keys and, on the newest record, an `on` question still pending — whose
     // "yes" this event may be (routing-and-config item 29). Read here once and
@@ -650,11 +670,23 @@ export async function dispatch(
         );
         if (execution.kind === "answered") return ended;
         operatorPreset = execution.preset;
+        operatorRequest = execution.request;
         // A command bind that ran before the preset already carries the
         // decision's event on its record: the agent run does not repeat it.
         if (execution.carried) operatorEvent = undefined;
       }
     }
+    // Item 29's ledger promise (run-history item 60): a decision still pending
+    // — a routed preset whose event was to ride the run, or a shadow row with
+    // no live slot to land on — that meets a terminal path which starts no run
+    // records on a door record of its own, exactly as a question, a refusal
+    // and an all-handed-back decision do.
+    const recordPendingOperator = async () => {
+      if (operatorEvent === undefined) return;
+      const event = operatorEvent;
+      operatorEvent = undefined;
+      await recordOperatorDecision(deps, msg, event, ending, trace);
+    };
 
     // Stage A (dispatch/fastPath.ts): a message that names a registered chat
     // command is answered inline — never a model turn, and before the history
@@ -667,10 +699,16 @@ export async function dispatch(
       return ended;
 
     const { directives, history } = await readRequest({ msg, io, root });
-    // The operator's preset stands where a directive would: the request is the
-    // person's words, the agent the decision's (`agentSource: "operator"`
-    // below), and the route stage is not asked.
-    if (operatorPreset !== undefined) directives.agent = operatorPreset;
+    // The operator's preset stands where a directive would in the RESOLUTION
+    // (`resolveRun`'s own `operatorPreset` field, `agentSource: "operator"`
+    // below) — never written into `directives.agent`, so admission's follow-up
+    // rule and the thread-owner rule below keep reading the person's typed
+    // intent alone: a preset bind into a thread a live run or an idle unit
+    // owns folds or is refused by the owner's rule, never refused as an agent
+    // request nobody typed and never started as a rival run (issue 2010's
+    // class). A confirmed proposal carries its own task: its tail is the
+    // request, since the person's message was the word "yes".
+    if (operatorRequest !== undefined) directives.text = operatorRequest;
 
     // The thread's runs, read once (dispatch/thread.ts) for a reply in an
     // existing thread — a message that starts a thread has none, and a spawn,
@@ -715,6 +753,7 @@ export async function dispatch(
       directives,
       history,
       ...(stickyAgent !== undefined ? { stickyAgent } : {}),
+      ...(operatorPreset !== undefined ? { operatorPreset } : {}),
     });
     const { sticky } = settled;
     let { resolved, agentSource } = settled;
@@ -740,18 +779,47 @@ export async function dispatch(
     // thread owned by an unfinished unit with no live run is one thread event
     // on that unit — appended with the mode read off the row, the instance
     // nudged, the sender acked — and the router never runs (the gate does).
-    // A directive naming an agent falls through to today's path: `agent:review
-    // <url>` in a pipeline thread still means what it says. A live thread is
-    // the live run's (admission steers below); a session or no owner is the
+    // In a UNIT's thread a directive naming an agent falls through to today's
+    // path: `agent:review <url>` there still means what it says. A live thread
+    // is the live run's (admission steers below); a session or no owner is the
     // sticky path and the router, exactly as before.
-    if (thread && !threadLive && directives.agent === undefined && deps.coordinatorInstances !== undefined) {
+    if (thread && !threadLive && deps.coordinatorInstances !== undefined) {
       const owner = await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey);
-      if (owner.kind === "unit") {
+      if (owner.kind === "live" && owner.run.instanceId !== undefined) {
+        // The seed thread of a live pipeline runner (issue 2010; record 0051's
+        // owner rule, thread-admission item 9): a hosted runner occupies no
+        // admission slot, so `threadLive` is false here, yet the thread is the
+        // runner's for its life — nothing runs beside it. A reply, directive
+        // or not, is refused naming the owner and the unit thread to reply in,
+        // never started as a rival run beside the live pipeline.
+        const units = await deps.coordinatorInstances
+          .listUnits(owner.run.instanceId)
+          .catch(() => [] as CoordinatorUnit[]);
+        const open = units.filter((u) => u.ending === undefined);
+        await refuse(
+          refusalOf(
+            "pipeline_thread_owned",
+            REFUSAL_SENTENCES.pipeline_thread_owned({
+              agent: owner.run.agent ?? "ship",
+              units: open.map((u) => ({
+                unit: u.unit,
+                ...(u.threadKey !== undefined ? { threadKey: u.threadKey } : {}),
+              })),
+            }),
+          ),
+        );
+        await recordPendingOperator();
+        return ended;
+      }
+      if (owner.kind === "unit" && directives.agent === undefined) {
         // The same gate a live steer passes (admission's allowlist check): the
         // event is read by the unit's next coding child — a write-identity run
         // — so its sender must be allowed to run `coding`, refused the same
         // named way, before anything is appended. "Run" includes "is heard by".
-        if ((await authorizeAgent(deps, { msg, io, refuse, agentName: "coding" })).kind === "refused") return ended;
+        if ((await authorizeAgent(deps, { msg, io, refuse, agentName: "coding" })).kind === "refused") {
+          await recordPendingOperator();
+          return ended;
+        }
         const answer = await root.span("dispatch.unit_owned_thread", () =>
           answerUnitOwnedThread(deps, {
             msg,
@@ -762,7 +830,10 @@ export async function dispatch(
             verbosity: deps.config.verbosityFor(msg.channelId, msg.userId, directives.verbosity),
           }),
         );
-        if (answer === "acked") return ended;
+        if (answer === "acked") {
+          await recordPendingOperator();
+          return ended;
+        }
         // `route-fresh`: the instance is gone — the row was ended `terminated`
         // and the thread told — so the request runs on as if the thread were
         // unowned by any unit.
@@ -887,7 +958,21 @@ export async function dispatch(
         ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
       });
     // A reply folded into the live child of a spawned thread: its parent hears it now.
-    if (outcome.kind === "steered") await tellLineage({ kind: "steered" });
+    if (outcome.kind === "steered") {
+      await tellLineage({ kind: "steered" });
+      // A decision that routed a preset into a live thread was folded by the
+      // owner rule instead of starting a run: the decision's event rides the
+      // live run's record — exactly where a shadow row lands. A fold with no
+      // local slot (a run live on another generation, or one still in setup
+      // whose slot has no runId yet) has no record here to ride, so the event
+      // lands on a door record instead — item 29's ledger promise holds on
+      // every steered exit, not only the local one.
+      const liveRun = operatorEvent !== undefined ? admission.get(msg.threadKey)?.runId : undefined;
+      if (operatorEvent !== undefined && liveRun !== undefined) {
+        registry.publish(liveRun, { type: "operator", ...operatorEvent, at: clock() });
+        operatorEvent = undefined;
+      } else await recordPendingOperator();
+    }
     if (outcome.kind !== "proceed") return ended;
     admitted = outcome.admitted;
     const taken = await adoptCarriedRun(deps, admissionCtx);
