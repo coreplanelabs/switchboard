@@ -18347,6 +18347,133 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(receipt).toContain(HAND_BACK_PREFIX);
   });
 
+  // The operator's write hand-back collapsed onto the one confirmation path
+  // (record 0044; routing-and-config items 25 and 29): a write-class bind on a
+  // channel that can show a click is offered through the confirmation store
+  // exactly like a routed write — same row, same Yes handler, same expiry —
+  // and the plain `To run this:` text remains only where no channel can show one.
+  const confirming = () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    let now = 1_000_000;
+    const store = new InMemoryConfirmationStore({ clock: () => now });
+    deps.confirmations = store;
+    const audits: AuditEntry[] = [];
+    const bound = buildCoreCommands(deps.config, null, {
+      registry,
+      secrets: processSecrets,
+      dataDir: deps.dataDir ?? mkdtempSync(join(tmpdir(), "swb-operator-confirm-")),
+      warn: () => {},
+      audit: (e) => void audits.push(e),
+    });
+    const invoked: string[] = [];
+    deps.invoked = invoked;
+    deps.commands = {
+      ...bound,
+      invoke: (id, raw, caller, trace) => {
+        invoked.push(id);
+        return bound.invoke(id, raw, caller, trace);
+      },
+    };
+    deps.operatorModel = decides({
+      reason: "the ask",
+      binds: [{ line: "config set me --agent review", reason: "the ask" }],
+    });
+    deps.verifierModel = agrees("the author asked for this write");
+    return { deps, registry, store, audits, tick: (ms: number) => void (now += ms) };
+  };
+  const offering = () => {
+    const f = fakeIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    f.io.offer = vi.fn(async (o) => void offers.push(o));
+    return { ...f, offers };
+  };
+  const requester: Actor = { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS };
+
+  it("on: a config-set-me bind on a channel with offer mints one confirmation row and offers the click — no To-run-this text (routing-and-config items 25 and 29)", async () => {
+    const { deps, store } = confirming();
+    const { io, replies, offers } = offering();
+    await dispatch(deps, msg("set my agent to review", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual([]);
+    expect(offers).toEqual([
+      {
+        id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        line: "config set me --agent review",
+        risk: expect.any(String),
+        expiresAt: 1_000_000 + CONFIRMATION_TTL_MS,
+      },
+    ]);
+    expect(store.rows.size).toBe(1);
+    expect(store.rows.get(offers[0]!.id)).toMatchObject({
+      kind: "run",
+      command: "config.set",
+      receipt: "config set me --agent review",
+      message: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:1.0" },
+      model: "anthropic/general-model",
+    });
+    // The bind's receipt still renders, the verifier's line riding it — and no
+    // reply carries the hand-back text: the click is the affordance.
+    const receipt = replies.find((r) => r.includes("bound: `config set me --agent review` — write — the ask"));
+    expect(receipt).toBeDefined();
+    expect(receipt).toContain("verified: the author asked for this write");
+    expect(replies.some((r) => r.includes(HAND_BACK_PREFIX))).toBe(false);
+  });
+
+  it("on: the offered bind's Yes runs it as the requester with source confirm — the routed write's own handler, one record with outcome confirmed", async () => {
+    const { deps, registry, store, audits } = confirming();
+    const o = offering();
+    await dispatch(deps, msg("set my agent to review", "slack:UADMIN"), o.io);
+    const clickIO = fakeIO();
+    const outcome = await dispatchClick(deps, {
+      kind: "confirm",
+      id: o.offers[0]!.id,
+      actor: requester,
+      io: clickIO.io,
+    });
+    expect(outcome).toEqual({ status: "completed" });
+    expect(deps.invoked).toEqual(["config.set"]);
+    expect(audits).toEqual([
+      expect.objectContaining({ commandId: "config.set", callerId: "slack:UADMIN", outcome: "ok", source: "confirm" }),
+    ]);
+    expect(clickIO.replies[0]).toContain("routed: config set me --agent review");
+    expect(store.rows.size).toBe(0);
+    // r1 is the offered decision's door record; r2 the confirmed run.
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({ outcome: "binds" });
+    expect(registry.snapshotById("r2")!.events.find((e) => e.type === "route")).toMatchObject({
+      outcome: "confirmed",
+      reason: "confirmed after offer",
+      command: "config.set",
+    });
+  });
+
+  it("on: the expired Yes names the ten-minute window and nothing runs", async () => {
+    const { deps, tick } = confirming();
+    const o = offering();
+    await dispatch(deps, msg("set my agent to review", "slack:UADMIN"), o.io);
+    tick(CONFIRMATION_TTL_MS);
+    const clickIO = fakeIO();
+    const outcome = await dispatchClick(deps, {
+      kind: "confirm",
+      id: o.offers[0]!.id,
+      actor: requester,
+      io: clickIO.io,
+    });
+    expect(outcome).toEqual({ status: "refused", refusal: "confirmation_expired", cause: "request" });
+    expect(clickIO.replies).toEqual([OFFER_EXPIRED_LINE]);
+    expect(OFFER_EXPIRED_LINE).toContain("ten minutes");
+    expect(deps.invoked).toEqual([]);
+  });
+
+  it("on: the same bind on a channel without offer hands back the line as today, and no row is minted", async () => {
+    const { deps, store } = confirming();
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("set my agent to review", "slack:UADMIN"), io);
+    expect(store.rows.size).toBe(0);
+    expect(deps.invoked).toEqual([]);
+    const receipt = replies.find((r) => r.includes("bound: `config set me --agent review`"));
+    expect(receipt).toContain(HAND_BACK_PREFIX);
+    expect(receipt).toContain("`config set me --agent review`");
+  });
+
   it("on: a bind naming a preset — `agent:<preset>` or the bare name — starts that preset's run on the person's own words, never the line's paraphrase; the receipt carries the verifier's line, the run carries the decision and agentSource operator", async () => {
     for (const line of [
       "agent:general what changed this week in acme/repo?",

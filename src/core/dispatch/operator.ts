@@ -42,11 +42,12 @@ import { parseChatCommand, type ChatCommands } from "../commandChat.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RequestTrace } from "../requestTrace.js";
-import { HAND_BACK_PREFIX } from "./handBack.js";
+import { renderHandBackLine } from "./handBack.js";
+import { STORE_UNREACHABLE_NOTE, UNSHOWABLE_LINE } from "../confirmations.js";
 import { askStructured, attemptsOfThrow, type StructuredAttempt } from "./structured.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { recordOperatorDecision, runChatCommand, type OperatorEventFields } from "./commandRun.js";
-import { renderOperatorReceipt, renderVerifierHandBack, renderVerifierLine } from "./reply.js";
+import { renderConfirmationOffer, renderOperatorReceipt, renderVerifierHandBack, renderVerifierLine } from "./reply.js";
 import { OPERATOR_TAIL_BYTES, operatorTail, type OperatorTailTurn } from "./seed.js";
 import {
   parseVerifierAnswer,
@@ -63,6 +64,8 @@ import {
   ROUTE_RECEIPT_CAP,
   ROUTE_TIMEOUT_MS,
   verifierPrompt,
+  mintConfirmationOffer,
+  routeReceipt,
   type RoutableCommand,
   type RoutablePreset,
   type RouteModel,
@@ -821,9 +824,15 @@ function verifierModelOf(deps: {
  * bind that runs posts the command's own answer bare, while the record's
  * `operator` event keeps the bind unchanged at every level; the class ladder is the door's
  * own (`routedRunsAtOnce` under the path's confirm class), so a bind at or
- * after the confirm class is handed back as the line to paste, never run —
- * the operator outranks no guard. A bind that is not a registered command
- * line is handed back too. Before any of that, THE VERIFIER holds the binds a
+ * after the confirm class never runs — the operator outranks no guard — and is
+ * offered as record 0044's one click where the channel can show one
+ * (`mintConfirmationOffer`: the same row, Yes handler and ten-minute expiry as
+ * a routed write, routing-and-config item 25), the plain hand-back text kept
+ * only where no channel can show a click (the CLI, HTTP). A bind that is not a
+ * registered command line is handed back too — a residue: under record 0067
+ * the seam's bind guard re-asks an unparseable line, so only a confirmed
+ * proposal or a registry-less process can reach it. Before any of that, THE
+ * VERIFIER holds the binds a
  * planted instruction could fill (routing-and-config item 25): for a
  * bind that starts a run (`agent:<preset>`, any identity), a bind of `steer`
  * and a bind of class write or above, one more model call on the fast tier
@@ -960,7 +969,7 @@ export async function executeOperatorDecision(
       // One run per message: the binds after the preset are handed back as
       // lines rather than dropped, and the route stage starts the preset on
       // the request itself.
-      for (const rest of binds.slice(i + 1)) await io.reply(`${HAND_BACK_PREFIX}\n\`${rest.line}\``);
+      for (const rest of binds.slice(i + 1)) await io.reply(renderHandBackLine(rest.line));
       // A confirmed proposal routes its own tail as the request; a fresh bind
       // routes the person's own message, as ever.
       const request = bind.confirmed ? presetRequestOf(bind.line) : undefined;
@@ -971,7 +980,7 @@ export async function executeOperatorDecision(
       // bind never parses as a registry command): the call was spent, so its
       // receipt reaches the person instead of being dropped with the parse —
       // at `verbose`, where receipts live; the hand-back itself at every level.
-      await io.reply(`${verbose && verified ? `${verified}\n` : ""}${HAND_BACK_PREFIX}\n\`${bind.line}\``);
+      await io.reply(`${verbose && verified ? `${verified}\n` : ""}${renderHandBackLine(bind.line)}`);
       continue;
     }
     const radius = bound.radius;
@@ -984,8 +993,36 @@ export async function executeOperatorDecision(
     const runsNow = def.id === "steer.run" || routedRunsAtOnce(def as CommandDef<unknown>, confirm.value, parsed.input);
     const receipt = `${renderOperatorReceipt(bind.line, radius, bind.reason)}${verified ? `\n${verified}` : ""}`;
     if (!runsNow) {
-      // The hand-back reaches every level; its receipt prefix is `verbose` material.
-      await io.reply(`${verbose ? `${receipt}\n` : ""}${HAND_BACK_PREFIX}\n\`${bind.line}\``);
+      // The one confirmation path (record 0044; routing-and-config item 25): a
+      // write-class bind on a channel that can show a click is offered through
+      // the confirmation store exactly like a routed write — the same row, the
+      // same Yes handler, the same ten-minute expiry — so the person clicks
+      // instead of retyping; the plain `To run this:` text remains only where
+      // no channel can show a click (the CLI, HTTP). The receipt prefix is
+      // `verbose` material (item 28's ladder); the offer and the hand-back
+      // reach every level.
+      const mint = await mintConfirmationOffer({
+        io,
+        store: deps.confirmations,
+        msg,
+        def: bound.def,
+        input: parsed.input,
+        receipt: routeReceipt(bound.def, parsed.input),
+        // The row's model is the decider's, as the routed offer stores the
+        // router's: the operator runs on the ref behind `defaults.models.general`.
+        model: deps.config.config.defaults.models["general"] ?? "",
+      });
+      if (mint.kind === "offered") {
+        if (verbose) await io.reply(receipt);
+        await renderConfirmationOffer(io, mint.shown);
+        continue;
+      }
+      if (mint.kind === "unshowable") {
+        await io.reply(`${verbose ? `${receipt}\n` : ""}${UNSHOWABLE_LINE}`);
+        continue;
+      }
+      const note = mint.kind === "store_unreachable" ? `\n${STORE_UNREACHABLE_NOTE}` : "";
+      await io.reply(`${verbose ? `${receipt}\n` : ""}${renderHandBackLine(bind.line)}${note}`);
       continue;
     }
     if (verbose) await io.reply(receipt);
