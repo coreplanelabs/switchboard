@@ -13,6 +13,7 @@ import { registerMemoryCommands, type MemoryCommandDeps } from "./memory.js";
 import { registerMetricsCommands, type MetricsCommandDeps } from "./metrics.js";
 import { registerPlaneCommands, type PlaneCommandDeps } from "./plane.js";
 import { registerProvidersCommands, type ProvidersCommandDeps } from "./providers.js";
+import { registerPullsCommands, type PullsCommandDeps } from "./pulls.js";
 import { registerRepoCommands, type RepoCommandDeps } from "./repo.js";
 import { registerReviewCommands, type ReviewCommandDeps } from "./review.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./runs.js";
@@ -47,6 +48,7 @@ export type CoreCommandDeps = HelpCommandDeps &
   CostsCommandDeps &
   MetricsCommandDeps &
   ProvidersCommandDeps &
+  PullsCommandDeps &
   ArtifactsCommandDeps &
   PlaneCommandDeps &
   SteerCommandDeps;
@@ -71,6 +73,7 @@ export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>)
   registerCostsCommands(registry);
   registerMetricsCommands(registry);
   registerProvidersCommands(registry);
+  registerPullsCommands(registry);
   registerArtifactsCommands(registry);
   registerPlaneCommands(registry);
 }

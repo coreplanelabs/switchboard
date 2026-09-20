@@ -211,6 +211,21 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
     args: ["run-8f2", "it should also update the changelog"],
     options: {},
   }),
+  // The sweep (record 0071): rebase the pipeline's open pull requests.
+  f("c40h", "happy", "rebase every open pull request in acme/api onto its base", "pulls.rebase", {
+    args: [],
+    options: { repo: "acme/api" },
+  }),
+  f(
+    "c40p",
+    "paraphrase",
+    "our pull requests in acme/api went stale behind the merges — bring them current",
+    "pulls.rebase",
+    {
+      args: [],
+      options: { repo: "acme/api" },
+    },
+  ),
 ];
 
 const d = (id: string, text: string, command: string, allow?: readonly string[]): RouteCommandDecoy => ({
@@ -269,6 +284,8 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c35d", "is the review agent worth what it costs us?", "costs.by"),
   d("c39d", "the metrics point for run run-8f2 looks wrong — what does it carry?", "metrics.trend"),
   d("c37d", "which openrouter model should the coding preset run on?", "providers.check"),
+  // Asks why the pull request conflicts, not for it to be rebased.
+  d("c40d", "why is acme/api#42 conflicting with main?", "pulls.rebase", ["runs.findings"]),
 ];
 
 /** Every example of the command half, fixtures then decoys, for one replay. */

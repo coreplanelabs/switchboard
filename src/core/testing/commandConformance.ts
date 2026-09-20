@@ -557,6 +557,10 @@ export const COMMAND_FIXTURES: Readonly<
     why: "as config.show, plus `--thread` for the thread scope on machine surfaces and `--user` for the user scope's binding",
   },
   "config.instructions": { baseline: { channel: FIXTURE.channel }, why: "as config.show" },
+  "pulls.rebase": {
+    baseline: { repo: FIXTURE.repo },
+    why: "a machine caller has no origin thread — without `--repo` (or a full pull request reference) there is no repository to sweep",
+  },
   "repo.reconfigure": {
     baseline: { ref: "main" },
     why: "at least one change is required (a bare `repo reconfigure <slug>` is `nothing to reconfigure`)",

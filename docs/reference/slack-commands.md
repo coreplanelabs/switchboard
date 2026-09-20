@@ -154,6 +154,12 @@ Combine freely: `agent:ship model:anthropic/claude-opus-5 effort:high in acme/ap
 |---|---|---|
 | `providers check` | Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each. | admins |
 
+### `pulls`
+
+| Command | What it does | Who can run it |
+|---|---|---|
+| `pulls rebase [pr] [--repo <string>]` | Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request. | admins |
+
 ### `plane`
 
 | Command | What it does | Who can run it |

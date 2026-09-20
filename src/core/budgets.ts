@@ -194,6 +194,12 @@ export const FLOORS: Readonly<Record<RoundKind, number>> = {
  *  when the remainder allows it. */
 export const MERGE_WAIT_ASK_MINUTES = 60;
 
+/** The sweep's bounds (record 0071, mechanism two): the short lease of the one
+ *  model round a conflicting pull request may buy, and the spend that round is
+ *  capped at per pull request — a round refused at either bound ends the pull
+ *  request's line with the conflict named, never a retry loop. */
+export const PULL_SWEEP = { leaseMinutes: 15, spendCapUsd: 5 } as const;
+
 /** The provider retry ladder (issue 1932): the backoff before each retry of a
  *  transient model-call failure — a gateway 5xx, a stream cut before
  *  `message_stop`, a gateway timeout. Three attempts with growing waits,

@@ -765,6 +765,22 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
         return `↪ folded into run ${runId} at its next boundary`;
       },
     },
+    // The sweep behind `pulls rebase` (record 0071): a recording stub — the real
+    // resolver runs git and can start a model round, which no fixture holds.
+    pulls: {
+      service: async () => ({
+        sweep: async (target: { repo: string; number?: number }) => {
+          s.executed.push(`pulls sweep ${target.repo}${target.number === undefined ? "" : `#${target.number}`}`);
+          const number = target.number ?? 42;
+          return {
+            repo: target.repo,
+            results: [
+              { repo: target.repo, number, outcome: "skipped" as const, line: `#${number} skipped, already current` },
+            ],
+          };
+        },
+      }),
+    },
     review: { abridger: async () => s.abridger, runs },
     friction: {
       ledger: async () => new RunStoreFrictionLedger(s.store),

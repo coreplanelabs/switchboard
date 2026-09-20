@@ -90,6 +90,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/costs.snapshot` | `POST` | `costs:write` | Take the costs snapshot now: read both billing sources and the run history once over the page's widest range, store the result, and serve it to every reader of the costs page from then on. |
 | `/api/metrics.trend` | `GET`, `POST` | `metrics:read` | The run trend from the metrics dataset: runs, failure rate, p50/p95 wall and dollars per day and per agent over the range, weighted for sampling — the /metrics page's report as text or JSON; nothing written. |
 | `/api/providers.check` | `GET`, `POST` | `providers:read` | Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each. |
+| `/api/pulls.rebase` | `POST` | `pulls:write` | Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request. |
 | `/api/plane.show` | `GET`, `POST` | `runs:read` | What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written. |
 
 <!-- /generated:api-routes -->
