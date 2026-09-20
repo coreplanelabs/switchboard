@@ -162,7 +162,7 @@ export async function prepareRelaunch(
       };
     if (reattached.kind === "reattach_refused")
       return refuse(
-        `the run's workspace could not be re-attached in the replacement container (${reattached.why}); the run restarts from its request as a new run in this thread`,
+        `the run's workspace could not be re-attached in the replacement container (${reattached.why}); the run restarts from its request under the same run id`,
         "workspace lost with the replaced container; restarting from the request",
         "workspace_lost",
       );

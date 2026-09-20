@@ -166,13 +166,25 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
   ): Promise<void> => {
     const attempts = RUN_HISTORY_RETRY_DELAYS_MS.length + 1;
     // The writer's final word to the sink (run-history item 54): this record is
-    // not put again, so a finish the sink kept named as in flight settles now.
-    const giveUp = (why: string): void => {
+    // not put again THROUGH THIS SINK, so a finish the sink kept named as in
+    // flight settles now. A tracked run's sink is the ledger's (`via`); when it
+    // gives up, the record still reaches the plain store directly — best
+    // effort, once — so a run whose ledger finish cannot land keeps its record
+    // (item 54: "its record still reaches the store"), exactly as an untracked
+    // run's always has.
+    const giveUp = async (why: string): Promise<void> => {
       failures++;
       try {
         sink.abandoned(record, why);
       } catch (err) {
         opts.warn(`[run-history] abandoned hook failed for ${record.id}: ${describe(err)}`);
+      }
+      if (sink === opts.store || flag?.superseded) return;
+      try {
+        await opts.store.put(record, span ? { span } : undefined);
+        if (!flag) persisted(record.id);
+      } catch (err) {
+        opts.warn(`[run-history] ${record.id} store fallback after give-up failed: ${describe(err)}`);
       }
     };
     for (let attempt = 1; ; attempt++) {
@@ -191,17 +203,17 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
             routeMissingLogged = true;
             opts.warn(ROUTE_MISSING_MESSAGE);
           }
-          giveUp(describe(err));
+          await giveUp(describe(err));
           return;
         }
         if (err instanceof PermanentStoreError) {
           opts.warn(`[run-history] ${record.id} not persisted (permanent, not retried): ${describe(err)}`);
-          giveUp(describe(err));
+          await giveUp(describe(err));
           return;
         }
         if (attempt >= attempts) {
           opts.warn(`[run-history] ${record.id} not persisted after ${attempts} attempts: ${describe(err)}`);
-          giveUp(`not persisted after ${attempts} attempts: ${describe(err)}`);
+          await giveUp(`not persisted after ${attempts} attempts: ${describe(err)}`);
           return;
         }
         await sleep(jittered(RUN_HISTORY_RETRY_DELAYS_MS[attempt - 1]));

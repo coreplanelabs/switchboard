@@ -75,6 +75,11 @@ export interface CreateOptions {
   /** The run's original start (the ledger row's), so the record and the
    *  card's elapsed time span the whole run, not the resume. */
   startedAt?: number;
+  /** The predecessor's capability token, carried by a restart that keeps the
+   *  run's identity (run-history item 54): every link posted for the run —
+   *  the card's, the unit thread's — keeps opening the page across a
+   *  container replacement. Absent, a fresh token is minted. */
+  token?: string;
 }
 
 export interface RunHandle {
@@ -216,7 +221,7 @@ export class RunRegistry {
   create(label?: string, meta?: RunMeta, opts: CreateOptions = {}): RunHandle {
     this.sweep();
     const id = opts.id ?? this.genId();
-    const token = this.genToken();
+    const token = opts.token ?? this.genToken();
     const stored = label === undefined ? undefined : redactAndCap(label, RUN_LABEL_MAX);
     const run: RunState = {
       id,

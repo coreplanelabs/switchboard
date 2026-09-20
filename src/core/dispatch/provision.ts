@@ -55,6 +55,7 @@ import type { LiveThread } from "../threadAdmission.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import { messageIdOf, type ChannelIO, type HistoryItem, type IncomingMessage, type StatusHandle } from "../types.js";
 import type { AdmissionDeps, DispatchFollowUp, RestartContext, ResumeContext, RunHooks } from "./admission.js";
+import type { CarriedRunIdentity } from "./reattach.js";
 import type { AuthorizeDeps, GateCard, GateContext } from "./authorize.js";
 import { channelVisibilityOf, type RecordDeps } from "./record.js";
 import {
@@ -320,6 +321,16 @@ export interface RegisterRunContext {
   admitted: LiveThread<DispatchFollowUp>;
   /** The run that spawned this one (run-history item 46), when it is a child. */
   parentRunId?: string;
+  /** The run this request restarts (`DispatchOptions.restartOf`; run-history
+   *  item 54): with `restartCarried` beside it the restart continues that
+   *  run's identity — its id is reused, so the page a person opened and every
+   *  posted link stay valid; alone it steers admission only, and the restart
+   *  runs under a fresh id. */
+  restartOf?: string;
+  /** The predecessor's identity when its registry row could still be read
+   *  (run-history item 54): the events replayed under their seqs, the
+   *  capability token kept, and the replacement said as one `resumed` note. */
+  restartCarried?: CarriedRunIdentity;
   /** The coordinator's instance and key (item 48), when a coordinator spawned it. */
   coordinator?: CoordinatorTag;
   /** Where the run's conversation starts (run-history item 52): `parent` for
@@ -395,8 +406,17 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // resume adopted its row above; a restart reserved it above.
   // The run's id, minted here (item 42) — after the ship fork, which mints
   // its own — so the registry row, the row reserved before the attach and
-  // the record all share it; a resume or a restart keeps the row's.
-  const runId = carriedRow?.runId ?? registry.mintId();
+  // the record all share it; a resume or a restart keeps the row's. A restart
+  // from the request keeps the run it restarts as ITS OWN id (item 54) only
+  // when the predecessor's identity rode along (`restartCarried`): the record
+  // gains a segment instead of the thread gaining a second run, so the run
+  // page, the ledger row and every posted link survive the replacement. With
+  // the identity gone — the closing run's registry row was already discarded —
+  // the restart runs under a fresh id (`restartOf` still rides for the
+  // admission anti-steer alone): reusing the id with nothing to replay would
+  // upsert an eventless record over the predecessor's, silently replacing the
+  // transcript its interrupted record holds.
+  const runId = carriedRow?.runId ?? (ctx.restartCarried ? ctx.restartOf : undefined) ?? registry.mintId();
   // Asked once per run (the authorization spec's channel-visibility rule):
   // the registry row, the reservation and the claim reuse it.
   const channelVisibility = await root.span("dispatch.channel_visibility", () =>
@@ -445,10 +465,25 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       ...(seed !== undefined ? { seed } : {}),
     },
     // Under the run's id, at the card's start (the reservation's, or the
-    // carried row's) — a resume replays its events, a restart starts them
+    // carried row's) — a resume replays its events; a restart from the
+    // request replays its predecessor's and keeps its capability token (item
+    // 54), so the record reads as one run with a new segment and the links
+    // already posted keep opening the page; an item-42 restart starts them
     // afresh at the row's original start.
-    { id: runId, startedAt, ...(resume ? { replay: resume.events } : {}) },
+    {
+      id: runId,
+      startedAt,
+      ...(resume
+        ? { replay: resume.events }
+        : ctx.restartCarried
+          ? { replay: ctx.restartCarried.events, token: ctx.restartCarried.token }
+          : {}),
+    },
   );
+  // The replacement is ONE line on the transcript (item 54), in user words,
+  // between the replayed segment and the turn the restart publishes next.
+  if (ctx.restartCarried)
+    registry.publish(run.id, { type: "run_note", kind: "resumed", summary: ctx.restartCarried.note, at: clock() });
   // With no PUBLIC_BASE_URL the link is simply omitted — the feature
   // degrades gracefully, the run is otherwise unchanged. The card carries it
   // from here, and a follow-up's ack/refusal can link the run page

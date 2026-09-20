@@ -2,8 +2,9 @@
 // item 54): where the run's row says its workspace is, so the attach reuses it
 // instead of provisioning as for a new run; and what happens when that
 // workspace cannot be re-attached: the resumed run is closed with a note that
-// says why, and its request is dispatched again as a new run in the thread,
-// never migrated silently onto another backend.
+// says why, and its request is dispatched again in the thread — under the
+// same run id, carrying the run's identity (`CarriedRunIdentity`) — never
+// migrated silently onto another backend.
 import { workspaceBindingOf, type WorkspaceBinding } from "../../execution/factory.js";
 import { sendChildSignal, type CoordinatorTag, type WorkflowSender } from "../coordinator/contract.js";
 import type { RunEvent } from "../runEvents.js";
@@ -58,8 +59,45 @@ export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent
 export function lostWorkspaceNote(why: string, restarts: boolean): string {
   const lost = `resumed after a restart: the run's workspace could not be re-attached (${why})`;
   return restarts
-    ? `${lost}; the run restarts from its request as a new run in this thread`
+    ? `${lost}; the run restarts from its request under the same run id`
     : `${lost}, and the row's request cannot be read, so the run ends here; re-send it to run it again`;
+}
+
+/**
+ * The identity a restart from the request carries forward (run-history item
+ * 54): the restarted run is the SAME run — one id, one page, one row on every
+ * list — so the events the predecessor published are replayed under their
+ * seqs (the record's first segment, as a renewed lease opens a new segment
+ * under record 0046), the capability token is kept (every link already posted
+ * — the card's, the unit thread's — keeps opening the page), the original
+ * start stands, and the replacement itself is one `resumed` note on the
+ * transcript, in user words.
+ */
+export interface CarriedRunIdentity {
+  /** The predecessor's retained events, replayed under their seqs. */
+  events: RunEvent[];
+  /** The predecessor's capability token: posted links stay valid. */
+  token: string;
+  /** The run's original start, so the card and the record span the whole run. */
+  startedAt: number;
+  /** The replacement in user words — the one event line the page shows. */
+  note: string;
+}
+
+/** The predecessor's identity read off the registry — taken BEFORE the
+ *  dispatch's wind-down discards or evicts its row. Undefined when the row is
+ *  already gone: the restart then runs under a fresh id, exactly as every
+ *  restart did before the identity was kept — a page that moved, never a
+ *  request that vanished. */
+export function carriedRunIdentity(
+  registry: Pick<RunRegistry, "snapshotById" | "getById">,
+  runId: string,
+  note: string,
+): CarriedRunIdentity | undefined {
+  const snap = registry.snapshotById(runId);
+  const summary = registry.getById(runId);
+  if (!snap || !summary) return undefined;
+  return { events: snap.events, token: summary.token, startedAt: snap.startedAt, note };
 }
 
 /** What `abandonLostWorkspace` reads off the dispatch. */
@@ -124,9 +162,9 @@ export async function announceChildRoll(ctx: {
  * 54): the run's work was on that backend or nowhere, so nothing else is
  * provisioned. The `resumed` note saying why goes on the run's stream and
  * into its record, the card closes, the adopted row closes `interrupted`, and
- * the request the row carries is handed back for a fresh dispatch (a new run
- * in the thread, provisioned as a fresh run is) once this dispatch has freed
- * the thread. Undefined when the row's request cannot be read: the run ends
+ * the request the row carries is handed back for a fresh dispatch (the same
+ * run id continued in the thread, provisioned as a fresh run is) once this
+ * dispatch has freed the thread. Undefined when the row's request cannot be read: the run ends
  * here, the note and the card say so.
  */
 export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<IncomingMessage | undefined> {
@@ -137,7 +175,7 @@ export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<I
   await refuse("workspace_lost", async () => {
     registry.publish(run.id, note);
     // A coordinator's child says the roll to its parent too (run-history item
-    // 47a). When the request restarts as a new run in this thread (issue 1903:
+    // 47a). When the request restarts in this thread (issue 1903:
     // a replaced container's child resumes from its request by itself), the
     // word is `resumed` — the parent's wait keeps waiting and follows the
     // successor through `read-record`'s `restartedAs`, so the pipeline never
@@ -193,7 +231,7 @@ export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<I
  *  list it. */
 export interface RestartTurn {
   msg: IncomingMessage;
-  opts: { trace: RequestTrace; restartOf?: string; coordinator?: CoordinatorTag };
+  opts: { trace: RequestTrace; restartOf?: string; restartCarried?: CarriedRunIdentity; coordinator?: CoordinatorTag };
 }
 
 export function prepareRestartTurn(
@@ -203,12 +241,15 @@ export function prepareRestartTurn(
     pending: PersonFollowUp[];
     clock: Clock;
     restartOf?: string;
+    /** The predecessor's identity when its registry row could still be read:
+     *  the restart keeps the run's id, token, start and events. */
+    carried?: CarriedRunIdentity;
     /** The tag the interrupted run carried (run-history item 48a): the
      *  restart is the same instance's child, or no coordinator's. */
     coordinator?: CoordinatorTag;
   },
 ): RestartTurn {
-  const { request, pending, clock, restartOf, coordinator } = ctx;
+  const { request, pending, clock, restartOf, carried, coordinator } = ctx;
   const merged = mergeFollowUps(pending);
   const receivedAt = clock();
   const msg: IncomingMessage = {
@@ -240,6 +281,7 @@ export function prepareRestartTurn(
     opts: {
       trace,
       ...(restartOf !== undefined ? { restartOf } : {}),
+      ...(carried !== undefined ? { restartCarried: carried } : {}),
       ...(coordinator !== undefined ? { coordinator } : {}),
     },
   };

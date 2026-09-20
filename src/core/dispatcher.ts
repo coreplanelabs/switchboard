@@ -109,8 +109,10 @@ import {
   abandonLostWorkspace,
   announceChildRoll,
   carriedCoordinatorTag,
+  carriedRunIdentity,
   carriedWorkspaceBinding,
   prepareRestartTurn,
+  type CarriedRunIdentity,
 } from "./dispatch/reattach.js";
 import { workspaceBindingFor } from "../execution/factory.js";
 import { fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
@@ -331,9 +333,16 @@ export interface DispatchOptions {
    *  finish write is in flight while this request is admitted, and after a
    *  resume across a bot generation the boot-gap map may still name it
    *  (thread-admission item 5) — so admission never steers this request into
-   *  that run's inbox: it runs fresh, as a new run in the thread. Absent for
+   *  that run's inbox: it runs fresh in the thread. Absent for
    *  every other request. */
   restartOf?: string;
+  /** Set beside `restartOf` when the closed run's registry row could still be
+   *  read (run-history item 54): the restart keeps the run's identity — the
+   *  same id, the same capability token, the predecessor's events replayed —
+   *  so the page a person opened, the posted links and the ledger row stay
+   *  valid across the replacement, and every list counts one run. Absent, the
+   *  restart runs under a fresh id. */
+  restartCarried?: CarriedRunIdentity;
   /** Set by `spawnChild()` (dispatch/spawn.ts; routing-and-config item 20):
    *  this request is a child run — the run that spawned it, its depth, and the
    *  wall clock the parent had left, which the child's effective profile takes
@@ -577,7 +586,8 @@ export async function dispatch(
   // 54; harness-pi item 16), and the run it restarts — the one this dispatch
   // closed `interrupted`, which admission must never steer the request into
   // (thread-admission item 5). Undefined until a restart is decided.
-  let restartRequest: { request: IncomingMessage; restartOf?: string; coordinator?: CoordinatorTag } | undefined;
+  let restartRequest:
+    { request: IncomingMessage; restartOf?: string; note: string; coordinator?: CoordinatorTag } | undefined;
   const reservationHooks = {
     onStop: (mode: StopMode) => void registered?.control.requestStop(mode),
     onFenced: () => {
@@ -1041,6 +1051,7 @@ export async function dispatch(
         ...(opts.seed ? { seed: opts.seed } : {}),
         ...(opts.coordinator ? { coordinator: opts.coordinator } : {}),
         ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
+        ...(opts.restartCarried !== undefined ? { restartCarried: opts.restartCarried } : {}),
       });
     // A reply folded into the live child of a spawned thread: its parent hears it now.
     if (outcome.kind === "steered") {
@@ -1116,7 +1127,9 @@ export async function dispatch(
     // A resumed run's clock is the original start (its ledger row's), so the
     // card's elapsed time spans the whole run, not the resume.
     // The card's clock is the request's: it ticks from receipt (docs/reference/specs/tracing.md).
-    const startedAt = carriedRow?.startedAt ?? receivedAt;
+    // A restart that carries its predecessor's identity keeps the original
+    // start too (run-history item 54): the card and the record span one run.
+    const startedAt = carriedRow?.startedAt ?? opts.restartCarried?.startedAt ?? receivedAt;
     const ack = await openAckCard(deps, { io, agent, resolved, startedAt, clock, root, trace, route });
     const { shell, card } = ack;
     setupCard = card;
@@ -1365,6 +1378,8 @@ export async function dispatch(
       parentRunId,
       coordinator,
       seed,
+      ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
+      ...(opts.restartCarried !== undefined ? { restartCarried: opts.restartCarried } : {}),
       ...(seedTurns ? { seedTurns } : {}),
       agentSource,
       modelCard,
@@ -1573,6 +1588,7 @@ export async function dispatch(
           restartRequest = {
             request,
             restartOf: resume.row.runId,
+            note: "workspace lost, resumed from the request",
             ...(coordinator !== undefined ? { coordinator } : {}),
           };
         resumeRowClosed = true;
@@ -1949,7 +1965,19 @@ export async function dispatch(
       // request: the interruption's refusal by name, never a failure.
       refused = true;
       ended.refusal ??= ran.refusal;
-      restartRequest = ran.restart;
+      // The replacement in user words — the one `resumed` line the restarted
+      // run's transcript carries (run-history item 54). Both refusals of the
+      // replaced-container road (harness-pi item 16) — the relaunch ceiling's
+      // `container_replaced` and the lost worktree's `workspace_lost` — read
+      // as the replacement; anything else (a harness mismatch) keeps its own
+      // reason.
+      restartRequest = {
+        ...ran.restart,
+        note:
+          ran.refusal === "container_replaced" || ran.refusal === "workspace_lost"
+            ? "container replaced, resumed from the request"
+            : `${ran.reason}; resumed from the request`,
+      };
       console.log(`[dispatch] ${msg.threadKey} run ${run.id} restarts from its request: ${ran.note}`);
       return ended;
     }
@@ -2132,6 +2160,14 @@ export async function dispatch(
     // for — and run untracked for its whole life (item 54). A fenced
     // reservation is another generation's to restart: `abandon` is a no-op on it.
     if (reserved && !ledgerRun) await root.span("post.ledger_abandon", () => reserved!.abandon());
+    // The predecessor's identity a restart keeps (run-history item 54), read
+    // BEFORE the discard below takes the row: its events, its token, its
+    // start — so the restart runs under the same run id and every posted link,
+    // the ledger row and the run page stay valid across the replacement.
+    const restartIdentity =
+      restartRequest?.restartOf !== undefined
+        ? carriedRunIdentity(registry, restartRequest.restartOf, restartRequest.note)
+        : undefined;
     // …and the registry row created with it goes the same way: no finished
     // frame, no record — a run that never started is not listed as one that did.
     if (registered && !runLoopStarted) registry.discard(registered.id);
@@ -2171,19 +2207,21 @@ export async function dispatch(
     ended.status = caught ? "failed" : refused ? "refused" : stopMode ? "stopped" : "completed";
     root.end(caught ? "error" : "ok", { status: ended.status });
     if (restartRequest) {
-      // The run's request, dispatched again as a new run now that the thread
-      // is free — a resumed run whose workspace could not be re-attached (item
-      // 54), or a live run whose pi container was replaced under it
-      // (harness-pi item 16) — with the follow-ups the run never consumed
-      // appended, as a fresh turn would carry them, and the closed run named
-      // so admission never steers the request into its row: the finish above
-      // is still in flight, and the boot-gap map may still list the run.
+      // The run's request, dispatched again now that the thread is free — a
+      // resumed run whose workspace could not be re-attached (item 54), or a
+      // live run whose pi container was replaced under it (harness-pi item 16)
+      // — with the follow-ups the run never consumed appended, as a fresh turn
+      // would carry them, and the closed run named so admission never steers
+      // the request into its row: the finish above is still in flight, and the
+      // boot-gap map may still list the run. The identity captured above rides
+      // along, so the restart continues the SAME run — one id, one page.
       const pending = settled.kind === "handed-on" ? settled.pending : [];
       const restart = prepareRestartTurn(deps, {
         request: restartRequest.request,
         pending,
         clock,
         ...(restartRequest.restartOf !== undefined ? { restartOf: restartRequest.restartOf } : {}),
+        ...(restartIdentity !== undefined ? { carried: restartIdentity } : {}),
         ...(restartRequest.coordinator !== undefined ? { coordinator: restartRequest.coordinator } : {}),
       });
       await dispatch(deps, restart.msg, io, restart.opts).catch((err: unknown) =>

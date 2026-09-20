@@ -584,6 +584,16 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     let awaited: { runId: string; outcome: LandingOutcome } | undefined;
     // This generation's own dead reservation met on the thread, abandoned again from here.
     let reabandoned: { runId: string; failed?: string } | undefined;
+    // A restart that keeps its predecessor's run id (item 54) reaches here
+    // while that run's finish may still be in flight: claiming now would be
+    // the owner's idempotent re-claim of the CLOSING row — same run, same
+    // generation — and the landing finish would then delete that row under
+    // the restarted run. Await the landing first (bounded by the finish's own
+    // calls, exactly as the thread-live wait below is), so the claim inserts
+    // a fresh row for the run's new segment; a finish that failed leaves the
+    // run's own row standing, and the idempotent re-claim keeps it.
+    const priorFinish = landing.get(req.runId);
+    if (priorFinish !== undefined) awaited = { runId: req.runId, outcome: await priorFinish.settled };
     for (let attempt = 1; ; attempt++) {
       try {
         let session: RunSession | undefined;
