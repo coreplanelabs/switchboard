@@ -1,6 +1,6 @@
 ---
 title: The coordinator runs a plan, not a pull request; a child is handed a contract and hands back a deviation; verification cannot be weakened without its spec
-status: proposed
+status: accepted
 date: 2026-09-11
 pattern: Planner over workers with one policy table per child; specs as the contract both ways; deterministic guards on the review gate
 ---

@@ -1,6 +1,6 @@
 ---
 title: The home page is a chat; the browser is a channel adapter; a turn is a run; the conversation is the thread's records; delight is motion over surfaces that already exist
-status: proposed
+status: accepted
 date: 2026-09-16
 pattern: A fifth implementation behind the channel seam, never a special case; the store of record reused as the conversation store; one view model for the live and the finished; the surface's baseline decided by who the surface admits
 ---

@@ -1,6 +1,6 @@
 ---
 title: A session's log outlives its runs in one searchable object; a run seeds from its notepad and the log's tail and recalls the rest; compaction is a pointer, never a loss
-status: proposed
+status: accepted
 date: 2026-09-14
 pattern: Append-only log with a search index as the store of record; a working-notes document beside it; the context window as a cache over both
 ---
