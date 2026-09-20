@@ -669,11 +669,21 @@ export async function dispatch(
           }),
         );
         if (execution.kind === "answered") return ended;
-        operatorPreset = execution.preset;
-        operatorRequest = execution.request;
         // A command bind that ran before the preset already carries the
         // decision's event on its record: the agent run does not repeat it.
         if (execution.carried) operatorEvent = undefined;
+        if (execution.kind === "route") {
+          operatorPreset = execution.preset;
+          operatorRequest = execution.request;
+        } else if (operatorEvent !== undefined) {
+          // The verifier's floor on a non-destructive bind (routing-and-config
+          // item 25): a disagreement or a failed verifier call on a fresh
+          // run-starting bind falls back to the readers' route — the route
+          // stage runs as under `off`, the router picking the preset as it did
+          // before the operator — and the decision rides the run that then
+          // runs with the verifier's verdict or failure as its reason.
+          operatorEvent = { ...operatorEvent, reason: execution.reason };
+        }
       }
     }
     // Item 29's ledger promise (run-history item 60): a decision still pending

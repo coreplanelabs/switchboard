@@ -304,7 +304,11 @@ function bindViolationOf(line: string, ordinal: number, guard: OperatorBindGuard
   const preset = presetBindOf(line, guard.presets);
   if (preset !== undefined) {
     const words = oneLine(guard.requestText).trim();
-    if (words.length > 0 && !oneLine(line).includes(words))
+    // A request whose head is a typo'd directive naming the same preset is
+    // carried without that token (`stripDirectiveHead`): the bind's own
+    // `agent:<preset>` head already says it, and repeating it mangles the line.
+    const stripped = oneLine(stripDirectiveHead(guard.requestText, preset)).trim();
+    if (words.length > 0 && !oneLine(line).includes(words) && !oneLine(line).includes(stripped))
       return `bind ${ordinal} names the preset "${preset}" but drops the request's own words; bind the preset on the request verbatim`;
     return undefined;
   }
@@ -717,6 +721,19 @@ export function presetBindOf(line: string, presets: readonly string[]): string |
   return name !== undefined && presets.includes(name) ? name : undefined;
 }
 
+/** The request's words for a preset bind, a typo'd directive head stripped:
+ *  when the request opens with a directive-shaped token (`<word>:<preset>`)
+ *  whose preset half is the SAME preset the operator bound — `adgent:ship fix
+ *  the login, …`, a mistyped `agent:` head the directive parser never read — the
+ *  token duplicates the head the bind carries, and repeating it mangles the
+ *  line the verifier judges and the request the route runs. The words after
+ *  the token are the request; a token with no tail keeps the original text, so
+ *  an empty request never routes. */
+export function stripDirectiveHead(text: string, preset: string): string {
+  const m = /^([^\s:]+):(\S+)\s+(\S[\s\S]*)$/.exec(text.trim());
+  return m && m[2] === preset ? m[3].trim() : text;
+}
+
 /** The request a confirmed preset proposal carries: the line's tail after its
  *  head token (`agent:<preset>` or the preset's bare name) — the task the
  *  proposal spelled out, which the answering "yes" does not repeat. Undefined
@@ -742,6 +759,13 @@ export type OperatorExecution =
        *  was the word "yes", which routes nothing. Absent for a fresh preset
        *  bind, whose request stays the person's own words. */
       request?: string;
+      carried: boolean;
+    }
+  | {
+      kind: "fallback";
+      /** The verifier's verdict or failure, for the decision's event: the
+       *  reason the run that then runs carries (routing-and-config item 25). */
+      reason: string;
       carried: boolean;
     };
 
@@ -845,7 +869,21 @@ function verifierModelOf(deps: {
  * (`renderVerifierLine`) that rides every reply of its bind — the hand-back
  * of an unparseable run-starting line included, so the spent call stays
  * legible — and the ladder proceeds unchanged: the verifier
- * weakens no guard and outranks none. A registry read runs without the call.
+ * weakens no guard and outranks none. On a held bind that is NOT a registry
+ * command — a fresh preset line, or a run-starting `agent:` head the table
+ * does not offer — a disagreement or a failed call is not a hand-back but the
+ * readers' floor (record 0067's floor principle; routing-and-config item 25):
+ * the execution answers `kind: "fallback"` with the verdict or failure as its
+ * reason, the dispatcher routes the event as under `off`, the request still
+ * runs, and the decision's event rides that run with the verifier's reason on
+ * it — only a write- or destructive-class command bind (steer included) keeps
+ * today's hand-back, since a registry command bound from prose is the case
+ * the hold exists for, and so does a confirmed proposal, whose message was
+ * the word "yes" and routes nothing. A fresh preset bind's request carries
+ * the person's words with a leading directive-shaped token naming the same
+ * preset stripped (`stripDirectiveHead`: a typo'd `agent:` head such as
+ * `adgent:ship` duplicates the head the bind carries, and repeating it
+ * mangles the judged line). A registry read runs without the call.
  * A bind that names a preset (`presetBindOf`: an `agent:<preset>` head or the
  * preset's bare first word) is a run to start, not a command to invoke: the
  * verifier holds it over the line the route will run — the preset on the
@@ -937,8 +975,15 @@ export async function executeOperatorDecision(
     // pending question's proposal is the line the person's "yes" agreed to,
     // and only that line carries the task — the person's message is the word
     // "yes" — so the proposal itself is judged, printed and routed.
+    // A typo'd directive head naming the bound preset is stripped from the
+    // request (`stripDirectiveHead`): the bind's own head already carries it.
+    const requestWords = preset !== undefined && !bind.confirmed ? stripDirectiveHead(msg.text, preset) : undefined;
     const runs =
-      preset !== undefined ? (bind.confirmed ? bind.line : redactSecrets(`agent:${preset} ${msg.text}`)) : bind.line;
+      preset !== undefined
+        ? bind.confirmed
+          ? bind.line
+          : redactSecrets(`agent:${preset} ${requestWords}`)
+        : bind.line;
     const line = preset !== undefined ? operatorLine(runs) : bind.line;
     // The verifier's hold (the one-door plan): a disagreement — a failure and a timeout
     // count as one, and so does a process with no model to verify on — hands
@@ -950,8 +995,23 @@ export async function executeOperatorDecision(
         ? await verifyOperatorBind(await authorTurnsOnce(), runs, model)
         : { agrees: false, reason: "no model to verify on" };
       if (!verdict.agrees) {
-        // The disagreement names the line the operator bound — for a preset
-        // bind, the paraphrase a plant may have filled — so the person sees
+        if (bound === undefined && !bind.confirmed) {
+          // The verifier's floor on a non-destructive bind (routing-and-config
+          // item 25): a fresh run-starting bind — a preset line, or an
+          // `agent:` head the table does not offer — falls back to the
+          // readers' route, which runs the person's own words instead: never
+          // a dead hand-back for a request that runs the same either way. The
+          // verdict or failure rides the decision's event, and the binds
+          // after it are handed back as lines, as on an agreement. Only a
+          // write- or destructive-class command bind (steer included) keeps
+          // the hand-back — a registry command from prose is the case the
+          // hold exists for — and so does a confirmed proposal, whose
+          // message was the word "yes" and routes nothing.
+          for (const rest of binds.slice(i + 1)) await io.reply(renderHandBackLine(rest.line));
+          return { kind: "fallback", reason: `the verifier held the bind: ${verdict.reason}`, carried };
+        }
+        // A command, steer or confirmed bind keeps the hand-back: the
+        // disagreement names the line the operator bound, so the person sees
         // what was bound against their words, never a line to type that
         // would start the run the hold just refused.
         await io.reply(renderVerifierHandBack(bind.line, verdict.reason));
@@ -971,8 +1031,13 @@ export async function executeOperatorDecision(
       // the request itself.
       for (const rest of binds.slice(i + 1)) await io.reply(renderHandBackLine(rest.line));
       // A confirmed proposal routes its own tail as the request; a fresh bind
-      // routes the person's own message, as ever.
-      const request = bind.confirmed ? presetRequestOf(bind.line) : undefined;
+      // routes the person's own message — a typo'd directive head naming the
+      // bound preset stripped off it, since the route's own head carries it.
+      const request = bind.confirmed
+        ? presetRequestOf(bind.line)
+        : requestWords !== undefined && requestWords !== msg.text
+          ? requestWords
+          : undefined;
       return { kind: "route", preset, ...(request !== undefined ? { request } : {}), carried };
     }
     if (!parsed || parsed.kind !== "invoke" || !def || !bound) {

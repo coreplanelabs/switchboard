@@ -11,6 +11,7 @@ import {
   parseOperatorDecision,
   presetBindOf,
   presetRequestOf,
+  stripDirectiveHead,
   renderOperatorQuestion,
   runOperator,
   verifierHolds,
@@ -415,6 +416,31 @@ describe("the operator's violation set at the seam (record 0067, amended): an un
   it("a process with no registry wired skips the cannot-parse check — the line stays the execute path's hand-back", async () => {
     const answer = await runOperator(input(), async () => decide("please list the runs for me"));
     expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ line: "please list the runs for me" }] });
+  });
+
+  it("a preset bind carrying the request minus its typo'd directive head is no violation — the head duplicates the bind's own", async () => {
+    const answer = await runOperator(
+      input({ text: "adgent:ship in acme/repo, fix the intake gate", projection: projectionOf(["general", "ship"]) }),
+      async () => decide("agent:ship in acme/repo, fix the intake gate"),
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ line: "agent:ship in acme/repo, fix the intake gate" }],
+    });
+    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
+  });
+});
+
+describe("stripDirectiveHead — a typo'd directive token naming the bound preset is stripped from the request", () => {
+  it("strips `<word>:<preset>` at the head when the preset half is the bound preset", () => {
+    expect(stripDirectiveHead("adgent:ship fix the login in acme/repo", "ship")).toBe("fix the login in acme/repo");
+    expect(stripDirectiveHead("agnet:review the PR", "review")).toBe("the PR");
+  });
+
+  it("keeps the text whole when the token names another preset, is no token, or has no tail", () => {
+    expect(stripDirectiveHead("adgent:ship fix it", "review")).toBe("adgent:ship fix it");
+    expect(stripDirectiveHead("fix the login", "ship")).toBe("fix the login");
+    expect(stripDirectiveHead("adgent:ship", "ship")).toBe("adgent:ship");
   });
 });
 
