@@ -632,6 +632,10 @@ export const COMMAND_FIXTURES: Readonly<
     },
     why: "an installation needs an organization and a provider (both example providers here, so `--model`/`--model-key` alone are coherent); the account, zone and GitHub ids are constrained strings the generic sample cannot satisfy; the fixture has no terminal, so the baseline stands in for the prompt",
   },
+  "plane.stop": {
+    hints: { pipeline: "ship-fin-1" },
+    why: "the pipeline id must exist in the fixture's unit store — the generic sample is unknown (`not_found`)",
+  },
 };
 
 /** The suite's variants for one command: `exhaustiveVariants` over the shared

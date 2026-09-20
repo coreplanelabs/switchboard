@@ -1,4 +1,6 @@
+import { matchesPredicate } from "./authz/predicate.js";
 import type { Predicate } from "./authz/types.js";
+import type { RunActor } from "./runEvents.js";
 import type { CoordinatorInstanceStore } from "./coordinator/instanceStore.js";
 import { buildPlaneTable, type PlanePullRequestFacts, type PlaneTable } from "./plane/table.js";
 import { checkPrTitle } from "./prTitle.mjs";
@@ -40,8 +42,9 @@ export interface PlaneGithubReads {
 }
 
 export interface PlaneServiceDeps {
-  runs: Pick<RunsService, "listRuns" | "listInstanceUnits">;
-  instances: Pick<CoordinatorInstanceStore, "get">;
+  runs: Pick<RunsService, "listRuns" | "listInstanceUnits"> & Partial<Pick<RunsService, "stopRun">>;
+  instances: Pick<CoordinatorInstanceStore, "get"> &
+    Partial<Pick<CoordinatorInstanceStore, "listUnits" | "markStopped">>;
   /** Absent (no GitHub credential in this process): every pull request is `unknown`. */
   github?: PlaneGithubReads;
   /** The repository's title rule (`check:pr-title`); default: the checked-in vocabulary. */
@@ -55,11 +58,36 @@ export interface PlaneServiceDeps {
   recentLimit?: number;
 }
 
+/** What `plane stop <instance>` did (record 0064's `runner_stop` move):
+ *  the stop mark on the instance row — the runner honours it before every unit
+ *  start and at every spawn — the hosted parent's hard stop, and each live
+ *  child ended, all in one move; recorded on the parent run (the seal's
+ *  events) and in the unit thread (the child's own abort lands there). */
+export type PlaneStopReport =
+  | { kind: "unknown_instance"; instanceId: string }
+  | { kind: "unavailable"; reason: string }
+  | {
+      kind: "stopped";
+      instanceId: string;
+      /** Whether the stop mark landed on the instance row (best effort: a mark
+       *  that could not be written still stops the runs, and the report says
+       *  the runner may still be walking). */
+      runnerStopped: boolean;
+      /** The hosted parent run's stop outcome, when the instance names one. */
+      parent?: { id: string; outcome: string };
+      /** Each live child ended, with the stop's outcome. */
+      children: Array<{ id: string; outcome: string }>;
+    };
+
 export interface PlaneService {
   /** The table for a viewer: every row under `visibleTo`. Never throws for a
    *  GitHub that cannot be read; a store that throws propagates, as the runs
    *  service's own reads do. */
   table(visibleTo: Predicate): Promise<PlaneTable>;
+  /** `plane stop <instance>` (record 0064): terminate the runner instance
+   *  and end its live children in one move. An instance the viewer's predicate
+   *  does not admit is `unknown_instance`, like a run they may not see. */
+  stop(instanceId: string, actor: RunActor, visibleTo: Predicate): Promise<PlaneStopReport>;
 }
 
 export const DEFAULT_RECENT_MS = minutesToMs(PLANE.recentMinutes);
@@ -160,6 +188,69 @@ export function createPlaneService(deps: PlaneServiceDeps): PlaneService {
       const pullRequests = await Promise.all([...targets.values()].slice(0, maxPullRequests).map(readPullRequest));
 
       return buildPlaneTable({ now, runs, instances, pullRequests });
+    },
+
+    async stop(instanceId, actor, visibleTo) {
+      const { stopRun } = deps.runs;
+      const { listUnits, markStopped } = deps.instances;
+      if (stopRun === undefined || listUnits === undefined || markStopped === undefined)
+        return { kind: "unavailable", reason: "this process holds no run-history store to stop a runner through" };
+      const instance = await deps.instances.get(instanceId);
+      if (
+        !instance ||
+        !matchesPredicate(visibleTo, {
+          channelId: instance.channelId,
+          userId: instance.userId,
+          repo: instance.repo,
+          channelVisibility: "unknown",
+        })
+      )
+        return { kind: "unknown_instance", instanceId };
+      // The mark first (record 0060; issue 1924): the runner reads it back
+      // before every unit start and at every spawn, so it starts nothing more.
+      // Best effort — a mark that could not be written still ends the runs.
+      let runnerStopped = false;
+      try {
+        runnerStopped = (await markStopped.call(deps.instances, instanceId, clock())).ok;
+      } catch {
+        // the report says the runner may still be walking
+      }
+      // The hosted parent: a hard stop seals it and releases the host key; a
+      // parent already over answers its refusal words instead of throwing.
+      const outcomeOf = async (id: string): Promise<string> => {
+        const res = await stopRun.call(deps.runs, id, "hard", actor);
+        return res.ok ? res.value.state : res.error;
+      };
+      const parent =
+        instance.runId !== undefined ? { id: instance.runId, outcome: await outcomeOf(instance.runId) } : undefined;
+      // The live children, one per unit thread the instance opened (the
+      // requesting thread for a one-unit plan): each ended hard — the stop is
+      // recorded on the child run, whose record lives in the unit thread.
+      const children: Array<{ id: string; outcome: string }> = [];
+      const threads = new Set<string>();
+      for (const unit of await listUnits.call(deps.instances, instanceId)) {
+        if (unit.threadKey !== undefined) threads.add(unit.threadKey);
+        if (unit.reviewThread !== undefined) threads.add(unit.reviewThread.threadKey);
+      }
+      for (const threadKey of threads) {
+        const { runs } = await deps.runs.listRuns({
+          status: "active",
+          visibleTo,
+          threadKey,
+          limit: RUN_LIST_MAX_LIMIT,
+        });
+        for (const run of runs) {
+          if (run.id === instance.runId) continue;
+          children.push({ id: run.id, outcome: await outcomeOf(run.id) });
+        }
+      }
+      return {
+        kind: "stopped",
+        instanceId,
+        runnerStopped,
+        ...(parent !== undefined ? { parent } : {}),
+        children,
+      };
     },
   };
 }

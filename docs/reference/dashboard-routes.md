@@ -93,6 +93,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/providers.check` | `GET`, `POST` | `providers:read` | Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each. |
 | `/api/pulls.rebase` | `POST` | `pulls:write` | Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request. |
 | `/api/plane.show` | `GET`, `POST` | `runs:read` | What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written. |
+| `/api/plane.stop` | `POST` | `runs:write` | Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads. |
 
 <!-- /generated:api-routes -->
 

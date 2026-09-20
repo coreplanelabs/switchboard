@@ -1159,14 +1159,20 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
             // A probe starts no run, so a drain never defers it (record 0064:
             // a draining generation defers `admit` and executes the rest); a
             // process without a probe seam skips it and the offer closes.
+            // A move effect (record 0064's watches: retitle, pr_open,
+            // rebase_round, reissue) has no executor seam in this generation
+            // yet: it defers and stays offered, bounded and harmless, for a
+            // bot that can execute it — never a claim it was done.
             const outcome: PlaneAckOutcome =
               effect.kind === "probe"
                 ? executor?.probe === undefined
                   ? "skipped"
                   : await executor.probe(effect)
-                : executor === undefined || executor.draining()
+                : effect.kind !== "admit"
                   ? "deferred"
-                  : await executor.admit(effect);
+                  : executor === undefined || executor.draining()
+                    ? "deferred"
+                    : await executor.admit(effect);
             await ledger.planeAck(effect.id, outcome);
           } catch (err) {
             warn(`[ledger] plane ack failed for effect ${effect.id}: ${describe(err)} — it stays offered`);

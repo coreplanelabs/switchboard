@@ -338,6 +338,30 @@ export async function fetchRefExists(repo: string, ref: string): Promise<boolean
   return res.status === 404 ? false : undefined;
 }
 
+/** The head commit's subject line of a branch — `GET /repos/{repo}/commits/{ref}`,
+ *  the commit message's first line. The runner's recover open titles by it when
+ *  it passes the title rule (record 0064's `unit_title` move; agent-ship item
+ *  10). Undefined when the fact could not be read — no credential, a non-2xx
+ *  answer, a body without the message — never a throw. */
+export async function branchHeadSubject(repo: string, branch: string): Promise<string | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  if (!token) return undefined;
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/commits/${encodeURIComponent(branch)}`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as { commit?: { message?: unknown } } | null;
+  const message = data?.commit?.message;
+  if (typeof message !== "string" || message.trim() === "") return undefined;
+  return message.split("\n", 1)[0]!.trim();
+}
+
 /** One PR's entry-check facts for ship (spec item 10): open/closed, the author
  *  identity (login AND immutable numeric id — the same pair the org
  *  auto-approve workflow pins), whether the head lives on the base repo, and

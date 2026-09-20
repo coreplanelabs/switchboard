@@ -1,5 +1,7 @@
+import { z } from "zod";
 import { predicateFor } from "../authz/predicate.js";
 import {
+  CommandError,
   commandDefiner,
   type CommandDef,
   type CommandRegistry,
@@ -7,7 +9,7 @@ import {
   type JsonValue,
 } from "../commandRegistry.js";
 import { formatDuration } from "../time/formatDuration.js";
-import type { PlaneService } from "../planeService.js";
+import type { PlaneService, PlaneStopReport } from "../planeService.js";
 import type { PlanePullRequestRow, PlaneRunRow, PlaneTable, PlaneUnitRow } from "../plane/table.js";
 import { runDurationMs } from "../runDuration.js";
 
@@ -116,8 +118,61 @@ export const planeShow = defineCommand({
   },
 });
 
+// `plane stop <instance>` (record 0064, "Endings and the watches"): the
+// `runner_stop` move — a person terminates the runner instance and ends its
+// live children in ONE move, so no orphan is left (issue 1924). The stop mark
+// lands on the instance row (the runner honours it before every unit start and
+// at every spawn), the hosted parent is sealed hard, and each live child in a
+// unit thread is ended hard — recorded on the parent run and, through each
+// child's own record, in the unit thread. Destructive: nothing restarts it.
+
+/** The report in the user's words: one line per thing stopped. */
+export function renderPlaneStop(output: JsonValue): string {
+  const report = output as unknown as Extract<PlaneStopReport, { kind: "stopped" }>;
+  const lines = [
+    report.runnerStopped
+      ? `pipeline ${report.instanceId} stopped — it starts no more units`
+      : `pipeline ${report.instanceId}: the stop mark could not be written — it may still be walking; its live children were ended`,
+  ];
+  if (report.parent) lines.push(`pipeline run ${shortId(report.parent.id)} — ${report.parent.outcome}`);
+  for (const child of report.children) lines.push(`child run ${shortId(child.id)} — ${child.outcome}`);
+  if (report.children.length === 0) lines.push("no live child was running");
+  return lines.join("\n");
+}
+
+export const planeStop = defineCommand({
+  id: "plane.stop",
+  args: [
+    {
+      name: "pipeline",
+      schema: z.string().min(1),
+      describe: "the pipeline's id (`plan-<plan-id>` or `plan-<plan-id>-<n>`), as the ship reply names it",
+    },
+  ],
+  action: "runs:write",
+  effect: "write",
+  // Ends a whole pipeline and its live children; nothing restarts them.
+  annotations: { destructive: true, risk: () => "ends a whole pipeline and aborts its live children now" },
+  describe:
+    "Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads.",
+  render: renderPlaneStop,
+  handler: async ({ args, caller, deps }) => {
+    const service = await deps.plane.service();
+    const report = await service.stop(
+      args.pipeline,
+      { kind: caller.kind, id: caller.id },
+      predicateFor(caller.actor, "runs:write", "run"),
+    );
+    if (report.kind === "unknown_instance")
+      throw new CommandError("not_found", `no pipeline is known as \`${args.pipeline}\``);
+    if (report.kind === "unavailable") throw new CommandError("unavailable", report.reason);
+    return report as unknown as JsonObject;
+  },
+});
+
 export const planeCommands: readonly CommandDef<PlaneCommandDeps>[] = [
   planeShow,
+  planeStop,
 ] as unknown as CommandDef<PlaneCommandDeps>[];
 
 export function registerPlaneCommands<D extends PlaneCommandDeps>(registry: CommandRegistry<D>): void {

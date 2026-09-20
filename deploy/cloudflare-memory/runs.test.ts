@@ -1413,6 +1413,38 @@ describe("orchestration plane — the tables, the decider, shadow and the effect
     });
   });
 
+  it("two child_sealed findings on one subject merge into ONE plane_findings row, the first filed_at kept", async () => {
+    const key = storeKey();
+    // A seal with a pushed branch, no pull request, no live runner and no known
+    // repository degrades to a finding (orphaned_child) instead of guessing.
+    const sealed = (at: number) =>
+      ({ kind: "child_sealed", at, runId: "r1", runnerLive: false, branch: "fix/x" }) as const;
+    await runInDurableObject(stubOf(key), async (inst: RunHistoryDO, state) => {
+      expect(inst.planeApply(sealed(1_000)).effects).toEqual([]);
+      const rows = () =>
+        state.storage.sql
+          .exec<{ id: string; watch: string; subject: string; timeline_json: string; filed_at: number }>(
+            `SELECT id, watch, subject, timeline_json, filed_at FROM plane_findings`,
+          )
+          .toArray();
+      const first = rows();
+      expect(first).toHaveLength(1);
+      expect(first[0]).toMatchObject({
+        id: "orphaned_child#r1",
+        watch: "orphaned_child",
+        subject: "r1",
+        filed_at: 1_000,
+      });
+      // The second observation is absorbed: still one row, timeline of two,
+      // the first-seen stamp kept — the DO-side merge, not a second row.
+      expect(inst.planeApply(sealed(2_000)).effects).toEqual([]);
+      const merged = rows();
+      expect(merged).toHaveLength(1);
+      expect(merged[0]!.filed_at).toBe(1_000);
+      expect((JSON.parse(merged[0]!.timeline_json) as { at: number }[]).map((e) => e.at)).toEqual([1_000, 2_000]);
+    });
+  });
+
   it("shadow logs refused:thread-live beside queued for a second ask on a live thread, and persists nothing", async () => {
     const key = storeKey();
     expect((await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"))).status).toBe(200);

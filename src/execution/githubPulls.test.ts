@@ -17,6 +17,7 @@ import {
   listOpenPullRequests,
   fixupCommitSubjects,
   fetchPullRequestReviews,
+  branchHeadSubject,
   fetchRefExists,
   fetchRepoShipInfo,
   findMergedPrByHead,
@@ -455,6 +456,42 @@ describe("githubPulls", () => {
       vi.stubEnv("GITHUB_APP_ID", "");
       const calls = stubFetch(() => new Response("{}", { status: 200 }));
       expect(await fetchRefExists("acme/api", "main")).toBeUndefined();
+      expect(calls).toHaveLength(0); // no unauthenticated probe
+    });
+  });
+
+  describe("branchHeadSubject (the runner's open title, record 0064's unit_title move)", () => {
+    it("answers the head commit message's first line, trimmed", async () => {
+      stubToken();
+      const calls = stubFetch(
+        () =>
+          new Response(JSON.stringify({ commit: { message: "fix(ship): warm the cache\n\nA body line." } }), {
+            status: 200,
+          }),
+      );
+      expect(await branchHeadSubject("acme/api", "plan/x/u1")).toBe("fix(ship): warm the cache");
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/commits/plan%2Fx%2Fu1");
+    });
+
+    it("a non-2xx answer, a body without the message, an empty message, a network failure and a missing credential are undefined — never a throw", async () => {
+      stubToken();
+      stubFetch(() => new Response("{}", { status: 404 }));
+      expect(await branchHeadSubject("acme/api", "gone")).toBeUndefined();
+      stubFetch(() => new Response(JSON.stringify({ commit: {} }), { status: 200 }));
+      expect(await branchHeadSubject("acme/api", "b")).toBeUndefined();
+      stubFetch(() => new Response(JSON.stringify({ commit: { message: "   " } }), { status: 200 }));
+      expect(await branchHeadSubject("acme/api", "b")).toBeUndefined();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          throw new Error("ECONNRESET");
+        }),
+      );
+      expect(await branchHeadSubject("acme/api", "b")).toBeUndefined();
+      vi.stubEnv("GH_TOKEN", "");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const calls = stubFetch(() => new Response("{}", { status: 200 }));
+      expect(await branchHeadSubject("acme/api", "b")).toBeUndefined();
       expect(calls).toHaveLength(0); // no unauthenticated probe
     });
   });

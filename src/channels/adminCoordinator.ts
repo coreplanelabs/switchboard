@@ -197,6 +197,13 @@ export interface AdminCoordinatorDeps {
    *  the branch — the pr-check opens the pull request from the branch itself
    *  instead of answering `none` over stranded work (agent-ship item 15). */
   openPullRequest: (target: PullRequestTarget) => Promise<OpenedPullRequest>;
+  /** The branch head commit's subject (githubPulls.branchHeadSubject): the
+   *  recover open's preferred title when the record holds no submitted
+   *  description and the subject passes the title rule (record 0064's
+   *  `unit_title` move — the runner's own open takes the rule at open, so the
+   *  required check passes first time). Absent, or unreadable, or failing the
+   *  rule: the conventional fallback stands. */
+  branchHeadSubject?: (repo: string, branch: string) => Promise<string | undefined>;
   /** The identity rewrite before the recover path's open (record 0062;
    *  agent-ship items 10 and 15): the same rewrite the coding post-step runs,
    *  over an EMPTY start state — every earlier round's commits were rewritten
@@ -1209,8 +1216,10 @@ export function recoveredFallbackTitle(
  *  child pushed its branch and then died — the pull request is opened from the
  *  branch itself through the same open-or-edit as any run's, the title from
  *  the child's submitted description when the record holds one (used as is —
- *  the submit tool's gate already judged it), else the unit's title as the
- *  conventional fallback above (issue 1877); the body from the description,
+ *  the submit tool's gate already judged it), else the head commit's subject
+ *  when it passes the title rule (record 0064's `unit_title` move), else the
+ *  unit's title as the conventional fallback above (issue 1877); the body from
+ *  the description,
  *  else a minimal body naming the unit. `none` names why when nothing could be
  *  opened; a GitHub failure that is neither reason is thrown for the caller's
  *  `github_unavailable`. */
@@ -1223,7 +1232,7 @@ async function recoverPushedBranch(
 ): Promise<Recovered> {
   if (instance.base === undefined) return { kind: "none", why: "no_base" };
   const unitName = row?.unit ?? "the unit";
-  let title = recoveredFallbackTitle(row, branch, instance.plan?.id ?? parsePlanBranch(branch)?.planId);
+  let title: string | undefined;
   let prBody = `Opened by the plan runner from the pushed branch \`${branch}\`: the coding run ${runId} of ${unitName} ended before it could open the pull request or submit its description. The review round asks for the description.`;
   try {
     const full = await deps.runs.getRun(runId, { include: "messages" });
@@ -1248,6 +1257,15 @@ async function recoverPushedBranch(
   } catch {
     // the minimal body stands
   }
+  // No submitted description: the head commit's subject when it passes the
+  // title rule (record 0064's `unit_title` move — the open passes the required
+  // check first time), else the conventional fallback from the unit's title
+  // (issue 1877). An unreadable subject claims nothing and the fallback stands.
+  if (title === undefined && deps.branchHeadSubject !== undefined) {
+    const subject = await deps.branchHeadSubject(instance.repo, branch).catch(() => undefined);
+    if (subject !== undefined && checkPrTitle(subject, PR_TITLE_VOCABULARY).ok) title = subject;
+  }
+  title ??= recoveredFallbackTitle(row, branch, instance.plan?.id ?? parsePlanBranch(branch)?.planId);
   // The identity rewrite before the open (record 0062): the recover path
   // opens over the same guarantee the coding post-step gives — the commits
   // carry only the allowed identities. Unreadable is thrown for the caller's
