@@ -6,7 +6,7 @@ Read what the installation costs, per day and per group, on the dashboard or fro
 
 - A `costs` block in `config.yaml`: the Cloudflare account and the groups of Workers, containers and Durable Objects to price.
 - `CF_ANALYTICS_TOKEN` (Account Analytics: Read); optionally `ANTHROPIC_ADMIN_KEY` for model spend.
-- A dashboard session.
+- A dashboard sign-in.
 
 Without the block, **Costs** is not in the header and `/costs` answers 503.
 
@@ -18,7 +18,7 @@ Right after a fresh installation starts there is no snapshot yet: the page says 
 
 ## Take a snapshot now
 
-Click **Snapshot now** beside the status line (it is there when your session holds `costs:write`), ask the bot for `costs snapshot` in Slack, or run `switchboard costs snapshot` on the CLI. Every open costs page shows the take as it happens — the line reads `Taking a snapshot now…` and the figures repaint when it lands, no reload needed. The take reads both billing sources and the run history once (a few seconds, half a minute in a bad one), stores the result, and the page shows it on the next load with your name on the status line. The command needs the `costs:write` grant — an admin's `all` or a `grants` entry that names it — because a take reads two providers and replaces what every viewer sees.
+Click **Snapshot now** beside the status line (it is there when your sign-in holds `costs:write`), ask the bot for `costs snapshot` in Slack, or run `switchboard costs snapshot` on the CLI. Every open costs page shows the take as it happens — the line reads `Taking a snapshot now…` and the figures repaint when it lands, no reload needed. The take reads both billing sources and the run history once (a few seconds, half a minute in a bad one), stores the result, and the page shows it on the next load with your name on the status line. The command needs the `costs:write` grant — an admin's `all` or a `grants` entry that names it — because a take reads two providers and replaces what every viewer sees.
 
 ## When a take fails
 
@@ -32,7 +32,7 @@ Open `/costs/<group>`.
 
 The tabs above the tables lay the same dollars against the runs: **By user**, **By thread**, **By channel**, **By agent** and **By model** (`/costs/<group>?view=users|threads|channels|agents|models`). Each row is one key with its runs, the LLM dollars from the runs' tokens priced through the price table (`costs.prices` over the Anthropic list), the day's Cloudflare spend allocated by the key's share of run wall-clock (an allocation, not a meter — and none on the model tab, where a run may span models and the rows carry LLM alone), the total and its share. A child run bills to whoever started its parent, in the child's own thread and agent. A model neither table knows reads `unpriced tokens`, never $0. The coverage line says where the run history begins and how many runs are still being priced; the reconciliation line ties the attributed LLM to the group's own figure. On the By user tab, **me** keeps your own rows when your sign-in email matches a Slack user.
 
-The same report on every command surface: `costs by user` in Slack (the `costs:read` grant; a browser session holds it), `switchboard costs by agent --days 7 --group <group>` on the CLI, `GET /api/costs.by?dimension=model` over HTTP, the `costs_by` MCP tool. The JSON twins are `/costs/<group>/<view>.json`.
+The same report on every command surface: `costs by user` in Slack (the `costs:read` grant; a browser sign-in holds it), `switchboard costs by agent --days 7 --group <group>` on the CLI, `GET /api/costs.by?dimension=model` over HTTP, the `costs_by` MCP tool. The JSON twins are `/costs/<group>/<view>.json`.
 
 Every finished run's own dollars are on its run page beside the duration and in `runs get` as `cost` — the same tokens priced the same way, `unpriced` for a model without a price. A model the list does not know (another provider's, a new release) is priced by naming its rates under `costs.prices` in `config.yaml`.
 

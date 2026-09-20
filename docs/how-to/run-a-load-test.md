@@ -39,7 +39,7 @@ npm run load -- sandbox --threads 8 --hold 300 --cpu-seconds 60
 
 The first command per thread (`first-exec`) is the cold start. Past the fleet's `max_instances` a thread waits for a seat (`fleet-busy`). Exceeding either pool needs `--override`.
 
-## Load the seeded sandbox tier
+## Load the seeded sandbox path
 
 A sandbox seeded from a resident's snapshot restores the checkout and its installed dependencies before the run's first command (execution items 25–26). Point the sandbox load at a resident that has a snapshot:
 

@@ -53,11 +53,11 @@ The gauge is on every surface: `repo list` appends `· disk 4.06 GiB/14.4 GiB (2
 
 | State | Meaning | Remedy |
 |---|---|---|
-| `disk-pressure` on a status card | A new thread would not fit; the request ran in a cold sandbox, the resident stays `warm` | Fewer concurrent branches with divergent lockfiles, or a larger instance |
+| `disk-pressure` on a status card | A new thread would not fit; the request ran in a cold sandbox, the resident stays `warm` | Fewer concurrent branches with divergent lockfiles, or a larger container |
 | `degraded` with `disk-full: …` on the dashboard | The disk filled; requests run cold until the container restarts and restores its snapshot | Refills within the hour: the working set no longer fits. Resize, or offboard a repository |
 
 ## Next
 
 - [Resident contract](../reference/specs/resident-repos.md): the eviction rules.
-- [Capacity and sizing](../explanation/capacity-and-sizing.md): why disk sizes the instance.
+- [Capacity and sizing](../explanation/capacity-and-sizing.md): why disk sizes the container.
 - [Authorization](../reference/authorization.md): `repo:write` versus `restrict.repos`.

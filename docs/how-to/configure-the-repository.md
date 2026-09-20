@@ -20,7 +20,7 @@ The title is the whole commit, so breaking changes are `feat(config)!: …` — 
 `.depot/workflows/pr-title.yml` checks `type(scope)!: description` against `release-please-config.json` and the [code map's Areas](../reference/code-map.md#areas); `!` needs [Migration notes](../reference/migrations.md).
 
 ```sh
-npm run check:pr-title -- "feat(slack): thread admission"
+npm run check:pr-title -- "feat(slack): thread routing"
 ```
 
 During the Depot CI trial, CI and PR title checks run automatically only from `.depot/workflows/`; their GitHub Actions copies are manual rollback options. CodeQL, Scorecard, release-please, production deployment and review auto-approval use GitHub Actions on Depot runners. Release publishing retains its GitHub OIDC identity for npm trusted publishing and image attestations. Each workflow has one automatic owner.

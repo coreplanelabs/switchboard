@@ -1,13 +1,6 @@
 {
   "docs/explanation/a-thread-continues.md": {
-    "session": 9
-  },
-  "docs/explanation/agents-and-toolsets.md": {
-    "runner": 1
-  },
-  "docs/explanation/capacity-and-sizing.md": {
-    "instance": 5,
-    "admission": 1
+    "session": 3
   },
   "docs/explanation/design-decisions.md": {
     "admission": 2,
@@ -21,69 +14,14 @@
     "attempt": 1
   },
   "docs/explanation/how-a-request-flows.md": {
-    "session": 1,
-    "runner": 1,
     "admission": 1
-  },
-  "docs/explanation/how-switchboard-improves-itself.md": {
-    "admission": 1
-  },
-  "docs/explanation/known-limits.md": {
-    "intake": 1,
-    "instance": 1,
-    "runner": 1
-  },
-  "docs/explanation/runs-live-and-history.md": {
-    "session": 1
-  },
-  "docs/explanation/security-model.md": {
-    "attempt": 1
-  },
-  "docs/how-to/add-a-provider.md": {
-    "tier": 1
   },
   "docs/how-to/check-spend.md": {
-    "session": 3,
     "attempt": 1
   },
-  "docs/how-to/configure-the-repository.md": {
-    "admission": 1
-  },
-  "docs/how-to/configure-your-defaults.md": {
-    "segment": 1,
-    "tier": 1
-  },
-  "docs/how-to/connect-an-mcp-server.md": {
-    "tier": 1
-  },
-  "docs/how-to/onboard-a-repo.md": {
-    "instance": 2
-  },
-  "docs/how-to/put-a-preset-on-opencode.md": {
-    "session": 1,
-    "tier": 1
-  },
-  "docs/how-to/restrict-who-can-do-what.md": {
-    "session": 2
-  },
-  "docs/how-to/run-a-load-test.md": {
-    "tier": 1
-  },
-  "docs/how-to/ship-a-release.md": {
-    "handoff": 1
-  },
   "docs/how-to/turn-features-on-and-off.md": {
-    "instance": 2,
-    "coordinator": 1,
-    "runner": 2,
-    "tier": 1
-  },
-  "docs/how-to/watch-a-run.md": {
-    "session": 1
-  },
-  "docs/reference/authorization.md": {
-    "session": 3,
-    "tier": 2
+    "instance": 1,
+    "coordinator": 1
   },
   "docs/reference/cli.md": {
     "intake": 1,
@@ -91,35 +29,24 @@
     "tier": 2
   },
   "docs/reference/code-map.md": {
-    "instance": 4,
-    "coordinator": 4,
-    "runner": 3,
-    "admission": 2,
+    "coordinator": 3,
+    "admission": 1,
     "handoff": 3,
-    "session": 5,
-    "tier": 3,
-    "attempt": 1,
+    "instance": 1,
+    "session": 2,
     "wind-down": 1
   },
   "docs/reference/configuration.md": {
-    "session": 2,
     "intake": 1
   },
   "docs/reference/dashboard-routes.md": {
-    "session": 4,
-    "instance": 1,
-    "admission": 1,
-    "tier": 5,
-    "intake": 1
+    "intake": 1,
+    "session": 2,
+    "tier": 3
   },
   "docs/reference/migrations.md": {
-    "instance": 2,
-    "runner": 4,
-    "handoff": 2,
-    "segment": 1,
-    "lease": 1,
-    "session": 5,
-    "tier": 1,
+    "runner": 2,
+    "session": 3,
     "coordinator": 1
   },
   "docs/reference/slack-commands.md": {

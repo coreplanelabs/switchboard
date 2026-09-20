@@ -75,7 +75,7 @@ sequenceDiagram
     participant SDO as ScheduleDO
 
     Shim->>Bot: POST /ingress "friction propose" (cron bearer)
-    Note over Bot: admission: the friction:write grant<br/>visibility: the caller's run-read predicate
+    Note over Bot: the gate: the friction:write grant<br/>visibility: the caller's run-read predicate
     Bot->>Store: list recent runs the caller may read
     Store-->>Bot: run records, oldest first
     Bot->>Core: clusterFriction(records, minRuns=2)

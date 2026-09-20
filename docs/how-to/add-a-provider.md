@@ -39,7 +39,7 @@ A block carries what a run needs to know about its models (record 0052):
 | `wire` | the shape the block speaks — `anthropic-messages`, `openai-chat` or `openai-responses` |
 | `vendor` | the vendor whose models the block serves: a name, or `model` when the block is an aggregator and each model id names its vendor first (`openrouter/anthropic/claude-sonnet-4`) |
 | `catalog` | the pi registry file this block's cards are read from — default, the block's own name when the library ships such a file; `none` for a local server with no catalog |
-| `models.<id>` | the operator's per-model override: `levels` (our tiers → the wire's word, or `null` to refuse a tier), `capField`, `window`, `inputs`, `cache`, `price` |
+| `models.<id>` | the operator's per-model override: `levels` (our effort words → the wire's word, or `null` to refuse one), `capField`, `window`, `inputs`, `cache`, `price` |
 | `passthrough` | extra body fields merged into every request (a vendor-only feature), never a control |
 
 Nothing is required beyond `wire` (or its `type` alias) and, for a keyed provider, `apiKeyEnv`; the registry card and the wire's own defaults fill the rest, and a field no layer names goes out unvouched with a note on the run's record saying so. Set `models.<id>` where you know better than the registry.
