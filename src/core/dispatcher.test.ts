@@ -32,8 +32,9 @@ import { CONFIRMATION_TTL_MS, MINUTE_MS, QUESTION_TTL_MS } from "./budgets.js";
 import type { AuditEntry } from "./commandRegistry.js";
 import {
   InMemoryConfirmationStore,
+  pendingRowLine,
   renderOffer,
-  STORE_UNREACHABLE_NOTE,
+  STORE_UNREACHABLE_LINE,
   UNSHOWABLE_LINE,
   type ConfirmationStore,
 } from "./confirmations.js";
@@ -17292,15 +17293,16 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     expect(registry.snapshotById("r1")?.events.find((e) => e.type === "route")).toMatchObject({ outcome: "hand_back" });
   });
 
-  it("with `offer` on the channel but no store in the process the hand-back is today's and nothing is offered", async () => {
+  it("with `offer` on the channel but no store in the process the refusal names the store and nothing is offered (the one-execution-path plan's E3)", async () => {
     const { deps } = wired();
     deps.confirmations = undefined;
     const { offers, replies } = await offered(deps);
-    expect(replies).toEqual([HAND_BACK_LINE]);
+    expect(replies).toEqual([STORE_UNREACHABLE_LINE]);
+    expect(replies.some((r) => r.includes("To run this:"))).toBe(false);
     expect(offers).toEqual([]);
   });
 
-  it("a token-shaped argument mints nothing: the reply says to type the line yourself, recorded as a hand-back; no offer", async () => {
+  it("a token-shaped argument mints nothing: the refusal names the unshowable value — never a line to retype — recorded as a hand-back; no offer", async () => {
     const { deps, registry, store } = wired();
     deps.routeModel = call("config_set", {
       scope: "channel",
@@ -17317,7 +17319,7 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     expect(snap?.events.find((e) => e.type === "answer")).toMatchObject({ text: UNSHOWABLE_LINE });
   });
 
-  it("a store that throws at mint falls back to the hand-back with one sentence naming it, recorded as a hand-back; no offer", async () => {
+  it("a store that throws at mint refuses naming the store — never a line to retype — recorded as a hand-back; no offer (the one-execution-path plan's E3)", async () => {
     const { deps, registry, store } = wired();
     const throwing: ConfirmationStore = {
       put: async () => {
@@ -17333,7 +17335,8 @@ describe("the confirmation through dispatch() and dispatchClick(): offered when 
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { offers, replies } = await offered(deps);
-      expect(replies).toEqual([`${HAND_BACK_LINE}\n${STORE_UNREACHABLE_NOTE}`]);
+      expect(replies).toEqual([STORE_UNREACHABLE_LINE]);
+      expect(replies.some((r) => r.includes("To run this:"))).toBe(false);
       expect(offers).toEqual([]);
       expect(registry.snapshotById("r1")?.events.find((e) => e.type === "route")).toMatchObject({
         outcome: "hand_back",
@@ -18712,6 +18715,52 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const receipt = replies.find((r) => r.includes("bound: `config set me --agent review`"));
     expect(receipt).toContain(HAND_BACK_PREFIX);
     expect(receipt).toContain("`config set me --agent review`");
+  });
+
+  it("on: a decision's second write bind is refused naming the pending row — one row per thread, no double mint (the one-execution-path plan's E3)", async () => {
+    const { deps, store } = confirming();
+    deps.operatorModel = decides({
+      reason: "two writes in one decision",
+      binds: [
+        { line: "config set me --agent review", reason: "the first" },
+        { line: "config set me --agent general", reason: "the second" },
+      ],
+    });
+    const { io, replies, offers } = offering();
+    await dispatch(deps, msg("set my agent to review, then to general", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual([]);
+    // The first write bind mints the one click; the second never reaches the
+    // store — minting it would silently replace the row the person sees.
+    expect(offers).toHaveLength(1);
+    expect(offers[0]!.line).toBe("config set me --agent review");
+    expect(store.rows.size).toBe(1);
+    expect(replies.some((r) => r.includes(pendingRowLine("config set me --agent review")))).toBe(true);
+    expect(replies.some((r) => r.includes(HAND_BACK_PREFIX))).toBe(false);
+  });
+
+  it("on: a store that throws at the operator's mint refuses naming the store — never a line to retype (the one-execution-path plan's E3)", async () => {
+    const { deps, store } = confirming();
+    deps.confirmations = {
+      put: async () => {
+        throw new Error("object unreachable");
+      },
+      consume: (id, ids) => store.consume(id, ids),
+      cancel: (id, ids) => store.cancel(id, ids),
+      cancelByThread: (key, ids) => store.cancelByThread(key, ids),
+      pendingByThread: (key) => store.pendingByThread(key),
+      describe: () => "throwing",
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { io, replies, offers } = offering();
+      await dispatch(deps, msg("set my agent to review", "slack:UADMIN"), io);
+      expect(deps.invoked).toEqual([]);
+      expect(offers).toEqual([]);
+      expect(replies.some((r) => r.includes(STORE_UNREACHABLE_LINE))).toBe(true);
+      expect(replies.some((r) => r.includes(HAND_BACK_PREFIX))).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("on: a bind naming a preset — `agent:<preset>` or the bare name — starts that preset's run on the person's own words, never the line's paraphrase; the receipt carries the verifier's line, the run carries the decision and agentSource operator", async () => {

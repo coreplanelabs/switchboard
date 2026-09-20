@@ -84,11 +84,12 @@ import {
   confirmationMessageOf,
   newConfirmationId,
   renderOffer,
-  STORE_UNREACHABLE_NOTE,
+  STORE_UNREACHABLE_LINE,
   UNSHOWABLE_LINE,
   type Confirmation,
   type ConfirmationStore,
 } from "../confirmations.js";
+import { decideExecution } from "./execution.js";
 import { askStructured, attemptsOfThrow, type StructuredAttempt } from "./structured.js";
 import { repoFromThread } from "../repoContext.js";
 import type { ConversationReader } from "../references/types.js";
@@ -1574,22 +1575,26 @@ async function answerCommand(
 }
 
 /**
- * The door's answer for a command it does not run from prose (record 0044):
- * a hand-back, or — on a channel that can show one — an offer. Both are
- * records first (`recordRoutedDecision`: a command run that invokes nothing
- * and tells no surface of the run, its `route` event's `outcome` saying which)
- * and one reply second. A channel without `offer`, or a process without the
- * confirmation store, is answered `To run this: <chat form>` exactly as before
- * the store existed — plus the cut note as a second line when the chat form
- * was cut at `ROUTE_RECEIPT_CAP` — a line ending in `…` is not the line to
- * paste; the first line and the record's receipt stay the capped form. Otherwise the offer shows the FULL chat form of the bound
- * input — uncapped, because a line the person cannot read in full is not a
- * confirmation; the record keeps the capped receipt as today — and when
- * redaction would alter that line (an argument looks like a secret) nothing
- * is minted and the reply says to type the line. The row is minted in the
- * store with the connect ticket's ten-minute ttl, the object stamping the
- * expiry; a store that cannot be reached costs the button and nothing else:
- * the hand-back goes out with one sentence saying so, recorded as a hand-back.
+ * The door's answer for a command it does not run from prose (record 0044;
+ * record 0069's table, the one-execution-path plan's click unit): the cell
+ * `decideExecution` names for a `run_command` at or above the confirm class.
+ * Both shapes are records first (`recordRoutedDecision`: a command run that
+ * invokes nothing and tells no surface of the run, its `route` event's
+ * `outcome` saying which) and one reply second. A channel without `offer` is
+ * a typed surface: the refusal names the typed form — `To run this: <chat
+ * form>` exactly as before the store existed, plus the cut note as a second
+ * line when the chat form was cut at `ROUTE_RECEIPT_CAP` (a line ending in
+ * `…` is not the line to paste); the first line and the record's receipt
+ * stay the capped form. On a chat surface the offer shows the FULL chat form
+ * of the bound input — uncapped, because a line the person cannot read in
+ * full is not a confirmation; the record keeps the capped receipt as today —
+ * and a mint failure is a refusal naming why, never a line to retype: when
+ * redaction would alter the line (an argument looks like a secret) nothing
+ * is minted and the reply says the value cannot be shown; a store that
+ * cannot be reached at the mint — or a process holding none — answers that
+ * the click could not be offered, and the person's next message re-asks the
+ * door. Either failure is recorded as `hand_back` — the record's word for a
+ * held write that ran nothing — with the refusal as its answer.
  */
 /** How record 0044's mint answered: the offer to show, or why the text
  *  hand-back stands instead — no click to show (`no_click`: the channel has no
@@ -1689,10 +1694,22 @@ async function answerHandBack(
     receipt,
     model: route.model,
   });
-  if (mint.kind === "no_click") return answer(handBack, "hand_back", () => io.reply(handBack));
-  if (mint.kind === "unshowable") return answer(UNSHOWABLE_LINE, "hand_back", () => io.reply(UNSHOWABLE_LINE));
-  if (mint.kind === "store_unreachable") {
-    const text = `${handBack}\n${STORE_UNREACHABLE_NOTE}`;
+  if (mint.kind !== "offered") {
+    // The cell is the table's (record 0069; `decideExecution`): a channel
+    // without `offer` is a typed surface — the refusal names the typed form —
+    // and on chat an unminted write is a refusal naming why the mint failed
+    // (the store missing or unreachable, a line redaction would alter), never
+    // a line to retype.
+    const cell = decideExecution(
+      { kind: "run_command", confirm: "at_or_above", mintable: false },
+      io.offer ? "chat" : "typed",
+    );
+    const text =
+      cell.cell === "refuse" && cell.names === "typed_form"
+        ? handBack
+        : mint.kind === "unshowable"
+          ? UNSHOWABLE_LINE
+          : STORE_UNREACHABLE_LINE;
     return answer(text, "hand_back", () => io.reply(text));
   }
   const shown = mint.shown;

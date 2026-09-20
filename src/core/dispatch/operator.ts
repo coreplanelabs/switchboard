@@ -47,7 +47,8 @@ import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RequestTrace } from "../requestTrace.js";
 import { renderHandBackLine } from "./handBack.js";
-import { STORE_UNREACHABLE_NOTE, UNSHOWABLE_LINE } from "../confirmations.js";
+import { pendingRowLine, STORE_UNREACHABLE_LINE, UNSHOWABLE_LINE } from "../confirmations.js";
+import { decideExecution } from "./execution.js";
 import { askStructured, attemptsOfThrow, type StructuredAttempt } from "./structured.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { recordOperatorDecision, runChatCommand, type OperatorEventFields } from "./commandRun.js";
@@ -1061,7 +1062,13 @@ function verifierModelOf(deps: {
  * offered as record 0044's one click where the channel can show one
  * (`mintConfirmationOffer`: the same row, Yes handler and ten-minute expiry as
  * a routed write, routing-and-config item 25), the plain hand-back text kept
- * only where no channel can show a click (the CLI, HTTP). A bind that is not a
+ * only where no channel can show a click (the CLI, HTTP; record 0069's table,
+ * `decideExecution` — a typed surface's refusal names the typed form). On a
+ * chat surface a mint failure is a refusal naming why — the store missing or
+ * unreachable, a line redaction would alter — never a line to retype; and the
+ * store holds ONE pending row per thread (record 0044), so a decision with
+ * several write binds mints the first and refuses the rest naming the pending
+ * row (`pendingRowLine`) rather than silently replacing it. A bind that is not a
  * registered command line is handed back too — a residue: under record 0067
  * the seam's bind guard re-asks an unparseable line, so only a confirmed
  * proposal or a registry-less process can reach it. Before any of that, THE
@@ -1188,6 +1195,10 @@ export async function executeOperatorDecision(
   // The event rides the FIRST bind that runs — not blindly the first bind, or
   // a decision whose first bind is handed back would lose its record.
   let carried = false;
+  // The full line of the click this decision already minted, when it did:
+  // record 0044's store holds one pending row per thread, so a later write
+  // bind in the same decision is refused naming it rather than double-minted.
+  let offeredLine: string | undefined;
   const binds = event.binds ?? [];
   for (const [i, bind] of binds.entries()) {
     // The registry is read first: a command whose group shares a preset's
@@ -1297,8 +1308,14 @@ export async function executeOperatorDecision(
       // same Yes handler, the same ten-minute expiry — so the person clicks
       // instead of retyping; the plain `To run this:` text remains only where
       // no channel can show a click (the CLI, HTTP). The receipt prefix is
-      // `verbose` material (item 28's ladder); the offer and the hand-back
-      // reach every level.
+      // `verbose` material (item 28's ladder); the offer and the refusal
+      // reach every level. The store holds one pending row per thread, so a
+      // decision's second write bind is refused naming the pending row —
+      // minting it would silently replace the row the person is looking at.
+      if (offeredLine !== undefined) {
+        await io.reply(`${verbose ? `${receipt}\n` : ""}${pendingRowLine(offeredLine)}`);
+        continue;
+      }
       const mint = await mintConfirmationOffer({
         io,
         store: deps.confirmations,
@@ -1313,14 +1330,24 @@ export async function executeOperatorDecision(
       if (mint.kind === "offered") {
         if (verbose) await io.reply(receipt);
         await renderConfirmationOffer(io, mint.shown);
+        offeredLine = mint.shown.line;
         continue;
       }
-      if (mint.kind === "unshowable") {
-        await io.reply(`${verbose ? `${receipt}\n` : ""}${UNSHOWABLE_LINE}`);
-        continue;
-      }
-      const note = mint.kind === "store_unreachable" ? `\n${STORE_UNREACHABLE_NOTE}` : "";
-      await io.reply(`${verbose ? `${receipt}\n` : ""}${renderHandBackLine(bind.line)}${note}`);
+      // The cell is the table's (record 0069; `decideExecution`): a channel
+      // without `offer` is a typed surface, whose refusal names the typed
+      // form; on chat a mint failure is a refusal naming why — never a line
+      // to retype.
+      const cell = decideExecution(
+        { kind: "run_command", confirm: "at_or_above", mintable: false },
+        io.offer ? "chat" : "typed",
+      );
+      const text =
+        cell.cell === "refuse" && cell.names === "typed_form"
+          ? renderHandBackLine(bind.line)
+          : mint.kind === "unshowable"
+            ? UNSHOWABLE_LINE
+            : STORE_UNREACHABLE_LINE;
+      await io.reply(`${verbose ? `${receipt}\n` : ""}${text}`);
       continue;
     }
     if (verbose) await io.reply(receipt);

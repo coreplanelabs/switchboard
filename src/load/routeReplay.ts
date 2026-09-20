@@ -39,6 +39,7 @@ import {
 } from "../core/dispatch/route.js";
 import type { SloCheck } from "./aggregate.js";
 import { presetBindOf, type OperatorDecision } from "../core/dispatch/operator.js";
+import { decideExecution } from "../core/dispatch/execution.js";
 import type { RouteCompoundFixture } from "./routeCompoundFixtures.js";
 import type { DoorUnit, RouteDoorFixture } from "./routeDoorFixtures.js";
 import type { RouteCommandExample } from "./routeCommandFixtures.js";
@@ -666,9 +667,16 @@ export function partitionDoorFixtures(
 
 /** Judge one operator decision against a fixture's expected outcome. The
  *  `bind` and `refusal` kinds are observable over the replay's text seam
- *  today; the others — a typed line that runs, a click, a fold, a rebind,
- *  the floor — need the seam their unit builds, so a scored fixture of such
- *  a kind misses loudly by name until that unit extends this judge. */
+ *  today, and the click unit (E3) extended the judge with its own kinds:
+ *  a `click` hits when the decision binds the expected registry line whole
+ *  and record 0069's table lands a held write on a chat surface in the click
+ *  cell (`decideExecution` — the mint itself is unit-proven at the executor,
+ *  which the replay's decision seam cannot observe); a `run` hits when the
+ *  decision binds a line carrying the pasted words — the paste starts a run
+ *  through the table's `run` or `route` cell instead of dying as a dead
+ *  hand-back. The remaining kinds — a fold, a rebind, the floor — need the
+ *  seam their unit builds, so a scored fixture of such a kind misses loudly
+ *  by name until that unit extends this judge. */
 export function judgeDoorFixture(
   decision: OperatorDecision,
   fixture: RouteDoorFixture,
@@ -686,6 +694,17 @@ export function judgeDoorFixture(
   }
   if (expected.kind === "refusal") {
     const hit = decision.kind === "refusal" && decision.text.includes(expected.naming);
+    return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
+  }
+  if (expected.kind === "click") {
+    const hit =
+      bound !== undefined &&
+      bound.includes(expected.line) &&
+      decideExecution({ kind: "run_command", confirm: "at_or_above", mintable: true }, "chat").cell === "click";
+    return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
+  }
+  if (expected.kind === "run") {
+    const hit = decision.kind === "binds" && bound !== undefined && bound.includes(expected.line);
     return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
   }
   return {
