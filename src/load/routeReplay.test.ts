@@ -40,6 +40,8 @@ import { ROUTE_WRITE_FIXTURES } from "./routeWriteFixtures.js";
 import { ROUTE_MISS_FIXTURES } from "./routeMissFixtures.js";
 import { DIRECTIVE_WORDS, ROUTE_DIRECTIVE_FIXTURES } from "./routeDirectiveFixtures.js";
 import { ROUTE_PLANTED_FIXTURES } from "./routePlantedFixtures.js";
+import { ROUTE_DOOR_FIXTURES } from "./routeDoorFixtures.js";
+import type { OperatorDecision } from "../core/dispatch/operator.js";
 import {
   compoundExamples,
   compoundScore,
@@ -75,6 +77,10 @@ import {
   verifyCommands,
   DIRECTIVE_BIND_BAR,
   directiveScore,
+  DOOR_BIND_BAR,
+  doorFixtureScore,
+  renderDoorFixtures,
+  replayDoorFixtures,
   MISS_BIND_BAR,
   missScore,
   PLANTED_PASS_BAR,
@@ -2099,5 +2105,100 @@ describe("the agreement row over the shadow log (load-harness item 17)", () => {
     expect(median([])).toBeUndefined();
     expect(median([1, 3])).toBe(2);
     expect(median([1, 2, 9])).toBe(2);
+  });
+});
+
+describe("the checked-in door set (src/load/routeDoorFixtures.ts) and its replay over the operator (issue 2043)", () => {
+  const binds = (line: string): OperatorDecision => ({
+    kind: "binds",
+    binds: [{ line, reason: "a docs write" }],
+    reason: "a docs write in the named repo",
+  });
+  const refusal: OperatorDecision = {
+    kind: "refusal",
+    cause: "policy",
+    text: "control plane records require admin access",
+    reason: "invented authority",
+  };
+
+  it("every id is unique; every fixture names a repository and a record or plan by number and expects the write preset", () => {
+    expect(new Set(ROUTE_DOOR_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_DOOR_FIXTURES.length);
+    for (const f of ROUTE_DOOR_FIXTURES) {
+      expect(f.preset, f.id).toBe("ship");
+      expect(f.text, f.id).toContain("in acme/");
+      expect(/record \d{4}|plan \d{4}-\d{2}-\d{2}-\d{3}/.test(f.text), f.id).toBe(true);
+    }
+  });
+
+  it("a binds decision whose first bind is agent:ship on the request hits every fixture and the score is green", async () => {
+    const results = await replayDoorFixtures(ROUTE_DOOR_FIXTURES, async (text) => binds(`agent:ship ${text}`), {
+      now: () => 0,
+    });
+    expect(results.every((r) => r.hit)).toBe(true);
+    const score = doorFixtureScore(results);
+    expect(score).toMatchObject({
+      fixtures: ROUTE_DOOR_FIXTURES.length,
+      hits: ROUTE_DOOR_FIXTURES.length,
+      refusals: 0,
+      misses: [],
+    });
+    expect(score.hitRate).toBeGreaterThanOrEqual(DOOR_BIND_BAR);
+    expect(renderDoorFixtures(score)[0]).toContain(`${score.hits}/${score.fixtures}`);
+    expect(renderDoorFixtures(score)).toContain("misses: none");
+  });
+
+  it("the incident's refusal shape is a miss counted apart, rendered with the reason and the text, and the check row fails", async () => {
+    const results = await replayDoorFixtures(ROUTE_DOOR_FIXTURES, async () => refusal, { now: () => 0 });
+    const score = doorFixtureScore(results);
+    expect(score.hits).toBe(0);
+    expect(score.refusals).toBe(ROUTE_DOOR_FIXTURES.length);
+    const lines = renderDoorFixtures(score);
+    expect(lines[0]).toContain(`refused ${score.refusals}`);
+    expect(lines.some((l) => l.includes("invented authority"))).toBe(true);
+    const checks = routeChecks({
+      table: confusionTable([], []),
+      answered: 0,
+      readToWrite: 0,
+      compound: compoundScore([]),
+      compoundBar: { detection: 0.9 },
+      imperative: imperativeScore([]),
+      imperativeBar: { hit: 0.9 },
+      writePreset: "ship",
+      door: score,
+    });
+    const row = checks.find((c) => c.name.includes("door fixture"))!;
+    expect(row).toMatchObject({
+      pass: false,
+      actual: `0/${ROUTE_DOOR_FIXTURES.length} bound, ${score.refusals} refused`,
+    });
+  });
+
+  it("a bind of another preset, a non_decision and a question are misses; a hit needs the write preset's head", async () => {
+    const answers: Record<string, OperatorDecision> = {
+      [ROUTE_DOOR_FIXTURES[0].text]: binds(`agent:general ${ROUTE_DOOR_FIXTURES[0].text}`),
+      [ROUTE_DOOR_FIXTURES[1].text]: { kind: "non_decision", reason: "prose" },
+      [ROUTE_DOOR_FIXTURES[2].text]: { kind: "question", text: "which record?", reason: "unsure" },
+    };
+    const results = await replayDoorFixtures(
+      ROUTE_DOOR_FIXTURES,
+      async (text) => answers[text] ?? binds(`agent:ship ${text}`),
+      { now: () => 0 },
+    );
+    const score = doorFixtureScore(results);
+    expect(score.hits).toBe(ROUTE_DOOR_FIXTURES.length - 3);
+    expect(score.refusals).toBe(0);
+    expect(score.misses.map((m) => m.outcome)).toEqual(["binds", "non_decision", "question"]);
+    const routed = routeChecks({
+      table: confusionTable([], []),
+      answered: 0,
+      readToWrite: 0,
+      compound: compoundScore([]),
+      compoundBar: { detection: 0.9 },
+      imperative: imperativeScore([]),
+      imperativeBar: { hit: 0.9 },
+      writePreset: "ship",
+      door: score,
+    }).find((c) => c.name.includes("door fixture"))!;
+    expect(routed.pass).toBe(false);
   });
 });
