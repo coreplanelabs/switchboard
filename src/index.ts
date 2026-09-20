@@ -6,6 +6,8 @@ import { installationPath } from "./deploy/operatorRoot.js";
 import { intakeModelRef, openConfigStore } from "./config.js";
 import { parseModelRef } from "./core/provider.js";
 import { providerRouteModel } from "./core/dispatch/route.js";
+import { providerModelsReader } from "./core/dispatch/providerModels.js";
+import { configuredModelRefs } from "./core/commands/providers.js";
 import type { IntakeReceipt } from "./core/runLedger/types.js";
 import { capabilitiesFrom } from "./core/capabilities.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
@@ -535,6 +537,14 @@ export async function runBot(): Promise<void> {
   const deps: CoreDeps = {
     config,
     completions,
+    // The providers catalogue behind the loop's `provider_models` read tool
+    // (issue 2088): the refs this deployment can run, read once per block
+    // through the real fetch, so a write proposal names a real ref.
+    providerModels: providerModelsReader({
+      blocks: config.config.providers,
+      refs: configuredModelRefs(config.config),
+      fetch: (url) => fetch(url),
+    }),
     spanLog,
     runBearers,
     harness: {

@@ -2149,6 +2149,15 @@ describe("the door row scores the defect fixtures", () => {
     // binds decision on the joined ask.
     if (e.kind === "route") return { kind: "non_decision", reason: "the turn ended with no tool call" };
     if (e.kind === "fold") return binds("steer run r-0001 the reply's words");
+    // The write-intent cell (issue 2088): one question whose proposal is the
+    // write line built from the providers that exist.
+    if (e.kind === "question")
+      return {
+        kind: "question",
+        text: "`openai` names no model provider this deployment has",
+        proposal: `${e.proposes} --models.coding openrouter/<model>`,
+        reason: "a write the deployment cannot run as typed",
+      };
     return binds(`agent:ship ${e.carries}`);
   };
   // A parked fixture's answer reaches the loop as the joined ask
@@ -2163,15 +2172,15 @@ describe("the door row scores the defect fixtures", () => {
   const operate = async (text: string): Promise<OperatorDecision> => asExpected(byText.get(text)!);
   const bindFixtures = ROUTE_DOOR_FIXTURES.filter((f) => f.expected.kind === "bind");
 
-  it("the set is the eighteen defects — D1 to D14 and N1 to N4, each exactly once, ids unique, each tagged with the unit that turns it green", () => {
-    expect(ROUTE_DOOR_FIXTURES).toHaveLength(18);
-    expect(new Set(ROUTE_DOOR_FIXTURES.map((f) => f.id)).size).toBe(18);
+  it("the set is the nineteen defects — D1 to D14 and N1 to N5, each exactly once, ids unique, each tagged with the unit that turns it green", () => {
+    expect(ROUTE_DOOR_FIXTURES).toHaveLength(19);
+    expect(new Set(ROUTE_DOOR_FIXTURES.map((f) => f.id)).size).toBe(19);
     const defects = ROUTE_DOOR_FIXTURES.map((f) => f.defect);
     expect([...defects].sort()).toEqual(
-      [...Array.from({ length: 14 }, (_, i) => `D${i + 1}`), "N1", "N2", "N3", "N4"].sort(),
+      [...Array.from({ length: 14 }, (_, i) => `D${i + 1}`), "N1", "N2", "N3", "N4", "N5"].sort(),
     );
     for (const f of ROUTE_DOOR_FIXTURES) {
-      expect(["E2", "E3"], f.id).toContain(f.unit);
+      expect(["E2", "E3", "W1"], f.id).toContain(f.unit);
       expect(f.text.length, f.id).toBeGreaterThan(0);
     }
   });
@@ -2179,12 +2188,12 @@ describe("the door row scores the defect fixtures", () => {
   it("a fixture whose unit is unmerged scores pending, never fails: with no unit merged the whole set is pending and the check row passes", () => {
     const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, []);
     expect(split.scored).toEqual([]);
-    expect(split.pending).toHaveLength(18);
+    expect(split.pending).toHaveLength(19);
     const score = doorFixtureScore([], split.pending);
     expect(score).toMatchObject({ fixtures: 0, hits: 0, refusals: 0, misses: [] });
     expect(Number.isNaN(score.hitRate)).toBe(true);
     const lines = renderDoorFixtures(score);
-    expect(lines[0]).toContain("no fixture's unit is merged yet — 18 pending");
+    expect(lines[0]).toContain("no fixture's unit is merged yet — 19 pending");
     expect(lines[1]).toContain("D3 (unit E3)");
     expect(lines[1]).toContain("D13 (unit E3)");
     expect(lines).toContain("misses: none");
@@ -2200,12 +2209,12 @@ describe("the door row scores the defect fixtures", () => {
       door: score,
     }).find((c) => c.name.includes("door fixture"))!;
     expect(row.pass).toBe(true);
-    expect(row.actual).toContain("18 pending");
+    expect(row.actual).toContain("19 pending");
   });
 
-  it("partitioning splits by the unit tag: with E2 merged, E3's fixtures — D3's typed hand-back line expecting a run once E3 lands, and D13's click — stay pending", () => {
+  it("partitioning splits by the unit tag: with E2 merged, E3's fixtures — D3's typed hand-back line expecting a run once E3 lands, and D13's click — stay pending, and so does W1's N5", () => {
     const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, ["E2"]);
-    expect(split.pending.map((f) => f.defect).sort()).toEqual(["D13", "D3"]);
+    expect(split.pending.map((f) => f.defect).sort()).toEqual(["D13", "D3", "N5"]);
     const d03 = split.pending.find((f) => f.defect === "D3")!;
     expect(d03.expected).toEqual({ kind: "run", line: d03.text });
     const d13 = split.pending.find((f) => f.defect === "D13")!;
@@ -2213,10 +2222,10 @@ describe("the door row scores the defect fixtures", () => {
     expect(split.scored).toHaveLength(16);
   });
 
-  it("E2 and E3 are merged: all eighteen fixtures are scored at head and none is pending", async () => {
-    expect(DOOR_MERGED_UNITS).toEqual(["E2", "E3"]);
+  it("E2, E3 and W1 are merged: all nineteen fixtures are scored at head and none is pending", async () => {
+    expect(DOOR_MERGED_UNITS).toEqual(["E2", "E3", "W1"]);
     const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, DOOR_MERGED_UNITS);
-    expect(split.scored).toHaveLength(18);
+    expect(split.scored).toHaveLength(19);
     expect(split.pending).toEqual([]);
     const results = await replayDoorFixtures(split.scored, operate, { now: () => 0 });
     expect(results.filter((r) => !r.hit)).toEqual([]);
@@ -2274,6 +2283,20 @@ describe("the door row scores the defect fixtures", () => {
     const n4 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "N4")!;
     expect(judgeDoorFixture(binds("agent:ship the joined ask"), n4).hit).toBe(true);
     expect(judgeDoorFixture({ kind: "non_decision", reason: "floored" }, n4).hit).toBe(false);
+  });
+
+  it("the write-intent cell (issue 2088): a question expectation hits on a question whose proposal carries the write line, and misses on the incident's read bind or a proposal naming the read", () => {
+    const n5 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "N5")!;
+    expect(n5.expected.kind).toBe("question");
+    expect(judgeDoorFixture(asExpected(n5), n5).hit).toBe(true);
+    // The incident's shape: the read command bound instead of the write's question.
+    expect(judgeDoorFixture(binds("config show"), n5).hit).toBe(false);
+    // A question whose proposal is the read still stands in for the work.
+    expect(
+      judgeDoorFixture({ kind: "question", text: "did you mean?", proposal: "config show", reason: "r" }, n5).hit,
+    ).toBe(false);
+    // A question with no proposal proposes no line that would do the work.
+    expect(judgeDoorFixture({ kind: "question", text: "which models?", reason: "r" }, n5).hit).toBe(false);
   });
 
   it("a scored replay over the bind fixtures is green when each bind carries the words, and the check row passes with the pending count beside it", async () => {

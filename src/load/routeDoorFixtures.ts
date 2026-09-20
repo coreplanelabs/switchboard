@@ -1,8 +1,9 @@
 // The checked-in door set of `load:route` (docs/reference/specs/load-harness.md
-// item 17): the door row of eighteen fixtures — record 0069's fourteen defects
+// item 17): the door row of nineteen fixtures — record 0069's fourteen defects
 // D1 to D14 from one day under `routing.operator: on` (issues 1993, 2010,
-// 2025) and the first night's four door failures N1 to N4 (issues 2043, 2045,
-// 2046) — each the failure's message shape with the amended table's expected
+// 2025), the first night's four door failures N1 to N4 (issues 2043, 2045,
+// 2046) and the one loop's first defect N5 (issue 2088, the write ask a read
+// answered) — each the failure's message shape with the amended table's expected
 // outcome and the unit of the one-execution-path plan that turns it green.
 // The replay scores a fixture only once its unit is on `DOOR_MERGED_UNITS`
 // and prints the rest as pending, so the row is green at head while the
@@ -12,14 +13,16 @@
 
 /** The plan units that turn door fixtures green. E2 is the operator loop
  *  (typed tools, the parked question, policy-only refusals, the verifier's
- *  retirement); E3 is the click on every write path. */
-export type DoorUnit = "E2" | "E3";
+ *  retirement); E3 is the click on every write path; W1 is issue 2088's
+ *  write-intent question cell (a write-class intent never executes as a read
+ *  command — record 0069's amendment). */
+export type DoorUnit = "E2" | "E3" | "W1";
 
 /** The units already merged, read by the row's scorer: a fixture whose unit
  *  is not on this list is printed as pending, never replayed and never a
  *  failure. The unit that lands appends itself here in its own pull request,
  *  turning its fixtures from pending to scored. */
-export const DOOR_MERGED_UNITS: readonly DoorUnit[] = ["E2", "E3"];
+export const DOOR_MERGED_UNITS: readonly DoorUnit[] = ["E2", "E3", "W1"];
 
 /** The amended table's expected outcome for one fixture — what the door must
  *  do with the message once the fixture's unit is merged.
@@ -51,7 +54,11 @@ export type DoorExpectation =
   | { kind: "rebind"; carries: string }
   /** A turn that ends with no tool call floors to the readers' route on the
    *  person's own request — never a line to retype. */
-  | { kind: "route" };
+  | { kind: "route" }
+  /** One question (the write-intent cell, issue 2088): the decision is a
+   *  question whose proposal carries `proposes` — a line that would do the
+   *  asked work — and never `forbids` (the read that stood in for it). */
+  | { kind: "question"; proposes: string; forbids?: string };
 
 /** One door fixture: the failure's message shape, the defect it replays
  *  (record 0069's table), the unit that turns it green and the amended
@@ -270,5 +277,21 @@ export const ROUTE_DOOR_FIXTURES: readonly RouteDoorFixture[] = [
       question: "which repository?",
     },
     expected: { kind: "rebind", carries: "acme/api" },
+  },
+  // N5 (issue 2088): a plain-words write ask naming a provider this
+  // deployment does not have ("openai" — OpenAI models ride openrouter) was
+  // answered with a read (`config show`). The write-intent cell: the outcome
+  // is a question whose proposal is the write line built from the providers
+  // that exist, never a read standing in for the work. The `intent` argument
+  // itself is not asserted here: for a question outcome the decision seam the
+  // judge reads carries no command tool call to inspect, so the required
+  // `intent` beside `reason` is unit-proven at the parse instead
+  // (`src/core/dispatch/operator.test.ts::the write-intent cell (issue 2088)`).
+  {
+    id: "n05",
+    defect: "N5",
+    unit: "W1",
+    text: "change my default models to openai",
+    expected: { kind: "question", proposes: "config set me", forbids: "config show" },
   },
 ];

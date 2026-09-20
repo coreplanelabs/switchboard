@@ -40,6 +40,11 @@ describe("the turn-outcome table is total and owns every outcome", () => {
       expect: { chat: { cell: "question" }, typed: { cell: "question" } },
     },
     {
+      name: "an unresolvable write — a write-class call the deployment cannot run as typed — is the parked question with the best guess from what exists, never a read standing in (issue 2088)",
+      outcome: { kind: "unresolvable_write" },
+      expect: { chat: { cell: "question" }, typed: { cell: "question" } },
+    },
+    {
       name: "a turn ending with no tool call floors to the route — the only floor, terminal for the event",
       outcome: { kind: "ended" },
       expect: { chat: { cell: "route" }, typed: { cell: "route" } },
@@ -77,6 +82,7 @@ describe("the turn-outcome table is total and owns every outcome", () => {
       { kind: "run_command", confirm: "at_or_above", mintable: false },
       { kind: "bind_preset" },
       { kind: "ask" },
+      { kind: "unresolvable_write" },
       { kind: "ended" },
       { kind: "typed_line" },
       { kind: "steer_owned" },

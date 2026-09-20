@@ -60,6 +60,7 @@ import {
   type OperatorEventFields,
   type OperatorThreadOwner,
 } from "./dispatch/operator.js";
+import type { ProviderModelsReader } from "./dispatch/providerModels.js";
 import type { IntakeVerdict } from "./intake.js";
 import type { McpToolSource } from "../mcp/source.js";
 import {
@@ -157,6 +158,10 @@ export interface CoreDeps
    *  Default: the provider behind `defaults.models.general` — the strong
    *  tier, never `routing.model`'s fast one. Tests script one. */
   operatorModel?: RouteModel;
+  /** The providers catalogue behind the loop's `provider_models` read tool
+   *  (issue 2088): the refs this deployment can run, so a write proposal
+   *  names a real one. Absent, the tool answers its no-reader fallback. */
+  providerModels?: ProviderModelsReader;
   /** The one runs service (`RunDeps.runs`): the run tools, the thread read and stage A's paste check
    *  (record 0044) all read it — declared here so the two bases that name it agree. */
   runs?: RunsService;

@@ -31,6 +31,15 @@ export type TurnOutcome =
   /** `ask`: one question, parked as the thread's pending question in durable
    *  state; the person's next words in the thread are its answer. */
   | { kind: "ask" }
+  /** `unresolvable_write`: a write-class command call the deployment cannot
+   *  run as typed — a required argument missing, or a value naming a model
+   *  provider this deployment does not have (issue 2088: "openai" where
+   *  OpenAI models ride openrouter). The intent is a write, so no read
+   *  command answers it and no floor re-reads it: the cell is one question
+   *  whose proposal is the write line built from the providers and presets
+   *  that exist, so "yes" runs it through the click path and the person's
+   *  next words refine it. */
+  | { kind: "unresolvable_write" }
   /** A turn that ended with no tool call: the model had nothing to act on. */
   | { kind: "ended" }
   /** A line the person's own chat grammar parses: their typed decision — it
@@ -74,7 +83,10 @@ export type ExecutionCell =
  * naming why the mint failed — never a line to retype) and a typed surface a
  * refusal naming the typed form, typing being that surface's native act; a
  * preset bind routes the person's own request; an `ask` is the parked
- * question; a turn ending with no tool call floors to the route; a typed
+ * question — and so is a write-class call the deployment cannot run as typed
+ * (a required argument missing, or a provider it does not have), its proposal
+ * built from what exists (issue 2088's cell: a write intent never executes as
+ * a read command); a turn ending with no tool call floors to the route; a typed
  * registry line runs as typed; a steer into an owned thread runs as
  * admission's fold; and a refusal comes only from the policy table, naming
  * its row.
@@ -88,6 +100,8 @@ export function decideExecution(outcome: TurnOutcome, surface: Surface): Executi
     case "bind_preset":
       return { cell: "route" };
     case "ask":
+      return { cell: "question" };
+    case "unresolvable_write":
       return { cell: "question" };
     case "ended":
       return { cell: "route" };
