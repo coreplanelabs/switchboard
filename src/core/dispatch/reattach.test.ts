@@ -16,6 +16,7 @@ import {
   carriedWorkspaceBinding,
   lostWorkspaceNote,
   prepareRestartTurn,
+  recordRestartDeath,
 } from "./reattach.js";
 import type { PersonFollowUp } from "./settle.js";
 
@@ -177,11 +178,15 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
   it("publishes the resumed note on the run's stream, closes the card, closes the adopted row interrupted with the note in its record, and hands back the row's request", async () => {
     const w = world(resumeOf(row()));
     const restart = await abandonLostWorkspace(w.ctx);
-    expect(restart).toMatchObject({
+    expect(restart?.request).toMatchObject({
       text: "agent:coding fix the resolver",
       threadKey: "slack:CX:1.0",
       userId: "slack:UX",
     });
+    // The closed record rides back with the request (issue 2081): the caller
+    // keeps it so a restart dispatch that dies before the successor's claim
+    // can end the record for real.
+    expect(restart?.closed).toMatchObject({ id: "run-old", status: "interrupted", restarting: true });
     expect(w.refusals).toEqual(["workspace_lost"]);
     const note = w.registry
       .snapshotById("run-old")!
@@ -450,5 +455,131 @@ describe("the restarting ending", () => {
     expect(await abandonLostWorkspace(ends.ctx)).toBeUndefined();
     expect(ends.puts[0].status).toBe("interrupted");
     expect(ends.puts[0].restarting).toBeUndefined();
+  });
+});
+
+// Feature: issue 2081 — a restart dispatch that dies between the `restarting`
+// close and the successor's claim must not leave the record answering
+// still-running until the unit's wall clock runs out: the death is recorded as
+// the ending, and the record reads `interrupted` with the roll's own cause.
+describe("recordRestartDeath: the restart died between the restarting close and the successor's claim (issue 2081)", () => {
+  async function closedRestartingRecord(): Promise<RunRecord> {
+    const registry = new RunRegistry({ genId: () => "run-old", genToken: () => "tok" });
+    const run = registry.create("label", { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0" });
+    const puts: RunRecord[] = [];
+    const ledgerRun = new NullLedgerRun("run-old", { put: async (r) => void puts.push(r), abandoned: () => {} });
+    const shell = createCardShell({ label: "*coding*", startedAt: 5_000, now: () => NOW });
+    await abandonLostWorkspace({
+      msg: REQUEST,
+      io: {
+        reply: async () => {},
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => [],
+      },
+      refuse: async <T>(_outcome: string, fn: () => Promise<T>) => fn(),
+      card: { update: () => {}, done: async () => {} },
+      shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      run,
+      registry,
+      resume: {
+        row: row(),
+        lastStep,
+        plan: { kind: "finish", step: 1, answer: "x", stepRecorded: true } as unknown as ResumeContext["plan"],
+        events: [{ type: "input", messageId: "m1", text: "fix the resolver", at: 1, seq: 1 }],
+        lastSeq: 4,
+        repoCtx: { repo: "acme/api" },
+        inbox: [],
+      },
+      ledgerRun,
+      why: "reuse-refused: no worktree",
+    });
+    return puts[0];
+  }
+
+  it("ends the record for real: `restarting` dropped, one `restart_died` note appended past the highest seq naming how the dispatch ended, every earlier event kept — so the interruption's cause is still the roll's own words, never the dispatch error's", async () => {
+    const closed = await closedRestartingRecord();
+    expect(closed).toMatchObject({ restarting: true });
+    const written: RunRecord[] = [];
+    await recordRestartDeath({
+      writer: { write: (r) => void written.push(r) },
+      closed,
+      why: "boom at admission",
+      clock: () => NOW + 1,
+    });
+    expect(written).toHaveLength(1);
+    const ended = written[0];
+    expect(ended.id).toBe("run-old");
+    expect(ended.status).toBe("interrupted");
+    expect(ended.restarting).toBeUndefined();
+    // The earlier events — the workspace-lost `resumed` note among them — stand
+    // untouched, and the death note lands past the highest replayed seq.
+    expect(ended.events.slice(0, closed.events.length)).toEqual(closed.events);
+    const death = ended.events.at(-1) as { type: string; kind?: string; summary?: string; seq?: number; at?: number };
+    expect(death).toMatchObject({ type: "run_note", kind: "restart_died", seq: 6, at: NOW + 1 });
+    expect(death.summary).toBe(
+      "the restart from the request died before it claimed the run (boom at admission); this close is the run's end",
+    );
+    expect(ended.eventCount).toBe(closed.eventCount + 1);
+  });
+
+  it("a coordinator's child tells its parent `child-interrupted-<runId>` with the death as the reason, so the wait settles now instead of at its chunk's end", async () => {
+    const closed = await closedRestartingRecord();
+    const sent: Array<{ instance: string; type: string; payload: unknown }> = [];
+    const workflow: WorkflowSender = {
+      get: (instance) =>
+        Promise.resolve({
+          sendEvent: async (event: { type: string; payload: unknown }) => {
+            sent.push({ instance, ...event });
+          },
+        }),
+    };
+    await recordRestartDeath({
+      writer: { write: () => {} },
+      closed,
+      why: "the restart's dispatch ended failed",
+      clock: () => NOW + 1,
+      coordinator: { parentInstanceId: "plan-fix-1", idempotencyKey: "plan-fix-1:U10/0/coding" },
+      workflow,
+    });
+    expect(sent).toEqual([
+      {
+        instance: "plan-fix-1",
+        type: "child-interrupted-run-old",
+        payload: {
+          runId: "run-old",
+          parentInstanceId: "plan-fix-1",
+          kind: "interrupted",
+          reason:
+            "the restart from the request died before it claimed the run (the restart's dispatch ended failed); this close is the run's end",
+          at: NOW + 1,
+        },
+      },
+    ]);
+  });
+
+  it("a refusing workflow engine is swallowed, never thrown — the record's write already happened and the next read-record answers interrupted anyway", async () => {
+    const closed = await closedRestartingRecord();
+    const written: RunRecord[] = [];
+    const refusing: WorkflowSender = {
+      get: () =>
+        Promise.resolve({
+          sendEvent: async () => {
+            throw new Error("instance ended");
+          },
+        }),
+    };
+    await expect(
+      recordRestartDeath({
+        writer: { write: (r) => void written.push(r) },
+        closed,
+        why: "boom",
+        clock: () => NOW + 1,
+        coordinator: { parentInstanceId: "plan-fix-1", idempotencyKey: "plan-fix-1:U10/0/coding" },
+        workflow: refusing,
+      }),
+    ).resolves.toBeUndefined();
+    expect(written).toHaveLength(1);
   });
 });

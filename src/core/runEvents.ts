@@ -128,6 +128,13 @@ export type RunNoteKind =
    *  (docs/reference/specs/run-history.md item 37); the summary says how many calls were
    *  in flight at the kill and how each was settled. Published by the runner. */
   | "resumed"
+  /** The restart the run's `restarting` close promised never claimed the run
+   *  (issue 2081): its dispatch died between the close and the successor's
+   *  claim, so this interrupted close is the run's end, not a restart. The
+   *  summary names how the dispatch ended. Published by the dispatcher over
+   *  the closed record — a kind of its own, so the interruption's cause is
+   *  still read off the roll's earlier words, never off the dispatch error. */
+  | "restart_died"
   /** A control was decided against the model card and is not native (record
    *  0052): a fallback (`applied` differs from `asked`, `vouched` true) or
    *  an unvouched send (`vouched` false). One note per degraded control,
@@ -332,6 +339,7 @@ export const RUN_NOTE_KINDS = [
   "mcp_unavailable",
   "follow_up",
   "resumed",
+  "restart_died",
   "control_degraded",
   "seed",
   "redispatch",

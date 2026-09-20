@@ -12037,6 +12037,114 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     });
   });
 
+  it("a restart dispatch that dies between the restarting close and the successor's claim (issue 2081): the death is recorded as the ending — the store's record drops `restarting` and gains a `restart_died` note — so read-record answers interrupted with the roll's cause instead of still-running until the unit's wall clock", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    residentFetchStub({
+      attach: () =>
+        new Response(
+          JSON.stringify({ error: "reuse-refused: no worktree at /workspace/threads/t/main", needs: "recreate" }),
+          { status: 409 },
+        ),
+    });
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const request = msg("agent:coding fix it", "slack:UADMIN");
+    await ledger.claim({
+      runId: "run-old",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: {
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+        agent: "coding",
+        model: "anthropic/coding-model",
+        repo: "acme/api",
+        ref: "main",
+        request: durableInboxMessage(request, request.text, 4_000),
+        parentInstanceId: "plan-p",
+        idempotencyKey: "plan-p:u1/0/coding",
+      },
+      system: "sys",
+      tools: [],
+      state: { binding: { backend: "resident", workspace: "/workspace/threads/t/main", user: "worker2" } },
+    });
+    await ledger.seed("run-old", "gen-OLD", [
+      { idx: 0, message: { role: "user", content: [{ type: "text", text: "fix it" }] } },
+    ]);
+    await ledger.step(
+      "run-old",
+      "gen-OLD",
+      { step: 0, seq: 0, turnIndex: 1, inFlight: [], inboxConsumedSeq: 0, remainingMs: 300_000, turn: 0, iteration: 0 },
+      [],
+    );
+    await ledger.append("run-old", "gen-OLD", [{ type: "input", messageId: "m1", text: "fix it", at: 1, seq: 1 }]);
+    ledger.live.get("run-old")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+    const provider = capturingProvider("never reached");
+    const { deps, registry, store, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+    // The death between the close and the claim: the restart's dispatch (the
+    // resume itself reads `resume.repoCtx` and never calls this) throws before
+    // its run is registered, so no successor ever claims the carried id.
+    deps.resolveRepoContext = () => {
+      throw new Error("boom before the claim");
+    };
+    const plan = planResume({
+      transcript: {
+        complete: true,
+        compactions: [],
+        turns: 1,
+        messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+      },
+      lastStep: reclaimed.lastStep!,
+      tools: knownToolsFor(getAgent("coding")),
+    });
+    if (plan.kind !== "resume") throw new Error(plan.kind === "interrupted" ? plan.why : plan.kind);
+    const events = await ledger.readEvents("run-old");
+    const { io } = ioWithCard();
+    const outcome = await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), io, {
+      resume: {
+        row: reclaimed.row,
+        lastStep: reclaimed.lastStep!,
+        plan,
+        events,
+        lastSeq: 1,
+        repoCtx: { repo: "acme/api", ref: "main" },
+        inbox: [],
+      },
+    });
+    await writer.settled();
+    expect(outcome.status).toBe("refused");
+    expect(outcome.refusal).toBe("workspace_lost");
+    // No model call and no successor: the carried id never re-registered.
+    expect(provider.requests).toEqual([]);
+    expect(registry.snapshotById("run-old")).toBeNull();
+    // The restarting close was the ledger's (its row's finish); the death's
+    // correction is the store's copy — the same id, so it replaces the close
+    // where the records live — with `restarting` dropped and the death named.
+    expect(ledger.finished.get("run-old")).toMatchObject({ status: "interrupted", restarting: true });
+    const corrected = await store.get("run-old");
+    expect(corrected).toMatchObject({ id: "run-old", status: "interrupted" });
+    expect(corrected?.restarting).toBeUndefined();
+    const notes = (corrected?.events ?? []).filter((e) => e.type === "run_note") as Array<{
+      kind: string;
+      summary: string;
+    }>;
+    // The roll's own note stands — the interruption's cause stays the replaced
+    // workspace's words — and the death note names how the dispatch ended.
+    expect(notes.some((n) => n.kind === "resumed" && n.summary.includes("could not be re-attached"))).toBe(true);
+    const death = notes.find((n) => n.kind === "restart_died");
+    // The dispatch caught its own throw and ended `failed`; the death note
+    // names that outcome (a throw the dispatch could not catch would name the
+    // error's words instead).
+    expect(death?.summary).toBe(
+      "the restart from the request died before it claimed the run (the restart's dispatch ended failed); this close is the run's end",
+    );
+  });
+
   /**
    * The world of a pi run whose resident container is replaced under it
    * (harness-pi item 16; harness.md item 6): a resident thread, the ledger as

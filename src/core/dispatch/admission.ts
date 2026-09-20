@@ -39,7 +39,7 @@ import {
 } from "../threadAdmission.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import { reclaimedRunRecord } from "./record.js";
-import type { RunStatus } from "../runRecord.js";
+import type { RunRecord, RunStatus } from "../runRecord.js";
 import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { waitingWords, type PlaneAskAnswer } from "../plane/decide.js";
 import { replyAck, replyOutcome, REFUSAL_SENTENCES } from "./reply.js";
@@ -202,7 +202,10 @@ export async function closeRestartRow(adopted: LedgerRun, restart: RestartContex
  *  what ended the dispatch before the run started, so the row says what the
  *  request says — through the adopted run's sink so the ledger's finish
  *  removes the row. Best-effort: a failure is a warning, the sweep's next pass
- *  finds the row again. */
+ *  finds the row again. Answers the record it put — a `restarting` close's
+ *  caller keeps it, so a restart dispatch that dies before the successor's
+ *  claim can end the record for real (issue 2081) — or undefined when the put
+ *  failed. */
 export async function closeResumedRow(
   adopted: LedgerRun,
   resume: ResumeContext,
@@ -214,18 +217,21 @@ export async function closeResumedRow(
      *  waiting for `child_resumed` instead of ending its unit on it. */
     restarting?: true;
   },
-): Promise<void> {
+): Promise<RunRecord | undefined> {
   try {
     // One attempt, no retry — `putOnce` says the sink's final word on a failure
     // (run-history item 54); the assembly stays inside the try (best-effort).
-    await putOnce(adopted.sink, {
+    const record = {
       ...reclaimedRunRecord({ row: resume.row, events: resume.events, status, finishedAt: systemClock() }),
       ...(opts?.restarting === true ? { restarting: true as const } : {}),
-    });
+    };
+    await putOnce(adopted.sink, record);
+    return record;
   } catch (err) {
     console.warn(
       `[resume] ${resume.row.runId} could not be closed (${why}): ${err instanceof Error ? err.message : String(err)}`,
     );
+    return undefined;
   }
 }
 

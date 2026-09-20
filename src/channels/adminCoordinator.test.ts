@@ -868,6 +868,46 @@ describe("POST /admin/coordinator/read-record — an interrupted child (issues 1
     });
   });
 
+  it("a restarting record whose restart dispatch died (issue 2081) — `restarting` dropped, a `restart_died` note appended — answers interrupted with the roll's own recorded cause, so the unit ends on the interrupted note instead of walking out its wall clock", async () => {
+    const h = harness();
+    await h.store.put(
+      record("run-cut", {
+        ...TAG,
+        status: "interrupted",
+        events: [
+          { type: "input", messageId: "m1", text: "do the unit", seq: 1 },
+          {
+            type: "run_note",
+            kind: "resumed",
+            summary:
+              "resumed after a restart: the run's workspace could not be re-attached (workspace lost with the replaced container); the run restarts from its request under the same run id",
+            seq: 2,
+          },
+          {
+            type: "run_note",
+            kind: "restart_died",
+            summary:
+              "the restart from the request died before it claimed the run (boom at admission); this close is the run's end",
+            seq: 3,
+          },
+        ],
+      }),
+    );
+    const res = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-cut" }),
+      h.deps,
+    );
+    expect(res.status).toBe(200);
+    // Never still-running: the corrected record is the run's real end, and the
+    // cause is the roll's own words — the death note's kind is skipped, so the
+    // dispatch error can never misclassify the interruption.
+    expect((res.body as { run: unknown }).run).toMatchObject({
+      finished: true,
+      status: "interrupted",
+      interruption: "container_replaced",
+    });
+  });
+
   it("an interrupted child with NO restarted successor answers its facts with the cause off its own events — the replaced container here — so the ending's sentence names what actually happened (issue 1876)", async () => {
     const h = harness();
     await h.store.put(
