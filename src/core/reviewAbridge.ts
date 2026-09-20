@@ -6,7 +6,7 @@ import { anthropicApiKey } from "./anthropicApiKey.js";
 import type { EnvRecord, Secrets } from "../secrets.js";
 import { meatOnHost, type MeatRun, type MeatRunResult } from "./meatProcess.js";
 import {
-  MEAT_MODEL_DEFAULT,
+  MEAT_MODEL_MISSING,
   capDiff,
   resolveReadingDiff,
   sanitizeArtifactText,
@@ -68,7 +68,7 @@ export type AbridgeState =
 
 export interface AbridgeRequest {
   runId: string;
-  /** meat's `-model`; default the configured `meatModel`, else `claude-opus-5`. */
+  /** meat's `-model`; default the configured `review.readingDiff.meatModel`. */
   model?: string;
   /** Recompute a `done` run (replacing its meat artifact) or retry a `failed` one. */
   force?: boolean;
@@ -321,8 +321,9 @@ async function appendReviewArtifact(
 /** The production abridger: the run store, GitHub's compare on the App (or
  *  `GH_TOKEN`) read credential when the process holds one, meat on this host
  *  with the bot's own Anthropic key and a cache under `<dataDir>/meat-cache`,
- *  the configured `meatModel` (else Opus) and `meatTimeoutS`. Config is read
- *  per call, so a reload changes the model without a restart. */
+ *  the configured `meatModel` and `meatTimeoutS`. Config is read per call, so
+ *  a reload changes the model without a restart; a production asked for with
+ *  no `-model` flag and no configured `meatModel` fails naming the key. */
 export function reviewAbridgerFromConfig(
   config: () => Pick<AppConfig, "providers" | "review">,
   store: RunStore,
@@ -345,7 +346,11 @@ export function reviewAbridgerFromConfig(
       cacheDir: resolve(dataDir, "meat-cache"),
       hostEnv: { PATH: env.PATH, HOME: env.HOME },
     }),
-    defaultModel: () => resolved().meatModel ?? MEAT_MODEL_DEFAULT,
+    defaultModel: () => {
+      const model = resolved().meatModel;
+      if (!model) throw new Error(MEAT_MODEL_MISSING);
+      return model;
+    },
     timeoutMs: () => resolved().meatTimeoutS * 1000,
     clock: systemClock,
     warn,

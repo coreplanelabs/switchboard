@@ -157,7 +157,7 @@ export const reviewAbridge = defineCommand({
       .string()
       .min(1)
       .optional()
-      .describe("meat's model (default review.readingDiff.meatModel, else claude-opus-5)"),
+      .describe("meat's model (default review.readingDiff.meatModel; without either the abridge fails naming the key)"),
     force: flag.optional().describe("recompute even when an abridged diff is already stored, or retry a failed one"),
     wait: flag.optional().describe("block until the abridging finishes and answer the outcome instead of `running`"),
   }),

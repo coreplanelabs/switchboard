@@ -164,7 +164,7 @@ defaults:
 #   addressSeverity: minor         # blocking | major | minor (default) | nit
 #   readingDiff:
 #     provider: git                # git (default) | meat | off
-#     meatModel: claude-opus-5     # meat's -model; Opus-class is the floor that actually abridges
+#     meatModel: claude-opus-5     # meat's -model; required with provider: meat (no built-in model) — Opus-class is the floor that actually abridges
 #     meatTimeoutS: 240            # meat's own budget on the host; past it the abridging fails by name
 
 # Static per-channel defaults (channel ID -> scope). Runtime overrides set via

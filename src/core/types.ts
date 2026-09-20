@@ -162,7 +162,7 @@ export type StatusActivity = { kind: "command"; tool: string; command: string } 
 
 /** A structured progress frame; adapters decide how to render it. */
 export interface StatusUpdate {
-  /** one-line headline, e.g. "⚡ review on anthropic/claude-fable-5 · 42s" */
+  /** one-line headline, e.g. "⚡ review on <provider>/<model> · 42s" */
   title: string;
   /** the agent's checklist and any lead lines, one per line */
   detail?: string;

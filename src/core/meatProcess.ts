@@ -3,7 +3,7 @@ import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import type { Secret } from "../secrets.js";
 import { redactSecrets } from "./runEvents.js";
-import { MEAT_MODEL_DEFAULT, parseMeatJson, type MeatResult } from "./readingDiff.js";
+import { parseMeatJson, type MeatResult } from "./readingDiff.js";
 
 // meat.dev on the BOT host (docs/reference/specs/reading-diff.md items 5–6). The
 // abridged reading diff is one child process per production: `meat -json -model
@@ -21,8 +21,6 @@ import { MEAT_MODEL_DEFAULT, parseMeatJson, type MeatResult } from "./readingDif
 
 /** The binary's name on PATH; the bot image installs it at /usr/local/bin. */
 export const MEAT_BINARY = "meat";
-
-export { MEAT_MODEL_DEFAULT };
 
 /** The host probe behind the `readingDiffAbridge` capability (src/core/capabilities.ts):
  *  does `meat` resolve as an executable on the given PATH — what `command -v

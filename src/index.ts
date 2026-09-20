@@ -63,6 +63,7 @@ import { metricsDatasetWarning } from "./core/runStoreWorker.js";
 import { createRunsService } from "./core/runsService.js";
 import { createPlaneService } from "./core/planeService.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./core/runHistoryWriter.js";
+import { readingDiffStartupWarning } from "./core/readingDiff.js";
 import { autoAbridgeOnPersist, reviewAbridgerFromConfig } from "./core/reviewAbridge.js";
 import { meatOnPath } from "./core/meatProcess.js";
 import { buildRunLedger } from "./core/runLedgerWorker.js";
@@ -375,6 +376,10 @@ export async function runBot(): Promise<void> {
     () => config.config.review?.readingDiff,
     publicEnv(),
   );
+  // The env flip is applied at resolution, past the load-time validator: env
+  // forcing `meat` with no configured model is warned here, once, at boot.
+  const readingDiffWarning = readingDiffStartupWarning(config.config.review?.readingDiff, publicEnv());
+  if (readingDiffWarning) console.warn(readingDiffWarning);
   const runHistoryWriter = capabilities.runHistory
     ? createRunHistoryWriter({
         store: runStore,

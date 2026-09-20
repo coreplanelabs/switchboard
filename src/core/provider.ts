@@ -187,7 +187,7 @@ export interface VendorRef {
 /** The one vendor parse (record 0052): `parseModelRef` is the only other parser of a
  *  ref. A block that declares a vendor name uses it; a block that declares
  *  `vendor: model`, or a model id that carries its own vendor prefix
- *  (`openrouter/anthropic/claude-sonnet-5`), reads the vendor off the id's
+ *  (`openrouter/<vendor>/<model>`), reads the vendor off the id's
  *  first segment; otherwise the block's own name is the vendor. `catalog`
  *  never enters: a block named unlike its catalog still serves the vendor the
  *  declaration or the id names. */
@@ -272,11 +272,11 @@ export function billerHarnessProvider(biller: string | undefined): BillerHarness
 /** The env var Anthropic's own SDK reads when an `anthropic` provider block names none. */
 export const ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY";
 
-/** "anthropic/claude-opus-5" -> { provider: "anthropic", model: "claude-opus-5" } */
+/** "<provider>/<model>" -> { provider, model }: the split at the ref's first slash. */
 export function parseModelRef(ref: string): { provider: string; model: string } {
   const i = ref.indexOf("/");
   if (i === -1) {
-    throw new Error(`Model "${ref}" must be qualified as "<provider>/<model>", e.g. "anthropic/claude-opus-5"`);
+    throw new Error(`Model "${ref}" must be qualified as "<provider>/<model>"`);
   }
   return { provider: ref.slice(0, i), model: ref.slice(i + 1) };
 }

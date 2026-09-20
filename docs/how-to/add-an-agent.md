@@ -38,7 +38,7 @@ Every field is documented on `AgentDef` in the same file. The turn cap is never 
 ```yaml
 defaults:
   models:
-    docs: anthropic/claude-haiku-4-5
+    docs: <provider>/<model>
 ```
 
 Without an entry, the agent falls back to `defaults.models.general`.

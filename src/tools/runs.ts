@@ -227,7 +227,7 @@ export const spawnRunTool: RunnableTool = {
     }
     if (input.model !== undefined) {
       const model = String(input.model).trim();
-      if (!/^\S+\/\S+$/.test(model)) return "error: model takes a `<provider>/<model>` ref, e.g. `anthropic/claude-x`";
+      if (!/^\S+\/\S+$/.test(model)) return "error: model takes a `<provider>/<model>` ref";
       request.model = model;
     }
     if (input.effort !== undefined) {

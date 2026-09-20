@@ -347,7 +347,7 @@ export interface AppConfig {
   providers: Record<string, ProviderConfig>;
   defaults: {
     agent: string;
-    /** default model per agent, e.g. { general: "anthropic/claude-opus-5" } */
+    /** default model per agent, e.g. { general: "<provider>/<model>" } */
     models: Record<string, string>;
     /** default effort per agent, e.g. { coding: "medium" }; unset → the agent
      *  definition's effort, else the provider's default */

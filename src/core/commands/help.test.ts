@@ -136,7 +136,7 @@ describe("help.commands — the command reference", () => {
       ],
     });
     expect(text).toContain(
-      "*Per-request directives* (anywhere in the message):\n`agent:review model:anthropic/claude-opus-5 effort:low budget:20 look at PR 42`",
+      "*Per-request directives* (anywhere in the message):\n`agent:review model:<provider>/<model> effort:low budget:20 look at PR 42`",
     );
     expect(text).toContain("*Commands*");
     expect(text).toContain("  runs list      — list runs");
