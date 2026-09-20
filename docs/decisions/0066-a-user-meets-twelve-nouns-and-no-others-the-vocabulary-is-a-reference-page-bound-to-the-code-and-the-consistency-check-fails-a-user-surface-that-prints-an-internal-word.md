@@ -1,11 +1,13 @@
 ---
 title: A user meets twelve nouns and no others; the vocabulary is a reference page bound to the code, and the consistency check fails a user surface that prints an internal word
-status: proposed
+status: accepted
 date: 2026-09-19
 pattern: Ubiquitous language published as one glossary rendered as a generated region from a typed list that imports the code types carrying it; an anti-corruption layer at every user surface (internal words are translated at the boundary, never printed); a ratchet whose recorded baseline only shrinks, driven to zero as the acceptance gate
 ---
 
 # A user meets twelve nouns and no others; the vocabulary is a reference page bound to the code, and the consistency check fails a user surface that prints an internal word
+
+**Accepted 2026-09-19.** The maintainer decided both calls the record left open: the web rail keeps saying "Threads" (the rail is the thread noun's own surface), and `command` and `door` rows are hidden from a person's Runs list by default (a toggle shows them).
 
 **The ask.** Decide (the maintainer, before the plan's first unit is seeded): the product speaks twelve user nouns, each with exactly one meaning; every other word the system uses internally is allowed in specs, records and code and never printed on a user surface; the vocabulary is one reference page rendered from a typed list bound to the code types that carry it, and two checks under `verify` hold the line — a generated-region binding whose typed list imports the carrying types, and a `vocabulary:check` that fails an internal word extracted from a user-facing surface. Written for an engineer who knows the runs index, the run page, the card, the command registry and the docs tree. Success criteria:
 
