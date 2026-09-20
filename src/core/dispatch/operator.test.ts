@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   answerOperatorRead,
   bindFromAnswer,
@@ -21,6 +21,7 @@ import {
   renderOperatorQuestion,
   runOperator,
   stripDirectiveHead,
+  unresolvableModelRefs,
   type OperatorInput,
   type OperatorTurnContext,
 } from "./operator.js";
@@ -547,5 +548,152 @@ describe("operatorThreadTail reads the thread session first (session-log item 13
     expect(await operatorThreadTail(fallback, [{ agent: "general" }], "slack:C1:1.0")).toEqual([
       { text: "user: from a per-agent log" },
     ]);
+  });
+});
+
+// Issue 2088's write-intent cell (record 0069, as amended; `decideExecution`'s
+// `unresolvable_write` row): the executor can run the read/write check — every
+// command tool declares a typed `intent`, and a write-class intent never
+// executes as a read command or a line the deployment cannot run as typed.
+describe("the write-intent cell (issue 2088)", () => {
+  const configSet = (): RoutableCommand => ({
+    id: "config.set",
+    effect: "write",
+    tool: {
+      name: "config_set",
+      description: "set config",
+      inputSchema: { type: "object", properties: {}, required: ["scope"] },
+    },
+    def: { id: "config.set", args: [{ name: "scope" }], options: undefined } as unknown as CommandDef<unknown>,
+  });
+  const ctx = () => ctxOf({ commands: [command("runs.list"), configSet()], providers: ["anthropic", "openrouter"] });
+
+  it("every command tool the loop offers carries the required typed intent beside reason", () => {
+    const tools = operatorTools(input());
+    const list = tools.find((t) => t.name === "runs_list")!;
+    const schema = list.inputSchema as { properties: Record<string, { enum?: string[] }>; required: string[] };
+    expect(schema.properties.intent.enum).toEqual(["read", "write"]);
+    expect(schema.required).toEqual(expect.arrayContaining(["intent", "reason"]));
+  });
+
+  it("a write intent bound to a read-class command is a violation the seam re-asks (record 0067's shape) — the read never runs", () => {
+    const turn = parseOperatorTurn({ tool: "runs_list", input: { intent: "write", reason: "r" } }, ctx());
+    if (turn.kind !== "violation") throw new Error("not a violation");
+    expect(turn.violation).toContain("a write intent on the read command `runs list`");
+    expect(turn.violation).toContain("a read never covers a write");
+  });
+
+  it("a write whose model ref names no declared provider is a question whose proposal rebuilds the line on a provider that exists", () => {
+    const turn = parseOperatorTurn(
+      { tool: "config_set", input: { scope: "me", models: { coding: "openai/gpt-5" }, intent: "write", reason: "r" } },
+      ctx(),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
+    expect(turn.decision.text).toContain("`openai/gpt-5`");
+    expect(turn.decision.proposal).toContain("config set me");
+    expect(turn.decision.proposal).toContain("anthropic/<model>");
+    expect(turn.decision.proposal).not.toContain("openai");
+  });
+
+  it("with a catalogue-bearing block declared, the fallback proposal carries the asked ref whole onto it — never the first provider blind", () => {
+    const turn = parseOperatorTurn(
+      { tool: "config_set", input: { scope: "me", models: { coding: "openai/gpt-5" }, intent: "write", reason: "r" } },
+      ctxOf({
+        commands: [command("runs.list"), configSet()],
+        providers: ["anthropic", "openrouter"],
+        catalogueProviders: ["openrouter"],
+      }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
+    expect(turn.decision.proposal).toContain("openrouter/openai/gpt-5");
+    expect(turn.decision.proposal).not.toContain("anthropic");
+  });
+
+  it("a write missing a required argument is a question naming it — never a broken line downstream", () => {
+    const turn = parseOperatorTurn(
+      { tool: "config_set", input: { models: { coding: "anthropic/opus" }, intent: "write", reason: "r" } },
+      ctx(),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
+    expect(turn.decision.text).toContain("`scope`");
+    expect(turn.decision.proposal).toBeUndefined();
+  });
+
+  it("a read intent on a read command binds as ever, and without a providers list no ref is judged", () => {
+    const read = parseOperatorTurn({ tool: "runs_list", input: { intent: "read", reason: "r" } }, ctx());
+    expect(read).toMatchObject({ kind: "decision", decision: { kind: "binds", binds: [{ line: "runs list" }] } });
+    const unjudged = parseOperatorTurn(
+      { tool: "config_set", input: { scope: "me", models: { coding: "openai/gpt-5" }, intent: "write", reason: "r" } },
+      ctxOf({ commands: [configSet()] }),
+    );
+    expect(unjudged).toMatchObject({ kind: "decision", decision: { kind: "binds" } });
+  });
+
+  it("only model slots are judged: a repository slug on another key is never read as a ref", () => {
+    expect(unresolvableModelRefs({ repo: "acme/api", models: { coding: "openai/gpt-5" } }, ["anthropic"])).toEqual([
+      "openai/gpt-5",
+    ]);
+    expect(unresolvableModelRefs({ model: "anthropic/opus" }, ["anthropic"])).toEqual([]);
+  });
+
+  it("the prompt lists the deployment's providers and says a read command answers only a read intent", () => {
+    const prompt = buildOperatorPrompt(input({ providers: ["anthropic", "openrouter"] }));
+    expect(prompt.system).toContain("Model providers this deployment has: `anthropic`, `openrouter`.");
+    expect(prompt.system).toContain("A read command answers only a read intent");
+  });
+
+  it("the provider_models read tool answers from the wired catalogue with the call's filter, and the refs reach the next turn", async () => {
+    const read = vi.fn(
+      async (filter?: string) =>
+        `Model refs this deployment can run matching \`${filter}\`:\n- \`openrouter/openai/gpt-5\``,
+    );
+    const answers: (RouteToolCall | string)[] = [
+      { tool: OPERATOR_READ_TOOLS.providerModels, input: { filter: "openai" } },
+      {
+        tool: OPERATOR_ASK_TOOL,
+        input: {
+          text: "Did you mean these?",
+          proposal: "config set me --models.coding openrouter/openai/gpt-5",
+          reason: "unresolvable provider",
+        },
+      },
+    ];
+    const prompts: { retries?: readonly { answer: string; violation: string }[] }[] = [];
+    const answer = await runOperator(input({ providerModels: { read } }), async (prompt) => {
+      prompts.push(prompt);
+      return answers.shift()!;
+    });
+    expect(read).toHaveBeenCalledWith("openai");
+    expect(prompts[1].retries![0].violation).toContain("openrouter/openai/gpt-5");
+    expect(answer.decision).toMatchObject({
+      kind: "question",
+      proposal: "config set me --models.coding openrouter/openai/gpt-5",
+    });
+  });
+
+  it("without a wired catalogue the tool answers its fallback — the prompt's provider list is the ground truth — and a reader that throws is a named note, never a failed turn", async () => {
+    const bare: (RouteToolCall | string)[] = [{ tool: OPERATOR_READ_TOOLS.providerModels, input: {} }, ""];
+    const prompts: { retries?: readonly { answer: string; violation: string }[] }[] = [];
+    await runOperator(input(), async (prompt) => {
+      prompts.push(prompt);
+      return bare.shift()!;
+    });
+    expect(prompts[1].retries![0].violation).toContain("not available here");
+    const throwing: (RouteToolCall | string)[] = [{ tool: OPERATOR_READ_TOOLS.providerModels, input: {} }, ""];
+    const asked: { retries?: readonly { answer: string; violation: string }[] }[] = [];
+    await runOperator(
+      input({
+        providerModels: {
+          read: async () => {
+            throw new Error("catalogue down");
+          },
+        },
+      }),
+      async (prompt) => {
+        asked.push(prompt);
+        return throwing.shift()!;
+      },
+    );
+    expect(asked[1].retries![0].violation).toContain("catalogue down");
   });
 });

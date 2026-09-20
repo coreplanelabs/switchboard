@@ -18005,6 +18005,25 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(provider.requests).toHaveLength(0);
   });
 
+  it("on: an inline command answer leaves a record the store lists for the thread — the door's tool call, arguments and reason (issue 2088; run-history item 60)", async () => {
+    const { deps } = operatorDeps(ON_YAML);
+    const store = new InMemoryRunStore();
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    deps.operatorModel = decides({ reason: "one listing", binds: [{ line: "config show", reason: "the scopes" }] });
+    await dispatch(deps, msg("show me the config", "slack:UADMIN"), fakeIO().io);
+    await deps.runHistoryWriter.settled();
+    // `runs list --thread <key>` reads this listing: the inline answer's run.
+    const listed = await store.list({ threadKey: "slack:CX:1.0" });
+    expect(listed).toHaveLength(1);
+    const rec = (await store.get(listed[0].id))!;
+    expect(rec).toMatchObject({ agent: "command", threadKey: "slack:CX:1.0", status: "completed" });
+    expect(rec.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "binds",
+      binds: [{ line: "config show", reason: "the scopes" }],
+    });
+  });
+
   // The receipts ride the verbosity ladder (routing-and-config item 28), like
   // the router's `routed:` line: `bound:` and the verifier's `verified:` are
   // verbose material; the hand-back and the verifier's disagreement reach

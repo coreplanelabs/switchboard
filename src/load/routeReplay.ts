@@ -721,6 +721,20 @@ export function judgeDoorFixture(
     const hit = routes && (decision.kind === "non_decision" || decision.kind === "binds");
     return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
   }
+  if (expected.kind === "question") {
+    // Issue 2088's write-intent cell: a write ask the deployment cannot run
+    // as typed is one question whose proposal is a line that would do the
+    // asked work (`decideExecution`'s `unresolvable_write` row) — never a
+    // read command standing in for the write and never the floor.
+    const questions = decideExecution({ kind: "unresolvable_write" }, "chat").cell === "question";
+    const proposal = decision.kind === "question" ? decision.proposal : undefined;
+    const hit =
+      questions &&
+      proposal !== undefined &&
+      proposal.includes(expected.proposes) &&
+      (expected.forbids === undefined || !proposal.includes(expected.forbids));
+    return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
+  }
   if (expected.kind === "fold") {
     // The loop unit (E2): under the owner rule a reply into an owned thread
     // folds before the loop's answer posts — every decision but a question is

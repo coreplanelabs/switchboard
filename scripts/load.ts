@@ -1368,7 +1368,36 @@ async function routeReplay(f: Flags): Promise<boolean> {
   const doorSplit = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, DOOR_MERGED_UNITS);
   const doorResults = await replayDoorFixtures(
     doorSplit.scored,
-    async (text) => (await runOperator({ text, projection: { presets, commands: menu }, tail: [] }, model)).decision,
+    async (text) =>
+      (
+        await runOperator(
+          {
+            text,
+            projection: { presets, commands: menu },
+            tail: [],
+            // The incident deployment's shape (issue 2088): no `openai`
+            // provider — OpenAI models ride openrouter — so N5's proposal
+            // must be built from these.
+            providers: ["anthropic", "openrouter"],
+            // A canned catalogue (the replay stays off the network): the refs
+            // the write proposal may name, `openai` resolving to openrouter's.
+            providerModels: {
+              read: async (filter?: string) => {
+                const refs = [
+                  "anthropic/claude-opus-5",
+                  "openrouter/openai/gpt-5.2",
+                  "openrouter/openai/gpt-5.2-mini",
+                  "openrouter/meta-llama/llama-4",
+                ];
+                const needle = filter?.trim().toLowerCase();
+                const hit = needle ? refs.filter((r) => r.includes(needle)) : refs;
+                return ["Model refs this deployment can run:", ...hit.map((r) => `- \`${r}\``)].join("\n");
+              },
+            },
+          },
+          model,
+        )
+      ).decision,
     { concurrency, now: systemClock },
   );
   const door = doorFixtureScore(doorResults, doorSplit.pending);
