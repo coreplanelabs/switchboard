@@ -52,7 +52,15 @@ describe("the budgets module — one table every wall clock derives from (docs/d
   });
 
   it("the loop at 3 review rounds is coding, review, findings, review, findings, review, merge", () => {
-    expect(loopRounds({ maxRounds: 3 })).toEqual(["coding", "review", "findings", "review", "findings", "review", "merge"]);
+    expect(loopRounds({ maxRounds: 3 })).toEqual([
+      "coding",
+      "review",
+      "findings",
+      "review",
+      "findings",
+      "review",
+      "merge",
+    ]);
     expect(loopRounds({ maxRounds: 1 })).toEqual(["coding", "review", "merge"]);
   });
 
