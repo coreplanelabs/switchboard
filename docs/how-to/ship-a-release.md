@@ -32,7 +32,7 @@ The run also publishes the images as `ghcr.io/<owner>/<repo>` (bot), `-resident`
 
 ## Confirm it is live
 
-**Deployed is not live.** The bot step is done when `/healthz` reports a container running the release commit; the old one answers during the handoff, up to 15 minutes while a `ship` pipeline finishes.
+**Deployed is not live.** The bot step is done when `/healthz` reports a container running the release commit; the old one answers during the swap, up to 15 minutes while a `ship` pipeline finishes.
 
 ## See what any PR would deploy
 

@@ -14,7 +14,7 @@ What is deliberately off, narrow on purpose, not yet proven, or a known wart, so
 - **`review` is read-only by convention.** The hard boundary is the execution plane.
 - **DM scopes** are the manifest's choice.
 - **The friction ledger is run history.** `friction report` and `friction propose` see only what `runHistory` retains.
-- **The GitHub intake reads one event.** A `check_run` wakes the ship runner's merge step; a person's review, a comment or a merge reaches no agent until someone relays it in chat. The general door, an outside fact filed into the thread that owns the work, is [record 0047](../decisions/0047-an-outside-fact-finds-the-thread-that-owns-the-work.md), built after the smaller streams it names; no second event-specific intake is added before it.
+- **The GitHub listener reads one event.** A `check_run` wakes the pipeline's merge step; a person's review, a comment or a merge reaches no agent until someone relays it in chat. The general door, an outside fact filed into the thread that owns the work, is [record 0047](../decisions/0047-an-outside-fact-finds-the-thread-that-owns-the-work.md), built after the smaller streams it names; no second event-specific listener is added before it.
 - **A cold run holds an installation token.** A run on the cold sandbox or E2B plane carries a one-hour GitHub token in its environment for the whole run, scoped by permission and not by repository; the resident plane does not. The git door that replaces it with the run bearer is [record 0048](../decisions/0048-the-git-door-a-cold-runs-only-github-credential-is-its-run-bearer.md).
 - **Schedules are a code catalog.** A schedule exists only when a deploy carries it, and a firing runs as `http:cron` rather than as the actor the catalog declares. Schedules stored at runtime and fired by the minute tick are [record 0049](../decisions/0049-a-stored-schedule-is-a-turn-the-minute-tick-fires.md).
 
@@ -27,6 +27,6 @@ What is deliberately off, narrow on purpose, not yet proven, or a known wart, so
 
 ## Known warts
 
-- **A plan runner that outlives a bot deploy ends with one runtime error.** The Workflows engine pins the instance to the Worker version it started on and wakes it on the current one; when that wake completes the plan, the runtime cancels the `ShipCoordinator.run` call as "hung" one millisecond after recording the instance's end. The unit report, the card, the parent run record and the instance's status are all complete — read that error on a finished instance as this, not as a stuck runner. An instance that starts and ends on one version never logs it.
+- **A pipeline that outlives a bot deploy ends with one runtime error.** The Workflows engine pins the pipeline's Workflow to the Worker version it started on and wakes it on the current one; when that wake completes the plan, the runtime cancels the `ShipCoordinator.run` call as "hung" one millisecond after recording the pipeline's end. The unit report, the card, the parent run record and the pipeline's status are all complete — read that error on a finished pipeline as this, not as a stuck one. A pipeline that starts and ends on one Worker version never logs it.
 
 Complete list: the specs' [`[gap]` rows](../reference/specs/README.md); switches: [Turn features on and off](../how-to/turn-features-on-and-off.md).

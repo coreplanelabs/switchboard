@@ -22,7 +22,7 @@ Without an `all` entry nobody is admin and every gated command is refused.
 
 ```yaml
 grants:
-  access:*:                             # every Access browser session
+  access:*:                             # everyone signed in through Access
     actions: all
     channels: all
     repos: all
@@ -105,7 +105,7 @@ grants:
     actions: [dispatch, runs:read]
 ```
 
-- Access browser sessions hold every group's `read`; writes need a grant.
+- An Access sign-in holds every group's `read`; writes need a grant.
 - Service and ingress tokens hold exactly their entry; unlisted ones cannot `dispatch`. `SWITCHBOARD_INGRESS_TOKENS` only identifies.
 
 ## Check it

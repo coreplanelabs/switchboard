@@ -37,7 +37,7 @@ Keyed by platform-namespaced actor id. Three axes, each a list of names or the e
 | Actor id | Baseline | A `grants` entry … |
 |---|---|---|
 | `slack:U…` (a Slack user) | the open chat commands (`help`/`config`/`repo`/`friction`/`memory`/`mcp`/`schedule` reads, `memory:write`, `mcp:write`) plus `agent:run:<name>` for every agent not under `restrict.agents` | **adds** to the baseline |
-| `access:<sub>` (an Access browser session) | every group's `read`, plus `memory:write` and `mcp:write` for its own tier (the web chat makes a session a chat user) | **adds** to the baseline |
+| `access:<sub>` (a browser signed in through Access) | every group's `read`, plus `memory:write` and `mcp:write` for its own scope (the web chat makes a signed-in browser a chat user) | **adds** to the baseline |
 | `access:svc:<common_name>` (an Access service token) | nothing | is **exactly** what it holds |
 | `http:<subject>` / `mcp:<subject>` (an ingress token) | nothing | is **exactly** what it holds |
 | `schedule:<name>` (a cron firing) | what the schedule registry declares for it | **replaces** the declaration |
@@ -47,7 +47,7 @@ Keyed by platform-namespaced actor id. Three axes, each a list of names or the e
 
 ```yaml
 grants:
-  access:*:                         # every Cloudflare Access browser session: the org, granted once
+  access:*:                         # everyone signed in through Cloudflare Access: the org, granted once
     actions: all
     channels: all
     repos: all
@@ -55,9 +55,9 @@ grants:
     actions: [runs:read]
 ```
 
-A key `slack:*`, `http:*`, `mcp:*` or `access:*` is a **surface entry**: the same three axes, held by every actor that authenticated on that surface. Who may authenticate there is decided elsewhere (Access admits the org, Slack the workspace, the token maps the credentials), so the set is one an operator already trusts. An actor's grants are the **union** of its own entry (or its baseline) and its surface entry — a person listed for extra rights keeps what everyone holds, and a personal entry never narrows the surface entry. `access:*` is browser sessions only: an `access:svc:` service token is a named credential and holds exactly its own entry. A surface entry is not an actor — `adminsHint` names people, never `slack:*`.
+A key `slack:*`, `http:*`, `mcp:*` or `access:*` is a **surface entry**: the same three axes, held by every actor that authenticated on that surface. Who may authenticate there is decided elsewhere (Access admits the org, Slack the workspace, the token maps the credentials), so the set is one an operator already trusts. An actor's grants are the **union** of its own entry (or its baseline) and its surface entry — a person listed for extra rights keeps what everyone holds, and a personal entry never narrows the surface entry. `access:*` is browser sign-ins only: an `access:svc:` service token is a named credential and holds exactly its own entry. A surface entry is not an actor — `adminsHint` names people, never `slack:*`.
 
-Never a baseline, held only by a grant (or `all`): `config:write` (`config set/clear/instructions channel`, channel-tier MCP servers), `repo:write` (`repo onboard/offboard/reconfigure/rebuild`, `friction propose`, forgetting shared memories, org-tier MCP servers), every `runs:*` action, every `*:exec`, `dispatch`, `deploy:write` (the restart, the crash injection, and a probe bearer for the model proxy, `POST /admin/model-proxy/bearer`), `trace:read` (the bot's span log, `GET /admin/trace/log`). **No entry with `actions: all` means nobody is an admin** — the fail-closed default; `adminsHint` (the "ask …" in a 🚫 reply) names whoever holds it.
+Never a baseline, held only by a grant (or `all`): `config:write` (`config set/clear/instructions channel`, a channel's MCP servers), `repo:write` (`repo onboard/offboard/reconfigure/rebuild`, `friction propose`, forgetting shared memories, org-wide MCP servers), every `runs:*` action, every `*:exec`, `dispatch`, `deploy:write` (the restart, the crash injection, and a probe bearer for the model proxy, `POST /admin/model-proxy/bearer`), `trace:read` (the bot's span log, `GET /admin/trace/log`). **No entry with `actions: all` means nobody is an admin** — the fail-closed default; `adminsHint` (the "ask …" in a 🚫 reply) names whoever holds it.
 
 ### Validation
 

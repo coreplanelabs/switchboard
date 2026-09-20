@@ -4,7 +4,7 @@ Find a live run on the dashboard, read its timeline, stop it, and read it back a
 
 **You need:**
 
-- A dashboard session: whichever credential the installation's `dashboard.auth` strategy checks.
+- A dashboard sign-in: whichever credential the installation's `dashboard.auth` strategy checks.
 - The `runs:write` grant, to stop a run.
 - A `runHistory` block, to read back finished runs.
 
