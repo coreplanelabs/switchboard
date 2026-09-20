@@ -268,7 +268,12 @@ export interface AdminCoordinatorDeps {
    *  paths (githubPulls.fetchCheckRunDetails + checkFindings.classifyRoundChecks).
    *  Optional: without it the step falls back to `fetchCommitChecks`, every
    *  failure a real one — the flake rule simply never fires. */
-  fetchRoundChecks?: (repo: string, sha: string, prNumber: number) => Promise<RoundChecks | undefined>;
+  fetchRoundChecks?: (
+    repo: string,
+    sha: string,
+    prNumber: number,
+    baseRef?: string,
+  ) => Promise<RoundChecks | undefined>;
   /** The flake rule's one re-run (record 0055): re-run the failed jobs behind
    *  the named check runs at the head (githubPulls.rerunFailedJobs — the same
    *  `rerun-failed-jobs` retry the deploy pipeline documents). Optional:
@@ -2362,9 +2367,14 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
     );
     return json(200, { ok: true, retried, at });
   }
+  // The pull request's own facts beside the runs (issue 2063): a draft head
+  // is the machine's to hold — never to merge — and the base names the branch
+  // whose required checks say what the head must still gain. An unreadable
+  // answer leaves both out: the checks alone decide, as before.
+  const facts = await deps.fetchPrFacts({ repo: instance.repo, number: body.prNumber }).catch(() => undefined);
   let checks: RoundChecks | undefined;
   if (deps.fetchRoundChecks !== undefined) {
-    checks = await deps.fetchRoundChecks(instance.repo, headSha, body.prNumber).catch(() => undefined);
+    checks = await deps.fetchRoundChecks(instance.repo, headSha, body.prNumber, facts?.baseRef).catch(() => undefined);
   } else {
     // The fallback reading: the merge door's own, every failure a real one.
     const plain = await deps.fetchCommitChecks(instance.repo, headSha).catch(() => undefined);
@@ -2377,10 +2387,18 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
             failed: plain.failed.map((name) => ({ name, conclusion: "failure" })),
           };
   }
-  // A head still pending (or with no check reported) is what the machine's
-  // checks wait rides: register it so the intake's settled event wakes it
-  // (http-ingress item 12), exactly as the merge step's pending answer does.
-  if (checks === undefined || checks.pending.length > 0 || checks.total === 0)
+  // A head still pending — a run not completed, a required check whose run
+  // does not exist yet, no check reported, or a draft waiting on its ready
+  // event — is what the machine's checks wait rides: register it so the
+  // intake's settled event wakes it (http-ingress item 12), exactly as the
+  // merge step's pending answer does.
+  if (
+    checks === undefined ||
+    checks.pending.length > 0 ||
+    (checks.expected?.length ?? 0) > 0 ||
+    checks.total === 0 ||
+    facts?.draft === true
+  )
     deps.noteMergeWait?.(headSha, id.value, at);
   if (checks !== undefined && checks.failed.length > 0)
     log(
@@ -2388,7 +2406,12 @@ async function checksStep(body: Record<string, unknown>, deps: AdminCoordinatorD
         .map((f) => `${f.name} (${f.conclusion}${f.flakeSuspect === true ? ", suspected flake" : ""})`)
         .join(", ")}`,
     );
-  return json(200, { ok: true, ...(checks !== undefined ? { checks } : {}), at });
+  return json(200, {
+    ok: true,
+    ...(checks !== undefined ? { checks } : {}),
+    ...(facts?.draft === true ? { draft: true } : {}),
+    at,
+  });
 }
 
 const ENDING_ICON: Readonly<Record<string, string>> = {
@@ -2403,8 +2426,15 @@ const ENDING_ICON: Readonly<Record<string, string>> = {
  *  for a generated plan's one unit. */
 export function planSummary(units: readonly CoordinatorUnit[], generated = false): string {
   const lines = units.map((u) => {
+    // A unit with a thread and no ending is the machine's word for "no ending
+    // was chosen" — never a word a person can act on, so the line names the
+    // cause and the next step instead (issue 2063).
     const kind = u.ending ? u.ending.kind : u.threadKey ? "unfinished" : "not started";
-    const how = u.ending ? endingWordOf(u.ending.kind) : kind;
+    const how = u.ending
+      ? endingWordOf(u.ending.kind)
+      : u.threadKey
+        ? "no ending was recorded — re-issue `agent:ship` in its thread to continue"
+        : kind;
     const pr = u.pr ? ` — ${u.pr.url}` : "";
     return generated
       ? `${ENDING_ICON[kind] ?? "•"} ${how}${pr}`

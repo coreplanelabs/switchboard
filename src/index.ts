@@ -149,6 +149,7 @@ import {
   mergePullRequest,
   openPullRequest,
   pullRequestChangedPaths,
+  requiredCheckContexts,
   rerunFailedJobs,
   updatePullRequest,
 } from "./execution/githubPulls.js";
@@ -1114,11 +1115,16 @@ export async function runBot(): Promise<void> {
       // The round's checks step (record 0055): the runs at the reviewed head
       // classified against the pull request's changed paths, and the flake
       // rule's one re-run of the failed jobs behind them.
-      fetchRoundChecks: async (repo, sha, prNumber) => {
+      fetchRoundChecks: async (repo, sha, prNumber, baseRef) => {
         const runs = await fetchCheckRunDetails(repo, sha);
         if (runs === undefined) return undefined;
         const changed = await pullRequestChangedPaths({ repo, number: prNumber });
-        return classifyRoundChecks(runs, changed);
+        // The base's required checks (issue 2063): a required check no
+        // reported run answers yet — the repository's approve workflow at the
+        // verdict instant — reads as pending, so the round waits on the
+        // settled event instead of calling the head green early.
+        const required = baseRef !== undefined ? await requiredCheckContexts(repo, baseRef) : undefined;
+        return classifyRoundChecks(runs, changed, required);
       },
       rerunFailedChecks: rerunFailedJobs,
     });

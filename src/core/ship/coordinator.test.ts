@@ -2705,6 +2705,98 @@ describe("the round verdict — the checks step at the reviewed head (record 005
     );
     expect(headless.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
   });
+
+  it("green with the approve run not yet created — an expected check not reported — waits on the settled event, then merge-ready once it reports green (issue 2063)", () => {
+    const d = approved({ merge: "person", generated: true });
+    // Every reported check green, but the base requires a check no run answers
+    // yet: the head is not green — it waits like a pending one, never ends.
+    d.answer({
+      type: "checks",
+      checks: { total: 3, pending: [], failed: [], expected: ["approve"] },
+      at: T0 + 20 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "wait-checks", step: "U10/1/review/checks/wait/1", headSha: HEAD_A });
+    d.answer({ type: "wait-checks", outcome: "event" });
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/2" });
+    d.answer({ type: "checks", checks: { total: 4, pending: [], failed: [] }, at: T0 + 23 * MIN });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+  });
+
+  it("a draft pull request holds: the step waits for the ready event and continues once the head is ready; still a draft at the ask's end the unit ends held naming the draft — never an exit with no cause (issue 2063)", () => {
+    const d = approved({ merge: "person", generated: true });
+    d.answer({ type: "checks", checks: { total: 3, pending: [], failed: [] }, draft: true, at: T0 + 20 * MIN });
+    expect(d.action).toMatchObject({ type: "wait-checks", step: "U10/1/review/checks/wait/1", headSha: HEAD_A });
+    d.answer({ type: "wait-checks", outcome: "event" });
+    expect(d.action).toMatchObject({ type: "checks", step: "U10/1/review/checks/2" });
+    // Marked ready: the re-read carries no draft flag and the table continues.
+    d.answer({ type: "checks", checks: { total: 3, pending: [], failed: [] }, at: T0 + 25 * MIN });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+
+    // Still a draft at the ask's end: held, the cause named in one line.
+    const held = approved({ merge: "person", generated: true });
+    held.answer({ type: "checks", checks: { total: 3, pending: [], failed: [] }, draft: true, at: T0 + 20 * MIN });
+    held.answer({ type: "wait-checks", outcome: "timeout" });
+    held.answer({ type: "checks", checks: { total: 3, pending: [], failed: [] }, draft: true, at: T0 + 81 * MIN });
+    expect(held.state.ending).toMatchObject({ kind: "held", cause: "draft", pr: { number: 7 } });
+    expect(renderUnitReport(held.state, undefined, "quiet")).toContain("Held: draft — mark it ready to continue");
+    expect(renderUnitReport(held.state)).toContain("the pull request is a draft");
+
+    // A red check on a draft still opens its fix round: the work stands
+    // whether or not the pull request is a draft (cell a outranks cell d).
+    const red = approved({ merge: "person", generated: true });
+    red.answer({
+      type: "checks",
+      checks: { total: 3, pending: [], failed: [{ name: "ci / bot", conclusion: "failure" }] },
+      draft: true,
+      at: T0 + 20 * MIN,
+    });
+    expect(red.rounds()).toContain("1 review checks_failed");
+    expect(red.action).toMatchObject({ type: "spawn", round: { index: 1, kind: "findings" } });
+  });
+
+  it("regression (issue 2063): no path after an approve verdict leaves the unit without a named ending — every checks answer leads to an ending or the round's own next step, and no report reads 'unfinished'", () => {
+    const reads: Omit<Extract<StepReturn, { type: "checks" }>, "step" | "at">[] = [
+      { type: "checks" }, // GitHub unreadable
+      { type: "checks", checks: { total: 0, pending: [], failed: [] } }, // none reported
+      { type: "checks", checks: { total: 2, pending: [], failed: [] } }, // green
+      { type: "checks", checks: { total: 2, pending: ["ci / bot"], failed: [] } }, // queued
+      { type: "checks", checks: { total: 2, pending: [], failed: [], expected: ["approve"] } }, // approve run absent
+      { type: "checks", checks: { total: 2, pending: [], failed: [{ name: "ci", conclusion: "failure" }] } }, // red
+      {
+        type: "checks",
+        checks: { total: 3, pending: ["q"], failed: [{ name: "ci", conclusion: "failure" }] },
+      }, // red beside pending
+      {
+        type: "checks",
+        checks: { total: 2, pending: [], failed: [{ name: "t", conclusion: "timed_out", flakeSuspect: true }] },
+      }, // suspected flake
+      { type: "checks", checks: { total: 2, pending: [], failed: [] }, draft: true }, // draft
+    ];
+    for (const merge of ["person", "runner"] as const) {
+      for (const read of reads) {
+        const d = approved({ merge, generated: true });
+        let at = T0 + 20 * MIN;
+        let settled: "end" | "spawn" | undefined;
+        for (let i = 0; i < 40 && settled === undefined; i++) {
+          const action = d.action;
+          if (action.type === "end") settled = "end";
+          else if (action.type === "spawn")
+            settled = "spawn"; // a findings round: the unit is owned and continues
+          else if (action.type === "checks") {
+            at += 30 * MIN; // past the sixty-minute ask by the third read
+            d.answer({ ...read, at });
+          } else if (action.type === "wait-checks") d.answer({ type: "wait-checks", outcome: "timeout" });
+          else if (action.type === "merge") d.answer({ type: "merge", outcome: "merged", sha: HEAD_A, at });
+          else throw new Error(`unexpected action ${action.type} for ${JSON.stringify(read)}`);
+        }
+        expect(settled, `${merge}: ${JSON.stringify(read)}`).toBeDefined();
+        if (settled === "end") {
+          expect(typeof d.state.ending?.kind, `${merge}: ${JSON.stringify(read)}`).toBe("string");
+          expect(renderUnitReport(d.state)).not.toContain("unfinished");
+        }
+      }
+    }
+  });
 });
 
 describe("the round cap bounds fix rounds, never the terminal steps (issue 2023)", () => {

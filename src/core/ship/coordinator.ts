@@ -670,7 +670,7 @@ export type StepReturn =
    *  not be read, which the machine treats as pending (record 0055). A retry
    *  ask answers `retried` instead: whether the bot dispatched the re-run —
    *  false means there is nothing to wait for at the unchanged head. */
-  | { type: "checks"; step: string; checks?: RoundChecks; retried?: boolean; at: number }
+  | { type: "checks"; step: string; checks?: RoundChecks; draft?: boolean; retried?: boolean; at: number }
   | { type: "wait-checks"; step: string; outcome: "event" | "timeout" }
   | { type: "sleep"; step: string };
 
@@ -685,11 +685,16 @@ export interface CheckFailure {
   flakeSuspect?: boolean;
 }
 
-/** The check runs at the reviewed head as the round's checks step reads them. */
+/** The check runs at the reviewed head as the round's checks step reads them.
+ *  `expected` names checks the head must still gain — a required check, or the
+ *  repository's approve workflow whose run does not exist yet (issue 2063):
+ *  the base's required contexts not among the reported runs. The table reads
+ *  an expected-but-unreported check exactly as a pending one. */
 export interface RoundChecks {
   total: number;
   pending: string[];
   failed: CheckFailure[];
+  expected?: string[];
 }
 
 /** A failed check as a finding of the round (record 0055): a finding row like
@@ -753,10 +758,22 @@ export type UnitEnding =
    *  review round once the receipt is posted (item 10's resume path). */
   | {
       kind: "held";
+      cause?: undefined;
       pr?: PrRef;
       round: RoundRef;
       findings: Finding[];
       verdict: "approve" | "request_changes";
+      reviewRounds: number;
+    }
+  /** The pull request is a draft (issue 2063): nothing can merge and a fix
+   *  round would change nothing, so the checks step waits for the ready event
+   *  inside its ask and, still a draft at the ask's end, the unit ends held —
+   *  `held: draft — mark it ready to continue` — never an unnamed exit. */
+  | {
+      kind: "held";
+      cause: "draft";
+      pr?: PrRef;
+      round: RoundRef;
       reviewRounds: number;
     }
   | { kind: "merge_refused"; pr: PrRef; reason: string; reviewRounds: number }
@@ -1689,19 +1706,29 @@ function enterChecks(s: UnitPipelineState, round: RoundRef, notes: CoordinatorNo
   };
 }
 
-/** The order the checks step reads a head in (record 0055, issue 1991):
- *  a failed check is the round's answer as soon as it is read, whatever else
- *  is still pending — with the flake rule spending its one re-run first when
- *  every failure is a suspect — and only a head with no failed check waits on
- *  the pending ones; a head with no check reported gets one chunk of grace;
- *  the rest is green. One function so the siblings that fold more outcomes
- *  into the step (a held ending, a transient round re-run) read the same order. */
+/** The checks step's decision table over the reviewed head's facts (record
+ *  0055; issues 1991 and 2063) — one function, read top to bottom, so every
+ *  sibling that folds more outcomes into the step (a held ending, a transient
+ *  round re-run) reads the same order:
+ *  (a) any failed check is the round's answer as soon as it is read, whatever
+ *      else is still pending — with the flake rule spending its one re-run
+ *      first when every failure is a suspect;
+ *  (d) no failure and the pull request a draft: the step waits for the ready
+ *      event — nothing can merge a draft and a fix round would change nothing;
+ *  (b) no failure and a check pending, queued, expected but not yet reported
+ *      (`expected`: a required check, or the repository's approve workflow
+ *      whose run does not exist yet), or GitHub unreadable: the head waits on
+ *      the settled event and is read again;
+ *  (—) no check reported at all: one chunk of grace, never more;
+ *  (c) every expected check reported green: the round proceeds with no wait. */
 function checksVerdict(
   checks: RoundChecks | undefined,
   p: { retried: boolean; graced: boolean },
+  draft?: boolean,
 ):
   | { kind: "retry"; names: string[] }
   | { kind: "failed"; failed: CheckFailure[] }
+  | { kind: "draft" }
   | { kind: "pending" }
   | { kind: "grace" }
   | { kind: "green" } {
@@ -1715,8 +1742,14 @@ function checksVerdict(
       return { kind: "retry", names: checks.failed.map((f) => f.name) };
     return { kind: "failed", failed: checks.failed };
   }
-  // GitHub unreadable answers as pending and is re-read at the chunk's end.
-  if (checks === undefined || checks.pending.length > 0) return { kind: "pending" };
+  // A draft outranks the waits: its checks may sit green forever, and only a
+  // person's "ready" changes anything — a red check above still gets its fix
+  // round, since that work stands whether or not the pull request is a draft.
+  if (draft === true) return { kind: "draft" };
+  // GitHub unreadable answers as pending and is re-read at the chunk's end;
+  // an expected check not yet reported (issue 2063) is pending the same way.
+  if (checks === undefined || checks.pending.length > 0 || (checks.expected?.length ?? 0) > 0)
+    return { kind: "pending" };
   // No check reported at the head: one chunk of grace — the first check starts
   // within minutes where CI exists — then the round proceeds, so a repository
   // without CI costs one chunk per round and never idles (record 0055).
@@ -1739,6 +1772,7 @@ function settleChecks(
   p: Extract<Phase, { at: "checks" }>,
   checks: RoundChecks | undefined,
   retried?: boolean,
+  draft?: boolean,
 ): Transition {
   const { round } = p;
   const wait = (over: Partial<Extract<Phase, { at: "checks-wait" }>>): Transition => ({
@@ -1772,7 +1806,7 @@ function settleChecks(
     }
     return wait({ retried: true });
   }
-  const verdict = checksVerdict(checks, p);
+  const verdict = checksVerdict(checks, p, draft);
   switch (verdict.kind) {
     case "retry":
       return {
@@ -1797,6 +1831,21 @@ function settleChecks(
         );
       return enterRound(next, { index: round.index, kind: "findings" }, notes);
     }
+    case "draft":
+      // A draft pull request (issue 2063): the unit idles on the settled event
+      // — marking it ready starts the head's check suites, whose completion
+      // fires `checks-settled-<head>` — and the re-read continues through the
+      // table. Still a draft at the ask's end, the unit ends held naming the
+      // draft and the person's next step, never an exit with no cause.
+      if (s.clock - p.since >= p.waitMs)
+        return end(s, {
+          kind: "held",
+          cause: "draft",
+          ...(s.pr !== undefined ? { pr: s.pr } : {}),
+          round: p.round,
+          reviewRounds: s.reviewRounds,
+        });
+      return wait({});
     case "pending":
       // A head still pending or unreadable at the ask's end proceeds — the
       // ending's facts read names what is still pending, and the merge door
@@ -2316,7 +2365,7 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       return settlePrCheck(clocked, p, (ret as Extract<StepReturn, { type: "pr-check" }>).pr);
     case "checks": {
       const r = ret as Extract<StepReturn, { type: "checks" }>;
-      return settleChecks(clocked, p, r.checks, r.retried);
+      return settleChecks(clocked, p, r.checks, r.retried, r.draft);
     }
     case "checks-wait":
       // The event fired or the chunk elapsed either way the head is read again.
@@ -2644,6 +2693,20 @@ export function renderUnitReport(
         .filter(Boolean)
         .join("\n");
     case "held": {
+      // The draft hold (issue 2063): the pull request is a draft, so nothing
+      // can merge and no fix round would change anything — the one line names
+      // the cause and the person's exact next step.
+      if (e.cause === "draft") {
+        const link = e.pr !== undefined ? ` — ${e.pr.url}` : "";
+        if (!shows(verbosity, "verbose")) return `⏸️ Held: draft — mark it ready to continue${link}`;
+        const draftReissue = s.input.generated
+          ? `To continue, mark it ready and re-issue \`agent:ship\` in this thread with only the PR URL${e.pr !== undefined ? ` (${e.pr.url})` : ""} — no new task text; the re-issued pipeline resumes at the review round.`
+          : `To continue, mark it ready; ${reissue.charAt(0).toLowerCase()}${reissue.slice(1)}`;
+        return join([
+          `⏸️ Held after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — the pull request is a draft, so nothing can merge and no fix round would change anything.`,
+          draftReissue,
+        ]);
+      }
       // The person's next step is the report's whole point (issue 1990): the
       // human-gated rows are named with the reviewer's own words, and the
       // re-issue line says the attempt resumes at the review round — item 10's

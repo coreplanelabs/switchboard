@@ -216,6 +216,7 @@ function harness(
   const compares: Array<[string, string, string]> = [];
   const sleeps: number[] = [];
   const roundChecksAsked: number[] = [];
+  const roundChecksBase: (string | undefined)[] = [];
   const reruns: Array<{ sha: string; names: string[] }> = [];
   const mergeWaitNotes: Array<{ headSha: string; instanceId: string; at: number }> = [];
   const enqueues: Array<{ repo: string; number: number }> = [];
@@ -283,8 +284,9 @@ function harness(
     },
     ...(over.roundChecks !== undefined
       ? {
-          fetchRoundChecks: async (_repo: string, _sha: string, prNumber: number) => {
+          fetchRoundChecks: async (_repo: string, _sha: string, prNumber: number, baseRef?: string) => {
             roundChecksAsked.push(prNumber);
+            roundChecksBase.push(baseRef);
             if (over.roundChecks instanceof Error) throw over.roundChecks;
             return over.roundChecks;
           },
@@ -364,6 +366,7 @@ function harness(
     merges,
     github,
     roundChecksAsked,
+    roundChecksBase,
     reruns,
     mergeWaitNotes,
     enqueues,
@@ -3452,6 +3455,33 @@ describe("POST /admin/coordinator/checks — the round's checks read at the revi
     const none = await checksHarness({ roundChecks: { total: 0, pending: [], failed: [] } });
     await checks(none);
     expect(none.mergeWaitNotes).toEqual([{ headSha: HEAD, instanceId: INSTANCE.id, at: NOW }]);
+  });
+
+  it("an expected check not yet reported registers the head in the merge-wait book like a pending one, and the round reader is handed the pull request's own base for the required checks (issue 2063)", async () => {
+    const h = await checksHarness({
+      roundChecks: { total: 3, pending: [], failed: [], expected: ["approve"] },
+      prFacts: { state: "open", sameRepoHead: true, baseRef: "main" },
+    });
+    const answer = await checks(h);
+    expect(answer.body).toMatchObject({ ok: true, checks: { expected: ["approve"] } });
+    expect(h.roundChecksBase).toEqual(["main"]);
+    expect(h.mergeWaitNotes).toEqual([{ headSha: HEAD, instanceId: INSTANCE.id, at: NOW }]);
+  });
+
+  it("a draft pull request is answered as the head's own fact beside the checks and registered in the merge-wait book, so the ready event wakes the machine's hold (issue 2063)", async () => {
+    const h = await checksHarness({
+      roundChecks: { total: 3, pending: [], failed: [] },
+      prFacts: { state: "open", sameRepoHead: true, draft: true },
+    });
+    expect((await checks(h)).body).toMatchObject({ ok: true, draft: true });
+    expect(h.mergeWaitNotes).toEqual([{ headSha: HEAD, instanceId: INSTANCE.id, at: NOW }]);
+    // A non-draft head with everything green carries no draft flag and no wait.
+    const ready = await checksHarness({
+      roundChecks: { total: 3, pending: [], failed: [] },
+      prFacts: { state: "open", sameRepoHead: true, draft: false },
+    });
+    expect((await checks(ready)).body).not.toHaveProperty("draft");
+    expect(ready.mergeWaitNotes).toEqual([]);
   });
 
   it("a retry ask re-runs the named failed checks' jobs — the flake rule's one re-run — and answers whether it was dispatched; without the dep it answers false", async () => {

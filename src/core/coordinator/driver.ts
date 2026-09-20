@@ -451,12 +451,15 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
  *  ask's answer carries `retried` instead: whether the re-run was dispatched,
  *  so the machine never waits on a head an undispatched re-run left unchanged. */
 function checksReturn(step: string, a: BotAnswer): StepReturn {
-  const { ok, checks, retried, at } = a.body;
+  const { ok, checks, draft, retried, at } = a.body;
   if (ok !== true) throw new UnreadableAnswer("checks", a, "ok");
   return {
     type: "checks",
     step,
     ...(isRoundChecks(checks) ? { checks } : {}),
+    // The pull request is a draft (issue 2063): the machine's table holds the
+    // unit for the ready event instead of merging or ending without a cause.
+    ...(draft === true ? { draft: true } : {}),
     ...(typeof retried === "boolean" ? { retried } : {}),
     at,
   };
