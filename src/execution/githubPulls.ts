@@ -959,6 +959,85 @@ export async function rerunFailedJobs(repo: string, sha: string, names: string[]
 /** One review on a pull request as the coordinator reads it back: who posted
  *  it, GitHub's state, the head it was pinned to and its body — enough to tell
  *  whether the bot's own verdict stands on the pull request at a given head. */
+/** One open pull request as `GET /repos/{repo}/pulls?state=open` lists it —
+ *  the sweep's raw listing (agent-ship.md item 20). The listing's
+ *  `mergeable_state` is NOT here on purpose: the list endpoint never carries
+ *  it, so the sweep reads each pull request's facts fresh
+ *  (`fetchPullRequestFacts`) before deciding anything. */
+export interface OpenPullRequestRow {
+  number: number;
+  /** Head branch name; absent when malformed. */
+  headRef?: string;
+  /** Base branch name; absent when malformed. */
+  baseRef?: string;
+  /** Head sha (40-hex) when well-formed. */
+  headSha?: string;
+  /** True only on a POSITIVE match of head repo == base repo (a fork's head
+   *  is not the pipeline's to rebase). */
+  sameRepoHead: boolean;
+}
+
+/** Every open pull request of `repo`, oldest first as GitHub lists them (one
+ *  page of 100 — the pipeline's open set is far smaller). Throws on missing
+ *  credential or a non-2xx response, so the sweep's answer names the failure
+ *  instead of sweeping an empty list. */
+export async function listOpenPullRequests(repo: string): Promise<OpenPullRequestRow[]> {
+  const token = await requireToken();
+  const res = await fetch(`https://api.github.com/repos/${repo}/pulls?state=open&per_page=100`, {
+    headers: apiHeaders(token),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `the open pull requests of ${repo} could not be listed: HTTP ${res.status} ${redactAndCap(text, 300)}`,
+    );
+  }
+  const rows = (await res.json().catch(() => null)) as unknown;
+  if (!Array.isArray(rows)) throw new Error(`the open pull requests of ${repo} could not be listed: malformed answer`);
+  return rows.flatMap((r) => {
+    const row = r as {
+      number?: unknown;
+      head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } };
+      base?: { ref?: unknown };
+    };
+    if (typeof row.number !== "number") return [];
+    const headRepo = typeof row.head?.repo?.full_name === "string" ? row.head.repo.full_name.toLowerCase() : undefined;
+    return [
+      {
+        number: row.number,
+        ...(typeof row.head?.ref === "string" && row.head.ref ? { headRef: row.head.ref } : {}),
+        ...(typeof row.base?.ref === "string" && row.base.ref ? { baseRef: row.base.ref } : {}),
+        ...(typeof row.head?.sha === "string" && /^[0-9a-f]{40}$/.test(row.head.sha) ? { headSha: row.head.sha } : {}),
+        sameRepoHead: headRepo === repo.toLowerCase(),
+      },
+    ];
+  });
+}
+
+/** The pull request's current title and body — what the sweep's anchor
+ *  regeneration edits in place (`updatePullRequest` takes both). Undefined
+ *  when GitHub cannot answer; never throws. */
+export async function fetchPullRequestTitleBody(pr: {
+  repo: string;
+  number: number;
+}): Promise<{ title: string; body: string } | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as { title?: unknown; body?: unknown } | null;
+  if (!data || typeof data.title !== "string") return undefined;
+  return { title: data.title, body: typeof data.body === "string" ? data.body : "" };
+}
+
 export interface PullRequestReview {
   author?: { login?: string; id?: number };
   state: string;

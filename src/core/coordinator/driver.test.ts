@@ -1943,7 +1943,7 @@ describe("the plan runner's driver — a resume at review (agent-ship item 10)",
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string; report: string } }>;
     expect(end.ending.kind).toBe("merge_ready");
     expect(end.ending.report).toContain(`⚠️ Approved but not merge-ready after 1 review round: ${PR_URL}`);
-    expect(end.ending.report).toContain("the head conflicts with `main`: rebase onto `main`, push, and re-review");
+    expect(end.ending.report).toContain("the head conflicts with `main`: `pulls rebase");
     expect(end.ending.report).not.toContain("✅ Merge-ready");
     expect(end.ending.report).not.toContain("checks green");
   });

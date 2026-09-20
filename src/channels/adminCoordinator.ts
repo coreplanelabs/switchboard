@@ -2218,13 +2218,14 @@ async function merge(
   // (spec item 9): zero checks stays pending only on a mergeable pull request.
   // The refusal names the pull request's own base — a stacked unit rebases
   // onto its parent, not onto the default branch — and the remedy it offers
-  // is the two-minute one: rebase, push, merge by hand. It never says
-  // "re-issue", because a re-issue reads as "run the unit again" and the
+  // is the sweep (record 0071, mechanism two): `pulls rebase` runs the
+  // two-rung resolver and an unchanged patch carries the approval. It never
+  // says "re-issue", because a re-issue reads as "run the unit again" and the
   // approved work is already on the branch.
   if (facts.mergeableState === "dirty") {
     const base = facts.baseRef ?? "its base";
     return refused(
-      `${where} conflicts with \`${base}\` at \`${headSha.slice(0, 7)}\` — rebase onto \`${base}\`, push, and merge it by hand once the checks are green; the approved work stands`,
+      `${where} conflicts with \`${base}\` at \`${headSha.slice(0, 7)}\` — \`pulls rebase ${where}\` rebases it onto \`${base}\` (an unchanged patch carries the approval); merge it by hand once the checks are green. The approved work stands`,
     );
   }
   const approved = await reviewPostedAt(deps, pr, "approve", headSha);

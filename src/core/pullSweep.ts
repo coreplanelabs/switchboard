@@ -1,4 +1,5 @@
 import { PULL_SWEEP } from "./budgets.js";
+import { redactSecrets } from "./redact.js";
 
 // The sweep a person runs (record 0071, mechanism two; docs/reference/specs/agent-ship.md
 // item 20): `pulls rebase` walks the open pull requests the pipeline owns — or one
@@ -130,6 +131,11 @@ async function sweepOne(pr: SweepPullRequest, deps: PullSweepDeps): Promise<Swee
     line: line(pr, text),
   });
   const dirty = pr.mergeableState === "dirty";
+  // GitHub recomputes `mergeable_state` after every base move — exactly the
+  // moment the sweep exists for — so an unknown state is named, never claimed
+  // current: the next sweep reads the settled answer.
+  if (!dirty && (pr.mergeableState === "unknown" || pr.mergeableState === ""))
+    return at("skipped", "mergeability still computing — run the sweep again in a minute");
   // A stale-but-clean pull request is never rebased: it merges as it is.
   if (!dirty) return at("skipped", "skipped, already current");
   try {
@@ -164,7 +170,10 @@ async function sweepOne(pr: SweepPullRequest, deps: PullSweepDeps): Promise<Swee
         return at("skipped", "skipped, already current");
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    // Git quotes remote URLs and headers verbatim in its failure messages, and
+    // this line rides the command result to chat, the CLI and MCP unredacted —
+    // so no credential shape may survive to it.
+    const message = redactSecrets(err instanceof Error ? err.message : String(err));
     return at("error", `not rebased — ${message}`);
   }
 }

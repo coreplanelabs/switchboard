@@ -12,7 +12,9 @@ import {
   isAssignable,
   pullRequestHead,
   fetchPullRequestFacts,
+  fetchPullRequestTitleBody,
   fetchCommitChecks,
+  listOpenPullRequests,
   fixupCommitSubjects,
   fetchPullRequestReviews,
   fetchRefExists,
@@ -662,6 +664,54 @@ describe("githubPulls", () => {
       const calls = stubFetch(() => new Response(JSON.stringify(openPr), { status: 200 }));
       expect((await fetchPullRequestFacts({ repo: "acme/api", number: 7 }))?.state).toBe("open");
       expect((calls[0].init.headers as Record<string, string>).authorization).toBeUndefined();
+    });
+  });
+
+  // The pull sweep's listing (docs/reference/specs/agent-ship.md item 20, issue 2067):
+  // every open pull request with head/base/sha and the same-repo match — the
+  // sweep filters to the plan branches and reads each one's facts fresh.
+  describe("listOpenPullRequests and fetchPullRequestTitleBody (the sweep's listing, item 20)", () => {
+    it("lists the open pull requests with head, base, sha and the positive same-repo match; a malformed row is dropped", async () => {
+      stubToken();
+      const calls = stubFetch(
+        () =>
+          new Response(
+            JSON.stringify([
+              {
+                number: 7,
+                head: { ref: "plan/demo/u1", sha: "a".repeat(40), repo: { full_name: "acme/api" } },
+                base: { ref: "main" },
+              },
+              { number: 9, head: { ref: "feat/x", sha: "nope", repo: null }, base: { ref: "main" } },
+              { head: { ref: "no-number" } },
+            ]),
+            { status: 200 },
+          ),
+      );
+      expect(await listOpenPullRequests("acme/api")).toEqual([
+        { number: 7, headRef: "plan/demo/u1", baseRef: "main", headSha: "a".repeat(40), sameRepoHead: true },
+        { number: 9, headRef: "feat/x", baseRef: "main", sameRepoHead: false },
+      ]);
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/pulls?state=open&per_page=100");
+    });
+
+    it("throws by name on a non-2xx listing or a malformed answer — the sweep's line names the failure instead of sweeping an empty list", async () => {
+      stubToken();
+      stubFetch(() => new Response("nope", { status: 500 }));
+      await expect(listOpenPullRequests("acme/api")).rejects.toThrow(/could not be listed: HTTP 500/);
+      stubFetch(() => new Response('{"not":"a list"}', { status: 200 }));
+      await expect(listOpenPullRequests("acme/api")).rejects.toThrow(/malformed answer/);
+    });
+
+    it("fetchPullRequestTitleBody reads the description as GitHub has it — a null body reads empty, an unreadable answer undefined", async () => {
+      stubToken();
+      stubFetch(() => new Response(JSON.stringify({ title: "feat(core): demo", body: null }), { status: 200 }));
+      expect(await fetchPullRequestTitleBody({ repo: "acme/api", number: 7 })).toEqual({
+        title: "feat(core): demo",
+        body: "",
+      });
+      stubFetch(() => new Response("nope", { status: 502 }));
+      expect(await fetchPullRequestTitleBody({ repo: "acme/api", number: 7 })).toBeUndefined();
     });
   });
 

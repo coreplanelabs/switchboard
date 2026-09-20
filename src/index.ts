@@ -137,15 +137,22 @@ import {
   fetchMergeQueueState,
   fetchCommitChecks,
   fetchPullRequestFacts,
+  fetchPullRequestTitleBody,
   fixupCommitSubjects,
   fetchPullRequestReviews,
   findMergedPrByHead,
   findOpenPrByHead,
+  listOpenPullRequests,
   mergePullRequest,
   openPullRequest,
   pullRequestChangedPaths,
   rerunFailedJobs,
+  updatePullRequest,
 } from "./execution/githubPulls.js";
+import { postReviewComment } from "./execution/githubComments.js";
+import { createSweepGit, sweepAuthHeader, sweepCloneUrl } from "./execution/sweepCheckout.js";
+import { createPullSweepService } from "./core/pullSweep.js";
+import { buildPullSweepDeps } from "./core/pullSweepWiring.js";
 import { RestGithubApi } from "./execution/githubApi.js";
 import { resolveGithubIdentity } from "./execution/githubApp.js";
 import { dispatchIdentityRewrite } from "./execution/identityRewrite.js";
@@ -695,6 +702,66 @@ export async function runBot(): Promise<void> {
           await dispatch(deps, m, io);
         },
       }),
+    // The sweep behind `pulls rebase` (record 0071, mechanism two; issue 2067):
+    // the two-rung resolver over the pipeline's open pull requests. The listing
+    // and the effects are src/core/pullSweepWiring.ts over the GitHub REST
+    // modules; rung one runs in a throwaway clone of the pull request's branch
+    // (src/execution/sweepCheckout.ts); the delta re-review and the one bounded
+    // model round go through `dispatch()` as the requester — the command
+    // handler never starts a run itself (AGENTS.md invariant 3). One shared
+    // state per process, so the per-repository bound and the spent-round flag
+    // hold across sweeps and requesters.
+    pulls: () => {
+      // Shared across requesters: the spent-round flags (one model round per
+      // pull request) and the per-repository queue (one rebase in flight per
+      // repository, whoever asked) — each requester's service already queues
+      // its own sweeps, this chain queues them across requesters too.
+      const state = { roundSpent: new Set<string>() };
+      const chains = new Map<string, Promise<unknown>>();
+      return {
+        service: async (origin) => {
+          // A fresh service per ask, parameterized by the origin — everything
+          // that must outlive the ask (the spent-round flags, the per-repository
+          // queue) rides `state` and `chains` above, so caching a service per
+          // requester would only accumulate entries.
+          const inner = createPullSweepService(
+            buildPullSweepDeps({
+              github: {
+                listOpen: listOpenPullRequests,
+                facts: fetchPullRequestFacts,
+                reviews: fetchPullRequestReviews,
+                selfIdentity: resolveGithubIdentity,
+                postReview: postReviewComment,
+                titleBody: fetchPullRequestTitleBody,
+                update: (pr, patch) => updatePullRequest(pr.repo, pr.number, patch),
+              },
+              git: createSweepGit({ cloneUrl: sweepCloneUrl, authHeader: sweepAuthHeader }),
+              origin,
+              state,
+              dispatch: async (m) => {
+                const io = threadIoFor({ threadKey: m.threadKey, userId: m.userId }) ?? nullChannelIO(m.threadKey);
+                await dispatch(deps, m, io);
+              },
+            }),
+          );
+          return {
+            sweep: (target) => {
+              const tail = chains.get(target.repo) ?? Promise.resolve();
+              const next = tail.then(
+                () => inner.sweep(target),
+                () => inner.sweep(target),
+              );
+              const stored = next.catch(() => {});
+              chains.set(target.repo, stored);
+              void stored.then(() => {
+                if (chains.get(target.repo) === stored) chains.delete(target.repo);
+              });
+              return next;
+            },
+          };
+        },
+      };
+    },
   });
   // The same bound registry serves HTTP, MCP, and the chat fast path (U13): one
   // registration, every surface.

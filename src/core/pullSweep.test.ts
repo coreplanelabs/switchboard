@@ -153,6 +153,13 @@ describe("the sweep — one line per pull request, in user words", () => {
     expect(report.results[0]?.line).toBe("#9 skipped, already current");
     expect(calls).toEqual([]);
   });
+  it("an unknown mergeable state — GitHub still recomputing — is named, never claimed current", async () => {
+    const { calls, service } = fixture({ prs: [pr({ number: 9, mergeableState: "unknown" })] });
+    const report = await service.sweep({ repo: "acme/api" });
+    expect(report.results[0]?.outcome).toBe("skipped");
+    expect(report.results[0]?.line).toBe("#9 mergeability still computing — run the sweep again in a minute");
+    expect(calls).toEqual([]);
+  });
   it("one named pull request sweeps that one alone; an unknown number answers one honest line", async () => {
     const { service } = fixture({ prs: [pr({ number: 7 }), pr({ number: 2061 })] });
     const one = await service.sweep({ repo: "acme/api", number: 2061 });
@@ -171,6 +178,22 @@ describe("the sweep — one line per pull request, in user words", () => {
     const report = await service.sweep({ repo: "acme/api" });
     expect(report.results[0]?.line).toBe("#1 not rebased — git push refused: stale info");
     expect(report.results[1]?.outcome).toBe("carried");
+  });
+  it("a git failure that quotes a credential surfaces redacted — the line never carries a token", async () => {
+    // Git quotes the remote URL verbatim on a network error or 403; the line
+    // rides to chat, the CLI and MCP with no other redaction pass.
+    const { service } = fixture({
+      prs: [pr()],
+      rebase: () => {
+        throw new Error(
+          "git clone failed: fatal: unable to access 'https://x-access-token:ghs_secret1234567890abcdefghij@github.com/acme/api.git/': The requested URL returned error: 403",
+        );
+      },
+    });
+    const report = await service.sweep({ repo: "acme/api" });
+    expect(report.results[0]?.line).not.toContain("ghs_secret1234567890abcdefghij");
+    expect(report.results[0]?.line).toContain("x-access-token:«redacted»");
+    expect(report.results[0]?.line).toContain("error: 403");
   });
 });
 

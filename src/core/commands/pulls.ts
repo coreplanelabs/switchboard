@@ -20,10 +20,20 @@ import type { PullSweepService, SweepReport } from "../pullSweep.js";
 // registry serves. Needs the `github` capability: the sweep reads and pushes
 // the pipeline's pull requests over the App credential.
 
+/** Who asked for the sweep — what the wiring dispatches the model rung and
+ *  the delta re-review as (invariant 3: the run is `dispatch()`'s, started as
+ *  the requester, never the command handler's). */
+export interface SweepOrigin {
+  /** The caller's namespaced id (`slack:U…`, an HTTP token's id, `cli:local`). */
+  userId: string;
+  /** The chat caller's channel, when there is one — context for the run's record. */
+  channelId?: string;
+}
+
 export interface PullsCommandDeps {
   /** Absent where no sweep is wired (a bare test registry): the command answers `unavailable`. */
   pulls?: {
-    service(): Promise<PullSweepService>;
+    service(origin: SweepOrigin): Promise<PullSweepService>;
   };
 }
 
@@ -92,7 +102,10 @@ export const pullsRebase = defineCommand({
       );
     if (deps.pulls === undefined)
       throw new CommandError("unavailable", "no sweep service is wired in this process — ask the bot to run it");
-    const service = await deps.pulls.service();
+    const service = await deps.pulls.service({
+      userId: caller.id,
+      ...(caller.origin ? { channelId: caller.origin.channelId } : {}),
+    });
     try {
       const report = await service.sweep({ repo, ...(ref ? { number: ref.number } : {}) });
       return report as unknown as JsonValue;
