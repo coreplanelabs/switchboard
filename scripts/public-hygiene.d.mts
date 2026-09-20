@@ -26,6 +26,18 @@ export function classesFor(path: string): string[];
 export function parseAllowLines(text: string): Set<string>;
 export function scanText(path: string, text: string, allow: ReadonlySet<string>): FileScan;
 export function staleAllowEntries(allow: ReadonlySet<string>, used: ReadonlySet<string>): string[];
-export function growthProblems(current: Record<string, Counts>, listed: Record<string, Counts>): string[];
-export function ratchetProblems(current: Record<string, Counts>, listed: Record<string, Counts>): string[];
+export interface RatchetWording {
+  grew: string;
+  shrank: string;
+}
+export function growthProblems(
+  current: Record<string, Counts>,
+  listed: Record<string, Counts>,
+  wording?: RatchetWording,
+): string[];
+export function ratchetProblems(
+  current: Record<string, Counts>,
+  listed: Record<string, Counts>,
+  wording?: RatchetWording,
+): string[];
 export function scanTree(root: string, allow: ReadonlySet<string>): TreeScan;

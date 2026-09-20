@@ -1,0 +1,214 @@
+{
+  "docs/explanation/a-thread-continues.md": {
+    "session": 9
+  },
+  "docs/explanation/agents-and-toolsets.md": {
+    "runner": 1
+  },
+  "docs/explanation/capacity-and-sizing.md": {
+    "instance": 5,
+    "admission": 1
+  },
+  "docs/explanation/design-decisions.md": {
+    "admission": 2,
+    "lease": 3,
+    "coordinator": 2,
+    "session": 6,
+    "tier": 2,
+    "segment": 1,
+    "intake": 1,
+    "hosted": 2,
+    "attempt": 1
+  },
+  "docs/explanation/how-a-request-flows.md": {
+    "session": 1,
+    "runner": 1,
+    "admission": 1
+  },
+  "docs/explanation/how-switchboard-improves-itself.md": {
+    "admission": 1
+  },
+  "docs/explanation/known-limits.md": {
+    "intake": 1,
+    "instance": 1,
+    "runner": 1
+  },
+  "docs/explanation/runs-live-and-history.md": {
+    "session": 1
+  },
+  "docs/explanation/security-model.md": {
+    "attempt": 1
+  },
+  "docs/how-to/add-a-provider.md": {
+    "tier": 1
+  },
+  "docs/how-to/check-spend.md": {
+    "session": 3,
+    "attempt": 1
+  },
+  "docs/how-to/configure-the-repository.md": {
+    "admission": 1
+  },
+  "docs/how-to/configure-your-defaults.md": {
+    "segment": 1,
+    "tier": 1
+  },
+  "docs/how-to/connect-an-mcp-server.md": {
+    "tier": 1
+  },
+  "docs/how-to/onboard-a-repo.md": {
+    "instance": 2
+  },
+  "docs/how-to/put-a-preset-on-opencode.md": {
+    "session": 1,
+    "tier": 1
+  },
+  "docs/how-to/restrict-who-can-do-what.md": {
+    "session": 2
+  },
+  "docs/how-to/run-a-load-test.md": {
+    "tier": 1
+  },
+  "docs/how-to/ship-a-release.md": {
+    "handoff": 1
+  },
+  "docs/how-to/turn-features-on-and-off.md": {
+    "instance": 2,
+    "coordinator": 1,
+    "runner": 2,
+    "tier": 1
+  },
+  "docs/how-to/watch-a-run.md": {
+    "session": 1
+  },
+  "docs/reference/authorization.md": {
+    "session": 3,
+    "tier": 2
+  },
+  "docs/reference/cli.md": {
+    "intake": 1,
+    "hosted": 1,
+    "session": 1,
+    "tier": 2
+  },
+  "docs/reference/code-map.md": {
+    "instance": 4,
+    "coordinator": 4,
+    "runner": 3,
+    "admission": 2,
+    "handoff": 3,
+    "session": 5,
+    "tier": 3,
+    "attempt": 1,
+    "wind-down": 1
+  },
+  "docs/reference/configuration.md": {
+    "session": 2,
+    "intake": 1
+  },
+  "docs/reference/dashboard-routes.md": {
+    "session": 4,
+    "instance": 1,
+    "admission": 1,
+    "tier": 5,
+    "intake": 1,
+    "hosted": 1
+  },
+  "docs/reference/migrations.md": {
+    "instance": 2,
+    "runner": 4,
+    "handoff": 2,
+    "segment": 1,
+    "lease": 1,
+    "session": 5,
+    "tier": 1,
+    "coordinator": 1
+  },
+  "docs/reference/slack-commands.md": {
+    "session": 1,
+    "intake": 1,
+    "hosted": 1,
+    "tier": 2
+  },
+  "src/core/commands/config.ts": {
+    "intake": 2
+  },
+  "src/core/commands/mcp.ts": {
+    "tier": 2
+  },
+  "src/core/commands/runs.ts": {
+    "hosted": 1,
+    "instance": 1,
+    "attempt": 1,
+    "session": 2
+  },
+  "src/core/dispatch/admission.ts": {
+    "admission": 5,
+    "coordinator": 2
+  },
+  "src/core/dispatch/provision.ts": {
+    "runner": 1
+  },
+  "src/core/dispatch/relaunch.ts": {
+    "session": 1
+  },
+  "src/core/dispatch/reply.ts": {
+    "lease": 2,
+    "coordinator": 1,
+    "runner": 1
+  },
+  "src/core/dispatch/run.ts": {
+    "handoff": 1
+  },
+  "src/core/dispatch/runLoop.ts": {
+    "coordinator": 1,
+    "lease": 1,
+    "session": 1
+  },
+  "src/core/dispatch/seed.ts": {
+    "session": 9
+  },
+  "src/core/dispatch/settle.ts": {
+    "admission": 1
+  },
+  "src/core/dispatch/ship.ts": {
+    "instance": 1
+  },
+  "src/core/dispatch/spawn.ts": {
+    "tier": 3
+  },
+  "src/core/dispatch/thread.ts": {
+    "session": 2
+  },
+  "src/core/dispatch/threadArtifacts.ts": {
+    "handoff": 5
+  },
+  "src/core/ship/contract.ts": {
+    "handoff": 2,
+    "wind-down": 1
+  },
+  "src/core/ship/coordinator.ts": {
+    "instance": 2,
+    "attempt": 4,
+    "runner": 1,
+    "segment": 3,
+    "lease": 2
+  },
+  "src/core/ship/handoff.ts": {
+    "handoff": 3
+  },
+  "src/core/ship/renewal.ts": {
+    "handoff": 4,
+    "lease": 3,
+    "segment": 2
+  },
+  "web/src/components/settings/McpServersPanel.vue": {
+    "tier": 3
+  },
+  "web/src/pages/DeliveryPage.vue": {
+    "attempt": 1
+  },
+  "web/src/pages/UnitPage.vue": {
+    "attempt": 1
+  }
+}
