@@ -1,44 +1,40 @@
 import { describe, expect, it } from "vitest";
 import {
+  answerOperatorRead,
   bindFromAnswer,
   buildOperatorPrompt,
+  isOperatorReadTool,
   isYesAnswer,
   joinedAnswerRequest,
+  OPERATOR_ASK_TOOL,
+  OPERATOR_BIND_TOOL,
   OPERATOR_QUESTION_MARKER,
-  OPERATOR_TOOL_NAME,
-  pendingQuestionOf,
-  operatorAuthorTurns,
+  OPERATOR_READ_TOOLS,
   operatorEventOf,
   operatorProjection,
   operatorThreadTail,
-  parseOperatorDecision,
-  policyRowIds,
+  operatorTools,
+  parseOperatorTurn,
+  pendingQuestionOf,
   presetBindOf,
   presetRequestOf,
-  stripDirectiveHead,
   renderOperatorQuestion,
   runOperator,
-  verifierHolds,
-  verifyOperatorBind,
+  stripDirectiveHead,
   type OperatorInput,
+  type OperatorTurnContext,
 } from "./operator.js";
-import {
-  ROUTE_RECEIPT_CAP,
-  routablePresets,
-  type RoutableCommand,
-  type RouteModel,
-  type RoutePrompt,
-  type RouteToolCall,
-} from "./route.js";
+import { routablePresets, type RoutableCommand, type RouteModel, type RouteToolCall } from "./route.js";
 import type { ToolDef } from "../provider.js";
 import type { CommandDef } from "../commandRegistry.js";
+import { mcpToolName } from "../commandSurface.js";
 
 const tool = (name: string): ToolDef => ({ name, description: name, inputSchema: { type: "object", properties: {} } });
 const command = (id: string): RoutableCommand => ({
   id,
   effect: "read",
-  tool: tool(id.replace(".", "_")),
-  def: { id } as CommandDef<unknown>,
+  tool: tool(mcpToolName(id)),
+  def: { id, args: [], options: undefined } as unknown as CommandDef<unknown>,
 });
 
 const projectionOf = (allowed: readonly string[]) =>
@@ -55,90 +51,229 @@ const input = (over: Partial<OperatorInput> = {}): OperatorInput => ({
   ...over,
 });
 
-describe("parseOperatorDecision", () => {
-  it("two binds parse in order, each line redacted and cut like the receipt", () => {
-    const d = parseOperatorDecision({
-      tool: OPERATOR_TOOL_NAME,
-      input: {
-        reason: "two asks",
-        binds: [
-          { line: "config set me --agent research", reason: "a personal setting" },
-          { line: `runs list --status all ${"x".repeat(400)}`, reason: "the listing" },
-        ],
+const ctxOf = (over: Partial<OperatorTurnContext> = {}): OperatorTurnContext => ({
+  requestText: "list the runs",
+  presets: ["general", "research"],
+  commands: [command("runs.list"), command("repo.test")],
+  ...over,
+});
+
+describe("the operator is one loop with typed tools", () => {
+  it("the turn's tools are ask, bind_preset with the projection's presets as the enum, each command's own tool, then the reads — no decide tool and no refusal exists", () => {
+    const tools = operatorTools(input());
+    const names = tools.map((t) => t.name);
+    expect(names).toEqual([
+      OPERATOR_ASK_TOOL,
+      OPERATOR_BIND_TOOL,
+      "runs_list",
+      "repo_test",
+      ...Object.values(OPERATOR_READ_TOOLS),
+    ]);
+    const bind = tools.find((t) => t.name === OPERATOR_BIND_TOOL)!;
+    const preset = (bind.inputSchema as { properties: { preset: { enum: string[] } } }).properties.preset;
+    expect(preset.enum).toEqual(["general", "research"]);
+    expect(names).not.toContain("decide");
+    expect(names.some((n) => n.includes("refus"))).toBe(false);
+  });
+
+  it("an owned thread's turn offers no bind_preset tool and only the steer and read commands", () => {
+    const p = {
+      presets: projectionOf(["general"]).presets,
+      commands: [
+        command("runs.list"),
+        { ...command("steer.run"), effect: "write" as const },
+        { ...command("config.set"), effect: "write" as const },
+      ],
+    };
+    const names = operatorTools(input({ projection: p, owner: { kind: "live", runId: "r-live" } })).map((t) => t.name);
+    expect(names).not.toContain(OPERATOR_BIND_TOOL);
+    expect(names).toContain("steer_run");
+    expect(names).not.toContain("config_set");
+  });
+
+  it("bind_preset renders the preset on the PERSON's own words — the model's request copy never rides, so a paraphrase or a doubled head is unrepresentable", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "some paraphrase", reason: "read ask" } },
+      ctxOf({ requestText: "what changed this week?" }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds).toEqual([{ line: "agent:general what changed this week?", reason: "read ask" }]);
+  });
+
+  it("a typo'd directive head naming the bound preset is stripped from the request the bind carries", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "x", reason: "r" } },
+      ctxOf({ requestText: "adgent:general what changed this week?" }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].line).toBe("agent:general what changed this week?");
+  });
+
+  it("a bind_preset naming a preset outside the projection is a violation the loop re-asks — never a hand-back", () => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", request: "x", reason: "r" } },
+      ctxOf(),
+    );
+    expect(turn).toMatchObject({ kind: "violation" });
+  });
+
+  it("a command tool call renders through the registry's own grammar — the typed line, never a model-spelled one", () => {
+    const turn = parseOperatorTurn({ tool: "runs_list", input: {} }, ctxOf());
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0].line).toBe("runs list");
+  });
+
+  it("an ask is a question decision with the proposal cut like a receipt; an ask with no text is a violation", () => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_ASK_TOOL,
+        input: { text: "Which listing?", proposal: "runs list --status all", reason: "fork" },
       },
+      ctxOf(),
+    );
+    expect(turn).toMatchObject({
+      kind: "decision",
+      decision: { kind: "question", text: "Which listing?", proposal: "runs list --status all" },
     });
-    expect(d.kind).toBe("binds");
-    if (d.kind !== "binds") throw new Error("not binds");
-    expect(d.binds.map((b) => b.line)[0]).toBe("config set me --agent research");
-    expect(d.binds[1].line.length).toBeLessThanOrEqual(ROUTE_RECEIPT_CAP + 1); // the cap plus the cut's ellipsis
+    expect(parseOperatorTurn({ tool: OPERATOR_ASK_TOOL, input: { reason: "r" } }, ctxOf())).toMatchObject({
+      kind: "violation",
+    });
   });
 
-  it("a decision mixing binds and a question is a non_decision — nothing runs from a shape the schema forbade", () => {
-    const d = parseOperatorDecision({
-      tool: OPERATOR_TOOL_NAME,
-      input: {
-        reason: "confused",
-        binds: [{ line: "runs list", reason: "?" }],
-        question: { text: "did you mean the runs?" },
+  it("a turn that ends with no tool call is the floor: a non_decision, and the event is marked floored so it never re-enters the loop", () => {
+    const turn = parseOperatorTurn("nothing to do here", ctxOf());
+    expect(turn).toMatchObject({ kind: "decision", decision: { kind: "non_decision" } });
+    if (turn.kind !== "decision") throw new Error("not a decision");
+    const event = operatorEventOf("on", { decision: turn.decision, latencyMs: 1, outputTokens: 1 });
+    expect(event.floored).toBe(true);
+    expect(event.outcome).toBe("non_decision");
+    const bound = operatorEventOf("on", {
+      decision: { kind: "binds", binds: [{ line: "runs list", reason: "r" }], reason: "r" },
+      latencyMs: 1,
+      outputTokens: 1,
+    });
+    expect(bound.floored).toBeUndefined();
+  });
+
+  it("a read tool is recognized and answered from the turn's own state: the owner, the pending question, the facts, the help", () => {
+    expect(isOperatorReadTool(OPERATOR_READ_TOOLS.threadState)).toBe(true);
+    expect(isOperatorReadTool(OPERATOR_BIND_TOOL)).toBe(false);
+    const owned = answerOperatorRead(
+      OPERATOR_READ_TOOLS.threadState,
+      input({ owner: { kind: "unit", unit: "U12" }, pendingQuestion: { proposal: "runs list" } }),
+    );
+    expect(owned).toContain("the unfinished plan unit U12");
+    expect(owned).toContain("`runs list`");
+    expect(answerOperatorRead(OPERATOR_READ_TOOLS.threadState, input())).toContain("no owner");
+    expect(answerOperatorRead(OPERATOR_READ_TOOLS.repoFacts, input())).toContain("docs/decisions/*.md");
+    expect(answerOperatorRead(OPERATOR_READ_TOOLS.registryHelp, input())).toContain("Presets this author may run:");
+  });
+
+  it("an unknown tool is a violation naming it", () => {
+    expect(parseOperatorTurn({ tool: "decide", input: {} }, ctxOf())).toMatchObject({
+      kind: "violation",
+      violation: expect.stringContaining('"decide"') as unknown as string,
+    });
+  });
+});
+
+describe("runOperator — the loop over a scripted model", () => {
+  it("a read tool call is answered and the model asked again; the decision lands with the read as a turn", async () => {
+    const answers: (RouteToolCall | string)[] = [
+      { tool: OPERATOR_READ_TOOLS.repoFacts, input: {} },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "list the runs", reason: "read ask" } },
+    ];
+    const prompts: { retries?: readonly { answer: string; violation: string }[] }[] = [];
+    const model: RouteModel = async (prompt) => {
+      prompts.push(prompt);
+      return answers.shift()!;
+    };
+    const answer = await runOperator(input(), model);
+    expect(answer.decision).toMatchObject({ kind: "binds" });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1].retries![0].violation).toContain("docs/decisions/*.md");
+  });
+
+  it("an invalid call is re-asked with the violation named, then the corrected call is accepted — two attempts on the event", async () => {
+    const answers: (RouteToolCall | string)[] = [
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "ship", request: "x", reason: "r" } },
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", request: "list the runs", reason: "r" } },
+    ];
+    const answer = await runOperator(input(), async () => answers.shift()!);
+    expect(answer.decision.kind).toBe("binds");
+    expect(answer.attempts).toEqual([
+      {
+        outcome: "violation",
+        violation: expect.stringContaining("not a preset the projection offers") as unknown as string,
       },
-    });
-    expect(d.kind).toBe("non_decision");
-    if (d.kind !== "non_decision") throw new Error("not a non_decision");
-    expect(d.reason).toContain("mixing binds");
+      { outcome: "accepted" },
+    ]);
   });
 
-  it("a policy refusal keeps its cause, so the renderer offers no Yes for it", () => {
-    const d = parseOperatorDecision({
-      tool: OPERATOR_TOOL_NAME,
-      input: { reason: "forbidden", refusal: { cause: "policy", text: "guests may not steer runs" } },
+  it("a violation that persists past the bounded retries floors to non_decision — the readers' route, never a rendered sentence", async () => {
+    let calls = 0;
+    const answer = await runOperator(input(), async () => {
+      calls++;
+      return { tool: "decide", input: {} };
     });
-    expect(d).toMatchObject({ kind: "refusal", cause: "policy", text: "guests may not steer runs" });
-    const event = operatorEventOf("shadow", { decision: d, latencyMs: 5, outputTokens: 10 });
-    expect(event.refusalCause).toBe("policy");
-    expect(event.question).toBeUndefined();
+    expect(calls).toBe(3);
+    expect(answer.decision.kind).toBe("non_decision");
+    expect(answer.attempts).toHaveLength(3);
   });
 
-  it("a bound line carrying a secret is redacted before the record sees it", () => {
-    const d = parseOperatorDecision({
-      tool: OPERATOR_TOOL_NAME,
-      input: {
-        reason: "a setting",
-        binds: [{ line: `mcp add jira --token ghp_${"a".repeat(36)}`, reason: "the token" }],
-      },
+  it("a turn ending with no tool call is the floor directly: one call, no re-ask", async () => {
+    let calls = 0;
+    const answer = await runOperator(input(), async () => {
+      calls++;
+      return "";
     });
-    if (d.kind !== "binds") throw new Error("not binds");
-    expect(d.binds[0].line).not.toContain("ghp_" + "a".repeat(36));
+    expect(calls).toBe(1);
+    expect(answer.decision).toMatchObject({
+      kind: "non_decision",
+      reason: expect.stringContaining("no tool call") as unknown as string,
+    });
   });
 
-  it("another tool, prose, or an empty decision is a non_decision naming what came back", () => {
-    expect(parseOperatorDecision({ tool: "route", input: {} }).kind).toBe("non_decision");
-    expect(parseOperatorDecision("sure, I will run that for you").kind).toBe("non_decision");
-    expect(parseOperatorDecision({ tool: OPERATOR_TOOL_NAME, input: { reason: "hm" } }).kind).toBe("non_decision");
+  it("measures the latency and the output tokens beside the decision", async () => {
+    let now = 1000;
+    const answer = await runOperator(
+      input(),
+      async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which listing?", reason: "fork" } }),
+      { now: () => (now += 250) },
+    );
+    expect(answer.decision.kind).toBe("question");
+    expect(answer.latencyMs).toBe(250);
+    expect(answer.outputTokens).toBeGreaterThan(0);
   });
 
-  it("a shape the parse refused is a non_decision — never the model's decision — and a model-authored refusal is a refusal", () => {
-    const parsed = parseOperatorDecision("sure, I will run that for you");
-    expect(parsed).toMatchObject({ kind: "non_decision" });
-    const authored = parseOperatorDecision({
-      tool: OPERATOR_TOOL_NAME,
-      input: { reason: "forbidden", refusal: { cause: "policy", text: "guests may not steer runs" } },
+  it("a model that throws is a non_decision naming the failure — never a thrown error", async () => {
+    const answer = await runOperator(input(), async () => {
+      throw new Error("provider down");
     });
-    if (authored.kind !== "refusal") throw new Error("not a refusal");
-    // The event carries the outcome: the dispatcher's `on` branch reads
-    // `non_decision` to fall back to the readers' route, never a rendered line.
-    expect(operatorEventOf("on", { decision: parsed, latencyMs: 1, outputTokens: 1 }).outcome).toBe("non_decision");
-    expect(operatorEventOf("on", { decision: authored, latencyMs: 1, outputTokens: 1 }).outcome).toBe("refusal");
+    expect(answer.decision).toMatchObject({
+      kind: "non_decision",
+      reason: expect.stringContaining("provider down") as unknown as string,
+    });
+  });
+
+  it("the prompt is open: the tool set carries no forced choice, so the model may end the turn", () => {
+    const prompt = buildOperatorPrompt(input());
+    expect(prompt.open).toBe(true);
+    expect([prompt.tool, ...(prompt.tools ?? [])].map((t) => t.name)).toContain(OPERATOR_BIND_TOOL);
   });
 });
 
 describe("the question and its answer-as-a-bind", () => {
   it("a question decision renders with record 0054's marker and the proposed line", () => {
-    const d = parseOperatorDecision({
-      tool: OPERATOR_TOOL_NAME,
-      input: { reason: "ambiguous", question: { text: "Which listing?", proposal: "runs list --status all" } },
-    });
-    if (d.kind !== "question") throw new Error("not a question");
-    const rendered = renderOperatorQuestion(d);
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_ASK_TOOL,
+        input: { reason: "ambiguous", text: "Which listing?", proposal: "runs list --status all" },
+      },
+      ctxOf(),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "question") throw new Error("not a question");
+    const rendered = renderOperatorQuestion(turn.decision);
     expect(rendered).toContain(OPERATOR_QUESTION_MARKER);
     expect(rendered).toContain("`runs list --status all`");
   });
@@ -283,8 +418,8 @@ describe("the projection and the prompt order", () => {
     expect(prompt.system).toContain("docs/decisions/*.md");
     expect(prompt.system).toContain("docs/plans/*.md");
     expect(prompt.system).toContain("a ship unit edits like any other file");
-    expect(prompt.system).toContain("must stand on the authorization policy");
-    expect(prompt.system).toContain("no preset in the projection can write to <repo>");
+    expect(prompt.system).toContain("a refusal exists only where the authorization policy makes one");
+    expect(prompt.system).toContain("When you cannot act, ask one question or end the turn.");
   });
 
   it("an owned thread's prompt narrows the projection to steers and reads and says the reply is the owner's follow-up (issue 2027; thread-admission item 9)", () => {
@@ -323,309 +458,6 @@ describe("the projection and the prompt order", () => {
   });
 });
 
-describe("runOperator", () => {
-  it("measures the latency and the output tokens beside the decision", async () => {
-    let now = 1000;
-    const answer = await runOperator(
-      input(),
-      async () => {
-        now += 250;
-        return {
-          tool: OPERATOR_TOOL_NAME,
-          input: { reason: "one ask", binds: [{ line: "runs list", reason: "the listing" }] },
-        };
-      },
-      { now: () => now },
-    );
-    expect(answer.decision.kind).toBe("binds");
-    expect(answer.latencyMs).toBe(250);
-    expect(answer.outputTokens).toBeGreaterThan(0);
-  });
-
-  it("a model that throws is a non_decision naming the failure — never a thrown error, and never a re-ask", async () => {
-    let calls = 0;
-    const answer = await runOperator(input(), async () => {
-      calls++;
-      throw new Error("provider down");
-    });
-    // The call failed, so under `on` the dispatcher falls back to the readers'
-    // route instead of rendering anything; there was no answer to quote back.
-    expect(answer.decision).toMatchObject({ kind: "non_decision" });
-    expect(answer.decision.reason).toContain("provider down");
-    expect(answer.attempts).toBeUndefined();
-    expect(calls).toBe(1);
-  });
-
-  it("a violation whose re-ask then throws: a non_decision naming the failure, the collected attempt kept on the answer", async () => {
-    let calls = 0;
-    const answer = await runOperator(input(), async () => {
-      calls++;
-      if (calls === 1) return "prose, not a call";
-      throw new Error("the re-ask timed out");
-    });
-    expect(calls).toBe(2);
-    expect(answer.decision).toMatchObject({ kind: "non_decision" });
-    expect(answer.decision.reason).toContain("the re-ask timed out");
-    // The violation already collected — the re-ask the record exists to show —
-    // rides the event instead of being discarded with the throw.
-    expect(answer.attempts).toEqual([
-      { outcome: "violation", violation: "not a single JSON object: prose, not a call" },
-    ]);
-  });
-
-  it("the right call first: one attempt on the event, no re-ask", async () => {
-    const prompts: RoutePrompt[] = [];
-    const answer = await runOperator(input(), async (prompt) => {
-      prompts.push(prompt);
-      return { tool: OPERATOR_TOOL_NAME, input: { reason: "one ask", binds: [{ line: "runs list", reason: "it" }] } };
-    });
-    expect(answer.decision.kind).toBe("binds");
-    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
-    expect(prompts).toHaveLength(1);
-    expect(prompts[0]!.retries).toBeUndefined();
-  });
-
-  it("the wrong tool, then the right call: one re-ask naming both tools, the decision as a first-ask decision would run, two attempts on the event", async () => {
-    const prompts: RoutePrompt[] = [];
-    const answers: (RouteToolCall | string)[] = [
-      { tool: "route", input: { preset: "general" } },
-      { tool: OPERATOR_TOOL_NAME, input: { reason: "one ask", binds: [{ line: "runs list", reason: "it" }] } },
-    ];
-    const answer = await runOperator(input(), async (prompt) => {
-      prompts.push(prompt);
-      return answers.shift()!;
-    });
-    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ line: "runs list", reason: "it" }] });
-    expect(answer.attempts).toEqual([
-      { outcome: "violation", violation: 'the operator called tool "route", not decide' },
-      { outcome: "accepted" },
-    ]);
-    // The re-ask's user turn carries the parser's violation line verbatim,
-    // with the operator's noun and tool name interpolated (record 0067).
-    expect(prompts[1]!.retries).toEqual([
-      {
-        answer: JSON.stringify({ tool: "route", input: { preset: "general" } }),
-        violation:
-          'your answer was not a decision: the operator called tool "route", not decide; answer with the decide tool only',
-      },
-    ]);
-  });
-
-  it("prose three times: the floor is a non_decision — the readers' route, never a rendered refusal — with three attempts on the event", async () => {
-    let calls = 0;
-    const answer = await runOperator(input(), async () => {
-      calls++;
-      return "sure, I will run that for you";
-    });
-    expect(calls).toBe(3);
-    expect(answer.decision).toMatchObject({ kind: "non_decision" });
-    expect(answer.attempts).toHaveLength(3);
-    expect(answer.attempts!.every((a) => a.outcome === "violation")).toBe(true);
-    const event = operatorEventOf("on", answer);
-    expect(event.outcome).toBe("non_decision");
-    expect(event.attempts).toHaveLength(3);
-    // Nothing of the floor is a person's sentence: no refusal text rides it.
-    expect(event.refusalText).toBeUndefined();
-  });
-
-  it("a missing field: the re-ask's user turn carries the parser's violation line verbatim", async () => {
-    const prompts: RoutePrompt[] = [];
-    const answers: (RouteToolCall | string)[] = [
-      { tool: OPERATOR_TOOL_NAME, input: { reason: "hm" } },
-      { tool: OPERATOR_TOOL_NAME, input: { reason: "one ask", binds: [{ line: "runs list", reason: "it" }] } },
-    ];
-    await runOperator(input(), async (prompt) => {
-      prompts.push(prompt);
-      return answers.shift()!;
-    });
-    expect(prompts[1]!.retries?.[0]?.violation).toBe(
-      "your answer was not a decision: neither binds, a question nor a refusal; answer with the decide tool only",
-    );
-  });
-
-  it("a model-authored refusal (a real decision, standing on a policy row) is never re-asked and never floored", async () => {
-    let calls = 0;
-    const answer = await runOperator(input(), async () => {
-      calls++;
-      return {
-        tool: OPERATOR_TOOL_NAME,
-        input: { reason: "forbidden", refusal: { cause: "policy", text: "guests may not steer runs (steer:write)" } },
-      };
-    });
-    expect(calls).toBe(1);
-    expect(answer.decision).toMatchObject({
-      kind: "refusal",
-      cause: "policy",
-      text: "guests may not steer runs (steer:write)",
-    });
-    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
-  });
-});
-
-describe("a policy refusal stands on the policy table (issue 2043; record 0069's execution table)", () => {
-  const guard = { requestText: "in acme/api: record 0070 — flip the record's status to accepted", presets: ["ship"] };
-  const withRows = { ...guard, policyRows: policyRowIds() };
-  const refusing = (text: string): RouteToolCall => ({
-    tool: OPERATOR_TOOL_NAME,
-    input: { reason: "forbidden", refusal: { cause: "policy", text } },
-  });
-
-  it("policyRowIds reads the one authorization table: the action ids, deduplicated", () => {
-    const rows = policyRowIds();
-    expect(rows).toContain("steer:write");
-    expect(rows).toContain("repo:write");
-    expect(new Set(rows).size).toBe(rows.length);
-  });
-
-  it("a policy refusal naming no policy row and no projection gap is a violation, never the person's answer — the incident's invented authority", () => {
-    const d = parseOperatorDecision(
-      refusing(
-        "privileged administrative updates to control plane records require admin access; contact your repo administrator",
-      ),
-      withRows,
-    );
-    expect(d.kind).toBe("non_decision");
-    if (d.kind !== "non_decision") throw new Error("not a non_decision");
-    expect(d.reason).toContain("names no policy row");
-  });
-
-  it("a refusal that names a policy row's action id is honoured, and so is one naming the projection gap", () => {
-    const onRow = parseOperatorDecision(refusing("guests may not steer runs (steer:write)"), withRows);
-    expect(onRow).toMatchObject({ kind: "refusal", cause: "policy" });
-    const onGap = parseOperatorDecision(refusing("no preset in the projection can write to acme/api"), withRows);
-    expect(onGap).toMatchObject({ kind: "refusal", cause: "policy" });
-  });
-
-  it("a request-cause refusal is not held to the policy vocabulary — it claims no authority", () => {
-    const d = parseOperatorDecision(
-      {
-        tool: OPERATOR_TOOL_NAME,
-        input: { reason: "unusable", refusal: { cause: "request", text: "the message is empty" } },
-      },
-      withRows,
-    );
-    expect(d).toMatchObject({ kind: "refusal", cause: "request" });
-  });
-
-  it("without the guard's policy rows the check is skipped — the parse stays pure over the guard's data", () => {
-    const d = parseOperatorDecision(refusing("contact your repo administrator"), guard);
-    expect(d).toMatchObject({ kind: "refusal", cause: "policy" });
-  });
-
-  it("re-asked with the violation named, then a bind is accepted — the docs ask runs instead of dying on an invented authority", async () => {
-    const text = "in acme/api: record 0070 — flip the record's status to accepted";
-    const answers: (RouteToolCall | string)[] = [
-      refusing("privileged administrative updates to control plane records require admin access"),
-      {
-        tool: OPERATOR_TOOL_NAME,
-        input: { reason: "a docs write", binds: [{ line: `agent:ship ${text}`, reason: "docs change" }] },
-      },
-    ];
-    const answer = await runOperator(input({ text, projection: projectionOf(["ship"]) }), async () => answers.shift()!);
-    expect(answer.decision.kind).toBe("binds");
-    expect(answer.attempts).toEqual([
-      { outcome: "violation", violation: expect.stringContaining("names no policy row") as unknown as string },
-      { outcome: "accepted" },
-    ]);
-  });
-
-  it("a groundless refusal that persists floors to non_decision — the readers' route, exactly as a verifier disagreement does, never the refusal rendered", async () => {
-    let calls = 0;
-    const answer = await runOperator(input(), async () => {
-      calls++;
-      return refusing("production records require admin access and direct repository writes");
-    });
-    expect(calls).toBe(3); // the ask and the seam's two re-asks
-    expect(answer.decision.kind).toBe("non_decision");
-    if (answer.decision.kind !== "non_decision") throw new Error("not a non_decision");
-    expect(answer.decision.reason).toContain("names no policy row");
-  });
-});
-
-describe("the operator's violation set at the seam (record 0067, amended): an unparseable line, a preset bind without the request's words", () => {
-  const decide = (line: string): RouteToolCall => ({
-    tool: OPERATOR_TOOL_NAME,
-    input: { reason: "a coding ask", binds: [{ line, reason: "ship it" }] },
-  });
-
-  it("a flag-form ship line — flags in place of the person's text — is re-asked with the violation named, then the corrected line is accepted", async () => {
-    const prompts: RoutePrompt[] = [];
-    const answers = [
-      decide('ship --repo acme/repo --task "intake fix"'),
-      decide("ship fix the intake gate in acme/repo"),
-    ];
-    const answer = await runOperator(
-      input({ text: "fix the intake gate in acme/repo", projection: projectionOf(["general", "ship"]) }),
-      async (prompt) => {
-        prompts.push(prompt);
-        return answers.shift()!;
-      },
-    );
-    expect(answer.decision).toMatchObject({
-      kind: "binds",
-      binds: [{ line: "ship fix the intake gate in acme/repo" }],
-    });
-    expect(answer.attempts).toEqual([
-      {
-        outcome: "violation",
-        violation:
-          'bind 1 names the preset "ship" but drops the request\'s own words; bind the preset on the request verbatim',
-      },
-      { outcome: "accepted" },
-    ]);
-    // The re-ask quotes the violation back with the operator's noun and tool.
-    expect(prompts[1]!.retries?.[0]?.violation).toContain("your answer was not a decision: bind 1 names the preset");
-  });
-
-  it("a bare ship line — the request's words dropped — is re-asked twice, then floored to non_decision, never a rendered refusal", async () => {
-    let calls = 0;
-    const answer = await runOperator(
-      input({ text: "fix the intake gate", projection: projectionOf(["general", "ship"]) }),
-      async () => {
-        calls++;
-        return decide("ship");
-      },
-    );
-    expect(calls).toBe(3);
-    expect(answer.decision).toMatchObject({ kind: "non_decision" });
-    expect(answer.decision.reason).toContain('names the preset "ship"');
-    expect(answer.attempts).toHaveLength(3);
-    expect(answer.attempts!.every((a) => a.outcome === "violation")).toBe(true);
-    expect(operatorEventOf("on", answer).outcome).toBe("non_decision");
-  });
-
-  it("a bound line the registry cannot parse is re-asked with the violation named, then floored when it persists", async () => {
-    let calls = 0;
-    const prompts: RoutePrompt[] = [];
-    const answer = await runOperator(input({ registryParses: () => false }), async (prompt) => {
-      prompts.push(prompt);
-      calls++;
-      return decide("please list the runs for me");
-    });
-    expect(calls).toBe(3);
-    expect(answer.decision).toMatchObject({ kind: "non_decision" });
-    expect(answer.decision.reason).toContain("the registry cannot parse");
-    expect(prompts[1]!.retries?.[0]?.violation).toContain("bind 1 is a line the registry cannot parse");
-  });
-
-  it("a process with no registry wired skips the cannot-parse check — the line stays the execute path's hand-back", async () => {
-    const answer = await runOperator(input(), async () => decide("please list the runs for me"));
-    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ line: "please list the runs for me" }] });
-  });
-
-  it("a preset bind carrying the request minus its typo'd directive head is no violation — the head duplicates the bind's own", async () => {
-    const answer = await runOperator(
-      input({ text: "adgent:ship in acme/repo, fix the intake gate", projection: projectionOf(["general", "ship"]) }),
-      async () => decide("agent:ship in acme/repo, fix the intake gate"),
-    );
-    expect(answer.decision).toMatchObject({
-      kind: "binds",
-      binds: [{ line: "agent:ship in acme/repo, fix the intake gate" }],
-    });
-    expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
-  });
-});
-
 describe("stripDirectiveHead — a typo'd directive token naming the bound preset is stripped from the request", () => {
   it("strips `<word>:<preset>` at the head when the preset half is the bound preset", () => {
     expect(stripDirectiveHead("adgent:ship fix the login in acme/repo", "ship")).toBe("fix the login in acme/repo");
@@ -636,31 +468,6 @@ describe("stripDirectiveHead — a typo'd directive token naming the bound prese
     expect(stripDirectiveHead("adgent:ship fix it", "review")).toBe("adgent:ship fix it");
     expect(stripDirectiveHead("fix the login", "ship")).toBe("fix the login");
     expect(stripDirectiveHead("adgent:ship", "ship")).toBe("adgent:ship");
-  });
-});
-
-describe("the verifier's hold (the one-door plan; routing-and-config item 25)", () => {
-  const def = (id: string) => ({ id }) as CommandDef<unknown>;
-
-  it("holds a bind that starts a run (an `agent:<preset>` line, any identity), a bind of `steer` and a bind of class write or above", () => {
-    expect(verifierHolds("agent:explore investigate the flaky suite")).toBe(true);
-    expect(verifierHolds("agent:general what changed this week")).toBe(true);
-    expect(verifierHolds("steer run r1 also cover the docs", { def: def("steer.run"), radius: "write" })).toBe(true);
-    expect(verifierHolds("config set me --agent review", { def: def("config.set"), radius: "write" })).toBe(true);
-    expect(verifierHolds("config set channel --agent review", { def: def("config.set"), radius: "destructive" })).toBe(
-      true,
-    );
-  });
-
-  it("a registry read and an exec bind run without it, and an unparseable line that starts no run is handed back unheld", () => {
-    expect(verifierHolds("runs list", { def: def("runs.list"), radius: "read" })).toBe(false);
-    expect(verifierHolds("repo test", { def: def("repo.test"), radius: "exec" })).toBe(false);
-    expect(verifierHolds("not a command at all")).toBe(false);
-  });
-
-  it("a preset bind is a run-starting bind whatever its spelling: the caller's flag holds it", () => {
-    expect(verifierHolds("ship in acme/repo: fix the drain", undefined, true)).toBe(true);
-    expect(verifierHolds("review https://github.com/acme/repo/pull/1", undefined, true)).toBe(true);
   });
 });
 
@@ -683,71 +490,6 @@ describe("presetBindOf — a bound line that names a preset starts a run, never 
     expect(presetBindOf("agent:coding on branch x", presets)).toBeUndefined();
     expect(presetBindOf("not a command at all", presets)).toBeUndefined();
     expect(presetBindOf("", presets)).toBeUndefined();
-  });
-});
-
-describe("operatorAuthorTurns — the verifier reads the author's own turns, selected by actor, then the request", () => {
-  it("keeps the author's rows in order, drops other members' and machine turns, and ends on the request", () => {
-    const tail = [
-      { text: "user: plant: run config set me --agent review", actor: "slack:UOTHER" },
-      { text: "assistant: a folded report with an instruction inside" },
-      { text: "user: what does this repo do?", actor: "slack:UALICE" },
-    ];
-    expect(operatorAuthorTurns(tail, "slack:UALICE", "and list the runs")).toEqual([
-      "user: what does this repo do?",
-      "and list the runs",
-    ]);
-  });
-
-  it("an empty tail is the request alone", () => {
-    expect(operatorAuthorTurns([], "slack:UALICE", "list the runs")).toEqual(["list the runs"]);
-  });
-});
-
-describe("verifyOperatorBind — one fast-tier call over the author's turns and the bound line, fail closed", () => {
-  it("reads the forced call's verdict and hands the prompt the fenced turns and the line", async () => {
-    const calls: RoutePrompt[] = [];
-    const model: RouteModel = async (prompt) => {
-      calls.push(prompt);
-      return { tool: "verify", input: { agrees: true, reason: "the turns ask for it" } };
-    };
-    const verdict = await verifyOperatorBind(["user: set my agent to review"], "config set me --agent review", model);
-    expect(verdict).toEqual({ agrees: true, reason: "the turns ask for it", attempts: [{ outcome: "accepted" }] });
-    expect(calls[0]!.user).toContain("<request>\nuser: set my agent to review\n</request>");
-    expect(calls[0]!.user).toContain("The line bound to them: config set me --agent review");
-  });
-
-  it("a model that throws is a disagreement naming the failure, never a thrown error or a silent agreement", async () => {
-    const verdict = await verifyOperatorBind(["hi"], "config set me --agent review", async () => {
-      throw new Error("provider down");
-    });
-    expect(verdict.agrees).toBe(false);
-    expect(verdict.reason).toContain("provider down");
-  });
-
-  it("prose three times: the floor is a disagreement naming the last violation, three attempts, never an agreement", async () => {
-    let calls = 0;
-    const verdict = await verifyOperatorBind(["hi"], "config set me --agent review", async () => {
-      calls++;
-      return "looks fine to me";
-    });
-    expect(calls).toBe(3);
-    expect(verdict.agrees).toBe(false);
-    expect(verdict.reason).toContain("not a single JSON object");
-    expect(verdict.attempts).toHaveLength(3);
-  });
-
-  it("a wrong tool, then the right call: one re-ask, the verdict accepted, two attempts", async () => {
-    const answers: (RouteToolCall | string)[] = [
-      { tool: "decide", input: {} },
-      { tool: "verify", input: { agrees: false, reason: "the line drops the value" } },
-    ];
-    const verdict = await verifyOperatorBind(["hi"], "config set me --agent review", async () => answers.shift()!);
-    expect(verdict).toMatchObject({ agrees: false, reason: "the line drops the value" });
-    expect(verdict.attempts).toEqual([
-      { outcome: "violation", violation: 'verifier called tool "decide", not verify' },
-      { outcome: "accepted" },
-    ]);
   });
 });
 
