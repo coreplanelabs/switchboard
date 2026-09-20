@@ -103,23 +103,94 @@ export function isFleetBusyError(err: unknown): boolean {
 
 /** The Worker's answer on /read and /write (sent as HTTP 503): the named
  *  reason plus an `error` that keeps the SDK's own message as the cause, so
- *  the logs and the model can still see what the platform actually said. */
-export function fleetBusyAnswer(cause: string): { error: string; reason: typeof FLEET_BUSY_REASON } {
-  return { error: `${FLEET_BUSY_REASON}: ${FLEET_BUSY_EXPLANATION} (${cause})`, reason: FLEET_BUSY_REASON };
+ *  the logs and the model can still see what the platform actually said.
+ *  `containerId` is the thread's Durable Object id when the Worker knows it —
+ *  additive, so an older Worker's answer without it changes nothing — carried
+ *  so the bot's ending log can name which object the fleet refused. */
+export function fleetBusyAnswer(
+  cause: string,
+  containerId?: string,
+): { error: string; reason: typeof FLEET_BUSY_REASON; containerId?: string } {
+  return {
+    error: `${FLEET_BUSY_REASON}: ${FLEET_BUSY_EXPLANATION} (${cause})`,
+    reason: FLEET_BUSY_REASON,
+    ...(containerId !== undefined ? { containerId } : {}),
+  };
 }
 
 /** The Worker's answer on /exec, in-body under the streamed HTTP 200 like every
  *  other exec failure: the dual `error` + exit-127/stderr shape (item 3) so an
  *  executor that predates in-body errors still renders it, plus the reason. */
-export function fleetBusyExecAnswer(cause: string): {
+export function fleetBusyExecAnswer(
+  cause: string,
+  containerId?: string,
+): {
   error: string;
   reason: typeof FLEET_BUSY_REASON;
+  containerId?: string;
   stdout: "";
   stderr: string;
   exitCode: 127;
 } {
-  const { error, reason } = fleetBusyAnswer(cause);
-  return { error, reason, stdout: "", stderr: error, exitCode: 127 };
+  const { error, reason, containerId: id } = fleetBusyAnswer(cause, containerId);
+  return { error, reason, ...(id !== undefined ? { containerId: id } : {}), stdout: "", stderr: error, exitCode: 127 };
+}
+
+// ---------------------------------------------------------------------------
+// The fleet-busy ending as ONE queryable log line on each side. A run this
+// condition ends used to exist only on its card and its record — the Worker's
+// logs held the platform's raw refusals with no run attached, the bot's stdout
+// held nothing — so a log sweep after a capacity incident could not count the
+// runs it killed. The stable prefix below selects both lines in one query;
+// the card and the record are unchanged.
+
+/** The stable prefix both events share — a log query on it selects the pair. */
+export const FLEET_BUSY_LOG_PREFIX = "sandbox.fleet-busy" as const;
+/** The sandbox Worker's line, where the platform's refusal is named `fleet-busy`. */
+export const FLEET_BUSY_REFUSED_EVENT = `${FLEET_BUSY_LOG_PREFIX}.refused` as const;
+/** The bot's line, at the one site where the spent wait ends the run. */
+export const FLEET_BUSY_RUN_ENDED_EVENT = `${FLEET_BUSY_LOG_PREFIX}.run-ended` as const;
+
+/** What the executor learned from the LAST busy answer before its wait was
+ *  spent — carried on `ExecCapacityError` so the bot's ending site can log
+ *  these facts beside the run id, which only the bot knows. */
+export interface FleetBusyEndingFacts {
+  /** The Worker's error text, which keeps the platform's own refusal as the cause. */
+  refusal: string;
+  /** The total time the run spent waiting for an instance, in ms. */
+  waitedMs: number;
+  /** The sandbox Durable Object id the Worker answered with (absent from an older Worker). */
+  containerId?: string;
+}
+
+/** The Worker's one JSON line where the platform's refusal is turned into the
+ *  named condition, beside `sandbox.starting` and `sandbox.idle-stop`. */
+export function fleetBusyRefusedLine(fields: {
+  thread: string;
+  container: string;
+  refusal: string;
+  route?: string;
+}): string {
+  return JSON.stringify({ event: FLEET_BUSY_REFUSED_EVENT, ...fields });
+}
+
+/** The bot's one JSON line for a run the full fleet ended — or null for every
+ *  other ending, so the caller logs nothing then. Matched by the error's name
+ *  and its carried facts, never `instanceof`: this module is bundled into the
+ *  Worker and cannot import the executor's class. */
+export function fleetBusyRunEndedLine(run: string | undefined, thread: string, err: unknown): string | null {
+  if (typeof err !== "object" || err === null) return null;
+  const e = err as { name?: unknown; fleetBusy?: FleetBusyEndingFacts };
+  if (e.name !== "ExecCapacityError" || e.fleetBusy === undefined) return null;
+  const { refusal, waitedMs, containerId } = e.fleetBusy;
+  return JSON.stringify({
+    event: FLEET_BUSY_RUN_ENDED_EVENT,
+    ...(run !== undefined ? { run } : {}),
+    thread,
+    ...(containerId !== undefined ? { container: containerId } : {}),
+    refusal,
+    waitedMs,
+  });
 }
 
 /** The message `ExecCapacityError` carries once the wait is spent: names the

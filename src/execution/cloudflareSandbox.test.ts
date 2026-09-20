@@ -272,6 +272,32 @@ describe("CloudflareSandboxExecutor fleet-busy wait", () => {
     expect(calls).toHaveLength(4);
   });
 
+  it("the spent wait carries the ending's facts — the Worker's refusal text, the wait and the Durable Object id — for the bot's ending log", async () => {
+    const busyWithId = { ...BUSY_EXEC, containerId: "do-abc" };
+    scriptedFetch([{ body: busyWithId }]);
+    const outcome = new CloudflareSandboxExecutor(OPTS)
+      .exec("npm test", { timeoutMs: 60_000 })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const err = (await outcome) as ExecCapacityError;
+    expect(err).toBeInstanceOf(ExecCapacityError);
+    expect(err.fleetBusy).toEqual({
+      refusal: "fleet-busy: no free per-thread sandbox",
+      waitedMs: 60_000,
+      containerId: "do-abc",
+    });
+  });
+
+  it("an older Worker's busy answer without the container id still carries the refusal and the wait", async () => {
+    scriptedFetch([{ body: BUSY_EXEC }]);
+    const outcome = new CloudflareSandboxExecutor(OPTS)
+      .exec("npm test", { timeoutMs: 60_000 })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const err = (await outcome) as ExecCapacityError;
+    expect(err.fleetBusy).toEqual({ refusal: "fleet-busy: no free per-thread sandbox", waitedMs: 60_000 });
+  });
+
   it("never waits longer than FLEET_BUSY_WAIT_MAX_MS (5 min) even for a 20-minute command", async () => {
     const { calls } = scriptedFetch([{ body: BUSY_EXEC }]);
     const ex = new CloudflareSandboxExecutor(OPTS);
@@ -755,6 +781,9 @@ describe("CloudflareSandboxExecutor sandbox-starting wait", () => {
     expect((err as Error).message).toBe(
       "sandbox not ready — the thread's container did not finish starting within 600s; try again in a few minutes",
     );
+    // Only the fleet's ending carries the log facts (execution.md item 14):
+    // a start-wait ending logs nothing at the bot's ending site.
+    expect((err as ExecCapacityError).fleetBusy).toBeUndefined();
     // 5 + 10 + 15×39 = 600 s → 41 waits, 42 sends, then no more
     expect(calls).toHaveLength(42);
     await vi.advanceTimersByTimeAsync(60_000);

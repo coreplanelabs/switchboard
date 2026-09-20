@@ -57,6 +57,7 @@ import {
 import {
   fleetBusyAnswer,
   fleetBusyExecAnswer,
+  fleetBusyRefusedLine,
   isFleetBusyError,
   isRuntimeBusyError,
   isRuntimeBusySignal,
@@ -213,6 +214,9 @@ export interface ExecAnswer {
 export interface ExecFailure {
   error: string;
   reason?: string;
+  /** The thread's Durable Object id, on a `fleet-busy` answer alone — the bot's
+   *  ending log names which object the platform refused an instance to. */
+  containerId?: string;
   stdout: "";
   stderr: string;
   exitCode: 127;
@@ -668,8 +672,15 @@ export class SwitchboardSandbox extends Sandbox<Env> {
   private execFailure(err: unknown, startedAt: number): ExecFailure {
     const raw = thrownText(thrownShape(err));
     // A full fleet (docs/reference/specs/execution.md item 14): no container
-    // instance for this thread, so nothing started — the executor waits.
-    if (isFleetBusyError(err)) return fleetBusyExecAnswer(raw);
+    // instance for this thread, so nothing started — the executor waits. One
+    // queryable line per refusal, so a log sweep after a capacity incident
+    // can count them without reading cards; the answer carries this object's
+    // id so the bot's ending log can name which object the fleet refused.
+    if (isFleetBusyError(err)) {
+      const container = this.ctx.id.toString();
+      console.log(fleetBusyRefusedLine({ thread: this.ctx.id.name ?? container, container, refusal: raw }));
+      return fleetBusyExecAnswer(raw, container);
+    }
     // The runtime changed under the command (item 9): the process, if it
     // started, is gone with its output. Certain — the SDK said so by type.
     if (isRuntimeReplacement(err)) {
@@ -934,8 +945,14 @@ export default {
       // instance for this thread's Durable Object, so the file op never
       // started — re-sending is safe by construction. Named so the executor
       // waits instead of reading it as a dead sandbox; 503 because that is
-      // what it is.
-      if (isFleetBusyError(err)) return json(fleetBusyAnswer(msg), 503);
+      // what it is. One queryable line per refusal (the same event as the
+      // exec path's), the object's id computed from the thread key it is
+      // named by, since the error crossed the RPC boundary without it.
+      if (isFleetBusyError(err)) {
+        const container = env.Sandbox.idFromName(threadKey).toString();
+        console.log(fleetBusyRefusedLine({ thread: threadKey, container, refusal: msg, route: url.pathname }));
+        return json(fleetBusyAnswer(msg, container), 503);
+      }
       return json({ error: msg }, 500);
     }
   },

@@ -1,5 +1,12 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  FLEET_BUSY_LOG_PREFIX,
+  FLEET_BUSY_REFUSED_EVENT,
+  FLEET_BUSY_RUN_ENDED_EVENT,
+  fleetBusyRefusedLine,
+  fleetBusyRunEndedLine,
   isFleetBusyError,
   thrownShape,
   thrownText,
@@ -38,6 +45,7 @@ import {
   startWaitExhaustedMessage,
 } from "./sandboxErrors.js";
 import { BASH_TIMEOUT_MS } from "./bashTimeout.js";
+import { ExecCapacityError, ExecInfraError } from "./executor.js";
 
 // Feature: docs/reference/specs/execution.md item 14 — a full sandbox fleet is capacity,
 // not a dead sandbox. When concurrent cold runs exhaust max_instances the
@@ -114,6 +122,86 @@ describe("the fleet-busy answer shapes the Worker sends", () => {
     const a = fleetBusyExecAnswer("Failed to create session: 503");
     expect(a).toEqual({ error: a.error, reason: "fleet-busy", stdout: "", stderr: a.error, exitCode: 127 });
     expect(a.error).toMatch(/^fleet-busy: /);
+  });
+
+  it("both shapes carry the Durable Object id when the Worker passes it, and omit the key when it does not", () => {
+    expect(fleetBusyAnswer("cause", "do-abc").containerId).toBe("do-abc");
+    expect(fleetBusyExecAnswer("cause", "do-abc").containerId).toBe("do-abc");
+    expect("containerId" in fleetBusyAnswer("cause")).toBe(false);
+    expect("containerId" in fleetBusyExecAnswer("cause")).toBe(false);
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 14 — a run the full fleet
+// ended is one queryable log line on each side, under one stable prefix; every
+// other ending logs none. The card and the run record are unchanged.
+describe("the fleet-busy ending log lines", () => {
+  const facts = {
+    refusal: "fleet-busy: no free per-thread sandbox (no container instance that can be provided)",
+    waitedMs: 70_000,
+    containerId: "do-abc",
+  };
+
+  it("the bot's run-ended line carries the run id, the thread, the Durable Object id, the platform's refusal text and the wait spent", () => {
+    const err = new ExecCapacityError(fleetBusyExhaustedMessage(70_000), facts);
+    const line = fleetBusyRunEndedLine("run-1", "slack:C1:42", err);
+    expect(line).not.toBeNull();
+    expect(JSON.parse(line as string)).toEqual({
+      event: FLEET_BUSY_RUN_ENDED_EVENT,
+      run: "run-1",
+      thread: "slack:C1:42",
+      container: "do-abc",
+      refusal: facts.refusal,
+      waitedMs: 70_000,
+    });
+  });
+
+  it("an older Worker's answer without the container id still logs, without the key; an unregistered run logs without the run key", () => {
+    const err = new ExecCapacityError(fleetBusyExhaustedMessage(70_000), { refusal: "r", waitedMs: 70_000 });
+    const parsed = JSON.parse(fleetBusyRunEndedLine(undefined, "slack:C1:42", err) as string) as Record<
+      string,
+      unknown
+    >;
+    expect(parsed.event).toBe(FLEET_BUSY_RUN_ENDED_EVENT);
+    expect("container" in parsed).toBe(false);
+    expect("run" in parsed).toBe(false);
+  });
+
+  it("matches the error by name across an import boundary — a name-and-facts shape logs like the class itself", () => {
+    const shaped = Object.assign(new Error("sandbox fleet busy"), { name: "ExecCapacityError", fleetBusy: facts });
+    expect(fleetBusyRunEndedLine("run-1", "t", shaped)).not.toBeNull();
+  });
+
+  it("a run that ends any other way emits none: a plain error, an infra failure, a capacity ending that is not the fleet's", () => {
+    expect(fleetBusyRunEndedLine("run-1", "t", new Error("boom"))).toBeNull();
+    expect(
+      fleetBusyRunEndedLine("run-1", "t", new ExecInfraError("sandbox worker /exec: down", "answered")),
+    ).toBeNull();
+    expect(fleetBusyRunEndedLine("run-1", "t", new ExecCapacityError(startWaitExhaustedMessage(600_000)))).toBeNull();
+    expect(fleetBusyRunEndedLine("run-1", "t", "fleet busy")).toBeNull();
+    expect(fleetBusyRunEndedLine("run-1", "t", null)).toBeNull();
+  });
+
+  it("the Worker's refused line names the event, the thread, the container, the refusal and the route when there is one", () => {
+    const line = fleetBusyRefusedLine({ thread: "slack:C1:42", container: "do-abc", refusal: "raw", route: "/read" });
+    expect(JSON.parse(line)).toEqual({
+      event: FLEET_BUSY_REFUSED_EVENT,
+      thread: "slack:C1:42",
+      container: "do-abc",
+      refusal: "raw",
+      route: "/read",
+    });
+  });
+
+  it("both events share the stable prefix a log query selects", () => {
+    expect(FLEET_BUSY_REFUSED_EVENT.startsWith(`${FLEET_BUSY_LOG_PREFIX}.`)).toBe(true);
+    expect(FLEET_BUSY_RUN_ENDED_EVENT.startsWith(`${FLEET_BUSY_LOG_PREFIX}.`)).toBe(true);
+  });
+
+  it("the bot's ending site is the dispatcher's catch-all — the one place every failing run passes — wired once (static)", () => {
+    const dispatcher = readFileSync(resolve(import.meta.dirname, "../core/dispatcher.ts"), "utf8");
+    expect(dispatcher.match(/fleetBusyRunEndedLine\(/g)).toHaveLength(1); // exactly one call site
+    expect(dispatcher).toMatch(/fleetBusyRunEndedLine\(registered\?\.id, msg\.threadKey, err\)/);
   });
 });
 
