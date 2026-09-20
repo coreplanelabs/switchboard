@@ -113,7 +113,7 @@ function deltas(current, listed) {
   for (const path of [...paths].sort()) {
     const now = current[path] ?? {};
     const was = listed[path] ?? {};
-    for (const cls of Object.keys(CLASSES)) {
+    for (const cls of new Set([...Object.keys(was), ...Object.keys(now)])) {
       const a = was[cls] ?? 0;
       const b = now[cls] ?? 0;
       if (a !== b) out.push({ path, cls, a, b });
@@ -122,29 +122,32 @@ function deltas(current, listed) {
   return out;
 }
 
-const grew = ({ path, cls, a, b }) =>
-  `${path}: ${cls} ${a} → ${b} — new imprint; rewrite the line, or allow it by name in ${ALLOW_LINES_PATH}`;
+/** This ratchet's own wording; a sibling check (scripts/vocabulary-check.mjs) passes its own. */
+const HYGIENE_WORDING = {
+  grew: `new imprint; rewrite the line, or allow it by name in ${ALLOW_LINES_PATH}`,
+  shrank: "the list only shrinks: run `npm run hygiene:gen` to record the progress",
+};
+
+const grew = ({ path, cls, a, b }, wording) => `${path}: ${cls} ${a} → ${b} — ${wording.grew}`;
 
 /**
  * What `hygiene:gen` refuses to record: growth (or a new file) is new imprint,
  * and recording it would let `npm run fix` absorb it silently. Shrinkage is
  * exactly what gen exists to record, so it is not a problem here.
  */
-export function growthProblems(current, listed) {
+export function growthProblems(current, listed, wording = HYGIENE_WORDING) {
   return deltas(current, listed)
     .filter((d) => d.b > d.a)
-    .map(grew);
+    .map((d) => grew(d, wording));
 }
 
 /**
  * The ratchet: `current` and `listed` map path → class → count. Growth (or a
- * new file) is new imprint; shrinkage (or a vanished file) asks for `hygiene:gen`.
+ * new file) names the remedy; shrinkage (or a vanished file) asks for the gen.
  */
-export function ratchetProblems(current, listed) {
+export function ratchetProblems(current, listed, wording = HYGIENE_WORDING) {
   return deltas(current, listed).map((d) =>
-    d.b > d.a
-      ? grew(d)
-      : `${d.path}: ${d.cls} ${d.a} → ${d.b} — the list only shrinks: run \`npm run hygiene:gen\` to record the progress`,
+    d.b > d.a ? grew(d, wording) : `${d.path}: ${d.cls} ${d.a} → ${d.b} — ${wording.shrank}`,
   );
 }
 
