@@ -6,7 +6,7 @@ import type { PlaneService } from "../core/planeService.js";
 import type { PlaneTable } from "../core/plane/table.js";
 import type { RunView } from "../core/runsService.js";
 import { createPlaneViewHandler, parsePlaneRoute } from "./planeView.js";
-import { SEED_ELEMENT_ID, type PlaneSeed } from "./webSeed.js";
+import { SEED_ELEMENT_ID, type PlaneChatSeed, type PlaneSeed } from "./webSeed.js";
 import { makePageSender } from "./webShell.js";
 
 // The plane panel handler (docs/reference/specs/orchestration-plane.md item 5): routing, the
@@ -146,6 +146,78 @@ describe("createPlaneViewHandler", () => {
     handler(req("/plane.json"), r.res, {});
     await r.ended;
     expect(asked).toEqual([{ kind: "none" }]);
+  });
+
+  it("the page's seed carries the chat half for the session's viewer, at the table's one at (record 0070)", async () => {
+    const { service } = fakeService();
+    const half: PlaneChatSeed = {
+      conversation: "orchestrator",
+      turns: [],
+      sendUrl: "/threads/orchestrator/send",
+      viewer: { name: "alice" },
+      commands: [],
+    };
+    const askedFor: string[] = [];
+    const handler = createPlaneViewHandler(service, sendPage, {
+      chat: async (actor) => {
+        askedFor.push(actor.id);
+        return half;
+      },
+    });
+    const r = fakeRes();
+    expect(handler(req("/plane"), r.res, { actor: ACTORS.operator })).toBe(true);
+    await r.ended;
+    const seed = seedOf(r.body());
+    expect(seed.chat).toEqual(half);
+    // One clock for both halves: the chat half carries none of its own.
+    expect(seed.table.at).toBe(NOW);
+    expect(askedFor).toEqual([ACTORS.operator.id]);
+  });
+
+  it("a session-less viewer gets the panels alone — no chat half is built", async () => {
+    const { service } = fakeService();
+    let built = 0;
+    const handler = createPlaneViewHandler(service, sendPage, {
+      chat: async () => {
+        built++;
+        return { conversation: "orchestrator", turns: [], sendUrl: "/x", viewer: { name: "x" }, commands: [] };
+      },
+    });
+    const r = fakeRes();
+    handler(req("/plane"), r.res, {});
+    await r.ended;
+    expect(seedOf(r.body()).chat).toBeUndefined();
+    expect(built).toBe(0);
+  });
+
+  it("a chat half that cannot be read costs the column, never the panels", async () => {
+    const { service } = fakeService();
+    const handler = createPlaneViewHandler(service, sendPage, {
+      chat: async () => Promise.reject(new Error("store unreachable")),
+    });
+    const r = fakeRes();
+    handler(req("/plane"), r.res, { actor: ACTORS.operator });
+    await r.ended;
+    expect(r.status()).toBe(200);
+    const seed = seedOf(r.body());
+    expect(seed.chat).toBeUndefined();
+    expect(seed.table.runs).toHaveLength(3);
+  });
+
+  it("the JSON twin stays the table alone — the chat half never rides it", async () => {
+    const { service } = fakeService();
+    let built = 0;
+    const handler = createPlaneViewHandler(service, sendPage, {
+      chat: async () => {
+        built++;
+        return { conversation: "orchestrator", turns: [], sendUrl: "/x", viewer: { name: "x" }, commands: [] };
+      },
+    });
+    const r = fakeRes();
+    handler(req("/plane.json"), r.res, { actor: ACTORS.operator });
+    await r.ended;
+    expect(JSON.parse(r.body())).toEqual(TABLE);
+    expect(built).toBe(0);
   });
 
   it("a table that cannot be built is a 502 with the reason, never a 500", async () => {

@@ -2,6 +2,8 @@ import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { Actor } from "../core/authz/types.js";
 import { predicateFor } from "../core/authz/predicate.js";
 import type { PlaneService } from "../core/planeService.js";
+import type { AccessIdentity } from "./accessAuth.js";
+import type { PlaneChatSeed } from "./webSeed.js";
 import type { PageSender } from "./webShell.js";
 
 // The plane panel (docs/reference/specs/orchestration-plane.md item 5;
@@ -25,6 +27,8 @@ export function parsePlaneRoute(pathname: string): PlaneRoute | null {
 export interface PlaneViewContext {
   /** The viewer the gate resolved (record 0042); absent → nothing is visible. */
   actor?: Actor;
+  /** The session behind the actor, for the chat half's viewer name; absent → the actor's own. */
+  identity?: AccessIdentity;
 }
 
 const UPSTREAM_REASON_MAX = 400;
@@ -45,6 +49,10 @@ export function createPlaneViewHandler(
   opts: {
     /** The live rows' capability tokens by run id — the registry's index face, as the runs index reads it. */
     liveTokens?: () => Map<string, string>;
+    /** The chat half (record 0070): the viewer's orchestrator thread, built by the
+     *  web chat's own reader. Absent — or a session-less viewer — seeds the
+     *  panels alone, full-width as before the column existed. */
+    chat?: (actor: Actor, identity?: AccessIdentity) => Promise<PlaneChatSeed>;
   } = {},
 ): (req: HttpRequest, res: ServerResponse, ctx?: PlaneViewContext) => boolean {
   const liveTokens = opts.liveTokens ?? (() => new Map<string, string>());
@@ -57,9 +65,15 @@ export function createPlaneViewHandler(
       return true;
     }
     const visibleTo = ctx.actor ? predicateFor(ctx.actor, "runs:read", "run") : ({ kind: "none" } as const);
-    service
-      .table(visibleTo)
-      .then((table) => {
+    // The chat half rides the page alone (the JSON twin stays the table, as
+    // `plane show` answers it); a chat that cannot be read costs the column,
+    // never the panels — the table's own failure below stays the 502.
+    const chatHalf =
+      route.kind === "page" && ctx.actor && opts.chat
+        ? opts.chat(ctx.actor, ctx.identity).catch(() => undefined)
+        : Promise.resolve(undefined);
+    Promise.all([service.table(visibleTo), chatHalf])
+      .then(([table, chat]) => {
         if (route.kind === "json") {
           res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
           res.end(JSON.stringify(table));
@@ -71,7 +85,7 @@ export function createPlaneViewHandler(
           const token = !row.run.finished && row.run.ownerGen === undefined ? live.get(row.run.id) : undefined;
           if (token !== undefined) tokens[row.run.id] = token;
         }
-        page(req, res, 200, ctx.actor, "Plane", { page: "plane", table, tokens });
+        page(req, res, 200, ctx.actor, "Plane", { page: "plane", table, tokens, ...(chat ? { chat } : {}) });
       })
       .catch((err: unknown) => {
         const reason = (err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX);

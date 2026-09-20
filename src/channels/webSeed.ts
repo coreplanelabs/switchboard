@@ -422,6 +422,28 @@ export interface PlaneSeed {
   table: PlaneTable;
   /** Capability tokens by run id for the live rows this process holds (a finished or foreign row has none). */
   tokens: Record<string, string>;
+  /** The chat column (record 0070): the viewer's own orchestrator thread —
+   *  one per person, keyed on the session, created on first open and continued
+   *  ever after — rendered by the same chat components `/threads` mounts.
+   *  Absent for a session-less viewer, who gets the panels full-width. The
+   *  half carries no clock of its own: both halves read the table's `at`, so
+   *  a row the chat cites is the row the panel paints. */
+  chat?: PlaneChatSeed;
+}
+
+/** The plane's chat half: the orchestrator conversation's turns and what the
+ *  composer needs, a strict subset of `HomeSeed` — the rail, the greeting and
+ *  the page chrome stay the home page's. */
+export interface PlaneChatSeed {
+  /** The conversation id in the viewer's own lane (`orchestrator` — deterministic, one per person). */
+  conversation: string;
+  /** The thread's runs as turns, oldest first, as the home page seeds them. */
+  turns: (HomeTurnSeed | HomeReceiptTurnSeed | HomeParentTurnSeed)[];
+  /** Where the composer POSTs (`/threads/orchestrator/send` — the web chat's own route). */
+  sendUrl: string;
+  viewer: { name: string };
+  /** The `/` palette's rows, as the home page carries them. */
+  commands: HomeCommandSeed[];
 }
 
 export interface DeliverySeed {

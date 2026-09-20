@@ -23,6 +23,7 @@ import type {
   HomeReceiptTurnSeed,
   HomeSeed,
   HomeTurnSeed,
+  PlaneChatSeed,
 } from "./webSeed.js";
 import type { IntakeQuery, IntakeReceipt } from "../core/runLedger/types.js";
 import type { PageSender } from "./webShell.js";
@@ -460,6 +461,32 @@ export function paletteCommands(list: readonly CommandDef<unknown>[], actor: Act
       };
     })
     .sort((a, b) => a.chat.localeCompare(b.chat));
+}
+
+/** The orchestrator conversation (record 0070): one per person, deterministic,
+ *  in the session's own lane — created on first open and continued ever after.
+ *  It is an ordinary conversation id, so `/threads/orchestrator` and its send
+ *  route serve it with no route of their own. */
+export const ORCHESTRATOR_CONVERSATION = "orchestrator";
+
+/** The plane page's chat half (orchestration-plane.md item 11): the viewer's
+ *  orchestrator thread read exactly as the home page reads a conversation —
+ *  `turnsOf` under the viewer's own predicate — plus the composer's palette.
+ *  The half carries no clock: the plane seed's `table.at` is both halves'. */
+export function orchestratorChatSeed(
+  deps: ConversationDeps & { commands: { list(): readonly CommandDef<unknown>[] } },
+): (actor: Actor, identity?: AccessIdentity) => Promise<PlaneChatSeed> {
+  return async (actor, identity) => {
+    const sub = actor.id.replace(/^access:/, "");
+    const { turns } = await turnsOf(deps, threadKeyFor(sub, ORCHESTRATOR_CONVERSATION), actor);
+    return {
+      conversation: ORCHESTRATOR_CONVERSATION,
+      turns,
+      sendUrl: `/threads/${ORCHESTRATOR_CONVERSATION}/send`,
+      viewer: { name: actor.asUser?.name ?? identity?.email ?? sub },
+      commands: paletteCommands(deps.commands.list(), actor),
+    };
+  };
 }
 
 /** What the empty state offers (web-chat.md item 2): what Switchboard does well,

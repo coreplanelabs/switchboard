@@ -24,6 +24,7 @@ import {
   conversationIdOf,
   createWebChatHandler,
   historyOf,
+  orchestratorChatSeed,
   resumeWebIO,
   webThreadIO,
   EXCERPT_MAX,
@@ -745,6 +746,29 @@ describe("POST /threads/<id>/send — the body into dispatch() as this session (
 });
 
 // ---- GET /threads and /threads/<id> ------------------------------------------------
+
+describe("orchestratorChatSeed — the plane's chat half (record 0070; orchestration-plane item 11)", () => {
+  it("reads the viewer's own orchestrator thread — one per person, in their lane — with the composer's send URL and palette", async () => {
+    const { service, registry, store } = setup();
+    await store.put(record("r-orc", NOW - 60_000, { threadKey: "web:a1:orchestrator" }));
+    // Another conversation of the viewer's: never part of the half.
+    await store.put(record("r-else", NOW - 30_000));
+    const half = await orchestratorChatSeed({ service, registry, commands: { list: () => COMMANDS } })(alice, IDENTITY);
+    expect(half.conversation).toBe("orchestrator");
+    expect(half.sendUrl).toBe("/threads/orchestrator/send");
+    expect(half.turns.map((t) => ("id" in t ? t.id : ""))).toEqual(["r-orc"]);
+    expect(half.viewer.name).toBe("alice@example.test");
+    expect(half.commands.map((c) => c.chat)).toEqual(["config show", "help show", "mcp add"]);
+  });
+
+  it("a viewer with no orchestrator runs yet gets an empty thread — created on first open, continued ever after", async () => {
+    const { service, registry } = setup();
+    const half = await orchestratorChatSeed({ service, registry, commands: { list: () => [] } })(linked);
+    expect(half.turns).toEqual([]);
+    // The linked person's own name; without a link or an identity, the sub.
+    expect(half.viewer.name).toBe("alice");
+  });
+});
 
 describe("GET /threads and /threads/<id> — the seed from the runs service (items 2, 7, 8, 11)", () => {
   it("/threads mints a conversation of the viewer's own lane: no turns, a send URL under it, the palette the viewer may run, chips grounded in their runs", async () => {
