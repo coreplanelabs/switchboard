@@ -6,6 +6,10 @@
 // at all. Node-free by design, like `table.ts`: no clock, no io, no ids it
 // did not derive from its inputs — the same event over the same state is the
 // same answer, which is what the shadow comparison and the tests rest on.
+// (`budgets.ts` is constants, not io — the one import keeps every duration
+// literal where `clock:check` expects it.)
+
+import { PLANE, minutesToMs } from "../budgets.js";
 
 /** The three stages an ask is judged at (record 0064): the bot's admission
  *  door, the plan runner's seed door, the resident's seat. this unit decides the
@@ -28,7 +32,12 @@ export type PlaneCondition =
    *  side. Each is flipped by the resident's own level report, forwarded by
    *  the bot to `POST /plane/level`, never polled. */
   | { kind: "seat"; resident: string; met: boolean }
-  | { kind: "memory"; resident: string; met: boolean };
+  | { kind: "memory"; resident: string; met: boolean }
+  /** The provider condition (record 0064, "The queue"): the model proxy's last
+   *  report for the provider is `up`. A parked run (a turn the proxy could not
+   *  complete after its retry) waits on it; the provider's next relayed
+   *  success, for any run, flips it. */
+  | { kind: "provider_up"; provider: string; met: boolean };
 
 /** One resident level as the plane stores it (`plane_levels`): the side of
  *  the line the resident last reported, stamped with the report time and the
@@ -36,7 +45,9 @@ export type PlaneCondition =
  *  without a report — is `unknown` (`residentSideOf`), never assumed below. */
 export interface PlaneLevelRow {
   resident: string;
-  name: "seat" | "memory";
+  /** `provider` rows carry the model proxy's level for a provider (record
+   *  0064): `below` is `up` (the condition met), `above` is `down`. */
+  name: "seat" | "memory" | "provider";
   side: "below" | "above";
   reportedAt: number;
   generation: string;
@@ -48,7 +59,7 @@ export interface PlaneLevelRow {
 export function residentSideOf(
   levels: PlaneLevelRow[],
   resident: string,
-  name: "seat" | "memory",
+  name: "seat" | "memory" | "provider",
   generation?: string,
 ): "below" | "above" | "unknown" {
   const row = levels.find((l) => l.resident === resident && l.name === name);
@@ -61,7 +72,12 @@ export function residentSideOf(
  *  the ledger claim that promotes it (the `plane_reservations` row). A second
  *  ask meanwhile sees the thread taken and queues. The seal deletes it. */
 export interface PlaneReservation {
-  kind: "thread";
+  /** `thread`: an admitted ask's hold. `steer`: a checkpoint steer's dedupe
+   *  row, key `<runId>#<round>#<cause>` — the fixed sentence lands at most
+   *  once per run per round per cause and once per round in all (record 0064,
+   *  "The backpressure contract"). `park`: a run whose turn the proxy could
+   *  not complete, key `<provider>#<runId>`, waiting on `provider_up`. */
+  kind: "thread" | "steer" | "park";
   key: string;
   runId: string;
   at: number;
@@ -130,10 +146,56 @@ export interface PlaneAskEvent {
    *  nowhere, and the drain never refuses a run it waits for. */
   restartOf?: boolean;
 }
+/** The facts one heartbeat carries (record 0064, "The backpressure contract"):
+ *  the round index, the in-flight call with its declared bound, the last
+ *  event's time and the newest pushed head. The bot assembles them from what
+ *  its write-through already sees; every stamp is one it was given, never a
+ *  clock it read. */
+export interface HeartbeatFacts {
+  /** The round index: the run's step counter — a steer lands at most once per round. */
+  round: number;
+  /** Whether this is a coding (write-preset) run: only those are steered. */
+  coding: boolean;
+  /** The run's start — the no-push clock's floor before any head is pushed. */
+  startedAt: number;
+  /** The call in flight, its declared bound (a bash timeout) when it stated one,
+   *  and when the run's stream last moved as it went out. */
+  inFlight?: { callId: string; tool: string; sinceAt: number; boundMs?: number };
+  /** The last event's time on the run's stream. */
+  lastEventAt?: number;
+  /** The newest pushed head the stream carried (`pushed_head`, with its `clean` fact). */
+  pushedHead?: { ref: string; sha: string; at: number; clean?: boolean };
+}
+
+/** The checkpoint steer's one fixed sentence (record 0064): the same words for
+ *  every cause, so a person and a child read one instruction, never a variant. */
+export const CHECKPOINT_STEER_SENTENCE =
+  "finish the step you are on, push a checkpoint and end the round; start no new command; the resident takes your push";
+
+/** The steer that re-issues a held turn once its provider reports up (record 0064). */
+export function reissueSteerSentence(provider: string): string {
+  return `the model provider ${provider} is answering again — re-issue the held turn and continue`;
+}
+
+/** The checkpoint steer's causes: an in-flight call past its bound (or the
+ *  no-bound line) and a coding round with no pushed head past `noPushMinutes`. */
+export type SteerCause = "long_call" | "no_push";
+
 export type PlaneEvent =
   | PlaneAskEvent
   | { kind: "sealed"; at: number; threadKey: string }
   | { kind: "withdraw"; at: number; runId: string }
+  /** One heartbeat's facts (record 0064): judged for the checkpoint steer.
+   *  `noPushMs`/`noBoundMs` override the defaults (tests, config — a later
+   *  unit's `plane.noPushMinutes`). */
+  | { kind: "heartbeat"; at: number; runId: string; facts: HeartbeatFacts; noPushMs?: number; noBoundMs?: number }
+  /** A provider's level as the model proxy reported it: `up` on a relayed
+   *  success, `down` on a failure past its one retry. `up` re-issues every
+   *  turn held parked on the provider, once each. */
+  | { kind: "provider_level"; at: number; provider: string; level: "up" | "down" }
+  /** A run parked on its provider (record 0064): the harness holds the turn,
+   *  the lease keeps counting, and the provider's next `up` steers it once. */
+  | { kind: "park"; at: number; runId: string; provider: string }
   /** A window's open or lift (`window_open`); kind `deploy` is the pending deploy (`deploy_settled`). */
   | { kind: "window"; at: number; window: string; phase: "opened" | "lifted" }
   /** A resident's level report (record 0064): forwarded by the bot from the levels a
@@ -182,9 +244,13 @@ export type PlaneWrite =
   | { table: "plane_queue"; op: "state"; runId: string; state: PlaneQueueRow["state"] }
   | { table: "plane_effects"; op: "offer"; effect: PlaneEffect; at: number }
   | { table: "plane_reservations"; op: "put"; row: PlaneReservation }
-  | { table: "plane_reservations"; op: "del"; key: string }
+  | { table: "plane_reservations"; op: "del"; key: string; kind?: PlaneReservation["kind"] }
   | { table: "plane_windows"; op: "put"; window: string; at: number }
-  | { table: "plane_windows"; op: "del"; window: string };
+  | { table: "plane_windows"; op: "del"; window: string }
+  /** A steer into a live run's durable inbox (run-history item 40), written in
+   *  the decider's transaction: the row's sender is `plane` (record 0057's
+   *  amendment), and the run reads it at its next boundary like any follow-up. */
+  | { table: "run_inbox"; op: "push"; runId: string; message: Record<string, unknown> };
 
 /** The bot's own outcome for one dispatch, posted to `POST /plane/outcome`
  *  under `plane.admission: shadow` (orchestration-plane item 8): `proceeded`, `refused:<code>` or
@@ -244,7 +310,116 @@ export function decide(state: PlaneState, event: PlaneEvent): PlaneDecision {
       return onObservation(state, event);
     case "reask":
       return onReask(state, event);
+    case "heartbeat":
+      return onHeartbeat(state, event);
+    case "provider_level":
+      return onProviderLevel(state, event);
+    case "park":
+      return onPark(state, event);
   }
+}
+
+/** The inbox row a plane steer writes: sender `plane` (record 0064), the sentence as
+ *  the text, and the cause under `plane` so the run page can say why. */
+function planeInboxMessage(text: string, at: number, plane: Record<string, unknown>): Record<string, unknown> {
+  return { text, at, userId: "plane", userName: "plane", plane };
+}
+
+/** The checkpoint steer (record 0064, "The backpressure contract"): a stalled
+ *  or push-less coding run reads one fixed sentence at its next boundary. At
+ *  most one reservation per run per round per cause, and — the sentence being
+ *  the same for every cause — one inbox row per run per round: a second
+ *  heartbeat in the same round writes none, a new round writes one again. */
+function onHeartbeat(
+  state: PlaneState,
+  event: { kind: "heartbeat"; at: number; runId: string; facts: HeartbeatFacts; noPushMs?: number; noBoundMs?: number },
+): PlaneDecision {
+  const { facts } = event;
+  if (!facts.coding) return { state, effects: [], writes: [] };
+  const noPushMs = event.noPushMs ?? minutesToMs(PLANE.noPushMinutes);
+  const noBoundMs = event.noBoundMs ?? minutesToMs(PLANE.noBoundMinutes);
+  const causes: SteerCause[] = [];
+  if (facts.inFlight && event.at - facts.inFlight.sinceAt > (facts.inFlight.boundMs ?? noBoundMs))
+    causes.push("long_call");
+  if (event.at - Math.max(facts.pushedHead?.at ?? 0, facts.startedAt) > noPushMs) causes.push("no_push");
+  const roundPrefix = `${event.runId}#${facts.round}#`;
+  const seen = (cause: SteerCause) =>
+    state.reservations.some((r) => r.kind === "steer" && r.key === `${roundPrefix}${cause}`);
+  const fresh = causes.filter((c) => !seen(c));
+  if (fresh.length === 0) return { state, effects: [], writes: [] };
+  const roundSteered = state.reservations.some((r) => r.kind === "steer" && r.key.startsWith(roundPrefix));
+  const rows: PlaneReservation[] = fresh.map((cause) => ({
+    kind: "steer",
+    key: `${roundPrefix}${cause}`,
+    runId: event.runId,
+    at: event.at,
+  }));
+  const writes: PlaneWrite[] = rows.map((row) => ({ table: "plane_reservations", op: "put", row }));
+  if (!roundSteered)
+    writes.push({
+      table: "run_inbox",
+      op: "push",
+      runId: event.runId,
+      message: planeInboxMessage(CHECKPOINT_STEER_SENTENCE, event.at, {
+        steer: "checkpoint",
+        causes: fresh,
+        round: facts.round,
+      }),
+    });
+  return { state: { ...state, reservations: [...state.reservations, ...rows] }, effects: [], writes };
+}
+
+/** A provider's level (record 0064): the row is written under name `provider`
+ *  (`up` ≡ `below`, `down` ≡ `above`), and an `up` re-issues every turn held
+ *  parked on the provider — one steer each, the park row deleted with it —
+ *  then walks the queue for anything waiting on `provider_up`. */
+function onProviderLevel(
+  state: PlaneState,
+  event: { kind: "provider_level"; at: number; provider: string; level: "up" | "down" },
+): PlaneDecision {
+  const row: PlaneLevelRow = {
+    resident: event.provider,
+    name: "provider",
+    side: event.level === "up" ? "below" : "above",
+    reportedAt: event.at,
+    generation: "",
+  };
+  const levels = [...state.levels.filter((l) => !(l.resident === event.provider && l.name === "provider")), row];
+  const writes: PlaneWrite[] = [{ table: "plane_levels", op: "put", row }];
+  let next = { ...state, levels };
+  if (event.level === "down") return { state: next, effects: [], writes };
+  const parked = next.reservations.filter((r) => r.kind === "park" && r.key.startsWith(`${event.provider}#`));
+  for (const p of parked) {
+    writes.push({
+      table: "run_inbox",
+      op: "push",
+      runId: p.runId,
+      message: planeInboxMessage(reissueSteerSentence(event.provider), event.at, {
+        steer: "reissue",
+        provider: event.provider,
+      }),
+    });
+    writes.push({ table: "plane_reservations", op: "del", key: p.key, kind: "park" });
+  }
+  if (parked.length > 0) next = { ...next, reservations: next.reservations.filter((r) => !parked.includes(r)) };
+  const walked = walk(next, event.at);
+  return { ...walked, writes: [...writes, ...walked.writes] };
+}
+
+/** A run parked on its provider: one park row — a second park of the same run
+ *  on the same provider is the same wait, never a second steer later. */
+function onPark(
+  state: PlaneState,
+  event: { kind: "park"; at: number; runId: string; provider: string },
+): PlaneDecision {
+  const key = `${event.provider}#${event.runId}`;
+  if (state.reservations.some((r) => r.kind === "park" && r.key === key)) return { state, effects: [], writes: [] };
+  const row: PlaneReservation = { kind: "park", key, runId: event.runId, at: event.at };
+  return {
+    state: { ...state, reservations: [...state.reservations, row] },
+    effects: [],
+    writes: [{ table: "plane_reservations", op: "put", row }],
+  };
 }
 
 /** The `/plane/admit` answer (record 0064, "The queue"): `admitted` with the
@@ -284,7 +459,9 @@ export function waitingWords(waiting: PlaneCondition[]): string {
             ? `a seat on ${c.resident}`
             : c.kind === "memory"
               ? `memory on ${c.resident}`
-              : `the ${c.window} window`,
+              : c.kind === "provider_up"
+                ? `the ${c.provider} provider`
+                : `the ${c.window} window`,
     )
     .join(", then ");
 }
@@ -299,7 +476,8 @@ function unmetConditionsOf(state: PlaneState, event: PlaneAskEvent): PlaneCondit
   const out: PlaneCondition[] = [];
   if (
     event.stage === "admission" &&
-    (state.liveThreads.includes(event.threadKey) || state.reservations.some((r) => r.key === event.threadKey))
+    (state.liveThreads.includes(event.threadKey) ||
+      state.reservations.some((r) => r.kind === "thread" && r.key === event.threadKey))
   )
     out.push({ kind: "thread_free", threadKey: event.threadKey, met: false });
   if (!event.restartOf)
@@ -337,6 +515,7 @@ function sameCondition(a: PlaneCondition, b: PlaneCondition): boolean {
   if (a.kind === "window_open" && b.kind === "window_open") return a.window === b.window;
   if ((a.kind === "seat" && b.kind === "seat") || (a.kind === "memory" && b.kind === "memory"))
     return a.resident === b.resident;
+  if (a.kind === "provider_up" && b.kind === "provider_up") return a.provider === b.provider;
   return true; // deploy_settled has one subject
 }
 
@@ -381,7 +560,7 @@ function onAsk(state: PlaneState, event: PlaneAskEvent): PlaneDecision {
 
 function onSealed(state: PlaneState, event: { kind: "sealed"; at: number; threadKey: string }): PlaneDecision {
   const liveThreads = state.liveThreads.filter((t) => t !== event.threadKey);
-  const reservations = state.reservations.filter((r) => r.key !== event.threadKey);
+  const reservations = state.reservations.filter((r) => r.kind !== "thread" || r.key !== event.threadKey);
   const freed = liveThreads.length !== state.liveThreads.length || reservations.length !== state.reservations.length;
   if (!freed && !hasWaiting(state, event.threadKey)) return { state, effects: [], writes: [] };
   const writes: PlaneWrite[] =
@@ -554,7 +733,10 @@ function conditionsMet(state: PlaneState, row: PlaneQueueRow): boolean {
   return row.conditions.every((c) => {
     switch (c.kind) {
       case "thread_free":
-        return !state.liveThreads.includes(c.threadKey) && !state.reservations.some((r) => r.key === c.threadKey);
+        return (
+          !state.liveThreads.includes(c.threadKey) &&
+          !state.reservations.some((r) => r.kind === "thread" && r.key === c.threadKey)
+        );
       case "window_open":
         return !state.openWindows.includes(c.window);
       case "deploy_settled":
@@ -565,6 +747,9 @@ function conditionsMet(state: PlaneState, row: PlaneQueueRow): boolean {
         return residentSideOf(state.levels, c.resident, "seat") === "below";
       case "memory":
         return residentSideOf(state.levels, c.resident, "memory") === "below";
+      // A provider condition is met only by the proxy's `up` report (stored `below`).
+      case "provider_up":
+        return residentSideOf(state.levels, c.provider, "provider") === "below";
     }
   });
 }

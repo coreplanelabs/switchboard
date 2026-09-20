@@ -2,7 +2,7 @@
 // and a run corpus spanning every channel visibility and several users.
 // Test-only; not re-exported by index.ts.
 
-import { browserActions, CHAT_OPEN_ACTIONS } from "./grants.js";
+import { browserActions, CHAT_OPEN_ACTIONS, PLANE_ACTOR_ID, PLANE_GRANTS } from "./grants.js";
 import type { Actor, ActorKind, ChannelVisibility, Grants, Resource } from "./types.js";
 
 /** The command groups the fixture's operator and browser translate over (a subset of the catalogue's). */
@@ -201,6 +201,8 @@ export const ACTORS = {
   coordinator: actor("service", "http:coordinator", { actions: new Set(["coordinator:step"]) }),
   /** The same bearer as the plan runner holds it: the step grant and the merge grant. */
   runner: actor("service", "http:coordinator", { actions: new Set(["coordinator:step", "plan:merge"]) }),
+  /** The plane's system actor (record 0064): the ledger object's steer writes, one standing grant. */
+  plane: actor("service", PLANE_ACTOR_ID, PLANE_GRANTS),
   /** An agent holding everything, acting for the non-member (never exceeds the principal). */
   agentForNonMember: actor(
     "agent",

@@ -23,7 +23,7 @@ import type { AssembledTranscript } from "./transcript.js";
 import type { FenceResult, Notepad, SessionHit } from "./types.js";
 import { PermanentStoreError, RouteMissingError } from "../runStoreWorker.js";
 import { createAppendFlusher } from "./flusher.js";
-import type { RunLedger } from "./ledger.js";
+import type { HeartbeatFacts, RunLedger } from "./ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost } from "../plane/decide.js";
 import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./ledger.js";
 import { requestIndex, sessionKey } from "./sessionLog.js";
@@ -236,6 +236,11 @@ export interface LedgerRun {
 export interface AdoptRunRequest {
   runId: string;
   threadKey: string;
+  /** The row's meta and original start, so an adopted coding run keeps its
+   *  heartbeat facts (record 0064) — the backpressure contract must survive a
+   *  restart, not end at it. Absent only where the caller has no row to read. */
+  meta?: LiveRunMeta;
+  startedAt?: number;
   /** The row's state, so patches merge into what the previous generation recorded. */
   state: RunState;
   /** The last step record's number; the next step write is `lastStep + 1`. */
@@ -331,6 +336,9 @@ export interface LedgerWriteThrough {
    *  decider judges the level just seen; a failed or missing route is one
    *  warning — the plane must never take the door down. */
   planeLevel(post: PlaneLevelPost): Promise<void>;
+  /** A run parked on its provider (record 0064): fire and forget like the
+   *  level post — a failure is one warning, the run's own lease still counts. */
+  planePark(runId: string, provider: string): Promise<void>;
   /** A refusal-by-name met at attach or exec (record 0064): `reentered` false when the
    *  plane never held the run — the caller's own fallback stands. */
   planeObserve(post: PlaneObservePost): Promise<{ reentered: boolean }>;
@@ -394,6 +402,8 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
     // No ledger, no plane: the post has nowhere to land and shadow is moot.
   }
   async planeLevel(_post: PlaneLevelPost): Promise<void> {}
+
+  async planePark(_runId: string, _provider: string): Promise<void> {}
 
   async planeObserve(_post: PlaneObservePost): Promise<{ reentered: boolean }> {
     return { reentered: false };
@@ -759,20 +769,40 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       ...(opts.schedule ? { schedule: opts.schedule } : {}),
     });
 
+    /** The heartbeat body's raw material (record 0064): assembled from what
+     *  this write-through already sees — the step reports, the event stream and
+     *  the run's meta. Every stamp is one it was handed, never a clock read. */
+    private readonly coding: boolean;
+    private readonly runStartedAt: number;
+    private factRound = 0;
+    private factInFlight: HeartbeatFacts["inFlight"];
+    private factLastEventAt: number | undefined;
+    private factPushedHead: HeartbeatFacts["pushedHead"];
+    /** Each in-flight call's dispatch stamp, from its `tool_call` event's `at`
+     *  — pruned at every step write to the step's own calls, so it never grows. */
+    private readonly factCallStarts = new Map<string, number>();
+
     constructor(
-      req: Pick<OpenRunRequest, "runId" | "threadKey" | "state" | "onStop" | "onFenced"> & { meta?: LiveRunMeta },
+      req: Pick<OpenRunRequest, "runId" | "threadKey" | "state" | "onStop" | "onFenced"> & {
+        meta?: LiveRunMeta;
+        startedAt?: number;
+      },
       from: { stepNo: number; lastSeq: number; resumable?: boolean; session?: RunSession } = {
         stepNo: 0,
         lastSeq: 0,
       },
     ) {
       this.hosted = req.meta?.hosted === true;
+      this.coding = req.meta?.agent === "coding";
+      this.runStartedAt = req.startedAt ?? 0;
       this.runId = req.runId;
       this.threadKey = req.threadKey;
       this.state = req.state ?? {};
       this.onStop = req.onStop;
       this.onFenced = req.onFenced;
       this.stepNo = from.stepNo;
+      // An adopted run's next heartbeat says the round it is on, not round zero.
+      this.factRound = from.stepNo;
       this.lastSeq = from.lastSeq;
       this.adopted = from.resumable === true;
       this.sessionRow = from.session;
@@ -949,6 +979,24 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         turn: report.turn,
         iteration: report.iteration,
       };
+      // The heartbeat body's step facts (record 0064): the round is the step
+      // counter, and the call in flight is stamped from the stream's last move
+      // — the step report lands as the assistant turn does, before the tools run.
+      this.factRound = record.step;
+      const kept = new Set(record.inFlight.map((c) => c.callId));
+      for (const id of this.factCallStarts.keys()) if (!kept.has(id)) this.factCallStarts.delete(id);
+      const call = record.inFlight[0];
+      this.factInFlight = call
+        ? {
+            callId: call.callId,
+            tool: call.tool,
+            // The call's own dispatch stamp when its `tool_call` event already
+            // landed; the stream's last move as a floor until it does (the
+            // event corrects it below) — never a clock read.
+            sinceAt: this.factCallStarts.get(call.callId) ?? this.factLastEventAt ?? this.runStartedAt,
+            ...(call.boundMs !== undefined ? { boundMs: call.boundMs } : {}),
+          }
+        : undefined;
       for (let attempt = 1; ; attempt++) {
         try {
           const result = await ledger.step(this.runId, gen, record, turns, this.sessionRow?.key);
@@ -968,6 +1016,28 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     event(event: RunEvent, seq: number): void {
       if (this.detached || this.finished) return;
       this.lastSeq = seq;
+      // The heartbeat body's stream facts (record 0064): the last event's
+      // time and the newest pushed head with its `clean` fact ride each beat.
+      const e = event as { type?: string; at?: number; ref?: string; sha?: string; clean?: boolean; callId?: string };
+      if (typeof e.at === "number") this.factLastEventAt = e.at;
+      // The in-flight fact tracks the call itself (record 0064): its dispatch
+      // stamps `sinceAt`, and its result clears it — a call that finished must
+      // never read as still running past its bound.
+      if (e.type === "tool_call" && typeof e.callId === "string" && typeof e.at === "number") {
+        this.factCallStarts.set(e.callId, e.at);
+        if (this.factInFlight?.callId === e.callId) this.factInFlight = { ...this.factInFlight, sinceAt: e.at };
+      }
+      if (e.type === "tool_result" && typeof e.callId === "string") {
+        this.factCallStarts.delete(e.callId);
+        if (this.factInFlight?.callId === e.callId) this.factInFlight = undefined;
+      }
+      if (e.type === "pushed_head" && typeof e.ref === "string" && typeof e.sha === "string")
+        this.factPushedHead = {
+          ref: e.ref,
+          sha: e.sha,
+          at: e.at ?? this.factLastEventAt ?? this.runStartedAt,
+          ...(e.clean !== undefined ? { clean: e.clean } : {}),
+        };
       this.flusher.push({ ...event, seq });
     }
 
@@ -1054,7 +1124,21 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private async beat(): Promise<void> {
       if (this.detached || this.finished) return;
       try {
-        const result = await ledger.heartbeat(this.runId, gen, leaseMs);
+        // The heartbeat body (record 0064): only a coding run with a known
+        // start is judged for the checkpoint steer — a hosted parent or an
+        // adopted row without its start still extends its lease, facts-less.
+        const facts: HeartbeatFacts | undefined =
+          this.coding && this.runStartedAt > 0
+            ? {
+                round: this.factRound,
+                coding: true,
+                startedAt: this.runStartedAt,
+                ...(this.factInFlight !== undefined ? { inFlight: this.factInFlight } : {}),
+                ...(this.factLastEventAt !== undefined ? { lastEventAt: this.factLastEventAt } : {}),
+                ...(this.factPushedHead !== undefined ? { pushedHead: this.factPushedHead } : {}),
+              }
+            : undefined;
+        const result = await ledger.heartbeat(this.runId, gen, leaseMs, facts);
         if (!result.ok) {
           this.detach(`heartbeat refused (${result.reason})`);
           return;
@@ -1258,7 +1342,17 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       try {
         await ledger.planeLevel(post);
       } catch (err) {
-        warn(`[ledger] plane level post failed for ${post.resident}: ${describe(err)} — the plane reads it stale`);
+        const subject = "resident" in post ? post.resident : post.provider;
+        warn(`[ledger] plane level post failed for ${subject}: ${describe(err)} — the plane reads it stale`);
+      }
+    },
+    async planePark(runId, provider) {
+      try {
+        await ledger.planePark(runId, provider);
+      } catch (err) {
+        warn(
+          `[ledger] plane park failed for run ${runId} on ${provider}: ${describe(err)} — the run runs on its lease`,
+        );
       }
     },
     async planeObserve(post) {

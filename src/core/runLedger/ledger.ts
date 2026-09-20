@@ -6,7 +6,16 @@
 // means the transcript is complete up to it.
 
 import type { RunRecord } from "../runRecord.js";
-import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost, PlaneQueueRow } from "../plane/decide.js";
+import type {
+  HeartbeatFacts,
+  PlaneAckOutcome,
+  PlaneAskAnswer,
+  PlaneEffect,
+  PlaneOutcomePost,
+  PlaneQueueRow,
+} from "../plane/decide.js";
+
+export type { HeartbeatFacts } from "../plane/decide.js";
 
 /** The admission-stage ask's body (record 0064, "The queue"): the thread key,
  *  the requester and the request in the durable inbox's shape — what the
@@ -29,12 +38,16 @@ export interface PlaneAdmitPost {
 /** A resident's level report (record 0064): the side of the line a
  *  resident answer's `levels` field carried, forwarded to `POST /plane/level`.
  *  `drain` is the registry's fleet drain (`above` set, `below` cleared or expired). */
-export interface PlaneLevelPost {
-  resident: string;
-  name: "seat" | "memory" | "drain";
-  side: "below" | "above";
-  generation: string;
-}
+export type PlaneLevelPost =
+  | {
+      resident: string;
+      name: "seat" | "memory" | "drain";
+      side: "below" | "above";
+      generation: string;
+    }
+  /** The model proxy's provider level (record 0064): `up` on a relayed
+   *  success, `down` on a failure past its one retry. */
+  | { provider: string; name: "provider"; side: "up" | "down" };
 
 /** A refusal-by-name met at attach or exec (record 0064): the plane
  *  re-enters an admitted run's queue row at its old position. */
@@ -130,7 +143,11 @@ export interface RunLedger {
   /** Replace the notepad whole under the owner's fence (item 10); `text` is at
    *  most `NOTEPAD_MAX_BYTES` — the caller refuses more before asking. */
   writeNotepad(key: string, gen: string, text: string): Promise<FenceResult>;
-  heartbeat(runId: string, gen: string, leaseMs: number): Promise<HeartbeatResult>;
+  /** `facts` is the heartbeat body (record 0064, "The backpressure contract"):
+   *  the round, the in-flight call, the last event and the newest pushed head
+   *  — what the plane judges the checkpoint steer on. Optional: an owner
+   *  without facts (a hosted parent, an older wiring) still extends its lease. */
+  heartbeat(runId: string, gen: string, leaseMs: number, facts?: HeartbeatFacts): Promise<HeartbeatResult>;
   append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult>;
   setState(runId: string, gen: string, state: RunState): Promise<FenceResult>;
   /** Any generation: a steer arrives on whichever container is up. */
@@ -187,6 +204,9 @@ export interface RunLedger {
    *  levels changed; fire-and-forget on every path but the resident-stage ask,
    *  which awaits it so the decider judges the level just seen. */
   planeLevel(post: PlaneLevelPost): Promise<void>;
+  /** A run parked on its provider (record 0064): the proxy could not
+   *  complete the turn after its retry; the provider's next `up` steers it. */
+  planePark(runId: string, provider: string): Promise<void>;
   /** A refusal-by-name met at attach or exec (record 0064). */
   planeObserve(post: PlaneObservePost): Promise<{ reentered: boolean }>;
   /** `runs stop` on a queued id: the waiting row goes withdrawn; false for an

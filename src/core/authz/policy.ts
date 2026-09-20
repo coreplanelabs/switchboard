@@ -63,6 +63,12 @@ export const POLICY: readonly Rule[] = [
   // NAMED run (`authorizeSteerOwner`, authorization item 16a) — the requester,
   // a linked id, or `runs:write` — which no command-door row can see.
   { action: "steer:write", resource: "command", when: [grant("steer:write")] },
+  // The plane's checkpoint steer (record 0064): the system actor `plane`
+  // (`PLANE_ACTOR_ID`, a `service` actor holding `PLANE_GRANTS`' one standing
+  // `steer:write`) writes the steer into a write-preset run's inbox on the
+  // ledger object itself, sender `plane`; this row records that authority in
+  // the one table even though the object, not the bot, executes the write.
+  { action: "steer:write", resource: "run", actorKinds: ["service"], when: [grant("steer:write")] },
 
   // ── conversations ────────────────────────────────────────────────────────
   // Who may point the bot at another thread (record 0037). Asked for a

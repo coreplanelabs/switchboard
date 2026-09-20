@@ -1265,6 +1265,100 @@ describe("events, state, heartbeat", () => {
     expect(t.heartbeats()).toBe(0);
   });
 
+  it("a coding run's heartbeat carries the facts body — the round, the in-flight call with its bound, the last event's time and the newest pushed head with its clean fact (record 0064); a read run beats facts-less", async () => {
+    const { ledger, wt, t } = harness();
+    const run = (await openRun(
+      wt,
+      openReq({
+        meta: {
+          channelId: "slack:C1",
+          userId: "slack:UALICE",
+          threadKey: "slack:C1:1.0",
+          agent: "coding",
+          model: "p/m",
+        },
+      }),
+    ))!;
+    run.event({ type: "input", messageId: "m1", text: "go", at: 9_500 }, 1);
+    await run.step(step({ inFlight: [{ callId: "c9", tool: "bash", boundMs: 120_000 }] }));
+    run.event({ type: "pushed_head", ref: "feat/x", sha: "a".repeat(40), by: "push", clean: true, at: 9_900 }, 2);
+    await t.beat();
+    const last = ledger.heartbeatFacts.at(-1)!;
+    expect(last.facts).toEqual({
+      round: 1,
+      coding: true,
+      startedAt: 9_000,
+      inFlight: { callId: "c9", tool: "bash", sinceAt: 9_500, boundMs: 120_000 },
+      lastEventAt: 9_900,
+      pushedHead: { ref: "feat/x", sha: "a".repeat(40), at: 9_900, clean: true },
+    });
+    // A read preset (the default openReq agent) beats with no facts at all.
+    const read = (await openRun(wt, openReq({ runId: "r2", threadKey: "slack:C1:2.0" })))!;
+    await t.beat();
+    expect(ledger.heartbeatFacts.filter((f) => f.runId === "r2").every((f) => f.facts === undefined)).toBe(true);
+    await run.close();
+    await read.close();
+  });
+
+  it("the in-flight fact tracks the call itself (record 0064): its tool_call event stamps sinceAt and its tool_result clears it, so a finished call never reads as running", async () => {
+    const { ledger, wt, t } = harness();
+    const run = (await openRun(
+      wt,
+      openReq({
+        meta: {
+          channelId: "slack:C1",
+          userId: "slack:UALICE",
+          threadKey: "slack:C1:1.0",
+          agent: "coding",
+          model: "p/m",
+        },
+      }),
+    ))!;
+    await run.step(step({ inFlight: [{ callId: "c9", tool: "bash", boundMs: 120_000 }] }));
+    run.event({ type: "tool_call", tool: "bash", summary: "sleep 60", callId: "c9", at: 20_000 }, 1);
+    await t.beat();
+    expect(ledger.heartbeatFacts.at(-1)!.facts!.inFlight).toEqual({
+      callId: "c9",
+      tool: "bash",
+      sinceAt: 20_000, // the dispatch stamp, not the stream's last move at step time
+      boundMs: 120_000,
+    });
+    run.event({ type: "tool_result", tool: "bash", ok: true, summary: "done", callId: "c9", at: 30_000 }, 2);
+    await t.beat();
+    expect(ledger.heartbeatFacts.at(-1)!.facts!.inFlight).toBeUndefined();
+    await run.close();
+  });
+
+  it("an adopted coding run keeps the backpressure contract (record 0064): the row's meta and start ride the adopt and its next heartbeat carries facts at the adopted round", async () => {
+    const { ledger, wt, t } = harness();
+    // The rows exist from a previous generation's opens; the adopt takes them up.
+    await (await openRun(wt, openReq({ runId: "r7", threadKey: "slack:C1:7.0" })))!.close();
+    await (await openRun(wt, openReq({ runId: "r8", threadKey: "slack:C1:8.0" })))!.close();
+    const adopted = wt.adopt({
+      runId: "r7",
+      threadKey: "slack:C1:7.0",
+      meta: {
+        channelId: "slack:C1",
+        userId: "slack:UALICE",
+        threadKey: "slack:C1:7.0",
+        agent: "coding",
+        model: "p/m",
+      },
+      startedAt: 9_000,
+      state: {},
+      lastStep: 3,
+      lastSeq: 12,
+    });
+    const bare = wt.adopt({ runId: "r8", threadKey: "slack:C1:8.0", state: {}, lastStep: 1, lastSeq: 0 });
+    await t.beat();
+    const last = ledger.heartbeatFacts.filter((f) => f.runId === "r7").at(-1)!;
+    expect(last.facts).toEqual({ round: 3, coding: true, startedAt: 9_000 });
+    // Without the row's meta (a caller with nothing to read) the beat is facts-less, as before.
+    expect(ledger.heartbeatFacts.filter((f) => f.runId === "r8").every((f) => f.facts === undefined)).toBe(true);
+    await adopted.close();
+    await bare.close();
+  });
+
   it("a heartbeat the ledger refuses detaches the run and stops the timer", async () => {
     const { ledger, wt, t, warnings } = harness();
     const run = (await openRun(wt, openReq()))!;

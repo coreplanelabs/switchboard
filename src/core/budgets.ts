@@ -16,6 +16,10 @@
 // Workflow-driven coordinator and the deploy Workers can bundle it — the
 // dependency runs registry → budgets, never the reverse.
 
+export const SECOND_MS = 1_000;
+
+export const secondsToMs = (seconds: number): number => seconds * SECOND_MS;
+
 export const MINUTE_MS = 60_000;
 
 /** Minutes → milliseconds, for a duration a request names in minutes (a drain's
@@ -223,7 +227,15 @@ export const SHIP_WAIT = { marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes:
  *  it, a reservation's window, and the default re-ask cadence — how often a
  *  silent resident something waits on is probed (`plane.reaskMinutes`
  *  overrides it per deployment). */
-export const PLANE = { recentMinutes: 60, reservationMinutes: 2, reaskMinutes: 2 } as const;
+export const PLANE = {
+  recentMinutes: 60,
+  reservationMinutes: 2,
+  reaskMinutes: 2,
+  /** A coding round with no pushed head past this is steered once (record 0064, "The backpressure contract"). */
+  noPushMinutes: 15,
+  /** The line an in-flight call with NO declared bound is judged against for the same steer. */
+  noBoundMinutes: 20,
+} as const;
 
 /** The named amounts a lease holds back, in minutes. Each stands for a step
  *  every run or round pays: `provision` is attach and restore before the

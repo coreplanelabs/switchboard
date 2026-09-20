@@ -22,7 +22,9 @@ export interface StepReport {
    *  after `turns`, and it counts as one turn of the conversation. */
   compaction?: CompactionEntry;
   /** The tool calls this step is about to dispatch, by call id. */
-  inFlight: { callId: string; tool: string }[];
+  /** `boundMs` is the bound the call declared (a bash `timeout`), when it
+   *  stated one — what the plane judges a `long_call` steer against (record 0064). */
+  inFlight: { callId: string; tool: string; boundMs?: number }[];
   turn: number;
   iteration: number;
   remainingMs: number;

@@ -975,6 +975,13 @@ export async function runBot(): Promise<void> {
       ...(costsCfg?.prices ? { prices: () => costsCfg.prices } : {}),
       secrets: processSecrets,
       clock: systemClock,
+      // The plane's provider seam (model-proxy item 12a; record 0064): a level
+      // and a park land on the write-through's plane routes, fire and forget —
+      // the null write-through swallows both where no ledger is configured.
+      plane: {
+        level: (provider, side) => void runLedger.planeLevel({ provider, name: "provider", side }),
+        park: (runId, provider) => void runLedger.planePark(runId, provider),
+      },
     });
     // The harness routes (docs/reference/specs/harness-pi.md item 7): what a
     // run's pi extension asks over the run's own bearer — its relayed tool

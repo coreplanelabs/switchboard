@@ -105,6 +105,15 @@ export interface ModelProxyDeps {
    *  at startup, so unlike `providers` a reload reaches it with the process,
    *  not before. Absent → no operator layer in the turn's price. */
   prices?: () => ModelPriceTable;
+  /** The plane's provider seam (record 0064): `level` reports the provider
+   *  `up` on a relayed success and `down` on a failure past the one retry
+   *  (`createModelProxyHandler` dedupes to changes, so a healthy provider is
+   *  not re-reported every turn); `park` parks the failing turn's run on
+   *  `provider_up`. Both fire and forget — the proxy never waits on the plane. */
+  plane?: {
+    level(provider: string, side: "up" | "down"): void;
+    park(runId: string, provider: string): void;
+  };
 }
 
 export interface ProxyRequest {
@@ -750,16 +759,40 @@ export async function handleAdmitted(
     );
   const outcome = (status: number, outBytes: number) =>
     `[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → ${status} in=${Buffer.byteLength(payload)} out=${outBytes} ${Math.max(0, deps.clock() - startedAt)}ms`;
-  let res: Response;
-  try {
-    res = await (deps.fetch ?? fetch)(upstream.url, {
+  // One retry TOTAL on a transport failure or a 5xx (record 0064): the two
+  // failure shapes share it, so a turn makes at most two upstream calls. A
+  // failure past the retry is the provider's level going `down` — reported to
+  // the plane with the run parked on `provider_up` — and the error is still
+  // relayed (the harness's held turn reads the steer). A client abort says
+  // nothing about the provider: nothing is retried and nothing is reported.
+  const call = (): Promise<Response> =>
+    (deps.fetch ?? fetch)(upstream.url, {
       method: "POST",
       headers: upstream.headers,
       body: payload,
       ...(req.signal ? { signal: req.signal } : {}),
     });
+  const providerDown = () => {
+    deps.plane?.level(grant.providerName, "down");
+    deps.plane?.park(grant.runId, grant.providerName);
+  };
+  const aborted = () => req.signal?.aborted === true;
+  let res: Response | undefined;
+  let failure: unknown;
+  try {
+    res = await call();
   } catch (err) {
-    span.fail(err);
+    failure = err;
+  }
+  if ((res === undefined || res.status >= 500) && !aborted()) {
+    const retried = await call().catch(() => undefined);
+    // A retry that also failed transport keeps the first answer: a 5xx body
+    // relays as it came; nothing at all is the 502 below.
+    if (retried !== undefined) res = retried;
+  }
+  if ((res === undefined || res.status >= 500) && !aborted()) providerDown();
+  if (res === undefined) {
+    span.fail(failure ?? new Error("upstream unreachable"));
     span.end("error");
     log(`[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → upstream unreachable`);
     return refusalResponse(shape, 502, "upstream_unreachable", "the model provider did not answer");
@@ -771,6 +804,9 @@ export async function handleAdmitted(
     log(outcome(res.status, text.length));
     return { status: res.status, headers, body: text };
   }
+  // A relayed success is the provider's level `up` (record 0064): the plane
+  // re-issues every turn held parked on the provider, whichever run relayed it.
+  deps.plane?.level(grant.providerName, "up");
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream") && res.body) {
     const meter = new SseMeter(shape);
@@ -855,6 +891,24 @@ export function bodyKindOf(contentType: string | undefined): BodyKind {
  *  error page — is ever rendered by a browser as a document. */
 export function createModelProxyHandler(deps: ModelProxyDeps): (req: HttpRequest, res: ServerResponse) => void {
   const log = deps.log ?? ((line: string) => console.log(line));
+  // The level dedupe (record 0064): a provider's side is posted to the
+  // plane on change, so a healthy provider is not re-reported every turn — the
+  // first success after a `down` is what flips `provider_up` and re-issues the
+  // held turns.
+  const lastSide = new Map<string, "up" | "down">();
+  const planeDeps: ModelProxyDeps = deps.plane
+    ? {
+        ...deps,
+        plane: {
+          ...deps.plane,
+          level: (provider, side) => {
+            if (lastSide.get(provider) === side) return;
+            lastSide.set(provider, side);
+            deps.plane?.level(provider, side);
+          },
+        },
+      }
+    : deps;
   return (req, res) => {
     void (async () => {
       const path = (req.url ?? "/").split("?")[0];
@@ -872,7 +926,7 @@ export function createModelProxyHandler(deps: ModelProxyDeps): (req: HttpRequest
         res.end(typeof r.body === "string" ? r.body : undefined);
       };
       try {
-        const door = decideDoor(req.method, path, req.headers, deps.bearers);
+        const door = decideDoor(req.method, path, req.headers, planeDeps.bearers);
         if (!door.ok) {
           log(`[model-proxy] ${door.response.status} ${door.code}${door.runId ? ` run=${door.runId}` : ""}`);
           write(door.response);
@@ -886,7 +940,7 @@ export function createModelProxyHandler(deps: ModelProxyDeps): (req: HttpRequest
         const result = await handleAdmitted(
           door,
           { method: req.method, path, headers: req.headers, body: req, signal: controller.signal },
-          deps,
+          planeDeps,
         );
         if (typeof result.body === "string") {
           write(result);

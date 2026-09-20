@@ -50,7 +50,7 @@ import {
   RUN_STORE_TIMEOUT_MS,
   TransientStoreError,
 } from "./runStoreWorker.js";
-import type { FinishResult, HeartbeatResult, RunLedger } from "./runLedger/ledger.js";
+import type { FinishResult, HeartbeatFacts, HeartbeatResult, RunLedger } from "./runLedger/ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost, PlaneQueueRow } from "./plane/decide.js";
 import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./runLedger/ledger.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./runLedger/sessionLog.js";
@@ -349,9 +349,15 @@ export class WorkerRunLedger implements RunLedger {
     return this.fenceResult(await this.post("/runs/session/notepad/write", { key, gen, text }));
   }
 
-  async heartbeat(runId: string, gen: string, leaseMs: number): Promise<HeartbeatResult> {
+  async heartbeat(runId: string, gen: string, leaseMs: number, facts?: HeartbeatFacts): Promise<HeartbeatResult> {
     this.checkIds(runId, gen);
-    const r = await this.post("/runs/heartbeat", { storeKey: this.opts.storeKey, runId, gen, leaseMs });
+    const r = await this.post("/runs/heartbeat", {
+      storeKey: this.opts.storeKey,
+      runId,
+      gen,
+      leaseMs,
+      ...(facts !== undefined ? { facts } : {}),
+    });
     const f = this.fenceResult(r);
     if (!f.ok) return f;
     return {
@@ -390,6 +396,10 @@ export class WorkerRunLedger implements RunLedger {
 
   async planeLevel(post: PlaneLevelPost): Promise<void> {
     await this.post("/plane/level", { storeKey: this.opts.storeKey, ...post });
+  }
+
+  async planePark(runId: string, provider: string): Promise<void> {
+    await this.post("/plane/park", { storeKey: this.opts.storeKey, runId, provider });
   }
 
   async planeObserve(post: PlaneObservePost): Promise<{ reentered: boolean }> {

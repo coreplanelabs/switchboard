@@ -1594,3 +1594,84 @@ describe("the plane's resident stage — /plane/level, /plane/observe, the re-as
     expect((await post("/plane/observe", { storeKey: key, runId: "r1", resident: "r", refusal: "" })).status).toBe(400);
   });
 });
+
+describe("the plane's checkpoint steers and the provider condition — the heartbeat body, /plane/park, /plane/level provider (record 0064)", () => {
+  const SENTENCE =
+    "finish the step you are on, push a checkpoint and end the round; start no new command; the resident takes your push";
+  const beat = (key: string, runId: string, facts?: Record<string, unknown>) =>
+    post("/runs/heartbeat", { storeKey: key, runId, gen: "g1", leaseMs: 30_000, ...(facts ? { facts } : {}) });
+  const facts = (round: number, over: Record<string, unknown> = {}) => ({
+    round,
+    coding: true,
+    startedAt: 1,
+    inFlight: { callId: "c1", tool: "bash", sinceAt: 1, boundMs: 1 },
+    ...over,
+  });
+  const inbox = async (key: string, runId: string) =>
+    (await post("/runs/inbox/read", { storeKey: key, runId, afterSeq: 0 })).data.items as Array<{
+      seq: number;
+      message: Record<string, unknown>;
+    }>;
+
+  it("a heartbeat whose facts cross a bound writes ONE inbox row — the fixed sentence, sender plane — in the heartbeat's own transaction; a second beat in the round writes none, a new round writes one, a second cause repeats no sentence", async () => {
+    const key = storeKey();
+    const t = "slack:C20:1.0";
+    await post("/runs/claim", claimBody(key, "r1", t));
+    expect((await beat(key, "r1", facts(1))).status).toBe(200);
+    let items = await inbox(key, "r1");
+    expect(items).toHaveLength(1);
+    expect(items[0].message).toMatchObject({ text: SENTENCE, userId: "plane" });
+    // Same round, same cause: nothing more; a second cause (no_push, far past the window) records its row but repeats no sentence.
+    await beat(key, "r1", facts(1));
+    await beat(key, "r1", facts(1, { inFlight: undefined, startedAt: 1, pushedHead: undefined }));
+    expect(await inbox(key, "r1")).toHaveLength(1);
+    // A new round steers once more.
+    await beat(key, "r1", facts(2));
+    items = await inbox(key, "r1");
+    expect(items).toHaveLength(2);
+    expect(items[1].message).toMatchObject({ text: SENTENCE, userId: "plane" });
+  });
+
+  it("a facts-less heartbeat and healthy facts steer nothing", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "r2", "slack:C20:2.0"));
+    await beat(key, "r2");
+    await beat(key, "r2", {
+      round: 1,
+      coding: true,
+      startedAt: Date.now(),
+      inFlight: { callId: "c", tool: "bash", sinceAt: Date.now(), boundMs: 600_000 },
+    });
+    expect(await inbox(key, "r2")).toEqual([]);
+  });
+
+  it("a provider down lands in plane_levels; a parked run is re-issued ONCE by the provider's next up — the reissue steer with sender plane, the park row deleted — and a repeat up writes nothing", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "r3", "slack:C20:3.0"));
+    expect(
+      (await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "down" })).data,
+    ).toEqual({ admitted: 0 });
+    expect((await post("/plane/park", { storeKey: key, runId: "r3", provider: "anthropic" })).data).toEqual({
+      parked: true,
+    });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const sql = (inst as unknown as { sql: SqlStorage }).sql;
+      expect(sql.exec(`SELECT resident, name, side FROM plane_levels`).toArray()).toEqual([
+        { resident: "anthropic", name: "provider", side: "above" },
+      ]);
+      expect(sql.exec(`SELECT kind, key FROM plane_reservations`).toArray()).toEqual([
+        { kind: "park", key: "anthropic#r3" },
+      ]);
+    });
+    await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "up" });
+    const items = await inbox(key, "r3");
+    expect(items).toHaveLength(1);
+    expect(items[0].message).toMatchObject({ userId: "plane", plane: { steer: "reissue", provider: "anthropic" } });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const sql = (inst as unknown as { sql: SqlStorage }).sql;
+      expect(sql.exec(`SELECT * FROM plane_reservations WHERE kind = 'park'`).toArray()).toEqual([]);
+    });
+    await post("/plane/level", { storeKey: key, name: "provider", provider: "anthropic", side: "up" });
+    expect(await inbox(key, "r3")).toHaveLength(1);
+  });
+});

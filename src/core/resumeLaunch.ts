@@ -187,6 +187,8 @@ export async function launchResumes(
       const adopted = deps.runLedger.adopt({
         runId: row.runId,
         threadKey: row.threadKey,
+        meta: row.meta,
+        startedAt: row.startedAt,
         state: row.state,
         lastStep: 0,
         lastSeq,

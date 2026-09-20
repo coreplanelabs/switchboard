@@ -12,7 +12,7 @@ import {
   reclaimPhase,
   selectReclaim,
 } from "./decisions.js";
-import type { FinishResult, HeartbeatResult, RunLedger } from "./ledger.js";
+import type { FinishResult, HeartbeatFacts, HeartbeatResult, RunLedger } from "./ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneOutcomePost, PlaneQueueRow } from "../plane/decide.js";
 import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./ledger.js";
 import {
@@ -217,10 +217,14 @@ export class InMemoryRunLedger implements RunLedger {
     return { ok: true };
   }
 
-  async heartbeat(runId: string, gen: string, leaseMs: number): Promise<HeartbeatResult> {
+  /** The heartbeat facts each beat carried, kept for assertions (record 0064). */
+  readonly heartbeatFacts: Array<{ runId: string; facts?: HeartbeatFacts }> = [];
+
+  async heartbeat(runId: string, gen: string, leaseMs: number, facts?: HeartbeatFacts): Promise<HeartbeatResult> {
     const row = this.live.get(runId);
     const fence = checkFence(row, gen);
     if (!fence.ok || !row) return fence;
+    this.heartbeatFacts.push({ runId, ...(facts !== undefined ? { facts } : {}) });
     row.leaseUntil = this.now() + leaseMs;
     // The in-memory ledger offers no plane effects; the field is present like
     // the Worker's answer (orchestration-plane; record 0064; orchestration-plane item 7).
@@ -264,6 +268,13 @@ export class InMemoryRunLedger implements RunLedger {
 
   async planeLevel(post: PlaneLevelPost): Promise<void> {
     this.planeLevels.push(post);
+  }
+
+  /** The parks, kept for assertions (record 0064). */
+  readonly planeParks: Array<{ runId: string; provider: string }> = [];
+
+  async planePark(runId: string, provider: string): Promise<void> {
+    this.planeParks.push({ runId, provider });
   }
 
   async planeObserve(post: PlaneObservePost): Promise<{ reentered: boolean }> {

@@ -431,6 +431,8 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
     const adopted = deps.runLedger.adopt({
       runId: restart.row.runId,
       threadKey: msg.threadKey,
+      meta: restart.row.meta,
+      startedAt: restart.row.startedAt,
       state: restart.row.state,
       lastStep: 0,
       lastSeq: 0,
@@ -454,6 +456,8 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
     const adopted = deps.runLedger.adopt({
       runId: resume.row.runId,
       threadKey: msg.threadKey,
+      meta: resume.row.meta,
+      startedAt: resume.row.startedAt,
       state: resume.row.state,
       lastStep: resume.lastStep.step,
       lastSeq: resume.lastSeq,
@@ -926,6 +930,10 @@ export async function adoptCarriedRun(deps: AdmissionDeps, ctx: AdmissionContext
     carried.ledgerRun = deps.runLedger.adopt({
       runId: resume.row.runId,
       threadKey: msg.threadKey,
+      // The row's meta and original start ride the adopt (record 0064): a
+      // resumed coding run keeps its heartbeat facts past the restart.
+      meta: resume.row.meta,
+      startedAt: resume.row.startedAt,
       state: resume.row.state,
       lastStep: resume.lastStep.step,
       lastSeq: resume.lastSeq,
