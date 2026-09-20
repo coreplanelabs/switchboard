@@ -33,7 +33,7 @@ export interface AttrDomain {
    *  row and the log line, never on a span. */
   intake: "addressed" | "silent";
   /** How the verdict was reached (`IntakeSource`). */
-  intakeSource: "model" | "mode" | "error" | "timeout";
+  intakeSource: "model" | "mode" | "question" | "error" | "timeout";
   /** What became of the receipt (`IntakeReceiptOutcome`). */
   intakeReceipt: "inserted" | "existing" | "failed" | "absent";
   // dispatch.* / run.* / post.*

@@ -1648,6 +1648,33 @@ describe("receiveSlackMessage — the intake gate (docs/reference/specs/slack-ch
     expect(input!.key).toBe(`CGATE:${ev.ts}`);
   });
 
+  it("the operator's own pending question rides the facts (issue 2046): the newest run's on-mode question sets pendingQuestion, so the reply is addressed without a mention", async () => {
+    const s = gateClient();
+    stubDownloads(s.calls);
+    const page: RunView[] = [
+      {
+        id: "door",
+        agent: "door",
+        userId: "slack:UASKER",
+        startedAt: 100_000,
+        finished: true,
+        operator: { mode: "on", outcome: "question", reason: "ambiguous", proposal: "agent:explore acme/company" },
+      },
+    ] as RunView[];
+    let input: IntakeInput | undefined;
+    const decide = vi.fn(async (i: IntakeInput): Promise<IntakeDecision> => {
+      input = i;
+      return { verdict: "addressed", reason: "the bot asked", source: "question", receipt: "inserted" };
+    });
+    const { gate } = gateOf({
+      decideIntake: decide as unknown as typeof decideIntake,
+      runs: { listRuns: async () => ({ runs: page, total: 1 }) } as unknown as SlackIntakeGate["runs"],
+    });
+    const ev = followUp({ thread: [{ user: "UASKER", text: "in acme/company add the action", ts: parentTs }] });
+    await receiveSlackMessage(s.client, ev, spanStub().span, POLICY, [], gate);
+    expect(input!.facts.pendingQuestion).toBe(true);
+  });
+
   it("wireIntakeGate prints the degraded startup line exactly once when the ledger is null, and never with one", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {

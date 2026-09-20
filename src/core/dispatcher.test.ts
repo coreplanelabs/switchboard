@@ -18145,6 +18145,97 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(fresh.invoked).toEqual(["help.show"]);
   });
 
+  // The question path (issue 2046; routing-and-config item 29): a question the
+  // operator asked is pending state on the thread — the person's next words are
+  // its answer, joined back onto the original ask and bound as the request
+  // would have been, whether or not the reply mentions the bot; the answer
+  // never reaches the router as a bare fragment.
+  const QUESTION_REQUEST = "in acme/company add the lgtm github action like you see in other org repos";
+  const QUESTION_TEXT = "Which repo has the lgtm action?";
+  const JOINED = `${QUESTION_REQUEST} — ${QUESTION_TEXT}: acme/tools is the repo`;
+  const questionThread = () =>
+    [
+      {
+        id: "prev",
+        startedAt: 0,
+        finished: true,
+        eventCount: 2,
+        operator: {
+          mode: "on",
+          outcome: "question",
+          reason: "ambiguous",
+          proposal: "agent:explore acme/company",
+          question: `${QUESTION_TEXT}\nDid you mean:\n\`agent:explore acme/company\``,
+          request: QUESTION_REQUEST,
+        },
+      },
+    ] as RunView[];
+
+  it("on: a free-text answer to a pending question joins the original ask — the operator decides the joined line, no mention needed, and its preset bind routes it (issue 2046)", async () => {
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    const operator = decides({ reason: "the ask", binds: [{ line: `agent:general ${JOINED}`, reason: "the ask" }] });
+    deps.operatorModel = operator;
+    deps.verifierModel = vi.fn<RouteModel>(async () => ({
+      tool: "verify",
+      input: { agrees: true, reason: "the joined ask asks for this run" },
+    }));
+    const { io } = fakeIO();
+    // The reply is the answer's bare words: no mention, no directive, no repeat of the ask.
+    await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread: questionThread() });
+    // The operator's turn was asked the JOINED line, never the fragment.
+    const prompt: RoutePrompt = operator.mock.calls[0]![0];
+    expect(prompt.user).toContain(JOINED);
+    expect(prompt.user).toContain("A question is pending:");
+    // One agent run on the preset, fed the joined ask as the request.
+    expect(registry.getById("r1")).toMatchObject({ agent: "general" });
+    expect(provider.requests).toHaveLength(1);
+    expect(JSON.stringify(provider.requests[0])).toContain(JOINED);
+    const events = registry.snapshotById("r1")!.events;
+    expect(events.find((e) => e.type === "run_meta")).toMatchObject({ agent: "general", agentSource: "operator" });
+    expect(events.find((e) => e.type === "operator")).toMatchObject({ outcome: "binds" });
+  });
+
+  it("on: the seam floors on a pending question's answer — the readers' route sees the joined ask, never the bare fragment, so the reply is never 'unclear' (issue 2046)", async () => {
+    const FALLBACK_YAML = YAML_FIXTURE.replace(
+      "routing: { auto: false, operator: off }\n",
+      "routing: { auto: true, operator: on }\n",
+    );
+    const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);
+    deps.operatorModel = vi.fn<RouteModel>(async () => "sure, acme/tools it is");
+    const routePrompts: RoutePrompt[] = [];
+    deps.routeModel = vi.fn(async (prompt: RoutePrompt) => {
+      routePrompts.push(prompt);
+      return JSON.stringify({ preset: "review", reason: "a write ask on a named repository" });
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread: questionThread() });
+    // The router judged the joined ask — the thread's parent request with the
+    // question and its answer — never the fragment alone.
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(routePrompts[0]!.user).toContain(JOINED);
+    // The routed run carries the joined request and answers as ever.
+    expect(JSON.stringify(provider.requests[0])).toContain(JOINED);
+    expect(replies).toContain("answer");
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "non_decision",
+    });
+  });
+
+  it("on: a question's door record keeps the ask it interrupted — the operator event's `request` — so the next turn can join (issue 2046)", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    deps.operatorModel = decides({
+      reason: "a fork the run cannot resolve",
+      question: { text: QUESTION_TEXT, proposal: "agent:explore acme/company" },
+    });
+    await dispatch(deps, msg(QUESTION_REQUEST, "slack:UADMIN"), fakeIO().io);
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      outcome: "question",
+      proposal: "agent:explore acme/company",
+      request: QUESTION_REQUEST,
+    });
+  });
+
   it("on: a bind of `steer` names a run and folds into it at that run's next boundary, whichever thread holds it — no hand-back for the write class, and the plan thread starts no rival run", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
     wireCommands(deps); // rebind the catalogue over the test's own registry and admission map
@@ -19044,6 +19135,45 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       outcome: "refusal",
     });
     expect(registry.snapshotById("r2")).toBeNull();
+  });
+
+  it("on: a pending question's answer into a unit-owned idle thread folds the JOINED ask as the unit's event — the owner order unchanged, never the answer's bare words (issue 2046; thread-admission item 9)", async () => {
+    const INSTANCE = "plan-fix-the-login-6435ec";
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.putUnits([
+      {
+        instanceId: INSTANCE,
+        unit: "U12",
+        slug: "u12",
+        branch: "plan/fix-the-login-6435ec/u12",
+        dependsOn: [],
+        rounds: [],
+        threadKey: "slack:CX:1.0",
+      },
+    ]);
+    deps.coordinatorInstances = instances;
+    deps.workflow = { get: async () => ({ sendEvent: async () => {} }) };
+    // The question's door record is the thread's last word; a unit child row
+    // behind it names the owner.
+    const thread = [
+      ...questionThread(),
+      { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: INSTANCE },
+    ] as RunView[];
+    deps.operatorModel = decides({
+      reason: "reads as guidance for the door",
+      refusal: { cause: "request", text: "Noted." },
+    });
+    const { io } = fakeIO();
+    await dispatch(deps, msg("acme/tools is the repo", "slack:UADMIN"), io, { thread });
+    const events = await instances.listEvents({ instanceId: INSTANCE, unit: "U12" });
+    expect(events).toEqual([expect.objectContaining({ sender: "slack:UADMIN", text: JOINED, mode: "steer" })]);
+    expect(provider.requests).toHaveLength(0);
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "refusal",
+    });
   });
 
   it("on: a reply that is a typed `runs list` into an owned thread runs it — the typed line is the person's decision, never a fold (issue 2027)", async () => {

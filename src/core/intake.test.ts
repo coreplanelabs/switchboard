@@ -272,6 +272,55 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
     expect(l.writes[0]!.receipt).toMatchObject({ verdict: "silent", source: "mode", mode: "mention" });
   });
 
+  it("the bot's own pending question decides addressed deterministically — no model call, source: question, in classify and mention mode alike, with a receipt (issue 2046)", async () => {
+    const model = scripted(toolAnswer("silent"));
+    const l = ledger();
+    const classify = await decideIntake(
+      input({
+        facts: { replierIsRequester: true, mentionsOther: false, threadStartedByBot: false, pendingQuestion: true },
+      }),
+      deps({ model, ledger: l }),
+    );
+    expect(classify).toMatchObject({ verdict: "addressed", source: "question", receipt: "inserted" });
+    expect(classify.reason).toContain("question");
+    expect(model.prompts).toHaveLength(0);
+    expect(l.writes[0]!.receipt).toMatchObject({ verdict: "addressed", source: "question" });
+
+    // Mention mode too: the bot asked, so its own thread's reply needs no mention.
+    const mention = await decideIntake(
+      input({
+        mode: "mention",
+        facts: { replierIsRequester: true, mentionsOther: false, threadStartedByBot: false, pendingQuestion: true },
+      }),
+      deps({ model, ledger: ledger() }),
+    );
+    expect(mention).toMatchObject({ verdict: "addressed", source: "question" });
+    expect(model.prompts).toHaveLength(0);
+
+    // The receipt is still read first: another caller's stored row stands.
+    const stored = await decideIntake(
+      input({
+        facts: { replierIsRequester: true, mentionsOther: false, threadStartedByBot: false, pendingQuestion: true },
+      }),
+      deps({
+        model,
+        ledger: ledger({
+          row: {
+            verdict: "silent",
+            reason: "already decided",
+            source: "model",
+            mode: "classify",
+            model: "anthropic/fast-model",
+            gen: 1,
+            threadKey: "slack:C_BACKEND:1000.000100",
+            decidedAt: 1,
+          },
+        }),
+      }),
+    );
+    expect(stored).toMatchObject({ verdict: "silent", source: "model", receipt: "existing" });
+  });
+
   it("the model call is bounded: the timeout rides an AbortSignal handed through the seam", async () => {
     vi.useFakeTimers();
     try {

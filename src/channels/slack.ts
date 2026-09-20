@@ -18,6 +18,7 @@ import {
   type IntakeTurn,
 } from "../core/intake.js";
 import { readThread, requesterOf } from "../core/dispatch/thread.js";
+import { pendingQuestionOf } from "../core/dispatch/operator.js";
 import type { RunView, RunsService } from "../core/runsService.js";
 import type { ConfirmationStore } from "../core/confirmations.js";
 import type { IntakeMode } from "../config/validate.js";
@@ -905,6 +906,10 @@ async function intakeEvidence(
     mentionsOther: mentioned.some((id) => id !== ev.botUserId),
     ...(pending !== undefined ? { pendingConfirmation: pending.message.userId } : {}),
     threadStartedByBot: parent !== undefined && parent.user !== undefined && parent.user === ev.botUserId,
+    // The operator's own question as the thread's last word (issue 2046): the
+    // one fact that decides `addressed` without a model turn — the bot asked,
+    // so a reply in its own thread is addressed to it, mention or none.
+    ...(pendingQuestionOf(thread) !== undefined ? { pendingQuestion: true } : {}),
   };
   return { turns, facts, ...(thread ? { thread } : {}) };
 }

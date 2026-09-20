@@ -52,7 +52,10 @@ import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDep
 import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps, type RouteModel } from "./dispatch/route.js";
 import {
   executeOperatorDecision,
+  isYesAnswer,
+  joinedAnswerRequest,
   operatorStage,
+  pendingQuestionOf,
   type OperatorEventFields,
   type OperatorThreadOwner,
 } from "./dispatch/operator.js";
@@ -650,6 +653,20 @@ export async function dispatch(
         deps.coordinatorInstances !== undefined
       )
         pageOwner = await ownerOf(operatorThread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey);
+      // A pending question's free-text answer (issue 2046; routing-and-config
+      // item 29): when the thread's newest record is an `on` question and this
+      // reply is not the bare "yes" the proposal path binds, the person's words
+      // are the question's answer — joined back onto the original ask
+      // (`joinedAnswerRequest`) and decided, verified, routed and folded as the
+      // request would have been. The joined line is what the operator's turn,
+      // the bind guard, the verifier and — on any floor — the readers' route
+      // all read, so the answer never reaches the router as a bare fragment.
+      const pendingQuestion = operatorMode === "on" ? pendingQuestionOf(operatorThread) : undefined;
+      const joinedAnswer =
+        pendingQuestion !== undefined && !(pendingQuestion.proposal !== undefined && isYesAnswer(msg.text))
+          ? joinedAnswerRequest(pendingQuestion, msg.text)
+          : undefined;
+      const doorMsg = joinedAnswer !== undefined ? { ...msg, text: joinedAnswer } : msg;
       const threadOwner: OperatorThreadOwner | undefined =
         slot !== undefined || liveElsewhere
           ? { kind: "live", ...(slot?.runId !== undefined ? { runId: slot.runId } : {}) }
@@ -668,7 +685,7 @@ export async function dispatch(
               : undefined;
       operatorEvent = await root.span("dispatch.operator", () =>
         operatorStage(deps, {
-          msg,
+          msg: doorMsg,
           mode: operatorMode,
           ...(operatorThread ? { thread: operatorThread } : {}),
           ...(opts.intake ? { intake: opts.intake } : {}),
@@ -701,7 +718,7 @@ export async function dispatch(
       } else if (operatorMode === "on" && operatorEvent && !operatorFellBack) {
         const execution = await root.span("dispatch.operator_decision", () =>
           executeOperatorDecision(deps, {
-            msg,
+            msg: doorMsg,
             io,
             ending,
             trace,
@@ -736,6 +753,11 @@ export async function dispatch(
         // word "yes", which tells the owner nothing.
         if (execution.kind === "fold" && execution.request !== undefined) operatorRequest = execution.request;
       }
+      // Whatever path the decision took past the door — a preset routed, the
+      // verifier's fallback, the seam's `non_decision` floor, an owned
+      // thread's fold — the request that runs is the joined ask, never the
+      // answer's bare words (issue 2046).
+      if (joinedAnswer !== undefined && operatorRequest === undefined) operatorRequest = joinedAnswer;
     }
     // Item 29's ledger promise (run-history item 60): a decision still pending
     // — a routed preset whose event was to ride the run, or a shadow row with

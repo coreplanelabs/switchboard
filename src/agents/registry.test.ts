@@ -55,9 +55,9 @@ describe("agent registry matches the feature specs", () => {
     // `agent:coding` as a line to paste (agent-general.md item 3): a general
     // answer that ends in a command to type is the router's miss turned into
     // the person's chore.
-    expect(AGENTS.general.system).toMatch(/asking for it in plain words in a new top-level message in the channel/);
+    expect(AGENTS.general.system).toMatch(/asking for it in plain words/);
     expect(AGENTS.general.system).toContain('"in acme/api: fix the failing login test"');
-    expect(AGENTS.general.system).toMatch(/Never hand back a command or an `agent:…` line/);
+    expect(AGENTS.general.system).toMatch(/[Nn]ever hand back a command or an `agent:…` line/);
     expect(AGENTS.general.system).not.toMatch(/agent:(ship|coding|review|research)\b/);
     expect(AGENTS.general.system).toMatch(/review <PR URL>/);
     expect(AGENTS.general.system).toMatch(/web-research question/);
@@ -79,13 +79,15 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.general.system).toMatch(/never claim an action you did not perform/);
   });
 
-  it("general's prompt never promises a hand-off and points a code change at a new top-level message, not a thread reply", () => {
-    // Inside a sticky thread a plain reply continues `general` (routing-and-config.md
-    // item 3) — only a new top-level message reaches the router — so "send a
-    // plain message" advice is false in a thread, and the model must never
-    // assert a hand-off it cannot make: general cannot start another run.
-    expect(AGENTS.general.system).toMatch(/not a reply in this thread/);
-    expect(AGENTS.general.system).toMatch(/a reply in this thread comes back to you/);
+  it("general's prompt never promises a hand-off and never sends the person to a new top-level message — the door reads thread replies (issue 2046)", () => {
+    // The retype hand-back record 0069 retires: under the operator (on by
+    // default) the door reads every message, thread replies included, so
+    // "post a new top-level message" is a chore the person never owes — and
+    // the model must never assert a hand-off it cannot make: general cannot
+    // start another run.
+    expect(AGENTS.general.system).toMatch(/NEVER tell the person to post a new top-level message/);
+    expect(AGENTS.general.system).toMatch(/the door reads thread replies/);
+    expect(AGENTS.general.system).toMatch(/right here in the thread/);
     expect(AGENTS.general.system).toMatch(/[Nn]ever say you will hand off, route, forward or start anything/);
     expect(AGENTS.general.system).toMatch(/cannot start another agent's run/);
   });

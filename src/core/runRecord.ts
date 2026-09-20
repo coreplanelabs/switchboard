@@ -432,6 +432,9 @@ export interface RunOperatorDecision {
   question?: string;
   /** A question's proposed line — what the next turn's "yes" binds. */
   proposal?: string;
+  /** A question's original ask — what the person's next words join back onto
+   *  (`joinedAnswerRequest`). */
+  request?: string;
   refusalCause?: string;
   refusalText?: string;
   /** The structured seam's attempts (record 0067): what each answer violated,
@@ -456,6 +459,7 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
     ...(e.binds ? { binds: e.binds.map((b) => ({ line: b.line, reason: b.reason })) } : {}),
     ...(e.question !== undefined ? { question: e.question } : {}),
     ...(e.proposal !== undefined ? { proposal: e.proposal } : {}),
+    ...(e.request !== undefined ? { request: e.request } : {}),
     ...(e.refusalCause !== undefined ? { refusalCause: e.refusalCause } : {}),
     ...(e.refusalText !== undefined ? { refusalText: e.refusalText } : {}),
     ...(e.attempts

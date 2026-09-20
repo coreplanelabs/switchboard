@@ -1,5 +1,5 @@
 // The filed misses of `load:route` (docs/reference/specs/load-harness.md
-// item 17): the seventeen distinct router misses people filed, rewritten
+// item 17): the nineteen distinct router misses people filed, rewritten
 // without names, ids or org slugs, each carrying the bind the person meant —
 // a registry command with its input, or the preset a right route names. Some
 // were never the model's to miss: a directive regex, a typed-line grammar and
@@ -96,4 +96,16 @@ export const ROUTE_MISS_FIXTURES: readonly RouteMissFixture[] = [
   preset("m16", "take a look at https://github.com/acme/api/pull/88 when you get a chance", ["review"]),
   // An ask only a sandbox answers, routed to a chat-only preset.
   preset("m17", "run the whole verify in acme/api and tell me what breaks", ["explore"]),
+  // A write ask in a named repository drew a question instead of the write
+  // preset; the unresolved detail (which repo holds the workflow to copy) was
+  // the coding run's to resolve with the org in front of it.
+  preset("m18", "in acme/company add the lgtm github action like you see in other org repos", ["ship"]),
+  // The answer to that question, joined back onto the original ask (the shape
+  // the door routes on a floor): the joined line is a complete write ask,
+  // never an unclear fragment for the fallback preset.
+  preset(
+    "m19",
+    "in acme/company add the lgtm github action like you see in other org repos — Which repo has the lgtm action you want copied?: acme/tools is the repo",
+    ["ship"],
+  ),
 ];
