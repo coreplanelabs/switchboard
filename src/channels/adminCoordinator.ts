@@ -104,15 +104,18 @@ import type { ChannelIO, IncomingMessage } from "../core/types.js";
 import { authenticateIngressBearer } from "../deploy/restart.js";
 import type { GithubApi } from "../execution/githubApi.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
-import type {
-  CommitChecks,
-  MergedPrRef,
-  MergeResult,
-  OpenedPullRequest,
-  OpenPrRef,
-  PullRequestFacts,
-  PullRequestReview,
-  PullRequestTarget,
+import {
+  MERGE_QUEUE_405,
+  type CommitChecks,
+  type EnqueueResult,
+  type MergedPrRef,
+  type MergeQueueState,
+  type MergeResult,
+  type OpenedPullRequest,
+  type OpenPrRef,
+  type PullRequestFacts,
+  type PullRequestReview,
+  type PullRequestTarget,
 } from "../execution/githubPulls.js";
 import { EMPTY_START_STATE, type BranchStartState, type RewriteResult } from "../execution/identityRewrite.js";
 import type { Secret } from "../secrets.js";
@@ -225,6 +228,20 @@ export interface AdminCoordinatorDeps {
     pr: { repo: string; number: number },
     opts: { sha: string; title: string },
   ) => Promise<MergeResult>;
+  /** Whether a merge-queue rule protects the base branch (githubPulls.
+   *  branchHasMergeQueue), read before the squash so a merge-queue repository
+   *  is enqueued, never refused (issue 2011). Undefined = the rules could not
+   *  be read — the door falls back to recognising GitHub's 405. Optional:
+   *  without it, only the 405 recognition. */
+  branchHasMergeQueue?: (repo: string, branch: string) => Promise<boolean | undefined>;
+  /** The queue's one write (githubPulls.enqueuePullRequest): the GraphQL
+   *  `enqueuePullRequest` mutation — the same act `gh pr merge --auto`
+   *  performs. Optional: without it a merge-queue base is refused by name. */
+  enqueuePullRequest?: (pr: { repo: string; number: number }) => Promise<EnqueueResult>;
+  /** Where the pull request stands with the queue (githubPulls.
+   *  fetchMergeQueueState), read on a `queued` re-ask: still in it, or removed
+   *  with the queue's own reason. */
+  fetchMergeQueueState?: (pr: { repo: string; number: number }) => Promise<MergeQueueState | undefined>;
   /** Records "this instance's merge step waits at this head" on every `pending`
    *  answer — the check-run intake's address book (checksIntake.ts,
    *  http-ingress.md item 12). The round's checks step registers through the
@@ -1511,6 +1528,8 @@ const ROUND_OUTCOMES = [
   "no_verdict",
   "checks_failed",
   "transient",
+  "enqueued",
+  "dequeued",
   "aborted",
   "stopped",
   "continued",
@@ -1948,6 +1967,15 @@ function isReleasePullRequest(facts: PullRequestFacts): boolean {
  * person", GitHub's own refusal (a conflict, a branch protection, a moved head)
  * in GitHub's words. Checks still running answer `pending` for the machine's
  * poll. GitHub unreachable is a passing condition (502), never a verdict.
+ *
+ * A base that takes changes only through a merge queue is enqueued, never
+ * squashed and never refused (issue 2011): the base branch's ruleset says so
+ * ahead of the attempt, or — when the rules could not be read — GitHub's own
+ * 405 wording does; either way the door enqueues (the GraphQL
+ * `enqueuePullRequest` mutation, the same act `gh pr merge --auto` performs)
+ * and answers `enqueued`. A `queued: true` re-ask reads the queue's outcome
+ * instead: merged from the facts, still `enqueued`, or `removed` with the
+ * queue's own reason for the machine's finding round.
  */
 async function merge(
   body: Record<string, unknown>,
@@ -2001,9 +2029,10 @@ async function merge(
   if (isReleasePullRequest(facts))
     return refused(`${where} is the release pull request — always a person's merge, never the runner's`);
   if (facts.state !== "open") {
-    // Already merged — auto-merge fired, or a person merged after the approval:
-    // the unit is done, not refused. The door merged nothing, so the outcome
-    // says `by: other` with the merge commit and the time (spec item 9).
+    // Already merged — auto-merge fired, a person merged after the approval,
+    // or the merge queue merged what the door enqueued: the unit is done, not
+    // refused. The door merged nothing, so the outcome says `by: other` with
+    // the merge commit and the time (spec item 9).
     if (facts.mergedAt !== undefined && facts.mergeCommitSha !== undefined)
       return json(200, {
         ok: true,
@@ -2014,6 +2043,36 @@ async function merge(
         at,
       });
     return refused(`${where} is ${facts.state}`);
+  }
+  if (body.queued === true) {
+    // The pull request is in the base's merge queue (issue 2011): the door
+    // reads the queue's outcome instead of attempting the squash — a merge is
+    // answered above from the facts; still queued keeps the machine's wait;
+    // removed carries the queue's own reason for the finding round. The head
+    // guards are the queue's now: a push removes the entry, and the removal is
+    // the answer.
+    const queue =
+      deps.fetchMergeQueueState !== undefined ? await deps.fetchMergeQueueState(pr).catch(() => undefined) : undefined;
+    if (queue === undefined)
+      return json(502, {
+        ok: false,
+        error: "github_unavailable",
+        message: `the merge queue of ${where} could not be read`,
+        at,
+      });
+    if (queue.queued)
+      return json(200, {
+        ok: true,
+        outcome: "enqueued",
+        reason: queue.position !== undefined ? `position ${queue.position} in the merge queue` : "in the merge queue",
+        at,
+      });
+    return json(200, {
+      ok: true,
+      outcome: "removed",
+      reason: queue.reason ?? "removed from the merge queue with no reason given",
+      at,
+    });
   }
   if (facts.headRef !== row.branch)
     return refused(`${where} heads \`${facts.headRef ?? "?"}\`, not the unit's branch \`${row.branch}\``);
@@ -2073,6 +2132,32 @@ async function merge(
       at,
     });
   }
+  // The merge queue (issue 2011): a base whose ruleset routes every change
+  // through the queue is enqueued — the same act `gh pr merge --auto` performs
+  // — and never squashed; an unreadable ruleset decides nothing, and the 405's
+  // own wording below catches what the read missed.
+  const enqueue = async (): Promise<IngressResponse> => {
+    if (deps.enqueuePullRequest === undefined)
+      return refused(
+        `\`${facts.baseRef ?? "the base"}\` takes changes only through a merge queue and the door cannot enqueue — enqueue ${where} by hand (\`gh pr merge --auto\`); the approved work stands`,
+      );
+    let queued: EnqueueResult;
+    try {
+      queued = await deps.enqueuePullRequest(pr);
+    } catch (err) {
+      return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
+    }
+    if (!queued.ok) return refused(`GitHub refused to enqueue ${where}: ${queued.reason}`);
+    log(
+      `[coordinator] ${instance.id} ${row.unit}: enqueued ${where} at ${headSha.slice(0, 7)} — the base takes changes through a merge queue`,
+    );
+    return json(200, { ok: true, outcome: "enqueued", reason: `enqueued at \`${headSha.slice(0, 7)}\``, at });
+  };
+  const queueRuled =
+    deps.branchHasMergeQueue !== undefined && facts.baseRef !== undefined
+      ? await deps.branchHasMergeQueue(instance.repo, facts.baseRef).catch(() => undefined)
+      : undefined;
+  if (queueRuled === true) return enqueue();
   let merged: MergeResult;
   try {
     merged = await deps.mergePullRequest(pr, {
@@ -2083,6 +2168,9 @@ async function merge(
     return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
   }
   if (!merged.ok) {
+    // The rules read missed the queue (or could not run): GitHub's own 405
+    // wording says the base merges through the queue, so enqueue (issue 2011).
+    if (merged.status === 405 && MERGE_QUEUE_405.test(merged.reason)) return enqueue();
     log(
       `[coordinator] ${instance.id} ${row.unit}: GitHub refused the merge of ${where} (HTTP ${merged.status}): ${merged.reason}`,
     );

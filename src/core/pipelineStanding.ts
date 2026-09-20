@@ -95,6 +95,8 @@ export const ROUND_STAGE = {
   no_verdict: "hold",
   checks_failed: "fix",
   transient: "hold",
+  enqueued: "approved",
+  dequeued: "fix",
   aborted: "hold",
   stopped: "hold",
   continued: "continue",

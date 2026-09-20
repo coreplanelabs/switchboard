@@ -129,9 +129,12 @@ import { processShimOptions, shimWorkflowSender } from "./core/coordinator/insta
 import { classifyRoundChecks } from "./core/ship/checkFindings.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
 import {
+  branchHasMergeQueue,
   commitsOverBase,
   createBranchRef,
+  enqueuePullRequest,
   fetchCheckRunDetails,
+  fetchMergeQueueState,
   fetchCommitChecks,
   fetchPullRequestFacts,
   fixupCommitSubjects,
@@ -969,6 +972,11 @@ export async function runBot(): Promise<void> {
       // self-declared fix-up commits, read on the ending's facts pr-check.
       fixupCommitSubjects,
       mergePullRequest,
+      // The merge queue (issue 2011): a base ruled to merge through the queue
+      // is enqueued instead of squashed, and the queue's outcome is read back.
+      branchHasMergeQueue,
+      enqueuePullRequest,
+      fetchMergeQueueState,
       selfIdentity: resolveGithubIdentity,
       runHistoryWriter,
       channelVisibilityOf: (channelId) => channelVisibilityOf(deps, channelId),

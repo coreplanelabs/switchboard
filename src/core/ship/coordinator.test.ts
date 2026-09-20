@@ -31,6 +31,7 @@ import {
   type CoordinatorNote,
   type PrCheck,
   type StepReturn,
+  type UnitEnding,
   type UnitPipelineInput,
   type UnitPipelineState,
 } from "./coordinator.js";
@@ -3325,5 +3326,137 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
         },
       });
     }
+  });
+});
+
+describe("the merge queue — the door enqueues instead of merging (issue 2011)", () => {
+  /** The unit at its merge door: round 0, an approving review at HEAD_A, green checks. */
+  function atMergeDoor(over: Partial<UnitPipelineInput> = {}): Driver {
+    const d = fresh(input(over));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "x", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    greenChecks(d, T0 + 20 * MIN);
+    expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/1" });
+    return d;
+  }
+
+  it("an enqueued answer records the boundary once, waits like pending with every later ask marked `queued`, and the queue's merge ends the unit merged as today", () => {
+    const d = atMergeDoor();
+    d.answer({ type: "merge", outcome: "enqueued", reason: "enqueued at `a1b2c3d`", at: T0 + 21 * MIN });
+    // The boundary is recorded on the unit: one `enqueued` round note.
+    expect(d.rounds()).toContain("1 review enqueued");
+    expect(d.action).toMatchObject({ type: "wait-checks", step: "U10/merge/wait/1" });
+    d.answer({ type: "wait-checks", outcome: "timeout" });
+    // Every later ask carries `queued`, so the door reads the queue's outcome
+    // instead of attempting the squash again.
+    expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/2", queued: true });
+    d.answer({ type: "merge", outcome: "enqueued", reason: "position 2 in the merge queue", at: T0 + 26 * MIN });
+    // Still queued: the wait continues and no second boundary is noted.
+    expect(d.rounds().filter((r) => r.endsWith("enqueued"))).toHaveLength(1);
+    expect(d.action).toMatchObject({ type: "wait-checks", step: "U10/merge/wait/2" });
+    d.answer({ type: "wait-checks", outcome: "event" });
+    expect(d.action).toMatchObject({ type: "merge", step: "U10/merge/3", queued: true });
+    d.answer({
+      type: "merge",
+      outcome: "merged",
+      by: "other",
+      sha: HEAD_B,
+      mergedAt: "2026-09-20T00:01:00Z",
+      at: T0 + 30 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merged", by: "other", sha: HEAD_B } });
+    expect(renderUnitReport(d.state)).toContain("✅ Already merged");
+  });
+
+  it("a queue removal becomes a finding of the round — id check:merge-queue, severity blocking, the queue's own reason — under a `dequeued` note, and a fix round follows as after a red check", () => {
+    const d = atMergeDoor();
+    d.answer({ type: "merge", outcome: "enqueued", reason: "enqueued", at: T0 + 21 * MIN });
+    d.answer({ type: "wait-checks", outcome: "event" });
+    d.answer({ type: "merge", outcome: "removed", reason: "CI failed inside the queue", at: T0 + 25 * MIN });
+    expect(d.rounds()).toContain("1 coding dequeued");
+    expect(d.state.findingsByRound[1]).toEqual([
+      {
+        id: "check:merge-queue",
+        severity: "blocking",
+        file: "merge queue",
+        title: "removed from the merge queue — CI failed inside the queue",
+        check: true,
+      },
+    ]);
+    // The findings step runs as for any changes-requested round, the removal
+    // riding the brief by value like a check finding — it sits on no record.
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      step: "U10/1/findings",
+      round: { index: 1, kind: "findings" },
+      brief: {
+        kind: "findings",
+        pr: 7,
+        reviewRunId: "run-r1",
+        checks: [{ id: "check:merge-queue", severity: "blocking" }],
+      },
+    });
+  });
+
+  it("a queue removal with the rounds spent ends the unit at the round cap, and one with no review run to brief the fix from — a resume straight at the merge decision — ends merge_refused with the queue's reason", () => {
+    const capped = atMergeDoor({ caps: { maxRounds: 1, maxMinutes: 240 } });
+    capped.answer({ type: "merge", outcome: "enqueued", reason: "enqueued", at: T0 + 21 * MIN });
+    capped.answer({ type: "wait-checks", outcome: "event" });
+    capped.answer({ type: "merge", outcome: "removed", reason: "CI failed inside the queue", at: T0 + 25 * MIN });
+    expect(capped.action).toMatchObject({ type: "end", ending: { kind: "round_cap", maxRounds: 1 } });
+
+    // A resume straight at the merge decision (issue 1689) has no review run
+    // whose findings a fix round could be briefed from: a person decides.
+    const resumed = new Driver(openUnitPipeline(input(), T0));
+    resumed.answer({
+      type: "pr-check",
+      pr: {
+        state: "open",
+        prNumber: 7,
+        url: PR_URL,
+        headSha: HEAD_A,
+        branchHead: HEAD_A,
+        approved: true,
+        checks: { total: 2, pending: [], failed: [] },
+      },
+      at: T0 + MIN,
+    });
+    expect(resumed.action).toMatchObject({ type: "merge", step: "U10/merge/1" });
+    resumed.answer({ type: "merge", outcome: "enqueued", reason: "enqueued", at: T0 + 2 * MIN });
+    resumed.answer({ type: "wait-checks", outcome: "event" });
+    resumed.answer({ type: "merge", outcome: "removed", reason: "a conflict inside the queue", at: T0 + 5 * MIN });
+    expect(resumed.action).toMatchObject({
+      type: "end",
+      ending: {
+        kind: "merge_refused",
+        reason: "the merge queue removed the pull request: a conflict inside the queue",
+      },
+    });
+  });
+
+  it("still enqueued past the merge wait's budget ends merge_refused naming the queue — it merges on its own and a re-issued plan finds the merge", () => {
+    const d = atMergeDoor();
+    d.answer({ type: "merge", outcome: "enqueued", reason: "enqueued", at: T0 + 21 * MIN });
+    d.answer({ type: "wait-checks", outcome: "timeout" });
+    d.answer({
+      type: "merge",
+      outcome: "enqueued",
+      reason: "position 5 in the merge queue",
+      at: T0 + 20 * MIN + 60 * MIN,
+    });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_refused" } });
+    const reason = (d.state.ending as Extract<UnitEnding, { kind: "merge_refused" }>).reason;
+    expect(reason).toContain("still in the merge queue after 60 minutes");
+    expect(reason).toContain("the queue merges it on its own");
   });
 });

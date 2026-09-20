@@ -457,7 +457,11 @@ function mergeReturn(step: string, a: BotAnswer): StepReturn {
     return { type: "merge", step, outcome: "merged", by: "other", sha, mergedAt, at };
   if (ok === true && outcome === "merged" && typeof sha === "string")
     return { type: "merge", step, outcome: "merged", sha, at };
-  if (ok === true && (outcome === "pending" || outcome === "refused") && typeof reason === "string")
+  if (
+    ok === true &&
+    (outcome === "pending" || outcome === "refused" || outcome === "enqueued" || outcome === "removed") &&
+    typeof reason === "string"
+  )
     return { type: "merge", step, outcome, reason, at };
   throw new UnreadableAnswer("merge", a, "outcome");
 }
@@ -646,7 +650,12 @@ async function perform(
         answerOf(
           "merge",
           await step.do(action.step, STEP_CONFIG, () =>
-            call(bot, "merge", { ...tag, prNumber: action.prNumber, headSha: action.headSha }),
+            call(bot, "merge", {
+              ...tag,
+              prNumber: action.prNumber,
+              headSha: action.headSha,
+              ...(action.queued === true ? { queued: true } : {}),
+            }),
           ),
         ),
       );
