@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  TOUCHED_TESTS_COMMAND,
   CONTRACT_HEADING,
   CONTRACT_SECTION_HEADINGS,
   DEFAULT_CONTRACT_MAX_CHARS,
-  FAST_GATES_BEFORE_PUSH,
+  FAST_GATES_POINTER,
+  GATE_RECEIPTS,
   GUARDS,
   PR_TITLE_GUARD,
   TIMEOUT_ON_LONG_COMMANDS,
@@ -20,6 +20,7 @@ import {
   unitTitleOf,
   type ChildContract,
 } from "./contract.js";
+import { CODING_SYSTEM_RESIDENT, FAST_GATES_BEFORE_PUSH, TOUCHED_TESTS_COMMAND } from "../../agents/registry.js";
 
 // Feature: docs/reference/specs/agent-ship.md item 13 — the child contract. A
 // coding child started for a plan unit is handed one typed object (the unit's
@@ -373,11 +374,10 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     // the first instruction orders the push once the fast gates pass, hands the full verification
     // to CI (agent-coding item 13: an unpushed tree does not survive the run's end) and carries the
     // pre-push re-fetch, so the pull request is not born conflicting when main moved while the child worked
-    const gatesForMain = FAST_GATES_BEFORE_PUSH;
     expect(text).toContain(
       "Push the branch as soon as the change exists and the fast gates pass — the project's full verification " +
         "is CI's gate, run there after the push with any fix as a further commit; an unpushed tree does not " +
-        `survive the run's end. ${gatesForMain} Right before each push, fetch \`main\` again and rebase ` +
+        `survive the run's end. ${FAST_GATES_POINTER} ${GATE_RECEIPTS} Right before each push, fetch \`main\` again and rebase ` +
         "once more if it moved while you worked, so the pull request is not born conflicting.",
     );
     expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(
@@ -403,57 +403,42 @@ describe("renderContract — one block under `## Contract`, fixed sub-headings i
     expect(text).not.toContain("Cut to fit");
   });
 
-  it("the first instruction names the fast gates a child runs before every push — the changed-set forms, never the whole suite — and routes each exit line to the description's validation table, an unrun gate to the handoff's unproven", () => {
+  it("the first instruction points at the preset's fast gates instead of re-stating them — the sentence lives once, in the coding prompts — and keeps the receipts: each exit line to the description's validation table, an unrun gate to the handoff's unproven", () => {
     const { text } = renderContract(u10(), {});
-    // the five gates by name, each a command a child can run verbatim, each scoped to the changed set;
-    // the test gate is the touched files by name — never a changed-set run, which on a moving base
-    // is most of the suite
-    expect(FAST_GATES_BEFORE_PUSH).toContain(TOUCHED_TESTS_COMMAND);
-    expect(text).toContain(TOUCHED_TESTS_COMMAND);
+    // the pointer names the preset's paragraph (THE FAST GATES) and hands the full runs to CI
+    expect(text).toContain(FAST_GATES_POINTER);
+    expect(FAST_GATES_POINTER).toContain("THE FAST GATES");
+    expect(FAST_GATES_POINTER).toContain("the changed-set forms");
+    expect(FAST_GATES_POINTER).toContain("never yours to run");
+    // the contract no longer re-states the gates' command shapes: a plan child reads the
+    // sentence once, in its preset instructions (issue 1796)
+    expect(text).not.toContain(FAST_GATES_BEFORE_PUSH);
+    expect(text).not.toContain(TOUCHED_TESTS_COMMAND);
+    expect(text).not.toContain("tsc --noEmit");
     expect(text).not.toContain("--changed origin");
     expect(text).not.toContain("origin/<base>");
-    expect(FAST_GATES_BEFORE_PUSH).toContain(
-      "`tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`",
-    );
-    expect(FAST_GATES_BEFORE_PUSH).toContain("`npx prettier --check` on the changed files");
-    expect(FAST_GATES_BEFORE_PUSH).toContain("`npm run hygiene:check`");
-    expect(FAST_GATES_BEFORE_PUSH).toContain("`npm run specs:check`");
-    // the full suite and the full typecheck are not the child's criteria — CI is that gate,
-    // and the only place they run; the gates are the changed set, judgement beyond them
-    expect(FAST_GATES_BEFORE_PUSH).toContain(
-      "Passing the full test suite and the full typecheck is NOT part of your criteria",
-    );
-    expect(FAST_GATES_BEFORE_PUSH).toContain("CI is that gate and the only place they run");
-    // the principle, stated plainly: CI runs everything on the push; the child validates its own
-    // change before pushing, at the changed-set scope
-    expect(FAST_GATES_BEFORE_PUSH).toContain(
-      "Every CI pipeline runs the tests, the types, the formatting and the full verification on your push",
-    );
-    expect(FAST_GATES_BEFORE_PUSH).toContain("at the changed-set scope");
-    expect(FAST_GATES_BEFORE_PUSH).toContain("judgement");
-    expect(FAST_GATES_BEFORE_PUSH).not.toContain("`npm test`");
-    expect(FAST_GATES_BEFORE_PUSH).not.toContain("`npm run verify`");
-    // a contract that does not know its base renders the same gate: the touched files need no base
+    expect(text).not.toContain("cheapest proving checks");
+    // the preset prompt plus the rendered contract carry the paragraph exactly once, byte-identically
+    // across the coding variants (the constant is the one source)
+    expect(`${CODING_SYSTEM_RESIDENT}\n${text}`.split(FAST_GATES_BEFORE_PUSH)).toHaveLength(2);
+    // a contract that does not know its base renders the same pointer: it needs no base
     const unknown = renderContract({ ...u10(), rebase: { branch: undefined, onto: undefined } }, {});
-    expect(unknown.text).toContain(TOUCHED_TESTS_COMMAND);
-    expect(unknown.text).not.toContain("--changed origin");
-    // the receipts point at what exists: the exit line is the proof column of the PR description's
-    // validation table (the handoff has no verified list); a gate the child could not run goes under
-    // the handoff's unproven list and is never claimed clean
-    expect(FAST_GATES_BEFORE_PUSH).toContain(
+    expect(unknown.text).toContain(FAST_GATES_POINTER);
+    // the receipts stay the contract's own — only a plan child has a handoff to route them to:
+    // the exit line is the proof column of the PR description's validation table (the handoff has
+    // no verified list); a gate the child could not run goes under the handoff's unproven list
+    expect(text).toContain(GATE_RECEIPTS);
+    expect(GATE_RECEIPTS).toContain(
       "Paste each command's exit line into the PR description's validation table as the row's proof",
     );
-    expect(FAST_GATES_BEFORE_PUSH).toContain(
+    expect(GATE_RECEIPTS).toContain(
       "a gate you could not run goes under the handoff's unproven list and is never claimed clean",
     );
-    expect(FAST_GATES_BEFORE_PUSH).not.toContain("verified list");
-    // the rendered first instruction carries the gates (base substituted) and no longer the vague phrase
-    const gates = FAST_GATES_BEFORE_PUSH;
-    expect(text).toContain(gates);
-    expect(text).not.toContain("cheapest proving checks");
-    // the gates sit between the push order and the pre-push re-fetch
-    expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(text.indexOf(gates));
-    expect(text.indexOf(gates)).toBeLessThan(text.indexOf("Right before each push"));
+    expect(GATE_RECEIPTS).not.toContain("verified list");
+    expect(FAST_GATES_BEFORE_PUSH).not.toContain("handoff");
+    // the pointer and the receipts sit between the push order and the pre-push re-fetch
+    expect(text.indexOf("Push the branch as soon as the change exists")).toBeLessThan(text.indexOf(FAST_GATES_POINTER));
+    expect(text.indexOf(GATE_RECEIPTS)).toBeLessThan(text.indexOf("Right before each push"));
   });
 
   it("a unit with no spec rows and no rules says so under the same headings", () => {

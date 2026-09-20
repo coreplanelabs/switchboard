@@ -254,6 +254,31 @@ Keep notes with the \`notes\` tool: one short document, replaced whole each time
 // classes are by duration, the project's own scripts and CI say which is which.
 export const CHECKS_BY_COST = `CHECKS BY COST — push before the expensive ones. Every check you might run has a cost class: seconds (a formatter or a linter on the files you touched, one test file, a docs, link or spec check, the typecheck of one package) or minutes (the whole test suite, a build, a dependency install, an end-to-end or full verification). Know a command's class before you run it — from the project's own scripts and CI configuration, from how long it took last time, or by the class above when you have nothing better. Prove each change with the cheapest check that can prove it, matched to the change's scope and scoped to the changed set — the tests nearest your change, the touched project's typecheck, the changed files' formatting, never the whole tree: a documentation change gets the documentation checks, one module gets its own tests, a shared type gets the typecheck. Every CI pipeline runs the tests, the types, the formatting and the full verification on your push, so you never run them again: you validate and fix your own change before pushing, at the changed-set scope. Passing the full test suite and the full typecheck is NOT part of your criteria: CI is that gate and the only place they run — on a shared machine they cost minutes that every other run pays for. As soon as the change exists and those checks pass, commit and push — the pushed branch is the deliverable, and an unpushed tree does not survive the run's end. Beyond the changed set, use judgement about what this change needs rather than a checklist, fixing forward with further commits and pushes. Never start an operation whose expected duration does not fit the time you have left minus what a commit, a push and the description need: push what there is and say plainly what is unverified instead. At the wind-down note, commit and push what compiles, say what does not, then answer. ${TIMEOUT_ON_LONG_COMMANDS} The description's validation names exactly what ran; what did not run is CI's to gate, and you say so.`;
 
+// Every coding prompt carries this verbatim, right after the checks-by-cost
+// rule (docs/reference/specs/agent-coding.md item 13; issue 1796): the fast
+// gates before every push, each the changed-set form with its command named,
+// and the full verification named as CI's gate. The paragraph lived in the
+// ship contract's first instruction alone, so every ask that was not a plan
+// unit had to repeat it by hand or watch the run spend most of its budget on
+// the whole suite or the full verification before its first push (issue 1909
+// measured three such command shapes at 85–95 % of a child's life). One
+// constant, one text: the three coding variants carry the same bytes, the
+// contract's first instruction points here instead of re-stating it
+// (src/core/ship/contract.ts), and no requester repeats it. Unlike the
+// checks-by-cost rule above, this paragraph names its commands on purpose —
+// children handed only the classes chose wrong in both directions — and a
+// repository on another stack maps each gate by its class.
+export const TOUCHED_TESTS_COMMAND = "`npx vitest run` on the test files you touched, by name,";
+
+export const FAST_GATES_BEFORE_PUSH =
+  "THE FAST GATES, before every push — each scoped to the changed set, never the whole project: " +
+  `${TOUCHED_TESTS_COMMAND} once (never \`--changed\`, never a directory: on a moving base that is most of the suite), ` +
+  "`tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`, " +
+  "`npx prettier --check` on the changed files, `npm run hygiene:check` and `npm run specs:check` — " +
+  "then your judgement on what else this change needs, not a longer checklist. The full verification is " +
+  "CI's gate — `npm run verify` runs there on your push, never here: push a head early and let CI judge it, " +
+  "fixing forward with further commits and pushes.";
+
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
 
 You work inside a dedicated workspace directory with bash, read_file, and write_file tools. ${SANDBOX_TOOLCHAIN}
@@ -275,6 +300,8 @@ Workflow for shipping a PR:
 8. Report back with a short summary of what you did, including anything you skipped or couldn't verify; Switchboard adds the PR link when it opens the PR.
 
 ${CHECKS_BY_COST}
+
+${FAST_GATES_BEFORE_PUSH}
 
 ${NEVER_MERGE}
 
@@ -323,6 +350,8 @@ Workflow for shipping a change:
 
 ${CHECKS_BY_COST}
 
+${FAST_GATES_BEFORE_PUSH}
+
 ${NEVER_MERGE}
 
 ${UNIT_CONTRACT}
@@ -365,6 +394,8 @@ Workflow for shipping a change:
 8. Report back with a short summary of what you did, including anything you skipped or couldn't verify; Switchboard adds the PR link when it opens the PR.
 
 ${CHECKS_BY_COST}
+
+${FAST_GATES_BEFORE_PUSH}
 
 ${NEVER_MERGE}
 

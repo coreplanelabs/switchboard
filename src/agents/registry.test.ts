@@ -17,6 +17,8 @@ import {
   statusCardRule,
   type AgentDef,
   CHECKS_BY_COST,
+  FAST_GATES_BEFORE_PUSH,
+  TOUCHED_TESTS_COMMAND,
 } from "./registry.js";
 import { TIMEOUT_ON_LONG_COMMANDS } from "../core/ship/contract.js";
 
@@ -520,6 +522,64 @@ describe("coding prompts: checks by cost — push before the expensive ones (age
   it("the review prompts do not carry it — a review pushes nothing", () => {
     for (const sys of [AGENTS.review.system, AGENTS.review.residentSystem!])
       expect(sys).not.toContain("CHECKS BY COST");
+  });
+});
+
+// Feature: docs/reference/specs/agent-coding.md item 13 — the fast gates. The
+// paragraph lived in the ship contract's first instruction alone, so every ask
+// that was not a plan unit had to repeat it by hand, and a run without it spent
+// most of its budget on the whole suite or the full verification before its
+// first push (issues 1796 and 1909). Now the preset's own instructions carry
+// it once, and the contract points at it (src/core/ship/contract.test.ts pins
+// that side).
+describe("coding prompts: the fast gates before every push (agent-coding item 13, issue 1796)", () => {
+  const codingPrompts = () => [AGENTS.coding.system, AGENTS.coding.residentSystem!, AGENTS.coding.seededSystem!];
+
+  it("the paragraph names the five changed-set gates by command and `npm run verify` as CI's gate, and orders the early push", () => {
+    // the test gate is the touched files by name — never a changed-set or directory run,
+    // which on a moving base is most of the suite
+    expect(FAST_GATES_BEFORE_PUSH).toContain(TOUCHED_TESTS_COMMAND);
+    expect(FAST_GATES_BEFORE_PUSH).toContain("never `--changed`, never a directory");
+    expect(FAST_GATES_BEFORE_PUSH).toContain(
+      "`tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`",
+    );
+    expect(FAST_GATES_BEFORE_PUSH).toContain("`npx prettier --check` on the changed files");
+    expect(FAST_GATES_BEFORE_PUSH).toContain("`npm run hygiene:check`");
+    expect(FAST_GATES_BEFORE_PUSH).toContain("`npm run specs:check`");
+    // each scoped to the changed set; judgement beyond the list, never a longer checklist
+    expect(FAST_GATES_BEFORE_PUSH).toContain("each scoped to the changed set, never the whole project");
+    expect(FAST_GATES_BEFORE_PUSH).toContain("judgement");
+    // the full verification is CI's gate, named, and the head is pushed early for CI to judge
+    expect(FAST_GATES_BEFORE_PUSH).toContain("The full verification is CI's gate — `npm run verify` runs there");
+    expect(FAST_GATES_BEFORE_PUSH).toContain("push a head early and let CI judge it");
+    // the receipts rule stays the contract's own: only a plan child has a handoff
+    expect(FAST_GATES_BEFORE_PUSH).not.toContain("handoff");
+    expect(FAST_GATES_BEFORE_PUSH).not.toContain("validation table");
+  });
+
+  it("every coding prompt carries the paragraph exactly once — the same bytes across the three variants — right after the checks-by-cost rule", () => {
+    for (const sys of codingPrompts()) {
+      expect(sys.split(FAST_GATES_BEFORE_PUSH)).toHaveLength(2);
+      // adjacency, not mere order: only whitespace sits between the two paragraphs
+      const between = sys.slice(
+        sys.indexOf(CHECKS_BY_COST) + CHECKS_BY_COST.length,
+        sys.indexOf(FAST_GATES_BEFORE_PUSH),
+      );
+      expect(between).toMatch(/^\s*$/);
+    }
+  });
+
+  it("no other preset carries it: a review pushes nothing, and the workspace-less presets run no gates", () => {
+    const others = [
+      AGENTS.review.system,
+      AGENTS.review.residentSystem!,
+      REVIEW_SYSTEM_SEEDED,
+      AGENTS.general.system,
+      AGENTS.research.system,
+      AGENTS.explore.system,
+      AGENTS.conductor.system,
+    ];
+    for (const sys of others) expect(sys).not.toContain("THE FAST GATES");
   });
 });
 
