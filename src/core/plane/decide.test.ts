@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  causeOfClose,
+  causeOfReclaim,
   conditionOfRefusal,
   decide,
+  endingCauseWords,
+  PLANE_ENDING_CAUSES,
   emptyPlaneState,
   planeAskAnswerOf,
   planeAskWordOf,
@@ -592,5 +596,31 @@ describe("decide — the checkpoint steers and the provider condition (record 00
     expect(decide(s, { kind: "provider_level", at: 1_000, provider: "anthropic", level: "down" }).effects).toEqual([]);
     const up = decide(s, { kind: "provider_level", at: 2_000, provider: "anthropic", level: "up" });
     expect(up.effects.map((e) => e.kind)).toEqual(["admit"]);
+  });
+});
+
+describe("endings and their causes", () => {
+  it("causeOfClose maps a closing record's status onto the closed set: completed, failed and the stops to themselves; interrupted with `restarting` to resident_replaced; any other close to lease_lapsed, which blames nobody", () => {
+    expect(causeOfClose("completed")).toBe("completed");
+    expect(causeOfClose("failed")).toBe("failed");
+    expect(causeOfClose("stopped_soft")).toBe("stopped");
+    expect(causeOfClose("stopped_hard")).toBe("stopped");
+    expect(causeOfClose("interrupted", true)).toBe("resident_replaced");
+    expect(causeOfClose("interrupted")).toBe("lease_lapsed");
+    expect(causeOfClose("interrupted", false)).toBe("lease_lapsed");
+  });
+
+  it("causeOfReclaim assigns a cause only to `closed` — a row resumed, restarted or re-hosted did not close, so a roll that resumes every row assigns nothing", () => {
+    expect(causeOfReclaim("closed")).toBe("lease_lapsed");
+    expect(causeOfReclaim("resume")).toBeUndefined();
+    expect(causeOfReclaim("restart")).toBeUndefined();
+    expect(causeOfReclaim("rehost")).toBeUndefined();
+  });
+
+  it("endingCauseWords renders every cause of the closed set in the user's nouns — the one rendering every surface shares, so no note composes its own", () => {
+    for (const cause of PLANE_ENDING_CAUSES) expect(endingCauseWords(cause).length).toBeGreaterThan(0);
+    expect(endingCauseWords("lease_lapsed")).toBe("its lease lapsed with no heartbeat");
+    expect(endingCauseWords("resident_replaced")).toBe("the resident container running it was replaced");
+    expect(endingCauseWords("runner_gone")).toBe("the runner instance driving it is gone");
   });
 });

@@ -11,8 +11,10 @@ import type {
   PlaneAckOutcome,
   PlaneAskAnswer,
   PlaneEffect,
+  PlaneEndingCause,
   PlaneOutcomePost,
   PlaneQueueRow,
+  PlaneReclaimWord,
 } from "../plane/decide.js";
 
 export type { HeartbeatFacts } from "../plane/decide.js";
@@ -216,6 +218,15 @@ export interface RunLedger {
    *  ask with its position, conditions and state; null for an id the queue
    *  does not hold. */
   planeQueued(runId: string): Promise<PlaneQueueRow | null>;
+  /** The reclaim's outcome per row (record 0064, "Endings and the watches"):
+   *  `resume`, `restart` and `rehost` record nothing — the run carries on —
+   *  and `closed` records the ending's cause on the object, answered back so
+   *  the interrupted note renders the plane's word. An older state Worker
+   *  without the route throws like every other missing route, and the caller
+   *  keeps today's words. */
+  planeReclaimed(
+    outcomes: readonly { runId: string; outcome: PlaneReclaimWord }[],
+  ): Promise<{ runId: string; cause: PlaneEndingCause }[]>;
   /** The events appended so far for a LIVE run, in `seq` order — what a
    *  reclaim closes an unresumable run's record with (the finished-runs routes
    *  never see a live run). Empty for an unknown run. */

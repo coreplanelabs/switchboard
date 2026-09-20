@@ -215,6 +215,11 @@ export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<I
           ],
         },
         "the run's workspace could not be re-attached",
+        "interrupted",
+        // A close a restart follows is not the run's end (record 0064; item
+        // 47a): the record says `restarting`, so a waiting parent re-arms on
+        // `child_resumed` instead of ending its unit.
+        restored ? { restarting: true } : undefined,
       );
   });
   console.log(

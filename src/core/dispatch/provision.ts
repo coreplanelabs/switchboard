@@ -678,6 +678,9 @@ export interface ReserveContext {
   seed?: RunSeed;
   /** The router's decision when it chose the preset, on the row (run-history item 35). */
   route?: RouteDecided;
+  /** The run this dispatch restarts (record 0064; run-history item 54), on the
+   *  row's meta so the plane reads the claim as a restart. */
+  restartOf?: string;
 }
 
 /**
@@ -735,6 +738,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
           readonly: profile.identity === "read",
           profile,
           ...(parentRunId !== undefined ? { parentRunId } : {}),
+          ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
           ...coordinatorFields(coordinator),
           ...(seed !== undefined ? { seed } : {}),
           ...(route !== undefined ? { route } : {}),

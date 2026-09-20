@@ -83,6 +83,20 @@ describe("InMemoryRunLedger", () => {
     expect(await ledger.readTranscript("r1")).toEqual({ complete: true, turns: 0, messages: [], compactions: [] });
   });
 
+  it("a same-id successor's finish replaces a standing resident_replaced — a restarting close is the run continuing, so the ending agrees with the record, and a completed ending is final", async () => {
+    const ledger = new InMemoryRunLedger(() => 0);
+    await ledger.claim(claimReq("r1", "slack:C1:1.0"));
+    await ledger.finish("r1", "g1", { ...record("r1"), status: "interrupted", restarting: true } as RunRecord);
+    expect(ledger.planeEndings.get("r1")).toMatchObject({ kind: "interrupted", cause: "resident_replaced" });
+    // The restart reuses the run's id (run-history item 42) and completes.
+    await ledger.claim(claimReq("r1", "slack:C1:1.0"));
+    await ledger.finish("r1", "g1", record("r1"));
+    expect(ledger.planeEndings.get("r1")).toMatchObject({ kind: "completed", cause: "completed" });
+    // A completed ending is final: a later report cannot rewrite it.
+    await ledger.planeReclaimed([{ runId: "r1", outcome: "closed" }]);
+    expect(ledger.planeEndings.get("r1")).toMatchObject({ cause: "completed" });
+  });
+
   it("a second claim on the same thread is refused with the live run; a different thread is fine; the same run by its owner is idempotent", async () => {
     const ledger = new InMemoryRunLedger(() => 0);
     await ledger.claim(claimReq("r1", "slack:C1:1.0"));

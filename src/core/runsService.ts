@@ -210,6 +210,12 @@ export interface RunView {
    *  `interrupted` (run-history item 27). Absent on live rows and on final
    *  (finished) records. */
   provisional?: true;
+  /** The record says the reattach path restarted this run from its request
+   *  (record 0064; run-history item 47a): the `interrupted` close is not the
+   *  run's end — the same id carries on — so a waiting parent keeps waiting
+   *  for `child_resumed` instead of ending its unit. Absent on live rows and
+   *  on final records. */
+  restarting?: true;
   /** The generation driving this run when it is not this process (run-history
    *  item 41): a row read from the run ledger — live under another container,
    *  or reclaimed here and not yet launched. Absent on this process's rows. */
@@ -578,6 +584,9 @@ function persistedView(item: RunListItem, prices: ModelPriceTable): RunView {
     // item 27). The flag is absent on final records, so it is never copied for
     // a run that ended normally.
     ...(item.provisional === true ? { provisional: true } : {}),
+    // A restarting close (record 0064; run-history item 47a) rides the view so
+    // read-record keeps the parent waiting instead of ending its unit.
+    ...(item.restarting === true ? { restarting: true } : {}),
     ...costOf(item, prices),
   };
 }

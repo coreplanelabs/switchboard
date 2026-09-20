@@ -208,14 +208,20 @@ export async function closeResumedRow(
   resume: ResumeContext,
   why: string,
   status: RunStatus = "interrupted",
+  opts?: {
+    /** The close is a restart, not an end (record 0064; run-history item 47a):
+     *  the record carries `restarting: true`, so a waiting parent keeps
+     *  waiting for `child_resumed` instead of ending its unit on it. */
+    restarting?: true;
+  },
 ): Promise<void> {
   try {
     // One attempt, no retry — `putOnce` says the sink's final word on a failure
     // (run-history item 54); the assembly stays inside the try (best-effort).
-    await putOnce(
-      adopted.sink,
-      reclaimedRunRecord({ row: resume.row, events: resume.events, status, finishedAt: systemClock() }),
-    );
+    await putOnce(adopted.sink, {
+      ...reclaimedRunRecord({ row: resume.row, events: resume.events, status, finishedAt: systemClock() }),
+      ...(opts?.restarting === true ? { restarting: true as const } : {}),
+    });
   } catch (err) {
     console.warn(
       `[resume] ${resume.row.runId} could not be closed (${why}): ${err instanceof Error ? err.message : String(err)}`,

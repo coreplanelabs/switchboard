@@ -11,6 +11,93 @@
 
 import { PLANE, minutesToMs } from "../budgets.js";
 
+// ---- endings and their causes (record 0064, "Endings and the watches") ------------------------
+
+/** The closed set an ending's cause comes from (record 0064): the plane
+ *  assigns it because it is the only component that saw both the lease and
+ *  the generation; the bot's notes, the reattach text and the runner's report
+ *  render it and never compose one. */
+export type PlaneEndingCause =
+  "completed" | "failed" | "stopped" | "withdrawn" | "refused" | "lease_lapsed" | "resident_replaced" | "runner_gone";
+
+export const PLANE_ENDING_CAUSES: readonly PlaneEndingCause[] = [
+  "completed",
+  "failed",
+  "stopped",
+  "withdrawn",
+  "refused",
+  "lease_lapsed",
+  "resident_replaced",
+  "runner_gone",
+];
+
+/** The ending fact the object records when a live row closes: the record's
+ *  own kind (its status word) and the cause from the closed set. One per
+ *  closed row — the first cause stands, except that the same run's later
+ *  finish replaces a standing `resident_replaced`: a restarting close is the
+ *  run continuing under its own id, not its end. */
+export interface PlaneEnding {
+  kind: string;
+  cause: PlaneEndingCause;
+  at: number;
+}
+
+/** How the bot's reclaim classified one row (record 0064): `resume`, `restart`
+ *  and `rehost` continue the run, so the plane records nothing for them; only
+ *  `closed` assigns a cause. */
+export type PlaneReclaimWord = "resume" | "restart" | "rehost" | "closed";
+
+/** The cause a closing record's status maps to (record 0064). An `interrupted`
+ *  close with `restarting` set is the reattach path restarting the run after
+ *  its workspace vanished — the resident's container was replaced under it;
+ *  any other `interrupted` close falls to `lease_lapsed`, which is true and
+ *  blames nobody. */
+export function causeOfClose(status: string, restarting?: boolean): PlaneEndingCause {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "stopped_soft":
+    case "stopped_hard":
+    case "stopped":
+      return "stopped";
+    default:
+      return restarting === true ? "resident_replaced" : "lease_lapsed";
+  }
+}
+
+/** The cause a reclaim outcome records: only `closed` assigns one — a row
+ *  resumed, restarted or re-hosted did not close, so a roll that resumes every
+ *  row assigns nothing. */
+export function causeOfReclaim(word: PlaneReclaimWord): PlaneEndingCause | undefined {
+  return word === "closed" ? "lease_lapsed" : undefined;
+}
+
+/** The one rendering of a cause, in the user's nouns (record 0064): every
+ *  surface that says why a run ended reads this, so no note composes its own
+ *  cause. */
+export function endingCauseWords(cause: PlaneEndingCause): string {
+  switch (cause) {
+    case "completed":
+      return "it completed";
+    case "failed":
+      return "it failed";
+    case "stopped":
+      return "it was stopped";
+    case "withdrawn":
+      return "its wait was withdrawn";
+    case "refused":
+      return "its admission was refused";
+    case "lease_lapsed":
+      return "its lease lapsed with no heartbeat";
+    case "resident_replaced":
+      return "the resident container running it was replaced";
+    case "runner_gone":
+      return "the runner instance driving it is gone";
+  }
+}
+
 /** The three stages an ask is judged at (record 0064): the bot's admission
  *  door, the plan runner's seed door, the resident's seat. this unit decides the
  *  admission stage alone; the others' conditions arrive with their units. */

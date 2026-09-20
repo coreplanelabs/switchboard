@@ -79,6 +79,12 @@ export interface LiveRunMeta {
   /** The run that spawned this one (item 46), so a reclaimed child's record
    *  still names its parent. Absent on every run a person or a schedule started. */
   parentRunId?: string;
+  /** The run this claim restarts (record 0064; run-history item 54): set by
+   *  the restart-from-request dispatch, so the plane knows the claim continues
+   *  a run it saw end `restarting` — the object sends the waiting parent
+   *  `child-resumed-<runId>` from it, and a `restartOf` ask passes the windows
+   *  and the memory line. Absent on every fresh request. */
+  restartOf?: string;
   /** The coordinator instance this run is a child of, and the key its spawn
    *  carried (item 48) — stored at the claim, so a reclaimed child's record
    *  still sends the parent its event and a retried spawn finds its run. */

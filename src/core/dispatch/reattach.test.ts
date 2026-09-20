@@ -404,3 +404,51 @@ describe("prepareRestartTurn: the request runs again as its own dispatch", () =>
     expect(turn.msg.userId).toBe("slack:UX"); // the request's own sender, not the follow-up's
   });
 });
+
+describe("the restarting ending", () => {
+  function world(resume: ResumeContext) {
+    const registry = new RunRegistry({ genId: () => "run-old", genToken: () => "tok" });
+    const run = registry.create("label", { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0" });
+    const puts: RunRecord[] = [];
+    const ledgerRun = new NullLedgerRun("run-old", { put: async (r) => void puts.push(r), abandoned: () => {} });
+    const shell = createCardShell({ label: "*coding*", startedAt: 5_000, now: () => NOW });
+    const ctx = {
+      msg: REQUEST,
+      io: {
+        reply: async () => {},
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => [],
+      },
+      refuse: async <T>(_outcome: string, fn: () => Promise<T>) => fn(),
+      card: { update: () => {}, done: async () => {} },
+      shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      run,
+      registry,
+      resume,
+      ledgerRun,
+      why: "reuse-refused: no worktree",
+    };
+    return { ctx, puts };
+  }
+  const resumeWith = (r: LiveRunRow): ResumeContext => ({
+    row: r,
+    lastStep,
+    plan: { kind: "finish", step: 1, answer: "x", stepRecorded: true } as unknown as ResumeContext["plan"],
+    events: [{ type: "input", messageId: "m1", text: "fix the resolver", at: 1, seq: 1 }],
+    lastSeq: 4,
+    repoCtx: { repo: "acme/api" },
+    inbox: [],
+  });
+
+  it("a close a restart follows carries `restarting: true` on its record, and one no restart follows does not — the ending says the run carries on, so a waiting parent re-arms instead of ending its unit (run-history item 47a)", async () => {
+    const restarts = world(resumeWith(row()));
+    expect(await abandonLostWorkspace(restarts.ctx)).toBeDefined();
+    expect(restarts.puts[0]).toMatchObject({ status: "interrupted", restarting: true });
+    const ends = world(resumeWith(row({}, { request: undefined })));
+    expect(await abandonLostWorkspace(ends.ctx)).toBeUndefined();
+    expect(ends.puts[0].status).toBe("interrupted");
+    expect(ends.puts[0].restarting).toBeUndefined();
+  });
+});

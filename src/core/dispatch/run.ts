@@ -255,6 +255,9 @@ export interface ClaimContext {
   seed?: RunSeed;
   /** The router's decision when it chose the preset, on the row (run-history item 35). */
   route?: RouteDecided;
+  /** The run this dispatch restarts (record 0064; run-history item 54), on the
+   *  row's meta so the plane reads the claim as a restart. */
+  restartOf?: string;
   /** Marks the run's card `untracked by the ledger` when the promotion's claim
    *  goes untracked — the same label the reserve-time untracked path sets in
    *  the dispatcher, wired from there because the card's shell lives there. */
@@ -348,6 +351,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
           readonly: profile.identity === "read",
           profile,
           ...(parentRunId !== undefined ? { parentRunId } : {}),
+          ...(ctx.restartOf !== undefined ? { restartOf: ctx.restartOf } : {}),
           ...coordinatorFields(coordinator),
           ...(seed !== undefined ? { seed } : {}),
           ...(route !== undefined ? { route } : {}),
