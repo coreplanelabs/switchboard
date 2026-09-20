@@ -17917,6 +17917,119 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(provider.requests).toHaveLength(0);
   });
 
+  // The receipts ride the verbosity ladder (routing-and-config item 28), like
+  // the router's `routed:` line: `bound:` and the verifier's `verified:` are
+  // verbose material; the hand-back and the verifier's disagreement reach
+  // every level, and the record's operator event keeps the bind unchanged.
+  it("on at quiet: a command bind that runs posts the command's own answer bare, a held write posts the hand-back alone, and the record keeps the bind (item 28)", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+    deps.operatorModel = decides({ reason: "one listing", binds: [{ line: "config show", reason: "the scopes" }] });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("show me the config", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["config.show"]);
+    // One reply: the command's own answer, no receipt prefix before it.
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).not.toContain("bound:");
+    // The record's operator event is unchanged at every level.
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      outcome: "binds",
+      binds: [{ line: "config show", reason: "the scopes" }],
+    });
+
+    // A verified write the ladder holds: the hand-back reaches quiet bare —
+    // no `bound:` prefix, no `verified:` line, the line to paste intact.
+    const held = operatorDeps(ON_YAML);
+    wireCommands(held.deps);
+    await held.deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+    held.deps.operatorModel = decides({
+      reason: "one held write",
+      binds: [{ line: "config set me --agent review", reason: "the ask" }],
+    });
+    held.deps.verifierModel = vi.fn<RouteModel>(async () => ({
+      tool: "verify",
+      input: { agrees: true, reason: "the author asked for this write" },
+    }));
+    const heldIO = fakeIO();
+    await dispatch(held.deps, msg("set my agent to review", "slack:UADMIN"), heldIO.io);
+    expect(held.deps.invoked).toEqual([]);
+    expect(heldIO.replies).toEqual([`${HAND_BACK_PREFIX}\n\`config set me --agent review\``]);
+
+    // The verifier's disagreement is the person's to read at every level.
+    const refused = operatorDeps(ON_YAML);
+    wireCommands(refused.deps);
+    await refused.deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+    refused.deps.operatorModel = decides({
+      reason: "a write nobody asked for",
+      binds: [{ line: "config set me --agent review", reason: "the brief asks" }],
+    });
+    refused.deps.verifierModel = vi.fn<RouteModel>(async () => ({
+      tool: "verify",
+      input: { agrees: false, reason: "no author turn asked for a config write" },
+    }));
+    const refusedIO = fakeIO();
+    await dispatch(refused.deps, msg("summarize this repo", "slack:UADMIN"), refusedIO.io);
+    expect(refusedIO.replies).toHaveLength(1);
+    expect(refusedIO.replies[0]).toContain("no author turn asked for a config write");
+    expect(refusedIO.replies[0]).toContain("To run it, type the line yourself:");
+  });
+
+  it("on at the untouched default — quiet: a preset bind posts nothing before the run's card; the card's preset word is the receipt (item 28)", async () => {
+    // No layer names a level: makeDeps' debug injection misses this fixture,
+    // so the level is the code's default (`quiet`).
+    const DEFAULT_YAML = ON_YAML.replace("defaults:\n", "defaults: # no verbosity anywhere: the code's default\n");
+    const { deps, registry, provider } = operatorDeps(DEFAULT_YAML);
+    wireCommands(deps);
+    deps.operatorModel = decides({
+      reason: "a question for the assistant",
+      binds: [{ line: "agent:general what changed this week?", reason: "the ask" }],
+    });
+    deps.verifierModel = vi.fn<RouteModel>(async () => ({
+      tool: "verify",
+      input: { agrees: true, reason: "the author asked for this run" },
+    }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("what changed this week?", "slack:UADMIN"), io);
+    // The run started on the preset; no `bound:` and no `verified:` preceded its card.
+    expect(registry.getById("r1")).toMatchObject({ agent: "general" });
+    expect(provider.requests).toHaveLength(1);
+    expect(replies.some((r) => r.includes("bound:"))).toBe(false);
+    expect(replies.some((r) => r.includes("verified:"))).toBe(false);
+    // The decision still rides the run's record, bind unchanged.
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      outcome: "binds",
+      binds: [{ line: "agent:general what changed this week?", reason: "the ask" }],
+    });
+  });
+
+  it("on at verbose: the receipt renders byte for byte — `bound: <line> — <class> — <reason>`, the verified line beside it", async () => {
+    const { deps } = operatorDeps(ON_YAML);
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "verbose" });
+    deps.operatorModel = decides({ reason: "one listing", binds: [{ line: "config show", reason: "the scopes" }] });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("show me the config", "slack:UADMIN"), io);
+    expect(deps.invoked).toEqual(["config.show"]);
+    expect(replies[0]).toBe("bound: `config show` — read — the scopes");
+
+    // A verified preset bind: the receipt and the verifier's word, byte for byte.
+    const preset = operatorDeps(ON_YAML);
+    wireCommands(preset.deps);
+    await preset.deps.config.setChannelOverride("slack:CX", { verbosity: "verbose" });
+    preset.deps.operatorModel = decides({
+      reason: "a question for the assistant",
+      binds: [{ line: "agent:general what changed this week?", reason: "the ask" }],
+    });
+    preset.deps.verifierModel = vi.fn<RouteModel>(async () => ({
+      tool: "verify",
+      input: { agrees: true, reason: "the author asked for this run" },
+    }));
+    const presetIO = fakeIO();
+    await dispatch(preset.deps, msg("what changed this week?", "slack:UADMIN"), presetIO.io);
+    expect(presetIO.replies[0]).toBe(
+      "bound: `agent:general what changed this week?` — read — the ask\nverified: the author asked for this run",
+    );
+  });
+
   it("on: a question renders with the marker and a policy refusal renders no Yes", async () => {
     const { deps } = operatorDeps(ON_YAML);
     deps.operatorModel = decides({

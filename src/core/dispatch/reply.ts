@@ -392,7 +392,9 @@ export function errorReply(err: unknown): string {
  *  rule): every bind's receipt carries the line as bound, the class verdict
  *  over its PARSED input and the operator's one-line reason — so the person
  *  reads what ran, how dangerous the door judged it and why the operator
- *  chose it, from one line. */
+ *  chose it, from one line — at `verbose` and above (routing-and-config item
+ *  28), like the router's `routed:` line; the record's `operator` event keeps
+ *  the bind at every level. */
 export function renderOperatorReceipt(line: string, radius: string, reason: string): string {
   return `bound: \`${line}\` — ${radius} — ${reason}`;
 }
@@ -409,7 +411,9 @@ export function renderVerifierHandBack(line: string, reason: string): string {
 }
 
 /** The one extra receipt line an agreeing verifier adds (the one-door plan): the check's
- *  word beside the bind's receipt, so a verified bind is legible as one. */
+ *  word beside the bind's receipt, so a verified bind is legible as one —
+ *  `verbose` material like the receipt it rides; the disagreement's hand-back
+ *  (`renderVerifierHandBack`) reaches every level. */
 export function renderVerifierLine(reason: string): string {
   return `verified: ${reason}`;
 }

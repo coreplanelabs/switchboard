@@ -27,6 +27,8 @@
 // back to the readers' route for that event, the decision recorded on the run
 // that then runs, never a refusal shown to the person.
 import { parseModelRef, type ToolDef } from "../provider.js";
+import { parseDirectives } from "../../directives.js";
+import { shows } from "../verbosity.js";
 import { oneLine, redactAndCap, redactSecrets } from "../redact.js";
 import type { IntakeVerdict } from "../intake.js";
 import type { ConfigStore } from "../../config.js";
@@ -812,7 +814,12 @@ function verifierModelOf(deps: {
  * sentence — a `policy` refusal renders no Yes and no way to run it anyway,
  * the fence of record 0054 kept. Binds run in order, each with a receipt
  * naming the line, the class verdict over the PARSED input and the operator's
- * reason (reply.ts `renderOperatorReceipt`); the class ladder is the door's
+ * reason (reply.ts `renderOperatorReceipt`) — and the receipt is `verbose`
+ * material on item 28's ladder, like the router's `routed:` line: at `quiet`
+ * (the default) a preset bind posts nothing before the run's card (the card's
+ * preset word is the receipt, exactly as a routed run's card is) and a command
+ * bind that runs posts the command's own answer bare, while the record's
+ * `operator` event keeps the bind unchanged at every level; the class ladder is the door's
  * own (`routedRunsAtOnce` under the path's confirm class), so a bind at or
  * after the confirm class is handed back as the line to paste, never run —
  * the operator outranks no guard. A bind that is not a registered command
@@ -861,6 +868,16 @@ export async function executeOperatorDecision(
   },
 ): Promise<OperatorExecution> {
   const { event, io, msg } = ctx;
+  // The receipts (`bound:`, the verifier's `verified:`) are the system's word
+  // on what it did for the person — `verbose` material (routing-and-config
+  // item 28), resolved like the stages that speak before a request resolves
+  // (the message's own directive over the scopes, `verbosityFor`). The
+  // hand-back and the verifier's disagreement reach every level: the person
+  // must type the line or re-ask, whatever their ladder says.
+  const verbose = shows(
+    deps.config.verbosityFor(msg.channelId, msg.userId, parseDirectives(msg.text).verbosity),
+    "verbose",
+  );
   const answered: OperatorExecution = { kind: "answered" };
   if (event.outcome === "question") {
     await io.reply(event.question ?? "");
@@ -936,7 +953,10 @@ export async function executeOperatorDecision(
     if (preset !== undefined) {
       const identity = presets.find((p) => p.name === preset)?.identity;
       const radius = identity === "write" ? "write" : "read";
-      await io.reply(`${renderOperatorReceipt(line, radius, bind.reason)}${verified ? `\n${verified}` : ""}`);
+      // Below `verbose` the receipt posts nothing: the run's card — its
+      // preset word — is the receipt, exactly as a routed run's card is.
+      if (verbose)
+        await io.reply(`${renderOperatorReceipt(line, radius, bind.reason)}${verified ? `\n${verified}` : ""}`);
       // One run per message: the binds after the preset are handed back as
       // lines rather than dropped, and the route stage starts the preset on
       // the request itself.
@@ -949,8 +969,9 @@ export async function executeOperatorDecision(
     if (!parsed || parsed.kind !== "invoke" || !def || !bound) {
       // An agreeing verifier's line rides this hand-back too (an `agent:<preset>`
       // bind never parses as a registry command): the call was spent, so its
-      // receipt reaches the person instead of being dropped with the parse.
-      await io.reply(`${verified ? `${verified}\n` : ""}${HAND_BACK_PREFIX}\n\`${bind.line}\``);
+      // receipt reaches the person instead of being dropped with the parse —
+      // at `verbose`, where receipts live; the hand-back itself at every level.
+      await io.reply(`${verbose && verified ? `${verified}\n` : ""}${HAND_BACK_PREFIX}\n\`${bind.line}\``);
       continue;
     }
     const radius = bound.radius;
@@ -963,10 +984,11 @@ export async function executeOperatorDecision(
     const runsNow = def.id === "steer.run" || routedRunsAtOnce(def as CommandDef<unknown>, confirm.value, parsed.input);
     const receipt = `${renderOperatorReceipt(bind.line, radius, bind.reason)}${verified ? `\n${verified}` : ""}`;
     if (!runsNow) {
-      await io.reply(`${receipt}\n${HAND_BACK_PREFIX}\n\`${bind.line}\``);
+      // The hand-back reaches every level; its receipt prefix is `verbose` material.
+      await io.reply(`${verbose ? `${receipt}\n` : ""}${HAND_BACK_PREFIX}\n\`${bind.line}\``);
       continue;
     }
-    await io.reply(receipt);
+    if (verbose) await io.reply(receipt);
     const res = await runChatCommand(deps, msg, io, parsed, ctx.ending, ctx.trace, carried ? {} : { operator: event });
     carried = true;
     if (res.text.length > 0) await io.reply(res.text);
