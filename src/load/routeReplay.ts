@@ -38,7 +38,7 @@ import {
   type VerifierAnswer,
 } from "../core/dispatch/route.js";
 import type { SloCheck } from "./aggregate.js";
-import { presetBindOf, type OperatorDecision } from "../core/dispatch/operator.js";
+import { joinedAnswerRequest, presetBindOf, type OperatorDecision } from "../core/dispatch/operator.js";
 import { decideExecution } from "../core/dispatch/execution.js";
 import type { RouteCompoundFixture } from "./routeCompoundFixtures.js";
 import type { DoorUnit, RouteDoorFixture } from "./routeDoorFixtures.js";
@@ -674,9 +674,13 @@ export function partitionDoorFixtures(
  *  which the replay's decision seam cannot observe); a `run` hits when the
  *  decision binds a line carrying the pasted words — the paste starts a run
  *  through the table's `run` or `route` cell instead of dying as a dead
- *  hand-back. The remaining kinds — a fold, a rebind, the floor — need the
- *  seam their unit builds, so a scored fixture of such a kind misses loudly
- *  by name until that unit extends this judge. */
+ *  hand-back. The loop unit (E2) extended the judge with its own kinds: a
+ *  `route` hits when the decision floored (or bound) — the `ended` row's cell
+ *  is the route, never a line to retype; a `fold` hits when the decision is
+ *  anything an owned thread folds (everything but a question, the
+ *  `steer_owned` row); a `rebind` hits when the parked question's answer,
+ *  joined onto the original ask before the loop saw it, carried the ask's
+ *  words and the decision bound. */
 export function judgeDoorFixture(
   decision: OperatorDecision,
   fixture: RouteDoorFixture,
@@ -707,11 +711,33 @@ export function judgeDoorFixture(
     const hit = decision.kind === "binds" && bound !== undefined && bound.includes(expected.line);
     return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
   }
-  return {
-    hit: false,
-    ...(bound !== undefined ? { bound } : {}),
-    reason: `the replay's seam cannot observe a \`${expected.kind}\` outcome yet — unit ${fixture.unit} extends the judge when it flips this fixture to scored`,
-  };
+  if (expected.kind === "route") {
+    // The loop unit (E2): a turn that ends with no tool call is the floor —
+    // the readers' route on the person's own request (`decideExecution`'s
+    // `ended` row) — and a decision that acted instead still never rendered a
+    // line to retype, so a bind hits too; only a question or a refusal (the
+    // incident's shape) misses.
+    const routes = decideExecution({ kind: "ended" }, "chat").cell === "route";
+    const hit = routes && (decision.kind === "non_decision" || decision.kind === "binds");
+    return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
+  }
+  if (expected.kind === "fold") {
+    // The loop unit (E2): under the owner rule a reply into an owned thread
+    // folds before the loop's answer posts — every decision but a question is
+    // the fold of the whole message (`decideExecution`'s `steer_owned` row),
+    // so only a question (a rival prose answer) misses.
+    const folds = decideExecution({ kind: "steer_owned" }, "chat").cell === "run";
+    const hit = folds && decision.kind !== "question";
+    return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
+  }
+  // `rebind` (the loop unit, E2): the parked question's answer was joined
+  // onto the original request before the operator saw it (`replayDoorFixtures`
+  // hands the joined line to `operate`), so the fixture hits when the joined
+  // request carries the original ask's words and the decision bound — never a
+  // floor and never a question re-asked.
+  const joined = fixture.parked !== undefined ? joinedAnswerRequest(fixture.parked, fixture.text) : undefined;
+  const hit = joined !== undefined && joined.includes(expected.carries) && decision.kind === "binds";
+  return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
 }
 
 /** Ask the operator about each door fixture — the operator's own seam, never
@@ -733,7 +759,14 @@ export async function replayDoorFixtures(
       if (i >= fixtures.length) return;
       const fixture = fixtures[i];
       const started = now();
-      const decision = await operate(fixture.text);
+      // A parked question's answer is joined onto the original ask before the
+      // loop sees it (issue 2046; `joinedAnswerRequest`), exactly as the
+      // dispatcher joins it — the answer never reaches the door as a fragment.
+      const text =
+        fixture.parked !== undefined
+          ? (joinedAnswerRequest(fixture.parked, fixture.text) ?? fixture.text)
+          : fixture.text;
+      const decision = await operate(text);
       results[i] = {
         ...fixture,
         outcome: decision.kind,

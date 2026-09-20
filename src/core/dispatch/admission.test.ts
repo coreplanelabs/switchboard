@@ -23,6 +23,7 @@ import type { PlaneAskAnswer, PlaneOutcomePost } from "../plane/decide.js";
 import type { PlaneAdmitPost } from "../runLedger/ledger.js";
 import type { InboxItem, LiveRunRow, StepRecord } from "../runLedger/types.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
+import { joinedAnswerRequest, pendingQuestionOf } from "./operator.js";
 import {
   admit,
   adoptCarriedRun,
@@ -1294,5 +1295,43 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
     const member = { ...requester, id: "slack:UOTHER", actor: { ...requester.actor, id: "slack:UOTHER" } };
     await expect(sender.send("run-done", "words", member)).rejects.toThrow(STEER_OWNER_REFUSED);
     expect(redispatched).toEqual([]);
+  });
+});
+
+describe("the owner rule and the pending question are read before the loop", () => {
+  // Record 0069, as amended (the one-execution-path plan's loop unit): the
+  // owner rule and the pending question are STATE the dispatcher reads before
+  // the operator's loop sees the message — a reply into an owned thread folds
+  // through admission's inbox, and a parked question's answer is joined onto
+  // the original request, so neither ever reaches the loop as a rival or a
+  // bare fragment.
+  it("a reply into a thread a live run holds is admission's fold: the words land in the owner's inbox and no rival slot exists", async () => {
+    const admission = new ThreadAdmission<DispatchFollowUp>();
+    const claim = admission.claim(THREAD, { agent: "general", now: 4_000 });
+    claim.live.runId = "run-owner";
+    const ledger = new RecordingLedger({ pushSeq: () => 7 });
+    const { deps, ctx } = setup("also cover the docs", { admission, ledger });
+    const outcome = await admit(deps, ctx);
+    expect(outcome).toEqual({ kind: "steered", where: "here" });
+    const [item] = claim.live.inbox.drain();
+    expect(item.msg).toMatchObject({ text: "also cover the docs" });
+    expect(admission.get(THREAD)).toBe(claim.live);
+  });
+
+  it("a parked question's answer rebinds the original request joined with the question — never a bare fragment for the loop", () => {
+    const pending = pendingQuestionOf([
+      {
+        operator: {
+          mode: "on",
+          outcome: "question",
+          question: "Which repo?",
+          request: "add the lgtm action like the other repos",
+        },
+      },
+    ]);
+    expect(pending).toBeDefined();
+    expect(joinedAnswerRequest(pending!, "acme/api")).toBe(
+      "add the lgtm action like the other repos — Which repo?: acme/api",
+    );
   });
 });

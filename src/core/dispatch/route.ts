@@ -355,11 +355,17 @@ export interface RoutePrompt {
    *  no command is offered, and the model is then forced to call `tool`. */
   tools?: ToolDef[];
   /** The re-asks so far (record 0067, `askStructured`): per violation, the
-   *  model's own answer and the re-ask's user turn naming the violation.
+   *  model's own answer and the re-ask's user turn naming the violation —
+   *  the operator's loop rides its read-tool answers the same way.
    *  Rendered by `providerRouteModel` as an assistant turn and a user turn
    *  after the first, so a re-ask hits the prompt cache for everything but
    *  the two new turns. Absent — a first ask — the prompt is as ever. */
   retries?: ReadonlyArray<{ answer: string; violation: string }>;
+  /** An OPEN turn (the operator's loop, record 0069 as amended): the model
+   *  may answer with any offered tool — or with none, ending the turn, which
+   *  the loop floors to the readers' route. Absent, the tool is forced as
+   *  ever: the route's answer is always a call. */
+  open?: boolean;
 }
 
 /** The output cap for one answer: the largest answer the parse accepts — every
@@ -789,7 +795,7 @@ export const VERIFY_TOOL_NAME = "verify";
 
 /** The verifier's answer: whether the bound line does what the sentence
  *  asked, and why in one line. `attempts` is the structured seam's list
- *  (record 0067), set by `verifyOperatorBind` for the record. */
+ *  (record 0067), carried where a caller records the exchange. */
 export interface VerifierAnswer {
   agrees: boolean;
   reason: string;
@@ -828,11 +834,11 @@ export function verifierViolationOf(answer: VerifierAnswer): string | undefined 
 }
 
 /**
- * The verifier's prompt (record 0044, the verifier; the one-door plan's verifier hold):
- * one more call on a qualifying bind, shown the AUTHOR's own turns — never
- * the thread's, whose other rows may carry a planted brief or another
- * member's words; the selection is the caller's (`operatorAuthorTurns`) —
- * and the line the bind carries, the exact line the person would type, and
+ * The verifier's prompt (record 0044, the verifier): one call on a bind,
+ * shown the AUTHOR's own turns — never the thread's, whose other rows may
+ * carry a planted brief or another member's words; the selection is the
+ * caller's — and the line the bind carries, the exact line the person
+ * would type, and
  * asked one question: does this line do what those turns asked? The system
  * half says the model is checking a binding, not making one — it never
  * routes, rebinds or rewrites — and says what to disagree with; the user half
@@ -841,10 +847,11 @@ export function verifierViolationOf(answer: VerifierAnswer): string | undefined 
  * stable per deployment and cacheable as the router's is. The answer is a
  * forced call to `VERIFY_TOOL_NAME` through the same seam the router uses
  * (`RouteModel`; `providerRouteModel` forces a prompt's one tool by name),
- * read by `parseVerifierAnswer`. Production wires it into the operator's hold
- * (`verifyOperatorBind` in operator.ts, routing-and-config item 25); the
- * replay's `--verify` scores it with the sentence as the one turn
- * (load-harness item 17).
+ * read by `parseVerifierAnswer`. The verifier retired from the operator's
+ * path (routing-and-config item 25); its caller is the load harness's
+ * bind-verdict row — the replay's `--verify` (`verifyBind` in routeReplay)
+ * scores it with the fixture's sentence as the one turn (load-harness
+ * item 17).
  */
 export function verifierPrompt(input: { turns: readonly string[]; line: string }): RoutePrompt {
   const system = [
@@ -1165,8 +1172,14 @@ export function providerRouteModel(
     // record 0036 unit 2): the route tool and the commands, the model forced
     // to call one of them (`any`; parallel calls off on the wire).
     const tools = [prompt.tool, ...(prompt.tools ?? [])];
-    const toolChoice =
-      tools.length > 1 ? ({ type: "any" } as const) : ({ type: "tool", name: prompt.tool.name } as const);
+    // An open turn (the operator's loop) lets the model end with no call —
+    // the floor's one cause (toolChoice absent: the model chooses); a closed
+    // one forces the prompt's tool(s) as ever.
+    const toolChoice = prompt.open
+      ? undefined
+      : tools.length > 1
+        ? ({ type: "any" } as const)
+        : ({ type: "tool", name: prompt.tool.name } as const);
     // The re-asks so far (record 0067): each violation rides as the model's
     // own answer and one user turn after the first, so a re-ask hits the
     // prompt cache for everything but the two new turns.

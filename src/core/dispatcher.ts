@@ -156,11 +156,6 @@ export interface CoreDeps
    *  Default: the provider behind `defaults.models.general` — the strong
    *  tier, never `routing.model`'s fast one. Tests script one. */
   operatorModel?: RouteModel;
-  /** The verifier's model call (the one-door plan's verifier hold; routing-and-config
-   *  item 25): the hold on a run-starting, steer or write-class bind under
-   *  `routing.operator: on`. Default: the FAST tier — `routing.model`, else
-   *  the provider behind `defaults.models.general`. Tests script one. */
-  verifierModel?: RouteModel;
   /** The one runs service (`RunDeps.runs`): the run tools, the thread read and stage A's paste check
    *  (record 0044) all read it — declared here so the two bases that name it agree. */
   runs?: RunsService;
@@ -668,10 +663,11 @@ export async function dispatch(
       // item 29): when the thread's newest record is an `on` question and this
       // reply is not the bare "yes" the proposal path binds, the person's words
       // are the question's answer — joined back onto the original ask
-      // (`joinedAnswerRequest`) and decided, verified, routed and folded as the
-      // request would have been. The joined line is what the operator's turn,
-      // the bind guard, the verifier and — on any floor — the readers' route
-      // all read, so the answer never reaches the router as a bare fragment.
+      // (`joinedAnswerRequest`) and decided, routed and folded as the request
+      // would have been — mention or not, never floored as a bare answer. The
+      // joined line is what the operator's loop and — on any floor — the
+      // readers' route read, so the answer never reaches the router as a bare
+      // fragment.
       const pendingQuestion = operatorMode === "on" ? pendingQuestionOf(operatorThread) : undefined;
       const joinedAnswer =
         pendingQuestion !== undefined && !(pendingQuestion.proposal !== undefined && isYesAnswer(msg.text))
@@ -745,14 +741,6 @@ export async function dispatch(
         if (execution.kind === "route") {
           operatorPreset = execution.preset;
           operatorRequest = execution.request;
-        } else if (execution.kind === "fallback" && operatorEvent !== undefined) {
-          // The verifier's floor on a non-destructive bind (routing-and-config
-          // item 25): a disagreement or a failed verifier call on a fresh
-          // run-starting bind falls back to the readers' route — the route
-          // stage runs as under `off`, the router picking the preset as it did
-          // before the operator — and the decision rides the run that then
-          // runs with the verifier's verdict or failure as its reason.
-          operatorEvent = { ...operatorEvent, reason: execution.reason };
         }
         // `kind: "fold"` (issue 2027; thread-admission item 9): the decision was
         // neither steers-and-reads nor a question in an owned thread, so the
@@ -765,9 +753,8 @@ export async function dispatch(
         if (execution.kind === "fold" && execution.request !== undefined) operatorRequest = execution.request;
       }
       // Whatever path the decision took past the door — a preset routed, the
-      // verifier's fallback, the seam's `non_decision` floor, an owned
-      // thread's fold — the request that runs is the joined ask, never the
-      // answer's bare words (issue 2046).
+      // loop's `non_decision` floor, an owned thread's fold — the request
+      // that runs is the joined ask, never the answer's bare words (issue 2046).
       if (joinedAnswer !== undefined && operatorRequest === undefined) operatorRequest = joinedAnswer;
     }
     // Item 29's ledger promise (run-history item 60): a decision still pending

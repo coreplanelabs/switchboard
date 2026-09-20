@@ -1066,6 +1066,11 @@ export type RunEvent =
       mode: "shadow" | "on";
       outcome: "binds" | "question" | "refusal" | "non_decision";
       reason: string;
+      /** The decision was the loop's floor (record 0069, as amended): a turn
+       *  that ended with no tool call, or the bounded re-asks ran out — the
+       *  readers' route ran the person's own request, and the event never
+       *  re-enters the loop. Additive: unknown → ignored. */
+      floored?: true;
       /** A bind marked `confirmed` is a pending question's confirmed proposal
        *  (`bindFromAnswer`): the line itself carries the task — the person's
        *  message was the word "yes" — so a confirmed preset line routes its

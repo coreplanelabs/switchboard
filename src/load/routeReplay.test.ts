@@ -41,7 +41,7 @@ import { ROUTE_MISS_FIXTURES } from "./routeMissFixtures.js";
 import { DIRECTIVE_WORDS, ROUTE_DIRECTIVE_FIXTURES } from "./routeDirectiveFixtures.js";
 import { ROUTE_PLANTED_FIXTURES } from "./routePlantedFixtures.js";
 import { DOOR_MERGED_UNITS, ROUTE_DOOR_FIXTURES, type RouteDoorFixture } from "./routeDoorFixtures.js";
-import type { OperatorDecision } from "../core/dispatch/operator.js";
+import { joinedAnswerRequest, type OperatorDecision } from "../core/dispatch/operator.js";
 import {
   compoundExamples,
   compoundScore,
@@ -2144,9 +2144,22 @@ describe("the door row scores the defect fixtures", () => {
     // The click unit's kinds (E3): the decision binds the expected line whole
     // — the registry line the click shows, or the pasted line that now runs.
     if (e.kind === "click" || e.kind === "run") return binds(e.line);
-    return { kind: "non_decision", reason: "not observable over the text seam" };
+    // The loop unit's kinds (E2): a route is an ended turn (the floor); a
+    // fold is any decision but a question — here a steer bind; a rebind is a
+    // binds decision on the joined ask.
+    if (e.kind === "route") return { kind: "non_decision", reason: "the turn ended with no tool call" };
+    if (e.kind === "fold") return binds("steer run r-0001 the reply's words");
+    return binds(`agent:ship ${e.carries}`);
   };
-  const byText = new Map(ROUTE_DOOR_FIXTURES.map((f) => [f.text, f]));
+  // A parked fixture's answer reaches the loop as the joined ask
+  // (`replayDoorFixtures` joins before it operates), so the lookup reads the
+  // joined text back to the fixture.
+  const byText = new Map(
+    ROUTE_DOOR_FIXTURES.flatMap((f) => {
+      const joined = f.parked !== undefined ? joinedAnswerRequest(f.parked, f.text) : undefined;
+      return [[f.text, f] as const, ...(joined !== undefined ? [[joined, f] as const] : [])];
+    }),
+  );
   const operate = async (text: string): Promise<OperatorDecision> => asExpected(byText.get(text)!);
   const bindFixtures = ROUTE_DOOR_FIXTURES.filter((f) => f.expected.kind === "bind");
 
@@ -2200,13 +2213,13 @@ describe("the door row scores the defect fixtures", () => {
     expect(split.scored).toHaveLength(16);
   });
 
-  it("E3 is merged (the click unit): its two fixtures — D3's run and D13's click — are scored at head and the E2 set stays pending", async () => {
-    expect(DOOR_MERGED_UNITS).toEqual(["E3"]);
+  it("E2 and E3 are merged: all eighteen fixtures are scored at head and none is pending", async () => {
+    expect(DOOR_MERGED_UNITS).toEqual(["E2", "E3"]);
     const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, DOOR_MERGED_UNITS);
-    expect(split.scored.map((f) => f.defect).sort()).toEqual(["D13", "D3"]);
-    expect(split.pending).toHaveLength(16);
+    expect(split.scored).toHaveLength(18);
+    expect(split.pending).toEqual([]);
     const results = await replayDoorFixtures(split.scored, operate, { now: () => 0 });
-    expect(results.every((r) => r.hit)).toBe(true);
+    expect(results.filter((r) => !r.hit)).toEqual([]);
   });
 
   it("a click expectation hits when the decision binds the offered registry line whole — the table's chat cell for a held write is the click — and misses on another line or the incident's refusal", () => {
@@ -2251,12 +2264,16 @@ describe("the door row scores the defect fixtures", () => {
     expect(doorFixtureScore(results).refusals).toBe(0);
   });
 
-  it("an outcome the text seam cannot observe misses by name, so a unit that merges such a fixture must extend the judge", () => {
+  it("the loop unit's kinds: a fold hits on any decision but a question, a route on the floor, a rebind on a bind over the joined ask", () => {
     const d07 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "D7")!;
-    const judged = judgeDoorFixture(binds(d07.text), d07);
-    expect(judged.hit).toBe(false);
-    expect(judged.reason).toContain("cannot observe a `fold` outcome");
-    expect(judged.reason).toContain(`unit ${d07.unit}`);
+    expect(judgeDoorFixture(binds(d07.text), d07).hit).toBe(true);
+    expect(judgeDoorFixture({ kind: "question", text: "steer it?", reason: "unsure" }, d07).hit).toBe(false);
+    const d14 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "D14")!;
+    expect(judgeDoorFixture({ kind: "non_decision", reason: "the turn ended with no tool call" }, d14).hit).toBe(true);
+    expect(judgeDoorFixture({ kind: "question", text: "which thing?", reason: "unsure" }, d14).hit).toBe(false);
+    const n4 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "N4")!;
+    expect(judgeDoorFixture(binds("agent:ship the joined ask"), n4).hit).toBe(true);
+    expect(judgeDoorFixture({ kind: "non_decision", reason: "floored" }, n4).hit).toBe(false);
   });
 
   it("a scored replay over the bind fixtures is green when each bind carries the words, and the check row passes with the pending count beside it", async () => {

@@ -19,7 +19,7 @@ export type DoorUnit = "E2" | "E3";
  *  is not on this list is printed as pending, never replayed and never a
  *  failure. The unit that lands appends itself here in its own pull request,
  *  turning its fixtures from pending to scored. */
-export const DOOR_MERGED_UNITS: readonly DoorUnit[] = ["E3"];
+export const DOOR_MERGED_UNITS: readonly DoorUnit[] = ["E2", "E3"];
 
 /** The amended table's expected outcome for one fixture — what the door must
  *  do with the message once the fixture's unit is merged.
@@ -215,9 +215,10 @@ export const ROUTE_DOOR_FIXTURES: readonly RouteDoorFixture[] = [
     text: "set the coding model on this channel to acme/fast-1",
     expected: { kind: "click", line: "config set channel --models.coding acme/fast-1" },
   },
-  // D14 (issue 1993; `renderVerifierHandBack`): the verifier's failure mode a
-  // hand-back rather than a floor. The verifier retires; a turn that ends
-  // with no tool call floors to the route on the person's own request.
+  // D14 (issue 1993): the verifier's failure mode was a hand-back rather than
+  // a floor. The verifier retired with the loop unit (`renderVerifierHandBack`
+  // deleted); a turn that ends with no tool call floors to the route on the
+  // person's own request.
   {
     id: "d14",
     defect: "D14",
