@@ -85,6 +85,7 @@ const GATES: Record<string, (c: Capabilities) => boolean> = {
   "mcp.promote": (c) => c.mcp,
   "schedule.list": (c) => c.schedules,
   "delivery.report": (c) => c.github,
+  "pulls.rebase": (c) => c.github,
   "costs.by": (c) => c.costs,
   "costs.snapshot": (c) => c.costs,
   "metrics.trend": (c) => c.metrics,

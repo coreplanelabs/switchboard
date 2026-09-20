@@ -1125,6 +1125,32 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "pulls:write",
+    "args": [
+      {
+        "name": "pr",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "pulls.rebase",
+    "options": [
+      {
+        "name": "repo",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "repo:exec",
     "args": [
       {

@@ -4,6 +4,7 @@ import { AGENTS, presetDoor } from "../agents/registry.js";
 import { bootstrapOnHost } from "../agentEnv/host.js";
 import type { ConfigStore } from "../config.js";
 import type { SteerCommandDeps } from "./commands/steer.js";
+import type { PullsCommandDeps } from "./commands/pulls.js";
 import type { AffectedReport } from "../deploy/affected.js";
 import { cliVersionOnHost } from "../deploy/host.js";
 import { systemClock } from "./trace/clock.js";
@@ -164,6 +165,11 @@ export interface CoreCommandWiring {
    *  the fold by run id under the steer owner rule. A getter, because the bot
    *  wires it beside the dispatcher; absent → the command answers `unavailable`. */
   steer?: () => SteerCommandDeps["steer"];
+  /** The sweep service behind `pulls rebase` (record 0071, mechanism two): the
+   *  two-rung resolver over the pipeline's open pull requests. A getter, because
+   *  the bot wires it beside the dispatcher (the model rung starts a run, which
+   *  is dispatch()'s job alone); absent → the command answers `unavailable`. */
+  pulls?: () => PullsCommandDeps["pulls"];
 }
 
 /** The snapshot of a process nobody stamped: a checkout's CLI, a test. */
@@ -436,6 +442,7 @@ export function buildCoreCommands(
     metrics: { service: metrics },
     plane: { service: plane },
     ...(wiring.steer ? { steer: wiring.steer() } : {}),
+    ...(wiring.pulls ? { pulls: wiring.pulls() } : {}),
     // `providers check`: the loaded blocks and refs, the installed pi registry
     // (the very catalog the dispatcher resolves cards against), the real fetch.
     providers: {

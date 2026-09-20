@@ -266,7 +266,7 @@ describe("command conformance — catalogue fences", () => {
     expect(blastRadiusGaps(CATALOGUE)).toEqual([]);
     const fenced = CATALOGUE.filter((c) => c.surfaces?.chat !== false && c.effect === "write");
     expect(fenced.filter((c) => c.action.endsWith(":exec")).map((c) => c.id)).toEqual(["repo.test", "repo.build"]);
-    expect(fenced.filter((c) => !c.action.endsWith(":exec"))).toHaveLength(18);
+    expect(fenced.filter((c) => !c.action.endsWith(":exec"))).toHaveLength(19);
   });
 
   it("blast radius: a write missing `destructive` or `risk`, or whose risk line is empty, is named with the field; an exec-class write, a read and a chat-hidden write are exempt", () => {

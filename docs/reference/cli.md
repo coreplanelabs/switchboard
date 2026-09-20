@@ -182,6 +182,12 @@ One table per group, in registration order. "Surfaces" is where that command can
 |---|---|---|
 | `providers check` | Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each. | every surface |
 
+### `pulls`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `pulls rebase [pr] [--repo <string>]` | Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request. | every surface |
+
 ### `artifacts`
 
 | Command | What it does | Surfaces |

@@ -214,6 +214,17 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
     [A.admin, A.browser, A.operator],
     [A.member, A.chatUser, A.noGrants, A.dispatchOnly],
   ),
+  // `pulls rebase` force-pushes the pipeline's branches and can start a paid
+  // fix round (record 0071): the grant alone, never a baseline.
+  "pulls:write command [has-grant(pulls:write)]": {
+    allow: [[A.admin, command("pulls.rebase")]],
+    deny: [
+      [A.member, command("pulls.rebase")],
+      [A.noGrants, command("pulls.rebase")],
+      [A.chatUser, command("pulls.rebase")],
+      [A.browser, command("pulls.rebase")],
+    ],
+  },
   "friction:write command [has-grant(friction:write)]": {
     allow: [
       [A.schedule, command("friction.propose")],

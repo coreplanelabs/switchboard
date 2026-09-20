@@ -108,6 +108,11 @@ export const POLICY: readonly Rule[] = [
   // read is never a chat baseline, like the costs reads.
   { action: "providers:read", resource: "command", when: [grant("providers:read")] },
 
+  // ── pull requests ──────────────────────────────────────────────────
+  // `pulls rebase` force-pushes the pipeline's branches and can start a paid
+  // fix round (record 0071): a grant, never a chat baseline.
+  { action: "pulls:write", resource: "command", when: [grant("pulls:write")] },
+
   // ── repos ────────────────────────────────────────────────────────────────
   { action: "repo:read", resource: "command", when: [grant("repo:read")] },
   { action: "repo:write", resource: "repo", when: [grant("repo:write")] },
