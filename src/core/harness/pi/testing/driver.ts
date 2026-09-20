@@ -63,6 +63,7 @@ const agentFor = (identity: Identity): AgentDef => ({
   toolset: "full",
   machine: identity === "none" ? "none" : "repo-resident",
   identity,
+  tiers: ["strong"],
   maxTurns: 50,
   maxTokens: 4096,
   maxMinutes: CONFORMANCE_MAX_MINUTES,

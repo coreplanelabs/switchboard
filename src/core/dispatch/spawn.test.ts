@@ -17,6 +17,8 @@ import {
   nullSpawnCapability,
   spawnCapabilityFor,
   spawnChild,
+  spawnTierRefusal,
+  tierOfModel,
   type SpawnDeps,
   type SpawnParent,
 } from "./spawn.js";
@@ -516,6 +518,83 @@ describe("spawnCapabilityFor — the capability a spawning run's tools hold", ()
   });
 });
 
+// The fast tier is the router's own model (`routing.model`); everything else is strong.
+const FAST_YAML = `${YAML}routing:
+  model: anthropic/fast-model
+`;
+
+describe("tiers at spawn — the parent's model and effort in the child's request slot (the one-door plan's tiers rule)", () => {
+  const cfg = { routing: { model: "anthropic/fast-model" } };
+
+  it("tierOfModel: the router's model is the fast tier; every other ref — and every ref where routing.model is unset — is strong", () => {
+    expect(tierOfModel("anthropic/fast-model", cfg)).toBe("fast");
+    expect(tierOfModel("anthropic/general-model", cfg)).toBe("strong");
+    expect(tierOfModel("anthropic/fast-model", {})).toBe("strong");
+  });
+
+  it("spawnTierRefusal: coding, ship and review on the fast tier are refused naming the tier and the allowed set; explore and research pass on fast; a strong model passes everywhere; no model and an unknown preset refuse nothing", () => {
+    for (const preset of ["coding", "ship", "review"]) {
+      const message = spawnTierRefusal({ preset, model: "anthropic/fast-model" }, cfg);
+      expect(message, preset).toContain("fast tier");
+      expect(message, preset).toContain("`strong`");
+      expect(spawnTierRefusal({ preset, model: "anthropic/general-model" }, cfg)).toBeUndefined();
+    }
+    for (const preset of ["explore", "research", "general", "conductor"]) {
+      expect(spawnTierRefusal({ preset, model: "anthropic/fast-model" }, cfg), preset).toBeUndefined();
+    }
+    expect(spawnTierRefusal({ preset: "coding" }, cfg)).toBeUndefined();
+    expect(spawnTierRefusal({ preset: "no-such-preset", model: "anthropic/fast-model" }, cfg)).toBeUndefined();
+  });
+
+  it("a review spawn naming the fast model is refused `spawn_tier` before anything is opened — no thread, no dispatch", async () => {
+    const ch = channel();
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const out = await spawnChild(deps(dispatch, { yaml: FAST_YAML }), parent(ch.io), {
+      preset: "review",
+      prompt: "review the diff",
+      model: "anthropic/fast-model",
+    });
+    expect(out).toMatchObject({ kind: "refused", reason: "spawn_tier" });
+    expect(out.kind === "refused" && out.message).toContain("fast tier");
+    expect(ch.leads).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it("an explore spawn on the fast tier passes, and the child's request carries the parent's model and effort as its own directives — the request slot, resolved ahead of every scope", async () => {
+    const ch = channel();
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const out = await spawnChild(deps(dispatch, { yaml: FAST_YAML }), parent(ch.io), {
+      preset: "explore",
+      prompt: "time the suite",
+      model: "anthropic/fast-model",
+      effort: "low",
+    });
+    expect(out.kind).toBe("spawned");
+    expect(calls[0].msg.text).toBe("agent:explore model:anthropic/fast-model effort:low time the suite");
+  });
+
+  it("escalation is a new run: a child that ended is continued by a second spawn on the strong tier — a fresh run with its own model directive, the first untouched", async () => {
+    const ch = channel();
+    let n = 0;
+    const { dispatch, calls } = fakeDispatch(async (_msg, io) => {
+      io.runStarted?.({ id: `run-${++n}` });
+      return { status: "completed" };
+    });
+    const capability = spawnCapabilityFor(deps(dispatch, { yaml: FAST_YAML }), parent(ch.io));
+    const first = await capability.spawn(
+      { preset: "explore", prompt: "time the suite", model: "anthropic/fast-model" },
+      { remainingMs: 30 * 60_000 },
+    );
+    expect(first.kind === "spawned" && first.runId).toBe("run-1");
+    const second = await capability.spawn(
+      { preset: "explore", prompt: "continue: profile the slow shard", model: "anthropic/general-model" },
+      { remainingMs: 30 * 60_000 },
+    );
+    expect(second.kind === "spawned" && second.runId).toBe("run-2");
+    expect(calls[1].msg.text).toBe("agent:explore model:anthropic/general-model continue: profile the slow shard");
+  });
+});
+
 describe("childRequestText / maxChildrenOf", () => {
   it("the child's text is the preset directive, then the budget, then the repository, then the prompt", () => {
     expect(childRequestText({ preset: "research", prompt: "what changed?" })).toBe("agent:research what changed?");
@@ -529,6 +608,17 @@ describe("childRequestText / maxChildrenOf", () => {
     expect(childRequestText({ preset: "coding", prompt: "do the unit", repo: "acme/api", ref: "plan/p/u10" })).toBe(
       "agent:coding in acme/api on branch plan/p/u10: do the unit",
     );
+    // The parent's tier rides as the child's own directives, ahead of the budget.
+    expect(
+      childRequestText({
+        preset: "explore",
+        prompt: "time the suite",
+        repo: "acme/api",
+        budget: 30,
+        model: "anthropic/fast-model",
+        effort: "low",
+      }),
+    ).toBe("agent:explore model:anthropic/fast-model effort:low budget:30 in acme/api: time the suite");
   });
 
   it("the lead names the child preset, the requester and the parent; a prompt is cut to one line", () => {

@@ -47,6 +47,14 @@ export function machineNeedsRepo(machine: MachineClass): boolean {
 export const IDENTITIES = ["none", "read", "write"] as const;
 export type Identity = (typeof IDENTITIES)[number];
 
+/** The model tiers a preset may run on (the one-door plan's tiers rule): the
+ *  `fast` tier is the router's own model (`routing.model`), everything else is
+ *  `strong`. Each preset declares its allowed set below (`AgentDef.tiers`);
+ *  a parent choosing a child's model at spawn is held to the child preset's
+ *  set, and escalation is a new run — a run's tier is fixed at dispatch. */
+export const MODEL_TIERS = ["fast", "strong"] as const;
+export type ModelTier = (typeof MODEL_TIERS)[number];
+
 /** The wall clocks live in `src/core/budgets.ts` (docs/decisions/0046): a
  *  preset's ask, the turn cap derived from it and every allowance are rows
  *  there, and this registry reads them. Re-exported for the readers that
@@ -89,6 +97,12 @@ export interface AgentDef {
    *  worktree flag and the token the sandbox env and the `repo-cold` vet mint
    *  read this, through the run's effective profile. */
   identity: Identity;
+  /** The model tiers this preset may run on (`MODEL_TIERS`): what a parent's
+   *  spawn — and the operator's bind — may put in the child's request slot.
+   *  A preset that writes code (`coding`, `ship`, `review`) never includes
+   *  `fast`: a wrong approval or a wrong edit costs more than the tokens
+   *  saved; `explore` and `research` read, and may run fast. */
+  tiers: readonly ModelTier[];
   /** Whether the request router (docs/reference/specs/routing-and-config.md
    *  item 21) may pick this preset for a plain message. Absent means yes: the
    *  router's table is rendered from this registry. `false` keeps a preset
@@ -664,6 +678,7 @@ const WORK_PRESETS = {
     identity: "none",
     maxTokens: 16000,
     ...loopBudget("general"),
+    tiers: ["fast", "strong"],
   },
   coding: {
     name: "coding",
@@ -678,6 +693,7 @@ const WORK_PRESETS = {
     // `config set channel efforts.coding=…`, or `effort:` per request).
     machine: "repo-resident",
     identity: "write", // pushes branches and opens pull requests
+    tiers: ["strong"], // code-writing never runs fast (the one-door plan's tiers rule)
     // Never routed: a plain write ask deserves the coding → review loop, so
     // the router's table offers `ship` in coding's seat — a routed ship runs
     // a generated one-unit plan whose merge is a person's, never the runner's.
@@ -693,6 +709,7 @@ const WORK_PRESETS = {
     toolset: "readonly",
     machine: "repo-resident",
     identity: "read", // a read-scoped token and a read-only worktree: it cannot post or push from inside
+    tiers: ["strong"], // a wrong finding costs a merge decision: reviews never run fast
     maxTokens: 64000,
     ...loopBudget("review"), // a safety net — typical reviews land in ~5 minutes
     effort: "medium", // fast turns; one big-context pass does the deep work
@@ -717,6 +734,7 @@ const WORK_PRESETS = {
     toolset: "full",
     machine: "repo-resident",
     identity: "write",
+    tiers: ["strong"], // the pipeline's children write and review code: never fast
     // Routable: a routed ship runs a generated one-unit plan whose merge is a
     // person's (`merge: person`) and never a seeded plan (the hand-off refuses
     // a routed `plan <path>.md` naming `agent:ship`), so a wrong route costs a
@@ -733,6 +751,7 @@ const WORK_PRESETS = {
     toolset: "web",
     machine: "none", // web I/O only; no workspace is provisioned
     identity: "none",
+    tiers: ["fast", "strong"], // reads and reports: may run fast
     maxTokens: 24000,
     ...loopBudget("research"),
     effort: "medium",
@@ -747,6 +766,7 @@ const WORK_PRESETS = {
     // review depends on: a two-hour job shares no container with anyone.
     machine: "repo-cold",
     identity: "read", // a read-scoped token: it can clone and read, never push — whatever the caller holds
+    tiers: ["fast", "strong"], // reads and reports: may run fast
     maxTokens: 64000,
     ...loopBudget("explore"),
     // No built-in effort: the deployment decides, as for coding.
@@ -761,6 +781,7 @@ export const AGENTS: Record<string, AgentDef> = {
       "Coordinates other runs: spawns child runs as the requester — each in a thread of its own, under their permissions — follows them, and reports. No workspace or shell.",
     system: conductorSystem(Object.values(WORK_PRESETS)),
     toolset: "conductor",
+    tiers: ["fast", "strong"], // reads and coordinates: may run fast
     // Nothing is provisioned and no credential minted: the run tools call the
     // dispatcher, the GitHub reads are REST in the bot process.
     machine: "none",

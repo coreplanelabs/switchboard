@@ -50,6 +50,7 @@ const agent: AgentDef = {
   toolset: "full",
   machine: "repo-resident",
   identity: "write",
+  tiers: ["strong"],
   maxTurns: 270,
   maxTokens: 64000,
   maxMinutes: 45,

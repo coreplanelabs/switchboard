@@ -1125,6 +1125,11 @@ export class ConfigStore {
    * Agent:    request directive > user scope > channel scope > default.
    * Model:    request directive > (user > channel) forced model
    *           > (user > channel > defaults) per-agent model.
+   *           The request slot is also the parent's: a spawn writes the
+   *           parent's choice into the child's request as `model:`/`effort:`
+   *           directives (`childRequestText`), held to the child preset's
+   *           tier set at the spawn (`spawnTierRefusal`), so a child resolves
+   *           the parent's tier ahead of every scope.
    * Effort:   the same ladder as model; unset at every layer → undefined.
    * Verbosity: request directive > user > channel > defaults; unset at every
    *           layer → `quiet` (`verbosityFor`, which the stages that speak

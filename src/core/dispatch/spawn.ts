@@ -25,8 +25,9 @@
 // dependency slice it reads is declared here (`SpawnCoreDeps`), so a program
 // that types this file — the dashboard's `vue-tsc` types every core module the
 // run tools reach — never pulls the dispatcher in behind it.
-import { AGENTS } from "../../agents/registry.js";
+import { AGENTS, type ModelTier } from "../../agents/registry.js";
 import type { ConfigStore } from "../../config.js";
+import type { Effort } from "../../effort.js";
 import { carveChildOfParent, LOOP_PRESETS, type LoopPreset } from "../budgets.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
@@ -74,6 +75,45 @@ export interface SpawnRequest {
   budget?: number;
   /** The branch the child's thread binds to (`on branch <ref>`), when the caller names one; needs `repo`. */
   ref?: string;
+  /** The parent's choice of the child's model, `<provider>/<model>`: the
+   *  child's `model:` directive — the request slot of the resolve ladder, so
+   *  it wins over every scope. Held to the child preset's tier set
+   *  (`AgentDef.tiers`, `spawnTierRefusal`): a model outside it is refused
+   *  `spawn_tier` before anything is opened. Escalation is a new run: a
+   *  run's tier is fixed at dispatch. */
+  model?: string;
+  /** The parent's choice of the child's effort: the child's `effort:`
+   *  directive, riding the same request slot as `model`. */
+  effort?: Effort;
+}
+
+/** Which tier a model ref is (the one-door plan's tiers rule): `fast` when it
+ *  is the router's own model (`routing.model`), else `strong`. A deployment
+ *  without `routing.model` has no fast tier, and every ref reads `strong`. */
+export function tierOfModel(modelRef: string, cfg: { routing?: { model?: string } }): ModelTier {
+  return cfg.routing?.model !== undefined && modelRef === cfg.routing.model ? "fast" : "strong";
+}
+
+/** The tier gate every spawn passes (`spawn_tier`): the message when the
+ *  requested model's tier is outside the child preset's allowed set
+ *  (`AgentDef.tiers`), undefined when the spawn names no model, the preset is
+ *  unknown (the pipeline's agent gate names that refusal) or the tier is
+ *  allowed. Shared with the plan runner's spawn route, whose children do not
+ *  go through `spawnChild`. */
+export function spawnTierRefusal(
+  request: Pick<SpawnRequest, "preset" | "model">,
+  cfg: { routing?: { model?: string } },
+): string | undefined {
+  if (request.model === undefined) return undefined;
+  const def = AGENTS[request.preset];
+  if (!def) return undefined;
+  const tier = tierOfModel(request.model, cfg);
+  if (def.tiers.includes(tier)) return undefined;
+  return (
+    `\`${request.model}\` is the ${tier} tier, and a \`${request.preset}\` run's allowed tiers are ` +
+    `${def.tiers.map((t) => `\`${t}\``).join(", ")} — name a model on an allowed tier, or leave \`model\` out ` +
+    `and the config layers decide`
+  );
 }
 
 /** What `dispatch()` is told about a child's parent (`DispatchOptions.parent`):
@@ -154,13 +194,20 @@ export interface SpawnDeps<D extends SpawnCoreDeps = SpawnCoreDeps> {
   onChildEnded?: (child: { runId: string; threadKey: string }, outcome: DispatchOutcome) => void;
 }
 
-/** The child's request text: the preset directive, a `budget:` directive when
+/** The child's request text: the preset directive, `model:` and `effort:`
+ *  directives when the parent chose the child's tier (the request slot of the
+ *  resolve ladder, ahead of every scope), a `budget:` directive when
  *  the parent narrowed it, the repository as `in <owner/name>` for a preset
  *  that works in one — with `on branch <ref>` when the child's thread must bind
  *  to a branch (a coordinator's coding child on its unit's branch) — then the
  *  prompt: the message the requester would have typed by hand. */
 export function childRequestText(request: SpawnRequest): string {
-  const directives = [`agent:${request.preset}`, ...(request.budget !== undefined ? [`budget:${request.budget}`] : [])];
+  const directives = [
+    `agent:${request.preset}`,
+    ...(request.model !== undefined ? [`model:${request.model}`] : []),
+    ...(request.effort !== undefined ? [`effort:${request.effort}`] : []),
+    ...(request.budget !== undefined ? [`budget:${request.budget}`] : []),
+  ];
   const branch = request.ref !== undefined ? ` on branch ${request.ref}` : "";
   const repo = request.repo !== undefined ? ` in ${request.repo}${branch}:` : "";
   return `${directives.join(" ")}${repo} ${request.prompt}`;
@@ -242,6 +289,11 @@ export async function spawnChild<D extends SpawnCoreDeps>(
       `a child run cannot spawn: this run is itself a child, and a tree is ${MAX_SPAWN_DEPTH} level deep — the run that started it is the one to ask`,
     );
   }
+  // The tier gate (the one-door plan's tiers rule): a parent's model choice is
+  // held to the child preset's allowed set before anything is opened, so a
+  // coding, ship or review child never runs on the fast tier.
+  const tierProblem = spawnTierRefusal(request, deps.core.config.config);
+  if (tierProblem !== undefined) return refused("spawn_tier", tierProblem);
   // A child is a reader (agent-conductor item 3): the registry's identity
   // column is the line, never a list kept here, so a preset that writes is
   // refused by name and the requester is pointed at starting it by hand.

@@ -959,6 +959,7 @@ describe("the post-turn on the run's session — refused, answered by silence, o
       toolset: "full",
       machine: "repo-resident",
       identity: "write",
+      tiers: ["strong"],
       maxTurns: 50,
       maxTokens: 4096,
       maxMinutes: 10,

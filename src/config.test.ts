@@ -142,6 +142,26 @@ describe("layered resolution", () => {
     });
   });
 
+  it("a spawned child resolves the parent's tier ahead of scopes: the request slot's model and effort — the `model:`/`effort:` directives a spawn writes into the child's request — beat the user's and the channel's", async () => {
+    const tiered = store(
+      YAML_FIXTURE.replace(
+        '  "slack:UPERAGENT":',
+        '  "slack:UTIER":\n    model: anthropic/user-forced-model\n    effort: high\n  "slack:UPERAGENT":',
+      ),
+    );
+    const r = tiered.resolve({
+      channelId: "slack:CREVIEW",
+      userId: "slack:UTIER",
+      request: { agent: "explore", model: "anthropic/parent-chosen", effort: "low" },
+    });
+    expect(r.modelRef).toBe("anthropic/parent-chosen");
+    expect(r.effort).toBe("low");
+    // Without the request slot the scopes stand — the parent's choice is what moved them.
+    const scoped = tiered.resolve({ channelId: "slack:CREVIEW", userId: "slack:UTIER", request: { agent: "explore" } });
+    expect(scoped.modelRef).toBe("anthropic/user-forced-model");
+    expect(scoped.effort).toBe("high");
+  });
+
   it("a user's forced model beats per-agent models", async () => {
     const r = s.resolve({ channelId: "slack:CREVIEW", userId: "slack:UFORCED", request: {} });
     expect(r.modelRef).toBe("anthropic/user-forced-model");
