@@ -250,7 +250,7 @@ describe("runChatCommand — the recording rule widens to a routed decision with
     input: { args: ["channel"], options: { models: { coding: "anthropic/other-model" } } },
   } as const;
 
-  it("a `config.set` call carrying a route with `outcome: pasted` is recorded — the handler runs, the record carries the outcome and the hand-back's id — and the channel is told of no run", async () => {
+  it("a `config.set` call carrying a route with `outcome: confirmed` is recorded — the handler runs and the record carries the outcome — and the channel is told of no run", async () => {
     const d = deps();
     const invoke = spiedInvoke(d);
     const { message, io, ending, trace } = request("config set channel --models.coding anthropic/other-model", d);
@@ -259,7 +259,7 @@ describe("runChatCommand — the recording rule widens to a routed decision with
     io.runStarted = started;
     io.runFinished = finished;
     const res = await runChatCommand(d, message, io, SET, ending, trace, {
-      route: { ...HAND_BACK, reason: "pasted after hand-back", outcome: "pasted", handBackRunId: "run-hb" },
+      route: { ...HAND_BACK, reason: "confirmed after offer", outcome: "confirmed" },
     });
     expect(res.ok).toBe(true);
     expect(invoke).toHaveBeenCalledTimes(1);
@@ -270,9 +270,8 @@ describe("runChatCommand — the recording rule widens to a routed decision with
     expect(contentTypes(snap?.events ?? [])).toEqual(["input", "run_meta", "route", "answer"]);
     expect(snap?.events.find((e) => e.type === "route")).toMatchObject({
       command: "config.set",
-      outcome: "pasted",
-      handBackRunId: "run-hb",
-      reason: "pasted after hand-back",
+      outcome: "confirmed",
+      reason: "confirmed after offer",
     });
     // A typed no-work command is answered as it always was: no run announced.
     expect(started).not.toHaveBeenCalled();
@@ -290,7 +289,7 @@ describe("runChatCommand — the recording rule widens to a routed decision with
     expect(d.runRegistry.snapshotById("run-cmd")).toBeNull();
   });
 
-  it("an inline-run command is still announced to the channel when it carries an outcome — the paste of `mcp add` is the run it always was", async () => {
+  it("an inline-run command is still announced to the channel when it carries an outcome — the confirmed `mcp add` is the run it always was", async () => {
     expect(isInlineRunCommand("mcp.add")).toBe(true);
     const d = deps();
     const { message, io, ending, trace } = request("mcp add acme https://mcp.example.test/sse", d);
@@ -309,16 +308,14 @@ describe("runChatCommand — the recording rule widens to a routed decision with
           command: "mcp.add",
           input: { args: ["acme", "https://mcp.example.test/sse"], options: {} },
           receipt: "mcp add acme https://mcp.example.test/sse",
-          reason: "pasted after hand-back",
-          outcome: "pasted",
-          handBackRunId: "run-hb",
+          reason: "confirmed after offer",
+          outcome: "confirmed",
         },
       },
     );
     expect(started).toHaveBeenCalledWith({ id: "run-cmd" });
     expect(d.runRegistry.snapshotById("run-cmd")?.events.find((e) => e.type === "route")).toMatchObject({
-      outcome: "pasted",
-      handBackRunId: "run-hb",
+      outcome: "confirmed",
     });
   });
 });

@@ -7,10 +7,11 @@ import { InMemoryRunStore, type RunStore } from "../core/runStore.js";
 import { createRunsService } from "../core/runsService.js";
 import { doorReport, renderDoor } from "./doorReport.js";
 
-// Feature: docs/reference/specs/load-harness.md item 19 (record 0044, the
-// counts before anything is built): `npm run load -- door` reads the run
-// store's command records and prints, per day and per command, the hand-backs
-// the door recorded, the pastes that followed and the paste-through rate. It
+// Feature: docs/reference/specs/load-harness.md item 19 (record 0044): `npm
+// run load -- door` reads the run store's command records and prints, per day
+// and per command, the hand-backs the door recorded. The paste counters
+// retired with the chat hand-back (record 0069's plan, the retirement unit):
+// a legacy record carrying `outcome: pasted` is read and left out. It
 // invokes nothing; the store's list and per-run events are its only inputs.
 // Refusals count off the same store (record 0054, as amended: every refusal is
 // a run record): the dispatcher's `door` records and the refused route
@@ -76,23 +77,21 @@ async function serviceOver(records: readonly RunRecord[]) {
   return createRunsService({ registry: new RunRegistry({ now: () => NOW }), store, clock: () => NOW });
 }
 
-/** Two days, three commands, one paste joined, one paste whose hand-back is
- *  outside the window, one routed read and one agent run to be left alone. */
+/** Two days, three commands, one legacy paste record to be left out, one
+ *  routed read and one agent run to be left alone. */
 const FIXTURE: RunRecord[] = [
   commandRecord("hb-1", DAY_ONE, decision("config.set", { outcome: "hand_back" })),
   commandRecord("hb-2", DAY_ONE + 60_000, decision("mcp.add", { outcome: "hand_back" })),
-  // The paste lands the next day: it is counted under its hand-back's day and command.
+  // A record from before the paste machinery retired: read and left out.
   commandRecord(
-    "p-1",
+    "p-legacy",
     DAY_TWO,
-    decision("config.set", { reason: "pasted after hand-back", outcome: "pasted", handBackRunId: "hb-1" }),
+    decision("config.set", {
+      reason: "pasted after hand-back",
+      ...({ outcome: "pasted", handBackRunId: "hb-1" } as unknown as Partial<Route>),
+    }),
   ),
   commandRecord("hb-3", DAY_TWO + 60_000, decision("repo.offboard", { outcome: "hand_back" })),
-  commandRecord(
-    "p-old",
-    DAY_TWO + 120_000,
-    decision("config.set", { reason: "pasted after hand-back", outcome: "pasted", handBackRunId: "hb-gone" }),
-  ),
   // A routed read: a route with no outcome. Not a door decision about a state change.
   commandRecord("read-1", DAY_TWO + 180_000, decision("friction.report")),
   // A typed inline run with no route at all.
@@ -145,40 +144,37 @@ const DOOR: RunRecord[] = [
   doorRecord("d-3", DAY_TWO + 30_000, "code_from_a_newer_bot"),
 ];
 
-describe("doorReport — hand-backs, the pastes that followed and the rate, per day and per command", () => {
-  it("counts a hand-back under its day and command, joins a paste to its hand-back by id (the hand-back's bucket, whatever day the paste landed), keeps a paste whose hand-back is outside the window apart, and ignores a routed read and a typed run", async () => {
+describe("doorReport — hand-backs per day and per command", () => {
+  it("counts a hand-back under its day and command, leaves a legacy paste record out, and ignores a routed read and a typed run", async () => {
     const report = await doorReport(await serviceOver(FIXTURE));
     expect(report).toEqual({
       handBacks: 3,
-      pastes: 1,
-      unmatchedPastes: 1,
-      commandRuns: 7,
+      commandRuns: 6,
       failedCommandRuns: 0,
       doorRuns: 0,
       storeUnavailable: false,
       refusals: [],
       rows: [
-        { day: "1999-01-03", command: "config.set", handBacks: 1, pastes: 1 },
-        { day: "1999-01-03", command: "mcp.add", handBacks: 1, pastes: 0 },
-        { day: "1999-01-04", command: "repo.offboard", handBacks: 1, pastes: 0 },
+        { day: "1999-01-03", command: "config.set", handBacks: 1 },
+        { day: "1999-01-03", command: "mcp.add", handBacks: 1 },
+        { day: "1999-01-04", command: "repo.offboard", handBacks: 1 },
       ],
     });
   });
 
-  it("renders the totals with the rate, then each day with its commands — a rate over zero hand-backs prints as a dash, never a division error", async () => {
+  it("renders the totals, then each day with its commands — no paste counter on the volume line", async () => {
     const lines = renderDoor(await doorReport(await serviceOver(FIXTURE)));
     expect(lines).toEqual([
-      "door: 3 hand-back(s), 1 paste(s) joined (33.3% pasted), 1 paste(s) whose hand-back is outside the window; 7 command run(s) (0 failed) and 0 door record(s) read",
-      "- 1999-01-03: hand-backs 2, pastes 1 (50%)",
-      "  - config.set: hand-backs 1, pastes 1 (100%)",
-      "  - mcp.add: hand-backs 1, pastes 0 (0%)",
-      "- 1999-01-04: hand-backs 1, pastes 0 (0%)",
-      "  - repo.offboard: hand-backs 1, pastes 0 (0%)",
+      "door: 3 hand-back(s); 6 command run(s) (0 failed) and 0 door record(s) read",
+      "- 1999-01-03: hand-backs 2",
+      "  - config.set: hand-backs 1",
+      "  - mcp.add: hand-backs 1",
+      "- 1999-01-04: hand-backs 1",
+      "  - repo.offboard: hand-backs 1",
     ]);
+    expect(lines.join("\n")).not.toMatch(/paste/);
     const nothing = renderDoor(await doorReport(await serviceOver([])));
-    expect(nothing).toEqual([
-      "door: 0 hand-back(s), 0 paste(s) joined (— pasted), 0 paste(s) whose hand-back is outside the window; 0 command run(s) (0 failed) and 0 door record(s) read",
-    ]);
+    expect(nothing).toEqual(["door: 0 hand-back(s); 0 command run(s) (0 failed) and 0 door record(s) read"]);
     expect(nothing.join("\n")).not.toMatch(/NaN|Infinity/);
   });
 
@@ -238,12 +234,10 @@ describe("doorReport — hand-backs, the pastes that followed and the rate, per 
     expect(lines.join("\n")).not.toContain("command_");
   });
 
-  it("`sinceMs` bounds the window: a hand-back before it is not read, so its later paste is the unmatched kind", async () => {
+  it("`sinceMs` bounds the window: a hand-back before it is not read", async () => {
     const report = await doorReport(await serviceOver(FIXTURE), { sinceMs: DAY_TWO });
     expect(report.handBacks).toBe(1);
-    expect(report.pastes).toBe(0);
-    expect(report.unmatchedPastes).toBe(2);
-    expect(report.rows).toEqual([{ day: "1999-01-04", command: "repo.offboard", handBacks: 1, pastes: 0 }]);
+    expect(report.rows).toEqual([{ day: "1999-01-04", command: "repo.offboard", handBacks: 1 }]);
   });
 
   it("pages the store to its end with the list's own cursor, so a window larger than one page counts every run", async () => {

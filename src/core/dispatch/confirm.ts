@@ -32,8 +32,7 @@ export const OFFER_USED_LINE = "this offer was already used";
 export const OFFER_UNREADABLE_LINE = "the confirmation could not be read; type the line to run it";
 export const OFFER_CANCELLED_LINE = "Cancelled; nothing ran";
 
-/** The reason a confirmed run's `route` event gives: the click's counterpart
- *  of the paste's `pasted after hand-back`. */
+/** The reason a confirmed run's `route` event gives on the record. */
 export const CONFIRMED_REASON = "confirmed after offer";
 
 /** The reason a refused click's record gives (record 0054; [run-history.md](../../../docs/reference/specs/run-history.md)

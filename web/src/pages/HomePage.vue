@@ -23,6 +23,7 @@ import {
   conversationTitle,
   liveUrls,
   matchSteer,
+  offerFill,
   RAIL_PREF,
   RAIL_WIDTH,
   railPrefs,
@@ -148,6 +149,7 @@ async function submit(): Promise<void> {
       runId?: string;
       viewPath?: string;
       reply?: string;
+      offer?: { line?: string; risk?: string; question?: string };
       error?: string;
     };
     if (res.status === 202 && typeof payload.viewPath === "string" && typeof payload.runId === "string") {
@@ -173,15 +175,19 @@ async function submit(): Promise<void> {
       });
       return;
     }
+    if (res.ok && payload.offer && typeof payload.offer.line === "string") {
+      // The click row (record 0044): the offered line fills the composer —
+      // the box is the affordance, and sending the line runs it as typed.
+      person.pending = false;
+      const fill = offerFill({ line: payload.offer.line, ...payload.offer });
+      text.value = fill.command;
+      hint.value = fill.hint;
+      return;
+    }
     if (res.ok && typeof payload.reply === "string") {
       person.pending = false;
       const reply = classifyReply(payload.reply);
-      if (reply.kind === "handBack") {
-        text.value = reply.command;
-        // A second line (the cut note, the store-unreachable note) is shown as
-        // the hint beside the box, never as part of the command to run.
-        hint.value = reply.note ?? "Enter runs it";
-      } else if (reply.kind === "inline") {
+      if (reply.kind === "inline") {
         items.push({ key: key("i"), kind: "inline", text: reply.text });
       }
       // A steer acknowledgement paints nothing: the live turn's `input` event confirms the turn.

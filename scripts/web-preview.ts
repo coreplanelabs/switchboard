@@ -2800,8 +2800,17 @@ createServer((req, res) => {
         res.end(JSON.stringify(body));
       };
       if (text.trim() === "") return json(400, { error: "`text` is required and must be a non-empty string" });
+      // A routed write on the chat surface rides the response's `offer` — the click
+      // row that fills the composer (record 0069; web-chat.md item 3) — never a
+      // "To run this:" line the person retypes.
       if (/^use\b/i.test(text.trim()))
-        return json(200, { reply: "To run this: config set me --models.coding anthropic/claude-opus-5" });
+        return json(200, {
+          reply: "",
+          offer: {
+            line: "config set me --models.coding anthropic/claude-opus-5",
+            risk: "changes the scope's settings for everyone in it until reset",
+          },
+        });
       // `help` is a fast-path command: an inline reply, no run (the bot's chat catalogue);
       // the plain question routes to `general`, which answers from the self-description.
       if (/^help\b/i.test(text.trim()) || /^what can switchboard do/i.test(text.trim()))

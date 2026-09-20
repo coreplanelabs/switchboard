@@ -1,4 +1,3 @@
-import { HAND_BACK_PREFIX } from "@core/core/dispatch/handBack.js";
 import { formatDateTime, formatRelative } from "./format";
 import { SURFACE_NAME } from "./indexRow";
 
@@ -18,34 +17,36 @@ export function composerMode(live: boolean, text: string): ComposerMode {
   return text.trim() === "" ? "stop" : "steer";
 }
 
-/** What a `200 { reply }` means on the page: a hand-back (record 0039) is the
- *  line to paste, which fills the composer and paints no turn; a steer
- *  acknowledgement paints nothing either (the live turn's `input` event
- *  confirms the turn already drawn); anything else is an inline turn, shown
- *  once and never stored. */
-export type InlineReply =
-  | { kind: "handBack"; command: string; note?: string }
-  | { kind: "steerAck"; text: string }
-  | { kind: "inline"; text: string };
+/** What a `200 { reply }` means on the page: a steer acknowledgement paints
+ *  nothing (the live turn's `input` event confirms the turn already drawn);
+ *  anything else is an inline turn, shown once and never stored. A routed
+ *  write never arrives as reply text: it rides the response's `offer` — the
+ *  click row — and `offerFill` says what the composer does with it. */
+export type InlineReply = { kind: "steerAck"; text: string } | { kind: "inline"; text: string };
 
 const STEER_ACK_MARK = "↪ Folded into";
 
 export function classifyReply(reply: string): InlineReply {
   const text = reply.trim();
-  if (text.startsWith(HAND_BACK_PREFIX)) {
-    // Only the first line is the command: a hand-back may carry a second line
-    // (the cut note, the store-unreachable note), which must never ride into
-    // the composer as part of the command — it is shown beside the box instead.
-    const body = text.slice(HAND_BACK_PREFIX.length).trim();
-    const nl = body.indexOf("\n");
-    if (nl === -1) return { kind: "handBack", command: body };
-    const note = body.slice(nl + 1).trim();
-    return note === ""
-      ? { kind: "handBack", command: body.slice(0, nl).trim() }
-      : { kind: "handBack", command: body.slice(0, nl).trim(), note };
-  }
   if (text.startsWith(STEER_ACK_MARK)) return { kind: "steerAck", text };
   return { kind: "inline", text };
+}
+
+/** The click row as the send response carries it (record 0044's offer): the
+ *  full bound line, the command's risk line when it declares one, and a
+ *  question's sentence on a did-you-mean offer (record 0054). */
+export interface OfferReply {
+  line: string;
+  risk?: string;
+  question?: string;
+}
+
+/** What the composer does with a click row (record 0069: no chat surface is
+ *  handed a line to retype — the row's line FILLS the box, ready to send):
+ *  the line is the command, and the hint beside the box is the question's
+ *  sentence, else the risk line, else `Enter runs it`. */
+export function offerFill(offer: OfferReply): { command: string; hint: string } {
+  return { command: offer.line, hint: offer.question ?? (offer.risk || "Enter runs it") };
 }
 
 /** The run's stream and stop routes from the view path a `202` carries
@@ -229,7 +230,8 @@ export function shortcutFor(ev: {
 }
 
 /** The placeholder guides the hand (rule 8): what to ask while nothing is live,
- *  what the box does while a run is, and the one thing to do after a hand-back. */
+ *  what the box does while a run is, and nothing once a click row filled the
+ *  box — the filled command is the guide. */
 export function placeholderFor(mode: ComposerMode, hint?: string): string {
   if (hint) return "";
   if (mode === "steer") return "Say what to add — it folds into the run at its next step";

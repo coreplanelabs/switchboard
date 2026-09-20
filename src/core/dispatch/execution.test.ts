@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { decideExecution, type ExecutionCell, type Surface, type TurnOutcome } from "./execution.js";
 
@@ -98,5 +100,52 @@ describe("the turn-outcome table is total and owns every outcome", () => {
     expect(() => decideExecution({ kind: "unknown_tool" } as unknown as TurnOutcome, "chat")).toThrow(
       /no cell for turn outcome/,
     );
+  });
+});
+
+// The retirement unit's tree assertion (record 0069's plan): the hand-back
+// prefix survives only where a TYPED surface names the line to type. The scan
+// walks every production module under src/core/dispatch and src/channels and
+// holds the prefix's render sites to the named files — a new render site is a
+// failing name here before it is a defect in a thread.
+describe("no chat render emits the hand-back prefix", () => {
+  const roots = ["src/core/dispatch", "src/channels"];
+  const sources = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true, recursive: true })
+      .filter((e) => e.isFile() && (e.name.endsWith(".ts") || e.name.endsWith(".vue")) && !e.name.endsWith(".test.ts"))
+      .map((e) => join(e.parentPath, e.name));
+  const files = roots.flatMap(sources);
+
+  it("the scan sees the tree", () => {
+    expect(files.length).toBeGreaterThan(20);
+  });
+
+  it("the prefix and its renderer are referenced only where typed surfaces name lines in refusals", () => {
+    // handBack.ts defines both; route.ts and operator.ts render them on the
+    // table's `refuse → typed_form` cell alone — never on a chat surface.
+    const allowed = new Set(
+      ["src/core/dispatch/handBack.ts", "src/core/dispatch/route.ts", "src/core/dispatch/operator.ts"].map((p) =>
+        join(...p.split("/")),
+      ),
+    );
+    const hits = files.filter((f) => /HAND_BACK_PREFIX|renderHandBackLine|To run this:/.test(readFileSync(f, "utf8")));
+    expect(hits.filter((f) => !allowed.has(f))).toEqual([]);
+  });
+
+  it("the cut note and the paste machinery are gone", () => {
+    for (const f of files) {
+      const text = readFileSync(f, "utf8");
+      expect(text, f).not.toMatch(/HAND_BACK_CUT_NOTE|pastedRoute|handBackRunId/);
+      expect(text, f).not.toMatch(/"pasted"/);
+    }
+  });
+
+  it("the web bundle no longer parses the prefix — the composer fills from the click row", () => {
+    const web = sources(join("web", "src"));
+    expect(web.length).toBeGreaterThan(5);
+    for (const f of web) {
+      const text = readFileSync(f, "utf8");
+      expect(text, f).not.toMatch(/HAND_BACK_PREFIX|To run this:/);
+    }
   });
 });

@@ -96,9 +96,9 @@ export const ROUTE_DOOR_FIXTURES: readonly RouteDoorFixture[] = [
     text: "in acme/api on the main branch: close out the login-timeout issue — extend the session refresh and open a PR titled after the fix.",
     expected: { kind: "bind", preset: "ship", carries: "extend the session refresh", forbids: "--repo" },
   },
-  // D3 (issue 1993): the hand-back line a bare `ship` — a line that cannot
-  // run as pasted ("Nothing to ship"). The fixture types the handed-back
-  // line; once E3 lands, the table leaves no line that cannot run as pasted.
+  // D3 (issue 1993): the day's defect was a bare `ship` line handed back to
+  // retype that could not run ("Nothing to ship"). Since E3, a chat surface
+  // is offered the click instead; the fixture holds the click's line runnable.
   {
     id: "d03",
     defect: "D3",
