@@ -485,13 +485,15 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     greenChecks(d, T0 + 20 * MIN);
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
     // A conflicting head is never called merge-ready, whatever the checks say
-    // — even green ones — and the line names the base to rebase onto.
+    // — even green ones — and the line names the sweep as the remedy (record
+    // 0071: `pulls rebase` runs the resolver and an unchanged patch carries
+    // the approval), with the base it rebases onto.
     const dirty = renderUnitReport(d.state, {
       mergeableState: "dirty",
       checks: { total: 3, pending: [], failed: [] },
     });
     expect(dirty).toContain(
-      "⚠️ Approved but not merge-ready after 1 review round: https://github.com/acme/api/pull/7 — the head conflicts with `main`: rebase onto `main`, push, and re-review. The approved work stands.",
+      "⚠️ Approved but not merge-ready after 1 review round: https://github.com/acme/api/pull/7 — the head conflicts with `main`: `pulls rebase https://github.com/acme/api/pull/7` rebases it onto `main` (an unchanged patch carries the approval). The approved work stands.",
     );
     expect(dirty).not.toContain("✅ Merge-ready");
     expect(dirty).toContain("Verdict: LGTM — clean");

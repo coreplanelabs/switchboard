@@ -2529,7 +2529,7 @@ export interface CommitChecksFacts {
  *  the line is unchanged. */
 function mergeReadyHeadline(rounds: string, url: string, base: string, facts: MergeReadyFacts | undefined): string {
   if (facts?.mergeableState === "dirty")
-    return `⚠️ Approved but not merge-ready after ${rounds}: ${url} — the head conflicts with \`${base}\`: rebase onto \`${base}\`, push, and re-review. The approved work stands.`;
+    return `⚠️ Approved but not merge-ready after ${rounds}: ${url} — the head conflicts with \`${base}\`: \`pulls rebase ${url}\` rebases it onto \`${base}\` (an unchanged patch carries the approval). The approved work stands.`;
   const fixups = facts?.fixupCommits ?? [];
   if (fixups.length > 0)
     return `⚠️ Approved but not merge-ready after ${rounds}: ${url} — ${fixups.length} unsquashed fix-up commit${fixups.length === 1 ? "" : "s"} on the head (${fixups.join("; ")}): squash into the unit's commit, push, and re-review.`;
