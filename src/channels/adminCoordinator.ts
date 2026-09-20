@@ -89,6 +89,8 @@ import type { LedgerRun } from "../core/runLedger/writeThrough.js";
 import type { HostingState } from "../core/runLedger/types.js";
 import type { RunsService, RunView } from "../core/runsService.js";
 import { parsePlanBranch, type Brief, type RoundChecks } from "../core/ship/coordinator.js";
+import { BOT_SCOPES, checkPrTitle, TITLE_MAX_LENGTH } from "../core/prTitle.mjs";
+import PR_TITLE_VOCABULARY from "../core/prTitleVocabulary.json" with { type: "json" };
 import { isHandoffShape, renderHandoffComment, type Handoff } from "../core/ship/handoff.js";
 import { normalizeHead, sameCommit } from "../core/reviewedHead.js";
 import {
@@ -1064,12 +1066,54 @@ function isEmptyBranchRefusal(err: unknown): boolean {
   return /HTTP 422\b/.test(message) && /no commits between/i.test(message);
 }
 
+/** The last line with the cap: over `max`, cut at the last word boundary that
+ *  fits, never mid-word, and drop what a cut leaves dangling (a period the
+ *  title gate refuses, a comma, a dash). A single over-long word past the
+ *  `after` index (the description's start — cutting into the `type(scope): `
+ *  prefix would leave no title at all) is hard-cut at the cap. */
+function cutAtWordBoundary(line: string, max: number, after: number): string {
+  const tidy = (s: string) => s.replace(/[\s.,;:—–-]+$/u, "");
+  if (line.length <= max) return tidy(line);
+  const head = line.slice(0, max + 1);
+  const space = head.lastIndexOf(" ");
+  return tidy(space > after ? head.slice(0, space) : line.slice(0, max));
+}
+
+/** The recovered pull request's fallback title (issue 1877), when the dead
+ *  coding child's record holds no submitted description: never the unit
+ *  heading verbatim — `U<n>: <unit title>` fails the required `title` check and
+ *  costs a fix round on a title, not on code. A unit title that already reads
+ *  as a conventional line the gate accepts is kept; otherwise the line is
+ *  `<type>[(<area>)]: <unit title>` — the type the title's own leading word
+ *  when the release config knows it, else `chore`; the scope the plan's area,
+ *  the first plan-id segment naming a code-map scope (never a bot's), omitted
+ *  when none does (the gate allows an unscoped line) — the whole line cut to
+ *  the 72-character cap at a word boundary. */
+export function recoveredFallbackTitle(
+  row: { unit: string; title?: string } | undefined,
+  branch: string,
+  planId: string | undefined,
+): string {
+  const raw = (row?.title ?? `${row?.unit ?? "the unit"} — ${branch}`).trim();
+  if (checkPrTitle(raw, PR_TITLE_VOCABULARY).ok) return raw;
+  const words = raw.split(/\s+/u);
+  const first = (words[0] ?? "").toLowerCase().replace(/:$/u, "");
+  const type = PR_TITLE_VOCABULARY.types.includes(first) ? first : "chore";
+  const rest = (type === first ? words.slice(1) : words).join(" ");
+  const area = planId?.split("-").find((seg) => PR_TITLE_VOCABULARY.scopes.includes(seg) && !BOT_SCOPES.includes(seg));
+  const prefix = `${type}${area !== undefined ? `(${area})` : ""}: `;
+  return cutAtWordBoundary(`${prefix}${rest === "" ? branch : rest}`, TITLE_MAX_LENGTH, prefix.length);
+}
+
 /** The recover path's pull request (agent-ship items 10 and 15): a coding
  *  child pushed its branch and then died — the pull request is opened from the
- *  branch itself, title from the unit, body from the child's submitted
- *  description when the record holds one, else a minimal body naming the unit.
- *  `none` names why when nothing could be opened; a GitHub failure that is
- *  neither reason is thrown for the caller's `github_unavailable`. */
+ *  branch itself through the same open-or-edit as any run's, the title from
+ *  the child's submitted description when the record holds one (used as is —
+ *  the submit tool's gate already judged it), else the unit's title as the
+ *  conventional fallback above (issue 1877); the body from the description,
+ *  else a minimal body naming the unit. `none` names why when nothing could be
+ *  opened; a GitHub failure that is neither reason is thrown for the caller's
+ *  `github_unavailable`. */
 async function recoverPushedBranch(
   deps: AdminCoordinatorDeps,
   instance: CoordinatorInstance,
@@ -1079,7 +1123,7 @@ async function recoverPushedBranch(
 ): Promise<Recovered> {
   if (instance.base === undefined) return { kind: "none", why: "no_base" };
   const unitName = row?.unit ?? "the unit";
-  let title = row?.title !== undefined ? `${row.unit}: ${row.title}` : `${unitName} — ${branch}`;
+  let title = recoveredFallbackTitle(row, branch, instance.plan?.id ?? parsePlanBranch(branch)?.planId);
   let prBody = `Opened by the plan runner from the pushed branch \`${branch}\`: the coding run ${runId} of ${unitName} ended before it could open the pull request or submit its description. The review round asks for the description.`;
   try {
     const full = await deps.runs.getRun(runId, { include: "messages" });
