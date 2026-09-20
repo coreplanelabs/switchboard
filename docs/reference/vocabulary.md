@@ -6,6 +6,8 @@ The product speaks twelve nouns, each with exactly one meaning. Every surface a 
 
 Every row carries the same five facts: the meaning, what it holds, what it belongs to, the carrying code type, and the surfaces that print it.
 
+<!-- generated:vocabulary-nouns · npm run docs:gen — rendered from src/docs/vocabulary.ts, do not edit by hand -->
+
 | Noun | Meaning | Holds | Belongs to | Carried by | Printed by |
 | --- | --- | --- | --- | --- | --- |
 | <a id="thread"></a>**thread** | Where you talk — a Slack thread or a web thread. One live model run at a time; a pipeline's own hosted run occupies no thread. | runs | a channel | the thread key on `RunSummary` (`src/core/runRegistry/projections.ts`) | cards and replies, the web rail's Threads list, the runs index |
@@ -20,6 +22,8 @@ Every row carries the same five facts: the meaning, what it holds, what it belon
 | <a id="outcome"></a>**outcome** | How a run or a unit stands once it is not working — ended or idle; merged, merge-ready, idle, failed, stopped are its values. | its value | a run or a unit | `UnitEnding` (`src/core/ship/coordinator.ts`), the status on `RunSummary` | cards, the runs index, the plane table |
 | <a id="card"></a>**card** | The message Switchboard keeps updating in a thread for a run. | the run's live status | a thread | `StatusUpdate`/`StatusHandle` on `ChannelIO` (`src/core/types.ts`) | the thread itself — Slack and web |
 | <a id="pull-request"></a>**pull request** | GitHub's own noun, unchanged. | — | a unit | the pull request fields on `CoordinatorUnit`; `PlanePullRequestRow` (`src/core/plane/table.ts`) | the unit page, the plane table, the delivery report |
+
+<!-- /generated:vocabulary-nouns -->
 
 The person is the <a id="requester"></a>**requester** — one word on every surface, whoever they are to GitHub or to the config.
 

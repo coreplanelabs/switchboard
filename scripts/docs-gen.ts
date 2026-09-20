@@ -1,7 +1,8 @@
 // Write the generated regions of the docs: the reference tables from the
 // command registry (docs/reference/specs/docs-site.md items 6–8), the decisions
-// index from the records (item 17), and the two diagrams drawn in more than one
-// place from their one source each (item 21).
+// index from the records (item 17), the two diagrams drawn in more than one
+// place from their one source each (item 21), and the vocabulary's noun table
+// from the typed rows (item 23).
 //
 //   npm run docs:gen     rewrite every region; prints one line per file changed
 //   npm run docs:check   verify the committed regions match the code — what CI
@@ -22,6 +23,7 @@ import { renderDecisionIndex, type DecisionRecord } from "../src/docs/decisions.
 import { DIAGRAM_REGION_NOTE, DIAGRAM_REGIONS, type DiagramSources } from "../src/docs/diagrams.js";
 import { docCommands, GENERATED_REGIONS, type DocCommand } from "../src/docs/reference.js";
 import { declaredRegions, REGION_NOTE, replaceRegion } from "../src/docs/regions.js";
+import { VOCABULARY_REGION_NOTE, VOCABULARY_REGIONS, VOCABULARY_ROWS } from "../src/docs/vocabulary.js";
 
 const DOCS_DIR = process.env.SWITCHBOARD_DOCS_DIR ?? fileURLToPath(new URL("../docs", import.meta.url));
 
@@ -88,6 +90,9 @@ function render(cmds: readonly DocCommand[], records: readonly DecisionRecord[])
     ...Object.entries(DIAGRAM_REGIONS).map(([file, regions]) =>
       renderFile(file, bind(regions, DIAGRAM_SOURCES), DIAGRAM_REGION_NOTE),
     ),
+    ...Object.entries(VOCABULARY_REGIONS).map(([file, regions]) =>
+      renderFile(file, bind(regions, VOCABULARY_ROWS), VOCABULARY_REGION_NOTE),
+    ),
   ];
 }
 
@@ -102,7 +107,7 @@ function main(): number {
     for (const o of drifted) console.error(`docs:check ${o.file} is out of date — run \`npm run docs:gen\``);
     if (problems.length + drifted.length === 0) {
       console.log(
-        `docs:check ok — ${outcomes.length} file(s) match the command registry, the decision records and the diagram sources`,
+        `docs:check ok — ${outcomes.length} file(s) match the command registry, the decision records, the diagram sources and the vocabulary rows`,
       );
       return 0;
     }
