@@ -607,7 +607,13 @@ const hostedRefused = { ok: false, error: "hosted" } as const;
  *  `unfinished` for a unit whose thread opened, else `not started`. */
 function hostedSealAnswer(units: readonly CoordinatorUnit[], runnerStopped: boolean): string {
   const lines = units.map((u) => {
-    const how = u.ending ? u.ending.kind : u.threadKey !== undefined ? "unfinished" : "not started";
+    // "unfinished" is the machine's word for "no ending was chosen" — the seal
+    // names the cause and the next step instead (issue 2063).
+    const how = u.ending
+      ? u.ending.kind
+      : u.threadKey !== undefined
+        ? "no ending was recorded — re-issue `agent:ship` in its thread to continue"
+        : "not started";
     return `${u.unit} — ${how}${u.pr ? ` — ${u.pr.url}` : ""}`;
   });
   return [

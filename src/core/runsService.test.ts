@@ -2260,7 +2260,9 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     const events = reg.snapshotById(id)!.events;
     const answer = [...events].reverse().find((e) => e.type === "answer");
     expect(answer && "text" in answer && answer.text).toContain("U16 — merged");
-    expect(answer && "text" in answer && answer.text).toContain("U17 — unfinished");
+    expect(answer && "text" in answer && answer.text).toContain(
+      "U17 — no ending was recorded — re-issue `agent:ship` in its thread to continue",
+    );
     // Who asked is on the stream, as every operator stop records it.
     expect(events.find((e) => e.type === "run_note" && e.kind === "stop_requested")).toMatchObject({
       mode: "hard",

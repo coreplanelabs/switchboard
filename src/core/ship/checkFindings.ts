@@ -55,9 +55,19 @@ export function suspectedFlake(run: Pick<CheckRunDetail, "conclusion" | "output"
  *  carries them: total, the pending names, and each failure with its
  *  conclusion, URL and flake judgement — the merge door's reading (a run not
  *  `completed` is pending; success, skipped and neutral are green) joined with
- *  the classifier's. */
-export function classifyRoundChecks(runs: CheckRunDetail[], changedPaths?: string[]): RoundChecks {
+ *  the classifier's. `requiredContexts` — the base's required checks — adds
+ *  `expected`: a required check no reported run answers yet (the repository's
+ *  approve workflow whose run does not exist at the verdict instant, issue
+ *  2063), which the machine's table reads exactly as a pending one. */
+export function classifyRoundChecks(
+  runs: CheckRunDetail[],
+  changedPaths?: string[],
+  requiredContexts?: string[],
+): RoundChecks {
   const out: RoundChecks = { total: 0, pending: [], failed: [] };
+  const reported = new Set(runs.map((r) => r.name));
+  const expected = (requiredContexts ?? []).filter((name) => !reported.has(name));
+  if (expected.length > 0) out.expected = expected;
   for (const run of runs) {
     out.total++;
     if (run.status !== "completed") {

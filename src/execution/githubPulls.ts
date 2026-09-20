@@ -363,6 +363,11 @@ export interface PullRequestFacts {
    *  absent when the response did not carry the field. Named at entry and at
    *  the approved head (spec item 9), never refused. */
   autoMergeEnabled?: boolean;
+  /** Whether the pull request is a draft (`draft`): a draft head is held —
+   *  `held: draft — mark it ready to continue` — never merged and never a
+   *  cause-less exit (agent-ship item 9, issue 2063); absent when the
+   *  response did not carry the field. */
+  draft?: boolean;
   /** GitHub's own `mergeable`: true/false once computed, null while GitHub is
    *  still computing it; absent when the response did not carry the field. */
   mergeable?: boolean | null;
@@ -501,6 +506,7 @@ export async function fetchPullRequestFacts(pr: {
     user?: { login?: unknown; id?: unknown };
     head?: { ref?: unknown; sha?: unknown; repo?: { full_name?: unknown } };
     base?: { ref?: unknown };
+    draft?: unknown;
     auto_merge?: unknown;
     mergeable?: unknown;
     mergeable_state?: unknown;
@@ -535,6 +541,7 @@ export async function fetchPullRequestFacts(pr: {
     ...(typeof data.base?.ref === "string" && data.base.ref ? { baseRef: data.base.ref } : {}),
     ...(typeof data.html_url === "string" ? { htmlUrl: data.html_url } : {}),
     ...(typeof data.title === "string" && data.title ? { title: data.title } : {}),
+    ...(typeof data.draft === "boolean" ? { draft: data.draft } : {}),
     ...("auto_merge" in data ? { autoMergeEnabled: data.auto_merge !== null } : {}),
     ...("mergeable" in data ? { mergeable: data.mergeable === null ? null : data.mergeable === true } : {}),
     ...(typeof data.mergeable_state === "string" && data.mergeable_state
@@ -793,6 +800,38 @@ export async function fetchCommitChecks(repo: string, sha: string): Promise<Comm
     else if (typeof run.conclusion !== "string" || !GREEN_CONCLUSIONS.has(run.conclusion)) out.failed.push(name);
   }
   return out;
+}
+
+/** `GET /repos/{repo}/rules/branches/{branch}` → the contexts the branch's
+ *  effective rules require green (`required_status_checks` rules, protection
+ *  and rulesets alike), or undefined when GitHub cannot be read or the answer
+ *  is not the route's. The round's checks step subtracts the reported runs
+ *  from these to see a required check whose run does not exist yet — the
+ *  repository's approve workflow at the verdict instant (agent-ship item 9,
+ *  issue 2063). Never throws. */
+export async function requiredCheckContexts(repo: string, branch: string): Promise<string[] | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/rules/branches/${encodeGithubRef(branch)}?per_page=100`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as unknown;
+  if (!Array.isArray(data)) return undefined;
+  const contexts: string[] = [];
+  for (const rule of data as Array<{ type?: unknown; parameters?: { required_status_checks?: unknown } }>) {
+    if (rule?.type !== "required_status_checks") continue;
+    const rows = rule.parameters?.required_status_checks;
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows as Array<{ context?: unknown }>)
+      if (typeof row?.context === "string" && row.context.length > 0) contexts.push(row.context);
+  }
+  return [...new Set(contexts)];
 }
 
 /** Git's autosquash prefixes: a commit that names itself with one is, by its
