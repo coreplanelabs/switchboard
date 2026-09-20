@@ -32,7 +32,7 @@
   "commands": {
     "$comment": "What each root npm script does and when to run it — the source of the Commands table in AGENTS.md (npm run agents:gen). A script without an entry fails agents:check, so a new script cannot ship undocumented.",
     "verify": {
-      "does": "The whole gate: every root check, every workspace's verify, the site check — exactly what CI runs.",
+      "does": "The whole gate: every check, every workspace — exactly what CI runs.",
       "when": "Local sessions, before requesting review. ~4 min. A pipeline agent leaves it to CI."
     },
     "verify:root": {
@@ -40,11 +40,11 @@
       "when": "When only the bot changed."
     },
     "check:consistency": {
-      "does": "The sub-second checks that generated and declared things equal the code (lockfile, sandbox pairs, skills, licenses, docs tables, specs, project facts, this table).",
+      "does": "The sub-second checks that generated and declared things equal the code, this table included.",
       "when": "After touching a generated or declared artifact; one CI leg."
     },
     "test": {
-      "does": "The whole vitest suite (bot, web, the plain-Node Worker tests) from one entry, after `deploy:gen`.",
+      "does": "The whole vitest suite from one entry, after `deploy:gen`.",
       "when": "Local sessions, before pushing; a pipeline agent runs the changed set — the full suite is CI's."
     },
     "typecheck": {
@@ -160,20 +160,28 @@
       "when": "After renaming a test or editing a spec; `-- --fix` makes truncated titles explicit."
     },
     "specs:coverage": {
-      "does": "Maps a change's paths to the specs whose `Code`/`Tests` headers cover them, then lists changed source paths no spec covers.",
+      "does": "Maps a change's paths to the specs whose headers cover them, then lists paths no spec covers.",
       "when": "`-- --changed origin/main...HEAD [--test-guard]` before review; `-- --require` fails on an uncovered path; `-- --json` for machines."
     },
     "decisions:check": {
-      "does": "Every record under `docs/decisions/` and `docs/plans/` has a valid `status`, a superseded one names its successor, an accepted body only gains an appended `## Amended`.",
-      "when": "Part of `check:consistency`; a failing record is superseded or amended by appending, never edited."
+      "does": "Every record under `docs/decisions/` and `docs/plans/` has a valid `status`, a superseded one names its successor, an accepted body only gains `## Amended`.",
+      "when": "Part of `check:consistency`; a failing record is superseded or amended, never edited."
     },
     "hygiene:check": {
       "does": "The public tree's imprint (company, people, trackers, plan ids, ids, dates) equals the recorded list, which only shrinks.",
-      "when": "Part of `check:consistency`. New hit: rewrite the line or allow it in `scripts/public-hygiene.allow`."
+      "when": "Part of `check:consistency`. New hit: rewrite the line or allow it by name."
     },
     "hygiene:gen": {
       "does": "Records the tree's remaining imprint after a scrub; refuses growth unless `-- --force`.",
       "when": "Part of `fix`; new imprint fails it like `hygiene:check`."
+    },
+    "vocabulary:check": {
+      "does": "No internal word prints on a user surface; the baseline only shrinks.",
+      "when": "Part of `check:consistency`; a hit is rewritten in the user's nouns."
+    },
+    "vocabulary:gen": {
+      "does": "Records the remaining internal words; refuses growth unless `-- --force`.",
+      "when": "Part of `fix`."
     },
     "agents:gen": {
       "does": "Writes the Commands table in AGENTS.md from `package.json` and this file.",
@@ -220,8 +228,8 @@
       "when": "After a `web/` change."
     },
     "screenshots:gen": {
-      "does": "Renders the dashboard screenshots whose inputs changed, both themes, recording each surface's input hashes in `docs/public/screenshots/manifest/` (`--force`: all).",
-      "when": "After a `web/` or fixture change, once `screenshots:check` names it; needs `npx playwright-core install chromium`, so not in `fix`."
+      "does": "Renders the dashboard screenshots whose inputs changed, both themes, recording input hashes in the manifest (`--force`: all).",
+      "when": "After a `web/` or fixture change; needs `npx playwright-core install chromium`, so not in `fix`."
     },
     "screenshots:check": {
       "does": "Each surface's inputs still hash to what its screenshots were rendered from — no browser.",
