@@ -1705,6 +1705,7 @@ const ROUND_OUTCOMES = [
   "dequeued",
   "aborted",
   "stopped",
+  "held",
   "continued",
   "idle",
 ] as const satisfies readonly ShipRoundOutcome[];

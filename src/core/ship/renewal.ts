@@ -54,7 +54,9 @@ const sameSha = (a: string, b: string): boolean => {
 /** Progress is a fact the row records after unit eight and the runner reads
  *  without a model: the last head pushed to the unit's branch that differs from
  *  the head the segment started at and is not older than the lease; failing
- *  that, a handoff whose follow-ups shrank or whose deviations grew. */
+ *  that, a checkpoint handoff whose follow-ups shrank. A handoff carrying
+ *  deviations never reaches this decision: it is the round's own ending (issue
+ *  2086) and the unit ends held before any renewal is judged. */
 export function progressOf(input: ProgressInput): Progress {
   const last = [...input.pushed].reverse().find((h) => h.ref === input.branch);
   if (last !== undefined) {
@@ -69,8 +71,7 @@ export function progressOf(input: ProgressInput): Progress {
   const pushWhy = `no head newer than the budget's start was pushed to \`${input.branch}\``;
   if (input.handoff === undefined) return { progressed: false, why: pushWhy };
   const { previous, current } = input.handoff;
-  if (current.followUps.length < previous.followUps.length || current.deviations.length > previous.deviations.length)
-    return { progressed: true, by: "handoff" };
+  if (current.followUps.length < previous.followUps.length) return { progressed: true, by: "handoff" };
   return { progressed: false, why: `${pushWhy} and the write-up is unchanged` };
 }
 

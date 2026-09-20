@@ -776,6 +776,25 @@ export type UnitEnding =
       round: RoundRef;
       reviewRounds: number;
     }
+  /** The round-0 coding child concluded its round with an answer instead of a
+   *  pull request (issue 2086): its handoff records a deviation — a stop
+   *  condition it hit, a precondition that does not hold, a question it could
+   *  not resolve — read off the record, never its prose. The round has ended;
+   *  the unit ends held with the deviations as its reason and waits for the
+   *  person's word (it idles when the flag is on — the one held cause that
+   *  does), and the round is never renewed as a second segment: the renewal
+   *  grant (decision 0046, amended) is for a lease that ran out mid-work, not
+   *  for a round with an answer. */
+  | {
+      kind: "held";
+      cause: "blocked";
+      pr?: PrRef;
+      round: RoundRef;
+      runId: string;
+      reason: string;
+      finalReply?: string;
+      reviewRounds: number;
+    }
   | { kind: "merge_refused"; pr: PrRef; reason: string; reviewRounds: number }
   | { kind: "round_cap"; maxRounds: number; reviewRounds: number }
   | {
@@ -870,22 +889,20 @@ export type UnitEnding =
 
 /** The kinds that idle: every ending but the ended ones — the unit is
  *  unfinished (a cap, a stop, an abort, a refused merge, a segment's end) and
- *  a reply could continue it. `merged`, `already_landed`, `merge_ready`,
- *  `held` and `refused` never idle: the first two are done, merge-ready waits
- *  only for a person's merge, held waits only for a person's receipt (a fix
- *  round could change nothing, so nothing here can continue it), and a
- *  refused child would be refused again. */
-export type IdleWhy = Exclude<
-  UnitEnding["kind"],
-  "idle" | "merged" | "already_landed" | "merge_ready" | "held" | "refused"
->;
+ *  a reply could continue it. `merged`, `already_landed`, `merge_ready` and
+ *  `refused` never idle: the first two are done, merge-ready waits only for a
+ *  person's merge, and a refused child would be refused again. A gated or
+ *  draft `held` never idles either — it waits only for a person's receipt at
+ *  the pull request, which no thread reply can produce — but a blocked hold
+ *  (issue 2086) waits for exactly the person's word the idle's wake carries,
+ *  so it alone idles; `idleEnding` draws that line by cause. */
+export type IdleWhy = Exclude<UnitEnding["kind"], "idle" | "merged" | "already_landed" | "merge_ready" | "refused">;
 
 const NEVER_IDLES: ReadonlySet<UnitEnding["kind"]> = new Set([
   "idle",
   "merged",
   "already_landed",
   "merge_ready",
-  "held",
   "refused",
 ]);
 
@@ -1354,10 +1371,11 @@ function end(s: UnitPipelineState, ending: UnitEnding, notes: CoordinatorNote[] 
 function idleEnding(s: UnitPipelineState, ending: UnitEnding): Extract<UnitEnding, { kind: "idle" }> | undefined {
   if ((s.input.idleDays ?? 0) <= 0) return undefined;
   if (NEVER_IDLES.has(ending.kind)) return undefined;
-  const old = ending as Exclude<
-    UnitEnding,
-    { kind: "idle" | "merged" | "already_landed" | "merge_ready" | "held" | "refused" }
-  >;
+  // A gated or draft hold waits only for a person's receipt at the pull
+  // request — no thread reply can continue it — while a blocked hold (issue
+  // 2086) waits for exactly the person's word the wake carries, so it idles.
+  if (ending.kind === "held" && ending.cause !== "blocked") return undefined;
+  const old = ending as Exclude<UnitEnding, { kind: "idle" | "merged" | "already_landed" | "merge_ready" | "refused" }>;
   const grant = s.input.grant ?? DEFAULT_GRANT;
   // Unspent: an idle spends no renewal — the wake's segment does (this plan's
   // fifth unit) — so the row says what the grant still holds.
@@ -1996,14 +2014,42 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
         return end(s, { kind: "already_landed", landed, round, runId: phase.runId, reviewRounds: s.reviewRounds }, [
           roundNote(round, "completed"),
         ]);
-      // Round 0 ended without a pull request: the segment is over with the unit
-      // unfinished, and the grant decides whether the next opens (decision
-      // 0046, Renewal). Progress is read off the child's record — a head pushed
-      // to the unit's branch since the segment started, or a handoff that moved —
-      // never off its words; the decision then asks the grant's count, the cap
-      // and the fit, in that order, and a refusal names the clause. A plain
-      // abort keeps its old shape when nothing was pushed under a grant of zero:
-      // a clarifying question is not a stop to explain.
+      // A concluded round is never renewed (issue 2086; decision 0046,
+      // amended): a handoff recording a deviation is the round's own ending —
+      // a stop condition the child hit, a precondition that does not hold, a
+      // question it could not resolve — a typed fact off the record, never its
+      // prose. The unit ends held with the deviations as its reason and waits
+      // for the person's word; no renewal is judged and no second segment
+      // opens — the grant is for a lease that ran out mid-work, and a renewed
+      // segment would re-run the same brief with no memory of the answer. A
+      // handoff without deviations is the lease-end checkpoint (follow-ups,
+      // unproven criteria) and leaves the renewal decision below to the grant.
+      const deviations = phase.childHandoff?.deviations ?? [];
+      if (deviations.length > 0)
+        return end(
+          s,
+          {
+            kind: "held",
+            cause: "blocked",
+            ...(s.pr !== undefined ? { pr: s.pr } : {}),
+            round,
+            runId: phase.runId,
+            reason: deviations.map((dv) => `${dv.from} → ${dv.to} — ${dv.why}`).join("; "),
+            ...(phase.finalReply !== undefined ? { finalReply: phase.finalReply } : {}),
+            reviewRounds: s.reviewRounds,
+          },
+          [roundNote(round, "held")],
+        );
+      // Round 0 ended without a pull request and without an ending of its own:
+      // the segment is over with the unit unfinished — a lease end, never a
+      // concluded round (those ended above) — and the grant decides whether
+      // the next opens (decision 0046, Renewal). Progress is read off the
+      // child's record — a head pushed to the unit's branch since the segment
+      // started, or a checkpoint handoff that moved — never off its words; the
+      // decision then asks the grant's count, the cap and the fit, in that
+      // order, and a refusal names the clause. A plain abort keeps its old
+      // shape when nothing was pushed under a grant of zero: a clarifying
+      // question is not a stop to explain.
       const grant = s.input.grant ?? DEFAULT_GRANT;
       const session = s.input.session;
       const progress = progressOf({
@@ -2705,6 +2751,19 @@ export function renderUnitReport(
         return join([
           `⏸️ Held after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — the pull request is a draft, so nothing can merge and no fix round would change anything.`,
           draftReissue,
+        ]);
+      }
+      // The blocked hold (issue 2086): the coding child concluded its round
+      // with an answer instead of a pull request — its handoff's deviations
+      // are the reason — so the report leads with that answer and says plainly
+      // that no renewal was spent and no second coding child ran: the person's
+      // word in this thread is what continues the unit.
+      if (e.cause === "blocked") {
+        if (!shows(verbosity, "verbose")) return `⏸️ Held: blocked — ${e.reason}${prLine}`;
+        return join([
+          `⏸️ Held after ${rounds}: the coding child of round ${e.round.index} concluded its round blocked instead of opening a pull request — ${e.reason}.${prLine}`,
+          writeUpPointer(s, e.round.kind, e.runId),
+          `No renewal was spent and no second coding child ran — a concluded round is not renewed (a renewal continues a budget that ran out mid-work). Next step: your word in this thread — answer what the child raised, and the unit continues from there. ${reissue}`,
         ]);
       }
       // The person's next step is the report's whole point (issue 1990): the

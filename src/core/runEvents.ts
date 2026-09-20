@@ -436,6 +436,11 @@ export type ShipRoundOutcome =
   | "dequeued"
   | "aborted"
   | "stopped"
+  /** The round-0 coding child concluded its round with an answer instead of a
+   *  pull request (issue 2086): its handoff records a deviation — a stop
+   *  condition, a blocked precondition — so the unit ends held for the
+   *  person's word and no renewal is judged. */
+  | "held"
   /** The coding round ended at its lease with the unit unfinished and the row
    *  showing progress, and the grant renewed: the next segment opens (decision 0046). */
   | "continued"

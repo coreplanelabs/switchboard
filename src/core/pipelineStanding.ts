@@ -99,6 +99,7 @@ export const ROUND_STAGE = {
   dequeued: "fix",
   aborted: "hold",
   stopped: "hold",
+  held: "hold",
   continued: "continue",
   idle: "idle",
 } as const satisfies Record<ShipRoundOutcome, Stage | "start" | "continue" | "hold">;
@@ -171,6 +172,7 @@ export const ROUND_OUTCOME_WORDS = {
   dequeued: "removed from the merge queue",
   aborted: "aborted",
   stopped: "stopped",
+  held: "held",
   continued: "continuing",
   idle: "idle",
 } as const satisfies Record<ShipRoundOutcome, string>;
