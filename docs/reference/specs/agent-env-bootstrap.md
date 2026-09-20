@@ -1,6 +1,6 @@
 # Agent env bootstrap: downstream UAT creds into the agent's execution environment
 
-When the switchboard agent works on a **downstream service**, its execution environment — the shell where its `bash` tool runs (resident/sandbox/local-dev) — needs that service's environment variables so the real toolchain works: running the service's tests, generating code against it, deploying to that service's **UAT**. This tool materializes those env vars from 1Password via a **read-only service account scoped to a UAT vault**, so the agent can obtain a downstream service's **UAT** creds — never its prod — without spending agent turns on environment setup.
+When the switchboard agent works on a **downstream service**, its execution environment — the shell where its `bash` tool runs (resident/sandbox/local-dev) — needs that service's environment variables so the real toolchain works: running the service's tests, generating code against it, deploying to that service's **UAT**. This tool materializes those env vars from 1Password via a **read-only service account scoped to a UAT vault**, so the [agent](../vocabulary.md#agent) can obtain a downstream service's **UAT** creds — never its prod — without spending agent turns on environment setup.
 
 **This is NOT** Switchboard's own Cloudflare-Worker secret provisioning ([release-and-deploy.md](release-and-deploy.md) item 18 — that path writes to Switchboard's Workers via `wrangler secret put`). Here the write side **materializes env vars into the execution environment**: `--apply` writes a `chmod 600` dotenv file the toolchain sources, and the in-process integration hook returns the same `NAME→value` map for merging into a sandbox's env.
 
@@ -96,7 +96,7 @@ set -a; . .agent-env/<name>.uat.env; set +a
 
 `buildAgentEnv({ manifest, env, service, opReader, processEnv })` is the clean seam: it returns the resolved `NAME→value` map for a service's UAT env, enforcing the allowlist and the fail-closed token check, and writing no file. It is the direct analogue of `githubEnvs()` in `src/execution/factory.ts`, which today returns `{ GH_TOKEN }` for injection into a sandbox's `envs` (E2B `envs`, the Cloudflare Sandbox request body's `env`).
 
-**Open integration decision for the owner (deliberately NOT wired into the deployed executor in v1):** where downstream UAT env should enter a run. Two mechanisms, both supported by this tool:
+**Open integration decision for the owner (deliberately NOT wired into the deployed executor in v1):** where downstream UAT env should enter a [run](../vocabulary.md#run). Two mechanisms, both supported by this tool:
 
 1. **Baked into the repo's toolchain-setup step**: run `--apply` once during the resident warm-up / a repo's setup, and have the toolchain source the chmod-600 file. Simple, no code change to the executor; the file lives on the execution host.
 2. **In-process injection via `buildAgentEnv`**: call it from `factory.ts` alongside `githubEnvs()` and merge the result into the sandbox `envs`. Cleaner (no on-disk file), but adds an `op read` dependency and latency to executor provisioning, and needs a policy for *which service* a run targets (the dispatcher already resolves `ctx.repo`, which could map to a service).
