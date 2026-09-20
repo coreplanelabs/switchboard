@@ -581,3 +581,43 @@ describe("reclaimRuns — the hosted parent's classification (record 0060)", () 
     ]);
   });
 });
+
+describe("reclaimRuns — the reclaim's outcome reported to the plane", () => {
+  it("every taken row's word is reported (`closed` for a close; `resume`/`restart` for a hand-off to the launcher), the plane records lease_lapsed only for the closed one, and the interrupted note renders the recorded cause word", async () => {
+    const { ledger, run } = harness();
+    // Closed: no transcript, no step record.
+    await ledger.claim(claim("dead", "slack:C1:1.0"));
+    // Restart: an attaching row with its request.
+    await ledger.claim({
+      ...claim("att", "slack:C1:2.0"),
+      phase: "attaching",
+      meta: { ...claim("x", "t").meta, request: { text: "again", userId: "slack:UBOB" } },
+    });
+    const outcome = await run();
+    expect(outcome.closed.map((c) => c.runId)).toEqual(["dead"]);
+    expect(ledger.planeReclaims).toEqual([
+      { runId: "att", outcome: "restart" },
+      { runId: "dead", outcome: "closed" },
+    ]);
+    expect(ledger.planeEndings.get("dead")).toMatchObject({ cause: "lease_lapsed" });
+    expect(ledger.planeEndings.has("att")).toBe(false);
+    // The note RENDERS the plane's word (endingCauseWords), never composes one.
+    expect(outcome.closed[0].note).toContain("its lease lapsed with no heartbeat");
+    expect(outcome.closed[0].note).toContain("Re-send your request");
+  });
+
+  it("an older state Worker without the route is one warning and today's words — the notes stand as written", async () => {
+    const { ledger, run, warnings } = harness((inner) =>
+      overriding(inner, {
+        planeReclaimed: async () => {
+          throw new Error("no such route: /plane/reclaimed");
+        },
+      }),
+    );
+    await ledger.claim(claim("dead", "slack:C1:1.0"));
+    const outcome = await run();
+    expect(outcome.closed[0].note).toBe(closureNote(undefined, undefined));
+    expect(outcome.closed[0].note).toContain("The bot restarted while this run was in flight");
+    expect(warnings.some((w) => w.includes("outcome report not recorded"))).toBe(true);
+  });
+});

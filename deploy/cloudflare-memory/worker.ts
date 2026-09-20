@@ -79,11 +79,15 @@ import {
 } from "../../src/core/runLedger/decisions.ts";
 import { intakeReceiptRetentionMs, minutesToMs, PLANE } from "../../src/core/budgets.ts";
 import {
+  causeOfClose,
+  causeOfReclaim,
   decide,
   effectCapRefusal,
   planeAskAnswerOf,
   planeAskWordOf,
   RESIDENT_DRAIN_WINDOW,
+  type PlaneEndingCause,
+  type PlaneReclaimWord,
   type HeartbeatFacts,
   type PlaneAskAnswer,
   type PlaneLevelRow,
@@ -104,6 +108,7 @@ import {
   isCoordinatorInstance,
   isCoordinatorUnit,
   isThreadEvent,
+  sendChildSignal,
   sendRunFinished,
   UNIT_PATTERN,
   type CoordinatorInstance,
@@ -1778,6 +1783,12 @@ export class RunHistoryDO extends DurableObject<Env> {
         generation TEXT NOT NULL,
         PRIMARY KEY (resident, name)
       );
+      CREATE TABLE IF NOT EXISTS plane_endings (
+        run_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        cause TEXT NOT NULL,
+        at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -2132,6 +2143,54 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (set === null || set > due) await this.ctx.storage.setAlarm(due);
   }
 
+  /** The earliest instant the plane must wake at (record 0064): the
+   *  earliest hosting deadline, lease end or re-ask across its rows. A due
+   *  already past re-offers at the re-ask cadence, never in a hot loop, and
+   *  contributes nothing to end a run — the alarm only offers. */
+  private planeEarliestDue(now: number): number | undefined {
+    const dues: number[] = [];
+    const reoffer = now + this.planeReaskMs();
+    for (const r of this.sql
+      .exec<{ lease_until: number; state_json: string }>(`SELECT lease_until, state_json FROM live_runs`)
+      .toArray()) {
+      dues.push(r.lease_until > now ? r.lease_until : reoffer);
+      try {
+        const hosting = (JSON.parse(r.state_json) as Record<string, unknown>).hosting as { until?: unknown };
+        if (typeof hosting?.until === "number") dues.push(hosting.until > now ? hosting.until : reoffer);
+      } catch {
+        // A malformed state contributes no deadline.
+      }
+    }
+    if (this.planeWaitsOnResident()) dues.push(reoffer);
+    return dues.length === 0 ? undefined : Math.min(...dues);
+  }
+
+  /** The plane's one alarm (record 0064): set to the earliest due across
+   *  its rows — the owner's heartbeat, moving the lease end, moves an alarm
+   *  the plane armed; an alarm someone else armed earlier is left to fire
+   *  first (the handler re-arms). The armed slot is judged directly, never
+   *  the meta row alone: the slot is shared with the re-ask and the sweep and
+   *  a fired alarm is consumed, so a meta row equal to a static due (a
+   *  hosting deadline) can claim a wake that no longer exists. The due is
+   *  capped to the sweep interval so the retention sweep never starves behind
+   *  a distant hosting deadline. */
+  private async ensurePlaneAlarm(now: number): Promise<void> {
+    const raw = this.planeEarliestDue(now);
+    const prior = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'plane_alarm_at'`).toArray()[0];
+    const priorAt = prior ? Number(prior.value) : undefined;
+    if (raw === undefined) {
+      if (prior) this.sql.exec(`DELETE FROM meta WHERE key = 'plane_alarm_at'`);
+      return; // nothing waits: the sweep's own arming stands
+    }
+    const due = Math.min(raw, now + RUN_SWEEP_INTERVAL_MS);
+    const set = await this.ctx.storage.getAlarm();
+    // Re-arm when the slot is empty, later than the due, or holds an alarm
+    // this plane armed itself; an earlier foreign alarm fires first.
+    if (set !== due && (set === null || set > due || set === priorAt)) await this.ctx.storage.setAlarm(due);
+    if (due !== priorAt)
+      this.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_alarm_at', ?)`, String(due));
+  }
+
   /** A window's open or lift over the RPC seam (`/plane/deploy`; a later
    *  unit's `plane window lift`): kind `deploy` is the pending deploy. */
   planeWindow(window: string, phase: "opened" | "lifted", now: number): { admitted: number } {
@@ -2154,6 +2213,78 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** One queued row, for the queued id's page. */
   planeQueueRowOf(runId: string): PlaneQueueRow | null {
     return this.planeState().queue.find((r) => r.runId === runId) ?? null;
+  }
+
+  /** The ending's cause (record 0064, "Endings and the watches"): one
+   *  `ended { kind, cause }` per closed row, recorded only when a live row
+   *  closes and first-writer-wins — a roll that resumes every row assigns
+   *  nothing. One keyed exception, taken only by the finish (`supersedes`): a
+   *  standing `resident_replaced` was a `restarting` close — the run carried
+   *  on under its own id (run-history item 42's restart) — so that run's own
+   *  later finish replaces it and the ending agrees with the record. The bot
+   *  renders the word; the object never renders. */
+  private recordPlaneEnding(
+    runId: string,
+    kind: string,
+    cause: PlaneEndingCause,
+    at: number,
+    supersedes = false,
+  ): PlaneEndingCause {
+    this.sql.exec(
+      `INSERT OR IGNORE INTO plane_endings (run_id, kind, cause, at) VALUES (?, ?, ?, ?)`,
+      runId,
+      kind,
+      cause,
+      at,
+    );
+    const standing = this.sql
+      .exec<{ cause: string }>(`SELECT cause FROM plane_endings WHERE run_id = ?`, runId)
+      .toArray()[0];
+    if (
+      supersedes &&
+      standing !== undefined &&
+      standing.cause === "resident_replaced" &&
+      cause !== "resident_replaced"
+    ) {
+      this.sql.exec(`UPDATE plane_endings SET kind = ?, cause = ?, at = ? WHERE run_id = ?`, kind, cause, at, runId);
+      return cause;
+    }
+    return (standing?.cause as PlaneEndingCause | undefined) ?? cause;
+  }
+
+  /** The reclaim's outcome per row (record 0064; run-history item 36): only a
+   *  `closed` row records an ending — `lease_lapsed`, which is true and blames
+   *  nobody — and the standing cause is answered back so the bot's interrupted
+   *  note renders the plane's word. `resume`, `restart` and `rehost` record
+   *  nothing: the run carries on. */
+  planeReclaimed(
+    outcomes: readonly { runId: string; outcome: PlaneReclaimWord }[],
+    now: number,
+  ): { recorded: { runId: string; cause: PlaneEndingCause }[] } {
+    const recorded: { runId: string; cause: PlaneEndingCause }[] = [];
+    this.ctx.storage.transactionSync(() => {
+      for (const o of outcomes) {
+        const cause = causeOfReclaim(o.outcome);
+        if (cause === undefined) continue;
+        recorded.push({ runId: o.runId, cause: this.recordPlaneEnding(o.runId, "interrupted", cause, now) });
+      }
+    });
+    if (outcomes.length > 0)
+      console.log(
+        `[plane/reclaimed] ${outcomes.map((o) => `${o.runId}=${o.outcome}`).join(", ")} — ${recorded.length} ending(s) recorded`,
+      );
+    return { recorded };
+  }
+
+  /** One recorded ending (record 0064), or none: what a reader renders. */
+  planeEndingOf(runId: string): { kind: string; cause: PlaneEndingCause; at: number } | null {
+    const row = this.sql
+      .exec<{ kind: string; cause: string; at: number }>(
+        `SELECT kind, cause, at FROM plane_endings WHERE run_id = ?`,
+        runId,
+      )
+      .toArray()[0];
+    return row ? { kind: row.kind, cause: row.cause as PlaneEndingCause, at: row.at } : null;
   }
 
   /** The seal (record 0064, "The queue"): the run's own open effects are
@@ -2578,6 +2709,24 @@ export class RunHistoryDO extends DurableObject<Env> {
         JSON.stringify(req.state ?? {}),
       );
     });
+    if (out.ok) {
+      // A `restartOf` claim under a coordinator (record 0064): the plane
+      // tells the waiting parent the child resumed — best effort, beside the
+      // bot's own announcement; a duplicate is consumed and re-armed, harmless.
+      if (req.meta.restartOf !== undefined && req.meta.parentInstanceId !== undefined) {
+        const sent = await sendChildSignal(this.env.SHIP_COORDINATOR, {
+          runId: req.runId,
+          parentInstanceId: req.meta.parentInstanceId,
+          kind: "resumed",
+          reason: `restarted from run ${req.meta.restartOf}`,
+          at: now,
+        });
+        if (sent.kind === "failed")
+          console.warn(`[runs/claim] ${req.runId} → ${sent.type} not delivered to ${sent.instance}: ${sent.reason}`);
+      }
+      // The lease end joins the plane's alarm (record 0064): armed at the earliest due.
+      await this.ensurePlaneAlarm(now);
+    }
     return out;
   }
 
@@ -2617,6 +2766,9 @@ export class RunHistoryDO extends DurableObject<Env> {
       // client's ack loop needs no version probe.
       out = { ok: true, stop: row.stop, phase: row.phase, effects: this.openPlaneEffects() };
     });
+    // The owner's heartbeat refreshes the lease, so the plane's alarm moves
+    // with it (record 0064): re-armed only when the earliest due changed.
+    if (out.ok) await this.ensurePlaneAlarm(now);
     return out;
   }
 
@@ -2759,6 +2911,16 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
       const put = this.upsertInTransaction(record, proposal);
       this.deleteLiveRows([runId]);
+      // The ending's cause (record 0064), recorded exactly when the live
+      // row closes: the record's own status word, `restarting` reading as the
+      // resident replacement the reattach path observed.
+      this.recordPlaneEnding(
+        runId,
+        record.status,
+        causeOfClose(record.status, record.restarting === true),
+        record.finishedAt,
+        true,
+      );
       turnedFinal = put.turnedFinal;
       out = { ok: true, stored: put.stored };
     });
@@ -3270,8 +3432,25 @@ export class RunHistoryDO extends DurableObject<Env> {
         const probes = this.planeApply({ kind: "reask", at: now, cadenceMs: this.planeReaskMs() }).effects;
         if (probes.length > 0) console.log(`[plane/reask] ${probes.map((e) => e.id).join(", ")}`);
       }
+      // A lease end offers the row to a generation other than its owner and
+      // never ends a run (record 0064): the row stays exactly as it is —
+      // any reclaim can take it now — and the open effects are re-pushed so a
+      // listening bot sweeps sooner. The owner's next heartbeat refreshes an
+      // unreclaimed row and moves the alarm on.
+      const lapsed = this.sql
+        .exec<{ run_id: string; owner_gen: string }>(
+          `SELECT run_id, owner_gen FROM live_runs WHERE lease_until <= ?`,
+          now,
+        )
+        .toArray();
+      if (lapsed.length > 0) {
+        console.log(
+          `[plane/alarm] ${lapsed.length} lease(s) lapsed (${lapsed.map((l) => l.run_id).join(", ")}) — offered to any generation but the owner; nothing closed`,
+        );
+        this.pushPlaneEffects(this.openPlaneEffects());
+      }
       await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
-      await this.ensurePlaneReaskAlarm(now);
+      await this.ensurePlaneAlarm(now);
       root.end("ok", { swept: deleted });
     } catch (err) {
       root.fail(err);
@@ -4655,7 +4834,10 @@ const PLANE_ROUTES = new Set([
   "/plane/level",
   "/plane/observe",
   "/plane/park",
+  "/plane/reclaimed",
 ]);
+
+const PLANE_RECLAIM_WORDS = new Set(["resume", "restart", "rehost", "closed"]);
 
 const PLANE_LEVEL_NAMES = new Set(["seat", "memory", "drain"]);
 const PLANE_LEVEL_SIDES = new Set(["below", "above"]);
@@ -4799,6 +4981,21 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
     if (!parsed.ok) return json({ error: parsed.error }, 400);
     return json(await stub.planeWithdraw(parsed.value, now));
   }
+  if (pathname === "/plane/reclaimed") {
+    // The reclaim's outcome per row (record 0064; run-history item 36): only
+    // `closed` records an ending; the standing causes are answered back.
+    if (!Array.isArray(b.outcomes)) return json({ error: "outcomes must be an array" }, 400);
+    const outcomes: { runId: string; outcome: PlaneReclaimWord }[] = [];
+    for (const o of b.outcomes as unknown[]) {
+      const row = o as Record<string, unknown>;
+      const parsed = parseRunId(row?.runId);
+      if (!parsed.ok) return json({ error: parsed.error }, 400);
+      if (typeof row.outcome !== "string" || !PLANE_RECLAIM_WORDS.has(row.outcome))
+        return json({ error: "outcome must be resume, restart, rehost or closed" }, 400);
+      outcomes.push({ runId: parsed.value, outcome: row.outcome as PlaneReclaimWord });
+    }
+    return json(await stub.planeReclaimed(outcomes, now));
+  }
   if (pathname === "/plane/queued") {
     const parsed = parseRunId(b.runId);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
@@ -4889,6 +5086,11 @@ function parseClaim(b: Record<string, unknown>): Validated<ClaimRequest> {
     if (typeof meta.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(meta.idempotencyKey))
       return invalid("run.meta.idempotencyKey must be <parentInstanceId>:<step>");
   }
+  // The restart tag (record 0064) names the predecessor run whose windows the
+  // claim reuses and rides the `child-resumed` event's reason: a run id or
+  // absent, never another shape.
+  if (meta.restartOf !== undefined && (typeof meta.restartOf !== "string" || !RUN_ID_PATTERN.test(meta.restartOf)))
+    return invalid("run.meta.restartOf must be a run id");
   if (typeof r.system !== "string") return invalid("run.system must be a string");
   if (!Array.isArray(r.tools)) return invalid("run.tools must be an array");
   if (r.card !== undefined && r.card !== null) {

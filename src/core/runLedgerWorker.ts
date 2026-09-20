@@ -51,7 +51,15 @@ import {
   TransientStoreError,
 } from "./runStoreWorker.js";
 import type { FinishResult, HeartbeatFacts, HeartbeatResult, RunLedger } from "./runLedger/ledger.js";
-import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost, PlaneQueueRow } from "./plane/decide.js";
+import type {
+  PlaneAckOutcome,
+  PlaneAskAnswer,
+  PlaneEffect,
+  PlaneEndingCause,
+  PlaneOutcomePost,
+  PlaneQueueRow,
+  PlaneReclaimWord,
+} from "./plane/decide.js";
 import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./runLedger/ledger.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./runLedger/sessionLog.js";
 import { assembleTranscript, chunkRows, turnRows, type AssembledTranscript } from "./runLedger/transcript.js";
@@ -392,6 +400,13 @@ export class WorkerRunLedger implements RunLedger {
   async planeQueued(runId: string): Promise<PlaneQueueRow | null> {
     const r = await this.post("/plane/queued", { storeKey: this.opts.storeKey, runId });
     return (r.data as { row?: PlaneQueueRow | null }).row ?? null;
+  }
+
+  async planeReclaimed(
+    outcomes: readonly { runId: string; outcome: PlaneReclaimWord }[],
+  ): Promise<{ runId: string; cause: PlaneEndingCause }[]> {
+    const r = await this.post("/plane/reclaimed", { storeKey: this.opts.storeKey, outcomes });
+    return (r.data as { recorded?: { runId: string; cause: PlaneEndingCause }[] }).recorded ?? [];
   }
 
   async planeLevel(post: PlaneLevelPost): Promise<void> {

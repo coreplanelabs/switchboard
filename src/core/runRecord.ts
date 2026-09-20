@@ -225,6 +225,12 @@ export interface RunRecord {
    *  carried onto the record at the seal, so a history reader draws the run as
    *  a pipeline. Absent on every other run and on older records. */
   hosted?: true;
+  /** The reattach path restarted this run from its request when its workspace
+   *  could not be re-attached (record 0064; item 47a): the `interrupted` close
+   *  is not the run's end — the same id carries on — so a waiting parent keeps
+   *  waiting for `child_resumed` instead of ending its unit on this record.
+   *  Absent on every ending that is final. */
+  restarting?: true;
   /** Where the run's conversation started (item 52): `channel` — its own
    *  thread's history, as for every run a person, a schedule or a coordinator
    *  started — or `parent` — a spawned child seeded from its parent's text
@@ -1021,6 +1027,8 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // marker, like `provisional`, is the literal `true` or absent.
   if (r.pipeline !== undefined && !isPipelineSummaryShape(r.pipeline)) return false;
   if (r.hosted !== undefined && r.hosted !== true) return false;
+  // A restarting close carries the literal `true` or nothing (record 0064).
+  if (r.restarting !== undefined && r.restarting !== true) return false;
   if (typeof r.channelId !== "string" || typeof r.userId !== "string" || typeof r.threadKey !== "string") return false;
   if (r.relayedBy !== undefined && typeof r.relayedBy !== "string") return false;
   if (r.authenticatedAs !== undefined && typeof r.authenticatedAs !== "string") return false;

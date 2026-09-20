@@ -1470,6 +1470,7 @@ export async function dispatch(
       parentRunId,
       coordinator,
       seed,
+      ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
     });
     if (reservation) {
       reserved = reservation.reserved;
@@ -1843,6 +1844,7 @@ export async function dispatch(
       parentRunId,
       coordinator,
       seed,
+      ...(opts.restartOf !== undefined ? { restartOf: opts.restartOf } : {}),
       ...(session ? { seedLog: session.log } : {}),
       // A promotion gone untracked marks the card as the reserve-time path
       // above does — the label, not the bot log alone, says the run's row is gone.

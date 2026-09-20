@@ -33,6 +33,7 @@ import {
 } from "./runLedger/types.js";
 import { reclaimedRunRecord } from "./dispatch/record.js";
 import { shipInterruptedNote } from "./shipPipeline.js";
+import { endingCauseWords, type PlaneEndingCause, type PlaneReclaimWord } from "./plane/decide.js";
 
 export interface ReclaimedClosure {
   runId: string;
@@ -55,10 +56,18 @@ export interface ReclaimedClosure {
 
 /** The interrupted run's guidance (run-history item 36): a ship pipeline's
  *  names the PR it had and the re-issue that continues it; every other run's
- *  says to re-send the request. */
-export function closureNote(agent: string | undefined, prUrl: string | undefined): string {
-  // The boot gap IS a bot restart — the one site that may claim it (issue 1876).
-  if (agent === "ship") return shipInterruptedNote(prUrl, "bot_restart");
+ *  says to re-send the request. With the plane's recorded cause (record 0064)
+ *  the note RENDERS it — `endingCauseWords`, the one rendering every surface
+ *  shares — and never composes one; without it (an older state Worker) the
+ *  note keeps today's words. */
+export function closureNote(agent: string | undefined, prUrl: string | undefined, cause?: PlaneEndingCause): string {
+  if (agent === "ship")
+    // The plane's `resident_replaced` renders as the container sentence; every
+    // other close of the boot gap IS a bot restart — the one site that may
+    // claim it (issue 1876).
+    return shipInterruptedNote(prUrl, cause === "resident_replaced" ? "container_replaced" : "bot_restart");
+  if (cause !== undefined)
+    return `This run ended — ${endingCauseWords(cause)} — and it could not be resumed, so this card stopped updating. Re-send your request to run it again.`;
   return "The bot restarted while this run was in flight and it could not be resumed, so this card stopped updating. Re-send your request to run it again.";
 }
 
@@ -341,6 +350,28 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
     }
   } catch (err) {
     warn(`[reclaim] listing live runs failed: ${describe(err)} — the card sweep runs without the ledger's guard`);
+  }
+
+  // The reclaim's outcome is reported to the object (record 0064, "Endings and
+  // the watches"; run-history item 36): `resume`, `restart` and `rehost` record
+  // nothing — the run carries on — and each `closed` row's ending gets its
+  // cause, answered back so the interrupted note renders the plane's word. An
+  // older state Worker without the route is one warning and today's words.
+  const words: { runId: string; outcome: PlaneReclaimWord }[] = [
+    ...outcome.resumable.map((r) => ({ runId: r.row.runId, outcome: (r.kind ?? "resume") as PlaneReclaimWord })),
+    ...outcome.closed.map((c) => ({ runId: c.runId, outcome: "closed" as const })),
+  ];
+  if (words.length > 0) {
+    try {
+      const recorded = await ledger.planeReclaimed(words);
+      for (const { runId, cause } of recorded) {
+        const closure = outcome.closed.find((c) => c.runId === runId);
+        if (closure && closure.status === "interrupted")
+          closure.note = closureNote(closure.agent, closure.prUrl, cause);
+      }
+    } catch (err) {
+      warn(`[reclaim] outcome report not recorded (${describe(err)}) — the notes keep today's words`);
+    }
   }
 
   if (reclaimed.length > 0 || outcome.liveElsewhere.length > 0) {

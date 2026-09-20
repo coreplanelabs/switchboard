@@ -13,7 +13,17 @@ import {
   selectReclaim,
 } from "./decisions.js";
 import type { FinishResult, HeartbeatFacts, HeartbeatResult, RunLedger } from "./ledger.js";
-import type { PlaneAckOutcome, PlaneAskAnswer, PlaneOutcomePost, PlaneQueueRow } from "../plane/decide.js";
+import {
+  causeOfClose,
+  causeOfReclaim,
+  type PlaneAckOutcome,
+  type PlaneAskAnswer,
+  type PlaneEnding,
+  type PlaneEndingCause,
+  type PlaneOutcomePost,
+  type PlaneQueueRow,
+  type PlaneReclaimWord,
+} from "../plane/decide.js";
 import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./ledger.js";
 import {
   attachmentRefsOf,
@@ -289,6 +299,29 @@ export class InMemoryRunLedger implements RunLedger {
     return this.planeQueuedRows.get(runId) ?? null;
   }
 
+  /** The reclaim outcome reports, kept for assertions (record 0064): only a
+   *  `closed` row records an ending — the reference applies `causeOfReclaim`
+   *  exactly as the object does. */
+  readonly planeReclaims: Array<{ runId: string; outcome: PlaneReclaimWord }> = [];
+
+  async planeReclaimed(
+    outcomes: readonly { runId: string; outcome: PlaneReclaimWord }[],
+  ): Promise<{ runId: string; cause: PlaneEndingCause }[]> {
+    const recorded: { runId: string; cause: PlaneEndingCause }[] = [];
+    for (const o of outcomes) {
+      this.planeReclaims.push({ ...o });
+      const cause = causeOfReclaim(o.outcome);
+      if (cause === undefined) continue;
+      if (!this.planeEndings.has(o.runId)) this.planeEndings.set(o.runId, { kind: "interrupted", cause, at: 0 });
+      recorded.push({ runId: o.runId, cause: this.planeEndings.get(o.runId)!.cause });
+    }
+    return recorded;
+  }
+
+  /** The endings the plane recorded (record 0064): one per closed row, the
+   *  first cause standing — what the reference keeps for assertions. */
+  readonly planeEndings = new Map<string, PlaneEnding>();
+
   async append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult> {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
@@ -351,6 +384,17 @@ export class InMemoryRunLedger implements RunLedger {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
     this.finished.set(runId, record);
+    // The ending's cause (record 0064): recorded when the row closes, first
+    // cause standing — exactly the object's rule, its one keyed exception
+    // included: a standing `resident_replaced` was a `restarting` close, the
+    // run carried on under its own id, so that run's own later finish
+    // replaces it and the ending agrees with the record.
+    if (this.live.has(runId)) {
+      const cause = causeOfClose(record.status, record.restarting === true);
+      const standing = this.planeEndings.get(runId);
+      if (standing === undefined || (standing.cause === "resident_replaced" && cause !== "resident_replaced"))
+        this.planeEndings.set(runId, { kind: record.status, cause, at: record.finishedAt });
+    }
     this.live.delete(runId);
     this.steps.delete(runId);
     this.inbox.delete(runId);

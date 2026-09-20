@@ -1368,7 +1368,7 @@ describe("orchestration plane — the tables, the decider, shadow and the effect
       request: { text: "next" },
     }) as const;
 
-  it("a fresh object holds the plane's six tables", async () => {
+  it("a fresh object holds the plane's seven tables", async () => {
     const key = storeKey();
     await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
       const names = state.storage.sql
@@ -1379,6 +1379,7 @@ describe("orchestration plane — the tables, the decider, shadow and the effect
         .map((r) => r.name);
       expect(names).toEqual([
         "plane_effects",
+        "plane_endings",
         "plane_findings",
         "plane_levels",
         "plane_queue",

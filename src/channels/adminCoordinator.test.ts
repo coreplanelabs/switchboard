@@ -836,6 +836,26 @@ describe("POST /admin/coordinator/read-record — an interrupted child (issues 1
     });
   });
 
+  it("an interrupted record carrying `restarting: true` with no successor row yet answers the child as still running — the ending itself says a restart follows (record 0064), so the runner keeps waiting for child_resumed instead of ending the unit", async () => {
+    const h = harness();
+    await h.store.put(
+      record("run-cut", {
+        ...TAG,
+        status: "interrupted",
+        restarting: true,
+        events: [{ type: "input", messageId: "m1", text: "do the unit", seq: 1 }],
+      }),
+    );
+    const res = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-cut" }),
+      h.deps,
+    );
+    expect(res).toEqual({
+      status: 200,
+      body: { ok: true, run: { id: "run-cut", finished: false }, at: NOW },
+    });
+  });
+
   it("an interrupted child with NO restarted successor answers its facts with the cause off its own events — the replaced container here — so the ending's sentence names what actually happened (issue 1876)", async () => {
     const h = harness();
     await h.store.put(

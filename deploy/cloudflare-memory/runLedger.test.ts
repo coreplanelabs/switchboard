@@ -1675,3 +1675,187 @@ describe("the plane's checkpoint steers and the provider condition — the heart
     expect(await inbox(key, "r3")).toHaveLength(1);
   });
 });
+
+describe("the plane's endings and the alarm — the cause on close, /plane/reclaimed, the lease-end offer (record 0064)", () => {
+  const TAG = { parentInstanceId: "ship_acme_api_1", idempotencyKey: "ship_acme_api_1:u12/0/coding" };
+  type Sent = { instance: string; type: string; payload: unknown };
+
+  /** The Workflow binding doubled on the live object (item 47's pattern). */
+  async function coordinatorDouble(key: string): Promise<Sent[]> {
+    const sent: Sent[] = [];
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const holder = inst as unknown as { env: Record<string, unknown> };
+      holder.env = {
+        ...holder.env,
+        SHIP_COORDINATOR: {
+          get: async (id: string) => ({
+            sendEvent: async (event: { type: string; payload: unknown }) => {
+              sent.push({ instance: id, type: event.type, payload: event.payload });
+            },
+          }),
+        },
+      };
+    });
+    return sent;
+  }
+
+  async function endingOf(key: string, runId: string): Promise<unknown> {
+    let ending: unknown;
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      ending = inst.planeEndingOf(runId);
+    });
+    return ending;
+  }
+
+  it("the owner's finish records ended {kind, cause} exactly when the row closes — completed maps to completed, an interrupted record with `restarting` to resident_replaced, a bare interrupted to lease_lapsed — and the first cause stands", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "r1", "slack:C1:1.0"));
+    await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", "slack:C1:1.0") });
+    expect(await endingOf(key, "r1")).toMatchObject({ kind: "completed", cause: "completed" });
+    await post("/runs/claim", claimBody(key, "r2", "slack:C1:2.0"));
+    await post("/runs/finish", {
+      storeKey: key,
+      runId: "r2",
+      gen: "g1",
+      record: { ...record("r2", "slack:C1:2.0"), status: "interrupted", restarting: true },
+    });
+    expect(await endingOf(key, "r2")).toMatchObject({ kind: "interrupted", cause: "resident_replaced" });
+    await post("/runs/claim", claimBody(key, "r3", "slack:C1:3.0"));
+    await post("/runs/finish", {
+      storeKey: key,
+      runId: "r3",
+      gen: "g1",
+      record: { ...record("r3", "slack:C1:3.0"), status: "interrupted" },
+    });
+    expect(await endingOf(key, "r3")).toMatchObject({ kind: "interrupted", cause: "lease_lapsed" });
+    // First cause stands: a later report cannot rewrite r2's ending.
+    const again = await post("/plane/reclaimed", { storeKey: key, outcomes: [{ runId: "r2", outcome: "closed" }] });
+    expect(again.data).toEqual({ recorded: [{ runId: "r2", cause: "resident_replaced" }] });
+    expect(await endingOf(key, "r2")).toMatchObject({ cause: "resident_replaced" });
+  });
+
+  it("a same-id successor's finish replaces a standing resident_replaced — a restarting close is the run continuing, not its end, so a restarted run that completes reads completed as its record does", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "r1", "slack:C1:9.0"));
+    await post("/runs/finish", {
+      storeKey: key,
+      runId: "r1",
+      gen: "g1",
+      record: { ...record("r1", "slack:C1:9.0"), status: "interrupted", restarting: true },
+    });
+    expect(await endingOf(key, "r1")).toMatchObject({ kind: "interrupted", cause: "resident_replaced" });
+    // The restart reuses the run's id (run-history item 42) and completes.
+    await post("/runs/claim", claimBody(key, "r1", "slack:C1:9.0"));
+    await post("/runs/finish", { storeKey: key, runId: "r1", gen: "g1", record: record("r1", "slack:C1:9.0") });
+    expect(await endingOf(key, "r1")).toMatchObject({ kind: "completed", cause: "completed" });
+    // A completed ending is final: a later report cannot rewrite it.
+    await post("/plane/reclaimed", { storeKey: key, outcomes: [{ runId: "r1", outcome: "closed" }] });
+    expect(await endingOf(key, "r1")).toMatchObject({ cause: "completed" });
+  });
+
+  it("/plane/reclaimed records lease_lapsed for a closed row and nothing for resume, restart or rehost — a roll that resumes every row assigns nothing", async () => {
+    const key = storeKey();
+    const r = await post("/plane/reclaimed", {
+      storeKey: key,
+      outcomes: [
+        { runId: "a", outcome: "resume" },
+        { runId: "b", outcome: "restart" },
+        { runId: "c", outcome: "rehost" },
+        { runId: "d", outcome: "closed" },
+      ],
+    });
+    expect(r).toEqual({ status: 200, data: { recorded: [{ runId: "d", cause: "lease_lapsed" }] } });
+    expect(await endingOf(key, "a")).toBeNull();
+    expect(await endingOf(key, "b")).toBeNull();
+    expect(await endingOf(key, "c")).toBeNull();
+    expect(await endingOf(key, "d")).toMatchObject({ kind: "interrupted", cause: "lease_lapsed" });
+    // A malformed word is refused by name.
+    expect(
+      (await post("/plane/reclaimed", { storeKey: key, outcomes: [{ runId: "x", outcome: "ended" }] })).status,
+    ).toBe(400);
+  });
+
+  it("a claim whose meta carries restartOf under a coordinator sends the parent one child-resumed-<runId>; a claim without restartOf sends nothing; a Worker without the binding claims as before", async () => {
+    const key = storeKey();
+    const sent = await coordinatorDouble(key);
+    const meta = { ...claimBody(key, "r1", "slack:C2:1.0").run.meta, ...TAG, restartOf: "r1" };
+    expect((await post("/runs/claim", claimBody(key, "r1", "slack:C2:1.0", "g1", { meta }))).data).toEqual({
+      ok: true,
+    });
+    expect(sent).toEqual([
+      {
+        instance: "ship_acme_api_1",
+        type: "child-resumed-r1",
+        payload: expect.objectContaining({ runId: "r1", kind: "resumed", parentInstanceId: "ship_acme_api_1" }),
+      },
+    ]);
+    // Without restartOf: a plain claim under the same coordinator says nothing.
+    await post(
+      "/runs/claim",
+      claimBody(key, "r2", "slack:C2:2.0", "g1", {
+        meta: { ...claimBody(key, "r2", "slack:C2:2.0").run.meta, ...TAG },
+      }),
+    );
+    expect(sent).toHaveLength(1);
+    // A Worker without the binding: the claim still lands (no throw, no send).
+    const bare = storeKey();
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(bare, "r9", "slack:C2:9.0", "g1", {
+            meta: { ...claimBody(bare, "r9", "slack:C2:9.0").run.meta, ...TAG, restartOf: "r9" },
+          }),
+        )
+      ).data,
+    ).toEqual({ ok: true });
+  });
+
+  it("the alarm at a lease end offers the row and never ends a run — the row stays live and unclosed, and the owner's heartbeat re-arms the alarm to the new earliest", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "r1", "slack:C3:1.0"));
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    const armed = await runInDurableObject(stub, async (inst: RunHistoryDO) =>
+      (inst as unknown as { ctx: { storage: { getAlarm(): Promise<number | null> } } }).ctx.storage.getAlarm(),
+    );
+    expect(armed).not.toBeNull();
+    // The claim armed the alarm at the lease end (within the lease, not the 6 h sweep).
+    expect(armed! - Date.now()).toBeLessThanOrEqual(LEASE_MS);
+    // Fire it as if the lease end passed: the row is offered, never closed.
+    expect(await runDurableObjectAlarm(env.RUNS.get(env.RUNS.idFromName(key)))).toBe(true);
+    const live = await post("/runs/live", { storeKey: key });
+    expect((live.data.runs as { runId: string }[]).map((r) => r.runId)).toEqual(["r1"]);
+    expect(await endingOf(key, "r1")).toBeNull();
+    // The owner's heartbeat extends the lease and moves the plane's alarm on.
+    await post("/runs/heartbeat", { storeKey: key, runId: "r1", gen: "g1", leaseMs: LEASE_MS });
+    const rearmed = await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) =>
+      (inst as unknown as { ctx: { storage: { getAlarm(): Promise<number | null> } } }).ctx.storage.getAlarm(),
+    );
+    expect(rearmed).not.toBeNull();
+    expect(rearmed!).toBeGreaterThanOrEqual(armed!);
+  });
+
+  it("a consumed alarm never strands a static due — ensurePlaneAlarm judges the armed slot, not the meta row, and an earlier foreign alarm is left to fire first", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "r1", "slack:C3:2.0"));
+    type WithAlarm = {
+      ctx: { storage: { getAlarm(): Promise<number | null>; setAlarm(at: number): Promise<void> } };
+      ensurePlaneAlarm(now: number): Promise<void>;
+    };
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const priv = inst as unknown as WithAlarm;
+      const now = Date.now();
+      // An earlier alarm (the re-ask's) fired and was consumed; the handler
+      // re-armed the sweep far out. The earliest due (the lease end) did not
+      // move, so the meta row still equals it — the wake must be re-armed.
+      await priv.ctx.storage.setAlarm(now + 6 * 3_600_000);
+      await priv.ensurePlaneAlarm(now);
+      expect(((await priv.ctx.storage.getAlarm()) as number) - now).toBeLessThanOrEqual(LEASE_MS);
+      // An earlier alarm someone else armed is left to fire first.
+      const sooner = now + 1;
+      await priv.ctx.storage.setAlarm(sooner);
+      await priv.ensurePlaneAlarm(now);
+      expect(await priv.ctx.storage.getAlarm()).toBe(sooner);
+    });
+  });
+});

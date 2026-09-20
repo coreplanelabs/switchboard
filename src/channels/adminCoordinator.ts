@@ -1036,6 +1036,18 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
         restartedAs: successor,
         at,
       });
+    // The ending itself says a restart follows (`RunRecord.restarting`, record
+    // 0064; run-history item 47a): the reattach path is dispatching the run
+    // again under the same id, so even before the successor's row is readable
+    // the child is answered as still running — the runner keeps waiting for
+    // `child_resumed` instead of ending its unit on a resume that succeeded.
+    if (view.restarting === true)
+      return json(200, {
+        ok: true,
+        ...(instanceRow?.stop !== undefined ? { stopped: true } : {}),
+        run: { id: view.id, finished: false },
+        at,
+      });
   }
   // Whether the verdict stands on the unit's pull request: the child's own
   // record of its post first (item 18) — it posted, or it recorded why not —
