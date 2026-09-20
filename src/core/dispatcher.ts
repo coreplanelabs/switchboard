@@ -50,7 +50,12 @@ import { parseChatCommand } from "./commandChat.js";
 import { parseDirectives } from "../directives.js";
 import { readRequest, resolveProfile, resolveRun, resolveTarget, type ResolveDeps } from "./dispatch/resolve.js";
 import { compoundBrief, routeRequest, type RouteDecided, type RouteDeps, type RouteModel } from "./dispatch/route.js";
-import { executeOperatorDecision, operatorStage, type OperatorEventFields } from "./dispatch/operator.js";
+import {
+  executeOperatorDecision,
+  operatorStage,
+  type OperatorEventFields,
+  type OperatorThreadOwner,
+} from "./dispatch/operator.js";
 import type { IntakeVerdict } from "./intake.js";
 import type { McpToolSource } from "../mcp/source.js";
 import {
@@ -108,7 +113,7 @@ import { fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
-import { ownerOf, readThread, stickyAgentOf, threadPrOf, threadRouteOf } from "./dispatch/thread.js";
+import { ownerOf, readThread, stickyAgentOf, threadPrOf, threadRouteOf, type ThreadOwner } from "./dispatch/thread.js";
 import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
@@ -623,15 +628,51 @@ export async function dispatch(
     // "yes" this event may be (routing-and-config item 29). Read here once and
     // reused below, so the operator costs the dispatch no second page.
     let operatorThread: RunView[] | undefined;
+    // The thread's owner off the page (record 0051's owner order), read at most
+    // once per dispatch: computed here for the operator when a slot answers
+    // nothing, reused by the unit-owned branch below.
+    let pageOwner: ThreadOwner | undefined;
     if (operatorMode !== "off") {
       const runsService = deps.runs ?? createRunsService({ registry, store: deps.runStore });
       operatorThread = opts.thread ?? (await readThread(runsService, msg.threadKey));
+      // The thread's owner as the operator reads it (issue 2027; record 0051's
+      // owner order; thread-admission item 9): a live run — the local slot, one
+      // live on another generation, or the page's unfinished run (a hosted
+      // pipeline runner) — else the page's idle unit. Under an owner the turn's
+      // projection narrows to steers and reads, the prompt says the reply is
+      // the owner's follow-up, and the executor folds any other decision.
+      const slot = admission.get(msg.threadKey);
+      const liveElsewhere = deps.threadsElsewhere.get(msg.threadKey) !== undefined;
+      if (
+        slot === undefined &&
+        !liveElsewhere &&
+        operatorThread !== undefined &&
+        deps.coordinatorInstances !== undefined
+      )
+        pageOwner = await ownerOf(operatorThread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey);
+      const threadOwner: OperatorThreadOwner | undefined =
+        slot !== undefined || liveElsewhere
+          ? { kind: "live", ...(slot?.runId !== undefined ? { runId: slot.runId } : {}) }
+          : pageOwner?.kind === "live"
+            ? // A hosted pipeline runner takes no inbox (thread-admission item
+              // 9's seed rule): a steer offered here would queue words nothing
+              // drains, so the owner rides without a run id — the prompt
+              // offers no steer line, the executor folds a steer bind like any
+              // other, and the fold runs on to the seed refusal below, which
+              // names the unit threads to reply in.
+              pageOwner.run.instanceId !== undefined
+              ? { kind: "live" }
+              : { kind: "live", runId: pageOwner.run.id }
+            : pageOwner?.kind === "unit"
+              ? { kind: "unit", unit: pageOwner.unit.unit }
+              : undefined;
       operatorEvent = await root.span("dispatch.operator", () =>
         operatorStage(deps, {
           msg,
           mode: operatorMode,
           ...(operatorThread ? { thread: operatorThread } : {}),
           ...(opts.intake ? { intake: opts.intake } : {}),
+          ...(threadOwner ? { owner: threadOwner } : {}),
         }),
       );
       // Under `shadow`, a reply into a thread a run holds is a follow-up
@@ -666,16 +707,17 @@ export async function dispatch(
             trace,
             event: operatorEvent!,
             ...(operatorThread ? { thread: operatorThread } : {}),
+            ...(threadOwner ? { owner: threadOwner } : {}),
           }),
         );
         if (execution.kind === "answered") return ended;
         // A command bind that ran before the preset already carries the
         // decision's event on its record: the agent run does not repeat it.
-        if (execution.carried) operatorEvent = undefined;
+        if (execution.kind !== "fold" && execution.carried) operatorEvent = undefined;
         if (execution.kind === "route") {
           operatorPreset = execution.preset;
           operatorRequest = execution.request;
-        } else if (operatorEvent !== undefined) {
+        } else if (execution.kind === "fallback" && operatorEvent !== undefined) {
           // The verifier's floor on a non-destructive bind (routing-and-config
           // item 25): a disagreement or a failed verifier call on a fresh
           // run-starting bind falls back to the readers' route — the route
@@ -684,6 +726,15 @@ export async function dispatch(
           // runs with the verifier's verdict or failure as its reason.
           operatorEvent = { ...operatorEvent, reason: execution.reason };
         }
+        // `kind: "fold"` (issue 2027; thread-admission item 9): the decision was
+        // neither steers-and-reads nor a question in an owned thread, so the
+        // words are the owner's follow-up — the dispatch runs on to admission's
+        // fold (a live run) or the unit's one thread event (an idle unit), the
+        // decision's event riding the fold or a door record, no prose posted.
+        // A confirmed "yes" to a question minted before the thread became
+        // owned folds the proposal's own words: the person's message is the
+        // word "yes", which tells the owner nothing.
+        if (execution.kind === "fold" && execution.request !== undefined) operatorRequest = execution.request;
       }
     }
     // Item 29's ledger promise (run-history item 60): a decision still pending
@@ -794,7 +845,8 @@ export async function dispatch(
     // is the live run's (admission steers below); a session or no owner is the
     // sticky path and the router, exactly as before.
     if (thread && !threadLive && deps.coordinatorInstances !== undefined) {
-      const owner = await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey);
+      const owner =
+        pageOwner ?? (await ownerOf(thread, (id) => deps.coordinatorInstances!.listUnits(id), msg.threadKey));
       if (owner.kind === "live" && owner.run.instanceId !== undefined) {
         // The seed thread of a live pipeline runner (issue 2010; record 0051's
         // owner rule, thread-admission item 9): a hosted runner occupies no
