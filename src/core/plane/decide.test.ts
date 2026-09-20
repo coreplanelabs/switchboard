@@ -437,3 +437,160 @@ describe("decide — the resident stage's conditions (record 0064)", () => {
     expect(out.effects).toEqual([]);
   });
 });
+
+describe("decide — the checkpoint steers and the provider condition (record 0064)", () => {
+  const MIN = 60_000;
+  const facts = (over: Partial<import("./decide.js").HeartbeatFacts> = {}) => ({
+    round: 3,
+    coding: true,
+    startedAt: 0,
+    ...over,
+  });
+  const beat = (at: number, f = facts(), runId = "run-a") => ({ kind: "heartbeat", at, runId, facts: f }) as const;
+  const decideEvent = (e: unknown) => e as Parameters<typeof decide>[1];
+
+  it("a heartbeat whose in-flight call is past its declared bound writes ONE inbox row with the fixed sentence and the plane sender, plus the steer's dedupe row", () => {
+    const f = facts({
+      inFlight: { callId: "c1", tool: "bash", sinceAt: 0, boundMs: 5 * MIN },
+      pushedHead: { ref: "b", sha: "s", at: 5 * MIN },
+    });
+    const out = decide(emptyPlaneState(), decideEvent(beat(6 * MIN, f)));
+    const inbox = out.writes.filter((w) => w.table === "run_inbox");
+    expect(inbox).toEqual([
+      {
+        table: "run_inbox",
+        op: "push",
+        runId: "run-a",
+        message: {
+          text: "finish the step you are on, push a checkpoint and end the round; start no new command; the resident takes your push",
+          at: 6 * MIN,
+          userId: "plane",
+          userName: "plane",
+          plane: { steer: "checkpoint", causes: ["long_call"], round: 3 },
+        },
+      },
+    ]);
+    expect(out.writes.filter((w) => w.table === "plane_reservations")).toEqual([
+      {
+        table: "plane_reservations",
+        op: "put",
+        row: { kind: "steer", key: "run-a#3#long_call", runId: "run-a", at: 6 * MIN },
+      },
+    ]);
+  });
+
+  it("a call within its bound, a call with no bound within the no-bound line, and a non-coding run all steer nothing", () => {
+    const within = facts({
+      inFlight: { callId: "c1", tool: "bash", sinceAt: 0, boundMs: 10 * MIN },
+      pushedHead: { ref: "b", sha: "s", at: 5 * MIN },
+    });
+    expect(decide(emptyPlaneState(), decideEvent(beat(6 * MIN, within))).writes).toEqual([]);
+    const noBound = facts({
+      inFlight: { callId: "c1", tool: "bash", sinceAt: 0 },
+      pushedHead: { ref: "b", sha: "s", at: 14 * MIN },
+    });
+    expect(decide(emptyPlaneState(), decideEvent(beat(15 * MIN, noBound))).writes).toEqual([]);
+    const readonly = facts({ coding: false, inFlight: { callId: "c1", tool: "bash", sinceAt: 0, boundMs: MIN } });
+    expect(decide(emptyPlaneState(), decideEvent(beat(60 * MIN, readonly))).writes).toEqual([]);
+  });
+
+  it("a coding round with no pushed head past noPushMinutes steers no_push; a second heartbeat in the same round writes none; a new round writes one again", () => {
+    const first = decide(emptyPlaneState(), decideEvent(beat(16 * MIN)));
+    expect(first.writes.filter((w) => w.table === "run_inbox")).toHaveLength(1);
+    const second = decide(first.state, decideEvent(beat(17 * MIN)));
+    expect(second.writes).toEqual([]);
+    const nextRound = decide(second.state, decideEvent(beat(18 * MIN, facts({ round: 4 }))));
+    expect(nextRound.writes.filter((w) => w.table === "run_inbox")).toHaveLength(1);
+  });
+
+  it("the same sentence from two causes is written once per round: both dedupe rows land, one inbox row", () => {
+    const f = facts({ inFlight: { callId: "c1", tool: "bash", sinceAt: 0, boundMs: MIN } });
+    const out = decide(emptyPlaneState(), decideEvent(beat(16 * MIN, f)));
+    expect(out.writes.filter((w) => w.table === "plane_reservations")).toHaveLength(2);
+    expect(out.writes.filter((w) => w.table === "run_inbox")).toHaveLength(1);
+    // The second cause arriving on a later heartbeat of the same round records its row but repeats no sentence.
+    const noPushOnly = decide(
+      decide(emptyPlaneState(), decideEvent(beat(2 * MIN, f))).state, // long_call steered at 2min (no_push not yet due)
+      decideEvent(beat(16 * MIN, facts())),
+    );
+    expect(noPushOnly.writes.filter((w) => w.table === "plane_reservations")).toEqual([
+      {
+        table: "plane_reservations",
+        op: "put",
+        row: { kind: "steer", key: "run-a#3#no_push", runId: "run-a", at: 16 * MIN },
+      },
+    ]);
+    expect(noPushOnly.writes.filter((w) => w.table === "run_inbox")).toEqual([]);
+  });
+
+  it("a fresh push resets the no-push clock: a head pushed within the window steers nothing", () => {
+    const pushed = facts({ pushedHead: { ref: "b", sha: "s", at: 10 * MIN, clean: true } });
+    expect(decide(emptyPlaneState(), decideEvent(beat(16 * MIN, pushed))).writes).toEqual([]);
+  });
+
+  it("a provider down report writes the level row and nothing else; a park writes one park row, a second park of the same run is a no-op", () => {
+    const down = decide(emptyPlaneState(), { kind: "provider_level", at: 1_000, provider: "anthropic", level: "down" });
+    expect(down.writes).toEqual([
+      {
+        table: "plane_levels",
+        op: "put",
+        row: { resident: "anthropic", name: "provider", side: "above", reportedAt: 1_000, generation: "" },
+      },
+    ]);
+    const parked = decide(down.state, { kind: "park", at: 1_100, runId: "run-a", provider: "anthropic" });
+    expect(parked.writes).toEqual([
+      {
+        table: "plane_reservations",
+        op: "put",
+        row: { kind: "park", key: "anthropic#run-a", runId: "run-a", at: 1_100 },
+      },
+    ]);
+    expect(decide(parked.state, { kind: "park", at: 1_200, runId: "run-a", provider: "anthropic" }).writes).toEqual([]);
+  });
+
+  it("the provider's next up report — from any run — re-issues each held turn once: one inbox steer per parked run, the park rows deleted, and a repeat up steers nothing again", () => {
+    let s = decide(emptyPlaneState(), {
+      kind: "provider_level",
+      at: 1_000,
+      provider: "anthropic",
+      level: "down",
+    }).state;
+    s = decide(s, { kind: "park", at: 1_100, runId: "run-a", provider: "anthropic" }).state;
+    s = decide(s, { kind: "park", at: 1_200, runId: "run-b", provider: "anthropic" }).state;
+    const up = decide(s, { kind: "provider_level", at: 2_000, provider: "anthropic", level: "up" });
+    const inbox = up.writes.filter((w) => w.table === "run_inbox");
+    expect(inbox.map((w) => (w as { runId: string }).runId).sort()).toEqual(["run-a", "run-b"]);
+    for (const w of inbox)
+      expect((w as unknown as { message: { text: string; userId: string } }).message).toMatchObject({
+        text: "the model provider anthropic is answering again — re-issue the held turn and continue",
+        userId: "plane",
+      });
+    expect(up.writes.filter((w) => w.table === "plane_reservations" && w.op === "del")).toEqual([
+      { table: "plane_reservations", op: "del", key: "anthropic#run-a", kind: "park" },
+      { table: "plane_reservations", op: "del", key: "anthropic#run-b", kind: "park" },
+    ]);
+    expect(
+      decide(up.state, { kind: "provider_level", at: 3_000, provider: "anthropic", level: "up" }).writes.filter(
+        (w) => w.table === "run_inbox",
+      ),
+    ).toEqual([]);
+  });
+
+  it("a queued row waiting on provider_up is admitted by the up report and not before", () => {
+    const row = {
+      runId: "run-q",
+      requester: "slack:UQ",
+      threadKey: "slack:C1:9.9",
+      stage: "admission" as const,
+      request: {},
+      conditions: [{ kind: "provider_up" as const, provider: "anthropic", met: false }],
+      position: 1,
+      queuedAt: 500,
+      state: "waiting" as const,
+    };
+    const s = stateWith({ queue: [row] });
+    expect(decide(s, { kind: "provider_level", at: 1_000, provider: "anthropic", level: "down" }).effects).toEqual([]);
+    const up = decide(s, { kind: "provider_level", at: 2_000, provider: "anthropic", level: "up" });
+    expect(up.effects.map((e) => e.kind)).toEqual(["admit"]);
+  });
+});

@@ -150,10 +150,13 @@ export interface LiveRunRow {
   state: RunState;
 }
 
-/** One tool call the step dispatched; `tool` decides how a resume settles it. */
+/** One tool call the step dispatched; `tool` decides how a resume settles it.
+ *  `boundMs` is the bound the call declared (a bash `timeout`), when it stated
+ *  one — what the plane judges a `long_call` steer against (record 0064). */
 export interface InFlightCall {
   callId: string;
   tool: string;
+  boundMs?: number;
 }
 
 /** Written BEFORE a step's tools run (after its transcript turns landed). */

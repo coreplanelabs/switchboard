@@ -13,12 +13,21 @@
 // request become the session, the request alone is the prompt.
 
 import { isDeepStrictEqual } from "node:util";
+import { secondsToMs } from "../../budgets.js";
 import type { StepReport } from "../../runLedger/stepReport.js";
 import type { ChatMessage, ContentPart } from "../../chatMessage.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+
+/** The bound a call declared (record 0064): a bash `timeout` is seconds by
+ *  the tool's own contract; anything else declares none. */
+function boundOf(input: unknown): { boundMs?: number } {
+  if (!isRecord(input)) return {};
+  const t = input.timeout;
+  return typeof t === "number" && Number.isFinite(t) && t > 0 ? { boundMs: secondsToMs(t) } : {};
+}
 
 /** pi's user or assistant content blocks → the runner's parts. Thinking blocks
  *  are pi's provider-specific replay material and are dropped; the record's
@@ -217,7 +226,7 @@ export class PiMirror {
     turns.push(chat);
     const inFlight = chat.content
       .filter((p): p is Extract<ContentPart, { type: "tool_use" }> => p.type === "tool_use")
-      .map((p) => ({ callId: p.id, tool: p.name }));
+      .map((p) => ({ callId: p.id, tool: p.name, ...boundOf(p.input) }));
     const report: StepReport = {
       turns,
       firstIdx: this.idx,

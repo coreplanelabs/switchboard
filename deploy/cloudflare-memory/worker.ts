@@ -84,6 +84,7 @@ import {
   planeAskAnswerOf,
   planeAskWordOf,
   RESIDENT_DRAIN_WINDOW,
+  type HeartbeatFacts,
   type PlaneAskAnswer,
   type PlaneLevelRow,
   type PlaneAckOutcome,
@@ -1793,13 +1794,20 @@ export class RunHistoryDO extends DurableObject<Env> {
     // a dispatch that died between the admission answer and its claim must not
     // hold the thread forever. Promotion deletes the row (the live row holds
     // the thread from there), so age alone is the test.
+    // `steer` and `park` rows (record 0064) have no expiry window: a steer's
+    // dedupe row and a parked run's wait live until the run's seal deletes them.
     const reservations = this.sql
       .exec<{ kind: string; key: string; run_id: string; at: number }>(
-        `SELECT * FROM plane_reservations WHERE kind = 'thread' AND at > ?`,
+        `SELECT * FROM plane_reservations WHERE kind != 'thread' OR at > ?`,
         now - minutesToMs(PLANE.reservationMinutes),
       )
       .toArray()
-      .map((r): PlaneReservation => ({ kind: "thread", key: r.key, runId: r.run_id, at: r.at }));
+      .map((r): PlaneReservation => ({
+        kind: r.kind as PlaneReservation["kind"],
+        key: r.key,
+        runId: r.run_id,
+        at: r.at,
+      }));
     const openWindows = this.sql
       .exec<{ kind: string }>(`SELECT kind FROM plane_windows WHERE phase = 'open'`)
       .toArray()
@@ -1877,7 +1885,22 @@ export class RunHistoryDO extends DurableObject<Env> {
           w.row.at,
         );
       } else if (w.table === "plane_reservations" && w.op === "del") {
-        this.sql.exec(`DELETE FROM plane_reservations WHERE kind = 'thread' AND key = ?`, w.key);
+        this.sql.exec(`DELETE FROM plane_reservations WHERE kind = ? AND key = ?`, w.kind ?? "thread", w.key);
+      } else if (w.table === "run_inbox" && w.op === "push") {
+        // The plane's steer into a live run's durable inbox (record 0064;
+        // run-history item 40), in the decider's own transaction: the run reads
+        // it at its next boundary like any follow-up; a run with no live row
+        // reads nothing and the row would be an orphan, so it is skipped.
+        if (!this.liveRow(w.runId)) continue;
+        const last = this.sql
+          .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_inbox WHERE run_id = ?`, w.runId)
+          .one().m;
+        this.sql.exec(
+          `INSERT INTO run_inbox (run_id, seq, json) VALUES (?, ?, ?)`,
+          w.runId,
+          (last ?? 0) + 1,
+          JSON.stringify(w.message),
+        );
       } else if (w.table === "plane_windows" && w.op === "put") {
         this.sql.exec(
           `INSERT OR REPLACE INTO plane_windows (kind, key, phase, opened_at, reason_json) VALUES (?, ?, 'open', ?, '{}')`,
@@ -2016,9 +2039,20 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  drain posts land as the resident-drain window's open (`above`) and lift
    *  (`below` — a `cleared` or the alarm's `expired`). */
   planeLevel(
-    post: { resident: string; name: "seat" | "memory" | "drain"; side: "below" | "above"; generation: string },
+    post:
+      | { resident: string; name: "seat" | "memory" | "drain"; side: "below" | "above"; generation: string }
+      | { provider: string; name: "provider"; side: "up" | "down" },
     now: number,
   ): { admitted: number } {
+    // The model proxy's provider level (record 0064): `up` re-issues every
+    // held turn parked on the provider — the steers land as inbox writes in the
+    // decider's transaction — and walks anything queued on `provider_up`.
+    if (post.name === "provider") {
+      const r = this.planeApply({ kind: "provider_level", at: now, provider: post.provider, level: post.side });
+      const admitted = r.effects.filter((e) => e.kind === "admit").length;
+      console.log(`[plane/level] provider ${post.provider} ${post.side} — ${admitted} admission(s)`);
+      return { admitted };
+    }
     const r =
       post.name === "drain"
         ? this.planeApply({
@@ -2038,6 +2072,20 @@ export class RunHistoryDO extends DurableObject<Env> {
     const admitted = r.effects.filter((e) => e.kind === "admit").length;
     console.log(`[plane/level] ${post.resident} ${post.name} ${post.side} — ${admitted} admission(s)`);
     return { admitted };
+  }
+
+  /** A run parked on its provider (`POST /plane/park`, record 0064): the
+   *  proxy could not complete the turn after its retry; the harness holds the
+   *  turn and the provider's next `up` steers the run to re-issue it. */
+  planePark(runId: string, provider: string, now: number): { parked: boolean } {
+    let parked = false;
+    this.ctx.storage.transactionSync(() => {
+      const decision = decide(this.planeState(), { kind: "park", at: now, runId, provider });
+      this.applyPlaneWrites(decision.writes);
+      parked = decision.writes.length > 0;
+    });
+    console.log(`[plane/park] run ${runId} on ${provider} — ${parked ? "parked" : "already parked"}`);
+    return { parked };
   }
 
   /** A refusal-by-name the bot met at attach or exec (`POST /plane/observe`,
@@ -2118,6 +2166,9 @@ export class RunHistoryDO extends DurableObject<Env> {
         // Exact id matching (`admit:<runId>`), never LIKE: a bot-minted run id
         // can carry `%` or `_`, which a pattern would read as wildcards.
         this.sql.exec(`DELETE FROM plane_effects WHERE acked_at IS NULL AND id = 'admit:' || ?`, runId);
+        // The run's steer dedupe rows and any park go with it (record 0064):
+        // a sealed run holds no turn and reads no steer.
+        this.sql.exec(`DELETE FROM plane_reservations WHERE kind IN ('steer', 'park') AND run_id = ?`, runId);
         const decision = decide(this.planeState(), { kind: "sealed", at: now, threadKey });
         this.applyPlaneWrites(decision.writes);
         effects = decision.effects;
@@ -2531,7 +2582,13 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** Extends the lease iff the caller owns the run; answers what another generation asked for. */
-  async heartbeat(runId: string, gen: string, leaseMs: number, now: number): Promise<HeartbeatAnswer> {
+  async heartbeat(
+    runId: string,
+    gen: string,
+    leaseMs: number,
+    now: number,
+    facts?: HeartbeatFacts,
+  ): Promise<HeartbeatAnswer> {
     let out: HeartbeatAnswer = { ok: false, reason: "unknown-run" };
     this.ctx.storage.transactionSync(() => {
       const row = this.liveRow(runId);
@@ -2541,6 +2598,20 @@ export class RunHistoryDO extends DurableObject<Env> {
         return;
       }
       this.sql.exec(`UPDATE live_runs SET lease_until = ? WHERE run_id = ?`, now + leaseMs, runId);
+      // The heartbeat body (record 0064): the facts are judged for the
+      // checkpoint steer in this same transaction, so the inbox row and its
+      // dedupe row land with the lease or not at all. A cap throw here must
+      // not undo the lease of a healthy run, so the decision guards itself.
+      if (facts !== undefined) {
+        try {
+          const decision = decide(this.planeState(), { kind: "heartbeat", at: now, runId, facts });
+          this.applyPlaneWrites(decision.writes);
+          if (decision.writes.some((w) => w.table === "run_inbox"))
+            console.log(`[plane/steer] run ${runId} round ${facts.round} — checkpoint steer written`);
+        } catch (err) {
+          console.warn(`[plane/steer] run ${runId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       // The plane's open effects ride every owner's heartbeat answer (record
       // 0064; orchestration-plane item 7) — empty until a unit writes them, but always present, so the
       // client's ack loop needs no version probe.
@@ -4583,6 +4654,7 @@ const PLANE_ROUTES = new Set([
   "/plane/queued",
   "/plane/level",
   "/plane/observe",
+  "/plane/park",
 ]);
 
 const PLANE_LEVEL_NAMES = new Set(["seat", "memory", "drain"]);
@@ -4675,6 +4747,14 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
     }
   }
   if (pathname === "/plane/level") {
+    // The model proxy's provider level (record 0064): `up` on a relayed
+    // success, `down` on a failure past its one retry.
+    if (b.name === "provider") {
+      if (typeof b.provider !== "string" || b.provider.length === 0)
+        return json({ error: "provider must be a non-empty string" }, 400);
+      if (b.side !== "up" && b.side !== "down") return json({ error: "side must be up or down" }, 400);
+      return json(await stub.planeLevel({ provider: b.provider, name: "provider", side: b.side }, now));
+    }
     // A resident's level report (record 0064): forwarded by the bot from the levels a
     // resident answer carried, or from the registry's drain outbox.
     if (typeof b.resident !== "string" || b.resident.length === 0)
@@ -4705,6 +4785,14 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
     if (typeof b.refusal !== "string" || b.refusal.length === 0)
       return json({ error: "refusal must be a non-empty string" }, 400);
     return json(await stub.planeObserve({ runId: parsed.value, resident: b.resident, refusal: b.refusal }, now));
+  }
+  if (pathname === "/plane/park") {
+    // A run parked on its provider (record 0064).
+    const parsed = parseRunId(b.runId);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    if (typeof b.provider !== "string" || b.provider.length === 0)
+      return json({ error: "provider must be a non-empty string" }, 400);
+    return json(await stub.planePark(parsed.value, b.provider, now));
   }
   if (pathname === "/plane/withdraw") {
     const parsed = parseRunId(b.runId);
@@ -5220,7 +5308,17 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     // The RPC type mapping reads the effects' open-ended `request` JSON as
     // unserializable; the values are plain JSON, so the cast only restores the
     // declared shape (as the reclaim route's does).
-    const r = (await stub.heartbeat(runId.value, g.value, lease.value, now)) as unknown as HeartbeatAnswer;
+    // The heartbeat body (record 0064): plain JSON facts, validated by
+    // shape — a malformed body beats without facts rather than dropping the lease.
+    const facts =
+      typeof b.facts === "object" &&
+      b.facts !== null &&
+      typeof (b.facts as Record<string, unknown>).round === "number" &&
+      typeof (b.facts as Record<string, unknown>).coding === "boolean" &&
+      typeof (b.facts as Record<string, unknown>).startedAt === "number"
+        ? (b.facts as unknown as HeartbeatFacts)
+        : undefined;
+    const r = (await stub.heartbeat(runId.value, g.value, lease.value, now, facts)) as unknown as HeartbeatAnswer;
     return r.ok ? json(r) : json(r, 409);
   }
   if (pathname === "/runs/append") {

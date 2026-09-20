@@ -108,6 +108,18 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.noGrants, run({ channel: "dm", userId: "slack:UALICE" })],
     ],
   },
+  // The plane's steer on a run (record 0064): the system actor `plane` — a
+  // service actor with the one standing `steer:write` — is admitted; a chat
+  // user's steer:write rides the command row (the owner rule is the fence
+  // there), and a service actor without the grant is refused.
+  "steer:write run [has-grant(steer:write)] kinds=service": {
+    allow: [[A.plane, foreignPrivRun]],
+    deny: [
+      [A.coordinator, foreignPrivRun],
+      [A.chatUser, foreignPrivRun],
+      [A.token, foreignPrivRun],
+    ],
+  },
   "runs:write run [has-grant(runs:write) & member-of]": {
     // pub2 is PUBLIC: every actor is a member of it (item 4), so the non-member case is the dm run.
     allow: [

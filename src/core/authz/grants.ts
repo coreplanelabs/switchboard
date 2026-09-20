@@ -13,6 +13,18 @@ import { NO_GRANTS, type Grants, type GrantSet } from "./types.js";
 /** Every grant, on every axis. What admins and the local CLI hold. */
 export const ALL_GRANTS: Grants = Object.freeze({ actions: "all", channels: "all", repos: "all" });
 
+/** The plane's system actor (record 0064; record 0057 as amended): the run
+ *  ledger object steers write-preset runs itself — the checkpoint steer and the
+ *  held turn's reissue land as `run_inbox` rows with sender `plane` — under
+ *  this one standing grant. Recorded here so the table stays the whole story:
+ *  the write happens on the object, which holds no other authority. */
+export const PLANE_ACTOR_ID = "plane";
+export const PLANE_GRANTS: Grants = Object.freeze({
+  actions: new Set(["steer:write"]),
+  channels: "all",
+  repos: "all",
+});
+
 /** The namespaces a native `grants` key may use (invariant 4). `cli:` is not
  *  configurable (the local CLI always holds everything) and `agent:` actors
  *  derive their grants from their principal, so neither is listed. */

@@ -708,8 +708,22 @@ export async function runCodingPrPostStep(input: {
   // (run-history item 2; decision 0046): the branch the run pushed and the sha
   // the remote holds — never a checkout sitting at the base's own tip —
   // published whether or not a description or a pull request follows.
-  if (pushedBranch && branch !== undefined && headSha !== undefined)
-    input.publish({ type: "pushed_head", ref: branch, sha: headSha, by: "push", at: systemClock() });
+  if (pushedBranch && branch !== undefined && headSha !== undefined) {
+    // The `clean` fact (record 0064): no uncommitted or unpushed work at the
+    // push, from the same observation — absent when either measure is missing.
+    const clean =
+      observed.uncommittedChanges !== undefined && observed.unpushedCommits !== undefined
+        ? observed.uncommittedChanges === 0 && observed.unpushedCommits === 0
+        : undefined;
+    input.publish({
+      type: "pushed_head",
+      ref: branch,
+      sha: headSha,
+      by: "push",
+      ...(clean !== undefined ? { clean } : {}),
+      at: systemClock(),
+    });
+  }
   const ownPr = target.ownPr;
   // The requested-by line's facts (record 0062; pr-description.md item 5): a
   // property of every rendered body, never of one path — a body is always

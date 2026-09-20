@@ -1476,3 +1476,139 @@ describe("createModelProxyHandler — the node adapter", () => {
     expect(upstreamSignal!.aborted).toBe(true);
   });
 });
+
+describe("the provider level and the park (record 0064)", () => {
+  const planeFake = () => {
+    const levels: Array<{ provider: string; side: string }> = [];
+    const parks: Array<{ runId: string; provider: string }> = [];
+    return {
+      levels,
+      parks,
+      plane: {
+        level: (provider: string, side: "up" | "down") => void levels.push({ provider, side }),
+        park: (runId: string, provider: string) => void parks.push({ runId, provider }),
+      },
+    };
+  };
+
+  it("a transport failure gets one retry; past it the provider is reported down and the run parked, and the error is still relayed", async () => {
+    const h = harness({
+      answer: () => {
+        throw new TypeError("fetch failed");
+      },
+    });
+    const p = planeFake();
+    const deps = { ...h.deps, plane: p.plane };
+    const token = h.bearers.mint(h.grant("run-1"));
+    const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, deps);
+    expect(res.status).toBe(502);
+    expect(h.calls).toHaveLength(2); // the one retry
+    expect(p.levels).toEqual([{ provider: "anthropic", side: "down" }]);
+    expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
+  });
+
+  it("the retry is one in all: a transport failure whose retry answers 5xx makes two upstream calls, reports down once and relays the 5xx", async () => {
+    let first = true;
+    const h = harness({
+      answer: () => {
+        if (first) {
+          first = false;
+          throw new TypeError("fetch failed");
+        }
+        return new Response("overloaded", { status: 529 });
+      },
+    });
+    const p = planeFake();
+    const deps = { ...h.deps, plane: p.plane };
+    const token = h.bearers.mint(h.grant("run-1"));
+    const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, deps);
+    expect(res.status).toBe(529);
+    expect(h.calls).toHaveLength(2); // never a third call (record 0064's one retry)
+    expect(p.levels).toEqual([{ provider: "anthropic", side: "down" }]);
+    expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
+  });
+
+  it("a client abort is not the provider's failure: nothing is retried, no level is reported and no run is parked", async () => {
+    const controller = new AbortController();
+    const h = harness({
+      answer: () => {
+        controller.abort();
+        throw new TypeError("aborted");
+      },
+    });
+    const p = planeFake();
+    const deps = { ...h.deps, plane: p.plane };
+    const token = h.bearers.mint(h.grant("run-1"));
+    const res = await handleModelProxyRequest(request({ headers: bearer(token), signal: controller.signal }).req, deps);
+    expect(res.status).toBe(502);
+    expect(h.calls).toHaveLength(1); // the caller went away: no retry
+    expect(p.levels).toEqual([]);
+    expect(p.parks).toEqual([]);
+  });
+
+  it("a 5xx past the retry reports down and parks; a relayed success reports up; without the seam nothing is reported", async () => {
+    let status = 500;
+    const h = harness({
+      answer: () =>
+        new Response(JSON.stringify(anthropicMessage()), {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+    });
+    const p = planeFake();
+    const deps = { ...h.deps, plane: p.plane };
+    const token = h.bearers.mint(h.grant("run-1"));
+    await handleModelProxyRequest(request({ headers: bearer(token) }).req, deps);
+    expect(p.levels).toEqual([{ provider: "anthropic", side: "down" }]);
+    expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
+    status = 200;
+    await handleModelProxyRequest(request({ headers: bearer(token) }).req, deps);
+    expect(p.levels).toEqual([
+      { provider: "anthropic", side: "down" },
+      { provider: "anthropic", side: "up" },
+    ]);
+    // Without the seam the same failures relay as before, reporting nothing.
+    status = 500;
+    const bare = await handleModelProxyRequest(request({ headers: bearer(token) }).req, h.deps);
+    expect(bare.status).toBe(500);
+  });
+
+  it("createModelProxyHandler dedupes level reports to changes: a healthy provider is not re-reported every turn", async () => {
+    const h = harness();
+    const p = planeFake();
+    const handler = createModelProxyHandler({ ...h.deps, plane: p.plane });
+    const token = h.bearers.mint(h.grant("run-1"));
+    const once = async () => {
+      async function* iter() {
+        yield Buffer.from(JSON.stringify(anthropicRequest()), "utf8");
+      }
+      const req = Object.assign(iter(), {
+        method: "POST",
+        url: ANTHROPIC_MESSAGES_PATH,
+        headers: bearer(token),
+        destroy: vi.fn(),
+      });
+      let ended: () => void = () => {};
+      const finished = new Promise<void>((r) => (ended = r));
+      const res = Object.assign(new EventEmitter(), {
+        setHeader: () => res,
+        writeHead: () => res,
+        flushHeaders: vi.fn(),
+        write: () => true,
+        end: () => {
+          ended();
+          return res;
+        },
+        destroy: vi.fn(),
+        writableFinished: true,
+        headersSent: false,
+      });
+      handler(req as unknown as HttpRequest, res as unknown as ServerResponse);
+      await finished;
+    };
+    await once();
+    await once();
+    await once();
+    expect(p.levels).toEqual([{ provider: "anthropic", side: "up" }]);
+  });
+});
