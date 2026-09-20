@@ -133,6 +133,110 @@ describe("CloudflareSandboxExecutor credential freshness", () => {
   });
 });
 
+// Feature: docs/reference/specs/execution.md item 5 — the credential FILE the
+// executor keeps fresh in the sandbox (issue 1915): the harness process
+// inherits the env of its one start exec, so its git children need a store
+// file the executor rewrites when the token nears expiry; a push the remote
+// refused for its credential gets ONE fresh mint and ONE re-send, never a
+// backoff loop; a refresh that cannot mint ends the run legibly.
+describe("CloudflareSandboxExecutor credential file refresh", () => {
+  const HOUR = 60 * 60_000;
+  const OK = { stdout: "ok", stderr: "", exitCode: 0 };
+  const REFUSED = {
+    stdout: "",
+    stderr: "remote: Invalid username or token. Password authentication is not supported for Git operations.",
+    exitCode: 128,
+  };
+
+  function stubFetchSeq(bodies: unknown[]) {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      const body = bodies.length > 1 ? bodies.shift() : bodies[0];
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fn);
+    return { fn, calls };
+  }
+
+  it("a token inside its margin is refreshed before the exec: the write script lands first, the credential line riding the body's env, then the command runs", async () => {
+    const { calls } = stubFetchSeq([OK]);
+    const credential = vi.fn(async () => ({ token: "ghs_fresh", expiresAtMs: Date.now() + HOUR }));
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, credential });
+    await ex.exec("git status");
+    expect(calls).toHaveLength(2);
+    const write = sentBody(calls[0]!);
+    expect(String(write.command)).toContain("credential.helper");
+    expect((write.env as Record<string, string>).SWITCHBOARD_GIT_CREDENTIAL).toBe(
+      "https://x-access-token:ghs_fresh@github.com",
+    );
+    expect(String(write.command)).not.toContain("ghs_fresh");
+    expect(sentBody(calls[1]!).command).toBe("git status");
+    // Freshly written: the next exec runs without a second write.
+    await ex.exec("echo hi");
+    expect(calls).toHaveLength(3);
+    expect(credential).toHaveBeenCalledTimes(1);
+  });
+
+  it("a push the remote refused for its credential refreshes once (a fresh mint, skipping the cache) and re-sends once — never a loop: a second refusal is the answer", async () => {
+    const { calls } = stubFetchSeq([OK, OK, REFUSED, OK, OK]);
+    const credential = vi.fn(async () => ({ token: "ghs_x", expiresAtMs: Date.now() + HOUR }));
+    const ex = new CloudflareSandboxExecutor({ ...OPTS, credential });
+    await ex.exec("echo warm"); // write + command
+    const out = await ex.exec("git push -u origin fix-x"); // refused → fresh write → re-send ok
+    expect(out).toBe("ok");
+    expect(calls).toHaveLength(5);
+    expect(sentBody(calls[2]!).command).toBe("git push -u origin fix-x");
+    expect(String(sentBody(calls[3]!).command)).toContain("credential.helper");
+    expect(sentBody(calls[4]!).command).toBe("git push -u origin fix-x");
+    expect(credential).toHaveBeenLastCalledWith({ fresh: true });
+
+    // A push still refused after the one retry is answered as it is — no loop.
+    const again = stubFetchSeq([OK, REFUSED, OK, REFUSED]);
+    const ex2 = new CloudflareSandboxExecutor({
+      ...OPTS,
+      credential: async () => ({ token: "ghs_y", expiresAtMs: Date.now() + HOUR }),
+    });
+    const refused = await ex2.exec("git push origin fix-x"); // write, push refused, fresh write, push refused
+    expect(refused).toContain("Invalid username or token");
+    expect(again.calls).toHaveLength(4);
+  });
+
+  it("a non-push command whose output carries the refusal wording is never re-sent", async () => {
+    const { calls } = stubFetchSeq([OK, REFUSED]);
+    const ex = new CloudflareSandboxExecutor({
+      ...OPTS,
+      credential: async () => ({ token: "ghs_x", expiresAtMs: Date.now() + HOUR }),
+    });
+    const out = await ex.exec("cat push.log");
+    expect(out).toContain("Invalid username or token");
+    expect(calls).toHaveLength(2); // the write and the command — no retry
+  });
+
+  it("a refresh the exec needs that cannot mint is ExecInfraError/refused — the run ends with the branch state for the post-step, instead of the model sleeping against 401s", async () => {
+    stubFetchSeq([OK]);
+    const ex = new CloudflareSandboxExecutor({
+      ...OPTS,
+      credential: async () => {
+        throw new Error("GitHub App token mint failed: HTTP 502");
+      },
+    });
+    const err = await ex.exec("git status").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ExecInfraError);
+    expect((err as ExecInfraError).reason).toBe("refused");
+    expect((err as ExecInfraError).message).toContain("credential refresh failed");
+  });
+
+  it("an executor without a credential source refreshes nothing — the pre-refresher paths are unchanged", async () => {
+    const { calls } = stubFetchSeq([OK]);
+    await new CloudflareSandboxExecutor(OPTS).exec("git push origin x");
+    expect(calls).toHaveLength(1);
+  });
+});
+
 // Feature: docs/reference/specs/execution.md item 5 — the env map rides ONLY in the JSON
 // body; the request carries no `x-env-*` header on any route. Workers Logs
 // record an invocation's request headers and redact by a NAME heuristic —

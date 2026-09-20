@@ -2,7 +2,23 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, posix } from "node:path";
 import { Sandbox } from "e2b";
 import { bashTimeoutNote, clampBashTimeout } from "./bashTimeout.js";
-import { truncate, type ExecOptions, type Executor, type ReleaseMode, type ReleaseResult } from "./executor.js";
+import {
+  ExecInfraError,
+  truncate,
+  type ExecOptions,
+  type Executor,
+  type ReleaseMode,
+  type ReleaseResult,
+} from "./executor.js";
+import {
+  SandboxCredentialRefresher,
+  SandboxCredentialRefreshError,
+  isGitCredentialRefusal,
+  isGitPushCommand,
+  type SandboxCredentialSource,
+} from "./sandboxCredentials.js";
+import { SANDBOX_CREDENTIAL_WRITE_TIMEOUT_MS } from "../core/budgets.js";
+import { systemClock } from "../core/trace/clock.js";
 
 // Remote execution in an E2B micro-VM. One sandbox per thread: the repo
 // checkout and GH_TOKEN live inside the sandbox, never on the bot host.
@@ -11,6 +27,11 @@ import { truncate, type ExecOptions, type Executor, type ReleaseMode, type Relea
 // same graceful degradation as losing the local workspace dir).
 
 const WORKDIR = "/home/user/workspace";
+
+/** Where the credential store file lands in the micro-VM: beside the
+ *  workspace, outside every repository — the e2b twin of the sandbox's
+ *  `/workspace/.git-credentials` (sandboxCredentials.ts). */
+export const E2B_CREDENTIAL_FILE = "/home/user/.git-credentials";
 
 // The shared agent-trailer hook (deploy/hooks/prepare-commit-msg): the E2B
 // sandbox has no image build to COPY it in, so setup writes this copy — held
@@ -69,15 +90,25 @@ export interface E2BOptions {
    *  micro-VM's creation-time env would otherwise carry the token minted for
    *  the thread's first command for the sandbox's whole (reusable) life. */
   resolveEnvs: () => Promise<Record<string, string>>;
+  /** The run's GitHub credential with its expiry, for the executor-side
+   *  per-exec credential-file refresh (src/execution/sandboxCredentials.ts —
+   *  the same refresher the Cloudflare sandbox executor runs, so a pi child's
+   *  push late in the run never dies on the token inherited at its start);
+   *  absent for a run that holds none. */
+  credential?: SandboxCredentialSource;
   /** resident repo/ref context — reserved for resident environments (not yet used) */
   repo?: string;
   ref?: string;
 }
 
 export class E2BExecutor implements Executor {
+  /** The one refresher for this executor's thread (null without a source). */
+  private refresher: SandboxCredentialRefresher | null = null;
+
   private constructor(
     private sbx: Sandbox,
     private resolveEnvs: () => Promise<Record<string, string>>,
+    private credential?: SandboxCredentialSource,
   ) {}
 
   static async open(opts: E2BOptions): Promise<E2BExecutor> {
@@ -88,7 +119,7 @@ export class E2BExecutor implements Executor {
       try {
         const sbx = await Sandbox.connect(existing, { apiKey: opts.apiKey });
         await sbx.setTimeout(opts.timeoutMs);
-        return new E2BExecutor(sbx, opts.resolveEnvs);
+        return new E2BExecutor(sbx, opts.resolveEnvs, opts.credential);
       } catch {
         // expired or gone — fall through and create a fresh one
         delete state[opts.threadKey];
@@ -105,7 +136,43 @@ export class E2BExecutor implements Executor {
     });
     state[opts.threadKey] = sbx.sandboxId;
     writeState(opts.statePath, state);
-    return new E2BExecutor(sbx, opts.resolveEnvs);
+    return new E2BExecutor(sbx, opts.resolveEnvs, opts.credential);
+  }
+
+  /** Land the credential file in the micro-VM when the refresher says a write
+   *  is due (before every exec; `fresh` on the 401-retry path) — the same
+   *  contract as the Cloudflare sandbox executor's (sandboxCredentials.ts):
+   *  the credential line rides the write's own `envs`, never command text; the
+   *  write's global-helper reset displaces the setup's `!gh auth
+   *  git-credential`, so git stops answering with the token pi's children
+   *  inherited at their one start; a due refresh that cannot mint (or land)
+   *  ends the run `ExecInfraError`/`refused` for the post-step's report. */
+  private async refreshCredential(opts?: { fresh?: boolean }): Promise<boolean> {
+    const source = this.credential;
+    if (source === undefined) return false;
+    this.refresher ??= new SandboxCredentialRefresher(source, systemClock, E2B_CREDENTIAL_FILE);
+    let write;
+    try {
+      write = await this.refresher.dueWrite(opts?.fresh ? { fresh: true } : undefined);
+    } catch (err) {
+      if (err instanceof SandboxCredentialRefreshError) throw new ExecInfraError(err.message, "refused");
+      throw err;
+    }
+    if (write === null) return false;
+    // The write is its own command — never through exec(), which would
+    // re-enter this refresh. The SDK throws on a non-zero exit.
+    try {
+      await this.sbx.commands.run(write.script, { timeoutMs: SANDBOX_CREDENTIAL_WRITE_TIMEOUT_MS, envs: write.env });
+    } catch (err) {
+      const e = err as { stderr?: string; message?: string };
+      throw new ExecInfraError(
+        `sandbox git credential write failed: ${String(e.stderr ?? e.message ?? err).slice(0, 200)}`,
+        "refused",
+      );
+    }
+    // Recorded only now: a failed write is re-planned on the next exec.
+    write.confirm();
+    return true;
   }
 
   /** The e2b command API takes no AbortSignal, so a hard run stop
@@ -114,6 +181,22 @@ export class E2BExecutor implements Executor {
    *  `opts.timeoutMs` (the bash tool's per-call budget, re-clamped here) IS
    *  honored — it maps onto the SDK's own command timeout. */
   async exec(command: string, opts?: ExecOptions): Promise<string> {
+    // The credential file first, when the token it holds nears expiry — so this
+    // exec (and the harness children that outlive the env they inherited) never
+    // runs against a dying token (execution.md item 5).
+    await this.refreshCredential();
+    let out = await this.run(command, opts);
+    // A push the remote refused for its credential is a credential fault, not
+    // the command's: ONE fresh mint + rewrite, ONE re-send (a push is
+    // idempotent at the same tip) — never a backoff loop.
+    if (isGitPushCommand(command) && isGitCredentialRefusal(out)) {
+      const rewrote = await this.refreshCredential({ fresh: true });
+      if (rewrote) out = await this.run(command, opts);
+    }
+    return truncate(out);
+  }
+
+  private async run(command: string, opts?: ExecOptions): Promise<string> {
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
     const envs = await this.resolveEnvs();
     const result = await this.sbx.commands.run(command, { cwd: WORKDIR, timeoutMs, envs }).catch((err: unknown) => {
@@ -135,9 +218,9 @@ export class E2BExecutor implements Executor {
     });
     const parts = [result.stdout, result.stderr].filter(Boolean).join("\n--- stderr ---\n");
     if (result.exitCode !== 0) {
-      return truncate(`exit ${result.exitCode}:\n${parts}`);
+      return `exit ${result.exitCode}:\n${parts}`;
     }
-    return truncate(parts || "(no output)");
+    return parts || "(no output)";
   }
 
   async readFile(path: string): Promise<string> {

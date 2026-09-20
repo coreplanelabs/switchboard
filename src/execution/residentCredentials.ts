@@ -1,8 +1,11 @@
-/** The per-exec credential-refresh decision of the resident Worker
- *  (deploy/cloudflare-resident/worker.ts `execThreadImpl`), kept pure and
- *  dependency-free so it is unit-testable from src/ and imported across
+/** The per-exec credential-refresh decision of the execution layer, kept pure
+ *  and dependency-free so it is unit-testable from src/ and imported across
  *  packages by the Worker (like residentDetach/shellQuote) — the tested code
- *  IS the shipped code.
+ *  IS the shipped code. Two callers share it — the ONE credential refresher:
+ *  the resident Worker before every writable `/exec`
+ *  (deploy/cloudflare-resident/worker.ts `execThreadImpl`), and the sandbox
+ *  executor before every `/exec` it sends
+ *  (src/execution/sandboxCredentials.ts, issue 1915).
  *
  *  Background: attach writes a 1-hour GitHub App installation token
  *  into `<worktree>/.git/github-credentials` and points git's `store` helper

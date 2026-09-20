@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { E2BExecutor } from "./e2b.js";
+import { E2BExecutor, E2B_CREDENTIAL_FILE } from "./e2b.js";
+import {
+  SANDBOX_CREDENTIAL_ENV,
+  credentialLine,
+  credentialWriteScript,
+  type SandboxCredentialSource,
+} from "./sandboxCredentials.js";
 
 // Feature: docs/reference/specs/execution.md item 11 — per-call bash timeout on the E2B
 // path: ExecOptions.timeoutMs (already clamped by the tool layer, re-clamped
@@ -16,11 +22,13 @@ type RunFn = (
 function e2bWith(
   run: RunFn,
   resolveEnvs: () => Promise<Record<string, string>> = async () => ({}),
+  credential?: SandboxCredentialSource,
 ): { ex: E2BExecutor; run: ReturnType<typeof vi.fn> } {
   const spy = vi.fn(run);
   const ex = Object.create(E2BExecutor.prototype) as E2BExecutor;
   (ex as unknown as { sbx: unknown }).sbx = { commands: { run: spy } };
   (ex as unknown as { resolveEnvs: unknown }).resolveEnvs = resolveEnvs;
+  (ex as unknown as { credential: unknown }).credential = credential;
   return { ex, run: spy };
 }
 
@@ -59,6 +67,75 @@ describe("E2BExecutor credential freshness", () => {
     );
     await ex.exec("git commit -m x");
     expect(run.mock.calls[0][1]).toMatchObject({ envs: { GH_TOKEN: "ghs_write", ...FOUR } });
+  });
+});
+
+// Feature: docs/reference/specs/execution.md item 5 — the e2b half of the
+// executor-side credential-file refresh (issue 1915): pi's bash children
+// inherit the env of pi's one start exec on this backend too, so the store
+// file is what keeps a late push authenticated, exactly as on the Cloudflare
+// sandbox path.
+describe("E2BExecutor credential file refresh", () => {
+  const HOUR = 60 * 60_000;
+
+  it("lands the store file at the e2b path before the first exec, the credential line riding the write's own envs — never command text", async () => {
+    const { ex, run } = e2bWith(
+      async () => OK,
+      async () => ({ GH_TOKEN: "ghs_x" }),
+      async () => ({ token: "ghs_x", expiresAtMs: Date.now() + HOUR }),
+    );
+    await ex.exec("git status");
+    expect(run).toHaveBeenCalledTimes(2);
+    const [writeCmd, writeOpts] = run.mock.calls[0] as [string, { envs?: Record<string, string> }];
+    expect(writeCmd).toBe(credentialWriteScript(E2B_CREDENTIAL_FILE));
+    expect(writeCmd).not.toContain("ghs_x");
+    expect(writeOpts.envs).toEqual({ [SANDBOX_CREDENTIAL_ENV]: credentialLine("ghs_x") });
+    expect(run.mock.calls[1][0]).toBe("git status");
+    // Freshly written: the next exec runs alone.
+    await ex.exec("git log");
+    expect(run).toHaveBeenCalledTimes(3);
+  });
+
+  it("a push the remote refused for its credential refreshes once (a fresh mint) and re-sends once — never a loop", async () => {
+    const credential = vi.fn(async () => ({ token: "ghs_x", expiresAtMs: Date.now() + HOUR }));
+    let pushes = 0;
+    const { ex, run } = e2bWith(
+      async (cmd) => {
+        if (cmd.includes("push")) {
+          pushes += 1;
+          return { stdout: "", stderr: "remote: Invalid username or token", exitCode: 128 };
+        }
+        return OK;
+      },
+      async () => ({}),
+      credential,
+    );
+    const out = await ex.exec("git push origin HEAD");
+    expect(pushes).toBe(2); // one send, one re-send — a second refusal is the answer
+    expect(out).toContain("Invalid username or token");
+    expect(credential).toHaveBeenLastCalledWith({ fresh: true });
+    expect(run.mock.calls.filter(([c]) => String(c).includes("credential.helper")).length).toBe(2);
+  });
+
+  it("an executor without a credential source refreshes nothing — the pre-refresher paths are unchanged", async () => {
+    const { ex, run } = e2bWith(async () => OK);
+    await ex.exec("git push origin HEAD");
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed write exec ends the exec by name and is re-planned — never believed fresh", async () => {
+    const { ex } = e2bWith(
+      async (cmd) => {
+        if (cmd.includes("credential.helper"))
+          throw Object.assign(new Error("exit 1"), { exitCode: 1, stderr: "denied" });
+        return OK;
+      },
+      async () => ({}),
+      async () => ({ token: "ghs_x", expiresAtMs: Date.now() + HOUR }),
+    );
+    await expect(ex.exec("git status")).rejects.toThrow(/credential write failed/);
+    // Unconfirmed: the next exec plans the write again (and fails the same way).
+    await expect(ex.exec("git status")).rejects.toThrow(/credential write failed/);
   });
 });
 
