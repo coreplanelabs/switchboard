@@ -30,6 +30,7 @@ import { recordingSink } from "../../testing/recordingSink.js";
 import { FollowUpInbox } from "../../threadAdmission.js";
 import { createTracer } from "../../trace/tracer.js";
 import { textTurnsOf } from "../../dispatch/textTurns.js";
+import { reissueSteerSentence } from "../../plane/decide.js";
 import {
   HARNESS_URL_ENV,
   PI_SHELL_COMMAND_PREFIX,
@@ -72,6 +73,7 @@ import {
 import { FakeHarnessContainer, NETWORK_LOST_TEXT, TRANSPORT_LOST_TEXT } from "../testing/fakeContainer.js";
 import {
   compactionSteer,
+  isParkedProviderError,
   isTransientProviderError,
   ModelPolicyRefusedError,
   ModelTransientFailureError,
@@ -261,6 +263,9 @@ function world(
      *  from attach to release, so a standing transport failure resumes it —
      *  unless a test pins the sandbox's fail-by-name behavior. */
     backend?: "resident" | "sandbox";
+    /** The run can be parked on its provider (model-proxy item 12a): what the
+     *  run loop sets for a ledger-tracked run. */
+    providerPark?: boolean;
   } = {},
 ) {
   const clock = opts.clock ?? { now: NOW };
@@ -303,6 +308,7 @@ function world(
     ...(opts.notepad ? { notepad: opts.notepad } : {}),
     ...(opts.onCompactionFailed ? { onCompactionFailed: opts.onCompactionFailed } : {}),
     backend: opts.backend ?? "resident",
+    ...(opts.providerPark ? { providerPark: true } : {}),
     span: root,
     control,
     inbox,
@@ -1162,6 +1168,274 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       "invalid_request_error: max_tokens must be positive",
     ])
       expect(isTransientProviderError(m), m).toBe(false);
+  });
+
+  // Feature: docs/reference/specs/model-proxy.md item 12a — the harness half
+  // of the provider park (record 0064): a relayed failure of the shape the
+  // proxy parks on holds the turn — no `harness_error`, no retry ladder —
+  // while the run is parked on `provider_up`, and the plane's reissue steer
+  // re-issues exactly that held turn once.
+  it("a parked provider failure on a park-capable run holds the turn with no harness_error and no ladder; the plane's reissue steer re-issues the held turn once — two steers in one drain are one prompt — and the seq is consumed on pi's echo", async () => {
+    const w = world({ providerPark: true });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "502 the model provider did not answer",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else {
+        echoPrompt(c);
+        finalTurn(c, "recovered");
+      }
+    });
+    const done = w.start();
+    // The run parks: pi settled on the failed call and the loop stays open, holding the turn.
+    await vi.waitFor(() => expect(w.notes.some((n) => n.includes("the turn is held"))).toBe(true));
+    // The provider recovered twice over (a second park would be the same wait):
+    // both steers land in one drain and re-issue one prompt.
+    w.inbox.push({
+      text: reissueSteerSentence("anthropic"),
+      userId: "plane",
+      userName: "plane",
+      at: NOW,
+      ledgerSeq: 3,
+    });
+    w.inbox.push({
+      text: reissueSteerSentence("anthropic"),
+      userId: "plane",
+      userName: "plane",
+      at: NOW,
+      ledgerSeq: 4,
+    });
+    const answer = await done;
+    expect(answer).toBe("recovered");
+    // No `harness_error` anywhere on the record, and never the ladder: the
+    // proxy already retried once and the plane owned the recovery.
+    expect(w.events.filter((e) => e.type === "run_note" && e.kind === "harness_error")).toEqual([]);
+    expect(w.notes.some((n) => n.includes("retry 1 of"))).toBe(false);
+    // The held turn is re-issued as a prompt under its own id — pi settled on
+    // the failed call and reads a steer only at a boundary that is not coming.
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(2);
+    expect(String(prompts[1].id)).toContain(":reissue");
+    expect(String(prompts[1].message)).toContain("re-issued");
+    expect(w.container.commands().filter((c) => c.type === "steer")).toEqual([]);
+    // Both steers are on the record as inputs from the plane, and pi's echo of
+    // the reissue prompt consumes their seqs like any follow-up's.
+    expect(w.events.filter((e) => e.type === "input")).toHaveLength(2);
+    expect(w.steps.at(-1)?.inboxConsumedSeq).toBe(4);
+    expect(w.inbox.size).toBe(0);
+  });
+
+  it("a stream cut after a relayed success keeps the retry ladder even on a park-capable run: the proxy parked nothing, so no steer would release a hold", async () => {
+    const slept: number[] = [];
+    const w = world({ providerPark: true, sleep: async (ms) => void slept.push(ms) });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "Anthropic stream ended before message_stop",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else finalTurn(c, "recovered");
+    });
+    const answer = await w.start();
+    expect(answer).toBe("recovered");
+    expect(w.notes.some((n) => n.includes("retry 1 of"))).toBe(true);
+    expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
+  });
+
+  // The park classifier's line: a whole-call failure the proxy parks on — its
+  // own 502 or a relayed 5xx past its retry — never a post-success stream cut
+  // (no park exists, so a hold would wait on a steer that never comes) and
+  // never a 429, which the proxy relays without parking.
+  it("isParkedProviderError matches the failures the proxy parks on and never a stream cut or a sub-5xx status", () => {
+    for (const m of [
+      "502 the model provider did not answer",
+      "upstream_unreachable",
+      "HTTP 503 Service Unavailable",
+      "Anthropic API error 529: overloaded_error",
+      "api error 500",
+    ])
+      expect(isParkedProviderError(m), m).toBe(true);
+    for (const m of [
+      "Anthropic stream ended before message_stop",
+      "fetch failed",
+      "connection terminated",
+      "status code 429",
+      "403 revoked",
+      "model claude-502-test not found",
+    ])
+      expect(isParkedProviderError(m), m).toBe(false);
+  });
+
+  // The release path's two race windows (model-proxy item 12a): the plane's
+  // reissue row is recognized by sender and sentence whether or not the hold
+  // exists yet, buffered rather than steered, and the release prompt goes only
+  // once pi has settled on the held turn — else the one release is consumed as
+  // an ordinary steer (or refused mid-loop) and the run wedges to its lease.
+  it("a reissue steer drained before the hold exists is buffered, never an ordinary steer: the plane's up beating the errored message_end still releases the hold", async () => {
+    const w = world({ providerPark: true });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: "502 the model provider did not answer",
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else {
+        echoPrompt(c);
+        finalTurn(c, "recovered");
+      }
+    });
+    // A sub-second provider flap: the plane's up wrote the reissue row before
+    // this loop read pi's errored message_end — the row is in the inbox
+    // before any hold exists.
+    w.inbox.push({
+      text: reissueSteerSentence("anthropic"),
+      userId: "plane",
+      userName: "plane",
+      at: NOW,
+      ledgerSeq: 3,
+    });
+    const answer = await w.start();
+    expect(answer).toBe("recovered");
+    // Never an ordinary steer — pi settled on the failed call and would never
+    // read it, the hold left with no release ever coming.
+    expect(w.container.commands().filter((c) => c.type === "steer")).toEqual([]);
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(2);
+    expect(String(prompts[1].id)).toContain(":reissue");
+    expect(w.steps.at(-1)?.inboxConsumedSeq).toBe(3);
+  });
+
+  it("a reissue steer drained between the errored message_end and pi's settle waits for the settle: the release prompt is never sent mid-turn", async () => {
+    const w = world({ providerPark: true });
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0)
+        // The errored call alone — pi has not settled yet.
+        c.emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: "502 the model provider did not answer",
+          },
+        });
+      else {
+        echoPrompt(c);
+        finalTurn(c, "recovered");
+      }
+    });
+    const done = w.start();
+    await vi.waitFor(() => expect(w.notes.some((n) => n.includes("the turn is held"))).toBe(true));
+    w.inbox.push({
+      text: reissueSteerSentence("anthropic"),
+      userId: "plane",
+      userName: "plane",
+      at: NOW,
+      ledgerSeq: 3,
+    });
+    // Drained while pi is still mid-loop: buffered — no steer, and no prompt
+    // pi would refuse with "Agent is already processing".
+    await vi.waitFor(() => expect(w.events.filter((e) => e.type === "input")).toHaveLength(1));
+    expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(1);
+    expect(w.container.commands().filter((c) => c.type === "steer")).toEqual([]);
+    w.container.emit({ type: "agent_settled" });
+    const answer = await done;
+    expect(answer).toBe("recovered");
+    const prompts = w.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(2);
+    expect(String(prompts[1].id)).toContain(":reissue");
+  });
+
+  it("a refused reissue prompt is a failed release: the hold stands and the next settle re-sends it, never a cleared hold no steer would release", async () => {
+    const w = world({ providerPark: true });
+    const c = w.container;
+    let prompts = 0;
+    let reissueAsks = 0;
+    c.onStdin = (line) => {
+      const cmd = JSON.parse(line) as Record<string, unknown>;
+      if (cmd.type === "set_auto_retry")
+        c.emit({ id: cmd.id, type: "response", command: "set_auto_retry", success: true });
+      if (cmd.type === "get_state")
+        c.emit({
+          id: cmd.id,
+          type: "response",
+          command: "get_state",
+          success: true,
+          data: { sessionFile: `${paths.sessionDir}/s.jsonl`, sessionId: "sid", isStreaming: false },
+        });
+      if (cmd.type === "prompt") {
+        if (String(cmd.id).includes(":reissue") && ++reissueAsks === 1) {
+          // pi was not at a turn boundary after all: the release is refused,
+          // and pi settles afterwards.
+          c.emit(
+            { id: cmd.id, type: "response", command: "prompt", success: false, error: PI_BUSY_REFUSAL },
+            { type: "agent_settled" },
+          );
+          return;
+        }
+        c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+        if (prompts++ === 0)
+          c.emit(
+            {
+              type: "message_end",
+              message: {
+                role: "assistant",
+                content: [],
+                stopReason: "error",
+                errorMessage: "502 the model provider did not answer",
+              },
+            },
+            { type: "agent_settled" },
+          );
+        else {
+          echoPrompt(c);
+          finalTurn(c, "recovered");
+        }
+      }
+    };
+    const done = w.start();
+    await vi.waitFor(() => expect(w.notes.some((n) => n.includes("the turn is held"))).toBe(true));
+    w.inbox.push({
+      text: reissueSteerSentence("anthropic"),
+      userId: "plane",
+      userName: "plane",
+      at: NOW,
+      ledgerSeq: 3,
+    });
+    const answer = await done;
+    expect(answer).toBe("recovered");
+    expect(w.notes.some((n) => n.includes("the turn stays held"))).toBe(true);
+    const promptIds = w.container
+      .commands()
+      .filter((cc) => cc.type === "prompt")
+      .map((cc) => String(cc.id));
+    expect(promptIds.filter((i) => i.includes(":reissue"))).toHaveLength(2);
   });
 
   // A call the provider refused under its usage policy is the failure by name:

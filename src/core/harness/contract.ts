@@ -478,6 +478,15 @@ export interface HarnessRun {
   span?: Span;
   control?: RunControl;
   inbox?: FollowUpInbox;
+  /** The run can be parked on its provider (model-proxy item 12a; record
+   *  0064): a failure past the model proxy's one retry reported the provider
+   *  down and parked the run on `provider_up`, so the harness holds the
+   *  failed turn — no `harness_error`, no retry ladder — and the plane's
+   *  reissue steer, one more inbox row with sender `plane`, re-issues it.
+   *  Set by the run loop only for a ledger-tracked run: without the ledger
+   *  nothing parks and no steer would ever release the hold, so the retry
+   *  ladder answers as before. */
+  providerPark?: boolean;
   /** A steered follow-up's staged files (record 0033): awaited before the steer is sent, so the
    *  files are copied into the store and pulled into the container's workspace first; the line
    *  it answers with (the attachments line, or empty) ends the steer's text. Bound by the loop

@@ -265,6 +265,15 @@ export function reissueSteerSentence(provider: string): string {
   return `the model provider ${provider} is answering again — re-issue the held turn and continue`;
 }
 
+/** The reissue steer read back (model-proxy item 12a): what the pi harness
+ *  releases a held turn on — the sentence above with any provider's name,
+ *  judged whole against the inbox row's text beside its `plane` sender, so a
+ *  parked turn is only re-driven by the plane's own words, never a person's
+ *  follow-up that happens to mention a provider. */
+export function isReissueSteerText(text: string): boolean {
+  return /^the model provider .+ is answering again — re-issue the held turn and continue$/.test(text.trim());
+}
+
 /** The checkpoint steer's causes: an in-flight call past its bound (or the
  *  no-bound line) and a coding round with no pushed head past `noPushMinutes`. */
 export type SteerCause = "long_call" | "no_push";
