@@ -25,7 +25,7 @@ Every agent here reads this first. Detail is a link away: [README.md](README.md)
 
 ## Where things are
 
-Area by area, module by module: the [Code map](docs/reference/code-map.md). The behavior each area must keep: its spec under [`docs/reference/specs/`](docs/reference/specs/README.md). Why it is shaped that way: the [decision records](docs/explanation/design-decisions.md). When they disagree with the code, one of them is wrong, and the checks (`specs:check`, `decisions:check`, `docs:check`) say which.
+The user's nouns: the [Vocabulary](docs/reference/vocabulary.md). Module by module: the [Code map](docs/reference/code-map.md). The behavior each area must keep: its spec under [`docs/reference/specs/`](docs/reference/specs/README.md). The why behind it: the [decision records](docs/explanation/design-decisions.md). When they disagree with the code, one is wrong; the checks (`specs:check`, `decisions:check`, `docs:check`) say which.
 
 ## Commands
 

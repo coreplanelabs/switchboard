@@ -247,6 +247,7 @@ export default defineConfig({
         text: "Reference",
         collapsed: false,
         items: [
+          { text: "Vocabulary", link: "/reference/vocabulary" },
           { text: "Slack commands", link: "/reference/slack-commands" },
           { text: "CLI", link: "/reference/cli" },
           { text: "Configuration", link: "/reference/configuration" },
@@ -263,6 +264,7 @@ export default defineConfig({
         items: [
           { text: "Architecture", link: "/explanation/architecture" },
           { text: "How a request flows", link: "/explanation/how-a-request-flows" },
+          { text: "What holds what", link: "/explanation/what-holds-what" },
           { text: "The agents and their toolsets", link: "/explanation/agents-and-toolsets" },
           { text: "Worker topology", link: "/explanation/worker-topology" },
           { text: "One definition, every surface", link: "/explanation/one-command-many-surfaces" },
