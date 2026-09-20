@@ -522,7 +522,7 @@ export const PLANE_ADMISSION_MODES = ["off", "shadow", "on"] as const;
 export type PlaneAdmissionMode = (typeof PLANE_ADMISSION_MODES)[number];
 
 /** The `plane` block's keys, held equal to `PlaneConfig` the way the top-level keys are. */
-const PLANE_KEYS: Record<keyof PlaneConfig, true> = { admission: true, reaskMinutes: true };
+const PLANE_KEYS: Record<keyof PlaneConfig, true> = { admission: true, reaskMinutes: true, coldFallback: true };
 
 /** `plane` (record 0064): `admission` is one of the three modes and
  *  `reaskMinutes` a positive number of minutes — anything else is refused by
@@ -535,6 +535,8 @@ function validatePlane(plane: PlaneConfig): void {
     throw new Error(`config.yaml: plane.admission must be ${PLANE_ADMISSION_MODES.join(", ")}`);
   if (plane.reaskMinutes !== undefined && (typeof plane.reaskMinutes !== "number" || !(plane.reaskMinutes > 0)))
     throw new Error("config.yaml: plane.reaskMinutes must be a positive number of minutes");
+  if (plane.coldFallback !== undefined && typeof plane.coldFallback !== "boolean")
+    throw new Error("config.yaml: plane.coldFallback must be true or false");
 }
 
 /** The `references` block's keys, held equal to `ReferencesConfig` the way the top-level keys are. */

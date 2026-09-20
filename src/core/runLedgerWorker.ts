@@ -52,7 +52,7 @@ import {
 } from "./runStoreWorker.js";
 import type { FinishResult, HeartbeatResult, RunLedger } from "./runLedger/ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost, PlaneQueueRow } from "./plane/decide.js";
-import type { PlaneAdmitPost } from "./runLedger/ledger.js";
+import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./runLedger/ledger.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./runLedger/sessionLog.js";
 import { assembleTranscript, chunkRows, turnRows, type AssembledTranscript } from "./runLedger/transcript.js";
 import {
@@ -386,6 +386,15 @@ export class WorkerRunLedger implements RunLedger {
   async planeQueued(runId: string): Promise<PlaneQueueRow | null> {
     const r = await this.post("/plane/queued", { storeKey: this.opts.storeKey, runId });
     return (r.data as { row?: PlaneQueueRow | null }).row ?? null;
+  }
+
+  async planeLevel(post: PlaneLevelPost): Promise<void> {
+    await this.post("/plane/level", { storeKey: this.opts.storeKey, ...post });
+  }
+
+  async planeObserve(post: PlaneObservePost): Promise<{ reentered: boolean }> {
+    const r = await this.post("/plane/observe", { storeKey: this.opts.storeKey, ...post });
+    return r.data as unknown as { reentered: boolean };
   }
 
   async append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult> {

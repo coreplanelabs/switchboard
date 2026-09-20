@@ -26,6 +26,21 @@ const ALL_FILES = [...WORKER_FILES, ...PURE_FILES];
 const RETIRED_LIST = /const RETIRED_SCHEDULE_CALLBACKS = \[[^\]]*\] as const;/;
 const withoutRetiredList = (source: string): string => source.replace(RETIRED_LIST, "");
 
+/** The one alarm the sources may arm: the registry DO's one-shot drain-lift
+ *  alarm (record 0064; levels.test.ts pins its shape) — a fleet drain nobody
+ *  lifts posts its own expiry to the plane. It lives on ResidentRegistryDO,
+ *  never on the resident's own lifecycle code (ResidentDO, the refresh cycle),
+ *  so the scan excises that class body and holds the ban over everything else;
+ *  a dedicated test below pins that the excised block arms the alarm only at
+ *  the drain's `until`. */
+const REGISTRY_CLASS_START = "export class ResidentRegistryDO";
+const registryClassBody = (source: string): string => {
+  const start = source.indexOf(REGISTRY_CLASS_START);
+  if (start === -1) return "";
+  return source.slice(start, source.indexOf("\nexport ", start + REGISTRY_CLASS_START.length));
+};
+const withoutRegistryDO = (source: string): string => source.replace(registryClassBody(source), "");
+
 describe("no lifecycle timer — the resident's cycles are Workflow instances, never a self-rearming alarm", () => {
   it("scans the entry, the instance module, the shared tunables and every pure resident module", () => {
     expect(WORKER_FILES.map(([name]) => name)).toEqual(["worker.ts", "refresh.ts", "shared.ts"]);
@@ -34,8 +49,20 @@ describe("no lifecycle timer — the resident's cycles are Workflow instances, n
     expect(PURE_FILES.map(([name]) => name)).toContain("src/execution/residentState.ts");
   });
 
-  it.each(ALL_FILES)("%s never arms the Durable Object alarm slot: no `setAlarm`", (_name, source) => {
-    expect(source).not.toMatch(/setAlarm/);
+  it.each(ALL_FILES)(
+    "%s never arms the Durable Object alarm slot outside the registry's drain-lift: no `setAlarm`",
+    (_name, source) => {
+      expect(withoutRegistryDO(source)).not.toMatch(/setAlarm/);
+    },
+  );
+
+  it("worker.ts arms the alarm slot only in ResidentRegistryDO, at the drain's `until` — the one-shot drain-lift, never a re-arming cycle", () => {
+    const [, source] = WORKER_FILES[0];
+    const registry = registryClassBody(source);
+    const calls = registry.match(/setAlarm\(/g) ?? [];
+    const drainLifts = registry.match(/setAlarm\(Date\.parse\(.*\.until\)\)/g) ?? [];
+    expect(calls.length, "the registry arms the drain-lift alarm").toBeGreaterThan(0);
+    expect(drainLifts.length, "every registry setAlarm is the drain-lift at `until`").toBe(calls.length);
   });
 
   it.each(ALL_FILES)(

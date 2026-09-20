@@ -25,7 +25,7 @@ import { PermanentStoreError, RouteMissingError } from "../runStoreWorker.js";
 import { createAppendFlusher } from "./flusher.js";
 import type { RunLedger } from "./ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost } from "../plane/decide.js";
-import type { PlaneAdmitPost } from "./ledger.js";
+import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./ledger.js";
 import { requestIndex, sessionKey } from "./sessionLog.js";
 import {
   APPEND_FLUSH_EVENTS,
@@ -83,7 +83,11 @@ export interface LedgerWriteThroughOptions {
    *  draining generation starts nothing it cannot finish. */
   planeEffects?: {
     draining(): boolean;
-    admit(effect: PlaneEffect): Promise<PlaneAckOutcome>;
+    admit(effect: Extract<PlaneEffect, { kind: "admit" }>): Promise<PlaneAckOutcome>;
+    /** The `probe` effect (record 0064): probe the resident's `/status`
+     *  and forward its levels. Absent — a process without a resident — the
+     *  probe is `skipped`; a drain never defers it (it starts no run). */
+    probe?(effect: Extract<PlaneEffect, { kind: "probe" }>): Promise<PlaneAckOutcome>;
   };
   /** Injectable timers (tests). */
   sleep?: (ms: number) => Promise<void>;
@@ -323,6 +327,13 @@ export interface LedgerWriteThrough {
   planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer>;
   /** `runs stop` on a queued id: the waiting row goes withdrawn. */
   planeWithdraw(runId: string): Promise<{ withdrawn: boolean }>;
+  /** A resident's level report (record 0064): awaited by the resident-stage ask so the
+   *  decider judges the level just seen; a failed or missing route is one
+   *  warning — the plane must never take the door down. */
+  planeLevel(post: PlaneLevelPost): Promise<void>;
+  /** A refusal-by-name met at attach or exec (record 0064): `reentered` false when the
+   *  plane never held the run — the caller's own fallback stands. */
+  planeObserve(post: PlaneObservePost): Promise<{ reentered: boolean }>;
 }
 
 /** The write-through of a process without a run ledger (a Null Object,
@@ -382,6 +393,12 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
   planeOutcome(_post: PlaneOutcomePost): void {
     // No ledger, no plane: the post has nowhere to land and shadow is moot.
   }
+  async planeLevel(_post: PlaneLevelPost): Promise<void> {}
+
+  async planeObserve(_post: PlaneObservePost): Promise<{ reentered: boolean }> {
+    return { reentered: false };
+  }
+
   async planeAdmit(_post: PlaneAdmitPost): Promise<PlaneAskAnswer> {
     // No ledger, no queue: every ask proceeds as it did before the plane existed.
     return { kind: "admitted", reservation: "none" };
@@ -1045,8 +1062,17 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         for (const effect of result.effects ?? []) {
           try {
             const executor = opts.planeEffects;
+            // A probe starts no run, so a drain never defers it (record 0064:
+            // a draining generation defers `admit` and executes the rest); a
+            // process without a probe seam skips it and the offer closes.
             const outcome: PlaneAckOutcome =
-              executor === undefined || executor.draining() ? "deferred" : await executor.admit(effect);
+              effect.kind === "probe"
+                ? executor?.probe === undefined
+                  ? "skipped"
+                  : await executor.probe(effect)
+                : executor === undefined || executor.draining()
+                  ? "deferred"
+                  : await executor.admit(effect);
             await ledger.planeAck(effect.id, outcome);
           } catch (err) {
             warn(`[ledger] plane ack failed for effect ${effect.id}: ${describe(err)} — it stays offered`);
@@ -1217,6 +1243,23 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     },
     async planeWithdraw(runId) {
       return ledger.planeWithdraw(runId);
+    },
+    async planeLevel(post) {
+      try {
+        await ledger.planeLevel(post);
+      } catch (err) {
+        warn(`[ledger] plane level post failed for ${post.resident}: ${describe(err)} — the plane reads it stale`);
+      }
+    },
+    async planeObserve(post) {
+      try {
+        return await ledger.planeObserve(post);
+      } catch (err) {
+        warn(
+          `[ledger] plane observation failed for run ${post.runId}: ${describe(err)} — the caller's fallback stands`,
+        );
+        return { reentered: false };
+      }
     },
     planeOutcome(post) {
       void ledger.planeOutcome(post).catch((err: unknown) => {

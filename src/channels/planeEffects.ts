@@ -31,7 +31,7 @@ export interface PlaneEffectsDeps {
   execute:
     | {
         draining(): boolean;
-        admit(effect: PlaneEffect): Promise<PlaneAckOutcome>;
+        admit(effect: Extract<PlaneEffect, { kind: "admit" }>): Promise<PlaneAckOutcome>;
       }
     | undefined;
   /** `RunLedger.planeAck` — closes or re-offers the effect on the object. */
@@ -42,7 +42,12 @@ export interface PlaneEffectsDeps {
 
 /** One pushed effect, shape-checked before anything runs: the push crosses a
  *  process boundary, so a malformed body is a 400, never a throw. */
-function parseEffect(v: unknown): PlaneEffect | undefined {
+/** The pushed effects this door executes are the admits alone: a `probe`
+ *  rides the heartbeat answer (its executor lives beside the ledger client),
+ *  so a pushed one is left unparsed here and stays offered there. */
+type AdmitEffect = Extract<PlaneEffect, { kind: "admit" }>;
+
+function parseEffect(v: unknown): AdmitEffect | undefined {
   if (typeof v !== "object" || v === null) return undefined;
   const e = v as Record<string, unknown>;
   if (e.kind !== "admit") return undefined;
@@ -55,7 +60,7 @@ function parseEffect(v: unknown): PlaneEffect | undefined {
     kind: "admit",
     runId: e.runId,
     threadKey: e.threadKey,
-    request: e.request as PlaneEffect["request"],
+    request: e.request as AdmitEffect["request"],
   };
 }
 
@@ -93,7 +98,11 @@ export function handlePlaneEffects(req: IncomingMessage, res: ServerResponse, de
       json(400, { ok: false, error: "effects must be an array" });
       return;
     }
-    const effects = raw.map(parseEffect);
+    // A pushed effect of another kind (a `probe`) is not this door's to run:
+    // it stays offered and rides the next heartbeat answer, whose loop has
+    // the executor for it — never a 400 that would fail the admits beside it.
+    const admits = raw.filter((v) => typeof v === "object" && v !== null && (v as { kind?: unknown }).kind === "admit");
+    const effects = admits.map(parseEffect);
     if (effects.some((e) => e === undefined)) {
       json(400, { ok: false, error: "malformed effect" });
       return;
@@ -102,7 +111,7 @@ export function handlePlaneEffects(req: IncomingMessage, res: ServerResponse, de
     // draining generation defers — the offer stays for a bot that can run it —
     // and a failed ack leaves the offer standing to ride the next answer.
     const acks: { id: string; outcome: PlaneAckOutcome }[] = [];
-    for (const effect of effects as PlaneEffect[]) {
+    for (const effect of effects as AdmitEffect[]) {
       try {
         const executor = deps.execute;
         const outcome: PlaneAckOutcome =

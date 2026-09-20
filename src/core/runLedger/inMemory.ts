@@ -14,7 +14,7 @@ import {
 } from "./decisions.js";
 import type { FinishResult, HeartbeatResult, RunLedger } from "./ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneOutcomePost, PlaneQueueRow } from "../plane/decide.js";
-import type { PlaneAdmitPost } from "./ledger.js";
+import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./ledger.js";
 import {
   attachmentRefsOf,
   DEFAULT_SESSION_LOG_MAX_BYTES,
@@ -255,6 +255,20 @@ export class InMemoryRunLedger implements RunLedger {
   async planeWithdraw(runId: string): Promise<{ withdrawn: boolean }> {
     this.planeWithdraws.push(runId);
     return { withdrawn: this.planeWithdrawAnswer };
+  }
+
+  /** The level reports and observations, kept for assertions (record 0064/record 0064). */
+  readonly planeLevels: PlaneLevelPost[] = [];
+  readonly planeObservations: PlaneObservePost[] = [];
+  planeObserveAnswer = false;
+
+  async planeLevel(post: PlaneLevelPost): Promise<void> {
+    this.planeLevels.push(post);
+  }
+
+  async planeObserve(post: PlaneObservePost): Promise<{ reentered: boolean }> {
+    this.planeObservations.push(post);
+    return { reentered: this.planeObserveAnswer };
   }
 
   /** Settable per test: the queued row `planeQueued` answers (default none). */
