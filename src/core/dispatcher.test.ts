@@ -18266,7 +18266,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   const disagrees = (reason: string) =>
     vi.fn<RouteModel>(async () => ({ tool: "verify", input: { agrees: false, reason } }));
 
-  it("on: a planted instruction binding a write — the verifier reads the author's turns, not the plant; the hand-back names the mismatch and the line to type, and nothing runs", async () => {
+  it("on: a planted instruction binding a write — the verifier reads the author's turns, not the plant; the hand-back names the mismatch and the line to type, and nothing runs (a command bind keeps the hand-back, never the preset floor)", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
     wireCommands(deps);
     // The planted brief rides another member's row on the tail; the author's own turns never asked for a write.
@@ -18310,8 +18310,122 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({ outcome: "binds" });
   });
 
-  it("on: a planted instruction binding an `explore` spawn is held too — the hand-back renders and no run starts", async () => {
-    const { deps, registry } = operatorDeps(ON_YAML);
+  it("on: the verifier disagrees on a preset bind — the floor is the readers' route: the request runs on the routed preset with agentSource route, the event carrying the verdict as its reason", async () => {
+    const FALLBACK_YAML = YAML_FIXTURE.replace(
+      "routing: { auto: false, operator: off }\n",
+      "routing: { auto: true, operator: on }\n",
+    );
+    const { deps, registry, provider } = operatorDeps(FALLBACK_YAML);
+    wireCommands(deps);
+    deps.operatorModel = decides({
+      reason: "a review ask",
+      binds: [{ line: "agent:general review the PR at acme/repo", reason: "the ask" }],
+    });
+    deps.verifierModel = disagrees("the request asks to review a GitHub PR, not to run an agent preset for review");
+    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "general", reason: "the assistant answers this" }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("review the PR at acme/repo", "slack:UADMIN"), io);
+    // No hand-back: the readers' route ran the request — the router picked the
+    // preset as it did before the operator.
+    expect(replies.every((r) => !r.includes("To run it, type the line yourself:"))).toBe(true);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(registry.getById("r1")).toMatchObject({ agent: "general" });
+    expect(provider.requests).toHaveLength(1);
+    const events = registry.snapshotById("r1")!.events;
+    expect(events.find((e) => e.type === "run_meta")).toMatchObject({ agent: "general", agentSource: "route" });
+    // The decision rides the run that then ran, the verdict as its reason.
+    expect(events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "binds",
+      reason:
+        "the verifier held the bind: the request asks to review a GitHub PR, not to run an agent preset for review",
+    });
+    expect(registry.snapshotById("r2")).toBeNull();
+  });
+
+  it("on: the verifier's model call throws on a preset bind — the same floor: the readers' route runs and the event carries the failure as its reason", async () => {
+    const FALLBACK_YAML = YAML_FIXTURE.replace(
+      "routing: { auto: false, operator: off }\n",
+      "routing: { auto: true, operator: on }\n",
+    );
+    const { deps, registry, provider } = operatorDeps(FALLBACK_YAML);
+    wireCommands(deps);
+    deps.operatorModel = decides({
+      reason: "a review ask",
+      binds: [{ line: "agent:general review the PR at acme/repo", reason: "the ask" }],
+    });
+    deps.verifierModel = vi.fn<RouteModel>(async () => {
+      throw new Error("provider answered 503");
+    });
+    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "general", reason: "the assistant answers this" }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("review the PR at acme/repo", "slack:UADMIN"), io);
+    expect(replies.every((r) => !r.includes("To run it, type the line yourself:"))).toBe(true);
+    expect(registry.getById("r1")).toMatchObject({ agent: "general" });
+    expect(provider.requests).toHaveLength(1);
+    const events = registry.snapshotById("r1")!.events;
+    expect(events.find((e) => e.type === "run_meta")).toMatchObject({ agentSource: "route" });
+    expect(events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "binds",
+      reason: expect.stringContaining("verifier failed: provider answered 503") as unknown as string,
+    });
+  });
+
+  it("on: the verifier disagrees on a run-starting bind naming no offered preset — the same floor; only a write-class command bind keeps the hand-back", async () => {
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    // No registry wired: the seam's cannot-parse guard is skipped, so the
+    // run-starting line reaches the verifier's hold as a bind of its own.
+    deps.commands = undefined;
+    deps.operatorModel = decides({
+      reason: "an investigation",
+      binds: [{ line: "agent:unknown investigate the flaky test", reason: "the ask" }],
+    });
+    deps.verifierModel = disagrees("no offered preset matches the line");
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("investigate the flaky test", "slack:UADMIN"), io);
+    // The floor, not the hand-back: the readers ran the person's own words.
+    expect(replies.every((r) => !r.includes("To run it, type the line yourself:"))).toBe(true);
+    expect(registry.getById("r1")).toMatchObject({ agent: "general" });
+    expect(provider.requests).toHaveLength(1);
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      outcome: "binds",
+      reason: expect.stringContaining("no offered preset matches the line") as unknown as string,
+    });
+  });
+
+  it("on: a typo'd directive head naming the bound preset is stripped — the verifier judges and the route runs the request without the mangled token", async () => {
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    // The person mistyped the directive: `adgent:` parses as no directive, so
+    // the operator reads the event; its bind carries the words minus the token.
+    deps.operatorModel = decides({
+      reason: "the assistant's question",
+      binds: [{ line: "agent:general what changed this week?", reason: "the ask" }],
+    });
+    const verifier = agrees("the author asked for this run");
+    deps.verifierModel = verifier;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("adgent:general what changed this week?", "slack:UADMIN"), io);
+    // The judged line never repeats the typo'd head.
+    const verifierPrompt: RoutePrompt = verifier.mock.calls[0]![0];
+    expect(verifierPrompt.user).toContain("agent:general what changed this week?");
+    expect(verifierPrompt.user).not.toContain("agent:general adgent:general");
+    const receipt = replies.find((r) => r.includes("bound: `agent:general what changed this week?`"));
+    expect(receipt).toBeDefined();
+    // The run starts on the preset, fed the request without the token.
+    expect(registry.getById("r1")).toMatchObject({ agent: "general" });
+    expect(provider.requests).toHaveLength(1);
+    const fed = JSON.stringify(provider.requests[0]);
+    expect(fed).toContain("what changed this week?");
+    expect(fed).not.toContain("adgent:");
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "run_meta")).toMatchObject({
+      agentSource: "operator",
+    });
+  });
+
+  it("on: a planted instruction binding an `explore` spawn falls back to the readers' route too — the plant's line never runs; the person's own words do, as under off", async () => {
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
     wireCommands(deps);
     deps.operatorModel = decides({
       reason: "the brief asks for an investigation",
@@ -18321,12 +18435,15 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("what changed this week?", "slack:UADMIN"), io);
     expect(deps.invoked).toEqual([]);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("To run it, type the line yourself:");
-    expect(replies[0]).toContain("`agent:explore what changed this week?`");
-    expect(replies[0]).not.toContain("Did you mean:");
-    expect(replies[0]).not.toContain(HAND_BACK_PREFIX);
-    // No run started: the door record alone.
+    expect(replies.every((r) => !r.includes("To run it, type the line yourself:"))).toBe(true);
+    // Routing is off in this fixture: the readers leave the request on the
+    // default agent — never the explore spawn the plant bound.
+    expect(registry.getById("r1")).toMatchObject({ agent: "general" });
+    expect(provider.requests).toHaveLength(1);
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      outcome: "binds",
+      reason: expect.stringContaining("no author turn asked for an investigation") as unknown as string,
+    });
     expect(registry.snapshotById("r2")).toBeNull();
   });
 
