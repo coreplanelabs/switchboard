@@ -85,6 +85,16 @@ import { DurableObject } from "cloudflare:workers";
 import { BASH_TIMEOUT_MAX_MS, clampBashTimeout } from "../../src/execution/bashTimeout.js";
 import { selectBindingsToPurge } from "../../src/execution/bindingPurge.js";
 import { busyAfterKillReason, planForceDetach } from "../../src/execution/residentDetach.js";
+import {
+  levelPosts,
+  memorySide,
+  mergeOutbox,
+  seatSide,
+  type LevelPost,
+  type LevelSample,
+  type LevelSide,
+  type ResidentLevelsDoc,
+} from "./levels.js";
 import { parseReadonly, planReadonlyAttach } from "../../src/execution/residentReadonly.js";
 import { decideWorktree, parseReuse, type WorktreeFacts } from "../../src/execution/residentReuse.js";
 import {
@@ -636,6 +646,12 @@ const DISK_KEY = "resident:disk";
  *  tick, persisted so the gauges (`/status`, `/residents`, the watchdog line)
  *  read storage only — the watchdog never touches the container. */
 const MEMORY_KEY = "resident:memory";
+/** The last level sample and the crossing outbox (record 0064; `levels.ts`). */
+const LEVELS_LAST_KEY = "resident:levels:last";
+const LEVELS_OUTBOX_KEY = "resident:levels:outbox";
+/** The registry's drain post (record 0064): the fleet drain's set/cleared/expired,
+ *  re-offered on every registry answer until superseded. */
+const DRAIN_OUTBOX_KEY = "drain:outbox";
 /** The lifecycle row (docs/reference/specs/resident-repos.md item 7): `workflow`,
  *  the one scheduler. Kept from the flagged rollout so `/status` and `/debug
  *  info` can say so; an `alarm` value a flip left behind reads `workflow`
@@ -1542,15 +1558,56 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   }
 
   /** Admin-only by construction (reached solely via POST /drain): replaces
-   *  whatever drain stood — a second deploy's drain extends the first's. */
+   *  whatever drain stood — a second deploy's drain extends the first's. The
+   *  set posts `above` for the plane (record 0064) and arms ONE alarm at
+   *  `until`, so a drain nobody lifts posts its expiry itself. */
   async setDrain(record: DrainRecord): Promise<DrainRecord> {
     await this.ctx.storage.put(DRAIN_KEY, record);
+    await this.pushDrainPost("above");
+    await this.ctx.storage.setAlarm(Date.parse(record.until));
     return record;
   }
 
-  /** Admin-only by construction (POST /undrain): true when a record was there. */
+  /** Admin-only by construction (POST /undrain): true when a record was there.
+   *  A cleared drain posts `below` — the plane's resident-drain window lifts. */
   async clearDrain(): Promise<boolean> {
-    return this.ctx.storage.delete(DRAIN_KEY);
+    const had = await this.ctx.storage.delete(DRAIN_KEY);
+    if (had) await this.pushDrainPost("below");
+    return had;
+  }
+
+  /** The one alarm, at the drain's `until` (record 0064): a drain past
+   *  its end is nothing (`liveDrain` already reads it so), and the expiry is
+   *  posted `below` like a clear — whoever forgot the drain, the plane's
+   *  window lifts. A drain replaced with a later `until` re-arms via setDrain. */
+  async alarm(): Promise<void> {
+    const now = systemClock();
+    const stored = await this.ctx.storage.get(DRAIN_KEY);
+    if (stored === undefined) return;
+    if (liveDrain(stored, now) === null) {
+      await this.ctx.storage.delete(DRAIN_KEY);
+      await this.pushDrainPost("below");
+    } else {
+      // Replaced with a later end under an already-armed alarm: re-arm at it.
+      await this.ctx.storage.setAlarm(Date.parse((stored as DrainRecord).until));
+    }
+  }
+
+  /** The drain's plane post (name `drain`), superseding the last: the plane
+   *  only needs the current side, and the bot's forward is idempotent. */
+  private async pushDrainPost(side: LevelSide): Promise<void> {
+    await this.ctx.storage.put(DRAIN_OUTBOX_KEY, {
+      name: "drain",
+      side,
+      generation: "",
+      at: new Date(systemClock()).toISOString(),
+    });
+  }
+
+  /** The pending drain post, for the registry's answers (`/drain`, `/undrain`,
+   *  `/residents`) — the bot forwards it to `POST /plane/level`. */
+  async getDrainOutbox(): Promise<LevelPost | null> {
+    return ((await this.ctx.storage.get(DRAIN_OUTBOX_KEY)) as LevelPost | undefined) ?? null;
   }
 }
 
@@ -4597,6 +4654,37 @@ export class ResidentDO extends Sandbox<Env> {
    *  only: the watchdog never touches the container). */
   async memoryGauge(): Promise<MemoryReading | null> {
     return this.memoryGuard.lastReading ?? (await this.ctx.storage.get<MemoryReading>(MEMORY_KEY)) ?? null;
+  }
+
+  /** The resident's levels (record 0064; `levels.ts`): the seat (the
+   *  thread/op user pool, whose exhaustion is the `user-pool-exhausted`
+   *  refusal) and the memory line (the gate's soft side), stamped with this
+   *  incarnation — the container's boot id where one is memoized, else the
+   *  DO incarnation, so a boot or a replaced runtime reads as a new
+   *  generation and re-states both levels. A crossing lands in the outbox
+   *  and is re-offered on every answer until a newer crossing of the same
+   *  name supersedes it; the bot forwards posts to `POST /plane/level`.
+   *  Storage reads and one storage write only — never a container touch, so
+   *  every `/attach`, `/exec` and `/status` answer can carry the document. */
+  async residentLevels(): Promise<ResidentLevelsDoc> {
+    const at = new Date(systemClock()).toISOString();
+    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+    const used = new Set([...all.values()].filter((b) => !b.evicted && b.user).map((b) => b.user));
+    for (const u of this.opUsersInUse) used.add(u);
+    const reading = await this.memoryGauge();
+    const generation = this.containerIdMemo ?? this.incarnation;
+    const seat = { side: seatSide(used.size, THREAD_USERS.length), used: used.size, total: THREAD_USERS.length };
+    const memory = { side: memorySide(reading?.percent ?? null), percent: reading?.percent ?? null };
+    const next: LevelSample = { seat: seat.side, memory: memory.side, generation };
+    const prev = (await this.ctx.storage.get<LevelSample>(LEVELS_LAST_KEY)) ?? null;
+    const posts = levelPosts(prev, next, at);
+    let outbox = (await this.ctx.storage.get<LevelPost[]>(LEVELS_OUTBOX_KEY)) ?? [];
+    if (posts.length > 0) {
+      outbox = mergeOutbox(outbox, posts);
+      await this.ctx.storage.put(LEVELS_OUTBOX_KEY, outbox);
+      await this.ctx.storage.put(LEVELS_LAST_KEY, next);
+    }
+    return { seat, memory, generation, at, posts: outbox };
   }
 
   /** The route gate (item 70): one fresh sample, then the pure verdict over
@@ -9027,7 +9115,7 @@ async function handleDrain(env: Env, body: Record<string, unknown>): Promise<Res
   if (!parsed.ok) return json({ error: parsed.error }, 400);
   const record = await registryStub(env).setDrain(parsed.record);
   console.log(`[drain] fleet closed to new runs by ${record.by} for ${record.reason}: until ${record.until}`);
-  return json({ draining: record });
+  return json({ draining: record, planeOutbox: await registryStub(env).getDrainOutbox() });
 }
 
 /** POST /undrain (admin): reopen the fleet. Idempotent — `cleared` says whether
@@ -9035,7 +9123,7 @@ async function handleDrain(env: Env, body: Record<string, unknown>): Promise<Res
 async function handleUndrain(env: Env): Promise<Response> {
   const cleared = await registryStub(env).clearDrain();
   console.log(`[drain] fleet reopened (${cleared ? "a drain stood" : "no drain stood"})`);
-  return json({ draining: null, cleared });
+  return json({ draining: null, cleared, planeOutbox: await registryStub(env).getDrainOutbox() });
 }
 
 /** POST /reconcile (drain scope): reconcile every resident's container onto
@@ -9116,13 +9204,16 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   // deploy gate reads /residents. The registry check rides in the same flight
   // (its 404 is judged first, the probes' results discarded then).
   const stub = residentStub(env, resource.resource);
-  const [record, status, inFlight, refresh, snapshot, memory] = await Promise.all([
+  const [record, status, inFlight, refresh, snapshot, memory, levels] = await Promise.all([
     registryStub(env).getRecord(resource.resource),
     stub.getStatus(),
     stub.getInFlightCount(),
     stub.getRefreshView(),
     stub.snapshotHandle(),
     stub.memoryGauge(),
+    // The levels (record 0064): what the bot forwards to the plane; the
+    // plane's `probe` effect is answered by exactly this read.
+    stub.residentLevels().catch(() => null),
   ]);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
   // Item 7: which scheduler drives the refresh cycle and, on the Workflow
@@ -9138,7 +9229,21 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
     // Item 70: the last memory reading, so the bot and the residents page can
     // show what the resident's own gate is reading.
     memory,
+    // Record 0064, record 0064: the levels and the crossing outbox on every answer.
+    ...(levels ? { levels } : {}),
   });
+}
+
+/** Levels on every data-plane answer (record 0064): the document is read
+ *  after the route's own work so the sample reflects it; a failed sample never
+ *  fails the answer — the bot forwards nothing that call. */
+async function withLevels<T>(
+  stub: ReturnType<typeof residentStub>,
+  pending: Promise<T>,
+): Promise<{ result: T; levels: ResidentLevelsDoc | null }> {
+  const result = await pending;
+  const levels = await stub.residentLevels().catch(() => null);
+  return { result, levels };
 }
 
 // -- thread data plane handlers -----------------------------------------------
@@ -9217,17 +9322,20 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
   // response does (`fetch failed` a few minutes in). A refusal
   // carries its `status` in the body; `ResidentExecutor.attach` reads it there.
   return streamHeartbeatJson(
-    ctx.stub.attachThread(
-      ctx.threadKey,
-      refHint,
-      readonly.readonly,
-      want.sha,
-      reuse.reuse,
-      ctx.record,
-      traceparent,
-      reason,
+    withLevels(
+      ctx.stub,
+      ctx.stub.attachThread(
+        ctx.threadKey,
+        refHint,
+        readonly.readonly,
+        want.sha,
+        reuse.reuse,
+        ctx.record,
+        traceparent,
+        reason,
+      ),
     ),
-    (result) => result,
+    ({ result, levels }) => ({ ...(result as object), ...(levels ? { levels } : {}) }),
     (err) => catchAllErr(err),
   );
 }
@@ -9282,7 +9390,9 @@ async function handleExec(env: Env, body: Record<string, unknown>, traceparent?:
   // read from the body alone through the one validated reader the sandbox
   // Worker uses, and handed to the exec's env option, never onto the command.
   const execEnv = envFromRequest({ body });
-  return streamThreadExec(ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs, traceparent, execEnv));
+  return streamThreadExec(
+    withLevels(ctx.stub, ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs, traceparent, execEnv)),
+  );
 }
 
 /** Stream one pending result with the thread-sandbox Worker's heartbeat
@@ -9333,13 +9443,18 @@ function streamHeartbeatJson<T>(
  *  `status`, its word and its `transient`,
  *  and the client reads it like the JSON routes' answer, never as a
  *  deterministic answer over HTTP 200. */
-function streamThreadExec(pending: Promise<Awaited<ReturnType<ResidentDO["execThread"]>>>): Response {
+function streamThreadExec(
+  pending: Promise<{ result: Awaited<ReturnType<ResidentDO["execThread"]>>; levels: ResidentLevelsDoc | null }>,
+): Response {
   return streamHeartbeatJson(
     pending,
-    (result) =>
-      "error" in result
+    ({ result, levels }) => ({
+      ...("error" in result
         ? execFailureDocument(result)
-        : { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, truncated: result.truncated },
+        : { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, truncated: result.truncated }),
+      // Record 0064, record 0064: levels on every answer, the crossing outbox included.
+      ...(levels ? { levels } : {}),
+    }),
     (err) => execFailureDocument(threadRejectionErr(err, "/exec")),
   );
 }

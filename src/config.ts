@@ -272,10 +272,13 @@ export function operatorModeOf(config: AppConfig): OperatorMode {
  *  dispatch and the ledger object logs the decider's decision beside it,
  *  nothing runs from the decider; `on` — a later unit's flip). `reaskMinutes`
  *  is the one re-ask cadence, used only while something waits on a reporter
- *  that fell silent; nothing reads it yet — the resident-conditions unit does. */
+ *  that fell silent. `coldFallback` flips write presets back to falling cold
+ *  under a resident condition instead of queueing at the resident stage — the
+ *  rollback lever for the resident conditions (record 0064). */
 export interface PlaneConfig {
   admission?: PlaneAdmissionMode;
   reaskMinutes?: number;
+  coldFallback?: boolean;
 }
 
 /** The plane's admission mode (record 0064; routing-and-config item 31):
@@ -289,6 +292,13 @@ export function planeAdmissionOf(config: AppConfig): PlaneAdmissionMode {
 /** The plane's re-ask cadence in minutes (record 0064): `plane.reaskMinutes`, else 2. */
 export function planeReaskMinutesOf(config: AppConfig): number {
   return config.plane?.reaskMinutes ?? 2;
+}
+
+/** Whether write presets fall cold under a resident condition instead of
+ *  queueing (record 0064): `plane.coldFallback`, else false — the
+ *  resident stage queues by default once `plane.admission` is `on`. */
+export function planeColdFallbackOf(config: AppConfig): boolean {
+  return config.plane?.coldFallback ?? false;
 }
 
 /** The `references` block (`AppConfig.references`; record 0037): the

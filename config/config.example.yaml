@@ -515,10 +515,15 @@ workspaceDir: ./workspaces
 # object, which logs its decider's decision beside it — nothing runs from the
 # decider; `on` — a later release's flip (the decider's answer is what runs).
 # `reaskMinutes` (default 2) is the plane's one re-ask cadence, used only while
-# something waits on a reporter that fell silent; nothing reads it yet.
+# something waits on a reporter that fell silent — a queued run waiting on a
+# resident that has said nothing within the cadence gets one probe per cadence.
+# `coldFallback` (default false) flips write presets back to falling cold under
+# a resident condition instead of queueing at the resident stage — the rollback
+# lever for the resident conditions.
 # plane:
 #   admission: shadow
 #   reaskMinutes: 2
+#   coldFallback: false
 
 # Linked threads (docs/decisions/0037-a-linked-thread-is-quoted-not-joined.md;
 # docs/reference/specs/routing-and-config.md item 22). Off by default. On, a

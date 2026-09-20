@@ -83,7 +83,9 @@ import {
   effectCapRefusal,
   planeAskAnswerOf,
   planeAskWordOf,
+  RESIDENT_DRAIN_WINDOW,
   type PlaneAskAnswer,
+  type PlaneLevelRow,
   type PlaneAckOutcome,
   type PlaneEffect,
   type PlaneEvent,
@@ -1830,7 +1832,19 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ thread_key: string }>(`SELECT thread_key FROM live_runs WHERE run_id IS NOT ?`, excludeRunId ?? null)
       .toArray()
       .map((r) => r.thread_key);
-    return { queue, liveThreads, reservations, openWindows };
+    const levels = this.sql
+      .exec<{ resident: string; name: string; side: string; reported_at: number; generation: string }>(
+        `SELECT * FROM plane_levels`,
+      )
+      .toArray()
+      .map((r): PlaneLevelRow => ({
+        resident: r.resident,
+        name: r.name as PlaneLevelRow["name"],
+        side: r.side as PlaneLevelRow["side"],
+        reportedAt: r.reported_at,
+        generation: r.generation,
+      }));
+    return { queue, liveThreads, reservations, openWindows, levels };
   }
 
   /** The decider's writes, applied inside the same `transactionSync` that read
@@ -1873,6 +1887,15 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       } else if (w.table === "plane_windows" && w.op === "del") {
         this.sql.exec(`DELETE FROM plane_windows WHERE kind = ?`, w.window);
+      } else if (w.table === "plane_levels") {
+        this.sql.exec(
+          `INSERT OR REPLACE INTO plane_levels (resident, name, side, reported_at, generation) VALUES (?, ?, ?, ?, ?)`,
+          w.row.resident,
+          w.row.name,
+          w.row.side,
+          w.row.reportedAt,
+          w.row.generation,
+        );
       } else {
         // The effect bounds (record 0064): an offer past the per-run or total
         // cap is refused by the cap's name — the throw aborts the transaction,
@@ -1881,20 +1904,31 @@ export class RunHistoryDO extends DurableObject<Env> {
           this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM plane_effects WHERE acked_at IS NULL`).toArray()[0]
             ?.n ?? 0,
         );
-        const forRun = Number(
-          this.sql
-            .exec<{
-              n: number;
-            }>(
-              // Exact id matching (`admit:<runId>`): the seal runs with bot-minted
-              // run ids, and a LIKE would read `%`/`_` in one as wildcards.
-              `SELECT COUNT(*) AS n FROM plane_effects WHERE acked_at IS NULL AND id = 'admit:' || ?`,
-              w.effect.runId,
-            )
-            .toArray()[0]?.n ?? 0,
-        );
+        const forRun =
+          w.effect.kind === "admit"
+            ? Number(
+                this.sql
+                  .exec<{
+                    n: number;
+                  }>(
+                    // Exact id matching (`admit:<runId>`): the seal runs with bot-minted
+                    // run ids, and a LIKE would read `%`/`_` in one as wildcards.
+                    `SELECT COUNT(*) AS n FROM plane_effects WHERE acked_at IS NULL AND id = 'admit:' || ?`,
+                    w.effect.runId,
+                  )
+                  .toArray()[0]?.n ?? 0,
+              )
+            : 0;
         const refusal = effectCapRefusal({ total, forRun }, w.effect);
         if (refusal !== undefined) throw new Error(refusal);
+        // A re-offer lands after an ack for any kind — a probe re-probes after
+        // its ack (one open probe per resident, record 0064), and an observation
+        // re-enters an admitted run whose acked `admit:<runId>` row would
+        // otherwise swallow the walk's re-offer, stranding the run `admitted`
+        // with no effect delivered. The decider only re-emits an effect when
+        // its subject is waiting again, and the bot's own getById dedup guards
+        // a genuine duplicate admit, so the acked row is history, not a fence.
+        this.sql.exec(`DELETE FROM plane_effects WHERE id = ? AND acked_at IS NOT NULL`, w.effect.id);
         // An offer keeps its first `offered_at`: a re-decided admit after a
         // roll is the same effect, not a younger one.
         this.sql.exec(
@@ -1940,27 +1974,114 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  transaction decides and writes — `admitted` reserves the thread,
    *  `queued` stores the request under the minted id. */
   planeAdmit(
-    post: { runId: string; requester: string; threadKey: string; request: Record<string, unknown> },
+    post: {
+      runId: string;
+      requester: string;
+      threadKey: string;
+      request: Record<string, unknown>;
+      stage?: PlaneStage;
+      resident?: string;
+      restartOf?: boolean;
+      reaskMs?: number;
+    },
     now: number,
   ): PlaneAskAnswer {
     let answer!: PlaneAskAnswer;
     this.ctx.storage.transactionSync(() => {
+      if (post.reaskMs !== undefined)
+        this.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_reask_ms', ?)`, String(post.reaskMs));
       const decision = decide(this.planeState(), {
         kind: "ask",
         at: now,
         runId: post.runId,
         requester: post.requester,
         threadKey: post.threadKey,
-        stage: "admission",
+        stage: post.stage ?? "admission",
         request: post.request,
+        ...(post.resident !== undefined ? { resident: post.resident } : {}),
+        ...(post.restartOf !== undefined ? { restartOf: post.restartOf } : {}),
       });
       this.applyPlaneWrites(decision.writes);
       answer = planeAskAnswerOf(decision, post.runId);
     });
+    if (answer.kind === "queued") void this.ensurePlaneReaskAlarm(now);
     console.log(
       `[plane/admit] ${post.threadKey} → ${answer.kind}${answer.kind === "queued" ? ` position ${answer.position}` : ""} (run ${post.runId})`,
     );
     return answer;
+  }
+
+  /** A resident's level report (`POST /plane/level`, record 0064): `seat` and `memory`
+   *  land as level events — a `below` side walks the queue; the registry's
+   *  drain posts land as the resident-drain window's open (`above`) and lift
+   *  (`below` — a `cleared` or the alarm's `expired`). */
+  planeLevel(
+    post: { resident: string; name: "seat" | "memory" | "drain"; side: "below" | "above"; generation: string },
+    now: number,
+  ): { admitted: number } {
+    const r =
+      post.name === "drain"
+        ? this.planeApply({
+            kind: "window",
+            at: now,
+            window: RESIDENT_DRAIN_WINDOW,
+            phase: post.side === "above" ? "opened" : "lifted",
+          })
+        : this.planeApply({
+            kind: "level",
+            at: now,
+            resident: post.resident,
+            name: post.name,
+            side: post.side,
+            generation: post.generation,
+          });
+    const admitted = r.effects.filter((e) => e.kind === "admit").length;
+    console.log(`[plane/level] ${post.resident} ${post.name} ${post.side} — ${admitted} admission(s)`);
+    return { admitted };
+  }
+
+  /** A refusal-by-name the bot met at attach or exec (`POST /plane/observe`,
+   *  record 0064): an admitted run re-enters the queue at its old position. */
+  planeObserve(post: { runId: string; resident: string; refusal: string }, now: number): { reentered: boolean } {
+    let reentered = false;
+    this.ctx.storage.transactionSync(() => {
+      const decision = decide(this.planeState(), {
+        kind: "observation",
+        at: now,
+        runId: post.runId,
+        resident: post.resident,
+        refusal: post.refusal,
+      });
+      this.applyPlaneWrites(decision.writes);
+      reentered = decision.writes.length > 0;
+    });
+    if (reentered) void this.ensurePlaneReaskAlarm(now);
+    console.log(
+      `[plane/observe] run ${post.runId} on ${post.resident}: ${post.refusal.slice(0, 60)} — ${reentered ? "re-entered" : "no-op"}`,
+    );
+    return { reentered };
+  }
+
+  /** The re-ask cadence (record 0064): while a queued row waits on a resident,
+   *  the object's alarm fires within the cadence — the sweep's own 6 h alarm
+   *  is pulled forward, never pushed back. */
+  private planeReaskMs(): number {
+    const row = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'plane_reask_ms'`).toArray()[0];
+    const stored = row ? Number(row.value) : NaN;
+    return Number.isFinite(stored) && stored > 0 ? stored : minutesToMs(PLANE.reaskMinutes);
+  }
+
+  private planeWaitsOnResident(): boolean {
+    return this.planeState().queue.some(
+      (r) => r.state === "waiting" && r.conditions.some((c) => c.kind === "seat" || c.kind === "memory"),
+    );
+  }
+
+  private async ensurePlaneReaskAlarm(now: number): Promise<void> {
+    if (!this.planeWaitsOnResident()) return;
+    const due = now + this.planeReaskMs();
+    const set = await this.ctx.storage.getAlarm();
+    if (set === null || set > due) await this.ctx.storage.setAlarm(due);
   }
 
   /** A window's open or lift over the RPC seam (`/plane/deploy`; a later
@@ -3045,7 +3166,18 @@ export class RunHistoryDO extends DurableObject<Env> {
       console.log(
         `[runs/alarm] swept ${deleted} rows outside policy, pruned ${receipts} intake receipt(s), dropped ${dropped} session log(s)`,
       );
+      // The plane's re-ask (record 0064): while a queued row waits on a resident
+      // that has said nothing within the cadence, one probe effect per
+      // resident — and the next alarm is pulled forward to the cadence, so a
+      // silent resident is probed, never waited on forever. The sweep rides
+      // the same alarm; a probing cadence re-runs it, which is only indexed
+      // deletes and only while something waits.
+      if (this.planeWaitsOnResident()) {
+        const probes = this.planeApply({ kind: "reask", at: now, cadenceMs: this.planeReaskMs() }).effects;
+        if (probes.length > 0) console.log(`[plane/reask] ${probes.map((e) => e.id).join(", ")}`);
+      }
       await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
+      await this.ensurePlaneReaskAlarm(now);
       root.end("ok", { swept: deleted });
     } catch (err) {
       root.fail(err);
@@ -4425,7 +4557,12 @@ const PLANE_ROUTES = new Set([
   "/plane/withdraw",
   "/plane/deploy",
   "/plane/queued",
+  "/plane/level",
+  "/plane/observe",
 ]);
+
+const PLANE_LEVEL_NAMES = new Set(["seat", "memory", "drain"]);
+const PLANE_LEVEL_SIDES = new Set(["below", "above"]);
 
 const PLANE_STAGES = new Set(["admission", "runner", "resident"]);
 const PLANE_OUTCOME = /^(proceeded|refused:[a-z0-9-]+|fell_cold:[a-z0-9_-]+)$/;
@@ -4484,6 +4621,14 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
       return json({ error: "requester must be a non-empty string" }, 400);
     if (typeof b.request !== "object" || b.request === null || Array.isArray(b.request))
       return json({ error: "request must be a JSON object" }, 400);
+    if (b.stage !== undefined && (typeof b.stage !== "string" || !PLANE_STAGES.has(b.stage)))
+      return json({ error: "stage must be admission, runner or resident" }, 400);
+    if (b.resident !== undefined && (typeof b.resident !== "string" || b.resident.length === 0))
+      return json({ error: "resident must be a non-empty string" }, 400);
+    if (b.restartOf !== undefined && typeof b.restartOf !== "boolean")
+      return json({ error: "restartOf must be a boolean" }, 400);
+    if (b.reaskMs !== undefined && (typeof b.reaskMs !== "number" || !(b.reaskMs > 0)))
+      return json({ error: "reaskMs must be a positive number of milliseconds" }, 400);
     try {
       const answer = await stub.planeAdmit(
         {
@@ -4491,6 +4636,10 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
           requester: b.requester,
           threadKey: b.threadKey,
           request: b.request as Record<string, unknown>,
+          ...(b.stage !== undefined ? { stage: b.stage as PlaneStage } : {}),
+          ...(b.resident !== undefined ? { resident: b.resident } : {}),
+          ...(b.restartOf !== undefined ? { restartOf: b.restartOf } : {}),
+          ...(b.reaskMs !== undefined ? { reaskMs: b.reaskMs } : {}),
         },
         now,
       );
@@ -4500,6 +4649,38 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
       // the cap's own sentence, never queued silently.
       return json({ error: err instanceof Error ? err.message : String(err) }, 409);
     }
+  }
+  if (pathname === "/plane/level") {
+    // A resident's level report (record 0064): forwarded by the bot from the levels a
+    // resident answer carried, or from the registry's drain outbox.
+    if (typeof b.resident !== "string" || b.resident.length === 0)
+      return json({ error: "resident must be a non-empty string" }, 400);
+    if (typeof b.name !== "string" || !PLANE_LEVEL_NAMES.has(b.name))
+      return json({ error: "name must be seat, memory or drain" }, 400);
+    if (typeof b.side !== "string" || !PLANE_LEVEL_SIDES.has(b.side))
+      return json({ error: "side must be below or above" }, 400);
+    if (typeof b.generation !== "string") return json({ error: "generation must be a string" }, 400);
+    return json(
+      await stub.planeLevel(
+        {
+          resident: b.resident,
+          name: b.name as "seat" | "memory" | "drain",
+          side: b.side as "below" | "above",
+          generation: b.generation,
+        },
+        now,
+      ),
+    );
+  }
+  if (pathname === "/plane/observe") {
+    // A refusal-by-name met at attach or exec (record 0064).
+    const parsed = parseRunId(b.runId);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    if (typeof b.resident !== "string" || b.resident.length === 0)
+      return json({ error: "resident must be a non-empty string" }, 400);
+    if (typeof b.refusal !== "string" || b.refusal.length === 0)
+      return json({ error: "refusal must be a non-empty string" }, 400);
+    return json(await stub.planeObserve({ runId: parsed.value, resident: b.resident, refusal: b.refusal }, now));
   }
   if (pathname === "/plane/withdraw") {
     const parsed = parseRunId(b.runId);

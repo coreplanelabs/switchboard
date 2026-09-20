@@ -1,5 +1,5 @@
 import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
@@ -1386,5 +1386,183 @@ describe("the plane's admission stage — /plane/admit, reservations, the seal's
     ).toBe(400);
     expect((await post("/plane/withdraw", { storeKey: key, runId: "" })).status).toBe(400);
     expect((await post("/plane/deploy", { storeKey: key, phase: "later" })).status).toBe(400);
+  });
+});
+
+describe("the plane's resident stage — /plane/level, /plane/observe, the re-ask alarm (orchestration-plane item 9; record 0064)", () => {
+  const requester = "slack:UALICE";
+  const level = (key: string, resident: string, name: string, side: string, generation = "gen-1") =>
+    post("/plane/level", { storeKey: key, resident, name, side, generation });
+  const residentAsk = (key: string, threadKey: string, resident: string, over: Record<string, unknown> = {}) =>
+    post("/plane/admit", {
+      storeKey: key,
+      threadKey,
+      requester,
+      request: { text: "code" },
+      stage: "resident",
+      resident,
+      ...over,
+    });
+
+  it("a level report lands in plane_levels; an above seat queues a resident ask holding no reservation; the below report admits it with its attaching row", async () => {
+    const key = storeKey();
+    const t = "slack:C10:1.0";
+    expect((await level(key, "owner/repo", "seat", "above")).data).toEqual({ admitted: 0 });
+    const asked = await residentAsk(key, t, "owner/repo");
+    expect(asked.data).toMatchObject({
+      kind: "queued",
+      position: 1,
+      waiting: [{ kind: "seat", resident: "owner/repo", met: false }],
+    });
+    const q = asked.data.id as string;
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const sql = (inst as unknown as { sql: SqlStorage }).sql;
+      expect(sql.exec(`SELECT resident, name, side FROM plane_levels`).toArray()).toEqual([
+        { resident: "owner/repo", name: "seat", side: "above" },
+      ]);
+      // A resident-stage ask holds nothing: its thread was reserved at admission.
+      expect(sql.exec(`SELECT * FROM plane_reservations WHERE run_id = ?`, q).toArray()).toEqual([]);
+      expect((await inst.listLive()).find((r) => r.runId === q)).toBeUndefined();
+    });
+    expect((await level(key, "owner/repo", "seat", "below")).data).toEqual({ admitted: 1 });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      expect(inst.openPlaneEffects().map((e) => e.id)).toEqual([`admit:${q}`]);
+      expect((await inst.listLive()).find((r) => r.runId === q)).toMatchObject({
+        ownerGen: "plane",
+        phase: "attaching",
+      });
+    });
+  });
+
+  it("an observation after the admit's ack re-enters the row and the next below report re-offers the SAME admit — the acked row never swallows it", async () => {
+    const key = storeKey();
+    const t = "slack:C11:1.0";
+    await level(key, "owner/repo", "seat", "above");
+    const q = (await residentAsk(key, t, "owner/repo")).data.id as string;
+    expect((await level(key, "owner/repo", "seat", "below")).data).toEqual({ admitted: 1 });
+    // The bot took the offer and acked it done; then the attach met the pool refusal.
+    await post("/plane/ack", { storeKey: key, id: `admit:${q}`, outcome: "done" });
+    const observed = await post("/plane/observe", {
+      storeKey: key,
+      runId: q,
+      resident: "owner/repo",
+      refusal: "user-pool-exhausted: no free worker user",
+    });
+    expect(observed.data).toEqual({ reentered: true });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const sql = (inst as unknown as { sql: SqlStorage }).sql;
+      // The refusal is evidence: the seat level is written back above.
+      expect(sql.exec(`SELECT side FROM plane_levels WHERE resident = 'owner/repo' AND name = 'seat'`).one()).toEqual({
+        side: "above",
+      });
+      expect(sql.exec(`SELECT state FROM plane_queue WHERE run_id = ?`, q).one()).toEqual({ state: "waiting" });
+      expect(inst.openPlaneEffects()).toEqual([]);
+    });
+    // The next below report walks the re-entered row: the admit is offered
+    // again despite the acked row under the same id (the pre-insert delete).
+    expect((await level(key, "owner/repo", "seat", "below")).data).toEqual({ admitted: 1 });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      expect(inst.openPlaneEffects().map((e) => e.id)).toEqual([`admit:${q}`]);
+    });
+    // An observation for a run the queue holds waiting (not admitted) is a no-op.
+    expect(
+      (
+        await post("/plane/observe", {
+          storeKey: key,
+          runId: "unknown-run",
+          resident: "owner/repo",
+          refusal: "draining",
+        })
+      ).data,
+    ).toEqual({ reentered: false });
+  });
+
+  it("a drain post opens the resident-drain window — an ask queues on it, a restartOf passes — and the below post lifts it, admitting the queued run", async () => {
+    const key = storeKey();
+    const t = "slack:C12:1.0";
+    expect((await level(key, "registry", "drain", "above")).data).toEqual({ admitted: 0 });
+    const asked = await post("/plane/admit", { storeKey: key, threadKey: t, requester, request: { text: "hi" } });
+    expect(asked.data).toMatchObject({
+      kind: "queued",
+      position: 1,
+      waiting: [{ kind: "window_open", window: "resident-drain", met: false }],
+    });
+    // A restart of a run the resident already holds passes the window.
+    expect(
+      (
+        await post("/plane/admit", {
+          storeKey: key,
+          threadKey: "slack:C12:2.0",
+          requester,
+          request: {},
+          restartOf: true,
+        })
+      ).data.kind,
+    ).toBe("admitted");
+    expect((await level(key, "registry", "drain", "below")).data).toEqual({ admitted: 1 });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      expect(inst.openPlaneEffects().map((e) => e.id)).toEqual([`admit:${asked.data.id as string}`]);
+    });
+  });
+
+  it("the re-ask alarm probes a silent resident within the cadence, pulls the sweep alarm forward, and re-offers the probe after its ack", async () => {
+    const key = storeKey();
+    await level(key, "owner/repo", "memory", "above");
+    // reaskMs: 1 — the report is already older than the cadence by alarm time.
+    const asked = await residentAsk(key, "slack:C13:1.0", "owner/repo", { reaskMs: 1 });
+    expect(asked.data).toMatchObject({
+      kind: "queued",
+      waiting: [{ kind: "memory", resident: "owner/repo", met: false }],
+    });
+    // The cadence's pull-forward, judged directly on the private ensure (the
+    // pool's alarm helper deletes the scheduled alarm around a trigger, so its
+    // stored time cannot be read back after one): a far sweep alarm is pulled
+    // to the cadence; an earlier alarm is never pushed back.
+    type WithAlarm = { ctx: DurableObjectState; ensurePlaneReaskAlarm(now: number): Promise<void> };
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) => {
+      const priv = inst as unknown as WithAlarm;
+      const now = Date.now();
+      await priv.ctx.storage.setAlarm(now + 6 * 3_600_000);
+      await priv.ensurePlaneReaskAlarm(now);
+      expect(((await priv.ctx.storage.getAlarm()) as number) - now).toBeLessThan(60_000);
+      const sooner = now + 1;
+      await priv.ctx.storage.setAlarm(sooner);
+      await priv.ensurePlaneReaskAlarm(now);
+      expect(await priv.ctx.storage.getAlarm()).toBe(sooner);
+    });
+    // Alarms fire natively in the pool and the 1 ms cadence re-arms on every
+    // firing, so the trigger is not forced — the offered probe is polled for.
+    const openIds = () =>
+      runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (inst: RunHistoryDO) =>
+        inst.openPlaneEffects().map((e) => e.id),
+      );
+    await vi.waitFor(async () => expect(await openIds()).toEqual(["probe:owner/repo"]), { timeout: 5_000 });
+    // The probe's answer was acked; a still-silent resident is probed again —
+    // the acked row under probe:<resident> never swallows the re-offer.
+    await post("/plane/ack", { storeKey: key, id: "probe:owner/repo", outcome: "done" });
+    await vi.waitFor(async () => expect(await openIds()).toEqual(["probe:owner/repo"]), { timeout: 5_000 });
+  });
+
+  it("validates: a level with a missing resident, a bad name or side, or a non-string generation is 400; an observation with a bad run id, missing resident or empty refusal is 400", async () => {
+    const key = storeKey();
+    expect((await post("/plane/level", { storeKey: key, name: "seat", side: "below", generation: "g" })).status).toBe(
+      400,
+    );
+    expect(
+      (await post("/plane/level", { storeKey: key, resident: "r", name: "cpu", side: "below", generation: "g" }))
+        .status,
+    ).toBe(400);
+    expect(
+      (await post("/plane/level", { storeKey: key, resident: "r", name: "seat", side: "over", generation: "g" }))
+        .status,
+    ).toBe(400);
+    expect((await post("/plane/level", { storeKey: key, resident: "r", name: "seat", side: "below" })).status).toBe(
+      400,
+    );
+    expect(
+      (await post("/plane/observe", { storeKey: key, runId: "no spaces!", resident: "r", refusal: "draining" })).status,
+    ).toBe(400);
+    expect((await post("/plane/observe", { storeKey: key, runId: "r1", refusal: "draining" })).status).toBe(400);
+    expect((await post("/plane/observe", { storeKey: key, runId: "r1", resident: "r", refusal: "" })).status).toBe(400);
   });
 });

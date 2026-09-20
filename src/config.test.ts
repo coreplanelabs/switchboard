@@ -17,6 +17,7 @@ import {
   OverridesConflictError,
   overridesBackingFor,
   planeAdmissionOf,
+  planeColdFallbackOf,
   planeReaskMinutesOf,
   referencesOn,
   routingOn,
@@ -966,6 +967,15 @@ describe("plane block (routing-and-config item 31, record 0064)", () => {
       );
     expect(() => store(YAML_FIXTURE + "plane: true\n")).toThrow(/plane must be a mapping/);
     expect(() => store(YAML_FIXTURE + "plane:\n  mode: shadow\n")).toThrow(/plane\.mode is not a known key/);
+  });
+
+  it("coldFallback parses as a boolean, defaults false, and a non-boolean is refused by name (record 0064)", () => {
+    const s = store(YAML_FIXTURE + "plane:\n  coldFallback: true\n");
+    expect(planeColdFallbackOf(s.config)).toBe(true);
+    expect(planeColdFallbackOf(store().config)).toBe(false);
+    expect(() => store(YAML_FIXTURE + 'plane:\n  coldFallback: "yes"\n')).toThrow(
+      /plane\.coldFallback must be true or false/,
+    );
   });
 });
 

@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  conditionOfRefusal,
   decide,
   emptyPlaneState,
   planeAskAnswerOf,
   planeAskWordOf,
+  residentSideOf,
+  RESIDENT_DRAIN_WINDOW,
   type PlaneAskEvent,
+  type PlaneLevelRow,
   type PlaneState,
 } from "./decide.js";
 
@@ -104,7 +108,7 @@ describe("decide — the plane's pure decider (orchestration-plane, record 0064)
     s = decide(s, ask({ runId: "run-b", at: 2_000 })).state;
     const out = decide(s, { kind: "sealed", at: 3_000, threadKey: "slack:C1:1.1" });
     // Only the oldest is admitted; its admission reserves the thread again.
-    expect(out.effects.map((e) => e.runId)).toEqual(["run-a"]);
+    expect(out.effects.map((e) => e.id)).toEqual(["admit:run-a"]);
     expect(out.state.reservations.map((r) => r.key)).toContain("slack:C1:1.1");
     expect(out.writes).toContainEqual({
       table: "plane_reservations",
@@ -119,9 +123,9 @@ describe("decide — the plane's pure decider (orchestration-plane, record 0064)
     s = decide(s, ask()).state;
     s = decide(s, ask({ runId: "run-b", threadKey: "slack:C2:2.2", at: 2_000 })).state;
     const one = decide(s, { kind: "sealed", at: 3_000, threadKey: "slack:C2:2.2" });
-    expect(one.effects.map((e) => e.runId)).toEqual(["run-b"]);
+    expect(one.effects.map((e) => e.id)).toEqual(["admit:run-b"]);
     const two = decide(one.state, { kind: "sealed", at: 4_000, threadKey: "slack:C1:1.1" });
-    expect(two.effects.map((e) => e.runId)).toEqual(["run-a"]);
+    expect(two.effects.map((e) => e.id)).toEqual(["admit:run-a"]);
   });
 
   it("an event with no transition returns the state unchanged: a seal nothing waits on", () => {
@@ -169,7 +173,7 @@ describe("decide — the plane's pure decider (orchestration-plane, record 0064)
     });
     const lifted = decide(queued.state, { kind: "window", at: 2_000, window: "quiet", phase: "lifted" });
     expect(lifted.writes).toContainEqual({ table: "plane_windows", op: "del", window: "quiet" });
-    expect(lifted.effects.map((e) => e.runId)).toEqual(["run-a"]);
+    expect(lifted.effects.map((e) => e.id)).toEqual(["admit:run-a"]);
   });
 
   it("an ask that meets a pending deploy queues on deploy_settled and deploy.landed flips it", () => {
@@ -183,7 +187,7 @@ describe("decide — the plane's pure decider (orchestration-plane, record 0064)
     });
     // The deploy runner's `deploy.landed` post lifts the deploy window and the queue walks.
     const landed = decide(queued.state, { kind: "window", at: 2_000, window: "deploy", phase: "lifted" });
-    expect(landed.effects.map((e) => e.runId)).toEqual(["run-a"]);
+    expect(landed.effects.map((e) => e.id)).toEqual(["admit:run-a"]);
     expect(landed.state.queue.find((r) => r.runId === "run-a")!.state).toBe("admitted");
   });
 
@@ -193,7 +197,7 @@ describe("decide — the plane's pure decider (orchestration-plane, record 0064)
     expect(planeAskAnswerOf(second, "run-b")).toMatchObject({ kind: "queued" });
     const sealed = decide(second.state, { kind: "sealed", at: 3_000, threadKey: "slack:C1:1.1" });
     expect(sealed.writes).toContainEqual({ table: "plane_reservations", op: "del", key: "slack:C1:1.1" });
-    expect(sealed.effects.map((e) => e.runId)).toEqual(["run-b"]);
+    expect(sealed.effects.map((e) => e.id)).toEqual(["admit:run-b"]);
   });
 
   it("position counts waiting rows sharing the unmet condition, per condition", () => {
@@ -204,5 +208,232 @@ describe("decide — the plane's pure decider (orchestration-plane, record 0064)
     s = decide(s, ask({ runId: "run-b", threadKey: "slack:C2:2.2", at: 2_000 })).state;
     const third = decide(s, ask({ runId: "run-c", at: 3_000 }));
     expect(planeAskAnswerOf(third, "run-c")).toMatchObject({ kind: "queued", position: 2 });
+  });
+});
+
+// Feature: docs/reference/specs/orchestration-plane.md — the resident stage's
+// conditions (record 0064, "The queue"): seat and memory levels queue
+// a write ask at stage three, a `below` report admits it, a refusal-by-name
+// re-enters an admitted run at its old position, and a silent resident is
+// probed at the re-ask cadence, never waited on forever.
+describe("decide — the resident stage's conditions (record 0064)", () => {
+  const level = (over: Partial<PlaneLevelRow> = {}): PlaneLevelRow => ({
+    resident: "acme/app",
+    name: "memory",
+    side: "above",
+    reportedAt: 500,
+    generation: "gen-1",
+    ...over,
+  });
+  const residentAsk = (over: Partial<PlaneAskEvent> = {}): PlaneAskEvent =>
+    ask({ stage: "resident", resident: "acme/app", ...over });
+
+  it("a write ask on a resident above the soft memory line queues at stage three on the memory condition", () => {
+    const out = decide(stateWith({ levels: [level()] }), residentAsk());
+    expect(planeAskAnswerOf(out, "run-a")).toEqual({
+      kind: "queued",
+      id: "run-a",
+      position: 1,
+      waiting: [{ kind: "memory", resident: "acme/app", met: false }],
+    });
+    // Queued at stage three holds nothing: no reservation, no run row — only the queue row.
+    expect(out.writes).toEqual([{ table: "plane_queue", op: "put", row: out.state.queue[0] }]);
+  });
+
+  it("an exhausted seat pool queues the ask on the seat condition", () => {
+    const out = decide(stateWith({ levels: [level({ name: "seat" })] }), residentAsk());
+    expect(planeAskAnswerOf(out, "run-a")).toMatchObject({
+      kind: "queued",
+      waiting: [{ kind: "seat", resident: "acme/app", met: false }],
+    });
+  });
+
+  it("a level report below the line admits the queued ask, with an admit effect and no earlier", () => {
+    const queued = decide(stateWith({ levels: [level()] }), residentAsk());
+    const still = decide(queued.state, {
+      kind: "level",
+      at: 2_000,
+      resident: "acme/app",
+      name: "memory",
+      side: "above",
+      generation: "gen-1",
+    });
+    expect(still.effects).toEqual([]);
+    const below = decide(still.state, {
+      kind: "level",
+      at: 3_000,
+      resident: "acme/app",
+      name: "memory",
+      side: "below",
+      generation: "gen-1",
+    });
+    expect(below.effects).toEqual([
+      {
+        id: "admit:run-a",
+        kind: "admit",
+        runId: "run-a",
+        threadKey: "slack:C1:1.1",
+        request: { text: "do the thing" },
+      },
+    ]);
+    expect(below.writes).toContainEqual({
+      table: "plane_levels",
+      op: "put",
+      row: { resident: "acme/app", name: "memory", side: "below", reportedAt: 3_000, generation: "gen-1" },
+    });
+  });
+
+  it("another resident's below report admits nothing here", () => {
+    const queued = decide(stateWith({ levels: [level()] }), residentAsk());
+    const other = decide(queued.state, {
+      kind: "level",
+      at: 2_000,
+      resident: "acme/other",
+      name: "memory",
+      side: "below",
+      generation: "gen-9",
+    });
+    expect(other.effects).toEqual([]);
+  });
+
+  it("a resident ask under levels below both lines proceeds and writes nothing — its thread is already this run's", () => {
+    const out = decide(
+      stateWith({ levels: [level({ side: "below" }), level({ name: "seat", side: "below" })] }),
+      residentAsk(),
+    );
+    expect(planeAskAnswerOf(out, "run-a")).toEqual({ kind: "admitted", reservation: "run-a" });
+    expect(out.writes).toEqual([]);
+  });
+
+  it("a restartOf ask passes the windows and the memory line (record 0064)", () => {
+    const out = decide(
+      stateWith({ levels: [level()], openWindows: [RESIDENT_DRAIN_WINDOW, "deploy"] }),
+      residentAsk({ restartOf: true }),
+    );
+    expect(planeAskAnswerOf(out, "run-a")).toEqual({ kind: "admitted", reservation: "run-a" });
+  });
+
+  it("an unknown resident — never reported, or a report from an older generation — queues nothing: the bot falls cold for it (record 0064)", () => {
+    expect(residentSideOf([], "acme/app", "memory")).toBe("unknown");
+    expect(residentSideOf([level()], "acme/app", "memory", "gen-2")).toBe("unknown");
+    expect(residentSideOf([level()], "acme/app", "memory", "gen-1")).toBe("above");
+    const out = decide(emptyPlaneState(), residentAsk());
+    expect(planeAskAnswerOf(out, "run-a")).toEqual({ kind: "admitted", reservation: "run-a" });
+    expect(out.writes).toEqual([]);
+  });
+
+  it("an admitted run refused a seat re-enters the queue at its old position, and the refusal writes the level above (record 0064)", () => {
+    const queued = decide(stateWith({ levels: [level()] }), residentAsk());
+    const admitted = decide(queued.state, {
+      kind: "level",
+      at: 2_000,
+      resident: "acme/app",
+      name: "memory",
+      side: "below",
+      generation: "gen-1",
+    });
+    const observed = decide(admitted.state, {
+      kind: "observation",
+      at: 3_000,
+      runId: "run-a",
+      resident: "acme/app",
+      refusal: "user-pool-exhausted: all 16 thread users are allocated",
+    });
+    const row = observed.state.queue.find((r) => r.runId === "run-a");
+    expect(row).toMatchObject({
+      state: "waiting",
+      position: 1,
+      conditions: [{ kind: "seat", resident: "acme/app", met: false }],
+    });
+    expect(observed.writes).toContainEqual({
+      table: "plane_levels",
+      op: "put",
+      row: { resident: "acme/app", name: "seat", side: "above", reportedAt: 3_000, generation: "gen-1" },
+    });
+    // The next below report re-admits it — same id, same effect.
+    const readmitted = decide(observed.state, {
+      kind: "level",
+      at: 4_000,
+      resident: "acme/app",
+      name: "seat",
+      side: "below",
+      generation: "gen-1",
+    });
+    expect(readmitted.effects.map((e) => e.id)).toEqual(["admit:run-a"]);
+  });
+
+  it("an observation for a run the queue never admitted, or a refusal with no condition, is a no-op", () => {
+    const out = decide(emptyPlaneState(), {
+      kind: "observation",
+      at: 1_000,
+      runId: "run-x",
+      resident: "acme/app",
+      refusal: "user-pool-exhausted: full",
+    });
+    expect(out.writes).toEqual([]);
+    expect(conditionOfRefusal("something-else entirely", "acme/app")).toBeUndefined();
+  });
+
+  it("conditionOfRefusal maps every named refusal: pool → seat, gate → memory, drain → the drain window, runtime → seat", () => {
+    expect(conditionOfRefusal("user-pool-exhausted: full", "a/b")).toEqual({
+      kind: "seat",
+      resident: "a/b",
+      met: false,
+    });
+    expect(conditionOfRefusal("memory-pressure: 92% of cap", "a/b")).toEqual({
+      kind: "memory",
+      resident: "a/b",
+      met: false,
+    });
+    expect(conditionOfRefusal("draining: the resident fleet is closed", "a/b")).toEqual({
+      kind: "window_open",
+      window: RESIDENT_DRAIN_WINDOW,
+      met: false,
+    });
+    expect(conditionOfRefusal("runtime-replaced: the container rolled", "a/b")).toEqual({
+      kind: "seat",
+      resident: "a/b",
+      met: false,
+    });
+  });
+
+  it("the registry's drain opens the resident-drain window and its cleared or expired post lifts it, admitting the waiters", () => {
+    const opened = decide(emptyPlaneState(), {
+      kind: "window",
+      at: 1_000,
+      window: RESIDENT_DRAIN_WINDOW,
+      phase: "opened",
+    });
+    const queued = decide(opened.state, ask({ at: 2_000 }));
+    expect(planeAskAnswerOf(queued, "run-a")).toMatchObject({
+      kind: "queued",
+      waiting: [{ kind: "window_open", window: RESIDENT_DRAIN_WINDOW, met: false }],
+    });
+    const lifted = decide(queued.state, { kind: "window", at: 3_000, window: RESIDENT_DRAIN_WINDOW, phase: "lifted" });
+    expect(lifted.effects.map((e) => e.id)).toEqual(["admit:run-a"]);
+  });
+
+  it("a reask emits one probe per silent resident a waiting row waits on — and none for one that reported within the cadence (record 0064)", () => {
+    const queued = decide(stateWith({ levels: [level({ reportedAt: 500 })] }), residentAsk());
+    const probed = decide(queued.state, { kind: "reask", at: 121_000, cadenceMs: 120_000 });
+    expect(probed.effects).toEqual([{ id: "probe:acme/app", kind: "probe", resident: "acme/app" }]);
+    expect(probed.writes).toEqual([{ table: "plane_effects", op: "offer", effect: probed.effects[0], at: 121_000 }]);
+    // A report within the cadence silences the probe.
+    const fresh = decide(queued.state, {
+      kind: "level",
+      at: 100_000,
+      resident: "acme/app",
+      name: "memory",
+      side: "above",
+      generation: "gen-1",
+    });
+    const quiet = decide(fresh.state, { kind: "reask", at: 121_000, cadenceMs: 120_000 });
+    expect(quiet.effects).toEqual([]);
+  });
+
+  it("a reask with nothing waiting on a resident emits nothing", () => {
+    const queued = decide(stateWith({ liveThreads: ["slack:C1:1.1"] }), ask());
+    const out = decide(queued.state, { kind: "reask", at: 500_000, cadenceMs: 120_000 });
+    expect(out.effects).toEqual([]);
   });
 });

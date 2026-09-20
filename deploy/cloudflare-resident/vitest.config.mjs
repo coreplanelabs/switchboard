@@ -65,6 +65,7 @@ export default defineConfig({
       "drain.test.ts",
       "memoryGuard.test.ts",
       "memoryGate.test.ts",
+      "levels.test.ts",
     ],
   },
 });

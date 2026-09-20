@@ -204,8 +204,11 @@ export const HOSTED_DEADLINE_MARGIN_MINUTES = 60;
  *  and the pause before a busy spawn is asked again. */
 export const SHIP_WAIT = { marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes: 5, busyRetryMinutes: 2 } as const;
 
-/** The plane's table (docs/decisions/0064): how long a finished run stays on it. */
-export const PLANE = { recentMinutes: 60, reservationMinutes: 2 } as const;
+/** The plane's table (docs/decisions/0064): how long a finished run stays on
+ *  it, a reservation's window, and the default re-ask cadence — how often a
+ *  silent resident something waits on is probed (`plane.reaskMinutes`
+ *  overrides it per deployment). */
+export const PLANE = { recentMinutes: 60, reservationMinutes: 2, reaskMinutes: 2 } as const;
 
 /** The named amounts a lease holds back, in minutes. Each stands for a step
  *  every run or round pays: `provision` is attach and restore before the

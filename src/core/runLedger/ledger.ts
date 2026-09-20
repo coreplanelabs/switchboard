@@ -15,6 +15,33 @@ export interface PlaneAdmitPost {
   requester: string;
   threadKey: string;
   request: Record<string, unknown>;
+  /** The stage asked at (default `admission`); the resident stage carries the
+   *  resident and, for a restart of a run the resident already holds,
+   *  `restartOf` (record 0064). */
+  stage?: "admission" | "runner" | "resident";
+  resident?: string;
+  restartOf?: boolean;
+  /** The deployment's re-ask cadence (`plane.reaskMinutes`) in ms, stored by
+   *  the object for its probe alarm (record 0064). */
+  reaskMs?: number;
+}
+
+/** A resident's level report (record 0064): the side of the line a
+ *  resident answer's `levels` field carried, forwarded to `POST /plane/level`.
+ *  `drain` is the registry's fleet drain (`above` set, `below` cleared or expired). */
+export interface PlaneLevelPost {
+  resident: string;
+  name: "seat" | "memory" | "drain";
+  side: "below" | "above";
+  generation: string;
+}
+
+/** A refusal-by-name met at attach or exec (record 0064): the plane
+ *  re-enters an admitted run's queue row at its old position. */
+export interface PlaneObservePost {
+  runId: string;
+  resident: string;
+  refusal: string;
 }
 import type { AssembledTranscript } from "./transcript.js";
 import type { Notepad, SessionHit } from "./types.js";
@@ -156,6 +183,12 @@ export interface RunLedger {
    *  reservation on the thread, or `queued` with the stored request's minted
    *  id, its position and the conditions it waits on. */
   planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer>;
+  /** A resident's level report (record 0064), forwarded when a resident answer's
+   *  levels changed; fire-and-forget on every path but the resident-stage ask,
+   *  which awaits it so the decider judges the level just seen. */
+  planeLevel(post: PlaneLevelPost): Promise<void>;
+  /** A refusal-by-name met at attach or exec (record 0064). */
+  planeObserve(post: PlaneObservePost): Promise<{ reentered: boolean }>;
   /** `runs stop` on a queued id: the waiting row goes withdrawn; false for an
    *  id the queue does not hold waiting. */
   planeWithdraw(runId: string): Promise<{ withdrawn: boolean }>;

@@ -401,7 +401,7 @@ export async function runBot(): Promise<void> {
   // the two paths cannot disagree on what an admit does.
   const planeEffectExecutor = {
     draining: () => draining,
-    admit: async (effect: PlaneEffect): Promise<PlaneAckOutcome> => {
+    admit: async (effect: Extract<PlaneEffect, { kind: "admit" }>): Promise<PlaneAckOutcome> => {
       // A duplicate admit after a roll: the run is already live here.
       if (defaultRunRegistry.getById(effect.runId)) return "skipped";
       if (!planeAdmitPass) return "deferred";

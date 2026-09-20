@@ -22,7 +22,40 @@ export type PlaneStage = "admission" | "runner" | "resident";
 export type PlaneCondition =
   | { kind: "thread_free"; threadKey: string; met: boolean }
   | { kind: "window_open"; window: string; met: boolean }
-  | { kind: "deploy_settled"; met: boolean };
+  | { kind: "deploy_settled"; met: boolean }
+  /** The resident stage's pair (record 0064, "The queue"; the resident unit):
+   *  `seat` — the thread/op user pool has room; `memory` — the gate's soft
+   *  side. Each is flipped by the resident's own level report, forwarded by
+   *  the bot to `POST /plane/level`, never polled. */
+  | { kind: "seat"; resident: string; met: boolean }
+  | { kind: "memory"; resident: string; met: boolean };
+
+/** One resident level as the plane stores it (`plane_levels`): the side of
+ *  the line the resident last reported, stamped with the report time and the
+ *  resident's generation. A resident with no row — or whose generation moved
+ *  without a report — is `unknown` (`residentSideOf`), never assumed below. */
+export interface PlaneLevelRow {
+  resident: string;
+  name: "seat" | "memory";
+  side: "below" | "above";
+  reportedAt: number;
+  generation: string;
+}
+
+/** The side a resident's level reads for an observer that knows the current
+ *  generation: `unknown` for a resident that never reported or whose report
+ *  predates the generation given (record 0064; the resident unit's record 0064). */
+export function residentSideOf(
+  levels: PlaneLevelRow[],
+  resident: string,
+  name: "seat" | "memory",
+  generation?: string,
+): "below" | "above" | "unknown" {
+  const row = levels.find((l) => l.resident === resident && l.name === name);
+  if (!row) return "unknown";
+  if (generation !== undefined && row.generation !== generation) return "unknown";
+  return row.side;
+}
 
 /** A reservation: an admitted ask's hold on its thread between the answer and
  *  the ledger claim that promotes it (the `plane_reservations` row). A second
@@ -60,15 +93,23 @@ export interface PlaneState {
   reservations: PlaneReservation[];
   /** Open window kinds; `deploy` is the pending-deploy window (`deploy_settled` is its absence). */
   openWindows: string[];
+  /** The residents' last level reports (`plane_levels`), one row per resident and name. */
+  levels: PlaneLevelRow[];
 }
 
 export function emptyPlaneState(): PlaneState {
-  return { queue: [], liveThreads: [], reservations: [], openWindows: [] };
+  return { queue: [], liveThreads: [], reservations: [], openWindows: [], levels: [] };
 }
 
 /** The window kind behind `deploy_settled`: opened while a deploy is pending,
  *  lifted by the deploy runner's `deploy.landed` post (record 0064). */
 export const DEPLOY_WINDOW = "deploy";
+
+/** The window behind the resident fleet's drain (resident-repos item 69):
+ *  opened by the registry's `set` post, lifted by its `cleared` or — from the
+ *  registry's one alarm at `until` — `expired` post. A `restartOf` claim
+ *  passes it like every window: the drain never refuses a run it waits for. */
+export const RESIDENT_DRAIN_WINDOW = "resident-drain";
 
 /** The closed event union. `ask`: may this run start now; `sealed`: a thread's
  *  live run ended (the ledger's seal, the event that flips `thread_free`);
@@ -81,29 +122,62 @@ export interface PlaneAskEvent {
   threadKey: string;
   stage: PlaneStage;
   request: Record<string, unknown>;
+  /** The resident the ask is for (stage `resident` only): its seat and memory
+   *  levels become the ask's conditions. */
+  resident?: string;
+  /** A restart of a run the resident already holds (record 0064): it
+   *  passes the windows and the memory line — its worktree lives there or
+   *  nowhere, and the drain never refuses a run it waits for. */
+  restartOf?: boolean;
 }
 export type PlaneEvent =
   | PlaneAskEvent
   | { kind: "sealed"; at: number; threadKey: string }
   | { kind: "withdraw"; at: number; runId: string }
   /** A window's open or lift (`window_open`); kind `deploy` is the pending deploy (`deploy_settled`). */
-  | { kind: "window"; at: number; window: string; phase: "opened" | "lifted" };
+  | { kind: "window"; at: number; window: string; phase: "opened" | "lifted" }
+  /** A resident's level report (record 0064): forwarded by the bot from the levels a
+   *  resident answer carried, or posted from the registry's outbox. A `below`
+   *  side walks the queue — the event that admits a waiting resident ask. */
+  | {
+      kind: "level";
+      at: number;
+      resident: string;
+      name: "seat" | "memory";
+      side: "below" | "above";
+      generation: string;
+    }
+  /** A refusal-by-name the bot met at attach or exec (record 0064): an admitted run
+   *  that meets one re-enters the queue at its old position, waiting on the
+   *  condition the refusal names, instead of falling cold. */
+  | { kind: "observation"; at: number; runId: string; resident: string; refusal: string }
+  /** The re-ask cadence (record 0064; `plane.reaskMinutes`): while a queued run
+   *  waits on a resident that has said nothing within the cadence, one
+   *  `probe(resident)` effect is emitted — a silent resident is probed, never
+   *  waited on forever. */
+  | { kind: "reask"; at: number; cadenceMs: number };
 
 /** The closed effect union: what the bot is asked to do, offered on its
  *  heartbeat and reclaim answers and acknowledged by id (`/plane/ack`). The
  *  id is derived from the run, so a duplicate offer after a roll is the same
  *  effect, acknowledged once. The transport unit adds execution; this one only shapes and stores. */
-export type PlaneEffect = {
-  id: string;
-  kind: "admit";
-  runId: string;
-  threadKey: string;
-  request: Record<string, unknown>;
-};
+export type PlaneEffect =
+  | {
+      id: string;
+      kind: "admit";
+      runId: string;
+      threadKey: string;
+      request: Record<string, unknown>;
+    }
+  /** Ask the bot to probe the resident's `/status` and forward its levels
+   *  (record 0064): the id is `probe:<resident>`, so the object holds at most one
+   *  open probe per resident and a duplicate offer is the same effect. */
+  | { id: string; kind: "probe"; resident: string };
 
 /** What the object must persist beside the returned state — the decider names
  *  the rows, the object owns the SQL, both inside one `transactionSync`. */
 export type PlaneWrite =
+  | { table: "plane_levels"; op: "put"; row: PlaneLevelRow }
   | { table: "plane_queue"; op: "put"; row: PlaneQueueRow }
   | { table: "plane_queue"; op: "state"; runId: string; state: PlaneQueueRow["state"] }
   | { table: "plane_effects"; op: "offer"; effect: PlaneEffect; at: number }
@@ -164,6 +238,12 @@ export function decide(state: PlaneState, event: PlaneEvent): PlaneDecision {
       return onWithdraw(state, event);
     case "window":
       return onWindow(state, event);
+    case "level":
+      return onLevel(state, event);
+    case "observation":
+      return onObservation(state, event);
+    case "reask":
+      return onReask(state, event);
   }
 }
 
@@ -200,22 +280,54 @@ export function waitingWords(waiting: PlaneCondition[]): string {
         ? "the thread's live run"
         : c.kind === "deploy_settled"
           ? "the pending deploy"
-          : `the ${c.window} window`,
+          : c.kind === "seat"
+            ? `a seat on ${c.resident}`
+            : c.kind === "memory"
+              ? `memory on ${c.resident}`
+              : `the ${c.window} window`,
     )
     .join(", then ");
 }
 
-/** The unmet conditions an ask meets right now: a live or reserved thread,
- *  every open window, a pending deploy. Empty means admitted. */
-function unmetConditionsOf(state: PlaneState, threadKey: string): PlaneCondition[] {
+/** The unmet conditions an ask meets right now. The admission stage asks the
+ *  thread and the windows; the resident stage asks the windows and the
+ *  resident's own levels — its thread is already this run's (reserved at
+ *  admission), so it is never a condition there. A `restartOf` ask passes the
+ *  windows and the memory line (record 0064); an `unknown` level is not a wait — the
+ *  bot falls cold for it (record 0064) — so only a reported `above` side queues. */
+function unmetConditionsOf(state: PlaneState, event: PlaneAskEvent): PlaneCondition[] {
   const out: PlaneCondition[] = [];
-  if (state.liveThreads.includes(threadKey) || state.reservations.some((r) => r.key === threadKey))
-    out.push({ kind: "thread_free", threadKey, met: false });
-  for (const w of state.openWindows)
-    out.push(
-      w === DEPLOY_WINDOW ? { kind: "deploy_settled", met: false } : { kind: "window_open", window: w, met: false },
-    );
+  if (
+    event.stage === "admission" &&
+    (state.liveThreads.includes(event.threadKey) || state.reservations.some((r) => r.key === event.threadKey))
+  )
+    out.push({ kind: "thread_free", threadKey: event.threadKey, met: false });
+  if (!event.restartOf)
+    for (const w of state.openWindows)
+      out.push(
+        w === DEPLOY_WINDOW ? { kind: "deploy_settled", met: false } : { kind: "window_open", window: w, met: false },
+      );
+  if (event.stage === "resident" && event.resident !== undefined) {
+    if (residentSideOf(state.levels, event.resident, "seat") === "above")
+      out.push({ kind: "seat", resident: event.resident, met: false });
+    if (!event.restartOf && residentSideOf(state.levels, event.resident, "memory") === "above")
+      out.push({ kind: "memory", resident: event.resident, met: false });
+  }
   return out;
+}
+
+/** The condition a refusal-by-name waits on (record 0064): the pool's is the seat,
+ *  the gate's the memory line, the drain's its window; a replaced or
+ *  unreachable runtime waits on the resident's next seat report (the probe
+ *  reaches it). An unrecognized refusal maps to nothing — the observation is
+ *  a no-op and the bot's own fallback stands. */
+export function conditionOfRefusal(refusal: string, resident: string): PlaneCondition | undefined {
+  if (refusal.startsWith("user-pool-exhausted")) return { kind: "seat", resident, met: false };
+  if (refusal.startsWith("memory-pressure")) return { kind: "memory", resident, met: false };
+  if (refusal.startsWith("draining")) return { kind: "window_open", window: RESIDENT_DRAIN_WINDOW, met: false };
+  if (refusal.startsWith("runtime-unreachable") || refusal.startsWith("runtime-replaced"))
+    return { kind: "seat", resident, met: false };
+  return undefined;
 }
 
 /** Whether two conditions are the same wait: same kind, same subject. */
@@ -223,12 +335,18 @@ function sameCondition(a: PlaneCondition, b: PlaneCondition): boolean {
   if (a.kind !== b.kind) return false;
   if (a.kind === "thread_free" && b.kind === "thread_free") return a.threadKey === b.threadKey;
   if (a.kind === "window_open" && b.kind === "window_open") return a.window === b.window;
+  if ((a.kind === "seat" && b.kind === "seat") || (a.kind === "memory" && b.kind === "memory"))
+    return a.resident === b.resident;
   return true; // deploy_settled has one subject
 }
 
 function onAsk(state: PlaneState, event: PlaneAskEvent): PlaneDecision {
-  const conditions = unmetConditionsOf(state, event.threadKey);
+  const conditions = unmetConditionsOf(state, event);
   if (conditions.length === 0) {
+    // The resident stage's ask holds nothing new on admission: its thread was
+    // reserved at the admission stage under this same run, so a reservation
+    // here would only shadow it.
+    if (event.stage === "resident") return { state, effects: [], writes: [] };
     // Admitted: the thread is reserved in the same transaction (record 0064,
     // "The queue") so a second ask a moment later queues; the ledger claim
     // promotes the reservation and the seal deletes it.
@@ -292,6 +410,97 @@ function onWindow(
   return { ...walked, writes: [{ table: "plane_windows", op: "del", window: event.window }, ...walked.writes] };
 }
 
+/** A level report (record 0064): the row is upserted, and a `below` side walks the
+ *  queue — the admitting event for every resident condition. An unchanged
+ *  side is still written (the report time and generation move), but only a
+ *  crossing to `below` can admit, and the walk judges that. */
+function onLevel(
+  state: PlaneState,
+  event: {
+    kind: "level";
+    at: number;
+    resident: string;
+    name: "seat" | "memory";
+    side: "below" | "above";
+    generation: string;
+  },
+): PlaneDecision {
+  const row: PlaneLevelRow = {
+    resident: event.resident,
+    name: event.name,
+    side: event.side,
+    reportedAt: event.at,
+    generation: event.generation,
+  };
+  const levels = [...state.levels.filter((l) => !(l.resident === event.resident && l.name === event.name)), row];
+  const next = { ...state, levels };
+  const write: PlaneWrite = { table: "plane_levels", op: "put", row };
+  if (event.side === "above") return { state: next, effects: [], writes: [write] };
+  const walked = walk(next, event.at);
+  return { ...walked, writes: [write, ...walked.writes] };
+}
+
+/** A refusal-by-name met by an admitted run (record 0064): its queue row re-enters
+ *  `waiting` at its old position on the refusal's condition, and a seat or
+ *  memory refusal is itself evidence of the side — the level row is written
+ *  `above` so the walk does not re-admit the run into the same refusal. A run
+ *  the queue never held, or a refusal with no condition, is a no-op. */
+function onObservation(
+  state: PlaneState,
+  event: { kind: "observation"; at: number; runId: string; resident: string; refusal: string },
+): PlaneDecision {
+  const row = state.queue.find((r) => r.runId === event.runId && r.state === "admitted");
+  const condition = conditionOfRefusal(event.refusal, event.resident);
+  if (!row || !condition) return { state, effects: [], writes: [] };
+  const reentered: PlaneQueueRow = { ...row, state: "waiting", conditions: [condition] };
+  const writes: PlaneWrite[] = [{ table: "plane_queue", op: "put", row: reentered }];
+  let levels = state.levels;
+  if (condition.kind === "seat" || condition.kind === "memory") {
+    // The refusal names no generation, so the row keeps the resident's last
+    // known one (any name) — a refusal is evidence about the resident as it
+    // reports now, not about an older build.
+    const prior =
+      state.levels.find((l) => l.resident === event.resident && l.name === condition.kind) ??
+      state.levels.find((l) => l.resident === event.resident);
+    const level: PlaneLevelRow = {
+      resident: event.resident,
+      name: condition.kind,
+      side: "above",
+      reportedAt: event.at,
+      generation: prior?.generation ?? "",
+    };
+    levels = [...state.levels.filter((l) => !(l.resident === event.resident && l.name === condition.kind)), level];
+    writes.push({ table: "plane_levels", op: "put", row: level });
+  }
+  return {
+    state: { ...state, queue: state.queue.map((r) => (r === row ? reentered : r)), levels },
+    effects: [],
+    writes,
+  };
+}
+
+/** The re-ask cadence (record 0064): for every resident a waiting row waits on
+ *  whose last report is older than the cadence (or that never reported), one
+ *  `probe` effect — id `probe:<resident>`, so the object holds at most one
+ *  open probe per resident. Nothing else moves: the probe's answer arrives as
+ *  a level event and that walks the queue. */
+function onReask(state: PlaneState, event: { kind: "reask"; at: number; cadenceMs: number }): PlaneDecision {
+  const waitedOn = new Set<string>();
+  for (const r of state.queue)
+    if (r.state === "waiting")
+      for (const c of r.conditions) if (c.kind === "seat" || c.kind === "memory") waitedOn.add(c.resident);
+  const effects: PlaneEffect[] = [];
+  const writes: PlaneWrite[] = [];
+  for (const resident of [...waitedOn].sort()) {
+    const latest = Math.max(0, ...state.levels.filter((l) => l.resident === resident).map((l) => l.reportedAt));
+    if (latest > event.at - event.cadenceMs) continue;
+    const effect: PlaneEffect = { id: `probe:${resident}`, kind: "probe", resident };
+    effects.push(effect);
+    writes.push({ table: "plane_effects", op: "offer", effect, at: event.at });
+  }
+  return { state, effects, writes };
+}
+
 function onWithdraw(state: PlaneState, event: { kind: "withdraw"; at: number; runId: string }): PlaneDecision {
   const row = state.queue.find((r) => r.runId === event.runId && r.state === "waiting");
   if (!row) return { state, effects: [], writes: [] };
@@ -350,6 +559,12 @@ function conditionsMet(state: PlaneState, row: PlaneQueueRow): boolean {
         return !state.openWindows.includes(c.window);
       case "deploy_settled":
         return !state.openWindows.includes(DEPLOY_WINDOW);
+      // A resident condition is met only by a reported `below` side: an
+      // `unknown` resident admits nothing — the probe reaches it first (record 0064).
+      case "seat":
+        return residentSideOf(state.levels, c.resident, "seat") === "below";
+      case "memory":
+        return residentSideOf(state.levels, c.resident, "memory") === "below";
     }
   });
 }
