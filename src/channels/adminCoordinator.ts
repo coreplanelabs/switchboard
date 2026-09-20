@@ -1923,6 +1923,17 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
     typeof ending.report !== "string"
   )
     return json(400, { ok: false, error: "ending must carry a kind and a report" });
+  const cause =
+    typeof ending.cause === "string" && ending.cause.length > 0 && ending.cause.length <= 64 ? ending.cause : undefined;
+  if (ending.cause !== undefined && cause === undefined)
+    return json(400, { ok: false, error: "ending cause must be 1 to 64 characters" });
+  const failedStep = typeof ending.step === "string" && STEP_NAME_PATTERN.test(ending.step) ? ending.step : undefined;
+  if (ending.step !== undefined && failedStep === undefined)
+    return json(400, { ok: false, error: "ending step must be a step name" });
+  const failedRound =
+    typeof ending.round === "number" && Number.isInteger(ending.round) && ending.round >= 0 ? ending.round : undefined;
+  if (ending.round !== undefined && failedRound === undefined)
+    return json(400, { ok: false, error: "ending round must be a non-negative integer" });
   // The thread's copy of the report (routing-and-config item 28): the driver
   // renders it at the request's verbosity beside the full report the row and
   // the board keep; absent (an older driver), the full report is the thread's.
@@ -1969,7 +1980,18 @@ async function unitEnd(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       ? { idle }
       : segment !== undefined
         ? { segments: segments.some((s) => s.index === segment.index) ? segments : [...segments, { ...segment, at }] }
-        : { ending: { kind: ending.kind, report: ending.report, at } }),
+        : {
+            ending: {
+              kind: ending.kind,
+              report: ending.report,
+              // Machine-readable failure context (issue 2100): readers do not
+              // need to parse the person's report to locate a thrown step.
+              ...(cause !== undefined ? { cause } : {}),
+              ...(failedStep !== undefined ? { step: failedStep } : {}),
+              ...(failedRound !== undefined ? { round: failedRound } : {}),
+              at,
+            },
+          }),
   };
   await deps.instances.putUnits([updated]);
   const thread = unitThread(instance, updated, units.length);

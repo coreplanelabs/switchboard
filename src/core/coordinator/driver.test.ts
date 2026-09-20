@@ -1819,6 +1819,253 @@ describe("the plan runner's driver — the entry checks resume a re-issued plan'
     const [end] = b.of("unit-end") as Array<{ ending: { kind: string } }>;
     expect(end.ending.kind).toBe("merge_ready");
   });
+
+  it("the seal's remedy holds (issue 2100): a re-issue in a thread whose pull request is approved and clean resumes at the checks step — under merge: runner the merge door is asked at exactly the approved head with no branch step and no coding child, never a fresh coding round", async () => {
+    const s = steps();
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      "pr-check": [
+        prOpen(T0, {
+          branchHead: HEAD,
+          approved: true,
+          checks: { total: 30, pending: [], failed: [] },
+          mergeableState: "clean",
+        }),
+      ],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + MIN)],
+      "unit-end": [acked(T0 + MIN)],
+      finish: [acked(T0 + MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merged" });
+    expect(b.of("branch")).toEqual([]);
+    expect(b.of("spawn")).toEqual([]);
+    expect(b.of("merge")).toEqual([{ parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD }]);
+    expect(s.names().some((n) => n.includes("/coding"))).toBe(false);
+  });
+});
+
+describe("the plan runner's driver — a step that throws inside the walk becomes the unit's ending (issue 2100)", () => {
+  const HEAD_2 = "b".repeat(40);
+  const red = { total: 2, pending: [], failed: [{ name: "ci", conclusion: "failure" }] };
+
+  it("the incident's shape pinned: a round-2 approve whose read-record stores a stamped non-transient refusal (HTTP 404 not_found — the walk's instant death, no retry ladder) posts the unit's ending before the instance fails — kind failed, cause step_threw, the read step and round 2, the one-line message in the user's words — and the finish still says failed; never the bare 'no ending was recorded' seal", async () => {
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U10/1/review/wait/1": "event",
+      "U10/1/findings/wait/1": "event",
+      "U10/2/review/wait/1": "event",
+    });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [
+        spawned("run-c0"),
+        spawned("run-r1", T0 + 10 * MIN),
+        spawned("run-f1", T0 + 21 * MIN),
+        spawned("run-r2", T0 + 30 * MIN),
+      ],
+      "read-record": [
+        codingDone("run-c0", T0 + 10 * MIN),
+        reviewApproved("run-r1", T0 + 20 * MIN),
+        record({ id: "run-f1", finished: true, status: "completed", headSha: HEAD_2 }, T0 + 30 * MIN),
+        // Round 2's LGTM landed on GitHub, but the record read answers a
+        // stamped refusal outside the transient set: the mapper throws
+        // OUTSIDE the step — the platform retries nothing — and before this
+        // fix the instance died two seconds after the approve with no ending.
+        ok({ ok: false, error: "not_found" }, T0 + 40 * MIN, 404),
+      ],
+      // Round 1's checks step reads a red head (the incident's seq 39–42:
+      // approve, then checks_failed, then the fix round and the re-review).
+      checks: [ok({ ok: true, checks: red }, T0 + 21 * MIN)],
+      "pr-check": [
+        prNone(),
+        prOpen(T0 + 10 * MIN),
+        ok({ ok: true, state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_2 }, T0 + 30 * MIN),
+      ],
+      round: Array.from({ length: 10 }, () => acked()),
+      "unit-end": [acked(T0 + 40 * MIN)],
+      finish: [acked(T0 + 40 * MIN)],
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow(
+      "the bot's read-record answer could not be read",
+    );
+    // The ending was told before the rethrow: the row carries the cause and
+    // the thread hears it in the user's words.
+    const ends = b.of("unit-end") as Array<{
+      ending: { kind: string; cause?: string; step?: string; round?: number; report: string; threadReport: string };
+    }>;
+    expect(ends).toHaveLength(1);
+    expect(ends[0]!.ending).toMatchObject({
+      kind: "failed",
+      cause: "step_threw",
+      step: "U10/2/review/read/1",
+      round: 2,
+    });
+    expect(ends[0]!.ending.report).toContain("The runner failed after round 2's review verdict");
+    expect(ends[0]!.ending.report).toContain("not_found");
+    expect(ends[0]!.ending.report).toContain("Re-issue `agent:ship` in this thread to continue");
+    // One line: the message never carries a stack or a second line.
+    expect(ends[0]!.ending.report.split("\n")[0]).toContain("HTTP 404");
+    expect(s.names()).toContain("U10/end/threw");
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
+  });
+
+  it("a step whose retries are exhausted inside the platform's ladder ends the same way: the checks step's twelve retries spent, the ending names the checks step of round 1 and the throw's message, and the original error still fails the instance", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+      checks: Array.from({ length: STEP_RETRIES.limit + 1 }, () => new Error("GitHub melted")),
+      round: Array.from({ length: 6 }, () => acked()),
+      "unit-end": [acked(T0 + 21 * MIN)],
+      finish: [acked(T0 + 21 * MIN)],
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("GitHub melted");
+    const ends = b.of("unit-end") as Array<{
+      ending: { kind: string; cause?: string; step?: string; round?: number; report: string };
+    }>;
+    expect(ends).toHaveLength(1);
+    expect(ends[0]!.ending).toMatchObject({
+      kind: "failed",
+      cause: "step_threw",
+      step: "U10/1/review/checks/1",
+      round: 1,
+    });
+    expect(ends[0]!.ending.report).toContain("The runner failed after round 1's review verdict");
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
+  });
+
+  it("unit-start exhausting its retries is inside the same net: its own step is recorded before the original error fails the instance, never a bare seal", async () => {
+    const s = steps();
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": Array.from({ length: STEP_RETRIES.limit + 1 }, () => new Error("the start door is down")),
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("the start door is down");
+    const [end] = b.of("unit-end") as Array<{ ending: { cause?: string; step?: string; round?: number } }>;
+    expect(end!.ending).toMatchObject({ cause: "step_threw", step: "U10/start" });
+    expect(end!.ending).not.toHaveProperty("round");
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
+  });
+
+  it("a round-note throw names the note that failed, not the preceding machine action, and keeps the round structured", async () => {
+    const s = steps();
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      "pr-check": [prNone()],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      round: Array.from({ length: STEP_RETRIES.limit + 1 }, () => new Error("the round writer is down")),
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("the round writer is down");
+    const [end] = b.of("unit-end") as Array<{ ending: { cause?: string; step?: string; round?: number } }>;
+    expect(end!.ending).toMatchObject({ cause: "step_threw", step: "U10/note/1", round: 0 });
+  });
+
+  it("a normal unit-end throw names the ending write that failed, not the preceding merge step", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+      round: [acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+      "unit-end": [
+        ...Array.from({ length: STEP_RETRIES.limit + 1 }, () => new Error("the ending writer is down")),
+        acked(),
+      ],
+      finish: [acked()],
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("the ending writer is down");
+    const ends = b.of("unit-end") as Array<{ ending: { cause?: string; step?: string; round?: number } }>;
+    expect(ends.at(-1)!.ending).toMatchObject({ cause: "step_threw", step: "U10/end", round: 1 });
+  });
+
+  it("a stopped unit's unit-end throw is caught at the walk boundary: the alternate ending names that unit's end step before the original error fails the instance", async () => {
+    const s = steps();
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "runner", { stopped: true })],
+      "unit-end": [
+        ...Array.from({ length: STEP_RETRIES.limit + 1 }, () => new Error("the stopped ending writer is down")),
+        acked(),
+      ],
+      finish: [acked()],
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("the stopped ending writer is down");
+    const ends = b.of("unit-end") as Array<{
+      unit: string;
+      ending: { kind: string; cause?: string; step?: string; round?: number };
+    }>;
+    expect(ends.at(-1)).toMatchObject({
+      unit: "U10",
+      ending: { kind: "failed", cause: "step_threw", step: "U10/end" },
+    });
+    expect(ends.at(-1)!.ending).not.toHaveProperty("round");
+    expect(s.names()).toContain("U10/end/threw");
+  });
+
+  it("a blocked unit's unit-end throw is caught at the walk boundary: the alternate ending names the blocked unit's end step before the original error fails the instance", async () => {
+    const s = steps();
+    const b = bot({
+      plan: [planAnswer([row("U10"), row("U11", { dependsOn: ["U10"] })])],
+      "unit-start": [started("U10")],
+      "pr-check": [prNone()],
+      branch: [ok({ ok: false, reason: "HTTP 422 reference already exists" })],
+      round: [acked()],
+      "unit-end": [
+        acked(),
+        ...Array.from({ length: STEP_RETRIES.limit + 1 }, () => new Error("the blocked ending writer is down")),
+        acked(),
+      ],
+      finish: [acked()],
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("the blocked ending writer is down");
+    const ends = b.of("unit-end") as Array<{
+      unit: string;
+      ending: { kind: string; cause?: string; step?: string; round?: number };
+    }>;
+    expect(ends.at(-1)).toMatchObject({
+      unit: "U11",
+      ending: { kind: "failed", cause: "step_threw", step: "U11/end" },
+    });
+    expect(ends.at(-1)!.ending).not.toHaveProperty("round");
+    expect(s.names()).toContain("U11/end/threw");
+  });
+
+  it("the ending's post is best effort: a bot that cannot record it leaves the original throw to fail the instance — the finish is still asked as failed and the walk's error is the one rethrown", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      // The read's stored answer is a stamped refusal → the mapper throws.
+      "read-record": [ok({ ok: false, error: "not_found" }, T0 + 10 * MIN, 404)],
+      "pr-check": [prNone()],
+      round: [acked()],
+      "unit-end": Array.from({ length: STEP_RETRIES.limit + 1 }, () => new Error("the bot is down")),
+      finish: [acked(T0 + 11 * MIN)],
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow(
+      "the bot's read-record answer could not be read",
+    );
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
+  });
 });
 
 describe("the plan runner's driver — a resume at review (agent-ship item 10)", () => {

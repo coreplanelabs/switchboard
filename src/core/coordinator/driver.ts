@@ -7,7 +7,13 @@
 // bot answer becomes the machine's return, and what is left to the platform's
 // retry: a call that throws inside a step is the platform's to ask again under
 // the one policy (twelve times, two minutes apart, constant — long enough for a
-// bot deploy and its rollover), and the driver never catches it.
+// bot deploy and its rollover), and the driver never catches it mid-step. A
+// throw that escapes a unit's pipeline anyway — a stored answer the mappers
+// cannot read, retries exhausted, the platform's own refusal — is told once as
+// the unit's ending (kind `failed`, cause `step_threw`, the step and round and
+// the throw's one line, issue 2100) before it is rethrown to fail the
+// instance, so the unit's row never reads as the bare "no ending was
+// recorded" seal.
 //
 // Every step's stored output is the bot's reply as the wire carried it — the
 // status and the text of a JSON object the bot stamped with its clock (`at`) —
@@ -686,6 +692,66 @@ async function perform(
   }
 }
 
+/** The throw's one line, for the step-threw ending's report (issue 2100). */
+function oneLineOf(err: unknown): string {
+  const line = (err instanceof Error ? err.message : String(err)).split("\n")[0]!.trim();
+  if (line.length === 0) return "an error with no message";
+  return line.length > REASON_MAX ? `${line.slice(0, REASON_MAX)}…` : line;
+}
+
+/** Where the machine was when a step threw: the step's own name and, inside a
+ *  round, the round it belonged to. */
+interface StepAt {
+  step: string;
+  round?: { index: number; kind: string };
+}
+
+/** A step that throws inside the walk becomes the unit's ending (issue 2100):
+ *  kind `failed`, cause `step_threw`, the step and round it was in and the
+ *  throw's one line, posted in the user's words — best effort, before the
+ *  throw is rethrown to fail the instance — so the unit's row carries a cause
+ *  a person can read instead of the bare "no ending was recorded" seal (the
+ *  walk-dies-before-unit-end path behind issues 2063 and 2100: run 21c50656
+ *  died between round 2's review verdict and its outcome write). */
+async function tellStepThrew(
+  step: StepRunner,
+  bot: CoordinatorBot,
+  prefix: string,
+  tag: { parentInstanceId: string; unit: string },
+  pr: { number: number; url: string } | undefined,
+  at: StepAt,
+  err: unknown,
+): Promise<void> {
+  const line = oneLineOf(err);
+  const where =
+    at.round === undefined
+      ? `at \`${at.step}\``
+      : at.round.kind === "review" && /\/review\/(read|checks)\b/.test(at.step)
+        ? `after round ${at.round.index}'s review verdict (\`${at.step}\`)`
+        : `in round ${at.round.index} (\`${at.step}\`)`;
+  const report =
+    `⚠️ The runner failed ${where}: ${line}\n\n` +
+    "Re-issue `agent:ship` in this thread to continue — a pull request already approved with green checks resumes at the checks step, never at a fresh coding round.";
+  const body = {
+    ...tag,
+    ending: {
+      kind: "failed",
+      cause: "step_threw",
+      step: at.step,
+      ...(at.round !== undefined ? { round: at.round.index } : {}),
+      report,
+      threadReport: report,
+    },
+    ...(pr !== undefined ? { pr } : {}),
+  };
+  try {
+    await step.do(`${prefix}/end/threw`, STEP_CONFIG, () => call(bot, "unit-end", body));
+  } catch {
+    // Best effort: the rethrow still fails the instance, and a bot that could
+    // not record the ending leaves the seal's line as before.
+  }
+}
+
 /** One unit's pipeline: its start, then the machine's steps until it ends;
  *  every round boundary and the ending told to the bot as they happen. */
 async function runUnit(
@@ -702,9 +768,21 @@ async function runUnit(
   // one's results (decision 0046).
   const prefix = stepPrefixOf(unit, session);
   const tag = { parentInstanceId: instanceId, unit };
-  const start = readUnitStart(
-    answerOf("unit-start", await step.do(`${prefix}/start`, STEP_CONFIG, () => call(bot, "unit-start", tag))),
-  );
+  // Where the machine is, tracked for the step-threw ending (issue 2100). The
+  // start belongs in the same net as the rest of the unit even though no
+  // pipeline state (and therefore no round) exists yet.
+  let last: StepAt = { step: `${prefix}/start` };
+  let start: ReturnType<typeof readUnitStart>;
+  try {
+    const startStep = `${prefix}/start`;
+    last = { step: startStep };
+    start = readUnitStart(
+      answerOf("unit-start", await step.do(startStep, STEP_CONFIG, () => call(bot, "unit-start", tag))),
+    );
+  } catch (err) {
+    await tellStepThrew(step, bot, prefix, tag, undefined, last, err);
+    throw err;
+  }
   // A resume at review (agent-ship item 10) rides the unit's row: the pull
   // request of ship's own the requester named opens the pipeline at its first
   // review round, with no pre-check, no branch and no round 0.
@@ -739,108 +817,129 @@ async function runUnit(
     start.at,
   );
   let notes = 0;
-  for (;;) {
-    const action = nextAction(state);
-    if (action.type === "end") return action.ending;
-    const transition = applyReturn(state, await perform(step, bot, instanceId, unit, action));
-    state = transition.state;
-    for (const note of transition.notes) {
-      if (note.type === "round") {
-        const body = {
-          ...tag,
-          index: note.index,
-          agent: note.agent,
-          outcome: note.outcome,
-          ...(note.gate !== undefined ? { gate: note.gate } : {}),
-        };
-        await step.do(`${prefix}/note/${++notes}`, STEP_CONFIG, () => call(bot, "round", body));
-      } else {
-        // A merge_ready ending names the pull request as it is at the APPROVED
-        // head (agent-ship item 9): one more pr-check reads the facts fresh —
-        // auto-merge may have been switched on since the round's check, or it
-        // may already have fired, in which case the answer is `merged` and the
-        // report says so rather than naming a gate that has passed. An
-        // unreadable answer just leaves the facts out.
-        let endFacts: MergeReadyFacts | undefined;
-        if (note.ending.kind === "merge_ready") {
-          try {
-            const check = prCheckReturn(
-              `${prefix}/end/pr-facts`,
-              answerOf(
-                "pr-check",
-                await step.do(`${prefix}/end/pr-facts`, STEP_CONFIG, () =>
-                  call(bot, "pr-check", { ...tag, checks: true }),
+  try {
+    for (;;) {
+      const action = nextAction(state);
+      if (action.type === "end") return action.ending;
+      // Keep the current round across its non-round phases (for example merge)
+      // while replacing it whenever the pipeline names a new one.
+      last = {
+        step: action.step,
+        ...("round" in state.phase
+          ? { round: state.phase.round }
+          : last.round !== undefined
+            ? { round: last.round }
+            : {}),
+      };
+      const transition = applyReturn(state, await perform(step, bot, instanceId, unit, action));
+      state = transition.state;
+      for (const note of transition.notes) {
+        if (note.type === "round") {
+          const body = {
+            ...tag,
+            index: note.index,
+            agent: note.agent,
+            outcome: note.outcome,
+            ...(note.gate !== undefined ? { gate: note.gate } : {}),
+          };
+          const noteStep = `${prefix}/note/${++notes}`;
+          last = { step: noteStep, round: { index: note.index, kind: note.agent } };
+          await step.do(noteStep, STEP_CONFIG, () => call(bot, "round", body));
+        } else {
+          // A merge_ready ending names the pull request as it is at the APPROVED
+          // head (agent-ship item 9): one more pr-check reads the facts fresh —
+          // auto-merge may have been switched on since the round's check, or it
+          // may already have fired, in which case the answer is `merged` and the
+          // report says so rather than naming a gate that has passed. An
+          // unreadable answer just leaves the facts out.
+          let endFacts: MergeReadyFacts | undefined;
+          if (note.ending.kind === "merge_ready") {
+            try {
+              const factsStep = `${prefix}/end/pr-facts`;
+              last = { step: factsStep, ...(last.round !== undefined ? { round: last.round } : {}) };
+              const check = prCheckReturn(
+                factsStep,
+                answerOf(
+                  "pr-check",
+                  await step.do(factsStep, STEP_CONFIG, () => call(bot, "pr-check", { ...tag, checks: true })),
                 ),
-              ),
-            );
-            if (check.type === "pr-check" && check.pr.state === "merged")
-              endFacts = { merged: { sha: check.pr.sha, mergedAt: check.pr.mergedAt } };
-            else if (check.type === "pr-check" && check.pr.state === "open")
-              endFacts = {
-                ...(check.pr.autoMergeEnabled !== undefined ? { autoMergeEnabled: check.pr.autoMergeEnabled } : {}),
-                // The checks at the approved head (record 0055): the report's
-                // headline is a claim about them, never "merge-ready" over a red one.
-                ...(check.pr.checks !== undefined ? { checks: check.pr.checks } : {}),
-                // The ready state beside them (agent-ship item 9): a conflicting
-                // head, or one carrying an unsquashed fix-up commit, is reported
-                // approved-but-not-merge-ready, never "merge-ready".
-                ...(check.pr.mergeableState !== undefined ? { mergeableState: check.pr.mergeableState } : {}),
-                ...(check.pr.fixupCommits !== undefined ? { fixupCommits: check.pr.fixupCommits } : {}),
-              };
-          } catch {
-            // the report simply omits the fact
+              );
+              if (check.type === "pr-check" && check.pr.state === "merged")
+                endFacts = { merged: { sha: check.pr.sha, mergedAt: check.pr.mergedAt } };
+              else if (check.type === "pr-check" && check.pr.state === "open")
+                endFacts = {
+                  ...(check.pr.autoMergeEnabled !== undefined ? { autoMergeEnabled: check.pr.autoMergeEnabled } : {}),
+                  // The checks at the approved head (record 0055): the report's
+                  // headline is a claim about them, never "merge-ready" over a red one.
+                  ...(check.pr.checks !== undefined ? { checks: check.pr.checks } : {}),
+                  // The ready state beside them (agent-ship item 9): a conflicting
+                  // head, or one carrying an unsquashed fix-up commit, is reported
+                  // approved-but-not-merge-ready, never "merge-ready".
+                  ...(check.pr.mergeableState !== undefined ? { mergeableState: check.pr.mergeableState } : {}),
+                  ...(check.pr.fixupCommits !== undefined ? { fixupCommits: check.pr.fixupCommits } : {}),
+                };
+            } catch {
+              // the report simply omits the fact
+            }
           }
-        }
-        // The last coding child's run is named so the bot can put its handoff
-        // — the deviations it recorded — on the unit's board issue beside the
-        // ending (agent-ship item 14).
-        const body = {
-          ...tag,
-          // Two copies (routing-and-config item 28): the full report for the
-          // row and the board, and the thread's at the request's verbosity.
-          ending: {
-            kind: note.ending.kind,
-            report: renderUnitReport(state, endFacts),
-            threadReport: renderUnitReport(state, endFacts, state.input.verbosity ?? DEFAULT_VERBOSITY),
-            // An idle ending carries its continuation facts (record 0051): the
-            // bot writes them on the row's `idle` in place of an ending, with
-            // the coding run id it already receives below.
-            ...(note.ending.kind === "idle"
+          // The last coding child's run is named so the bot can put its handoff
+          // — the deviations it recorded — on the unit's board issue beside the
+          // ending (agent-ship item 14).
+          const body = {
+            ...tag,
+            // Two copies (routing-and-config item 28): the full report for the
+            // row and the board, and the thread's at the request's verbosity.
+            ending: {
+              kind: note.ending.kind,
+              report: renderUnitReport(state, endFacts),
+              threadReport: renderUnitReport(state, endFacts, state.input.verbosity ?? DEFAULT_VERBOSITY),
+              // An idle ending carries its continuation facts (record 0051): the
+              // bot writes them on the row's `idle` in place of an ending, with
+              // the coding run id it already receives below.
+              ...(note.ending.kind === "idle"
+                ? {
+                    why: note.ending.why,
+                    renewalsLeft: note.ending.renewalsLeft,
+                    ...(note.ending.from !== undefined ? { from: note.ending.from } : {}),
+                    spendUsd: note.ending.spendUsd,
+                    ...(note.ending.handoff !== undefined ? { handoff: note.ending.handoff } : {}),
+                  }
+                : {}),
+            },
+            ...(state.pr !== undefined ? { pr: state.pr } : {}),
+            // A review_pending ending names the child's own last push so the next
+            // attempt's pre-check can start at the review round (the row's lastPush)
+            // — an idled one the same, off the idle's `from` (record 0051).
+            ...(note.ending.kind === "review_pending" && note.ending.headSha !== undefined
+              ? { headSha: note.ending.headSha }
+              : note.ending.kind === "idle" && note.ending.why === "review_pending" && note.ending.from !== undefined
+                ? { headSha: note.ending.from }
+                : {}),
+            ...(state.lastCodingRunId !== undefined ? { codingRunId: state.lastCodingRunId } : {}),
+            // A continued ending is a segment's end, not the unit's: the bot
+            // writes the renewal as a row keyed by the next segment's index
+            // (decision 0046), so a runner reclaimed here never renews twice.
+            ...(note.ending.kind === "continued"
               ? {
-                  why: note.ending.why,
-                  renewalsLeft: note.ending.renewalsLeft,
-                  ...(note.ending.from !== undefined ? { from: note.ending.from } : {}),
-                  spendUsd: note.ending.spendUsd,
-                  ...(note.ending.handoff !== undefined ? { handoff: note.ending.handoff } : {}),
+                  segment: {
+                    index: note.ending.segment,
+                    ...(note.ending.from !== undefined ? { from: note.ending.from } : {}),
+                    runId: note.ending.runId,
+                  },
                 }
               : {}),
-          },
-          ...(state.pr !== undefined ? { pr: state.pr } : {}),
-          // A review_pending ending names the child's own last push so the next
-          // attempt's pre-check can start at the review round (the row's lastPush)
-          // — an idled one the same, off the idle's `from` (record 0051).
-          ...(note.ending.kind === "review_pending" && note.ending.headSha !== undefined
-            ? { headSha: note.ending.headSha }
-            : note.ending.kind === "idle" && note.ending.why === "review_pending" && note.ending.from !== undefined
-              ? { headSha: note.ending.from }
-              : {}),
-          ...(state.lastCodingRunId !== undefined ? { codingRunId: state.lastCodingRunId } : {}),
-          // A continued ending is a segment's end, not the unit's: the bot
-          // writes the renewal as a row keyed by the next segment's index
-          // (decision 0046), so a runner reclaimed here never renews twice.
-          ...(note.ending.kind === "continued"
-            ? {
-                segment: {
-                  index: note.ending.segment,
-                  ...(note.ending.from !== undefined ? { from: note.ending.from } : {}),
-                  runId: note.ending.runId,
-                },
-              }
-            : {}),
-        };
-        await step.do(`${prefix}/end`, STEP_CONFIG, () => call(bot, "unit-end", body));
+          };
+          const endStep = `${prefix}/end`;
+          last = { step: endStep, ...(last.round !== undefined ? { round: last.round } : {}) };
+          await step.do(endStep, STEP_CONFIG, () => call(bot, "unit-end", body));
+        }
       }
     }
+  } catch (err) {
+    // The walk-dies-before-unit-end path (issue 2100): the throw becomes the
+    // unit's ending before it fails the instance, never the bare seal.
+    await tellStepThrew(step, bot, prefix, tag, state.pr, last, err);
+    throw err;
   }
 }
 
@@ -854,6 +953,24 @@ function blockedReport(unit: string, dep: string, depEnding: string): string {
     return `⛔ Blocked: ${unit} waits on ${dep}, which is blocked itself. Re-issue the plan naming the remaining units once it is resolved.`;
   const person = depEnding === "merge_ready";
   return `⛔ Blocked: ${unit} waits on ${dep}, which ended ${depEnding}${person ? " — a person's merge" : ""}. Re-issue the plan naming the remaining units once it is ${person ? "merged" : "resolved"}.`;
+}
+
+/** End a unit that never entered `runUnit` under the same failure net. */
+async function endUnrunUnit(
+  step: StepRunner,
+  bot: CoordinatorBot,
+  instanceId: string,
+  unit: string,
+  ending: { kind: "stopped" | "blocked"; report: string },
+): Promise<void> {
+  const tag = { parentInstanceId: instanceId, unit };
+  const endStep = `${unit}/end`;
+  try {
+    await step.do(endStep, STEP_CONFIG, () => call(bot, "unit-end", { ...tag, ending }));
+  } catch (err) {
+    await tellStepThrew(step, bot, unit, tag, undefined, { step: endStep }, err);
+    throw err;
+  }
 }
 
 /** The graph as one plan answer carries it: the instance's unit rows, in the plan's order. */
@@ -926,8 +1043,7 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
     if (plan.stopped) {
       for (const id of cursor.order.filter((u) => endings[u] === undefined)) {
         endings[id] = "stopped";
-        const body = { parentInstanceId: instanceId, unit: id, ending: { kind: "stopped", report: stoppedReport(id) } };
-        await step.do(`${id}/end`, STEP_CONFIG, () => call(bot, "unit-end", body));
+        await endUnrunUnit(step, bot, instanceId, id, { kind: "stopped", report: stoppedReport(id) });
       }
       break;
     }
@@ -975,12 +1091,10 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
   for (const id of blocked) {
     const node = graph.units.find((u) => u.id === id)!;
     const dep = node.dependsOn.find((d) => cursor.status[d] === "failed" || cursor.status[d] === "blocked")!;
-    const body = {
-      parentInstanceId: instanceId,
-      unit: id,
-      ending: { kind: "blocked", report: blockedReport(id, dep, endings[dep]!) },
-    };
-    await step.do(`${id}/end`, STEP_CONFIG, () => call(bot, "unit-end", body));
+    await endUnrunUnit(step, bot, instanceId, id, {
+      kind: "blocked",
+      report: blockedReport(id, dep, endings[dep]!),
+    });
   }
   if (!plan.stopped && !cursorFinished(cursor))
     throw new Error(`the plan's cursor did not finish: ${JSON.stringify(cursor.status)}`);

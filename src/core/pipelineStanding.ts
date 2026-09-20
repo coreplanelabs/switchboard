@@ -110,7 +110,9 @@ export const ROUND_STAGE = {
  *  and holds the stage, and every other kind closes the unit as `ended` with
  *  the kind as detail. `blocked` — a unit status the driver posts to
  *  `unit-end` for a unit that never started — ends the same way. Pinned to
- *  the union: a new ending kind fails the build here. */
+ *  the union: a new ending kind fails the build here. `failed` — the ending
+ *  the driver posts when a step threw inside the walk (cause `step_threw`,
+ *  issue 2100) — closes the unit the same way. */
 export const ENDING_STAGE = {
   merged: "merged",
   already_landed: "merged",
@@ -129,13 +131,15 @@ export const ENDING_STAGE = {
   refused: "ended",
   idle: "idle",
   blocked: "ended",
-} as const satisfies Record<UnitEnding["kind"] | "blocked", Stage | "hold">;
+  failed: "ended",
+} as const satisfies Record<UnitEnding["kind"] | "blocked" | "failed", Stage | "hold">;
 
 /** The user's words for a unit's ending (record 0066): what a card, a plan
  *  summary and the web unit page print instead of the internal token —
  *  `merge_ready` reads `merge-ready`, `round_cap` reads `round cap reached`,
  *  never the snake_case kind. Pinned to the union plus `blocked` (the driver's
- *  never-started status), so a new ending kind fails the build here. */
+ *  never-started status) and `failed` (the driver's step-threw ending, issue
+ *  2100), so a new ending kind fails the build here. */
 export const ENDING_WORDS = {
   merged: "merged",
   already_landed: "merged",
@@ -154,7 +158,8 @@ export const ENDING_WORDS = {
   refused: "refused",
   idle: "idle",
   blocked: "blocked",
-} as const satisfies Record<UnitEnding["kind"] | "blocked", string>;
+  failed: "failed",
+} as const satisfies Record<UnitEnding["kind"] | "blocked" | "failed", string>;
 
 /** The user's words for a round outcome (record 0066): the card's unit line
  *  prints these beside the round header, never `checks_failed` or another

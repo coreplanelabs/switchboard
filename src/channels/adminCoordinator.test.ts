@@ -41,6 +41,7 @@ import {
   createAdminCoordinatorHandler,
   handleCoordinatorRequest,
   isCoordinatorAdminPath,
+  planSummary,
   recoveredFallbackTitle,
   type AdminCoordinatorDeps,
 } from "./adminCoordinator.js";
@@ -3133,6 +3134,61 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     await flagged.instances.putUnits([unitRow("U10"), unitRow("U11")]);
     const body = (await call(flagged, "plan", { parentInstanceId: PLAN_INSTANCE.id })).body as Record<string, unknown>;
     expect(body.idleDays).toBe(7);
+  });
+
+  it("unit-end keeps a driver-posted step-threw ending whole (issue 2100): kind `failed` with cause `step_threw` lands on the row — the cause beside the kind and the report — the report reaches the unit's thread in the user's words, and the plan summary prints the ending, never the bare 'no ending was recorded' seal", async () => {
+    const replies: Array<{ threadKey: string; text: string }> = [];
+    const h = await planHarness({
+      ioFor: (thread) => ({
+        reply: async (text) => void replies.push({ threadKey: thread.threadKey, text }),
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => [],
+      }),
+    });
+    await hostParent(h);
+    await h.instances.putUnits([unitRow("U10", { threadKey: "slack:C1:2.0" })]);
+    const report =
+      "⚠️ The runner failed after round 2's review verdict (`U10/2/review/read/1`): HTTP 404 — not_found\n\nRe-issue `agent:ship` in this thread to continue — a pull request already approved with green checks resumes at the checks step, never at a fresh coding round.";
+    expect(
+      (
+        await call(h, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "failed", cause: "step_threw", step: "U10/2/review/read/1", round: 2, report },
+        })
+      ).status,
+    ).toBe(200);
+    const rows = await h.instances.listUnits(PLAN_INSTANCE.id);
+    expect(rows[0]!.ending).toEqual({
+      kind: "failed",
+      cause: "step_threw",
+      step: "U10/2/review/read/1",
+      round: 2,
+      report,
+      at: NOW,
+    });
+    expect(replies).toEqual([{ threadKey: "slack:C1:2.0", text: report }]);
+    expect(
+      (
+        await call(h, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "failed", cause: "step_threw", step: "bad:step", round: 2, report },
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await call(h, "unit-end", {
+          parentInstanceId: PLAN_INSTANCE.id,
+          unit: "U10",
+          ending: { kind: "failed", cause: "step_threw", step: "U10/2/review/read/1", round: -1, report },
+        })
+      ).status,
+    ).toBe(400);
+    const summary = planSummary(rows);
+    expect(summary).toContain("failed");
+    expect(summary).not.toContain("no ending was recorded");
   });
 
   it("unit-end writes the ending and the pull request on the row, posts the report in the unit's thread and redraws the card; finish writes the parent's record from the rows, closes the card and tells the requesting thread the plan's summary", async () => {
