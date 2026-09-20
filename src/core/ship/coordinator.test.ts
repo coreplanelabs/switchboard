@@ -571,6 +571,9 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     });
     expect(JSON.stringify(d.action)).not.toContain('"fix"');
     runChild(d, "run-f1", finished({ status: "completed", dispositions: [DECLINED], headSha: HEAD_B }), T0 + 40 * MIN);
+    // One spelling end to end (record 0066): the step names, the round refs and the
+    // ledger's rows all say `findings` — nothing translates it back to `fix`.
+    expect(JSON.stringify(d.state)).not.toContain('"fix"');
     expect(d.state.findingsRunByRound).toEqual({ 1: "run-f1" });
     expect(d.state.lastCodingRunId).toBe("run-f1");
     expect(d.action).toMatchObject({ type: "pr-check", step: "U10/1/findings/pr-check" });

@@ -912,7 +912,10 @@ export {
   type AddressSeveritySource,
 };
 
-export interface UnitSession {
+/** How far the unit's lease segments have got (decision 0046, the renewable
+ *  lease): the segment's number, the renewals and dollars spent before it and
+ *  the continuation facts — a progress counter, nothing conversational. */
+export interface LeaseSegmentProgress {
   segment: number;
   renewalsSpent: number;
   spendUsd: number | null;
@@ -952,7 +955,7 @@ export interface UnitPipelineInput {
    *  session's spend so far, the sha it continues from and the previous
    *  segment's handoff. Every step name of a later segment is prefixed with
    *  it, so the Workflow's durable steps never collide across segments. */
-  session?: UnitSession;
+  session?: LeaseSegmentProgress;
   /** The instance's mark (agent-ship item 16): a generated one-unit plan — a
    *  `plan` with an id and no `path` — whose unit runs in the requesting
    *  thread and is re-issued with the request's own text, never a plan path. */
@@ -1145,14 +1148,17 @@ const loopOf = (s: UnitPipelineState): Loop => ({ maxRounds: s.input.caps.maxRou
  *  A review round `n` and the findings step that follows it share `n`; the
  *  module's positions are the loop's own. */
 function roundCarve(s: UnitPipelineState, round: RoundRef): Carve {
-  const kind = round.kind === "findings" ? "fix" : round.kind;
-  return carve(remainingMs(s), { kind, index: loopPosition(loopOf(s), kind, round.index) }, loopOf(s));
+  return carve(
+    remainingMs(s),
+    { kind: round.kind, index: loopPosition(loopOf(s), round.kind, round.index) },
+    loopOf(s),
+  );
 }
 
 /** The prefix every step of this pipeline is named under: the unit id, and for
  *  a renewal's segment the segment too (`U10/s2/…`), so the Workflow's durable
  *  step cache never hands segment two the answers of segment one. */
-export const stepPrefixOf = (unit: string, session: UnitSession | undefined): string =>
+export const stepPrefixOf = (unit: string, session: LeaseSegmentProgress | undefined): string =>
   session !== undefined && session.segment > 1 ? `${unit}/s${session.segment}` : unit;
 const stepPrefix = (s: UnitPipelineState) => stepPrefixOf(s.input.unit.id, s.input.session);
 const roundStep = (s: UnitPipelineState, round: RoundRef) =>

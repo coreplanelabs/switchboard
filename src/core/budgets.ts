@@ -151,7 +151,7 @@ export type Preset = LoopPreset | "ship";
  *  that pushes at minute 29 and then runs the repo's whole gate (seven to ten
  *  minutes on a resident) was cut at 45 one run in twelve, so the ask is
  *  double the 90th percentile (31.5) with the gate inside it. Ship's holds
- *  its own loop at the default rounds with a fix round at that ask, not at
+ *  its own loop at the default rounds with a findings round at that ask, not at
  *  its floor (`fit` proves the floor case; the ask leaves room above it). */
 export const ASKS: Readonly<Record<Preset, number>> = {
   general: 5,
@@ -163,17 +163,18 @@ export const ASKS: Readonly<Record<Preset, number>> = {
   conductor: 120,
 };
 
-/** The rounds a ship loop is made of. `fix` is a coding child handed the
+/** The rounds a ship loop is made of. `findings` is a coding child handed the
  *  review's findings; `merge` is the runner's wait on the guards. */
-export type RoundKind = "coding" | "review" | "fix" | "merge";
+export type RoundKind = "coding" | "review" | "findings" | "merge";
 
 /** The least lease in which a round does useful work, in minutes. A carve that
  *  falls under the floor is refused rather than dispatched: a two-minute
- *  review or fix costs an attach and a model turn and finishes nothing.
- *  Review's is the ledger's 90th percentile of completed reviews (5.1 min over
- *  181); coding's is the least a fix round can run the repo's gate in — the
- *  gate alone takes seven to ten minutes on a resident, and a fix that cannot
- *  run it finishes nothing its contract asks; the merge wait's is a guess
+ *  review or findings round costs an attach and a model turn and finishes
+ *  nothing. Review's is the ledger's 90th percentile of completed reviews (5.1
+ *  min over 181); coding's is the least a findings round can run the repo's
+ *  gate in — the gate alone takes seven to ten minutes on a resident, and a
+ *  round that cannot run it finishes nothing its contract asks; the merge
+ *  wait's is a guess
  *  until the ledger says. */
 export const PRESET_FLOORS: Readonly<Record<LoopPreset, number>> = {
   general: 2,
@@ -185,7 +186,7 @@ export const PRESET_FLOORS: Readonly<Record<LoopPreset, number>> = {
 };
 export const FLOORS: Readonly<Record<RoundKind, number>> = {
   coding: PRESET_FLOORS.coding,
-  fix: PRESET_FLOORS.coding,
+  findings: PRESET_FLOORS.coding,
   review: PRESET_FLOORS.review,
   merge: 10,
 };
@@ -381,19 +382,20 @@ export interface RoundPosition {
 }
 
 /** The rounds of a loop in order: the coding round, then a review and, after
- *  every review but the last, a fix, then the merge wait. */
+ *  every review but the last, a findings round, then the merge wait. */
 export function loopRounds(loop: Loop): RoundKind[] {
   const rounds: RoundKind[] = ["coding"];
   for (let i = 0; i < loop.maxRounds; i++) {
     rounds.push("review");
-    if (i < loop.maxRounds - 1) rounds.push("fix");
+    if (i < loop.maxRounds - 1) rounds.push("findings");
   }
   rounds.push("merge");
   return rounds;
 }
 
 /** Where a round sits in `loopRounds`: the coding round first; review round
- *  `n` (counted from 1) and the fix that follows it at `2n − 1` and `2n`; the
+ *  `n` (counted from 1) and the findings round that follows it at `2n − 1`
+ *  and `2n`; the
  *  merge wait last. The ship coordinator numbers its rounds this way, so the
  *  reserve it carves with is the one the fit assumed. */
 export function loopPosition(loop: Loop, kind: RoundKind, n = 0): number {
@@ -402,7 +404,7 @@ export function loopPosition(loop: Loop, kind: RoundKind, n = 0): number {
       return 0;
     case "review":
       return 2 * n - 1;
-    case "fix":
+    case "findings":
       return 2 * n;
     case "merge":
       return 2 * loop.maxRounds;
@@ -423,7 +425,7 @@ export function carveChildOfParent(
 }
 
 /** The minutes a round holds back for what must follow it in the loop: the
- *  floor plus provisioning of every later review and fix, and the merge
+ *  floor plus provisioning of every later review and findings round, and the merge
  *  wait's floor. A merge holds nothing back; a round with no loop (a
  *  conductor's child) holds nothing back either. */
 export function reserveMinutes(
@@ -439,12 +441,12 @@ export function reserveMinutes(
   return reserve;
 }
 
-/** What a round asks for: the preset's ask for a coding or fix round, the
+/** What a round asks for: the preset's ask for a coding or findings round, the
  *  review's for a review, the merge wait's own for the merge. */
 export function roundAskMinutes(kind: RoundKind): number {
   switch (kind) {
     case "coding":
-    case "fix":
+    case "findings":
       return ASKS.coding;
     case "review":
       return ASKS.review;

@@ -61,7 +61,7 @@ import {
   type UnitEnding,
   type UnitPipelineState,
   stepPrefixOf,
-  type UnitSession,
+  type LeaseSegmentProgress,
 } from "../ship/coordinator.js";
 import {
   checksSettledEventType,
@@ -691,7 +691,7 @@ async function runUnit(
   instanceId: string,
   node: PlanUnitNode,
   plan: PlanFacts,
-  session?: UnitSession,
+  session?: LeaseSegmentProgress,
 ): Promise<UnitEnding> {
   const unit = node.id;
   // A renewal's segment names its steps under the segment (`U10/s2/…`), so

@@ -45,55 +45,63 @@ describe("the budgets module — one table every wall clock derives from (docs/d
 
   it("every floor is at most its round's ask, and the merge wait has an ask and a floor of its own", () => {
     expect(FLOORS.coding).toBeLessThanOrEqual(ASKS.coding);
-    expect(FLOORS.fix).toBeLessThanOrEqual(ASKS.coding);
+    expect(FLOORS.findings).toBeLessThanOrEqual(ASKS.coding);
     expect(FLOORS.review).toBeLessThanOrEqual(ASKS.review);
     expect(FLOORS.merge).toBeLessThanOrEqual(MERGE_WAIT_ASK_MINUTES);
     expect(MERGE_WAIT_ASK_MINUTES).toBe(60);
   });
 
-  it("the loop at 3 review rounds is coding, review, fix, review, fix, review, merge", () => {
-    expect(loopRounds({ maxRounds: 3 })).toEqual(["coding", "review", "fix", "review", "fix", "review", "merge"]);
+  it("the loop at 3 review rounds is coding, review, findings, review, findings, review, merge", () => {
+    expect(loopRounds({ maxRounds: 3 })).toEqual([
+      "coding",
+      "review",
+      "findings",
+      "review",
+      "findings",
+      "review",
+      "merge",
+    ]);
     expect(loopRounds({ maxRounds: 1 })).toEqual(["coding", "review", "merge"]);
   });
 
-  it("the coordinator's round numbers map onto the loop's positions: coding 0; review n and its fix at 2n − 1 and 2n; the merge last", () => {
+  it("the coordinator's round numbers map onto the loop's positions: coding 0; review n and its findings round at 2n − 1 and 2n; the merge last", () => {
     const loop = { maxRounds: 3 };
     expect(loopPosition(loop, "coding")).toBe(0);
     expect(loopPosition(loop, "review", 1)).toBe(1);
-    expect(loopPosition(loop, "fix", 1)).toBe(2);
+    expect(loopPosition(loop, "findings", 1)).toBe(2);
     expect(loopPosition(loop, "review", 3)).toBe(5);
     expect(loopPosition(loop, "merge")).toBe(6);
     expect(loopRounds(loop)[loopPosition(loop, "merge")]).toBe("merge");
   });
 
-  it("the floors are the presets': coding 15, review 5, research 3, general 2, explore and conductor 15 — the round floors derive from them (a fix round under 15 cannot run the suite its contract requires), and the ship waits are rows", () => {
+  it("the floors are the presets': coding 15, review 5, research 3, general 2, explore and conductor 15 — the round floors derive from them (a findings round under 15 cannot run the suite its contract requires), and the ship waits are rows", () => {
     expect(PRESET_FLOORS).toEqual({ general: 2, coding: 15, review: 5, research: 3, explore: 15, conductor: 15 });
-    expect(FLOORS).toEqual({ coding: 15, fix: 15, review: 5, merge: 10 });
+    expect(FLOORS).toEqual({ coding: 15, findings: 15, review: 5, merge: 10 });
     expect(SHIP_WAIT).toEqual({ marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes: 5, busyRetryMinutes: 2 });
   });
 });
 
 describe("the reserve — derived over the rounds that must follow, never tabled", () => {
-  it("before the coding round at 3 rounds: three reviews and two fixes with their provisioning, plus the merge floor", () => {
+  it("before the coding round at 3 rounds: three reviews and two findings rounds with their provisioning, plus the merge floor", () => {
     const expected =
-      3 * (FLOORS.review + ALLOWANCES.provision) + 2 * (FLOORS.fix + ALLOWANCES.provision) + FLOORS.merge;
+      3 * (FLOORS.review + ALLOWANCES.provision) + 2 * (FLOORS.findings + ALLOWANCES.provision) + FLOORS.merge;
     expect(reserveMinutes({ kind: "coding", index: 0 }, SHIP_DEFAULT)).toBe(expected);
     expect(expected).toBe(70);
   });
 
-  it("before the coding round at 4 rounds: four reviews and three fixes with their provisioning, plus the merge floor, 96", () => {
+  it("before the coding round at 4 rounds: four reviews and three findings rounds with their provisioning, plus the merge floor, 96", () => {
     const expected =
-      4 * (FLOORS.review + ALLOWANCES.provision) + 3 * (FLOORS.fix + ALLOWANCES.provision) + FLOORS.merge;
+      4 * (FLOORS.review + ALLOWANCES.provision) + 3 * (FLOORS.findings + ALLOWANCES.provision) + FLOORS.merge;
     expect(reserveMinutes({ kind: "coding", index: 0 }, { maxRounds: 4 })).toBe(expected);
     expect(expected).toBe(96);
   });
 
-  it("before each later round the reserve is what follows it: 62 before the first review, 44 before the first fix, 36, 18, 10, then 0 before the merge", () => {
+  it("before each later round the reserve is what follows it: 62 before the first review, 44 before the first findings round, 36, 18, 10, then 0 before the merge", () => {
     const loop = SHIP_DEFAULT;
     expect(reserveMinutes({ kind: "review", index: 1 }, loop)).toBe(62);
-    expect(reserveMinutes({ kind: "fix", index: 2 }, loop)).toBe(44);
+    expect(reserveMinutes({ kind: "findings", index: 2 }, loop)).toBe(44);
     expect(reserveMinutes({ kind: "review", index: 3 }, loop)).toBe(36);
-    expect(reserveMinutes({ kind: "fix", index: 4 }, loop)).toBe(18);
+    expect(reserveMinutes({ kind: "findings", index: 4 }, loop)).toBe(18);
     expect(reserveMinutes({ kind: "review", index: 5 }, loop)).toBe(10);
     expect(reserveMinutes({ kind: "merge", index: 6 }, loop)).toBe(0);
   });
@@ -115,8 +123,8 @@ describe("carve — a round's minutes from the parent's remainder, refused under
     });
   });
 
-  it("a fix round from 50 minutes is refused under its floor of 15: 50 − 44 leaves 6", () => {
-    expect(carve(50 * MINUTE_MS, { kind: "fix", index: 2 }, SHIP_DEFAULT)).toEqual({
+  it("a findings round from 50 minutes is refused under its floor of 15: 50 − 44 leaves 6", () => {
+    expect(carve(50 * MINUTE_MS, { kind: "findings", index: 2 }, SHIP_DEFAULT)).toEqual({
       kind: "refused",
       reason: "under floor",
       minutes: 6,
@@ -139,15 +147,15 @@ describe("carve — a round's minutes from the parent's remainder, refused under
     });
   });
 
-  it("a round bounded by the parent says so: a fix from 30 minutes is refused reporting 0, not −14; from 60 it gets 16 bounded by the parent", () => {
-    expect(carve(30 * MINUTE_MS, { kind: "fix", index: 2 }, SHIP_DEFAULT)).toEqual({
+  it("a round bounded by the parent says so: a findings round from 30 minutes is refused reporting 0, not −14; from 60 it gets 16 bounded by the parent", () => {
+    expect(carve(30 * MINUTE_MS, { kind: "findings", index: 2 }, SHIP_DEFAULT)).toEqual({
       kind: "refused",
       reason: "under floor",
       minutes: 0,
       floor: 15,
       holds: 44,
     });
-    expect(carve(60 * MINUTE_MS, { kind: "fix", index: 2 }, SHIP_DEFAULT)).toEqual({
+    expect(carve(60 * MINUTE_MS, { kind: "findings", index: 2 }, SHIP_DEFAULT)).toEqual({
       kind: "carved",
       minutes: 16,
       boundedBy: "parent",
@@ -194,7 +202,7 @@ describe("carve — a round's minutes from the parent's remainder, refused under
 });
 
 describe("the fit — a pipeline holds its first child at its ask and every later round at its floor", () => {
-  it("the loop the config allows by default fits inside the pipeline's ask with room for fix rounds at their ask: ship at 3 rounds needs 163 of 240", () => {
+  it("the loop the config allows by default fits inside the pipeline's ask with room for findings rounds at their ask: ship at 3 rounds needs 163 of 240", () => {
     expect(fit(SHIP_DEFAULT)).toEqual({ ok: true, need: 163, have: 240 });
     expect(fit(SHIP_DEFAULT).need).toBe(ALLOWANCES.provision + ASKS.coding + 70);
   });
