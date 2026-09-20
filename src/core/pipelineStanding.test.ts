@@ -25,6 +25,7 @@ function roundStageDecided(o: ShipRoundOutcome): string {
     case "request_changes":
     case "no_verdict":
     case "checks_failed":
+    case "transient":
     case "aborted":
     case "stopped":
     case "continued":
@@ -47,6 +48,7 @@ function endingStageDecided(k: UnitEnding["kind"]): string {
     case "review_pending":
     case "stopped":
     case "aborted":
+    case "transient":
     case "continued":
     case "no_verdict":
     case "interrupted":
@@ -64,6 +66,7 @@ const ROUND_OUTCOME_WORDS = [
   "request_changes",
   "no_verdict",
   "checks_failed",
+  "transient",
   "aborted",
   "stopped",
   "continued",
@@ -81,6 +84,7 @@ const UNIT_ENDING_WORDS = [
   "review_pending",
   "stopped",
   "aborted",
+  "transient",
   "continued",
   "no_verdict",
   "interrupted",

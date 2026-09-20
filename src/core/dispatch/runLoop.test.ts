@@ -62,7 +62,11 @@ import {
 } from "../harness/pi/relay.js";
 import { spawnCapabilityFor, type SpawnCapability, type SpawnDeps } from "./spawn.js";
 import type { SessionCapability } from "../../tools/session.js";
-import { ModelPolicyRefusedError, PiContainerReplacedError } from "../harness/pi/harness.js";
+import {
+  ModelPolicyRefusedError,
+  ModelTransientFailureError,
+  PiContainerReplacedError,
+} from "../harness/pi/harness.js";
 import { PiHarness } from "../harness/pi/piHarness.js";
 import { OpenCodeHarness } from "../harness/opencode/harness.js";
 import { scriptOpenCodeServe } from "../harness/opencode/testing/driver.js";
@@ -921,6 +925,33 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     down.ending.drain(undefined);
     await down.writer.settled();
     expect("failure" in (await down.store.get("run-l"))!).toBe(false);
+  });
+
+  // docs/reference/specs/run-history.md item 57 and agent-ship.md item 9: a
+  // provider transient past the harness's retry ladder is the failure by name,
+  // so a coordinator reading the child's record can re-run the round (issue 1932).
+  it("a run whose model call died on a provider transient past the harness's retry ladder fails by name: the record says failure: provider_transient", async () => {
+    const s = setup("", {
+      agent: "coding",
+      harness: {
+        harnesses: roster({
+          ...watched(piHarness).harness,
+          open: async () => {
+            throw new ModelTransientFailureError(
+              "the model call failed after 3 retries: 502 Bad gateway — this is usually transient; re-ask in the thread to run it again",
+            );
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      bearer: "sbr_run-l.s3cret",
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("after 3 retries");
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect((await s.store.get("run-l"))!).toMatchObject({ status: "failed", failure: { kind: "provider_transient" } });
   });
 });
 

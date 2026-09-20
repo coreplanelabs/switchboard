@@ -418,6 +418,10 @@ export type ShipRoundOutcome =
    *  0055): the failures become check findings and the findings step runs as
    *  for any changes-requested round. */
   | "checks_failed"
+  /** The round's coding child died on a provider transient with nothing
+   *  pushed (issue 1932): the first such boundary marks the round's one
+   *  re-run, a second the `transient` ending. */
+  | "transient"
   | "aborted"
   | "stopped"
   /** The coding round ended at its lease with the unit unfinished and the row

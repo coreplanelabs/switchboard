@@ -509,9 +509,14 @@ function isRunPullRequestShape(v: unknown): v is RunPullRequest {
  *  (item 57). `policy_refusal`: the model provider refused the run's call
  *  under its usage policy — the stop reason its wire names, never the
  *  explanation's words — so the session's next seed leaves the refused
- *  request out of its tail (docs/reference/specs/session-log.md item 9). A
- *  failure without a name here leaves the record without the field. */
-export const RUN_FAILURE_KINDS = ["policy_refusal"] as const;
+ *  request out of its tail (docs/reference/specs/session-log.md item 9).
+ *  `provider_transient`: the run's model call failed on a provider transient
+ *  (a gateway 5xx, a cut stream, a gateway timeout) with the harness's retry
+ *  ladder spent — the ship runner reads it off the child's record to re-run a
+ *  round-0 child that pushed nothing instead of aborting the unit
+ *  (docs/reference/specs/agent-ship.md item 9, issue 1932). A failure without
+ *  a name here leaves the record without the field. */
+export const RUN_FAILURE_KINDS = ["policy_refusal", "provider_transient"] as const;
 export type RunFailureKind = (typeof RUN_FAILURE_KINDS)[number];
 export interface RunFailure {
   kind: RunFailureKind;

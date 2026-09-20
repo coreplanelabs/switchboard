@@ -404,6 +404,11 @@ export interface RoundRef {
   /** Round 0 is the coding round; review round n and its findings step share n. */
   index: number;
   kind: RoundKind;
+  /** The round's attempt when it was re-run (agent-ship item 9, issue 1932):
+   *  2 for round 0's one re-run after a provider transient with nothing
+   *  pushed. Absent on a first attempt; suffixes the round's step names so the
+   *  Workflow's durable cache never hands the re-run the dead attempt's answers. */
+  attempt?: number;
 }
 export type ChildPreset = "coding" | "review";
 
@@ -524,6 +529,10 @@ export type ChildFacts =
       leaseStartedAt?: number;
       costUsd?: number | null;
       handoffLists?: Handoff;
+      /** The failure by name off a `failed` run's record (run-history item 57):
+       *  `provider_transient` marks a child a gateway 5xx, a cut stream or a
+       *  gateway timeout ended past the harness's retry ladder (issue 1932). */
+      failure?: { kind: string };
     };
 
 /** What heads the unit's branch on GitHub: nothing, an open pull request, or —
@@ -724,6 +733,14 @@ export type UnitEnding =
       spent: ShipBudgetSpent;
     }
   | { kind: "no_verdict"; round: RoundRef; reviewRounds: number; finalReply?: string }
+  /** Round 0's coding child died on a provider transient — a model-gateway
+   *  5xx, a cut stream, a gateway timeout, past the harness's retry ladder —
+   *  with nothing pushed, TWICE: the first such death re-ran the round once
+   *  (the ledger row and the branch untouched, a re-run costs only minutes),
+   *  and the second is the ending (agent-ship item 9, issue 1932). Named
+   *  `transient` so it reads as a condition beside `checks_failed` and `held`
+   *  in the plane's table, never as the child failing on its task. */
+  | { kind: "transient"; round: RoundRef; runId: string; reviewRounds: number }
   | { kind: "interrupted"; round: RoundRef; runId: string; reviewRounds: number }
   | { kind: "refused"; refusal: string; message?: string; round: RoundRef; reviewRounds: number }
   /** The unit idles instead of ending (record 0051): with the resolved
@@ -898,6 +915,11 @@ type Phase =
        *  pushed: the pr-check recovers a pushed branch by opening its pull
        *  request; with nothing pushed the unit ends with the child's own reason. */
       dead?: "failed" | "interrupted";
+      /** The dead child's record names a provider transient (`failure:
+       *  provider_transient`, issue 1932): with nothing pushed, round 0 is
+       *  re-run once instead of the unit aborting; a second transient in the
+       *  same round is the `transient` ending. */
+      transient?: true;
     }
   | { at: "merge"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number }
   | { at: "merge-wait"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number }
@@ -1045,7 +1067,8 @@ function roundCarve(s: UnitPipelineState, round: RoundRef): Carve {
 export const stepPrefixOf = (unit: string, session: UnitSession | undefined): string =>
   session !== undefined && session.segment > 1 ? `${unit}/s${session.segment}` : unit;
 const stepPrefix = (s: UnitPipelineState) => stepPrefixOf(s.input.unit.id, s.input.session);
-const roundStep = (s: UnitPipelineState, round: RoundRef) => `${stepPrefix(s)}/${round.index}/${round.kind}`;
+const roundStep = (s: UnitPipelineState, round: RoundRef) =>
+  `${stepPrefix(s)}/${round.index}/${round.kind}${round.attempt !== undefined ? `/a${round.attempt}` : ""}`;
 
 function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
   const unit = s.input.unit.id;
@@ -1378,7 +1401,19 @@ function settleCoding(
   // request (agent-ship items 10 and 15), and only a branch with
   // nothing on it ends the unit with the child's own reason.
   if (facts.status === "failed")
-    return { state: { ...next, phase: { at: "pr-check", round, runId, dead: "failed" } }, notes: [] };
+    return {
+      state: {
+        ...next,
+        phase: {
+          at: "pr-check",
+          round,
+          runId,
+          dead: "failed",
+          ...(facts.failure?.kind === "provider_transient" ? { transient: true as const } : {}),
+        },
+      },
+      notes: [],
+    };
   next = {
     ...next,
     phase: {
@@ -1747,6 +1782,16 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
         roundNote(round, "aborted"),
       ]);
     if (phase.dead === "failed") {
+      // A provider transient with nothing pushed is not the child's failure
+      // (issue 1932): the ledger row and the branch are untouched, so round 0
+      // is re-run once — a fresh attempt under fresh step names — and only a
+      // second transient in the same round is the ending, named `transient`.
+      if (phase.transient && round.kind === "coding" && pr.unrecovered === "no_commits") {
+        if ((round.attempt ?? 1) < 2) return enterRound(s, { ...round, attempt: 2 }, [roundNote(round, "transient")]);
+        return end(s, { kind: "transient", round, runId: phase.runId, reviewRounds: s.reviewRounds }, [
+          roundNote(round, "transient"),
+        ]);
+      }
       // The abort repeats the bot's reason for recovering nothing, and claims
       // no more than the answer carried.
       const why =
@@ -2467,6 +2512,13 @@ export function renderUnitReport(
         writeUpPointer(s, e.round.kind, e.runId),
         `🔁 Segment ${e.segment - 1} ended at its lease with the unit unfinished — ${e.line}. Segment ${e.segment} opens in this thread${e.from !== undefined ? ` from \`${e.from.slice(0, 7)}\`` : ""} under a fresh ${s.input.caps.maxMinutes}-minute lease, with this segment's write-up as its request; ${e.renewalsLeft} renewal${e.renewalsLeft === 1 ? "" : "s"} remain${e.spendUsd !== null ? `, $${e.spendUsd.toFixed(2)} spent so far` : ""}.`,
         aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
+      ]);
+    case "transient":
+      return join([
+        `⚠️ The coding child of round ${e.round.index} (run ${e.runId}) died on a provider transient — a model-gateway 5xx, a cut stream or a gateway timeout past the harness's retry ladder — with nothing pushed, after the round was already re-run once for the same reason. The task itself was never the problem.`,
+        aside(writeUpPointer(s, e.round.kind, s.lastCodingRunId)),
+        `⚠️ Ship ended after ${rounds}; re-issue once the provider settles.`,
+        reissue,
       ]);
     case "no_verdict":
       return join([

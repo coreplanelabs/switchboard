@@ -186,6 +186,13 @@ export const FLOORS: Readonly<Record<RoundKind, number>> = {
  *  when the remainder allows it. */
 export const MERGE_WAIT_ASK_MINUTES = 60;
 
+/** The provider retry ladder (issue 1932): the backoff before each retry of a
+ *  transient model-call failure — a gateway 5xx, a stream cut before
+ *  `message_stop`, a gateway timeout. Three attempts with growing waits,
+ *  charged to the run's lease; the waits stay small next to the run's minutes
+ *  because the observed blips are edge transients of seconds. */
+export const PROVIDER_RETRY_BACKOFFS_MS = [5_000, 15_000, 45_000] as const;
+
 /** A hosted ship parent's deadline margin past the pipeline's wall clock
  *  (record 0060): the row's `state.hosting.until` is the hand-off time plus
  *  the instance's `caps.maxMinutes` plus this hour, absorbing the runner's own

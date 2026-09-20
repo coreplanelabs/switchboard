@@ -64,7 +64,7 @@ import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
 import type { Settlement, ToolUsePart } from "../../runLedger/resume.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
-import { loopClock, MINUTE_MS, turnLeaseMs } from "../../budgets.js";
+import { loopClock, MINUTE_MS, PROVIDER_RETRY_BACKOFFS_MS, turnLeaseMs } from "../../budgets.js";
 import { followUpMessageId, followUpPrompt, followUpSnippet, type FollowUpInput } from "../../threadAdmission.js";
 import { PiBridge } from "./bridge.js";
 import {
@@ -143,9 +143,6 @@ const CALL_SEEN_TICK_MS = 50;
  *  call produced nothing, so the model simply picks up where it stood. */
 const PROVIDER_RETRY_PROMPT =
   "The previous model call failed mid-stream and is being retried; continue where you left off.";
-/** One backoff before the single retry — long enough to ride out a provider
- *  blip, short next to the run's minutes. */
-const PROVIDER_RETRY_BACKOFF_MS = 5_000;
 
 /** A provider failure worth one retry: a stream cut mid-message, a dropped
  *  connection, an overload or a retryable status code — never an auth or
@@ -381,6 +378,19 @@ export class ModelPolicyRefusedError extends Error {
   constructor(readonly providerMessage: string) {
     super(POLICY_REFUSAL_REPLY);
     this.name = "ModelPolicyRefusedError";
+  }
+}
+
+/** The run's model call failed on a provider transient — a gateway 5xx, a
+ *  stream cut before `message_stop`, a gateway timeout — with the retry ladder
+ *  spent (issue 1932). The failure by name: the run loop marks the record
+ *  `failure: provider_transient` (run-history item 57) so a coordinator
+ *  reading the child's record can tell an edge blip from the child failing on
+ *  its task and re-run the round instead of aborting the unit. */
+export class ModelTransientFailureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ModelTransientFailureError";
   }
 }
 
@@ -1578,9 +1588,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     let providerError: string | undefined;
     /** The failed call was refused under the provider's usage policy: the failure by name (item 6). */
     let providerRefusal = false;
-    /** The one transient failure this run already spent its retry on. */
-    let retriedProviderError: string | undefined;
-    let retryPromptSent = false;
+    /** Retries of transient provider failures already spent, off the bounded
+     *  ladder (`PROVIDER_RETRY_BACKOFFS_MS`, issue 1932) — charged to the lease. */
+    let providerRetries = 0;
+    /** A transient failure waiting for pi to settle so its retry can be re-driven. */
+    let retryOwed = false;
     /** A container command under the read failed saying the runtime was replaced (item 16): the loop ends for the judgement below. */
     let containerSaid: Error | undefined;
     /** A container command under the read failed on its transport with no word
@@ -1759,20 +1771,22 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           note("harness_error", `a model call failed while the bot was away (${obs.providerError}); continuing`);
         else if (
           obs.policyRefusal !== true &&
-          retriedProviderError === undefined &&
+          providerRetries < PROVIDER_RETRY_BACKOFFS_MS.length &&
           !writeUp &&
           isTransientProviderError(obs.providerError)
         ) {
-          // A truncated stream or a dropped connection is transient: the run
-          // gets ONE retry — the failed call produced nothing, so pi is
-          // re-prompted after a short backoff when it settles below. A second
-          // failure, or a non-transient one, fails the run as before. A call
+          // A truncated stream, a dropped connection or a gateway 5xx is
+          // transient: the run retries on the bounded ladder (issue 1932) —
+          // the failed call produced nothing, so pi is re-prompted after the
+          // attempt's backoff when it settles below, each attempt a note on
+          // the record and its wait charged to the lease. A failure past the
+          // ladder, or a non-transient one, fails the run as before. A call
           // refused under the provider's usage policy is never transient: the
           // same words would be refused again.
-          retriedProviderError = obs.providerError;
+          retryOwed = true;
           note(
             "harness_error",
-            `the model call failed (${obs.providerError}) — that looks transient; retrying once after ${PROVIDER_RETRY_BACKOFF_MS / 1000}s`,
+            `the model call failed (${obs.providerError}) — that looks transient; retry ${providerRetries + 1} of ${PROVIDER_RETRY_BACKOFFS_MS.length} after ${PROVIDER_RETRY_BACKOFFS_MS[providerRetries]! / 1000}s`,
           );
         } else if (cutAborted && !finaleAborted && isAbortedProviderError(obs.providerError)) {
           // The cut turn closing on the cut's own abort (decision 0046, unit
@@ -1793,14 +1807,20 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         }
       }
       if (obs.settled && !catchingUp) {
-        if (retriedProviderError !== undefined && providerError === undefined && !retryPromptSent && !hardStopped) {
-          // pi settled on the failed call: back off, then re-drive it. The
-          // retry's prompt carries its own id, so nothing mistakes its response
-          // for the seed's — and a reset that races its send is resolved by
-          // that id's echo like the seed's (item 16), never an id-less write.
-          retryPromptSent = true;
-          await deps.sleep(PROVIDER_RETRY_BACKOFF_MS);
-          sends.send({ id: `${ids.prompt}:retry`, type: "prompt", message: PROVIDER_RETRY_PROMPT });
+        if (retryOwed && providerError === undefined && !hardStopped) {
+          // pi settled on the failed call: back off on the attempt's rung,
+          // then re-drive it. The retry's prompt carries its own id, so nothing
+          // mistakes its response for the seed's — and a reset that races its
+          // send is resolved by that id's echo like the seed's (item 16),
+          // never an id-less write.
+          retryOwed = false;
+          await deps.sleep(PROVIDER_RETRY_BACKOFFS_MS[providerRetries]!);
+          providerRetries += 1;
+          sends.send({
+            id: providerRetries === 1 ? `${ids.prompt}:retry` : `${ids.prompt}:retry:${providerRetries}`,
+            type: "prompt",
+            message: PROVIDER_RETRY_PROMPT,
+          });
           check();
           if (hardStopped) break;
           continue;
@@ -1933,9 +1953,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       if (bypass) throw bypass;
       if (providerError !== undefined) {
         if (providerRefusal) throw policyRefused(providerError);
+        // A transient failure past the ladder is the failure by type (issue
+        // 1932): the record is marked `provider_transient`, so a coordinator
+        // can re-run the round instead of aborting the unit.
+        if (isTransientProviderError(providerError))
+          throw new ModelTransientFailureError(
+            `the model call failed after ${providerRetries} ${providerRetries === 1 ? "retry" : "retries"}: ${providerError} — this is usually transient; re-ask in the thread to run it again`,
+          );
         throw new Error(
-          retriedProviderError !== undefined
-            ? `the model call failed after a retry: ${providerError} — this is usually transient; re-ask in the thread to run it again`
+          providerRetries > 0
+            ? `the model call failed after ${providerRetries} ${providerRetries === 1 ? "retry" : "retries"}: ${providerError}`
             : `the model call failed: ${providerError}`,
         );
       }

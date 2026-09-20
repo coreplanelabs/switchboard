@@ -1,4 +1,4 @@
-import { ALLOWANCES, bearerExpiresAt, loopClock, MINUTE_MS } from "../../budgets.js";
+import { ALLOWANCES, bearerExpiresAt, loopClock, MINUTE_MS, PROVIDER_RETRY_BACKOFFS_MS } from "../../budgets.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentDef } from "../../../agents/registry.js";
 import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../../execution/executor.js";
@@ -67,6 +67,7 @@ import {
   compactionSteer,
   isTransientProviderError,
   ModelPolicyRefusedError,
+  ModelTransientFailureError,
   PiContainerReplacedError,
   POLICY_REFUSAL_REPLY,
   promptOf,
@@ -1047,26 +1048,31 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   });
 
   // Feature: docs/reference/specs/harness-pi.md item 6 — a transient provider
-  // failure (a stream cut mid-message) gets ONE retry after a backoff; a
-  // second failure fails the run naming the retry in plain words.
-  it("a transient provider failure is retried once after a backoff — pi is re-prompted and the retry's answer is the run's", async () => {
-    const w = world();
-    const streamError = {
+  // failure (a gateway 5xx, a stream cut mid-message) retries on the bounded
+  // ladder (issue 1932): each attempt a note on the record, its wait charged
+  // to the lease; a failure past the ladder fails the run in plain words.
+  it("a 5xx then success: the transient failure is retried after the ladder's first backoff — pi is re-prompted and the retry's answer is the run's", async () => {
+    const slept: number[] = [];
+    const w = world({ sleep: async (ms) => void slept.push(ms) });
+    const gatewayError = {
       type: "message_end",
       message: {
         role: "assistant",
         content: [],
         stopReason: "error",
-        errorMessage: "Anthropic stream ended before message_stop",
+        errorMessage: '502 {"title":"Error 502: Bad gateway","error_name":"origin_bad_gateway"}',
       },
     };
     scriptedPi(w.container, (n, c) => {
-      if (n === 0) c.emit(streamError, { type: "agent_settled" });
+      if (n === 0) c.emit(gatewayError, { type: "agent_settled" });
       else finalTurn(c, "recovered");
     });
     const answer = await w.start();
     expect(answer).toBe("recovered");
-    expect(w.notes.some((n) => n.includes("retrying once"))).toBe(true);
+    // The attempt is on the record, naming its rung of the ladder.
+    expect(w.notes.some((n) => n.includes("retry 1 of 3"))).toBe(true);
+    // The wait is the rung's, charged to the lease through the harness's sleep.
+    expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
     const prompts = w.container.commands().filter((c) => c.type === "prompt");
     expect(prompts).toHaveLength(2);
     expect(prompts[1]).toMatchObject({ message: expect.stringContaining("failed mid-stream") });
@@ -1076,22 +1082,36 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(prompts[1].id).not.toBe(prompts[0].id);
   });
 
-  it("a retry that also fails ends the run saying it is retryable in plain words; a non-transient error is never retried", async () => {
-    const streamError = {
+  it("a 5xx on every attempt spends the whole ladder then ends the run by type, each attempt on the record with its growing wait; a non-transient error is never retried", async () => {
+    const gatewayError = {
       type: "message_end",
       message: {
         role: "assistant",
         content: [],
         stopReason: "error",
-        errorMessage: "Anthropic stream ended before message_stop",
+        errorMessage: '502 {"title":"Error 502: Bad gateway","error_name":"origin_bad_gateway"}',
       },
     };
-    const twice = world();
-    scriptedPi(twice.container, (_n, c) => c.emit(streamError, { type: "agent_settled" }));
-    await expect(twice.start()).rejects.toThrow(
-      /the model call failed after a retry: .*stream ended.*re-ask in the thread/,
+    const slept: number[] = [];
+    const always = world({ sleep: async (ms) => void slept.push(ms) });
+    scriptedPi(always.container, (_n, c) => c.emit(gatewayError, { type: "agent_settled" }));
+    const err = await always.start().then(
+      () => undefined,
+      (e: unknown) => e,
     );
-    expect(twice.container.commands().filter((c) => c.type === "prompt").length).toBe(2);
+    // The failure by type (the run loop marks the record `provider_transient`),
+    // naming the spent ladder in plain words.
+    expect(err).toBeInstanceOf(ModelTransientFailureError);
+    expect((err as Error).message).toMatch(/the model call failed after 3 retries: .*502.*re-ask in the thread/);
+    // Each attempt is a run note on its rung, and each wait grew.
+    for (const [i, backoff] of PROVIDER_RETRY_BACKOFFS_MS.entries()) {
+      expect(always.notes.some((n) => n.includes(`retry ${i + 1} of ${PROVIDER_RETRY_BACKOFFS_MS.length}`))).toBe(true);
+      expect(slept).toContain(backoff);
+    }
+    // The seed plus the ladder's three re-drives, each under its own id.
+    const prompts = always.container.commands().filter((c) => c.type === "prompt");
+    expect(prompts).toHaveLength(4);
+    expect(new Set(prompts.map((p) => p.id)).size).toBe(4);
 
     const auth = world();
     scriptedPi(auth.container, (_n, c) =>
