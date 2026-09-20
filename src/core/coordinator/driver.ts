@@ -434,6 +434,9 @@ function prCheckReturn(step: string, a: BotAnswer): StepReturn {
         ...(Array.isArray(a.body.fixupCommits) && a.body.fixupCommits.every((s: unknown) => typeof s === "string")
           ? { fixupCommits: a.body.fixupCommits as string[] }
           : {}),
+        // The base's merge-queue rule beside the checks (issue 2011): the
+        // merge:person report says the person's merge is queued.
+        ...(typeof a.body.baseHasMergeQueue === "boolean" ? { baseHasMergeQueue: a.body.baseHasMergeQueue } : {}),
       },
       at,
     };
@@ -877,6 +880,11 @@ async function runUnit(
                   // approved-but-not-merge-ready, never "merge-ready".
                   ...(check.pr.mergeableState !== undefined ? { mergeableState: check.pr.mergeableState } : {}),
                   ...(check.pr.fixupCommits !== undefined ? { fixupCommits: check.pr.fixupCommits } : {}),
+                  // The base's merge-queue rule (issue 2011): the merge:person
+                  // path names "queued" in its remaining-gate line.
+                  ...(check.pr.baseHasMergeQueue !== undefined
+                    ? { baseHasMergeQueue: check.pr.baseHasMergeQueue }
+                    : {}),
                 };
             } catch {
               // the report simply omits the fact

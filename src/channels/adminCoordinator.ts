@@ -1370,6 +1370,14 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
       const prRef = { repo: instance.repo, number: open.number };
       const facts = body.checks === true ? await deps.fetchPrFacts(prRef).catch(() => undefined) : undefined;
       const fixups = body.checks === true ? await deps.fixupCommitSubjects(prRef).catch(() => undefined) : undefined;
+      // The base's merge-queue rule beside the checks (issue 2011): read only
+      // on the ending's facts read, so a `merge: person` report can say the
+      // person's merge is queued. Unreadable rules leave the field out.
+      const queueBase = facts?.baseRef ?? instance.base;
+      const baseHasMergeQueue =
+        body.checks === true && deps.branchHasMergeQueue !== undefined && queueBase !== undefined
+          ? await deps.branchHasMergeQueue(instance.repo, queueBase).catch(() => undefined)
+          : undefined;
       return json(200, {
         ok: true,
         state: "open",
@@ -1384,6 +1392,7 @@ async function prCheck(body: Record<string, unknown>, deps: AdminCoordinatorDeps
         ...(checks !== undefined ? { checks } : {}),
         ...(facts?.mergeableState !== undefined ? { mergeableState: facts.mergeableState } : {}),
         ...(fixups !== undefined ? { fixupCommits: fixups } : {}),
+        ...(typeof baseHasMergeQueue === "boolean" ? { baseHasMergeQueue } : {}),
         at,
       });
     }
