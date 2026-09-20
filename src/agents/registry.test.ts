@@ -131,15 +131,16 @@ describe("agent registry matches the feature specs", () => {
     expect(AGENTS.general.identity).toBe("none");
     expect(AGENTS.research.identity).toBe("none");
     expect(AGENTS.conductor.identity).toBe("none");
+    expect(AGENTS.orchestrator.identity).toBe("none");
   });
 
-  it("door declarations: how a plain message reaches each preset — the table for the five routable ones (ship among them), the compound form alone for the conductor, a directive alone for coding", () => {
+  it("door declarations: how a plain message reaches each preset — the table for the six routable ones (ship among them), the compound form alone for the conductor, a directive alone for coding", () => {
     // `presetDoor` reads `routable` off the def and names the compound preset
     // (docs/reference/specs/routing-and-config.md item 21); `help` renders its
     // lines from it, so a preset's door is declared once, here. Ship is routed
     // — a routed ship runs a generated plan merged by a person — and coding is
     // directive-only: a bare write ask deserves the coding → review loop.
-    for (const name of ["general", "ship", "review", "research", "explore"])
+    for (const name of ["general", "ship", "review", "research", "explore", "orchestrator"])
       expect(presetDoor(AGENTS[name]), name).toBe("routed");
     expect(COMPOUND_PRESET).toBe("conductor");
     expect(presetDoor(AGENTS.conductor)).toBe("compound");
@@ -327,7 +328,7 @@ describe("the workspace prompts name the image toolchain", () => {
   });
 
   it("the prompts without a workspace name none of it", () => {
-    for (const name of ["general", "research", "conductor"]) {
+    for (const name of ["general", "research", "conductor", "orchestrator"]) {
       expect(AGENTS[name].system, name).not.toMatch(/ffmpeg|playwright/);
     }
   });
@@ -1153,7 +1154,7 @@ describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
     const siblings = Object.values(AGENTS).filter((a) => a.name !== "conductor");
     const readers = siblings.filter((a) => a.identity !== "write");
     const writers = siblings.filter((a) => a.identity === "write");
-    expect(readers.map((a) => a.name)).toEqual(["general", "review", "research", "explore"]);
+    expect(readers.map((a) => a.name)).toEqual(["general", "review", "research", "explore", "orchestrator"]);
     expect(writers.map((a) => a.name)).toEqual(["coding", "ship"]);
     const list = sys.split("\n\n").find((p) => p.startsWith("THE PRESETS"))!;
     expect(list).toBeDefined();
@@ -1185,6 +1186,61 @@ describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
 
   it("conductor stays out of the single-route table: routable is false, and the def says the compound form is its one door", () => {
     expect(AGENTS.conductor.routable).toBe(false);
+  });
+});
+
+// Feature: record 0070, criteria 3 and 5 (docs/reference/specs/orchestration-plane.md
+// item 12) — the orchestrator preset: the plane's chat. No workspace, no shell,
+// no credential; its reach is the read tool set, its fleet facts come from the
+// plane's tables with the row cited, and a question the tables cannot answer
+// is said so, never recalled.
+describe("orchestrator agent (record 0070 — the plane's chat preset)", () => {
+  it("the capability row: no workspace (machine none), no credential (identity none), the orchestrator read toolset, and a budget sized for table reads", () => {
+    expect(AGENTS.orchestrator.machine).toBe("none");
+    expect(AGENTS.orchestrator.identity).toBe("none");
+    expect(AGENTS.orchestrator.toolset).toBe("orchestrator");
+    expect(AGENTS.orchestrator.maxMinutes).toBe(10);
+    expect(AGENTS.orchestrator.residentSystem).toBeUndefined();
+    expect(AGENTS.orchestrator.seededSystem).toBeUndefined();
+    expect(getAgent("orchestrator")).toBe(AGENTS.orchestrator);
+  });
+
+  it("reads and cites rows, so it may run fast; a plain message reaches it through the router's table like any other read preset", () => {
+    expect(AGENTS.orchestrator.tiers).toContain("fast");
+    expect(presetDoor(AGENTS.orchestrator)).toBe("routed");
+  });
+
+  it("its instructions make the tables the only source for a fleet fact: read before answering, cite the row read, and never answer a standing question from the conversation's earlier turns", () => {
+    const sys = AGENTS.orchestrator.system;
+    expect(sys).toMatch(/EVERY FLEET FACT COMES FROM THE TABLES, NEVER FROM MEMORY/);
+    expect(sys).toContain("`plane_show`");
+    expect(sys).toMatch(/cite the row you read/);
+    expect(sys).toMatch(/an earlier turn is history, the table is now/);
+  });
+
+  it("a question the tables cannot answer refuses to recall: the prompt orders 'the tables do not say' over a guess, and says the preset cannot act on the fleet itself", () => {
+    const sys = AGENTS.orchestrator.system;
+    expect(sys).toMatch(/answered "the tables do not say", plainly, instead of recalling or guessing/);
+    expect(sys).toMatch(/cannot run commands, edit code, merge or stop anything from here/);
+  });
+
+  it("the prose speaks record 0066's twelve nouns — no thirteenth noun rides in with the column", () => {
+    const sys = AGENTS.orchestrator.system;
+    for (const noun of [
+      "thread",
+      "run",
+      "agent",
+      "pipeline",
+      "unit",
+      "round",
+      "budget",
+      "follow-up",
+      "verdict",
+      "outcome",
+      "card",
+      "pull request",
+    ])
+      expect(sys, noun).toContain(noun);
   });
 });
 
@@ -1352,7 +1408,14 @@ describe("the status-card rule is one sentence for every tool-running preset", (
   it("every prompt naming update_status — the conductor aside, whose items are children — says ✱ on the first command, ✓ only after the result is read, never in the same turn", () => {
     const presets = Object.entries(AGENTS).filter(([name]) => name !== "conductor");
     const carrying = presets.filter(([, a]) => prompts(a).length > 0);
-    expect(carrying.map(([name]) => name).sort()).toEqual(["coding", "explore", "general", "research", "review"]);
+    expect(carrying.map(([name]) => name).sort()).toEqual([
+      "coding",
+      "explore",
+      "general",
+      "orchestrator",
+      "research",
+      "review",
+    ]);
     for (const [, a] of carrying) {
       for (const sys of prompts(a)) {
         expect(sys).toContain("Mark an item ✱ when you issue the first command that does it");

@@ -2348,6 +2348,7 @@ describe("boundaries (Scope.boundary): a scope caps, never grants", () => {
         research: true,
         explore: true,
         conductor: true,
+        orchestrator: true,
       },
       "slack:UDEV": {
         general: true,
@@ -2357,6 +2358,7 @@ describe("boundaries (Scope.boundary): a scope caps, never grants", () => {
         research: true,
         explore: true,
         conductor: true,
+        orchestrator: true,
       },
       "slack:UADMIN": {
         general: true,
@@ -2366,6 +2368,7 @@ describe("boundaries (Scope.boundary): a scope caps, never grants", () => {
         research: true,
         explore: true,
         conductor: true,
+        orchestrator: true,
       },
     };
     expect(Object.keys(baseline["slack:URANDOM"]).sort()).toEqual(Object.keys(AGENTS).sort());

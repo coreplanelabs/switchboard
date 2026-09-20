@@ -74,7 +74,7 @@ export interface AgentDef {
   system: string;
   /** key into TOOLSETS (src/tools/toolsets.ts): the tools the bot relays to
    *  the preset's pi; pi's own workspace tools follow `identity`. */
-  toolset: "full" | "readonly" | "web" | "assistant" | "explore" | "conductor" | "none";
+  toolset: "full" | "readonly" | "web" | "assistant" | "explore" | "conductor" | "orchestrator" | "none";
   /** The runaway guard, not a budget: `runawayTurnCap(maxMinutes)` for every
    *  preset that runs the loop (`loopBudget`). The wall clock below is the
    *  budget; a run that reaches this cap first was pacing like a loop, and its
@@ -647,6 +647,32 @@ ${BREVITY_RULE}
 ${FENCED_CONTENT_RULE}
 Report outcomes faithfully: a check you could not run is "could not check", never a guess. Use Slack-friendly formatting (no markdown headers; *bold*, bullets, code blocks — render the claim table as aligned rows inside a code block). Your final message is posted to Slack: lead with the overall verdict in one line, then the claim table, then what a follow-up should do.`;
 
+// The orchestrator (record 0070; docs/reference/specs/orchestration-plane.md
+// item 11): the plane's chat preset — one long-lived thread per person beside
+// the panels, and `agent:orchestrator` from any channel a grant admits. It
+// reads the fleet from the plane's projections (the `plane_show` tool answers
+// the SAME rows the panels paint) and never from its own context: every fleet
+// fact cites the row it read, and a question the tables cannot answer says so
+// instead of recalling. Machine `none`, identity `none`: no workspace, no
+// shell, no credential — the read tool set is its whole reach, and its writes
+// are the registry's fenced commands through the door (record 0070's later
+// units), never a tool here. The prose speaks record 0066's twelve nouns:
+// thread, run, agent, pipeline, unit, round, budget, follow-up, verdict,
+// outcome, card, pull request — no thirteenth noun rides in.
+const ORCHESTRATOR_SYSTEM = `You are Switchboard's orchestrator: the control plane's chat, answering a person about their fleet — every thread, run, agent, pipeline, unit, round, budget, follow-up, verdict, outcome, card and pull request the plane's tables carry.
+
+You have no workspace and no shell. Your tools: \`plane_show\` (the plane's live tables — every live and recently ended run, every unit and every tracked pull request, each with its owner and its health: the same rows the /plane panels paint, seen as the person who asked may see them), \`recall\` and \`notes\` (this thread's log and your notepad), and \`update_status\`.
+
+EVERY FLEET FACT COMES FROM THE TABLES, NEVER FROM MEMORY. Before answering any question about the fleet — what is running, which unit is idle, which pull request is merge-ready and nobody's — read the tables with \`plane_show\` and cite the row you read: name the run id, the unit or the pull request the answer stands on, so the person can check it against the panel beside you. Never answer a standing question from this conversation's earlier turns or your own context: an earlier turn is history, the table is now. A question the tables cannot answer — a why the rows do not carry, a fact outside the fleet — is answered "the tables do not say", plainly, instead of recalling or guessing; say what the rows do show and where the answer would live.
+
+You cannot run commands, edit code, merge or stop anything from here: acting on the fleet goes through Switchboard's own commands, which the person's own words reach through the door under their own grants — say what you found and let their next sentence act.
+
+${statusCardRule('"Read the plane tables", "Check the run\'s standing"')} A one-read answer needs no checklist.
+
+${BREVITY_RULE}
+${FENCED_CONTENT_RULE}
+Lead with the answer, then the cited rows — short lines, the row's own words. Your reply renders in the plane's chat column or the channel the question came from.`;
+
 // The conductor (docs/reference/specs/agent-conductor.md): a run that starts
 // other runs instead of doing the work — the spawn/await substrate's first
 // preset. A child is a `dispatch()` run as the requesting user, in a thread of
@@ -824,6 +850,20 @@ const WORK_PRESETS = {
     maxTokens: 64000,
     ...loopBudget("explore"),
     // No built-in effort: the deployment decides, as for coding.
+  },
+  orchestrator: {
+    name: "orchestrator",
+    description:
+      "Answers fleet questions from the plane's live tables — runs, units, pull requests — with the row cited. No workspace or shell.",
+    system: ORCHESTRATOR_SYSTEM,
+    toolset: "orchestrator",
+    // The plane read is a call in the bot process: nothing is provisioned
+    // and no credential is minted (record 0070, criterion 3).
+    machine: "none",
+    identity: "none",
+    tiers: ["fast", "strong"], // reads and cites rows: may run fast
+    maxTokens: 16000,
+    ...loopBudget("orchestrator"),
   },
 } satisfies Record<string, AgentDef>;
 

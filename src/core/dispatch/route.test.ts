@@ -140,9 +140,10 @@ describe("routablePresets — the table is the registry, never a copy", () => {
     }
   });
 
-  it("holds the five presets a plain message can mean; coding (a bare write ask deserves ship's review loop) and the conductor (it starts runs) are left to a directive", () => {
+  it("holds the six presets a plain message can mean; coding (a bare write ask deserves ship's review loop) and the conductor (it starts runs) are left to a directive", () => {
     const names = presets.map((p) => p.name);
-    for (const name of ["general", "ship", "review", "research", "explore"]) expect(names).toContain(name);
+    for (const name of ["general", "ship", "review", "research", "explore", "orchestrator"])
+      expect(names).toContain(name);
     expect(names).not.toContain("coding");
     expect(names).not.toContain("conductor");
     expect(AGENTS.coding.routable).toBe(false);
@@ -180,6 +181,35 @@ describe("routablePresets — the table is the registry, never a copy", () => {
       expect(row).toContain(`| ${p.identity} |`);
       expect(row).toContain(`| ${p.maxMinutes} min |`);
     }
+  });
+});
+
+// Feature: record 0070, criterion 3 (docs/reference/specs/orchestration-plane.md
+// item 12) — a fleet question is answered from the plane's tables, never from
+// the model's context: the router's table offers the orchestrator preset as
+// the row for it, its description naming the plane's tables and the cited row
+// so the router has grounds, and a route naming it is accepted like any other.
+describe("the orchestrator preset answers a fleet question from the tables", () => {
+  it("a fleet question routes to the orchestrator: its table row names the plane's tables and the cited row, and a route naming it is accepted", async () => {
+    const row = presets.find((p) => p.name === "orchestrator")!;
+    expect(row).toBeDefined();
+    expect(row.description).toMatch(/plane's live tables/);
+    expect(row.description).toMatch(/row cited/);
+    expect(row.machine).toBe("none");
+    expect(row.identity).toBe("none");
+    const model = scripted(answer("orchestrator", "a question about the fleet's standing"));
+    const d = await route(
+      {
+        text: "which unit is idle, and which pull request is merge-ready and nobody's?",
+        recentDirectives: {},
+        presets,
+        fallback: "general",
+        allowed: allNames,
+      },
+      model,
+    );
+    expect(d.preset).toBe("orchestrator");
+    expect(model.prompts).toHaveLength(1);
   });
 });
 
@@ -573,7 +603,7 @@ describe("routeTool — the answer's schema, derived from the offered table", ()
     expect(schema.properties.parts.minItems).toBe(2);
     expect(schema.properties.parts.maxItems).toBe(3);
     expect(schema.properties.parts.items.required).toEqual(["preset", "text"]);
-    expect(readers).toEqual(["general", "review", "research", "explore"]);
+    expect(readers).toEqual(["general", "review", "research", "explore", "orchestrator"]);
     expect(writers).toEqual(["ship"]);
     expect(schema.properties.parts.items.properties.preset.enum).toEqual(readers);
     for (const w of writers) expect(schema.properties.parts.items.properties.preset.enum).not.toContain(w);
@@ -584,7 +614,7 @@ describe("routeTool — the answer's schema, derived from the offered table", ()
     const tool = routeTool(presets, OFFER);
     const schema = tool.inputSchema as { properties: { parts: { description: string } } };
     expect(schema.properties.parts.description).toContain(
-      "each on a read-only preset (general, review, research or explore)",
+      "each on a read-only preset (general, review, research, explore or orchestrator)",
     );
     expect(schema.properties.parts.description).toMatch(/an ask that needs ship is never a part/i);
     expect(schema.properties.parts.description).toMatch(/omit parts and answer ship for the whole request/i);
@@ -1077,7 +1107,7 @@ describe("buildRoutePrompt — the compound form, described apart from the table
     expect(rules).toMatch(/answer `ship` alone for the whole request as typed/);
     expect(rules).toMatch(/"review PR 7 and fix what it finds" is one `ship` request/);
     // The form's example names a reader's slot, never "a name from the table".
-    expect(rules).toContain('"preset": "<one of general, review, research, explore>"');
+    expect(rules).toContain('"preset": "<one of general, review, research, explore, orchestrator>"');
     expect(rules).not.toContain('"preset": "<a name from the table>"');
   });
 

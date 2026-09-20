@@ -160,6 +160,46 @@ describe("resolveRun — the (agent, model, effort) triple", () => {
     expect(directed.agentSource).toBe("directive");
   });
 
+  // record 0070, criterion 5 (docs/reference/specs/orchestration-plane.md item 12):
+  // the orchestrator preset resolves through the config layers like any other —
+  // nothing hardcodes it to the plane page, and `agent:orchestrator` works from
+  // any channel a grant admits.
+  it("`agent:orchestrator` resolves through the layers: the request directive picks it anywhere, a user scope picks it with no directive, and a directive still beats the scope", () => {
+    const byDirective = resolveRun(deps(), {
+      msg: msg("agent:orchestrator which unit is idle?"),
+      directives: { agent: "orchestrator", text: "which unit is idle?" },
+      history: [],
+    });
+    expect(byDirective.resolved.agentName).toBe("orchestrator");
+    expect(byDirective.agentSource).toBe("directive");
+    const layered = {
+      config: configStore(
+        YAML +
+          `
+users:
+  "slack:UX":
+    agent: orchestrator
+    models:
+      orchestrator: anthropic/orchestrator-user-model
+`,
+      ),
+    };
+    const byUser = resolveRun(layered, {
+      msg: msg("what is running?"),
+      directives: { text: "what is running?" },
+      history: [],
+    });
+    expect(byUser.resolved.agentName).toBe("orchestrator");
+    expect(byUser.agentSource).toBe("user");
+    expect(byUser.resolved.modelRef).toBe("anthropic/orchestrator-user-model");
+    const overridden = resolveRun(layered, {
+      msg: msg("agent:review look at it"),
+      directives: { agent: "review", text: "look at it" },
+      history: [],
+    });
+    expect(overridden.resolved.agentName).toBe("review");
+  });
+
   it("with no directive anywhere the defaults apply, and the effort is unset", () => {
     const { sticky, resolved } = resolveRun(deps(), { msg: msg("hello"), directives: { text: "hello" }, history: [] });
     expect(sticky).toEqual({});

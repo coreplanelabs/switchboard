@@ -39,8 +39,17 @@ import {
 const SHIP_DEFAULT = { maxMinutes: ASKS.ship, maxRounds: 3 };
 
 describe("the budgets module — one table every wall clock derives from (docs/decisions/0046)", () => {
-  it("the asks: coding 90, review 25, research 8, general 5, explore 120, conductor 120, ship 240", () => {
-    expect(ASKS).toEqual({ general: 5, coding: 90, review: 25, ship: 240, research: 8, explore: 120, conductor: 120 });
+  it("the asks: coding 90, review 25, research 8, general 5, explore 120, conductor 120, orchestrator 10, ship 240", () => {
+    expect(ASKS).toEqual({
+      general: 5,
+      coding: 90,
+      review: 25,
+      ship: 240,
+      research: 8,
+      explore: 120,
+      conductor: 120,
+      orchestrator: 10,
+    });
   });
 
   it("every floor is at most its round's ask, and the merge wait has an ask and a floor of its own", () => {
@@ -74,8 +83,16 @@ describe("the budgets module — one table every wall clock derives from (docs/d
     expect(loopRounds(loop)[loopPosition(loop, "merge")]).toBe("merge");
   });
 
-  it("the floors are the presets': coding 15, review 5, research 3, general 2, explore and conductor 15 — the round floors derive from them (a findings round under 15 cannot run the suite its contract requires), and the ship waits are rows", () => {
-    expect(PRESET_FLOORS).toEqual({ general: 2, coding: 15, review: 5, research: 3, explore: 15, conductor: 15 });
+  it("the floors are the presets': coding 15, review 5, research 3, general and the orchestrator 2, explore and conductor 15 — the round floors derive from them (a findings round under 15 cannot run the suite its contract requires), and the ship waits are rows", () => {
+    expect(PRESET_FLOORS).toEqual({
+      general: 2,
+      coding: 15,
+      review: 5,
+      research: 3,
+      explore: 15,
+      conductor: 15,
+      orchestrator: 2,
+    });
     expect(FLOORS).toEqual({ coding: 15, findings: 15, review: 5, merge: 10 });
     expect(SHIP_WAIT).toEqual({ marginMinutes: 5, chunkMinutes: 5, mergeChunkMinutes: 5, busyRetryMinutes: 2 });
   });
@@ -235,6 +252,7 @@ describe("the stack — the write-up, the post-step and the exec margin fit insi
       research: 0,
       explore: 0,
       conductor: 0,
+      orchestrator: 0,
       ship: 0,
     });
   });
