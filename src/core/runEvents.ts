@@ -422,6 +422,12 @@ export type ShipRoundOutcome =
    *  pushed (issue 1932): the first such boundary marks the round's one
    *  re-run, a second the `transient` ending. */
   | "transient"
+  /** The merge door enqueued the pull request — the base takes changes only
+   *  through a merge queue (issue 2011): the unit waits for the queue's outcome. */
+  | "enqueued"
+  /** The merge queue removed the pull request: the removal reason becomes a
+   *  finding of the round, like a red check, and a fix round follows. */
+  | "dequeued"
   | "aborted"
   | "stopped"
   /** The coding round ended at its lease with the unit unfinished and the row

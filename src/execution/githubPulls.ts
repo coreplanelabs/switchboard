@@ -598,6 +598,166 @@ export async function mergePullRequest(
   throw new Error(`merge failed for ${pr.repo}#${pr.number}: HTTP ${res.status} ${redactAndCap(text, 300)}`);
 }
 
+// ---- the merge queue (agent-ship item 9; issue 2011) --------------------------------------------------
+
+/** GitHub's own wording when a ruleset routes every change through the merge
+ *  queue: the merge door recognises it on a 405 even when the base branch's
+ *  rules could not be read ahead of the attempt. */
+export const MERGE_QUEUE_405 = /must be made through the merge queue|merge queue/i;
+
+/** `GET /repos/{repo}/rules/branches/{branch}`: whether a `merge_queue` rule
+ *  protects the branch. Undefined when GitHub cannot be read or answers out of
+ *  shape — the caller falls back to recognising the merge's 405. */
+export async function branchHasMergeQueue(repo: string, branch: string): Promise<boolean | undefined> {
+  const token = await resolveGithubToken().catch(() => null);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com/repos/${repo}/rules/branches/${encodeURIComponent(branch)}`, {
+      headers: apiHeaders(token),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const data = (await res.json().catch(() => null)) as Array<{ type?: unknown }> | null;
+  if (!Array.isArray(data)) return undefined;
+  return data.some((rule) => rule && rule.type === "merge_queue");
+}
+
+/** One GraphQL call on the App token: the parsed `data`, or a throw naming the
+ *  HTTP status; GraphQL-level errors come back on `errors` for the caller. */
+async function graphql(
+  query: string,
+  variables: Record<string, unknown>,
+): Promise<{ data?: unknown; errors?: Array<{ message?: unknown }> }> {
+  const token = await requireToken();
+  const res = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: apiHeaders(token, true),
+    body: JSON.stringify({ query, variables }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  const text = await res.text().catch(() => "");
+  if (!res.ok) throw new Error(`GraphQL failed: HTTP ${res.status} ${redactAndCap(text, 300)}`);
+  try {
+    return JSON.parse(text) as { data?: unknown; errors?: Array<{ message?: unknown }> };
+  } catch {
+    throw new Error(`GraphQL answered out of shape: ${redactAndCap(text, 300)}`);
+  }
+}
+
+const prGraphqlArgs = (pr: { repo: string; number: number }) => {
+  const [owner, name] = pr.repo.split("/");
+  return { owner, name, number: pr.number };
+};
+
+export type EnqueueResult = { ok: true } | { ok: false; reason: string };
+
+/** The GraphQL `enqueuePullRequest` mutation — the same act `gh pr merge
+ *  --auto` performs on a merge-queue repository. A pull request already in the
+ *  queue is success (a replayed step enqueues nothing twice); any other GraphQL
+ *  error is an answer with GitHub's words, never a throw — a person decides.
+ *  A call that fails (network, HTTP) throws, like every write here. */
+export async function enqueuePullRequest(pr: { repo: string; number: number }): Promise<EnqueueResult> {
+  const looked = await graphql(
+    `
+      query ($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $number) {
+            id
+          }
+        }
+      }
+    `,
+    prGraphqlArgs(pr),
+  );
+  const nodeId = (looked.data as { repository?: { pullRequest?: { id?: unknown } } } | undefined)?.repository
+    ?.pullRequest?.id;
+  if (typeof nodeId !== "string")
+    return { ok: false, reason: firstGraphqlError(looked) ?? `${pr.repo}#${pr.number} has no node id` };
+  const answer = await graphql(
+    `
+      mutation ($id: ID!) {
+        enqueuePullRequest(input: { pullRequestId: $id }) {
+          mergeQueueEntry {
+            position
+          }
+        }
+      }
+    `,
+    { id: nodeId },
+  );
+  const error = firstGraphqlError(answer);
+  if (error === undefined) return { ok: true };
+  // Already queued — an earlier attempt's enqueue landed: the ask is satisfied.
+  if (/already.{0,20}queue/i.test(error)) return { ok: true };
+  return { ok: false, reason: error };
+}
+
+function firstGraphqlError(answer: { errors?: Array<{ message?: unknown }> }): string | undefined {
+  const msg = answer.errors?.find((e) => typeof e?.message === "string")?.message;
+  return typeof msg === "string" ? redactAndCap(msg, 300) : answer.errors?.length ? "GraphQL refused" : undefined;
+}
+
+/** Where an open pull request stands with the base's merge queue: in it, or
+ *  out of it — with the queue's own removal reason when the timeline carries a
+ *  `RemovedFromMergeQueueEvent` (a failing check in the queue, a conflict). */
+export type MergeQueueState = { queued: true; position?: number } | { queued: false; reason?: string };
+
+/** The pull request's `mergeQueueEntry` and the last removal's reason, over
+ *  GraphQL. Undefined when GitHub cannot be read — the caller treats unknown
+ *  as unanswered, never as removed. */
+export async function fetchMergeQueueState(pr: { repo: string; number: number }): Promise<MergeQueueState | undefined> {
+  let answer: Awaited<ReturnType<typeof graphql>>;
+  try {
+    answer = await graphql(
+      `
+        query ($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              mergeQueueEntry {
+                position
+              }
+              timelineItems(last: 10, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
+                nodes {
+                  ... on RemovedFromMergeQueueEvent {
+                    reason
+                  }
+                }
+              }
+            }
+          }
+        }
+      `,
+      prGraphqlArgs(pr),
+    );
+  } catch {
+    return undefined;
+  }
+  const node = (
+    answer.data as
+      | {
+          repository?: {
+            pullRequest?: {
+              mergeQueueEntry?: { position?: unknown } | null;
+              timelineItems?: { nodes?: Array<{ reason?: unknown } | null> };
+            } | null;
+          };
+        }
+      | undefined
+  )?.repository?.pullRequest;
+  if (node === undefined || node === null) return undefined;
+  const entry = node.mergeQueueEntry;
+  if (entry !== null && entry !== undefined)
+    return { queued: true, ...(typeof entry.position === "number" ? { position: entry.position } : {}) };
+  const reasons = (node.timelineItems?.nodes ?? []).filter(
+    (n): n is { reason: string } => n !== null && typeof n?.reason === "string" && n.reason.length > 0,
+  );
+  const reason = reasons.at(-1)?.reason;
+  return { queued: false, ...(reason !== undefined ? { reason: redactAndCap(reason, 300) } : {}) };
+}
+
 /** What the checks at a commit say: the runs still queued or in progress and
  *  the runs that ended in anything but success, skipped or neutral. */
 export interface CommitChecks {

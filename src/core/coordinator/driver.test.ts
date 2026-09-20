@@ -553,6 +553,36 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(end.ending.report).toContain("the runner merged nothing");
   });
 
+  it("a merge door answering enqueued keeps the unit live — the boundary rides the round route, every later ask carries `queued: true`, and the queue's merge ends the unit merged (issue 2011)", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+      round: [acked(), acked(), acked(), acked(), acked()],
+      merge: [
+        ok({ ok: true, outcome: "enqueued", reason: "enqueued at the approved head" }, T0 + 21 * MIN),
+        ok({ ok: true, outcome: "merged", by: "other", sha: MERGED, mergedAt: "2026-09-20T00:01:00Z" }, T0 + 27 * MIN),
+      ],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merged" });
+    expect(summary.outcome).toBe("completed");
+    // The first ask is the squash's; from the enqueue on, the ask says `queued`
+    // so the door reads the queue's outcome instead of squashing again.
+    expect(b.of("merge")).toEqual([
+      { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD },
+      { parentInstanceId: INSTANCE, unit: "U10", prNumber: 7, headSha: HEAD, queued: true },
+    ]);
+    // The enqueue boundary is recorded on the unit through the round route.
+    expect(b.of("round").map((r) => r.outcome)).toContain("enqueued");
+  });
+
   it("an interrupted coding child settles the round through its run-finished event and the confirming read-record; the recover pr-check names the dead run, and the pull request the bot opened from the pushed branch carries the round on to review — the round ends with the interruption's reason, never the budget clip", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
     const b = bot({

@@ -485,7 +485,10 @@ export type CoordinatorAction =
        *  over a record fact written minutes earlier. */
       pr?: number;
     }
-  | { type: "merge"; step: string; prNumber: number; headSha: string }
+  /** `queued`: the pull request is in the base's merge queue — the bot reads
+   *  the queue's outcome (merged, still queued, or removed with the reason)
+   *  instead of attempting the squash. */
+  | { type: "merge"; step: string; prNumber: number; headSha: string; queued?: true }
   /** Read the check runs at the reviewed head (record 0055, the round verdict):
    *  the merge door's own reading, folded into the round. `retry` names the
    *  failed checks whose one flake re-run the machine is spending: the bot
@@ -596,7 +599,9 @@ export type StepReturn =
   // The door found the pull request already merged after the approval — auto-merge
   // fired, or a person merged — so the runner merged nothing (`by: other`).
   | { type: "merge"; step: string; outcome: "merged"; by: "other"; sha: string; mergedAt: string; at: number }
-  | { type: "merge"; step: string; outcome: "pending" | "refused"; reason: string; at: number }
+  /** The door enqueued the pull request (or found it still queued), or the
+   *  queue removed it — the reason is the queue's own (issue 2011). */
+  | { type: "merge"; step: string; outcome: "pending" | "refused" | "enqueued" | "removed"; reason: string; at: number }
   /** The checks read at the reviewed head; `checks` absent means GitHub could
    *  not be read, which the machine treats as pending (record 0055). A retry
    *  ask answers `retried` instead: whether the bot dispatched the re-run —
@@ -634,6 +639,20 @@ export function checkFinding(f: CheckFailure): Finding {
     severity: "blocking",
     file: f.name,
     title: `CI check failed (${f.conclusion})${f.url !== undefined ? ` — ${f.url}` : ""}`,
+    check: true,
+  };
+}
+
+/** A merge-queue removal as a finding of the round (issue 2011): the queue's
+ *  reason — a failing check inside the queue, a conflict — rides the findings
+ *  brief exactly as a red check does, severity `blocking` so the level in
+ *  force always counts it, and a fix round follows. */
+export function queueRemovalFinding(reason: string): Finding {
+  return {
+    id: "check:merge-queue",
+    severity: "blocking",
+    file: "merge queue",
+    title: `removed from the merge queue — ${reason}`,
     check: true,
   };
 }
@@ -921,8 +940,11 @@ type Phase =
        *  same round is the `transient` ending. */
       transient?: true;
     }
-  | { at: "merge"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number }
-  | { at: "merge-wait"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number }
+  /** `queued`: the door enqueued the pull request — the base takes changes
+   *  only through a merge queue (issue 2011) — so every later ask reads the
+   *  queue's outcome instead of attempting the squash again. */
+  | { at: "merge"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number; queued?: true }
+  | { at: "merge-wait"; pr: PrRef; headSha: string; n: number; since: number; waitMs: number; queued?: true }
   /** The round's checks step (record 0055): the check runs at the reviewed head
    *  are read after an approve settles, before merge_ready or the merge door.
    *  `graced`: a head with no check reported has had its one-chunk grace;
@@ -1192,7 +1214,13 @@ export function nextAction(s: UnitPipelineState): CoordinatorAction {
         timeoutMs: Math.max(MIN, Math.min(MERGE_WAIT_CHUNK_MS, p.waitMs - (s.clock - p.since))),
       };
     case "merge":
-      return { type: "merge", step: `${unit}/merge/${p.n}`, prNumber: p.pr.number, headSha: p.headSha };
+      return {
+        type: "merge",
+        step: `${unit}/merge/${p.n}`,
+        prNumber: p.pr.number,
+        headSha: p.headSha,
+        ...(p.queued === true ? { queued: true as const } : {}),
+      };
     case "merge-wait":
       return {
         type: "wait-checks",
@@ -2195,27 +2223,81 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           : end(clocked, { kind: "merged", by: "runner", pr: p.pr, sha: r.sha, reviewRounds: s.reviewRounds });
       if (r.outcome === "refused")
         return end(clocked, { kind: "merge_refused", pr: p.pr, reason: r.reason, reviewRounds: s.reviewRounds });
+      if (r.outcome === "removed") {
+        // The queue removed the pull request — a failing check in the queue, a
+        // conflict: the removal reason becomes a finding of the round, like a
+        // red check does through the checks step, and a fix round follows
+        // (issue 2011). With no review run to brief the fix from (a resume
+        // straight at the merge decision) a person decides, the refusal
+        // carrying the queue's own reason.
+        const round: RoundRef = { index: s.reviewRounds, kind: "findings" };
+        if (s.reviewRunByRound[round.index] === undefined)
+          return end(clocked, {
+            kind: "merge_refused",
+            pr: p.pr,
+            reason: `the merge queue removed the pull request: ${r.reason}`,
+            reviewRounds: s.reviewRounds,
+          });
+        const findings = [...(s.findingsByRound[round.index] ?? []), queueRemovalFinding(r.reason)];
+        const next: UnitPipelineState = {
+          ...clocked,
+          findingsByRound: { ...s.findingsByRound, [round.index]: findings },
+        };
+        const notes: CoordinatorNote[] = [roundNote(round, "dequeued")];
+        if (next.reviewRounds >= next.input.caps.maxRounds)
+          return end(
+            next,
+            { kind: "round_cap", maxRounds: next.input.caps.maxRounds, reviewRounds: next.reviewRounds },
+            notes,
+          );
+        return enterRound(next, round, notes);
+      }
       const waited = r.at - p.since;
       if (waited >= p.waitMs)
         return end(clocked, {
           kind: "merge_refused",
           pr: p.pr,
-          reason: `still pending after ${Math.round(waited / MIN)} minutes (${r.reason})`,
+          reason:
+            r.outcome === "enqueued"
+              ? `still in the merge queue after ${Math.round(waited / MIN)} minutes (${r.reason}) — the queue merges it on its own; a re-issued plan finds it merged`
+              : `still pending after ${Math.round(waited / MIN)} minutes (${r.reason})`,
           reviewRounds: s.reviewRounds,
         });
+      // `enqueued` waits like `pending`, marked so every later ask reads the
+      // queue's outcome; the boundary is noted once, when the queue takes it.
+      const queued = r.outcome === "enqueued" ? true : p.queued;
       return {
         state: {
           ...clocked,
-          phase: { at: "merge-wait", pr: p.pr, headSha: p.headSha, n: p.n, since: p.since, waitMs: p.waitMs },
+          phase: {
+            at: "merge-wait",
+            pr: p.pr,
+            headSha: p.headSha,
+            n: p.n,
+            since: p.since,
+            waitMs: p.waitMs,
+            ...(queued === true ? { queued: true as const } : {}),
+          },
         },
-        notes: [],
+        notes:
+          r.outcome === "enqueued" && p.queued !== true
+            ? [roundNote({ index: s.reviewRounds, kind: "review" }, "enqueued")]
+            : [],
       };
     }
     case "merge-wait":
       return {
         state: {
           ...s,
-          phase: { at: "merge", pr: p.pr, headSha: p.headSha, n: p.n + 1, since: p.since, waitMs: p.waitMs },
+          phase: {
+            at: "merge",
+            pr: p.pr,
+            headSha: p.headSha,
+            n: p.n + 1,
+            since: p.since,
+            waitMs: p.waitMs,
+            ...(p.queued === true ? { queued: true as const } : {}),
+          },
         },
         notes: [],
       };

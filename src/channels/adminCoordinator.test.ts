@@ -21,7 +21,9 @@ import { isRunRecord, type RunRecord } from "../core/runRecord.js";
 import type { ChannelIO, IncomingMessage, StatusUpdate } from "../core/types.js";
 import type {
   CommitChecks,
+  EnqueueResult,
   MergedPrRef,
+  MergeQueueState,
   MergeResult,
   OpenPrRef,
   PullRequestFacts,
@@ -150,6 +152,13 @@ function harness(
     /** The head's self-declared fix-up commit subjects (the ending's facts read). */
     fixups?: string[] | Error;
     merge?: MergeResult | Error;
+    /** Whether a merge-queue rule protects the base (issue 2011): the door's
+     *  rules read — false by default (no queue), Error = unreadable. */
+    queueRule?: boolean | undefined | Error;
+    /** The enqueue's answer; wired only when the test provides one. */
+    enqueue?: EnqueueResult | Error;
+    /** The queue's state on a `queued` re-ask; wired only when provided. */
+    queueState?: MergeQueueState | Error;
     /** The runs page base the plan route answers (agent-ship item 12). */
     runPageBase?: string;
     /** A tiny backlog for the trim tests (record 0065): the seal must not read the trimmed snapshot's standing. */
@@ -203,6 +212,7 @@ function harness(
   const roundChecksAsked: number[] = [];
   const reruns: Array<{ sha: string; names: string[] }> = [];
   const mergeWaitNotes: Array<{ headSha: string; instanceId: string; at: number }> = [];
+  const enqueues: Array<{ repo: string; number: number }> = [];
   let reviewFetches = 0;
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
   const deps: AdminCoordinatorDeps = {
@@ -287,6 +297,27 @@ function harness(
       if (over.merge instanceof Error) throw over.merge;
       return over.merge ?? { ok: true, sha: "9".repeat(40) };
     },
+    branchHasMergeQueue: async () => {
+      if (over.queueRule instanceof Error) throw over.queueRule;
+      return "queueRule" in over ? over.queueRule : false;
+    },
+    ...("enqueue" in over
+      ? {
+          enqueuePullRequest: async (pr: { repo: string; number: number }) => {
+            enqueues.push(pr);
+            if (over.enqueue instanceof Error) throw over.enqueue;
+            return over.enqueue!;
+          },
+        }
+      : {}),
+    ...("queueState" in over
+      ? {
+          fetchMergeQueueState: async () => {
+            if (over.queueState instanceof Error) throw over.queueState;
+            return over.queueState;
+          },
+        }
+      : {}),
     runHistoryWriter: {
       // The real writer routes a record with `via` through that sink (the
       // ledger's one-transaction finish); this stub does the same so a test
@@ -328,6 +359,7 @@ function harness(
     roundChecksAsked,
     reruns,
     mergeWaitNotes,
+    enqueues,
   };
 }
 
@@ -3714,6 +3746,105 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       ).body,
     ).toMatchObject({ ok: true });
     expect(gone.logs.some((l) => l.includes("the board comment could not be posted"))).toBe(true);
+  });
+
+  it("a base with a merge-queue rule enqueues instead of squashing (issue 2011): the door answers enqueued, the pull request is enqueued once, and no squash is attempted", async () => {
+    const h = await mergeHarness({ queueRule: true, enqueue: { ok: true } });
+    expect(await merge(h)).toEqual({
+      status: 200,
+      body: { ok: true, outcome: "enqueued", reason: `enqueued at \`${HEAD.slice(0, 7)}\``, at: NOW },
+    });
+    expect(h.enqueues).toEqual([{ repo: "acme/api", number: 7 }]);
+    expect(h.merges).toEqual([]);
+    expect(h.logs.some((l) => l.includes("enqueued acme/api#7"))).toBe(true);
+  });
+
+  it("a 405 with the queue's wording on a repository whose rules could not be read enqueues too; any other refusal keeps GitHub's words; a queue ruled but with no enqueue wired is refused naming the hand enqueue", async () => {
+    const h = await mergeHarness({
+      queueRule: new Error("rules unreadable"),
+      merge: {
+        ok: false,
+        status: 405,
+        reason: "Repository rule violations found — Changes must be made through the merge queue",
+      },
+      enqueue: { ok: true },
+    });
+    expect((await merge(h)).body).toMatchObject({ outcome: "enqueued" });
+    // The squash was attempted (the rules read decided nothing) and the 405's
+    // own wording routed it to the queue.
+    expect(h.merges).toHaveLength(1);
+    expect(h.enqueues).toEqual([{ repo: "acme/api", number: 7 }]);
+    // A 405 without the queue's wording keeps today's refusal in GitHub's words.
+    const plain = await mergeHarness({
+      queueRule: undefined,
+      merge: { ok: false, status: 405, reason: "Pull Request is not mergeable" },
+      enqueue: { ok: true },
+    });
+    expect((await merge(plain)).body).toMatchObject({
+      outcome: "refused",
+      reason: "GitHub refused the merge of acme/api#7 (HTTP 405): Pull Request is not mergeable",
+    });
+    expect(plain.enqueues).toEqual([]);
+    // The queue is ruled but the door cannot enqueue: refused naming the hand act.
+    const bare = await mergeHarness({ queueRule: true });
+    expect((await merge(bare)).body).toMatchObject({
+      outcome: "refused",
+      reason:
+        "`main` takes changes only through a merge queue and the door cannot enqueue — enqueue acme/api#7 by hand (`gh pr merge --auto`); the approved work stands",
+    });
+    // GitHub refusing the enqueue itself is a refusal in GitHub's words.
+    const refused = await mergeHarness({ queueRule: true, enqueue: { ok: false, reason: "queue is locked" } });
+    expect((await merge(refused)).body).toMatchObject({
+      outcome: "refused",
+      reason: "GitHub refused to enqueue acme/api#7: queue is locked",
+    });
+  });
+
+  it("a `queued: true` re-ask reads the queue's outcome, never the squash: still queued answers enqueued with the position, a removal answers removed with the queue's own reason, a merge answers merged by other from the facts, and an unreadable queue is a 502", async () => {
+    const stillQueued = await mergeHarness({ queueState: { queued: true, position: 2 } });
+    expect((await merge(stillQueued, { ...body, queued: true })).body).toEqual({
+      ok: true,
+      outcome: "enqueued",
+      reason: "position 2 in the merge queue",
+      at: NOW,
+    });
+    expect(stillQueued.merges).toEqual([]);
+    const removed = await mergeHarness({ queueState: { queued: false, reason: "CI failed inside the queue" } });
+    expect((await merge(removed, { ...body, queued: true })).body).toEqual({
+      ok: true,
+      outcome: "removed",
+      reason: "CI failed inside the queue",
+      at: NOW,
+    });
+    const silent = await mergeHarness({ queueState: { queued: false } });
+    expect((await merge(silent, { ...body, queued: true })).body).toMatchObject({
+      outcome: "removed",
+      reason: "removed from the merge queue with no reason given",
+    });
+    // The queue merged what the door enqueued: merged by other, from the facts.
+    const mergedAt = "2026-09-20T00:01:00Z";
+    const mergedByQueue = await mergeHarness({
+      prFacts: facts({ state: "closed", mergedAt, mergeCommitSha: "9".repeat(40) }),
+      queueState: { queued: false },
+    });
+    expect((await merge(mergedByQueue, { ...body, queued: true })).body).toEqual({
+      ok: true,
+      outcome: "merged",
+      by: "other",
+      sha: "9".repeat(40),
+      mergedAt,
+      at: NOW,
+    });
+    const unreadable = await mergeHarness({ queueState: new Error("boom") });
+    expect((await merge(unreadable, { ...body, queued: true })).status).toBe(502);
+    const unwired = await mergeHarness();
+    expect((await merge(unwired, { ...body, queued: true })).status).toBe(502);
+  });
+
+  it("a repository without a merge queue merges directly as before: the rules read answers false, the squash lands, and nothing is enqueued", async () => {
+    const h = await mergeHarness({ enqueue: { ok: true } });
+    expect((await merge(h)).body).toMatchObject({ outcome: "merged", sha: MERGED });
+    expect(h.enqueues).toEqual([]);
   });
 });
 

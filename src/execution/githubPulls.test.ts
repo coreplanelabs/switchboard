@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   addAssignee,
   commitsOverBase,
+  branchHasMergeQueue,
   compareRange,
   createBranchRef,
+  enqueuePullRequest,
+  fetchMergeQueueState,
   createCommit,
   forceMoveRef,
   isAssignable,
@@ -665,6 +668,109 @@ describe("githubPulls", () => {
   // The plan runner's merge (docs/reference/specs/http-ingress.md item 9; record 0031's merge grant):
   // the bot squashes a plan branch's pull request itself at the approved head,
   // the title as the commit and an empty body, and reads the checks at the head.
+  describe("the merge queue — the rule, the enqueue and the queue's outcome (issue 2011)", () => {
+    it("branchHasMergeQueue reads the base branch's rules: a merge_queue rule answers true, none false, and an unreadable or out-of-shape answer undefined", async () => {
+      stubToken();
+      const calls = stubFetch(
+        () => new Response(JSON.stringify([{ type: "pull_request" }, { type: "merge_queue" }]), { status: 200 }),
+      );
+      expect(await branchHasMergeQueue("acme/api", "main")).toBe(true);
+      expect(calls[0].url).toBe("https://api.github.com/repos/acme/api/rules/branches/main");
+      stubFetch(() => new Response(JSON.stringify([{ type: "pull_request" }]), { status: 200 }));
+      expect(await branchHasMergeQueue("acme/api", "main")).toBe(false);
+      stubFetch(() => new Response("nope", { status: 500 }));
+      expect(await branchHasMergeQueue("acme/api", "main")).toBeUndefined();
+      stubFetch(() => new Response(JSON.stringify({ not: "an array" }), { status: 200 }));
+      expect(await branchHasMergeQueue("acme/api", "main")).toBeUndefined();
+      vi.stubGlobal("fetch", async () => {
+        throw new Error("network down");
+      });
+      expect(await branchHasMergeQueue("acme/api", "main")).toBeUndefined();
+    });
+
+    it("enqueuePullRequest looks up the node id, then the GraphQL enqueuePullRequest mutation — gh pr merge --auto's act; already-queued is success, any other GraphQL error is an answer in GitHub's words", async () => {
+      stubToken();
+      const answers = [
+        { data: { repository: { pullRequest: { id: "PR_node1" } } } },
+        { data: { enqueuePullRequest: { mergeQueueEntry: { position: 1 } } } },
+      ];
+      const calls = stubFetch(() => new Response(JSON.stringify(answers.shift()), { status: 200 }));
+      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 })).toEqual({ ok: true });
+      expect(calls.map((c) => c.url)).toEqual(["https://api.github.com/graphql", "https://api.github.com/graphql"]);
+      expect(String(calls[1].init.body)).toContain("enqueuePullRequest");
+      expect(JSON.parse(String(calls[1].init.body)).variables).toEqual({ id: "PR_node1" });
+      // Already in the queue — a replayed step: the ask is satisfied.
+      const replay = [
+        { data: { repository: { pullRequest: { id: "PR_node1" } } } },
+        { errors: [{ message: "The pull request is already in the merge queue" }] },
+      ];
+      stubFetch(() => new Response(JSON.stringify(replay.shift()), { status: 200 }));
+      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 })).toEqual({ ok: true });
+      // Any other GraphQL error is an answer, never a throw.
+      const refused = [
+        { data: { repository: { pullRequest: { id: "PR_node1" } } } },
+        { errors: [{ message: "Pull request is not mergeable" }] },
+      ];
+      stubFetch(() => new Response(JSON.stringify(refused.shift()), { status: 200 }));
+      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 })).toEqual({
+        ok: false,
+        reason: "Pull request is not mergeable",
+      });
+      // No node id — the lookup's own error rides the answer.
+      stubFetch(() => new Response(JSON.stringify({ errors: [{ message: "Could not resolve" }] }), { status: 200 }));
+      expect(await enqueuePullRequest({ repo: "acme/api", number: 7 })).toEqual({
+        ok: false,
+        reason: "Could not resolve",
+      });
+      // An HTTP failure throws, like every write here.
+      stubFetch(() => new Response("bad gateway", { status: 502 }));
+      await expect(enqueuePullRequest({ repo: "acme/api", number: 7 })).rejects.toThrow(/HTTP 502/);
+    });
+
+    it("fetchMergeQueueState reads the entry and the last removal's reason: queued with the position, removed with the queue's reason (or without one), undefined when GitHub cannot be read", async () => {
+      stubToken();
+      stubFetch(
+        () =>
+          new Response(
+            JSON.stringify({ data: { repository: { pullRequest: { mergeQueueEntry: { position: 3 } } } } }),
+            { status: 200 },
+          ),
+      );
+      expect(await fetchMergeQueueState({ repo: "acme/api", number: 7 })).toEqual({ queued: true, position: 3 });
+      stubFetch(
+        () =>
+          new Response(
+            JSON.stringify({
+              data: {
+                repository: {
+                  pullRequest: {
+                    mergeQueueEntry: null,
+                    timelineItems: { nodes: [{}, { reason: "CI_FAILURE" }] },
+                  },
+                },
+              },
+            }),
+            { status: 200 },
+          ),
+      );
+      expect(await fetchMergeQueueState({ repo: "acme/api", number: 7 })).toEqual({
+        queued: false,
+        reason: "CI_FAILURE",
+      });
+      stubFetch(
+        () =>
+          new Response(JSON.stringify({ data: { repository: { pullRequest: { mergeQueueEntry: null } } } }), {
+            status: 200,
+          }),
+      );
+      expect(await fetchMergeQueueState({ repo: "acme/api", number: 7 })).toEqual({ queued: false });
+      stubFetch(() => new Response("bad gateway", { status: 502 }));
+      expect(await fetchMergeQueueState({ repo: "acme/api", number: 7 })).toBeUndefined();
+      stubFetch(() => new Response(JSON.stringify({ data: { repository: { pullRequest: null } } }), { status: 200 }));
+      expect(await fetchMergeQueueState({ repo: "acme/api", number: 7 })).toBeUndefined();
+    });
+  });
+
   describe("the plan runner's merge — mergePullRequest and fetchCommitChecks", () => {
     it("the facts carry the pull request's title", async () => {
       stubToken();
