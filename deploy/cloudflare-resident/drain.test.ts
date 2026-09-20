@@ -338,7 +338,8 @@ describe("the Worker's wiring (by scan)", () => {
     expect(handler).toMatch(/if \(unverified\.length > 0\) await registryStub\(env\)\.holdDrainFor\(unverified\);/);
     // The DO method never trusts the pool-user probe on the deploy path (the
     // pre-deploy image passes it when the pool did not change): the active
-    // container is cycled (force) and the fresh start probed as the fact.
+    // container is cycled (force), and only the replacement's completed
+    // hydration to `warm` provides the report.
     expect(source).toMatch(
       /async reconcileForDeploy\(resource: string\): Promise<\{ result: ImageReconcileResult; verified: boolean \}>/,
     );
@@ -350,23 +351,19 @@ describe("the Worker's wiring (by scan)", () => {
     // leaves a hold nothing will report (the `until` backstop alone).
     expect(forDeploy).toMatch(/registryStub\(this\.env\)\.holdDrainFor\(\[resource\]\)/);
     expect(forDeploy.indexOf("holdDrainFor([resource])")).toBeLessThan(forDeploy.indexOf("IMAGE_REPORT_PENDING_KEY"));
-    // The later report stands on the post-deploy cycle's fresh start, never on
-    // the pool-user probe: the probe shortcut is gated on NO pending marker,
-    // and the fresh probe's report fires only after the stop.
+    // The later report stands on the post-deploy replacement completing its
+    // own hydration to `warm`, never on the stop or the inactive fact and never
+    // on the pool-user probe. The marker therefore survives both reconcile
+    // paths until `doHydrate` reaches `warm` on the fresh container.
     const reconcile = source.slice(
       source.indexOf("private async reconcileImage("),
-      source.indexOf("async reconcileForDeploy("),
+      source.indexOf("/** The report a held drain waits for"),
     );
     expect(reconcile).toMatch(/if \(!force && pending === undefined\) \{/);
-    expect(reconcile.indexOf("this.stop()")).toBeLessThan(
-      reconcile.lastIndexOf("this.reportPendingImageCurrent(where)"),
-    );
-    // A held resident whose container went inactive has no other reporter left
-    // (the drain refuses new attaches), so the inactive early-return reports a
-    // pending marker before answering — else the fleet stays closed until the
-    // drain's `until` backstop.
-    const inactiveReturn = reconcile.slice(0, reconcile.indexOf('return "inactive"'));
-    expect(inactiveReturn).toContain("this.reportPendingImageCurrent(where)");
+    expect(reconcile).not.toContain("reportPendingImageCurrent");
+    const hydrate = source.slice(source.indexOf("private async doHydrate()"), source.indexOf("// -- freshness"));
+    expect(hydrate.match(/setResidentState\("warm"\)/g)).toHaveLength(2);
+    expect(hydrate.match(/reportPendingImageCurrent\("hydrate"\)/g)).toHaveLength(2);
     expect(source).toMatch(/private async reportPendingImageCurrent\(where: string\): Promise<boolean>/);
     expect(source).toMatch(/registryStub\(this\.env\)\.reportContainerImageCurrent\(pending\.resource\)/);
     // The marker is deleted only AFTER a successful report, so a transient
@@ -393,9 +390,40 @@ describe("the Worker's wiring (by scan)", () => {
     // a busy container is still named by its operations first.
     expect(reconcile.indexOf("this.inFlightCount()")).toBeLessThan(reconcile.indexOf("registeredRunsBeyondOps"));
     expect(reconcile.indexOf("registeredRunsBeyondOps")).toBeLessThan(reconcile.indexOf("this.swapIncarnation()"));
-    // The call sites act only on a stop (`restarted`): a deferral never
-    // answers `image-stale` to an attach and never restarts a refresh cycle.
+    // The call sites act on their own words: a refresh cycle restarts only on
+    // a stop (`restarted`); an attach acts only on `stale` — a refusal, never
+    // a stop (issue 2101). A deferral never answers `image-stale` to an attach
+    // and never restarts a refresh cycle.
     expect(source).toMatch(/\(await this\.reconcileImage\("refresh"\)\) === "restarted"/);
-    expect(source).toMatch(/\(await this\.reconcileImage\("attach"\)\) === "restarted"/);
+    expect(source).toMatch(/\(await this\.reconcileImage\("attach"\)\) === "stale" && !registered/);
+  });
+
+  it("an attach never stops the container, and only the replacement's completed hydration reports the new image (issue 2101)", () => {
+    const reconcile = source.slice(
+      source.indexOf("private async reconcileImage("),
+      source.indexOf("/** The report a held drain waits for"),
+    );
+    // The attach branch answers before any stop: `stale` (refused — the run
+    // takes the fallback sandbox) or `deferred` (a stale pool with no marker
+    // keeps admitting onto a busy container); while the marker is pending
+    // every new attach is refused, so the resident can go quiet for the
+    // refresh cycle's restart.
+    const attachBranch = reconcile.slice(reconcile.indexOf('if (where === "attach")'), reconcile.indexOf("const busy"));
+    expect(attachBranch).toMatch(/return "stale";/);
+    expect(attachBranch).not.toMatch(/this\.stop\(/);
+    expect(attachBranch).not.toMatch(/swapIncarnation/);
+    expect(attachBranch).toMatch(/if \(pending === undefined && \(this\.inFlightCount\(\) > 0/);
+    // A successful stop and an inactive runtime both keep the marker. The one
+    // pool-user probe left runs only with NO pending marker (the current-image
+    // shortcut), while `doHydrate` reports only after the fresh start reaches
+    // `warm`, so neither reporting path races the restore.
+    expect(reconcile).not.toContain("reportPendingImageCurrent");
+    expect(reconcile.match(/this\.run\(\["id", "-u", last\]\)/g)).toHaveLength(1);
+    const hydrate = source.slice(source.indexOf("private async doHydrate()"), source.indexOf("// -- freshness"));
+    expect(hydrate).toContain('reportPendingImageCurrent("hydrate")');
+    // The attach route refuses a `stale` verdict only for a thread with no run
+    // registration — a registered run's re-attach passes as it passes the
+    // drain and the memory gate.
+    expect(source).toMatch(/=== "stale" && !registered/);
   });
 });
