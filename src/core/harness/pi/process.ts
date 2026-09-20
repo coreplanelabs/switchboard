@@ -370,15 +370,35 @@ export function piSystemPrompt(spec: PiLaunchSpec): string {
   return `${spec.system.trimEnd()}\n\n${harnessPromptNote(spec.relayTools, spec.identity)}\n`;
 }
 
+/** What pi's settings prepend to every bash command (`shellCommandPrefix`),
+ *  so the tool's timeout ends the command whatever it does with its pipes
+ *  (docs/reference/specs/harness-pi.md item 15). pi kills the command's
+ *  process group at the deadline, but its post-exit wait re-arms on every
+ *  output chunk, so a descendant outside the group (a `setsid`'d daemon, a
+ *  build tool's own group) that kept the tool's pipe open and kept writing
+ *  held a call open far past its bound. This prefix routes the shell's stdout
+ *  and stderr through one forwarder inside the group (bash process
+ *  substitution — pi's shell is bash by name): descendants inherit the pipe
+ *  into the forwarder, never the tool's own, so the deadline's group kill
+ *  closes the tool's read side and the call returns pi's own timeout result
+ *  with the output captured. */
+export const PI_SHELL_COMMAND_PREFIX = "exec > >(exec cat) 2>&1";
+
 /** pi's settings for a run: the checkout is never trusted (its `.pi/` never
  *  loads — `--no-extensions` already keeps discovery off; this is the second
- *  lock), no update checks — and, when the deployment sets them, pi's
- *  compaction thresholds under pi's own key (`compaction.reserveTokens`,
- *  `compaction.keepRecentTokens`): pi compacts when the context passes the
- *  window less the reserve, so a reserve near the window makes a short run
- *  compact. Unset, the file names no `compaction` and pi's defaults stand. */
+ *  lock), no update checks, the shell command prefix that makes the bash
+ *  tool's timeout final (`PI_SHELL_COMMAND_PREFIX`) — and, when the deployment
+ *  sets them, pi's compaction thresholds under pi's own key
+ *  (`compaction.reserveTokens`, `compaction.keepRecentTokens`): pi compacts
+ *  when the context passes the window less the reserve, so a reserve near the
+ *  window makes a short run compact. Unset, the file names no `compaction`
+ *  and pi's defaults stand. */
 export function piSettingsJson(compaction?: PiCompactionConfig): string {
-  const settings: Record<string, unknown> = { defaultProjectTrust: "never", checkForUpdates: false };
+  const settings: Record<string, unknown> = {
+    defaultProjectTrust: "never",
+    checkForUpdates: false,
+    shellCommandPrefix: PI_SHELL_COMMAND_PREFIX,
+  };
   const thresholds = {
     ...(compaction?.reserveTokens !== undefined ? { reserveTokens: compaction.reserveTokens } : {}),
     ...(compaction?.keepRecentTokens !== undefined ? { keepRecentTokens: compaction.keepRecentTokens } : {}),

@@ -30,7 +30,14 @@ import { recordingSink } from "../../testing/recordingSink.js";
 import { FollowUpInbox } from "../../threadAdmission.js";
 import { createTracer } from "../../trace/tracer.js";
 import { textTurnsOf } from "../../dispatch/textTurns.js";
-import { HARNESS_URL_ENV, RUN_BEARER_ENV, piRunPaths, piRunPathsAt, type PiRunPaths } from "./process.js";
+import {
+  HARNESS_URL_ENV,
+  PI_SHELL_COMMAND_PREFIX,
+  RUN_BEARER_ENV,
+  piRunPaths,
+  piRunPathsAt,
+  type PiRunPaths,
+} from "./process.js";
 import {
   HarnessRegistry,
   answerCompaction,
@@ -5208,6 +5215,7 @@ describe("runPiHarness — the deployment's compaction thresholds in pi's settin
     expect(JSON.parse(settings!)).toEqual({
       defaultProjectTrust: "never",
       checkForUpdates: false,
+      shellCommandPrefix: PI_SHELL_COMMAND_PREFIX,
       compaction: { reserveTokens: 150_000, keepRecentTokens: 8_000 },
     });
     const plain = world();
@@ -5216,6 +5224,7 @@ describe("runPiHarness — the deployment's compaction thresholds in pi's settin
     expect(JSON.parse(plain.container.files.get(`${paths.agentDir}/settings.json`)!)).toEqual({
       defaultProjectTrust: "never",
       checkForUpdates: false,
+      shellCommandPrefix: PI_SHELL_COMMAND_PREFIX,
     });
   });
 });

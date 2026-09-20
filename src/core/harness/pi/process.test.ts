@@ -3,6 +3,7 @@ import {
   HARNESS_URL_ENV,
   PI_BUILTIN_TOOLS,
   PI_READ_TOOLS,
+  PI_SHELL_COMMAND_PREFIX,
   PROXY_PROVIDER,
   RUN_BEARER_ENV,
   harnessPromptNote,
@@ -490,7 +491,11 @@ describe("piLaunchFiles", () => {
       "/var/tmp/switchboard-pi-run-7/agent/SYSTEM.md",
       "/var/tmp/switchboard-pi-run-7/extension.js",
     ]);
-    expect(JSON.parse(files[0].content)).toEqual({ defaultProjectTrust: "never", checkForUpdates: false });
+    expect(JSON.parse(files[0].content)).toEqual({
+      defaultProjectTrust: "never",
+      checkForUpdates: false,
+      shellCommandPrefix: PI_SHELL_COMMAND_PREFIX,
+    });
     expect(files[2].content.startsWith("You are the coding agent.\n\nHARNESS NOTE:")).toBe(true);
     expect(files[2].content).toContain("`update_status`, `submit_pr_description`");
     expect(files[3].content).toBe(PI_EXTENSION_SOURCE);
@@ -503,11 +508,13 @@ describe("piLaunchFiles", () => {
     expect(JSON.parse(both[0].content)).toEqual({
       defaultProjectTrust: "never",
       checkForUpdates: false,
+      shellCommandPrefix: PI_SHELL_COMMAND_PREFIX,
       compaction: { reserveTokens: 150_000, keepRecentTokens: 8_000 },
     });
     expect(JSON.parse(piSettingsJson({ reserveTokens: 150_000 }))).toEqual({
       defaultProjectTrust: "never",
       checkForUpdates: false,
+      shellCommandPrefix: PI_SHELL_COMMAND_PREFIX,
       compaction: { reserveTokens: 150_000 },
     });
     expect(piSettingsJson({})).toBe(piSettingsJson());
