@@ -1145,8 +1145,11 @@ const loopOf = (s: UnitPipelineState): Loop => ({ maxRounds: s.input.caps.maxRou
  *  A review round `n` and the findings step that follows it share `n`; the
  *  module's positions are the loop's own. */
 function roundCarve(s: UnitPipelineState, round: RoundRef): Carve {
-  const kind = round.kind === "findings" ? "fix" : round.kind;
-  return carve(remainingMs(s), { kind, index: loopPosition(loopOf(s), kind, round.index) }, loopOf(s));
+  return carve(
+    remainingMs(s),
+    { kind: round.kind, index: loopPosition(loopOf(s), round.kind, round.index) },
+    loopOf(s),
+  );
 }
 
 /** The prefix every step of this pipeline is named under: the unit id, and for
