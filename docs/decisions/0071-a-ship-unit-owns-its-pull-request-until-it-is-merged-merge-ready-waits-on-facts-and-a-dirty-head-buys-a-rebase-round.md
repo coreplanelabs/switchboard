@@ -1,6 +1,6 @@
 ---
 title: A ship unit owns its pull request until the pull request is merged — merge-ready waits on facts, a DIRTY head buys a rebase round, and anyone's merge ends the unit
-status: proposed
+status: accepted
 date: 2026-09-20
 pattern: Three mechanisms in place of one always-on loop — every push is preceded by a rebase onto the fetched base; a sweep command a person runs rebases the pipeline's open pull requests with a two-rung resolver (git alone with the repository's own merge drivers and rerere, then one bounded model round reading the repository's AGENTS.md); and watch-until-merge is a per-repository setting, off by default, reacting to push-to-base webhooks under a rebase-in-flight cap and a spend limit
 ---
@@ -8,6 +8,8 @@ pattern: Three mechanisms in place of one always-on loop — every push is prece
 # A ship unit owns its pull request until the pull request is merged: merge-ready waits on facts, a DIRTY head buys a rebase round, and anyone's merge ends the unit
 
 *The title and filename predate the amendment below and name the withdrawn shape — the always-on rebase round bought by a DIRTY head; they are kept to preserve links.*
+
+**Accepted 2026-09-20 05:45Z (22:45 PDT on the 19th)**, in the shape the amendment of #2048 gave it — the three mechanisms, in the order they ship: the rebase before every push (always, not configurable); the sweep a person runs with the two-rung resolver — git alone with the repository's own merge drivers and `git rerere`, then one bounded model round reading the repository's AGENTS.md; and watch-until-merge as an org setting with a per-repository override, off by default. Two calls are the maintainer's at acceptance: a stale-but-clean pull request is never rebased by the pipeline — DIRTY is the only trigger the sweep and the watch answer — and the resolver knows nothing about a repository's technology; what it may regenerate is only what the repository's own AGENTS.md names. The plan this record names in its rollout follows the record to accepted, with its first unit — the rebase before every push — ready to seed.
 
 *Amended 2026-09-20 04:55Z (while proposed), on the maintainer's redesign: the always-on rebase round — one per base move per unit — is withdrawn. It makes the expensive behaviour the default, and its only softer variant, "rebase once at some later time", is arbitrary and cannot be explained to a person. Three mechanisms replace it: a rebase before every push (always, not configurable), a sweep a person runs with a two-rung resolver, and watch-until-merge as a setting, off by default. Each changed section below carries a note of the same date; the incident, the today table and the rejected alternatives stand, with two alternatives added.*
 
