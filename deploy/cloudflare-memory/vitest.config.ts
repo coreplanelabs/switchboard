@@ -30,6 +30,13 @@ export default defineConfig({
     }),
   ],
   test: {
+    // One workerd runs every file: in parallel, the shrink test's 500-row
+    // delete loop (~17 s of DO work) queues the other files' requests past
+    // vitest's 5 s default and fails tests the change never touched. Serial
+    // files trade some wall time (23 s measured serial, against a 26 s wall
+    // holding 63 s of contended work) for a deterministic suite — contention,
+    // not correctness, was the only failure shape.
+    fileParallelism: false,
     include: [
       "worker.test.ts",
       "schedules.test.ts",

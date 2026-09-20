@@ -179,6 +179,10 @@ describe("the diagrams in this tree", () => {
     expect(wrong).toEqual([]);
   });
 
+  // mermaid's cold ESM import plus one parse per fence: the work grows with
+  // the docs and the import alone has crossed the 5 s default on a loaded CI
+  // shard (three sightings in one day). The bound is ten times the slowest
+  // run seen, not the global default — the other tests here stay at 5 s.
   it("every fence outside the records parses with mermaid", async () => {
     const { default: mermaid } = await import("mermaid");
     mermaid.initialize({ startOnLoad: false });
@@ -191,7 +195,7 @@ describe("the diagrams in this tree", () => {
       }
     }
     expect(broken).toEqual([]);
-  });
+  }, 60_000);
 
   it("the four seams and the deploy order are the generator's output wherever they are drawn, and each file declares exactly its regions", () => {
     const stale: string[] = [];

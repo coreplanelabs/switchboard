@@ -31,13 +31,15 @@ cat /tmp/swb-qt-heredoc`,
     `false; echo exit=$?`,
   ];
 
+  // Every case spawns real bash twice; wall time is the runner's load, not
+  // the code's — a loaded CI shard has taken these past the 5 s default.
   for (const c of cases) {
-    it(`round-trips: ${c.split("\n")[0]}`, () => {
+    it(`round-trips: ${c.split("\n")[0]}`, { timeout: 30_000 }, () => {
       expect(run(`bash -c ${shellQuote(c)}`)).toBe(run(c));
     });
   }
 
-  it("passes exit codes through", () => {
+  it("passes exit codes through", { timeout: 30_000 }, () => {
     expect(status(`bash -c ${shellQuote("exit 42")}`)).toBe(42);
   });
 });
@@ -48,11 +50,14 @@ describe.skipIf(!hasTimeout)("under the coreutils timeout wrapper (CI/Linux)", (
   // Mirrors the worker's production shape: timeout -k 10 <secs> bash -c '<cmd>'.
   const wrap = (c: string, secs = 280) => `timeout -k 10 ${secs} bash -c ${shellQuote(c)}`;
 
-  it("quoted commands behave identically under the wrapper", () => {
+  // Spawning coreutils `timeout` + bash on a loaded shard has taken 15 s
+  // where an idle machine takes 50 ms; the bound is for the shard, and the
+  // deadline case additionally sleeps ~1 s by design before the exit 124.
+  it("quoted commands behave identically under the wrapper", { timeout: 30_000 }, () => {
     expect(run(wrap(`echo "it's fine" && echo done`))).toBe("it's fine\ndone\n");
   });
 
-  it("a deadline kill is a genuine exit 124", () => {
+  it("a deadline kill is a genuine exit 124", { timeout: 30_000 }, () => {
     expect(status(wrap("sleep 5 && echo NOPE", 1))).toBe(124);
   });
 });

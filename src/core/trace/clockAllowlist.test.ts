@@ -44,25 +44,36 @@ describe("clock ratchet", () => {
     expect(countClockReads("x.mjs", "export const t = Date.now();")).toEqual({ "Date.now": 1 });
   });
 
-  it("the production file set excludes tests, test helpers, the one clock and the deploy tooling", () => {
-    const files = productionFiles(ROOT);
-    expect(files.some((f) => f.endsWith(".test.ts"))).toBe(false);
-    expect(files).not.toContain("src/core/trace/clock.ts");
-    expect(files.some((f) => f.startsWith("src/core/testing/"))).toBe(false);
-    expect(files).toContain("src/core/dispatcher.ts");
-  });
+  // The two tests below walk the whole tree; the scan has taken 6–9 s on a
+  // loaded host against the 5 s default while the same check passed as a
+  // script. The bound is the host's, not the scanner's.
+  it(
+    "the production file set excludes tests, test helpers, the one clock and the deploy tooling",
+    { timeout: 60_000 },
+    () => {
+      const files = productionFiles(ROOT);
+      expect(files.some((f) => f.endsWith(".test.ts"))).toBe(false);
+      expect(files).not.toContain("src/core/trace/clock.ts");
+      expect(files.some((f) => f.startsWith("src/core/testing/"))).toBe(false);
+      expect(files).toContain("src/core/dispatcher.ts");
+    },
+  );
 
-  it("the allowlist matches the tree exactly: no file grew, no listed file has fewer reads than recorded (regenerate with `npm run clock:gen` when a read is removed)", () => {
-    const listed = JSON.parse(readFileSync(join(ROOT, ALLOWLIST_PATH), "utf8")) as Allowlist;
-    const current = scan(ROOT);
-    expect(allowlistProblems(current, listed)).toEqual([]);
-    expect(current).toEqual(listed);
-    // The ratchet reached zero (docs/reference/specs/tracing.md item 8): nothing is allowed a direct read.
-    expect(listed).toEqual({});
-    // the problem report names both directions
-    expect(allowlistProblems({ "a.ts": 2 }, { "a.ts": 1, "b.ts": 1 })).toEqual([
-      "a.ts: 2 clock read(s), allowlist permits 1",
-      "b.ts: allowlist says 1 but 0 remain — shrink the entry",
-    ]);
-  });
+  it(
+    "the allowlist matches the tree exactly: no file grew, no listed file has fewer reads than recorded (regenerate with `npm run clock:gen` when a read is removed)",
+    { timeout: 60_000 },
+    () => {
+      const listed = JSON.parse(readFileSync(join(ROOT, ALLOWLIST_PATH), "utf8")) as Allowlist;
+      const current = scan(ROOT);
+      expect(allowlistProblems(current, listed)).toEqual([]);
+      expect(current).toEqual(listed);
+      // The ratchet reached zero (docs/reference/specs/tracing.md item 8): nothing is allowed a direct read.
+      expect(listed).toEqual({});
+      // the problem report names both directions
+      expect(allowlistProblems({ "a.ts": 2 }, { "a.ts": 1, "b.ts": 1 })).toEqual([
+        "a.ts: 2 clock read(s), allowlist permits 1",
+        "b.ts: allowlist says 1 but 0 remain — shrink the entry",
+      ]);
+    },
+  );
 });
