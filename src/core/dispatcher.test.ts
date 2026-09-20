@@ -18045,11 +18045,11 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const { deps: refusing } = operatorDeps(ON_YAML);
     refusing.operatorModel = decides({
       reason: "a rule forbids it",
-      refusal: { cause: "policy", text: "guests may not steer runs" },
+      refusal: { cause: "policy", text: "guests may not steer runs (steer:write)" },
     });
     const r = fakeIO();
     await dispatch(refusing, msg("steer that run", "slack:UADMIN"), r.io);
-    expect(r.replies).toEqual(["guests may not steer runs"]);
+    expect(r.replies).toEqual(["guests may not steer runs (steer:write)"]);
   });
 
   it("on: a question and a refusal each leave a door record carrying the decision as its operator event", async () => {
@@ -18071,13 +18071,13 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const { deps: refusing, registry: refusingRegistry } = operatorDeps(ON_YAML);
     refusing.operatorModel = decides({
       reason: "a rule forbids it",
-      refusal: { cause: "policy", text: "guests may not steer runs" },
+      refusal: { cause: "policy", text: "guests may not steer runs (steer:write)" },
     });
     await dispatch(refusing, msg("steer that run", "slack:UADMIN"), fakeIO().io);
     expect(refusingRegistry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
       outcome: "refusal",
       refusalCause: "policy",
-      refusalText: "guests may not steer runs",
+      refusalText: "guests may not steer runs (steer:write)",
     });
   });
 
@@ -19302,6 +19302,39 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         { outcome: "violation", violation: expect.stringContaining("not a single JSON object") as unknown as string },
         { outcome: "violation", violation: expect.stringContaining("not a single JSON object") as unknown as string },
       ],
+    });
+  });
+
+  it("on: a policy refusal naming no policy row is re-asked and then floors to the readers' route — the docs ask runs, the invented authority never rendered (issue 2043)", async () => {
+    const FALLBACK_YAML = YAML_FIXTURE.replace(
+      "routing: { auto: false, operator: off }\n",
+      "routing: { auto: true, operator: on }\n",
+    );
+    const { deps, provider, registry } = operatorDeps(FALLBACK_YAML);
+    // The incident's shape: a plain-words docs ask refused as administrative
+    // state, three times. The refusal names no policy row and no projection
+    // gap, so the seam re-asks it and the floor is non_decision — the readers'
+    // route runs the request.
+    deps.operatorModel = decides({
+      reason: "control plane records",
+      refusal: {
+        cause: "policy",
+        text: "privileged administrative updates to control plane records require admin access",
+      },
+    });
+    deps.routeModel = vi.fn(async () => JSON.stringify({ preset: "review", reason: "review fits the request" }));
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("in acme/api: record 0070 — flip the record's status to accepted", "slack:UADMIN"), io);
+    expect(deps.operatorModel).toHaveBeenCalledTimes(3);
+    expect(deps.routeModel).toHaveBeenCalledTimes(1);
+    expect(provider.requests[0].model).toBe("review-model");
+    expect(replies).toContain("answer");
+    // The invented authority never reached the person.
+    expect(replies.every((r) => !r.includes("admin access"))).toBe(true);
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "non_decision",
+      reason: expect.stringContaining("names no policy row") as unknown as string,
     });
   });
 

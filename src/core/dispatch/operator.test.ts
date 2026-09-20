@@ -9,6 +9,7 @@ import {
   operatorProjection,
   operatorThreadTail,
   parseOperatorDecision,
+  policyRowIds,
   presetBindOf,
   presetRequestOf,
   stripDirectiveHead,
@@ -199,6 +200,20 @@ describe("the projection and the prompt order", () => {
     expect(request).toBeGreaterThan(newer);
   });
 
+  it("the system half carries the repository facts rendered from the docs index, and the refusal rule names the policy ground (issue 2043)", () => {
+    const prompt = buildOperatorPrompt(input({ briefs: ["acme/api: a REST service"] }));
+    const projection = prompt.system.indexOf("Presets this author may run");
+    const facts = prompt.system.indexOf("Repository facts:");
+    const briefs = prompt.system.indexOf("Repository briefs:");
+    expect(facts).toBeGreaterThan(projection);
+    expect(briefs).toBeGreaterThan(facts);
+    expect(prompt.system).toContain("docs/decisions/*.md");
+    expect(prompt.system).toContain("docs/plans/*.md");
+    expect(prompt.system).toContain("a ship unit edits like any other file");
+    expect(prompt.system).toContain("must stand on the authorization policy");
+    expect(prompt.system).toContain("no preset in the projection can write to <repo>");
+  });
+
   it("an owned thread's prompt narrows the projection to steers and reads and says the reply is the owner's follow-up (issue 2027; thread-admission item 9)", () => {
     const p = {
       presets: projectionOf(["general"]).presets,
@@ -355,18 +370,102 @@ describe("runOperator", () => {
     );
   });
 
-  it("a model-authored refusal (a real decision) is never re-asked and never floored", async () => {
+  it("a model-authored refusal (a real decision, standing on a policy row) is never re-asked and never floored", async () => {
     let calls = 0;
     const answer = await runOperator(input(), async () => {
       calls++;
       return {
         tool: OPERATOR_TOOL_NAME,
-        input: { reason: "forbidden", refusal: { cause: "policy", text: "guests may not steer runs" } },
+        input: { reason: "forbidden", refusal: { cause: "policy", text: "guests may not steer runs (steer:write)" } },
       };
     });
     expect(calls).toBe(1);
-    expect(answer.decision).toMatchObject({ kind: "refusal", cause: "policy", text: "guests may not steer runs" });
+    expect(answer.decision).toMatchObject({
+      kind: "refusal",
+      cause: "policy",
+      text: "guests may not steer runs (steer:write)",
+    });
     expect(answer.attempts).toEqual([{ outcome: "accepted" }]);
+  });
+});
+
+describe("a policy refusal stands on the policy table (issue 2043; record 0069's execution table)", () => {
+  const guard = { requestText: "in acme/api: record 0070 — flip the record's status to accepted", presets: ["ship"] };
+  const withRows = { ...guard, policyRows: policyRowIds() };
+  const refusing = (text: string): RouteToolCall => ({
+    tool: OPERATOR_TOOL_NAME,
+    input: { reason: "forbidden", refusal: { cause: "policy", text } },
+  });
+
+  it("policyRowIds reads the one authorization table: the action ids, deduplicated", () => {
+    const rows = policyRowIds();
+    expect(rows).toContain("steer:write");
+    expect(rows).toContain("repo:write");
+    expect(new Set(rows).size).toBe(rows.length);
+  });
+
+  it("a policy refusal naming no policy row and no projection gap is a violation, never the person's answer — the incident's invented authority", () => {
+    const d = parseOperatorDecision(
+      refusing(
+        "privileged administrative updates to control plane records require admin access; contact your repo administrator",
+      ),
+      withRows,
+    );
+    expect(d.kind).toBe("non_decision");
+    if (d.kind !== "non_decision") throw new Error("not a non_decision");
+    expect(d.reason).toContain("names no policy row");
+  });
+
+  it("a refusal that names a policy row's action id is honoured, and so is one naming the projection gap", () => {
+    const onRow = parseOperatorDecision(refusing("guests may not steer runs (steer:write)"), withRows);
+    expect(onRow).toMatchObject({ kind: "refusal", cause: "policy" });
+    const onGap = parseOperatorDecision(refusing("no preset in the projection can write to acme/api"), withRows);
+    expect(onGap).toMatchObject({ kind: "refusal", cause: "policy" });
+  });
+
+  it("a request-cause refusal is not held to the policy vocabulary — it claims no authority", () => {
+    const d = parseOperatorDecision(
+      {
+        tool: OPERATOR_TOOL_NAME,
+        input: { reason: "unusable", refusal: { cause: "request", text: "the message is empty" } },
+      },
+      withRows,
+    );
+    expect(d).toMatchObject({ kind: "refusal", cause: "request" });
+  });
+
+  it("without the guard's policy rows the check is skipped — the parse stays pure over the guard's data", () => {
+    const d = parseOperatorDecision(refusing("contact your repo administrator"), guard);
+    expect(d).toMatchObject({ kind: "refusal", cause: "policy" });
+  });
+
+  it("re-asked with the violation named, then a bind is accepted — the docs ask runs instead of dying on an invented authority", async () => {
+    const text = "in acme/api: record 0070 — flip the record's status to accepted";
+    const answers: (RouteToolCall | string)[] = [
+      refusing("privileged administrative updates to control plane records require admin access"),
+      {
+        tool: OPERATOR_TOOL_NAME,
+        input: { reason: "a docs write", binds: [{ line: `agent:ship ${text}`, reason: "docs change" }] },
+      },
+    ];
+    const answer = await runOperator(input({ text, projection: projectionOf(["ship"]) }), async () => answers.shift()!);
+    expect(answer.decision.kind).toBe("binds");
+    expect(answer.attempts).toEqual([
+      { outcome: "violation", violation: expect.stringContaining("names no policy row") as unknown as string },
+      { outcome: "accepted" },
+    ]);
+  });
+
+  it("a groundless refusal that persists floors to non_decision — the readers' route, exactly as a verifier disagreement does, never the refusal rendered", async () => {
+    let calls = 0;
+    const answer = await runOperator(input(), async () => {
+      calls++;
+      return refusing("production records require admin access and direct repository writes");
+    });
+    expect(calls).toBe(3); // the ask and the seam's two re-asks
+    expect(answer.decision.kind).toBe("non_decision");
+    if (answer.decision.kind !== "non_decision") throw new Error("not a non_decision");
+    expect(answer.decision.reason).toContain("names no policy row");
   });
 });
 

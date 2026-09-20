@@ -100,9 +100,12 @@ import {
   renderPlanted,
   renderVolume,
   renderWrite,
+  doorFixtureScore,
+  renderDoorFixtures,
   replayCommands,
   replayCompound,
   replayDirectives,
+  replayDoorFixtures,
   replayImperative,
   replayMisses,
   replayPlanted,
@@ -125,6 +128,7 @@ import {
 } from "../src/load/routeReplay.js";
 import { ROUTE_COMPOUND_FIXTURES } from "../src/load/routeCompoundFixtures.js";
 import { ROUTE_IMPERATIVE_FIXTURES } from "../src/load/routeImperativeFixtures.js";
+import { ROUTE_DOOR_FIXTURES } from "../src/load/routeDoorFixtures.js";
 import { ROUTE_COMMAND_EXAMPLES } from "../src/load/routeCommandFixtures.js";
 import { ROUTE_WRITE_FIXTURES } from "../src/load/routeWriteFixtures.js";
 import { ROUTE_MISS_FIXTURES } from "../src/load/routeMissFixtures.js";
@@ -141,6 +145,7 @@ import {
   route,
   ROUTE_TIMEOUT_MS,
 } from "../src/core/dispatch/route.js";
+import { runOperator } from "../src/core/dispatch/operator.js";
 import { DEFAULT_MAX_CHILDREN } from "../src/core/dispatch/spawn.js";
 import { doorReport, renderDoor } from "../src/load/doorReport.js";
 import {
@@ -201,7 +206,8 @@ commands
              --print-prompt --task <name>: print the task's prompt and exit (for the same task on today's coding agent)
   route      the request router replayed against finished runs whose requester typed the preset (the label), its
              compound form scored on the checked-in set (src/load/routeCompoundFixtures.ts) and the history's conductor runs,
-             and the terse imperatives scored on theirs (src/load/routeImperativeFixtures.ts)
+             and the terse imperatives scored on theirs (src/load/routeImperativeFixtures.ts); the door set
+             (src/load/routeDoorFixtures.ts) replays the operator over the falsely refused docs asks
              --provider NAME  --model ID  [--key-env VAR  --base-url URL  --since DATE  --limit N  --default-agent NAME
              --concurrency N  --max-parts N (the compound cap, default spawn.maxChildren's 3)]
              [--verify: one more call on every bind of a write- or destructive-class command in the checked-in command set,
@@ -1352,6 +1358,15 @@ async function routeReplay(f: Flags): Promise<boolean> {
     now: systemClock,
   });
   const imperative = imperativeScore(imperativeResults);
+  // The door row (issue 2043): the OPERATOR itself replayed over the falsely
+  // refused docs asks — the full projection (every preset, the whole command
+  // menu), an empty tail — scored on binding the write preset, never refusing.
+  const doorResults = await replayDoorFixtures(
+    ROUTE_DOOR_FIXTURES,
+    async (text) => (await runOperator({ text, projection: { presets, commands: menu }, tail: [] }, model)).decision,
+    { concurrency, now: systemClock },
+  );
+  const door = doorFixtureScore(doorResults);
   const commandResults = await replayCommands(
     ROUTE_COMMAND_EXAMPLES,
     decideCommand,
@@ -1462,6 +1477,14 @@ async function routeReplay(f: Flags): Promise<boolean> {
         ...(r.bound === undefined && r.routed === undefined ? { reason: "no-route" } : {}),
       })),
     ),
+    ...doorResults.map((r): Sample => ({
+      op: "route-door",
+      startedAt: systemClock(),
+      ms: r.ms,
+      ok: r.hit,
+      status: r.outcome,
+      ...(r.hit ? {} : { reason: "door-miss" }),
+    })),
     ...directiveResults.map((r): Sample => ({
       op: "route-directive",
       startedAt: systemClock(),
@@ -1500,11 +1523,13 @@ async function routeReplay(f: Flags): Promise<boolean> {
     write,
     miss,
     directive,
+    door,
     ...(planted === undefined ? {} : { planted }),
   });
   process.stdout.write(`${renderWrite(write)[0]}\n`);
   process.stdout.write(`${renderMisses(miss)[0]}\n`);
   process.stdout.write(`${renderDirectives(directive)[0]}\n`);
+  process.stdout.write(`${renderDoorFixtures(door)[0]}\n`);
   if (planted !== undefined) process.stdout.write(`${renderPlanted(planted)[0]}\n`);
   process.stdout.write(`${renderVolume(volume)}\n`);
   process.stdout.write(`${renderAgreement(agreement)}\n`);
@@ -1553,6 +1578,9 @@ async function routeReplay(f: Flags): Promise<boolean> {
     "",
     `the directive words (${directive.fixtures} fixtures: each word in first position and mid-sentence):`,
     ...renderDirectives(directive),
+    "",
+    `the door set (${door.fixtures} falsely refused docs asks, replayed over the operator itself):`,
+    ...renderDoorFixtures(door),
     ...(planted === undefined
       ? [
           "",
