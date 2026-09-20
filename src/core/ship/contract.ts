@@ -461,6 +461,19 @@ export const GATE_RECEIPTS =
   "Paste each command's exit line into the PR description's validation table as the row's proof; a gate you " +
   "could not run goes under the handoff's unproven list and is never claimed clean.";
 
+/** The rebase before every push lives in the coding preset's own instructions
+ *  (`REBASE_BEFORE_PUSH`, src/agents/registry.ts — agent-coding item 13;
+ *  record 0071 mechanism one): the base fetched, the branch rebased onto it,
+ *  the fast gates re-run on the rebased tree, then the push — always, never
+ *  configurable. The contract used to carry the conditional form ("rebase once
+ *  more if it moved while you worked"); now the first instruction points at
+ *  the preset's paragraph, the same shape as the fast-gates pointer above, so
+ *  the child reads the rule once and cannot read a softer one here. */
+export const REBASE_POINTER =
+  "The rebase before every push is your preset instructions' rule (REBASE BEFORE EVERY PUSH): it holds before " +
+  "each push here — always, not configurable — so every head you push is current with its base and the pull " +
+  "request is never born conflicting.";
+
 function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
   const branch = rebase.branch ? `\`${rebase.branch}\`` : "the unit's branch";
   const onto = rebase.onto ? `\`${rebase.onto}\`` : "the merged parent";
@@ -470,8 +483,7 @@ function renderFirstInstruction(rebase: ChildContract["rebase"]): string {
     `the only writes are your own on that branch. A conflict ends the unit: report it as the handoff and stop. ` +
     `Push the branch as soon as the change exists and the fast gates pass — the project's full verification ` +
     `is CI's gate, run there after the push with any fix as a further commit; an unpushed tree does not ` +
-    `survive the run's end. ${gates} Right before each push, fetch ${onto} again and rebase ` +
-    `once more if it moved while you worked, so the pull request is not born conflicting. At the wind-down note, ` +
+    `survive the run's end. ${gates} ${REBASE_POINTER} At the wind-down note, ` +
     `commit and push what compiles, say what does not, then answer. ${TIMEOUT_ON_LONG_COMMANDS}`
   );
 }

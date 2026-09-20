@@ -9,6 +9,7 @@ import {
   nextStep,
   piCodingProfileScript,
   piReviewProfileScript,
+  rebaseBeforePushScript,
   reviewProfileScript,
   startScriptedProvider,
   type Script,
@@ -281,5 +282,38 @@ describe("startScriptedProvider — the server", () => {
     } finally {
       await server.close();
     }
+  });
+});
+
+// Feature: docs/reference/specs/agent-coding.md item 13 — the rebase before
+// every push (record 0071 mechanism one). The fixture is a coding child whose
+// base moved during its round; the replay proves the order the preset's
+// paragraph names: the fetch, the rebase and the fast gates come before the
+// push, always.
+describe("rebaseBeforePushScript — a child whose base moved rebases before the push (agent-coding item 13, record 0071)", () => {
+  it("replayed step by step, the fetch, the rebase and the gates all come before the push, in that order", () => {
+    const fixture = rebaseBeforePushScript({ cpuSeconds: 1 });
+    // walk the script the way the provider does: one step per tool-result count
+    const messages: Array<{ role: string; tool_call_id?: string; content?: unknown }> = [
+      { role: "user", content: "go" },
+    ];
+    const replayed: string[] = [];
+    for (;;) {
+      const step = nextStep(fixture, messages);
+      if (step.kind === "text") break;
+      replayed.push(String((step.input as { command?: string; path?: string }).command ?? step.name));
+      messages.push(toolMsg(String(replayed.length - 1)));
+    }
+    const at = (want: (cmd: string) => boolean) => replayed.findIndex(want);
+    const fetch = at((c) => c.startsWith("git fetch"));
+    const rebase = at((c) => c.startsWith("git rebase"));
+    const gates = at((c) => c.includes("burn"));
+    const push = at((c) => c.startsWith("git push"));
+    expect(fetch).toBeGreaterThan(-1);
+    expect(rebase).toBeGreaterThan(fetch);
+    expect(gates).toBeGreaterThan(rebase);
+    expect(push).toBeGreaterThan(gates);
+    // the push is the last tool of the round: nothing edits after the gates ran
+    expect(push).toBe(replayed.length - 1);
   });
 });

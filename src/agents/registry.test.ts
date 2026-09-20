@@ -18,6 +18,7 @@ import {
   type AgentDef,
   CHECKS_BY_COST,
   FAST_GATES_BEFORE_PUSH,
+  REBASE_BEFORE_PUSH,
   TOUCHED_TESTS_COMMAND,
 } from "./registry.js";
 import { TIMEOUT_ON_LONG_COMMANDS } from "../core/ship/contract.js";
@@ -580,6 +581,63 @@ describe("coding prompts: the fast gates before every push (agent-coding item 13
       AGENTS.conductor.system,
     ];
     for (const sys of others) expect(sys).not.toContain("THE FAST GATES");
+  });
+});
+
+// Feature: docs/reference/specs/agent-coding.md item 13 — the rebase before
+// every push (record 0071 mechanism one, issue 1747). Approved pull requests
+// went stale behind sibling merges and needed hand-posted rebases; the rule is
+// the preset's own, so a ship fix round's child — which runs these same coding
+// prompts — reads the same bytes, and the ship contract points at the
+// paragraph instead of re-stating it (src/core/ship/contract.test.ts pins that
+// side).
+describe("coding prompts: the rebase before every push (agent-coding item 13, record 0071 mechanism one)", () => {
+  const codingPrompts = () => [AGENTS.coding.system, AGENTS.coding.residentSystem!, AGENTS.coding.seededSystem!];
+
+  it("the paragraph orders the fetch, the rebase, the fast gates on the rebased tree, then the push — in that order, resolving with the context in hand and AGENTS.md for generated files, never configurable", () => {
+    expect(REBASE_BEFORE_PUSH).toContain("always, not configurable");
+    expect(REBASE_BEFORE_PUSH).toContain("Immediately before each push");
+    // the order is the paragraph's own: fetch, rebase, gates, push
+    const fetch = REBASE_BEFORE_PUSH.indexOf("fetch your base branch");
+    const rebase = REBASE_BEFORE_PUSH.indexOf("rebase your branch onto it");
+    const gates = REBASE_BEFORE_PUSH.indexOf("re-run THE FAST GATES on the rebased tree");
+    const push = REBASE_BEFORE_PUSH.indexOf("only then push");
+    expect(fetch).toBeGreaterThan(-1);
+    expect(rebase).toBeGreaterThan(fetch);
+    expect(gates).toBeGreaterThan(rebase);
+    expect(push).toBeGreaterThan(gates);
+    // conflicts resolve with the context already in the window, and a generated file is
+    // regenerated the way the repository's AGENTS.md says, never hand-merged
+    expect(REBASE_BEFORE_PUSH).toContain("resolve any conflict with the context you already have");
+    expect(REBASE_BEFORE_PUSH).toContain("AGENTS.md says how a generated file is regenerated");
+    // the why: a head reaching review is current with its base, no merge-ready behind a sibling
+    expect(REBASE_BEFORE_PUSH).toContain("current with its base");
+    expect(REBASE_BEFORE_PUSH).toContain("no unit ends merge-ready behind a sibling");
+  });
+
+  it("every coding prompt carries the paragraph exactly once — the same bytes across the three variants — right after the fast gates", () => {
+    for (const sys of codingPrompts()) {
+      expect(sys.split(REBASE_BEFORE_PUSH)).toHaveLength(2);
+      // adjacency, not mere order: only whitespace sits between the two paragraphs
+      const between = sys.slice(
+        sys.indexOf(FAST_GATES_BEFORE_PUSH) + FAST_GATES_BEFORE_PUSH.length,
+        sys.indexOf(REBASE_BEFORE_PUSH),
+      );
+      expect(between).toMatch(/^\s*$/);
+    }
+  });
+
+  it("no other preset carries it: a review pushes nothing, and the workspace-less presets push nothing", () => {
+    const others = [
+      AGENTS.review.system,
+      AGENTS.review.residentSystem!,
+      REVIEW_SYSTEM_SEEDED,
+      AGENTS.general.system,
+      AGENTS.research.system,
+      AGENTS.explore.system,
+      AGENTS.conductor.system,
+    ];
+    for (const sys of others) expect(sys).not.toContain("REBASE BEFORE EVERY PUSH");
   });
 });
 

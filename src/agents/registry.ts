@@ -279,6 +279,23 @@ export const FAST_GATES_BEFORE_PUSH =
   "CI's gate — `npm run verify` runs there on your push, never here: push a head early and let CI judge it, " +
   "fixing forward with further commits and pushes.";
 
+// Every coding prompt carries this verbatim, right after the fast gates
+// (agent-coding item 13; record 0071 mechanism one, issue 1747): the rebase
+// before every push, always and never configurable. Approved pull requests
+// went stale behind sibling merges and each needed a hand-posted rebase; a
+// rebase against a base the run just fetched, with the change's context still
+// in its window, is the cheapest rebase the system will ever run, so it is
+// unconditional. One constant, one text: the three coding variants carry the
+// same bytes — a ship fix round's child runs these same prompts — and the ship
+// contract's first instruction points here instead of re-stating it
+// (src/core/ship/contract.ts).
+export const REBASE_BEFORE_PUSH =
+  "REBASE BEFORE EVERY PUSH — always, not configurable. Immediately before each push: fetch your base branch, " +
+  "rebase your branch onto it, resolve any conflict with the context you already have (the repository's " +
+  "AGENTS.md says how a generated file is regenerated — regenerate it, never hand-merge it), re-run THE FAST " +
+  "GATES on the rebased tree, and only then push. Every head that reaches review is then current with its " +
+  "base when it lands, and no unit ends merge-ready behind a sibling that merged first.";
+
 const CODING_SYSTEM = `You are Switchboard's coding agent, operating from a Slack request.
 
 You work inside a dedicated workspace directory with bash, read_file, and write_file tools. ${SANDBOX_TOOLCHAIN}
@@ -302,6 +319,8 @@ Workflow for shipping a PR:
 ${CHECKS_BY_COST}
 
 ${FAST_GATES_BEFORE_PUSH}
+
+${REBASE_BEFORE_PUSH}
 
 ${NEVER_MERGE}
 
@@ -352,6 +371,8 @@ ${CHECKS_BY_COST}
 
 ${FAST_GATES_BEFORE_PUSH}
 
+${REBASE_BEFORE_PUSH}
+
 ${NEVER_MERGE}
 
 ${UNIT_CONTRACT}
@@ -396,6 +417,8 @@ Workflow for shipping a change:
 ${CHECKS_BY_COST}
 
 ${FAST_GATES_BEFORE_PUSH}
+
+${REBASE_BEFORE_PUSH}
 
 ${NEVER_MERGE}
 
