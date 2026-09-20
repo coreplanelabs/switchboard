@@ -209,6 +209,9 @@ interface PlanFacts {
   generated: boolean;
   /** The runs page base the bot answered: the report links a child's write-up to its run page with it. */
   runPageBase?: string;
+  /** The hard stop's mark (record 0060; issue 1924): the hosted parent was
+   *  sealed, so the walk ends the remaining units stopped and runs nothing more. */
+  stopped: boolean;
   repo: string;
   base: string;
   caps: ShipCaps;
@@ -263,6 +266,7 @@ function readPlan(a: BotAnswer): PlanFacts {
     idleDays: readIdleDays(b.idleDays),
     generated: b.generated === true,
     ...(typeof b.runPageBase === "string" && b.runPageBase.length > 0 ? { runPageBase: b.runPageBase } : {}),
+    stopped: b.stopped === true,
     repo: b.repo,
     base: b.base,
     caps: { maxRounds: b.caps.maxRounds, maxMinutes: b.caps.maxMinutes },
@@ -288,6 +292,9 @@ function spawnReturn(step: string, a: BotAnswer): StepReturn {
     return { type: "spawn", step, outcome: alreadySpawned === true ? "alreadySpawned" : "spawned", runId, at };
   if (a.status === 409 && error === "busy")
     return { type: "spawn", step, outcome: "busy", ...(typeof runId === "string" ? { runId } : {}), at };
+  // The hosted parent's hard stop (record 0060; issue 1924): the spawn is
+  // refused over the instance row's stop mark, and the unit ends stopped.
+  if (a.status === 409 && error === "stopped") return { type: "spawn", step, outcome: "stopped", at };
   if (a.status === 403 && typeof error === "string")
     return {
       type: "spawn",
@@ -306,7 +313,10 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
   const run = a.body.run;
   if (a.body.ok !== true || !isRecord(run) || typeof run.finished !== "boolean")
     throw new UnreadableAnswer("read-record", a, "run");
-  if (!run.finished) return { type: "read-record", step, run: { finished: false }, at: a.body.at };
+  // The hard stop's mark, as the bot's answer carries it (record 0060; issue
+  // 1924): a finished child's unit ends stopped on it.
+  const stopped = a.body.stopped === true ? { stopped: true as const } : {};
+  if (!run.finished) return { type: "read-record", step, run: { finished: false }, ...stopped, at: a.body.at };
   if (typeof run.status !== "string") throw new UnreadableAnswer("read-record", a, "status");
   // The typed artifacts as the bot's record carries them — shape-checked where
   // they were written (the run record's validator), read here as they are.
@@ -331,6 +341,7 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
   return {
     type: "read-record",
     step,
+    ...stopped,
     run: {
       finished: true,
       status: run.status as Extract<ChildFacts, { finished: true }>["status"],
@@ -820,6 +831,11 @@ async function runUnit(
   }
 }
 
+/** The report of a unit the hard stop ended before it ran (record 0060; issue 1924). */
+function stoppedReport(unit: string): string {
+  return `⏹ Stopped: the pipeline's hosted parent was hard-stopped, so ${unit} was ended without running. Re-issue the plan naming the remaining units to run them.`;
+}
+
 function blockedReport(unit: string, dep: string, depEnding: string): string {
   if (depEnding === "blocked")
     return `⛔ Blocked: ${unit} waits on ${dep}, which is blocked itself. Re-issue the plan naming the remaining units once it is resolved.`;
@@ -890,6 +906,18 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
   let cursor = openPlanCursor(graph);
   const endings: Record<string, string> = {};
   for (;;) {
+    // The hard stop's mark (record 0060; issue 1924), read before every unit
+    // start: the walk ends every unit not yet ended `stopped` — the rows say
+    // why they never ran — and starts nothing more. A stop that lands once
+    // every unit has ended changes nothing: there is nothing left to end.
+    if (plan.stopped) {
+      for (const id of cursor.order.filter((u) => endings[u] === undefined)) {
+        endings[id] = "stopped";
+        const body = { parentInstanceId: instanceId, unit: id, ending: { kind: "stopped", report: stoppedReport(id) } };
+        await step.do(`${id}/end`, STEP_CONFIG, () => call(bot, "unit-end", body));
+      }
+      break;
+    }
     const [next] = readyUnits(graph, cursor);
     if (next === undefined) break;
     cursor = startUnit(graph, cursor, next);
@@ -927,8 +955,9 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
   // Blocked units, in the plan's order: each told its own ending, so the rows
   // and the summary say why it never ran. Every blocked unit's ending is known
   // before any report is rendered — a plan may list a dependent before the
-  // dependency that blocks it.
-  const blocked = cursor.order.filter((id) => cursor.status[id] === "blocked");
+  // dependency that blocks it. A stopped walk skips this: every unended unit
+  // was already ended `stopped` above, and its cursor never finishes.
+  const blocked = plan.stopped ? [] : cursor.order.filter((id) => cursor.status[id] === "blocked");
   for (const id of blocked) endings[id] = "blocked";
   for (const id of blocked) {
     const node = graph.units.find((u) => u.id === id)!;
@@ -940,7 +969,8 @@ async function walk(step: StepRunner, bot: CoordinatorBot, instanceId: string): 
     };
     await step.do(`${id}/end`, STEP_CONFIG, () => call(bot, "unit-end", body));
   }
-  if (!cursorFinished(cursor)) throw new Error(`the plan's cursor did not finish: ${JSON.stringify(cursor.status)}`);
+  if (!plan.stopped && !cursorFinished(cursor))
+    throw new Error(`the plan's cursor did not finish: ${JSON.stringify(cursor.status)}`);
   return {
     instance: instanceId,
     ...(plan.planId !== undefined ? { planId: plan.planId } : {}),

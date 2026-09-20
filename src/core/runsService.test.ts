@@ -2194,6 +2194,16 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     const { reg } = testRegistry(regOver);
     const ledger = new InMemoryRunLedger(() => NOW);
     const units = new InMemoryCoordinatorInstanceStore();
+    await units.put({
+      id: "plan-p-1",
+      kind: "ship",
+      userId: "access:u1",
+      channelId: "web:s",
+      threadKey: "web:s:c9",
+      repo: "acme/api",
+      branch: "plan/p/u16",
+      createdAt: NOW - 60_000,
+    } satisfies CoordinatorInstance);
     await units.putUnits([
       unitRow("U16", {
         pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
@@ -2201,7 +2211,13 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
       }),
       unitRow("U17", { threadKey: "web:s:u2" }),
     ]);
-    const svc = createRunsService({ registry: reg, store: new InMemoryRunStore({ now: () => NOW }), ledger, units });
+    const svc = createRunsService({
+      registry: reg,
+      store: new InMemoryRunStore({ now: () => NOW }),
+      ledger,
+      units,
+      clock: () => NOW,
+    });
     const { id, token } = reg.create("ship · acme/api", hostedMeta);
     reg.publish(id, { type: "input", messageId: "m1", text: "ship the plan" });
     reg.publish(id, { type: "run_meta", agent: "ship", instanceId: "plan-p-1", at: NOW });
@@ -2216,7 +2232,7 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
       system: "",
       tools: [],
     });
-    return { reg, ledger, svc, id, token };
+    return { reg, ledger, svc, id, token, units };
   }
 
   it("a soft stop answers `hosted` and touches nothing: the run stays live, no stop_requested, the ledger untouched", async () => {
@@ -2265,6 +2281,44 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
       tools: [],
     });
     expect(claim.ok).toBe(true);
+  });
+
+  // Issue 1924: the hard stop also stops the runner — the seal writes the stop
+  // mark on the instance row, which the runner reads before every unit start
+  // and every child spawn, and the sealed parent's answer says so.
+  it("a hard stop writes the stop mark on the instance row and the answer names the stopped runner", async () => {
+    const { reg, svc, id, units } = await hostedWorld();
+    expect(await svc.stopRun(id, "hard", actor)).toMatchObject({ ok: true });
+    expect((await units.get("plan-p-1"))!.stop).toEqual({ at: NOW });
+    const events = reg.snapshotById(id)!.events;
+    const answer = [...events].reverse().find((e) => e.type === "answer");
+    expect(answer && "text" in answer && answer.text).toContain("The plan runner was stopped");
+    expect(answer && "text" in answer && answer.text).toContain("the remaining units end `stopped`");
+  });
+
+  it("a hard stop whose instance record is missing still seals, and the answer says the runner may still be walking instead of claiming a stop", async () => {
+    const { reg } = testRegistry();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    // No instance record: the mark has nowhere to land (unknown_instance).
+    const units = new InMemoryCoordinatorInstanceStore();
+    await units.putUnits([unitRow("U17", { threadKey: "web:s:u2" })]);
+    const warned: string[] = [];
+    const svc = createRunsService({
+      registry: reg,
+      store: new InMemoryRunStore({ now: () => NOW }),
+      ledger,
+      units,
+      warn: (m) => void warned.push(m),
+    });
+    const { id } = reg.create("ship · acme/api", hostedMeta);
+    reg.publish(id, { type: "run_meta", agent: "ship", instanceId: "plan-p-1", at: NOW });
+    expect(await svc.stopRun(id, "hard", actor)).toMatchObject({ ok: true });
+    expect(reg.getById(id)!.status).toBe("failed");
+    const events = reg.snapshotById(id)!.events;
+    const answer = [...events].reverse().find((e) => e.type === "answer");
+    expect(answer && "text" in answer && answer.text).toContain("could not be marked stopped");
+    expect(answer && "text" in answer && answer.text).not.toContain("The plan runner was stopped");
+    expect(warned.some((m) => m.includes("unknown_instance"))).toBe(true);
   });
 
   it("a soft stop on a foreign hosted ledger row refuses without calling the ledger's requestStop; a hard stop rides the row", async () => {

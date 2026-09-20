@@ -2107,3 +2107,121 @@ describe("the plan runner's driver — a unit whose pull request already merged 
     expect(bad.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
   });
 });
+
+// Feature: docs/reference/specs/agent-ship.md item 16 and live-view.md items 10
+// and 16 (record 0060; issue 1924) — the hosted parent's hard stop also stops
+// the runner: the seal writes a stop mark on the instance row, the bot's plan
+// answer carries it (`stopped: true`), its spawn route refuses over it, and its
+// read-record answer flags it — the walk honours the mark by ending every unit
+// not yet ended `stopped` and running nothing more.
+describe("the plan runner's driver — the hosted parent's hard stop stops the runner (record 0060, issue 1924)", () => {
+  it("a stop between units spawns nothing more and ends the remaining units stopped: the boundary re-read carries the mark, the next unit never starts, its row is told a stopped ending, and the finish is failed", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [
+        planAnswer([row("U10"), row("U11")]),
+        planAnswer([row("U10"), row("U11")], T0 + 22 * MIN, "runner", { stopped: true }),
+      ],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+      round: [acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+      "unit-end": [acked(), acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary).toEqual({
+      instance: INSTANCE,
+      planId: "fixture",
+      units: { U10: "merged", U11: "stopped" },
+      outcome: "failed",
+    });
+    // Nothing of U11 ran: no unit-start, no branch, no spawn — only its ending.
+    expect(b.of("unit-start").map((c) => c.unit)).toEqual(["U10"]);
+    expect(b.of("spawn").map((c) => c.unit)).toEqual(["U10", "U10"]);
+    expect(s.names().slice(-3)).toEqual(["plan/2", "U11/end", "finish"]);
+    const ends = b.of("unit-end") as Array<{ unit: string; ending: { kind: string; report: string } }>;
+    expect(ends[1]).toMatchObject({ unit: "U11", ending: { kind: "stopped" } });
+    expect(ends[1]!.ending.report).toContain("hard-stopped");
+    expect(ends[1]!.ending.report).toContain("U11 was ended without running");
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
+  });
+
+  it("a stop during a child ends the unit stopped when the child ends: the read-record answer carries the mark, the unit ends stopped whatever the child's own status, and no review child is spawned", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")]), planAnswer([row("U10")], T0 + 10 * MIN, "runner", { stopped: true })],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0")],
+      "read-record": [
+        ok(
+          {
+            ok: true,
+            stopped: true,
+            run: { id: "run-c0", finished: true, status: "completed", finalReply: "Done — branch pushed." },
+          },
+          T0 + 10 * MIN,
+        ),
+      ],
+      "pr-check": [prNone()],
+      round: [acked(), acked()],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "stopped" });
+    expect(summary.outcome).toBe("failed");
+    expect(b.of("spawn")).toHaveLength(1);
+    const [end] = b.of("unit-end") as Array<{ unit: string; ending: { kind: string } }>;
+    expect(end).toMatchObject({ unit: "U10", ending: { kind: "stopped" } });
+    expect(b.of("round").at(-1)).toMatchObject({ unit: "U10", index: 0, agent: "coding", outcome: "stopped" });
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
+  });
+
+  it("a stop that lands between a child's end and the next spawn is honoured at the spawn: the bot refuses it `stopped` and the unit ends stopped, never refused", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")]), planAnswer([row("U10")], T0 + 11 * MIN, "runner", { stopped: true })],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), ok({ ok: false, error: "stopped" }, T0 + 11 * MIN, 409)],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+      round: [acked(), acked(), acked()],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "stopped" });
+    expect(summary.outcome).toBe("failed");
+    // The refused spawn retried nothing: the refusal is terminal, one ask.
+    expect(s.attempts["U10/1/review"]).toBe(1);
+    const [end] = b.of("unit-end") as Array<{ unit: string; ending: { kind: string } }>;
+    expect(end).toMatchObject({ unit: "U10", ending: { kind: "stopped" } });
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
+  });
+
+  it("a stop on a runner that already finished changes nothing: a mark first seen once every unit has ended adds no ending and keeps the finish completed", async () => {
+    const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")]), planAnswer([row("U10")], T0 + 22 * MIN, "runner", { stopped: true })],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+      round: [acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary).toEqual({ instance: INSTANCE, planId: "fixture", units: { U10: "merged" }, outcome: "completed" });
+    expect(b.of("unit-end")).toHaveLength(1);
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "completed" }]);
+  });
+});

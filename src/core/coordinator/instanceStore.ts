@@ -28,6 +28,7 @@ export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "
 export type PutUnitsResult = { ok: true } | { ok: false; reason: "unavailable" };
 export type AppendEventResult = { ok: true; seq: number } | { ok: false; reason: "unavailable" };
 export type MarkConsumedResult = { ok: true } | { ok: false; reason: "unavailable" };
+export type MarkStoppedResult = { ok: true } | { ok: false; reason: "unknown_instance" | "unavailable" };
 
 /** The (instance, unit) a thread event belongs to. */
 export interface UnitEventKey {
@@ -53,6 +54,11 @@ export interface CoordinatorInstanceStore {
   putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult>;
   /** An instance's unit rows in the order they were first written — the plan's. */
   listUnits(instanceId: string): Promise<CoordinatorUnit[]>;
+  /** The hard stop's mark on the instance row (record 0060; issue 1924):
+   *  written when the hosted parent is sealed, read back by the runner's plan,
+   *  spawn and read-record routes. Idempotent — a marked row keeps its first
+   *  mark; an id no record holds is `unknown_instance`. */
+  markStopped(instanceId: string, at: number): Promise<MarkStoppedResult>;
   /** A thread event onto the unit's list (record 0051's reply-as-event rule): the store assigns
    *  the next sequence and enforces the per-event cap (attachments dropped
    *  whole, the row saying how many). A sibling of the unit rows, never a
@@ -99,6 +105,13 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
       if (key.startsWith(`${instanceId}\0`)) out.push(JSON.parse(text) as CoordinatorUnit);
     return out;
   }
+  async markStopped(instanceId: string, at: number): Promise<MarkStoppedResult> {
+    const text = this.rows.get(instanceId);
+    if (text === undefined) return { ok: false, reason: "unknown_instance" };
+    const instance = JSON.parse(text) as CoordinatorInstance;
+    if (instance.stop === undefined) this.rows.set(instanceId, JSON.stringify({ ...instance, stop: { at } }));
+    return { ok: true };
+  }
   async appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult> {
     const list = this.events.get(unitKey(key)) ?? [];
     const seq = (list[list.length - 1]?.seq ?? 0) + 1;
@@ -134,6 +147,9 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
   }
   async listUnits(_instanceId: string): Promise<CoordinatorUnit[]> {
     return [];
+  }
+  async markStopped(_instanceId: string, _at: number): Promise<MarkStoppedResult> {
+    return { ok: false, reason: "unavailable" };
   }
   async appendEvent(_key: UnitEventKey, _event: ThreadEventInput): Promise<AppendEventResult> {
     return { ok: false, reason: "unavailable" };
@@ -222,6 +238,14 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     if (!Array.isArray(d.units) || !d.units.every(isCoordinatorUnit))
       throw new Error("coordinator store /runs/coordinator/units/list: the answer is not a list of unit rows");
     return d.units;
+  }
+
+  async markStopped(instanceId: string, at: number): Promise<MarkStoppedResult> {
+    const r = await this.post("/runs/coordinator/stop", { instanceId, at });
+    const d = r.data as { ok?: unknown; reason?: unknown };
+    if (r.status === 409 && d.reason === "unknown_instance") return { ok: false, reason: "unknown_instance" };
+    if (d.ok === true) return { ok: true };
+    throw new Error(`coordinator store /runs/coordinator/stop: unexpected answer (HTTP ${r.status})`);
   }
 
   async appendEvent(key: UnitEventKey, event: ThreadEventInput): Promise<AppendEventResult> {

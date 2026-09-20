@@ -347,6 +347,11 @@ export interface CoordinatorInstance {
    *  attempt ended reruns the units not merged under `plan-<plan-id>-<attempt>`);
    *  absent for the first. */
   attempt?: number;
+  /** The hard stop's mark (record 0060; issue 1924): written when the hosted
+   *  parent is sealed, read by the runner before every unit start and before
+   *  every child spawn — it honours the mark by ending the remaining units
+   *  `stopped` and running nothing more. */
+  stop?: { at: number };
 }
 
 export interface UnitSegment {
@@ -491,6 +496,7 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
   if (!isOptionalText(r.runId) || !isOptionalText(r.label)) return false;
   if (r.verbosity !== undefined && !isVerbosity(r.verbosity)) return false;
   if (r.attempt !== undefined && !(Number.isInteger(r.attempt) && (r.attempt as number) >= 2)) return false;
+  if (r.stop !== undefined && !(isObject(r.stop) && isFinite(r.stop.at))) return false;
   return true;
 }
 
