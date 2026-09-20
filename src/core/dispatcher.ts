@@ -81,7 +81,7 @@ import {
   WorkspaceFiles,
   type StagedOutcome,
 } from "./dispatch/staging.js";
-import type { RunSeed } from "./runRecord.js";
+import type { RunRecord, RunSeed } from "./runRecord.js";
 import {
   attachWorkspace,
   budgetClipLabel,
@@ -112,6 +112,7 @@ import {
   carriedRunIdentity,
   carriedWorkspaceBinding,
   prepareRestartTurn,
+  recordRestartDeath,
   type CarriedRunIdentity,
 } from "./dispatch/reattach.js";
 import { workspaceBindingFor } from "../execution/factory.js";
@@ -582,7 +583,17 @@ export async function dispatch(
   // closed `interrupted`, which admission must never steer the request into
   // (thread-admission item 5). Undefined until a restart is decided.
   let restartRequest:
-    { request: IncomingMessage; restartOf?: string; note: string; coordinator?: CoordinatorTag } | undefined;
+    | {
+        request: IncomingMessage;
+        restartOf?: string;
+        note: string;
+        coordinator?: CoordinatorTag;
+        /** The `restarting` record the row was closed with (issue 2081): kept so
+         *  a restart dispatch that dies before the successor's claim ends that
+         *  record for real instead of leaving it answering still-running. */
+        closed?: RunRecord;
+      }
+    | undefined;
   const reservationHooks = {
     onStop: (mode: StopMode) => void registered?.control.requestStop(mode),
     onFenced: () => {
@@ -1553,7 +1564,7 @@ export async function dispatch(
       // saying why, and its request runs again as a new run in the thread,
       // provisioned as a fresh run is, after the outer finally frees the thread.
       if (resume) {
-        const request = await abandonLostWorkspace({
+        const abandoned = await abandonLostWorkspace({
           msg,
           io,
           refuse: refuseSilently,
@@ -1571,12 +1582,15 @@ export async function dispatch(
         });
         // The restart is the same instance's child (run-history item 48a): the
         // tag rebuilt from the row and its event rides along, as the run loop's
-        // interruption carries the tag it ran under.
-        if (request)
+        // interruption carries the tag it ran under. The `restarting` record the
+        // row closed with rides too, so a restart dispatch that dies before the
+        // successor's claim can end that record for real (issue 2081).
+        if (abandoned)
           restartRequest = {
-            request,
+            request: abandoned.request,
             restartOf: resume.row.runId,
             note: "workspace lost, resumed from the request",
+            ...(abandoned.closed !== undefined ? { closed: abandoned.closed } : {}),
             ...(coordinator !== undefined ? { coordinator } : {}),
           };
         resumeRowClosed = true;
@@ -2213,11 +2227,36 @@ export async function dispatch(
         ...(restartIdentity !== undefined ? { carried: restartIdentity } : {}),
         ...(restartRequest.coordinator !== undefined ? { coordinator: restartRequest.coordinator } : {}),
       });
-      await dispatch(deps, restart.msg, io, restart.opts).catch((err: unknown) =>
+      const restarted = await dispatch(deps, restart.msg, io, restart.opts).catch((err: unknown) => {
         console.error(
           `[dispatch] ${msg.threadKey} restart from the request failed: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
+        );
+        return err instanceof Error ? err.message : String(err);
+      });
+      // The restart died between the `restarting` close and the successor's
+      // claim (issue 2081): the carried id never re-registered, so no successor
+      // row will ever appear and the record would answer still-running until
+      // the unit's wall clock ran out. End the record for real — `restarting`
+      // dropped, the death on it — so `read-record` answers `interrupted` with
+      // the roll's recorded cause and the unit ends on the interrupted note.
+      // Only judged where the identity was carried: with it the successor is
+      // the same id, so a missing snapshot after the dispatch settled proves no
+      // claim happened; a death after the claim is the outer net's (the
+      // registered run finished `failed`, its record replacing the close's).
+      if (
+        restartRequest.closed?.restarting === true &&
+        restartRequest.restartOf !== undefined &&
+        restartIdentity !== undefined &&
+        !registry.snapshotById(restartRequest.restartOf)
+      )
+        await recordRestartDeath({
+          writer: deps.runHistoryWriter,
+          closed: restartRequest.closed,
+          why: typeof restarted === "string" ? restarted : `the restart's dispatch ended ${restarted.status}`,
+          clock,
+          ...(restartRequest.coordinator !== undefined ? { coordinator: restartRequest.coordinator } : {}),
+          ...(deps.workflow !== undefined ? { workflow: deps.workflow } : {}),
+        });
     } else if (settled.kind === "handed-on") {
       const fresh = prepareFreshTurn(deps, { agent: settled.agent, pending: settled.pending, clock });
       await dispatch(deps, fresh.msg, fresh.io, fresh.opts).catch((err: unknown) =>

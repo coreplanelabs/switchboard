@@ -17,6 +17,8 @@ import { mergeFollowUps } from "../threadAdmission.js";
 import type { Clock } from "../trace/types.js";
 import type { IncomingMessage } from "../types.js";
 import { closeResumedRow, type ResumeContext } from "./admission.js";
+import type { RunHistoryWriter } from "../runHistoryWriter.js";
+import type { RunRecord } from "../runRecord.js";
 import type { GateCard, GateContext } from "./authorize.js";
 import type { RefusalCode } from "../refusal.js";
 import type { PersonFollowUp } from "./settle.js";
@@ -157,6 +159,16 @@ export async function announceChildRoll(ctx: {
   return event;
 }
 
+/** What `abandonLostWorkspace` hands back when the request restarts: the
+ *  request to dispatch again, and the `restarting` record the row was closed
+ *  with — kept so a restart dispatch that dies before the successor's claim
+ *  can end that record for real (issue 2081); absent when the row could not
+ *  be closed (no ledger, or the put failed). */
+export interface AbandonedRestart {
+  request: IncomingMessage;
+  closed?: RunRecord;
+}
+
 /**
  * A resumed run whose workspace could not be re-attached (run-history item
  * 54): the run's work was on that backend or nowhere, so nothing else is
@@ -167,11 +179,12 @@ export async function announceChildRoll(ctx: {
  * dispatch has freed the thread. Undefined when the row's request cannot be read: the run ends
  * here, the note and the card say so.
  */
-export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<IncomingMessage | undefined> {
+export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<AbandonedRestart | undefined> {
   const { refuse, card, shell, closeLines, clock, run, registry, resume, ledgerRun, why, coordinator, workflow } = ctx;
   const restored = messageFromInbox(resume.row.meta.request ?? {}, resume.row.startedAt);
   const summary = lostWorkspaceNote(why, restored !== undefined);
   const note = { type: "run_note" as const, kind: "resumed" as const, summary, at: clock() };
+  let closed: RunRecord | undefined;
   await refuse("workspace_lost", async () => {
     registry.publish(run.id, note);
     // A coordinator's child says the roll to its parent too (run-history item
@@ -204,7 +217,7 @@ export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<I
     );
     // The record carries the note: the events replayed from the ledger plus this one, past the highest seq.
     if (ledgerRun)
-      await closeResumedRow(
+      closed = await closeResumedRow(
         ledgerRun,
         {
           ...resume,
@@ -225,7 +238,55 @@ export async function abandonLostWorkspace(ctx: LostWorkspaceContext): Promise<I
   console.log(
     `[resume] ${resume.row.threadKey} run ${resume.row.runId} ${restored ? "restarts from its request" : "ends"}: ${why}`,
   );
-  return restored?.msg;
+  return restored ? { request: restored.msg, ...(closed !== undefined ? { closed } : {}) } : undefined;
+}
+
+/**
+ * The restart the `restarting` close promised never claimed the run (issue
+ * 2081): its dispatch died between the close and the successor's claim, so no
+ * successor row will ever appear and `read-record` would answer the record as
+ * still running until the unit's wall clock ran out. The closed record is put
+ * again as the run's real end — `restarting` dropped, one `restart_died` note
+ * appended past its last seq saying how the dispatch ended — so the record
+ * reads `interrupted` with the roll's own recorded cause (the earlier notes
+ * stay, and the death note's kind is one the cause reader skips), and a
+ * coordinator parent is told `child-interrupted-<runId>` so its wait settles
+ * now instead of at its chunk's end. The write rides the history writer — the
+ * ledger's row is gone with the close, so the store is where the record lives
+ * and an upsert under the same id replaces it, with the writer's own retries.
+ */
+export async function recordRestartDeath(ctx: {
+  writer: Pick<RunHistoryWriter, "write">;
+  closed: RunRecord;
+  /** How the restart's dispatch ended: the thrown error's words, or its outcome. */
+  why: string;
+  clock: Clock;
+  coordinator?: CoordinatorTag;
+  workflow?: WorkflowSender;
+}): Promise<void> {
+  const { writer, closed, why, clock, coordinator, workflow } = ctx;
+  const at = clock();
+  const summary = `the restart from the request died before it claimed the run (${why}); this close is the run's end`;
+  const { restarting: _restarting, ...ended } = closed;
+  const lastSeq = closed.events.reduce((max, e) => Math.max(max, e.seq ?? 0), 0);
+  writer.write({
+    ...ended,
+    events: [...closed.events, { type: "run_note", kind: "restart_died", summary, at, seq: lastSeq + 1 }],
+    eventCount: closed.eventCount + 1,
+  });
+  // The parent's wait settles on the event and confirms by read-record; best
+  // effort, like every child signal — the next read answers interrupted anyway.
+  if (coordinator !== undefined) {
+    const sent = await sendChildSignal(workflow, {
+      runId: closed.id,
+      parentInstanceId: coordinator.parentInstanceId,
+      kind: "interrupted",
+      reason: summary,
+      at,
+    });
+    if (sent.kind === "failed")
+      console.warn(`[restart] ${closed.id} → ${sent.type} not delivered to ${sent.instance}: ${sent.reason}`);
+  }
 }
 
 /** The fresh dispatch a restart runs as: its own root, the request as the row
