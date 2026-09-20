@@ -30,7 +30,7 @@ const drained: PostAnswer = {
 const lifted: PostAnswer = { status: 200, body: { draining: null, cleared: true } };
 const reconciled: PostAnswer = {
   status: 200,
-  body: { reconciled: [{ resource: "repo:acme/api", result: "restarted" }] },
+  body: { reconciled: [{ resource: "repo:acme/api", result: "restarted", verified: true }] },
 };
 const REFUSED = [
   "[resident-preflight] preflight REFUSED: a Worker deploy swaps every ResidentDO isolate and kills in-flight runs and provisions —",
@@ -114,30 +114,36 @@ describe("the pure pieces", () => {
     );
     const stood = { drained: true, until: UNTIL };
     expect(drainLiftedLine("resident", lifted, stood)).toBe("[deploy:all] resident: fleet reopened");
+    // The gated lift (issue 1931): the reopen does not fire while a container
+    // still reports the pre-deploy image — the registry holds the drain and the
+    // line says the last container's report reopens the fleet.
+    expect(drainLiftedLine("resident", { status: 200, body: { cleared: false, held: ["repo:acme/api"] } }, stood)).toBe(
+      `[deploy:all] resident: fleet stays closed — repo:acme/api still reports the pre-deploy image; it reopens by itself on the last container's new-image report (backstop ${UNTIL})`,
+    );
     expect(drainLiftedLine("resident", { error: "POST x failed: fetch failed" }, stood)).toBe(
       `[deploy:all] resident: fleet NOT reopened (POST x failed: fetch failed) — it reopens by itself at ${UNTIL}; \`POST /undrain\` with the drain or admin bearer reopens it now`,
     );
   });
 
-  it("the reconcile line: every resident's word on a clean pass, the exceptions named when one deferred or failed (it restarts on its own next quiet check), and the request's own failure — never a failed deploy", () => {
+  it("the reconcile line: every resident VERIFIED on the new image on a clean pass, the unverified named when one deferred or its fresh probe failed (the drain holds until it reports), and the request's own failure — never a failed deploy", () => {
     expect(reconcileLine("resident", reconciled)).toBe(
-      "[deploy:all] resident: fleet reconciled onto the new image (repo:acme/api restarted)",
+      "[deploy:all] resident: fleet reconciled and every container verified on the new image (repo:acme/api restarted)",
     );
     expect(reconcileLine("resident", { status: 200, body: { reconciled: [] } })).toBe(
-      "[deploy:all] resident: fleet reconciled onto the new image (no residents)",
+      "[deploy:all] resident: fleet reconciled and every container verified on the new image (no residents)",
     );
     expect(
       reconcileLine("resident", {
         status: 200,
         body: {
           reconciled: [
-            { resource: "repo:acme/api", result: "current" },
-            { resource: "repo:acme/web", result: "deferred" },
+            { resource: "repo:acme/api", result: "restarted", verified: true },
+            { resource: "repo:acme/web", result: "deferred", verified: false },
           ],
         },
       }),
     ).toBe(
-      "[deploy:all] resident: fleet reconciled onto the new image with exceptions (repo:acme/api current, repo:acme/web deferred) — a deferred or failed resident restarts on its next quiet attach or refresh",
+      "[deploy:all] resident: fleet reconciled, but not every container is verified on the new image yet (repo:acme/api restarted, repo:acme/web deferred (unverified)) — the drain holds for the unverified until each reports",
     );
     expect(reconcileLine("resident", { status: 401, body: { error: "unauthorized" } })).toBe(
       "[deploy:all] resident: the fleet could NOT be reconciled onto the new image (HTTP 401: unauthorized) — a stale container restarts on its next quiet attach or refresh instead",
@@ -177,7 +183,9 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(h.calls[5].args).toEqual(["https://switchboard-resident.example.test/undrain", "drn", {}]);
     const lines = h.plain();
     expect(lines[0]).toBe(drainBeganLine("resident", drained));
-    expect(lines.at(-2)).toBe("[deploy:all] resident: fleet reconciled onto the new image (repo:acme/api restarted)");
+    expect(lines.at(-2)).toBe(
+      "[deploy:all] resident: fleet reconciled and every container verified on the new image (repo:acme/api restarted)",
+    );
     expect(lines.at(-1)).toBe("[deploy:all] resident: fleet reopened");
     // The drained wait is the longer budget: the heartbeat counts against 60 min, not 30.
     expect(lines.some((l) => l.includes("(60 min left)"))).toBe(true);

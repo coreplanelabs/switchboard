@@ -88,7 +88,13 @@ import type { RunRegistry } from "../core/runRegistry.js";
 import type { LedgerRun } from "../core/runLedger/writeThrough.js";
 import type { HostingState } from "../core/runLedger/types.js";
 import type { RunsService, RunView } from "../core/runsService.js";
-import { parsePlanBranch, type Brief, type RoundChecks } from "../core/ship/coordinator.js";
+import {
+  interruptionCauseOfWords,
+  parsePlanBranch,
+  type Brief,
+  type InterruptionCause,
+  type RoundChecks,
+} from "../core/ship/coordinator.js";
 import { BOT_SCOPES, checkPrTitle, TITLE_MAX_LENGTH } from "../core/prTitle.mjs";
 import PR_TITLE_VOCABULARY from "../core/prTitleVocabulary.json" with { type: "json" };
 import { isHandoffShape, renderHandoffComment, type Handoff } from "../core/ship/handoff.js";
@@ -1004,6 +1010,22 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   // The hard stop's mark (record 0060; issue 1924): a finished child's unit
   // ends stopped on it, whatever the child's own status.
   const instanceRow = await deps.instances.get(id.value);
+  // An interrupted child that restarted from its request (issue 1903: a
+  // replaced container's child resumes by itself) is not the round's end: the
+  // successor — a run of the same instance and idempotency key in the same
+  // thread — is answered as the child still running, and the machine keeps the
+  // wait on it instead of ending the unit over a resume that succeeded.
+  if (view.status === "interrupted") {
+    const successor = await restartedChildOf(deps, id.value, view).catch(() => undefined);
+    if (successor !== undefined)
+      return json(200, {
+        ok: true,
+        ...(instanceRow?.stop !== undefined ? { stopped: true } : {}),
+        run: { id: successor, finished: false },
+        restartedAs: successor,
+        at,
+      });
+  }
   // Whether the verdict stands on the unit's pull request: the child's own
   // record of its post first (item 18) — it posted, or it recorded why not —
   // and GitHub only when the record is silent, looked at patiently: the
@@ -1046,9 +1068,63 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
       // The failure by name (run-history item 57): a `provider_transient` lets
       // the machine re-run a round-0 child that pushed nothing (issue 1932).
       ...(record.failure !== undefined ? { failure: record.failure } : {}),
+      // What ended an interrupted child (issue 1876), off its record's own
+      // events: the unit's ending names the actual cause in the user's nouns.
+      ...(view.status === "interrupted" ? interruptionOf(record.events) : {}),
     },
     at,
   });
+}
+
+/** The interruption's cause off the record's own events (issue 1876): the last
+ *  words the roll wrote — a `child_interrupted` reason, a resume or
+ *  sandbox-roll note — classified by `interruptionCauseOfWords`; none when the
+ *  record names none, so the ending's sentence never guesses. */
+function interruptionOf(events: readonly RunEvent[] | undefined): { interruption: InterruptionCause } | object {
+  if (events === undefined) return {};
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    const words =
+      e.type === "child_interrupted"
+        ? e.reason
+        : e.type === "run_note" &&
+            (e.kind === "resumed" || e.kind === "sandbox_restarted" || e.kind === "harness_error")
+          ? e.summary
+          : undefined;
+    if (words === undefined) continue;
+    const cause = interruptionCauseOfWords(words);
+    if (cause !== undefined) return { interruption: cause };
+  }
+  return {};
+}
+
+/** The run an interrupted child restarted as (run-history item 54; issue
+ *  1903): the newest run of the same instance and idempotency key in the same
+ *  thread that is not the closed run itself — the restart's dispatch carried
+ *  the coordinator tag forward. None for a child without a key or thread, or
+ *  when nothing restarted it. */
+async function restartedChildOf(
+  deps: AdminCoordinatorDeps,
+  instanceId: string,
+  view: RunView,
+): Promise<string | undefined> {
+  if (view.threadKey === undefined || view.idempotencyKey === undefined) return undefined;
+  // The route is already instance-scoped (the run named must belong to the
+  // instance), so the listing reads everything and filters on the tag.
+  const listing = await deps.runs.listRuns({
+    status: "all",
+    visibleTo: { kind: "all" },
+    threadKey: view.threadKey,
+    limit: RUN_LIST_MAX_LIMIT,
+  });
+  const successor = listing.runs.find(
+    (r) =>
+      r.id !== view.id &&
+      r.parentInstanceId === instanceId &&
+      r.idempotencyKey === view.idempotencyKey &&
+      r.startedAt >= view.startedAt,
+  );
+  return successor?.id;
 }
 
 /** Why a recover pr-check opened nothing: GitHub refused the create because

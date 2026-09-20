@@ -57,7 +57,8 @@ export interface ReclaimedClosure {
  *  names the PR it had and the re-issue that continues it; every other run's
  *  says to re-send the request. */
 export function closureNote(agent: string | undefined, prUrl: string | undefined): string {
-  if (agent === "ship") return shipInterruptedNote(prUrl);
+  // The boot gap IS a bot restart — the one site that may claim it (issue 1876).
+  if (agent === "ship") return shipInterruptedNote(prUrl, "bot_restart");
   return "The bot restarted while this run was in flight and it could not be resumed, so this card stopped updating. Re-send your request to run it again.";
 }
 

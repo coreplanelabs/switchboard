@@ -316,7 +316,11 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
   // The hard stop's mark, as the bot's answer carries it (record 0060; issue
   // 1924): a finished child's unit ends stopped on it.
   const stopped = a.body.stopped === true ? { stopped: true as const } : {};
-  if (!run.finished) return { type: "read-record", step, run: { finished: false }, ...stopped, at: a.body.at };
+  // The interrupted child restarted from its request (issue 1903): the bot
+  // answers the live successor's id, and the machine keeps the wait on it.
+  const restarted = typeof a.body.restartedAs === "string" ? { restartedAs: a.body.restartedAs } : {};
+  if (!run.finished)
+    return { type: "read-record", step, run: { finished: false }, ...stopped, ...restarted, at: a.body.at };
   if (typeof run.status !== "string") throw new UnreadableAnswer("read-record", a, "status");
   // The typed artifacts as the bot's record carries them — shape-checked where
   // they were written (the run record's validator), read here as they are.
@@ -337,6 +341,7 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
     costUsd,
     handoffLists,
     failure,
+    interruption,
   } = facts;
   return {
     type: "read-record",
@@ -363,6 +368,11 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
       // The failure by name (run-history item 57), shape-checked: a
       // `provider_transient` drives the round-0 re-run (agent-ship item 9).
       ...(isRecord(failure) && typeof failure.kind === "string" ? { failure: { kind: failure.kind } } : {}),
+      // What ended an interrupted child (issue 1876): the ending's sentence
+      // names the cause instead of claiming a bot restart for every one.
+      ...(interruption === "bot_restart" || interruption === "container_replaced" || interruption === "sandbox_fault"
+        ? { interruption }
+        : {}),
     },
     at: a.body.at,
   };

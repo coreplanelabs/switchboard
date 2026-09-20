@@ -343,7 +343,15 @@ import {
 } from "../../src/execution/residentDepsStore.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
-import { drainRefusal, liveDrain, parseDrainRequest, type DrainRecord } from "./drain";
+import {
+  drainRefusal,
+  holdDrain,
+  liftDrain,
+  liveDrain,
+  parseDrainRequest,
+  reportImageCurrent,
+  type DrainRecord,
+} from "./drain";
 import {
   CGROUP_READ_ARGV,
   MEMORY_PRESSURE_REASON,
@@ -1434,6 +1442,10 @@ const TEST_OVERRIDES_KEY = "testOverrides";
  *  counts as a slot; it survives the isolate swap a deploy performs, which is
  *  why the record carries its own end. */
 const DRAIN_KEY = "drain";
+/** Resident-DO key (issue 1931): set when a deploy's reconcile could not
+ *  verify this resident's container on the new image; the next reconcile that
+ *  finds it current reports to the registry and clears it. */
+const IMAGE_REPORT_PENDING_KEY = "imageReportPending";
 
 type OnboardResult = { ok: true; record: ResidentRecord } | { ok: false; status: number; error: string };
 
@@ -1568,12 +1580,50 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     return record;
   }
 
-  /** Admin-only by construction (POST /undrain): true when a record was there.
-   *  A cleared drain posts `below` — the plane's resident-drain window lifts. */
-  async clearDrain(): Promise<boolean> {
+  /** Admin-only by construction (POST /undrain): `cleared` when a record was
+   *  there and was lifted — a cleared drain posts `below`, the plane's
+   *  resident-drain window lifts. With holds outstanding (issue 1931: a
+   *  container still to report the deploy's image) the fleet STAYS closed:
+   *  the record stands with `liftAsked` and the last container's report lifts
+   *  it (`reportContainerImageCurrent`); `until` remains the backstop. */
+  async clearDrain(): Promise<{ cleared: boolean; held: string[] }> {
+    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), systemClock());
+    if (record !== null) {
+      const lift = liftDrain(record);
+      if (!lift.cleared) {
+        await this.ctx.storage.put(DRAIN_KEY, lift.record);
+        return { cleared: false, held: lift.record.holds ?? [] };
+      }
+    }
     const had = await this.ctx.storage.delete(DRAIN_KEY);
     if (had) await this.pushDrainPost("below");
-    return had;
+    return { cleared: had, held: [] };
+  }
+
+  /** The deploy's reconcile could not verify these residents' containers on
+   *  the new image (issue 1931): hold the drain for each — the fleet must not
+   *  reopen onto them until they report. No live drain, nothing to hold. */
+  async holdDrainFor(resources: string[]): Promise<void> {
+    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), systemClock());
+    if (record === null || resources.length === 0) return;
+    await this.ctx.storage.put(DRAIN_KEY, holdDrain(record, resources));
+  }
+
+  /** One resident's word that its running container is on the deploy's image:
+   *  its hold drops, and when it was the last hold of a lift already asked the
+   *  drain lifts here — the reopen fires on the last container's report. */
+  async reportContainerImageCurrent(resource: string): Promise<{ lifted: boolean }> {
+    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), systemClock());
+    if (record === null) return { lifted: false };
+    const report = reportImageCurrent(record, resource);
+    if (report.record === null) {
+      await this.ctx.storage.delete(DRAIN_KEY);
+      await this.pushDrainPost("below");
+      console.log(`[drain] fleet reopened — ${resource} was the last container to report the deploy's image`);
+      return { lifted: true };
+    }
+    await this.ctx.storage.put(DRAIN_KEY, report.record);
+    return { lifted: false };
   }
 
   /** The one alarm, at the drain's `until` (record 0064): a drain past
@@ -4936,41 +4986,121 @@ export class ResidentDO extends Sandbox<Env> {
    *  registration whose release never came defers it only until the clean-idle
    *  sweep drains that registration. Answers `restarted` when a stop was
    *  issued, else why not. */
-  private async reconcileImage(where: string): Promise<ImageReconcileResult> {
-    if (!(await this.isRuntimeActive().catch(() => false))) return "inactive";
+  private async reconcileImage(where: string, force = false): Promise<ImageReconcileResult> {
+    if (!(await this.isRuntimeActive().catch(() => false))) {
+      // An inactive container's next start is on the deployed image by
+      // construction — and a held resident whose container idled out has no
+      // other reporter left: new attaches are refused by the very drain the
+      // hold keeps standing, so without this report the fleet stays closed
+      // until the drain's `until` backstop (issue 1931).
+      await this.reportPendingImageCurrent(where);
+      return "inactive";
+    }
     const last = THREAD_USERS[THREAD_USERS.length - 1];
-    const probe = await this.run(["id", "-u", last]);
-    if (probe.exitCode === 0) return "current";
+    // A pending report marker (issue 1931) means a deploy could not verify this
+    // container on its image: the probe shortcut below is a POOL-USER check the
+    // pre-deploy image passes when the pool did not change, so it can never
+    // satisfy the marker — the container is treated as stale until it is cycled
+    // post-deploy and the fresh start reported.
+    const pending = await this.ctx.storage.get<{ resource: string }>(IMAGE_REPORT_PENDING_KEY);
+    if (!force && pending === undefined) {
+      const probe = await this.run(["id", "-u", last]);
+      if (probe.exitCode === 0) return "current";
+    }
+    const stale = force
+      ? "the container predates the deploy"
+      : pending !== undefined
+        ? "a deploy's new-image report is pending, so the running container cannot be trusted current"
+        : `${last} missing in the running container`;
     const busy = this.inFlightCount();
     if (busy > 0) {
-      console.log(
-        `image-stale (${where}): ${last} missing but ${busy} operation(s)/attach(es) in flight — deferring restart`,
-      );
+      console.log(`image-stale (${where}): ${stale} but ${busy} operation(s)/attach(es) in flight — deferring restart`);
       return "deferred";
     }
     const registered = await this.registeredRunsBeyondOps();
     if (registered > 0) {
       console.log(
-        `image-stale (${where}): ${last} missing but ${registered} run registration(s) live — deferring restart until the resident is quiet`,
+        `image-stale (${where}): ${stale} but ${registered} run registration(s) live — deferring restart until the resident is quiet`,
       );
       return "deferred";
     }
-    console.log(
-      `image-stale (${where}): ${last} missing in the running container — stopping so it restarts on the current image`,
-    );
+    console.log(`image-stale (${where}): ${stale} — stopping so it restarts on the current image`);
     this.swapIncarnation(); // deliberate incarnation swap
     await this.stop().catch((err) => console.log(`image-stale: stop failed: ${errMsg(err)}`));
+    if (pending !== undefined) {
+      // The post-deploy cycle just happened: probe the FRESH container — the
+      // SDK boots it for this command on the image the deployed Worker pins,
+      // so a fresh start answering after the deploy is the verified fact
+      // (issue 1931), never the pool-user probe on the old process. A failed
+      // probe keeps the marker: the next reconcile tries the cycle again.
+      const fresh = await this.run(["id", "-u", last])
+        .then((p) => p.exitCode === 0)
+        .catch(() => false);
+      if (fresh) await this.reportPendingImageCurrent(where);
+      else
+        console.log(`image-stale (${where}): the fresh container's probe failed — the new-image report stays pending`);
+    }
     return "restarted";
+  }
+
+  /** The report a held drain waits for (issue 1931): when the deploy's
+   *  reconcile could not verify this resident's fresh container on the new
+   *  image, a marker stays in storage and the registry holds the drain. The
+   *  fact the report stands on is a fresh container start AFTER the deploy —
+   *  the marker makes `reconcileImage` treat the container as stale until the
+   *  cycle happens, so this is called only behind that fresh start (or on an
+   *  inactive resident, whose next start is on the new image by construction).
+   *  The marker is deleted only after a successful report: a transient failure
+   *  keeps it for the next reconcile, and the drain's `until` is the backstop
+   *  for a report that never lands. */
+  private async reportPendingImageCurrent(where: string): Promise<boolean> {
+    const pending = await this.ctx.storage.get<{ resource: string }>(IMAGE_REPORT_PENDING_KEY);
+    if (pending === undefined) return true;
+    try {
+      const { lifted } = await registryStub(this.env).reportContainerImageCurrent(pending.resource);
+      await this.ctx.storage.delete(IMAGE_REPORT_PENDING_KEY);
+      console.log(
+        `[reconcile] ${pending.resource} reports the deploy's image (${where})${lifted ? " — drain lifted" : ""}`,
+      );
+      return true;
+    } catch (err) {
+      console.log(
+        `[reconcile] ${pending.resource}: the new-image report failed (${where}): ${errMsg(err)} — retried on the next reconcile`,
+      );
+      return false;
+    }
   }
 
   /** The deploy's reconcile, inside the drain window (item 69's order: the
    *  runs in flight end, the swap lands, the containers reconcile, the fleet
    *  reopens): `POST /reconcile` calls this on every resident after the Worker
-   *  deploy landed and BEFORE the drain is lifted, so a container that
-   *  predates the new image restarts while nothing can be admitted onto it —
-   *  never under the first run the reopened fleet admits. */
-  async reconcileForDeploy(): Promise<{ result: ImageReconcileResult }> {
-    return { result: await this.reconcileImage("deploy") };
+   *  deploy landed and BEFORE the drain is lifted. The pool-user probe cannot
+   *  tell the pre-deploy image from the new one when the pool did not change,
+   *  and the platform replaces the container processes asynchronously after an
+   *  image-changing deploy (issue 1931) — so this path never trusts "current":
+   *  an active, quiet container is always cycled, and the fresh start —
+   *  necessarily on the deploy's image, which landed before this call — is
+   *  probed. `verified` true is the fact the reopen may stand on; anything
+   *  else (deferred, a failed fresh probe) leaves a hold on the drain, cleared
+   *  by this resident's later report (`reportPendingImageCurrent`), never by a
+   *  timer.
+   *
+   *  The hold lands BEFORE the marker: the marker is what lets any concurrent
+   *  attach/refresh reconcile report, and a report that reaches the registry
+   *  before the hold is a no-op — the marker would be consumed and the hold
+   *  added afterwards would wait for a report nothing sends (until the drain's
+   *  `until`). Held first, every report finds its hold. */
+  async reconcileForDeploy(resource: string): Promise<{ result: ImageReconcileResult; verified: boolean }> {
+    await registryStub(this.env).holdDrainFor([resource]);
+    await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource });
+    const result = await this.reconcileImage("deploy", true);
+    if (result === "deferred") return { result, verified: false };
+    // Inactive: the inactive early-return reported (the next start is on the
+    // new image by construction). Restarted: the cycle's fresh probe and
+    // report ran inside reconcileImage. Either way the marker gone is the
+    // verification.
+    const verified = (await this.ctx.storage.get(IMAGE_REPORT_PENDING_KEY)) === undefined;
+    return { result, verified };
   }
 
   // -- watchdog (the sparse cron; it re-arms nothing) --------------------------
@@ -9118,32 +9248,47 @@ async function handleDrain(env: Env, body: Record<string, unknown>): Promise<Res
   return json({ draining: record, planeOutbox: await registryStub(env).getDrainOutbox() });
 }
 
-/** POST /undrain (admin): reopen the fleet. Idempotent — `cleared` says whether
- *  a drain stood. */
+/** POST /undrain (admin): reopen the fleet. Idempotent — `cleared` says
+ *  whether a drain stood and was lifted. With containers still to report the
+ *  deploy's image (issue 1931) the fleet STAYS closed: `held` names them, the
+ *  record stands with the lift asked, and the last container's report reopens
+ *  the fleet — a fact, never a timer; the drain's `until` is the backstop. */
 async function handleUndrain(env: Env): Promise<Response> {
-  const cleared = await registryStub(env).clearDrain();
-  console.log(`[drain] fleet reopened (${cleared ? "a drain stood" : "no drain stood"})`);
-  return json({ draining: null, cleared, planeOutbox: await registryStub(env).getDrainOutbox() });
+  const lift = await registryStub(env).clearDrain();
+  if (!lift.cleared && lift.held.length > 0) {
+    console.log(`[drain] fleet stays closed — containers still to report the deploy's image: ${lift.held.join(", ")}`);
+    const draining = liveDrain(await registryStub(env).getDrain(), systemClock());
+    return json({ draining, cleared: false, held: lift.held, planeOutbox: await registryStub(env).getDrainOutbox() });
+  }
+  console.log(`[drain] fleet reopened (${lift.cleared ? "a drain stood" : "no drain stood"})`);
+  return json({ draining: null, cleared: lift.cleared, planeOutbox: await registryStub(env).getDrainOutbox() });
 }
 
 /** POST /reconcile (drain scope): reconcile every resident's container onto
  *  the current image — the deploy runner posts it after its Worker deploy
  *  landed and BEFORE its `/undrain`, so a stale container restarts inside the
  *  drain window (item 69's order) and never under a run the reopened fleet
- *  admits. Each resident answers what its reconcile decided; a failing one
- *  degrades to `error` without touching its neighbors, and a `deferred` or
- *  failed one restarts on its own next quiet attach or refresh cycle. */
+ *  admits. Each resident answers what its reconcile decided and whether its
+ *  fresh container was VERIFIED on the deploy's image (issue 1931); one not
+ *  verified — deferred, a failed fresh probe, an error — leaves a hold on the
+ *  drain, so the fleet reopens only on that container's later report. */
 async function handleReconcile(env: Env): Promise<Response> {
   const residents = await registryStub(env).list();
   const settled = await Promise.allSettled(
-    residents.map((record) => residentStub(env, record.resource).reconcileForDeploy()),
+    residents.map((record) => residentStub(env, record.resource).reconcileForDeploy(record.resource)),
   );
   const reconciled = residents.map((record, i) => {
     const s = settled[i];
     return s.status === "fulfilled"
-      ? { resource: record.resource, result: s.value.result }
-      : { resource: record.resource, result: "error" as const, error: errMsg(s.reason) };
+      ? { resource: record.resource, result: s.value.result, verified: s.value.verified }
+      : { resource: record.resource, result: "error" as const, verified: false, error: errMsg(s.reason) };
   });
+  // Each resident held ITSELF before its marker (reconcileForDeploy), so no
+  // report can outrun its hold; this pass is the backstop for a resident whose
+  // call rejected before it could — holdDrain deduplicates, so re-holding a
+  // deferred resident changes nothing.
+  const unverified = reconciled.filter((r) => !r.verified).map((r) => r.resource);
+  if (unverified.length > 0) await registryStub(env).holdDrainFor(unverified);
   console.log(`[reconcile] deploy image reconcile: ${JSON.stringify(reconciled)}`);
   return json({ reconciled });
 }

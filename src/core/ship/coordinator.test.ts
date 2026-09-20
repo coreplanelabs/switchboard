@@ -19,7 +19,9 @@ import {
   planInstanceId,
   readyUnits,
   renderUnitReport,
+  interruptionCauseOfWords,
   shipInterruptedNote,
+  type InterruptionCause,
   settleUnit,
   startUnit,
   unitBranch,
@@ -1730,6 +1732,89 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     runChild(withPr, "run-r1", finished({ status: "interrupted" }), T0 + 20 * MIN);
     expect(withPr.action).toMatchObject({ type: "end", ending: { kind: "interrupted", runId: "run-r1" } });
     expect(renderUnitReport(withPr.state)).toBe(shipInterruptedNote(PR_URL));
+  });
+
+  it("a child whose container was replaced mid-round RESUMES and the pipeline continues (issues 1903/1876): a read-record answering `restartedAs` moves the wait onto the successor, and the successor's finish carries the round on — the unit never ends over a resume that succeeded", () => {
+    const d = atWait();
+    d.answer({ type: "wait", outcome: "event" });
+    expect(d.action).toMatchObject({ type: "read-record", runId: "run-c0" });
+    // The bot found the restarted successor live: the child is answered as
+    // still running under the successor's id.
+    d.answer({ type: "read-record", run: { finished: false }, restartedAs: "run-c0b", at: T0 + 6 * MIN });
+    expect(d.action).toMatchObject({ type: "wait", runId: "run-c0b" });
+    d.answer({ type: "wait", outcome: "event" });
+    expect(d.action).toMatchObject({ type: "read-record", runId: "run-c0b" });
+    d.answer({
+      type: "read-record",
+      run: finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }),
+      at: T0 + 12 * MIN,
+    });
+    // The successor's pull request carries the round on to review — no ending.
+    expect(d.action.type).toBe("pr-check");
+    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 + 12 * MIN });
+    expect(d.action).toMatchObject({ type: "spawn", preset: "review" });
+  });
+
+  it("the interrupted ending names the actual cause from the ledger that saw it (issue 1876): the replaced container, the bot restart and the sandbox fault each get their own sentence, and a record naming none claims none", () => {
+    const endedWith = (cause?: InterruptionCause) => {
+      const d = atWait();
+      d.answer({ type: "wait", outcome: "event" });
+      d.answer({
+        type: "read-record",
+        run: finished({ status: "interrupted", ...(cause !== undefined ? { interruption: cause } : {}) }),
+        at: T0 + 5 * MIN,
+      });
+      d.answer({ type: "pr-check", pr: { state: "none" }, at: T0 + 6 * MIN });
+      expect(d.action).toMatchObject({
+        type: "end",
+        ending: { kind: "interrupted", ...(cause !== undefined ? { cause } : {}) },
+      });
+      return renderUnitReport(d.state);
+    };
+    expect(endedWith("container_replaced")).toContain(
+      "The resident container running this pipeline's child was replaced (a deploy's image swap) and the child could not resume, so the pipeline stopped.",
+    );
+    expect(endedWith("bot_restart")).toContain(
+      "The bot restarted while this ship pipeline was running, so the pipeline stopped.",
+    );
+    expect(endedWith("sandbox_fault")).toContain(
+      "The sandbox running this pipeline's child failed and the child could not resume, so the pipeline stopped.",
+    );
+    expect(endedWith(undefined)).toContain(
+      "This ship pipeline's child was interrupted and could not resume, so the pipeline stopped.",
+    );
+  });
+
+  it("interruptionCauseOfWords classifies the ledger's own words (issue 1876): the relaunch and lost-workspace notes name the container, sandbox words the sandbox, restart words the bot, anything else no cause — each pattern anchored on the writers' exact phrases, so an unrelated word cannot classify", () => {
+    expect(interruptionCauseOfWords("workspace lost with the replaced container; restarting from the request")).toBe(
+      "container_replaced",
+    );
+    expect(
+      interruptionCauseOfWords(
+        "the run's workspace could not be re-attached in the replacement container (reuse-refused); the run restarts from its request as a new run in this thread",
+      ),
+    ).toBe("container_replaced");
+    // contract.ts / relaunch.ts phrase: "container replaced under the run".
+    expect(
+      interruptionCauseOfWords(
+        "container replaced under the run; the harness keeps its own store; restarting from the request",
+      ),
+    ).toBe("container_replaced");
+    expect(interruptionCauseOfWords("the sandbox runtime was replaced under the run")).toBe("sandbox_fault");
+    // sandboxLifecycle.ts phrase — the sandbox rule wins although the words also mention the container's runtime.
+    expect(
+      interruptionCauseOfWords(
+        "sandbox recycled mid-command after 12s — the container's runtime was replaced or restarted under the command, which did not finish",
+      ),
+    ).toBe("sandbox_fault");
+    expect(interruptionCauseOfWords("the bot restarted while this run was in flight")).toBe("bot_restart");
+    expect(interruptionCauseOfWords("3 run(s) in flight — handed to the next generation on SIGTERM")).toBe(
+      "bot_restart",
+    );
+    expect(interruptionCauseOfWords("a provider transient")).toBeUndefined();
+    // Anchoring: a word merely CONTAINING a trigger classifies nothing.
+    expect(interruptionCauseOfWords("regenerating the view after the failure")).toBeUndefined();
+    expect(interruptionCauseOfWords("the run wrote to /workspace/sandbox-notes.md and failed")).toBeUndefined();
   });
 
   it("a findings child that died at an unchanged head ends with the child's own reason — interrupted with the ship-restart note naming the pull request, failed as an abort naming the failure — never as the round's inaction", () => {

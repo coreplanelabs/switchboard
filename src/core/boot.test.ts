@@ -318,7 +318,8 @@ describe("reclaimRuns", () => {
     expect(byId["ship-bare"].note).toContain("round 0 runs again on the same branch");
     expect(byId.plain.note).toContain("Re-send your request");
     expect(byId.replied.note).toBeUndefined();
-    expect(closureNote("ship", "https://x/pull/1")).toBe(shipInterruptedNote("https://x/pull/1"));
+    // The boot gap IS a bot restart — the one closure that may claim it (issue 1876).
+    expect(closureNote("ship", "https://x/pull/1")).toBe(shipInterruptedNote("https://x/pull/1", "bot_restart"));
   });
 
   it("a row this generation owns is never taken by its own sweep, however stale its lease — not closed, not relaunched, not listed elsewhere; the run it belongs to is still ours and running", async () => {

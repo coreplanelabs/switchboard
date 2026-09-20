@@ -77,21 +77,70 @@ export interface ShipCaps {
  *  rounds that must still follow, capped at the preset's ask, refused under the
  *  round's floor. Nothing here holds a reserve of its own. */
 
-/** What a ship pipeline's thread and card say when the bot died under it (run-
- *  history item 36): the work it did stands on GitHub with nobody driving it,
- *  so the note names the PR when one was opened and the exact re-issue that
- *  continues the loop — the same entry the preflight's resume-at-review takes
- *  (agent-ship item 10). Without a PR the task itself is the re-issue: round 0
- *  runs again on the pipeline's own deterministic branch. The coordinator says
- *  the same when a child of its closed `interrupted`. */
-export function shipInterruptedNote(prUrl?: string): string {
+/** What actually ended an interrupted child, from the ledger that saw it
+ *  (issue 1876): the ending's sentence names the cause in the user's nouns —
+ *  the bot restarted, the resident container was replaced, the sandbox failed
+ *  — never "the bot restarted" for a site three causes reach. Read off the
+ *  child's record by the bot's `read-record` (`child_interrupted` / the resume
+ *  notes) and carried on the `interrupted` ending; absent when the record
+ *  named none. */
+export type InterruptionCause = "bot_restart" | "container_replaced" | "sandbox_fault";
+
+/** What a ship pipeline's thread and card say when its child died under it
+ *  (run-history item 36): the work it did stands on GitHub with nobody driving
+ *  it, so the note names the actual cause (issue 1876 — the site is reached by
+ *  a bot restart, a resident container replacement and a sandbox fault, and
+ *  only the ledger's word picks one; with none the sentence claims no cause),
+ *  the PR when one was opened and the exact re-issue that continues the loop —
+ *  the same entry the preflight's resume-at-review takes (agent-ship item 10).
+ *  Without a PR the task itself is the re-issue: round 0 runs again on the
+ *  pipeline's own deterministic branch. A child whose container was replaced
+ *  resumes from its request by itself (issue 1903) and the pipeline keeps
+ *  waiting — this note is written only when that resume failed or no resume
+ *  applied. */
+/** The cause an interruption's recorded words name (issue 1876): the ledger
+ *  that saw the roll wrote them — the relaunch refusals and the lost-workspace
+ *  notes name the replaced container, the sandbox executor's wordings the
+ *  sandbox, the boot gap names the restart — and the ending's sentence repeats
+ *  the cause, never "the bot restarted" for words that say otherwise. Each
+ *  pattern is anchored on the exact phrases those ledgers write —
+ *  `src/core/harness/contract.ts` and `src/core/dispatch/relaunch.ts`
+ *  ("container replaced under the run", "replacement container"),
+ *  `src/core/dispatch/reattach.ts` ("workspace lost", "could not be
+ *  re-attached"), `src/execution/sandboxLifecycle.ts` and the sandbox worker's
+ *  failures ("sandbox recycled", "sandbox worker", "sandbox exec"),
+ *  `src/core/boot.ts` and the resume notes ("bot restarted", the deploy
+ *  hand-off's "next generation") — so an unrelated word ("regenerating…", a
+ *  reason merely mentioning a sandbox path) cannot classify. Unrecognized
+ *  words are no cause: the sentence then claims none. */
+export function interruptionCauseOfWords(words: string): InterruptionCause | undefined {
+  if (
+    /\bcontainer (?:was )?replaced\b|\breplac(?:ed|ement) container\b|\bworkspace lost\b|\bcould not be re-attached\b/i.test(
+      words,
+    )
+  )
+    return "container_replaced";
+  if (/\bsandbox (?:recycled|worker|exec|runtime)\b/i.test(words)) return "sandbox_fault";
+  if (/\bbot restart(?:ed|s)?\b|\b(?:next|previous|another) generation\b/i.test(words)) return "bot_restart";
+  return undefined;
+}
+
+export function shipInterruptedNote(prUrl?: string, cause?: InterruptionCause): string {
   const stands = prUrl
     ? `Its work stands on GitHub: ${prUrl}.`
     : "Whatever it pushed stands on its pipeline branch; no PR was opened yet.";
   const reissue = prUrl
     ? `To continue the review loop, re-issue \`agent:ship\` in this thread with only the PR URL (${prUrl}).`
     : "To continue, re-issue `agent:ship` in this thread with the task — round 0 runs again on the same branch.";
-  return `⚠️ The bot restarted while this ship pipeline was running, so the pipeline stopped. ${stands} ${reissue}`;
+  const opening =
+    cause === "container_replaced"
+      ? "⚠️ The resident container running this pipeline's child was replaced (a deploy's image swap) and the child could not resume, so the pipeline stopped."
+      : cause === "sandbox_fault"
+        ? "⚠️ The sandbox running this pipeline's child failed and the child could not resume, so the pipeline stopped."
+        : cause === "bot_restart"
+          ? "⚠️ The bot restarted while this ship pipeline was running, so the pipeline stopped."
+          : "⚠️ This ship pipeline's child was interrupted and could not resume, so the pipeline stopped.";
+  return `${opening} ${stands} ${reissue}`;
 }
 
 // ---- the plan graph --------------------------------------------------------------------------------
@@ -538,6 +587,10 @@ export type ChildFacts =
        *  `provider_transient` marks a child a gateway 5xx, a cut stream or a
        *  gateway timeout ended past the harness's retry ladder (issue 1932). */
       failure?: { kind: string };
+      /** What ended an `interrupted` child, off its record's own events (issue
+       *  1876): the ending's sentence names it instead of claiming a bot
+       *  restart for every cause. */
+      interruption?: InterruptionCause;
     };
 
 /** What heads the unit's branch on GitHub: nothing, an open pull request, or —
@@ -601,7 +654,10 @@ export type StepReturn =
   | { type: "wait"; step: string; outcome: "event" | "timeout" }
   // `stopped` on a read: the instance row carries the hard stop's mark, so a
   // finished child ends its unit `stopped` whatever the child's own status.
-  | { type: "read-record"; step: string; run: ChildFacts; stopped?: true; at: number }
+  /** `restartedAs`: the interrupted child restarted from its request as this
+   *  run (issue 1903 — a replaced container's child resumes by itself), so the
+   *  machine keeps waiting on the successor instead of ending the unit. */
+  | { type: "read-record"; step: string; run: ChildFacts; stopped?: true; restartedAs?: string; at: number }
   | { type: "pr-check"; step: string; pr: PrCheck; at: number }
   | { type: "merge"; step: string; outcome: "merged"; sha: string; at: number }
   // The door found the pull request already merged after the approval — auto-merge
@@ -768,7 +824,7 @@ export type UnitEnding =
    *  `transient` so it reads as a condition beside `checks_failed` and `held`
    *  in the plane's table, never as the child failing on its task. */
   | { kind: "transient"; round: RoundRef; runId: string; reviewRounds: number }
-  | { kind: "interrupted"; round: RoundRef; runId: string; reviewRounds: number }
+  | { kind: "interrupted"; round: RoundRef; runId: string; reviewRounds: number; cause?: InterruptionCause }
   | { kind: "refused"; refusal: string; message?: string; round: RoundRef; reviewRounds: number }
   /** The unit idles instead of ending (record 0051): with the resolved
    *  `ship.idleDays` above zero, `end()` wraps an idling kind — every kind but
@@ -942,6 +998,8 @@ type Phase =
        *  pushed: the pr-check recovers a pushed branch by opening its pull
        *  request; with nothing pushed the unit ends with the child's own reason. */
       dead?: "failed" | "interrupted";
+      /** What ended the dead child (issue 1876), for the `interrupted` ending's sentence. */
+      cause?: InterruptionCause;
       /** The dead child's record names a provider transient (`failure:
        *  provider_transient`, issue 1932): with nothing pushed, round 0 is
        *  re-run once instead of the unit aborting; a second transient in the
@@ -1814,9 +1872,17 @@ function settlePrCheck(s: UnitPipelineState, phase: Extract<Phase, { at: "pr-che
     // A dead child left nothing on the branch to recover: the unit ends with
     // the child's own reason — never the budget clip.
     if (phase.dead === "interrupted")
-      return end(s, { kind: "interrupted", round, runId: phase.runId, reviewRounds: s.reviewRounds }, [
-        roundNote(round, "aborted"),
-      ]);
+      return end(
+        s,
+        {
+          kind: "interrupted",
+          round,
+          runId: phase.runId,
+          reviewRounds: s.reviewRounds,
+          ...(phase.cause !== undefined ? { cause: phase.cause } : {}),
+        },
+        [roundNote(round, "aborted")],
+      );
     if (phase.dead === "failed") {
       // A provider transient with nothing pushed is not the child's failure
       // (issue 1932): the ledger row and the branch are untouched, so round 0
@@ -1973,9 +2039,17 @@ function roundOnOpenPr(
       // ends with the child's own reason — the ship-restart note for a bot
       // roll, the failure for a failed run — never as the round's inaction.
       if (phase.dead === "interrupted")
-        return end(next, { kind: "interrupted", round, runId: phase.runId, reviewRounds: next.reviewRounds }, [
-          roundNote(round, "aborted"),
-        ]);
+        return end(
+          next,
+          {
+            kind: "interrupted",
+            round,
+            runId: phase.runId,
+            reviewRounds: next.reviewRounds,
+            ...(phase.cause !== undefined ? { cause: phase.cause } : {}),
+          },
+          [roundNote(round, "aborted")],
+        );
       if (phase.dead === "failed")
         return end(
           next,
@@ -2171,10 +2245,14 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
     case "read": {
       const r = ret as Extract<StepReturn, { type: "read-record" }>;
       if (!r.run.finished)
+        // `restartedAs` (issues 1903/1876): the child's container was replaced
+        // and it restarted from its request as a new run — the round carries on
+        // waiting on the successor, and the unit never ends over a resume that
+        // succeeded. The next wait and read follow the successor's id.
         return {
           state: {
             ...clocked,
-            phase: { at: "wait", round: p.round, runId: p.runId, n: p.n + 1, until: p.until },
+            phase: { at: "wait", round: p.round, runId: r.restartedAs ?? p.runId, n: p.n + 1, until: p.until },
           },
           notes: [],
         };
@@ -2194,17 +2272,35 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           [roundNote(p.round, "stopped")],
         );
       if (r.run.status === "interrupted") {
+        const cause = r.run.interruption;
         // A dead CODING child may have pushed before the ledger closed it: the
         // pr-check recovers the branch. A review child has nothing on the
         // branch to recover, so its interruption still ends the unit at once.
         if (p.round.kind !== "review")
           return {
-            state: { ...clocked, phase: { at: "pr-check", round: p.round, runId: p.runId, dead: "interrupted" } },
+            state: {
+              ...clocked,
+              phase: {
+                at: "pr-check",
+                round: p.round,
+                runId: p.runId,
+                dead: "interrupted",
+                ...(cause !== undefined ? { cause } : {}),
+              },
+            },
             notes: [],
           };
-        return end(clocked, { kind: "interrupted", round: p.round, runId: p.runId, reviewRounds: s.reviewRounds }, [
-          roundNote(p.round, "aborted"),
-        ]);
+        return end(
+          clocked,
+          {
+            kind: "interrupted",
+            round: p.round,
+            runId: p.runId,
+            reviewRounds: s.reviewRounds,
+            ...(cause !== undefined ? { cause } : {}),
+          },
+          [roundNote(p.round, "aborted")],
+        );
       }
       return p.round.kind === "review"
         ? settleReview(clocked, p.round, r.run)
@@ -2668,7 +2764,7 @@ export function renderUnitReport(
         reissue,
       ]);
     case "interrupted":
-      return shipInterruptedNote(prUrl);
+      return shipInterruptedNote(prUrl, e.cause);
     case "refused":
       return join([
         `🚫 The ${presetOf(e.round.kind)} child of round ${e.round.index} was refused by the authorize stage (${e.refusal})${e.message ? `: ${e.message}` : ""} — every child is authorized as the requesting user, so the pipeline ends here.`,
