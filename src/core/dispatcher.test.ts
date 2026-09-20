@@ -11906,7 +11906,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.finished.get("run-old")?.status).toBe("stopped_hard");
   });
 
-  it("a resume whose recorded resident refuses to reuse the worktree provisions no sandbox: the resumed row closes interrupted with the note that says why, and the request runs again as a new run once the thread is free (item 54)", async () => {
+  it("a resume whose recorded resident refuses to reuse the worktree provisions no sandbox: the resumed row closes interrupted with the note that says why, and the request runs again under the SAME run id once the thread is free (item 54) — one row on the index, the record ending completed with the replacement said as one resumed note", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -11993,15 +11993,25 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     // The resumed dispatch itself ran nothing: refused by name, its row closed with the note in its record.
     expect(outcome.status).toBe("refused");
     expect(outcome.refusal).toBe("workspace_lost");
-    const closed = ledger.finished.get("run-old");
-    expect(closed?.status).toBe("interrupted");
-    const note = closed?.events.find((e) => e.type === "run_note") as { kind: string; summary: string } | undefined;
-    expect(note).toMatchObject({ kind: "resumed" });
-    expect(note?.summary).toContain("could not be re-attached");
-    expect(note?.summary).toContain("reuse-refused: no worktree at /workspace/threads/t/main");
-    expect(note?.summary).toContain("restarts from its request as a new run");
+    // The restart kept the run's id (item 54): the record under the ORIGINAL id
+    // ends completed — the interrupted close was its first segment's tombstone,
+    // replaced when the same run finished — and carries both the lost-workspace
+    // note and the replacement's one user-words line.
+    const record = ledger.finished.get("run-old");
+    expect(record?.status).toBe("completed");
+    const notes = (record?.events ?? []).filter((e) => e.type === "run_note") as Array<{
+      kind: string;
+      summary: string;
+    }>;
+    const lost = notes.find((n) => n.summary.includes("could not be re-attached"));
+    expect(lost).toMatchObject({ kind: "resumed" });
+    expect(lost?.summary).toContain("reuse-refused: no worktree at /workspace/threads/t/main");
+    expect(lost?.summary).toContain("restarts from its request under the same run id");
+    expect(notes.some((n) => n.kind === "resumed" && n.summary === "workspace lost, resumed from the request")).toBe(
+      true,
+    );
     // Never a sandbox for the resumed run: the resident alone was asked, in reuse-only mode; then the
-    // restarted run attached as a fresh run does (no reuse), on its own id, and answered the thread.
+    // restarted run attached as a fresh run does (no reuse), under the same id, and answered the thread.
     const attaches = calls.filter((c) => c.path === "/status" || c.path === "/attach");
     expect(attaches.map((c) => c.path)).toEqual(["/status", "/attach", "/status", "/attach"]);
     expect(attaches[1].body).toMatchObject({ reuse: true });
@@ -12009,21 +12019,21 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(calls.every((c) => c.host === "resident.example")).toBe(true);
     expect(provider.requests).toHaveLength(1);
     expect(replies.at(-1)).toBe("started over and done");
-    // The re-attach refusal's own `door` record took the first minted id
-    // (record 0054, as amended: every refusal is a run record), so the
-    // restarted run is `run-l2` and rides beside it.
+    // ONE run on the index beside the refusal's `door` record (record 0054):
+    // the restarted run is `run-old` itself — the page a person opened for that
+    // id serves the run, and no second id ever exists.
     expect(
       registry
         .listActive()
         .filter((r) => r.agent !== "door")
         .map((r) => r.id),
-    ).toEqual(["run-l2"]);
+    ).toEqual(["run-old"]);
     expect(registry.listActive().find((r) => r.agent === "door")).toMatchObject({ id: "run-l", status: "completed" });
-    expect(ledger.finished.get("run-l2")?.status).toBe("completed");
+    expect(registry.getById("run-old")).toMatchObject({ finished: true, status: "completed" });
     expect(ledger.live.has("run-old")).toBe(false);
     // The restarted run is the same instance's child: its own coordinator_tag names the plan's base,
     // so its unit branch is its push target and the base is what the gate protects.
-    expect(ledger.finished.get("run-l2")?.events.find((e) => e.type === "coordinator_tag")).toMatchObject({
+    expect(record?.events.find((e) => e.type === "coordinator_tag")).toMatchObject({
       parentInstanceId: "plan-p",
       base: "main",
     });
@@ -12268,42 +12278,21 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
   // adopt forgot it, and the state any later change that lists a run of this
   // generation would leave — the restart must still run fresh: the run it
   // restarts is not a live run.
-  it("a relaunch whose re-attach the resident refuses (another tree for the thread) closes the run interrupted with workspace_lost and restarts from the request, never steering into the row it closed: with the boot-gap map naming the replaced run and the row's finish landing only after the restart began, the request still runs as a new run in the thread — the first record carrying the verdict and the refusal — and the map forgets the run", async () => {
+  it("a relaunch whose re-attach the resident refuses (another tree for the thread) closes the run interrupted with workspace_lost and restarts from the request under the SAME run id, never steering into the row it closed: with the boot-gap map naming the replaced run, the request still runs fresh — the map forgets the run — and the one record ends completed with the verdict, the refusal and the replacement's user-words note", async () => {
     const inner = new InMemoryRunLedger(() => 10_000);
     const elsewhere = new ThreadsElsewhere();
     const order: string[] = [];
-    let restartBegan!: () => void;
-    const begun = new Promise<void>((r) => (restartBegan = r));
-    let finishLanded!: () => void;
-    const landed = new Promise<void>((r) => (finishLanded = r));
-    // The closed row's finish is held until the restart has begun — a push into
-    // the row (the bug) or the restart's own reservation — and lands before the
-    // reservation goes through, so the restarted run is tracked as it was live.
     const ledger = new Proxy(inner, {
       get(target, prop) {
         if (prop === "finish")
           return async (runId: string, gen: string, record: RunRecord) => {
-            if (runId === "run-1") await begun;
-            order.push(`finish ${runId}`);
-            const result = await target.finish(runId, gen, record);
-            if (runId === "run-1") finishLanded();
-            return result;
+            order.push(`finish ${runId} ${record.status}`);
+            return target.finish(runId, gen, record);
           };
         if (prop === "pushInbox")
           return async (runId: string, message: Record<string, unknown>) => {
             order.push(`push ${runId}`);
-            const result = await target.pushInbox(runId, message);
-            restartBegan();
-            return result;
-          };
-        if (prop === "claim")
-          return async (req: ClaimRequest) => {
-            if (req.runId !== "run-1") {
-              order.push(`claim ${req.runId}`);
-              restartBegan();
-              await Promise.race([landed, realSleep(2_000)]);
-            }
-            return target.claim(req);
+            return target.pushInbox(runId, message);
           };
         const v = Reflect.get(target, prop) as unknown;
         return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
@@ -12330,30 +12319,28 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     await writer.settled();
     expect(outcome).toEqual({ status: "refused", refusal: "workspace_lost" });
-    const closed = inner.finished.get("run-1");
-    expect(closed?.status).toBe("interrupted");
-    const notes = (closed?.events ?? []).filter((e) => e.type === "run_note") as Array<{
+    // The restart kept the id (item 54): the ONE record under run-1 ends
+    // completed — the interrupted close was the first segment's word, replaced
+    // when the same run finished — carrying the verdict, the refusal's note and
+    // the replacement's one user-words line.
+    const record = inner.finished.get("run-1");
+    expect(record?.status).toBe("completed");
+    const notes = (record?.events ?? []).filter((e) => e.type === "run_note") as Array<{
       kind: string;
       summary: string;
     }>;
-    // The card's degradations first (published before the first turn), then
-    // the verdict and the outcome — both the floor's kind; never `resumed` on a run that is not.
-    expect(notes.map((n) => n.kind)).toEqual([
-      "control_degraded",
-      "control_degraded",
-      "sandbox_restarted",
-      "sandbox_restarted",
-    ]);
-    expect(notes[3]!.summary).toBe(
-      "the run's workspace could not be re-attached in the replacement container (the resident's worktree for this thread is /workspace/threads/t/other as worker3, not the run's recorded /workspace/threads/t/main as worker2); the run restarts from its request as a new run in this thread",
+    expect(notes.filter((n) => n.kind === "sandbox_restarted").at(-1)?.summary).toBe(
+      "the run's workspace could not be re-attached in the replacement container (the resident's worktree for this thread is /workspace/threads/t/other as worker3, not the run's recorded /workspace/threads/t/main as worker2); the run restarts from its request under the same run id",
     );
+    expect(notes.filter((n) => n.kind === "resumed").map((n) => n.summary)).toEqual([
+      "container replaced, resumed from the request",
+    ]);
     // Never a push into the closed row, no steer ack in the thread; the map forgot the run.
     expect(order.filter((o) => o.startsWith("push"))).toEqual([]);
     expect(replies.filter((r) => r.startsWith("↪"))).toEqual([]);
     expect(elsewhere.get("slack:CX:1.0")).toBeUndefined();
-    // The request ran again as a new run in the thread, reserved before the closed row's finish landed and tracked once it had.
-    expect(order[0]).toBe("claim run-2");
-    expect(order).toContain("finish run-1");
+    // Both finishes went through the ledger under the one id — and no second id ever existed.
+    expect(order).toEqual(expect.arrayContaining(["finish run-1 interrupted", "finish run-1 completed"]));
     expect(containers).toHaveLength(2);
     expect(provider.requests).toHaveLength(1);
     expect(textTurnsOf(provider.requests[0]!.messages).at(-1)).toMatchObject({
@@ -12361,8 +12348,9 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       text: expect.stringContaining("fix it"),
     });
     expect(replies.at(-1)).toBe("started over and done");
-    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
-    expect(registry.getById("run-2")).toMatchObject({ finished: true, status: "completed" });
+    expect(registry.getById("run-2")).toBeNull();
+    expect(registry.getById("run-1")).toMatchObject({ finished: true, status: "completed" });
+    expect(inner.live.size).toBe(0);
   });
 
   // The same road in the order the process really has: the closed run's
@@ -12371,36 +12359,33 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
   // the ledger while the thread's live row is still the closed run's. Seen
   // live on a resident roll: the reservation was refused `thread-live`, the
   // restart ran untracked, and the store held only its start tombstone.
-  it("a restart whose reservation meets the closed run's row still live — its finish in flight from this same process — waits for that finish to land and claims again, so the restarted run is tracked as its predecessor was, never untracked with only its start tombstone in the store", async () => {
+  it("a restart whose reservation would meet the closed run's own row still live — its finish in flight from this same process — awaits that finish before claiming the SAME run id, so the restarted run gets a fresh row for its new segment and is tracked as its predecessor was, never riding the closing row the landing finish would delete", async () => {
     const inner = new InMemoryRunLedger(() => 10_000);
     const order: string[] = [];
-    let claimAnswered!: () => void;
-    const answered = new Promise<void>((r) => (claimAnswered = r));
-    // The closed row's finish lands only AFTER the restart's first claim was
-    // answered — refused, in the order production has when the write is slower
-    // than the dispatch of the restart; an `ok` there lands it just the same.
+    let restartBegan!: () => void;
+    const begun = new Promise<void>((r) => (restartBegan = r));
+    // The closed row's finish is held until the restart has begun (its registry
+    // row re-created under the same id, which precedes its reservation), so the
+    // reservation provably reaches the write-through while the finish is in
+    // flight — and must wait for it rather than adopt the closing row.
     const ledger = new Proxy(inner, {
       get(target, prop) {
         if (prop === "finish")
           return async (runId: string, gen: string, record: RunRecord) => {
-            if (runId === "run-1") await answered;
-            order.push(`finish ${runId}`);
+            if (runId === "run-1" && record.status === "interrupted") await Promise.race([begun, realSleep(2_000)]);
+            order.push(`finish ${runId} ${record.status}`);
             return target.finish(runId, gen, record);
           };
         if (prop === "claim")
           return async (req: ClaimRequest) => {
-            const result = await target.claim(req);
-            if (req.runId !== "run-1") {
-              order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
-              claimAnswered(); // any answer: an `ok` here (a regression) fails the order assertion, never hangs the suite
-            }
-            return result;
+            order.push(`claim ${req.runId} ${req.phase ?? "live"}`);
+            return target.claim(req);
           };
         const v = Reflect.get(target, prop) as unknown;
         return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
       },
     }) as InMemoryRunLedger;
-    const { deps, provider, writer, containers } = replacedContainerWorld(ledger, {
+    const { deps, provider, registry, writer, containers } = replacedContainerWorld(ledger, {
       // The re-attach (`reuse`) finds the thread rebound onto another tree: refused by name, the run restarts.
       attach: (body) =>
         new Response(
@@ -12413,30 +12398,38 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         ),
     });
     deps.admission = new ThreadAdmission();
+    const origCreate = registry.create.bind(registry);
+    let creates = 0;
+    registry.create = (label, meta, createOpts) => {
+      if (createOpts?.id === "run-1" && ++creates === 2) restartBegan();
+      return origCreate(label, meta, createOpts);
+    };
     const { io, replies } = ioWithCard();
     const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     await writer.settled();
     expect(outcome).toEqual({ status: "refused", refusal: "workspace_lost" });
-    expect(inner.finished.get("run-1")?.status).toBe("interrupted");
-    // The reservation met the closed run's live row, waited for its finish to
-    // land, and claimed again; then the prompt's promotion of that row (item
-    // 42: the same run and generation, `ok`), and the run's own finish.
+    // The restart began (its registry row re-created under run-1) while the
+    // interrupted finish was in flight; its reservation waited for that finish
+    // to land, then claimed the same id fresh — the reserve, its promotion,
+    // and the run's own finish, all under the one id.
+    expect(creates).toBe(2);
     expect(order).toEqual([
-      "claim run-2 thread-live",
-      "finish run-1",
-      "claim run-2 ok",
-      "claim run-2 ok",
-      "finish run-2",
+      "claim run-1 attaching",
+      "claim run-1 live",
+      "finish run-1 interrupted",
+      "claim run-1 attaching",
+      "claim run-1 live",
+      "finish run-1 completed",
     ]);
     expect(containers).toHaveLength(2);
     expect(provider.requests).toHaveLength(1);
     expect(replies.at(-1)).toBe("started over and done");
-    // Tracked as its predecessor was: the record went through the ledger's finish, and the row is closed.
-    expect(inner.finished.get("run-2")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
-    expect(inner.live.has("run-2")).toBe(false);
+    // Tracked as its predecessor was: one record under the one id, completed, and the row is closed.
+    expect(inner.finished.get("run-1")).toMatchObject({ status: "completed", threadKey: "slack:CX:1.0" });
+    expect(inner.live.has("run-1")).toBe(false);
     // …and nothing on its record says otherwise.
     expect(
-      inner.finished.get("run-2")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
+      inner.finished.get("run-1")!.events.filter((e) => e.type === "run_note" && e.kind === "ledger_untracked"),
     ).toEqual([]);
   });
 
@@ -12746,36 +12739,30 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(inner.live.size).toBe(0);
   });
 
-  // The same road when the predecessor's finish cannot land at all: the
-  // restart runs untracked — as the ledger's Phase 2 rule has always had it —
-  // but says so on its own record, not in the bot log alone.
-  it("a restart whose predecessor's finish keeps failing (the store client's timeout) claims once more the moment that finish settles, runs untracked, and carries exactly one ledger_untracked note naming the predecessor and the failure; its record reaches the plain store", async () => {
+  // The same road when the predecessor's finish cannot land at all: the row
+  // stands for good, and — with the restart keeping the run's own id — the
+  // standing row IS the restarted run's row: the re-claim after the settled
+  // failure is the owner's idempotent keep, so the run stays tracked and no
+  // untracked note is written; its record still reaches the plain store when
+  // its own finish fails the same way.
+  it("a restart whose predecessor's finish keeps failing (the store client's timeout) awaits that finish's settling, then keeps the run's own standing row — the same id, the owner's idempotent re-claim — so the restarted run is tracked with no ledger_untracked note, and its record reaches the plain store when the ledger finish fails again", async () => {
     const inner = new InMemoryRunLedger(() => 10_000);
     const order: string[] = [];
-    let claimAnswered!: () => void;
-    const answered = new Promise<void>((r) => (claimAnswered = r));
-    // The closed row's finish is in flight when the restart's first claim is
-    // answered, and then fails as the client fails when the state Worker
-    // answers nothing — every attempt the writer makes, so the row stands for
-    // good and the name is cleared only by the last attempt.
+    // Every finish of run-1 fails as the client fails when the state Worker
+    // answers nothing — every attempt the writer makes — so the row stands for
+    // good and the restart's claim can only ever meet it.
     const ledger = new Proxy(inner, {
       get(target, prop) {
         if (prop === "finish")
-          return async (runId: string, gen: string, record: RunRecord) => {
-            if (runId !== "run-1") return target.finish(runId, gen, record);
-            await answered;
-            await new Promise((r) => realSetTimeout(r, 0)); // the claim's answer is read before this settles
+          return async (runId: string) => {
+            if (runId !== "run-1") throw new Error(`unexpected finish ${runId}`);
             order.push("finish run-1 threw");
             throw new TransientStoreError("run ledger /runs/finish: The operation was aborted due to timeout");
           };
         if (prop === "claim")
           return async (req: ClaimRequest) => {
-            const result = await target.claim(req);
-            if (req.runId !== "run-1") {
-              order.push(`claim ${req.runId} ${result.ok ? "ok" : result.reason}`);
-              claimAnswered(); // any answer: an `ok` here (a regression) fails the order assertion, never hangs the suite
-            }
-            return result;
+            order.push(`claim ${req.runId} ${req.phase ?? "live"}`);
+            return target.claim(req);
           };
         const v = Reflect.get(target, prop) as unknown;
         return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
@@ -12797,31 +12784,34 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     await writer.settled();
     expect(outcome).toEqual({ status: "refused", refusal: "workspace_lost" });
-    // The re-claim happened the moment the finish's LAST attempt threw — the name
-    // stayed through the writer's two retries — and was refused again: the row still stands.
-    expect(order.slice(0, 5)).toEqual([
-      "claim run-2 thread-live",
-      "finish run-1 threw",
-      "finish run-1 threw",
-      "finish run-1 threw",
-      "claim run-2 thread-live",
-    ]);
+    // The predecessor's row stands (its finish never landed) and no record
+    // reached the ledger; the restart's reserve and promotion were the owner's
+    // idempotent re-claims of that standing row.
     expect(inner.live.has("run-1")).toBe(true);
     expect(inner.finished.has("run-1")).toBe(false);
-    // The restart ran and answered untracked: no ledger row of its own, its record in the plain store…
+    expect(order).toEqual([
+      "claim run-1 attaching",
+      "claim run-1 live",
+      "finish run-1 threw",
+      "finish run-1 threw",
+      "finish run-1 threw",
+      "claim run-1 attaching",
+      "claim run-1 live",
+      "finish run-1 threw",
+      "finish run-1 threw",
+      "finish run-1 threw",
+    ]);
+    // The restarted run ran and answered under the one id; its record reached
+    // the plain store when the ledger's finish failed again — and nothing on
+    // it says untracked: the run rode its own row the whole time.
     expect(containers).toHaveLength(2);
     expect(provider.requests).toHaveLength(1);
     expect(replies.at(-1)).toBe("started over and done");
-    expect(inner.finished.has("run-2")).toBe(false);
-    expect(registry.getById("run-2")).toMatchObject({ finished: true, status: "completed" });
-    const stored = await store.get("run-2");
+    expect(registry.getById("run-2")).toBeNull();
+    expect(registry.getById("run-1")).toMatchObject({ finished: true, status: "completed" });
+    const stored = await store.get("run-1");
     expect(stored?.status).toBe("completed");
-    // …and exactly one note on it says why, naming the predecessor and how its finish ended.
-    const notes = (stored?.events ?? []).filter((e) => e.type === "run_note" && e.kind === "ledger_untracked");
-    expect(notes).toHaveLength(1);
-    expect((notes[0] as { summary: string }).summary).toBe(
-      "not tracked by the run ledger: run run-1, whose finish was in flight in this process, still holds the thread's row: its finish did not land (not persisted after 3 attempts: run ledger /runs/finish: The operation was aborted due to timeout) — no handoff, resume or reclaim reaches this run; its record still reaches the store",
-    );
+    expect((stored?.events ?? []).filter((e) => e.type === "run_note" && e.kind === "ledger_untracked")).toEqual([]);
   });
 
   // Feature: docs/reference/specs/harness.md item 6, harness-pi.md items 8 and

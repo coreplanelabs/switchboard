@@ -1791,7 +1791,7 @@ describe("the unit pipeline — the event, the timeout and the confirmation (the
     );
     expect(
       interruptionCauseOfWords(
-        "the run's workspace could not be re-attached in the replacement container (reuse-refused); the run restarts from its request as a new run in this thread",
+        "the run's workspace could not be re-attached in the replacement container (reuse-refused); the run restarts from its request under the same run id",
       ),
     ).toBe("container_replaced");
     // contract.ts / relaunch.ts phrase: "container replaced under the run".

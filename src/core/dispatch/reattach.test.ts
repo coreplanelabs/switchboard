@@ -12,6 +12,7 @@ import {
   abandonLostWorkspace,
   announceChildRoll,
   carriedCoordinatorTag,
+  carriedRunIdentity,
   carriedWorkspaceBinding,
   lostWorkspaceNote,
   prepareRestartTurn,
@@ -186,7 +187,7 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
       .snapshotById("run-old")!
       .events.find((e) => e.type === "run_note" && (e as { kind: string }).kind === "resumed") as { summary: string };
     expect(note.summary).toBe(
-      "resumed after a restart: the run's workspace could not be re-attached (reuse-refused: no worktree at /workspace/threads/t/main); the run restarts from its request as a new run in this thread",
+      "resumed after a restart: the run's workspace could not be re-attached (reuse-refused: no worktree at /workspace/threads/t/main); the run restarts from its request under the same run id",
     );
     expect(JSON.stringify(w.closes)).toContain("workspace lost across the restart; restarting from the request");
     expect(w.puts).toHaveLength(1);
@@ -311,7 +312,7 @@ describe("abandonLostWorkspace: the resumed run closes saying why, and hands its
 
   it("lostWorkspaceNote names the refusal and whether the run restarts", () => {
     expect(lostWorkspaceNote("resident unreachable (fetch failed)", true)).toBe(
-      "resumed after a restart: the run's workspace could not be re-attached (resident unreachable (fetch failed)); the run restarts from its request as a new run in this thread",
+      "resumed after a restart: the run's workspace could not be re-attached (resident unreachable (fetch failed)); the run restarts from its request under the same run id",
     );
   });
 });
@@ -337,6 +338,27 @@ describe("prepareRestartTurn: the request runs again as its own dispatch", () =>
     expect(turn.msg.originAt).toBeUndefined();
     expect(turn.opts.trace.root.name).toBe("request");
     expect(turn.opts).not.toHaveProperty("restartOf");
+  });
+
+  it("carries the predecessor's identity onto the dispatch options (run-history item 54): the restart keeps the run's id, its events, its token and its start, and the replacement's user-words note rides along", () => {
+    const registry = new RunRegistry({ genId: () => "run-old", genToken: () => "tok-old" });
+    const run = registry.create("label", undefined, { startedAt: 5_000 });
+    registry.publish(run.id, { type: "input", messageId: "m1", text: "fix it", at: 6_000 });
+    const carried = carriedRunIdentity(registry, "run-old", "container replaced, resumed from the request");
+    expect(carried).toMatchObject({
+      token: "tok-old",
+      startedAt: 5_000,
+      note: "container replaced, resumed from the request",
+    });
+    expect(carried?.events.map((e) => e.type)).toEqual(["input"]);
+    const turn = prepareRestartTurn(
+      { clock: () => NOW },
+      { request: REQUEST, pending: [], clock: () => NOW, restartOf: "run-old", carried },
+    );
+    expect(turn.opts.restartCarried).toBe(carried);
+    // A row already gone — discarded, evicted — carries nothing: the restart
+    // runs under a fresh id, a page that moved, never a request that vanished.
+    expect(carriedRunIdentity(registry, "run-gone", "x")).toBeUndefined();
   });
 
   it("names the run it restarts on the dispatch options, so admission never steers the request into that run's row (thread-admission item 5)", () => {

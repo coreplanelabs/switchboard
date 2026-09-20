@@ -2060,7 +2060,7 @@ describe("the pi harness — the container replaced under a living bot: the rela
       kind: "interrupted",
       reason: "workspace lost with the replaced container; restarting from the request",
       refusal: "workspace_lost",
-      note: "the run's workspace could not be re-attached in the replacement container (no resident backend is configured in this process); the run restarts from its request as a new run in this thread",
+      note: "the run's workspace could not be re-attached in the replacement container (no resident backend is configured in this process); the run restarts from its request under the same run id",
       restart: { request: s.ctx.msg, restartOf: "run-l" },
     });
     expect(a.starts).toHaveLength(1);

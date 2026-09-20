@@ -624,6 +624,57 @@ describe("registerRun — the run's row on every surface before the attach", () 
       registry.snapshotById("run-old")!.events.filter((e) => ["input", "run_meta", "context"].includes(e.type)),
     ).toEqual([]);
   });
+
+  // run-history item 54: a restart reuses its predecessor's id only when the
+  // identity rode along; with the registry row already gone, `restartOf`
+  // steers admission alone and the restart runs under a fresh id — never an
+  // eventless upsert over the predecessor's record.
+  it("a restart keeps the run's id, token and events only with restartCarried; restartOf alone mints a fresh id", async () => {
+    const d = deps();
+    const r = request(d, "fix the login bug", "coding");
+    const base = {
+      agentSource: "directive" as const,
+      msg: r.message,
+      io: fakeIO().io,
+      agent: r.agent,
+      resolved: r.resolved,
+      directives: r.directives,
+      history: [],
+      repoCtx: {},
+      carriedRow: undefined,
+      resume: undefined,
+      startedAt: NOW,
+      receivedAt: NOW,
+      clock: () => NOW,
+      root: r.root,
+      trace: r.trace,
+      shell: r.shell,
+      admitted: r.admitted,
+      restartOf: "run-old",
+    };
+    // The identity carried: the predecessor's id, token and events live on.
+    const kept = new RunRegistry({ genId: () => "run-fresh", genToken: () => "tok-fresh" });
+    const carried = await registerRun(d, {
+      ...base,
+      registry: kept,
+      restartCarried: {
+        events: [{ type: "input", messageId: "m1", text: "first segment", at: 1, seq: 1 }],
+        token: "tok-old",
+        startedAt: 5_000,
+        note: "container replaced, resumed from the request",
+      },
+    });
+    expect(carried.runId).toBe("run-old");
+    expect(kept.getById("run-old")).toMatchObject({ token: "tok-old" });
+    expect(kept.snapshotById("run-old")!.events.map((e) => (e as { summary?: string }).summary)).toContain(
+      "container replaced, resumed from the request",
+    );
+    // The identity gone: a fresh id, a fresh token — the old record untouched.
+    const gone = new RunRegistry({ genId: () => "run-fresh", genToken: () => "tok-fresh" });
+    const fresh = await registerRun(d, { ...base, registry: gone });
+    expect(fresh.runId).toBe("run-fresh");
+    expect(gone.getById("run-old")).toBeNull();
+  });
 });
 
 describe("reserveRun — the ledger reservation before the attach", () => {

@@ -60,6 +60,28 @@ describe("RunRegistry.create", () => {
     // The next fresh run still mints its own id.
     expect(reg.create().id).toBe("id-1");
   });
+
+  it("a restart that keeps its predecessor's identity (run-history item 54) re-creates the run under the same id AND token — the posted capability links keep opening the page — replacing the finished row so the index counts one run, not two", () => {
+    const { reg } = testRegistry();
+    const first = reg.create("restarted", undefined, { id: "run-1", startedAt: 1_000 });
+    reg.publish(first.id, { type: "input", messageId: "m1", text: "go", at: 2, seq: 1 });
+    reg.finish(first.id, "interrupted");
+    const second = reg.create("restarted", undefined, {
+      id: "run-1",
+      token: first.token,
+      startedAt: 1_000,
+      replay: [{ type: "input", messageId: "m1", text: "go", at: 2, seq: 1 }],
+    });
+    expect(second.id).toBe(first.id);
+    expect(second.token).toBe(first.token);
+    // The old capability still validates: the link a card or a unit thread posted stays valid.
+    expect(reg.has("run-1", first.token)).toBe(true);
+    // One row on the index, live again, with the replayed segment behind it.
+    const rows = reg.listActive().filter((r) => r.id === "run-1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ finished: false, startedAt: 1_000 });
+    expect(reg.snapshot("run-1", first.token)!.events.map((e) => e.type)).toEqual(["input"]);
+  });
 });
 
 describe("RunRegistry.subscribe — token gate (constant-time capability)", () => {
