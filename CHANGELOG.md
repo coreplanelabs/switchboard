@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.256.0](https://github.com/coreplanelabs/switchboard/compare/v1.255.0...v1.256.0) (2026-09-20)
+
+
+### Features
+
+* **agents:** the coding prompts carry the fast gates before every push ([#2039](https://github.com/coreplanelabs/switchboard/issues/2039)) ([3e7147c](https://github.com/coreplanelabs/switchboard/commit/3e7147ce3f197819147f16af8f5097fe4d1103b1))
+* **core:** operator bound receipts ride at verbose and above ([#2034](https://github.com/coreplanelabs/switchboard/issues/2034)) ([4054b39](https://github.com/coreplanelabs/switchboard/commit/4054b39649745a7df1eb9ef1d964673e6bd7f003))
+* **dispatcher:** a held non-destructive bind falls back to the route ([#2033](https://github.com/coreplanelabs/switchboard/issues/2033)) ([92f6a3f](https://github.com/coreplanelabs/switchboard/commit/92f6a3fb72adf53578cca376819992f15fa2862a))
+* **dispatcher:** an operator write bind is offered as one click ([#2029](https://github.com/coreplanelabs/switchboard/issues/2029)) ([a50bf62](https://github.com/coreplanelabs/switchboard/commit/a50bf628c758012a5e7e651555bf31c9cba9ad76))
+* **ship:** the unit thread says the outcome in one line, in user words ([#2036](https://github.com/coreplanelabs/switchboard/issues/2036)) ([e82e0be](https://github.com/coreplanelabs/switchboard/commit/e82e0bed1b5c37c33e850e513de2765a80016a87))
+
+
+### Bug fixes
+
+* **core:** a reply into an owned thread is a steer by construction ([#2037](https://github.com/coreplanelabs/switchboard/issues/2037)) ([b8703a8](https://github.com/coreplanelabs/switchboard/commit/b8703a8d67f32d0c280d09930855b374c6ef0ddc))
+* **deploy:** the fleet reopens on each container's new-image report ([#2040](https://github.com/coreplanelabs/switchboard/issues/2040)) ([bc705a5](https://github.com/coreplanelabs/switchboard/commit/bc705a52348a2eb4d6db01725b2f13094c6b6b2b))
+* **ship:** an approval at the round cap still reaches checks and merge ([#2031](https://github.com/coreplanelabs/switchboard/issues/2031)) ([55c67ad](https://github.com/coreplanelabs/switchboard/commit/55c67add978280f2621fa15737c122ce513f61ab))
+* **ship:** the recovered pull request's title passes the title gate ([#2030](https://github.com/coreplanelabs/switchboard/issues/2030)) ([fc84b1d](https://github.com/coreplanelabs/switchboard/commit/fc84b1d48b6723a4f135d36016080bdd7ba45d12))
+
+
+### Documentation
+
+* **docs:** record 0069 gives the one door one execution path ([#2032](https://github.com/coreplanelabs/switchboard/issues/2032)) ([392fd45](https://github.com/coreplanelabs/switchboard/commit/392fd45c6f9ad9527230272d5616215b4a98a6a4))
+* **docs:** record 0070, the control plane pins a chat beside the panels ([#2028](https://github.com/coreplanelabs/switchboard/issues/2028)) ([42c6abe](https://github.com/coreplanelabs/switchboard/commit/42c6abe05276b38ef4a888ebed89bb439b207569))
+* **docs:** record 0071 keeps a ship unit on its pull request to merge ([#2038](https://github.com/coreplanelabs/switchboard/issues/2038)) ([123cfa3](https://github.com/coreplanelabs/switchboard/commit/123cfa387df39336f75467b970e32397f44a0a95))
+
 ## [1.255.0](https://github.com/coreplanelabs/switchboard/compare/v1.254.1...v1.255.0) (2026-09-20)
 
 
