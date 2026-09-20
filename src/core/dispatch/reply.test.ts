@@ -356,6 +356,15 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
           "🚫 A pipeline is already running in this thread — one pipeline per thread. Follow the one in flight here, or start this one in a thread of its own.",
       },
       {
+        code: "pipeline_thread_owned",
+        built: REFUSAL_SENTENCES.pipeline_thread_owned({
+          agent: "ship",
+          units: [{ unit: "U12", threadKey: "slack:CX:99.0" }],
+        }),
+        quoted:
+          "🚦 This thread belongs to the live *ship* pipeline runner — nothing runs beside it here. Reply in the unit's own thread instead: U12 (`slack:CX:99.0`).",
+      },
+      {
         code: "which_branch",
         built: REFUSAL_SENTENCES.which_branch({ repo: "o/r" }),
         quoted:

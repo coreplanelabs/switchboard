@@ -104,6 +104,12 @@ export function resolveRun(
      *  the agent of the thread's newest finished run with a session log, the
      *  one the caller read. The model and the effort are the user turns'. */
     stickyAgent?: string;
+    /** The preset an `on` operator decision routes the request through
+     *  (routing-and-config item 29): it stands where a directive would in the
+     *  resolution, carried as ITS OWN field — never written into the
+     *  directives — so admission's follow-up rule and the thread-owner rule
+     *  keep reading the person's typed intent alone. */
+    operatorPreset?: string;
   },
 ): ResolvedRun {
   const { msg, directives, history } = ctx;
@@ -121,7 +127,7 @@ export function resolveRun(
     channelId: msg.channelId,
     userId: msg.userId,
     request: {
-      agent: directives.agent ?? sticky.agent,
+      agent: directives.agent ?? ctx.operatorPreset ?? sticky.agent,
       model: directives.model ?? sticky.model,
       effort: directives.effort ?? sticky.effort,
       verbosity: directives.verbosity ?? sticky.verbosity,

@@ -105,6 +105,11 @@ export type OperatorDecision =
 export interface OperatorBind {
   line: string;
   reason: string;
+  /** The bind is a pending question's confirmed proposal (`bindFromAnswer`):
+   *  the LINE carries the task — the person's message was the word "yes" — so
+   *  a preset line routes its own tail as the request (`presetRequestOf`),
+   *  never the answer's word. A fresh bind never carries this. */
+  confirmed?: true;
 }
 
 /** The projection the operator decides over: the presets and commands the
@@ -375,7 +380,10 @@ export function parseOperatorDecision(answer: RouteToolCall | string, guard?: Op
  *  fresh. */
 export function bindFromAnswer(text: string, pending: { proposal: string }): OperatorBind | undefined {
   if (!/^yes[.!]?$/i.test(text.trim())) return undefined;
-  return { line: operatorLine(pending.proposal), reason: "yes to the pending question's proposal" };
+  // Marked confirmed: the proposal's line is the one place the task lives —
+  // the answer itself says nothing — so a preset proposal routes the line's
+  // tail as the request instead of the word "yes".
+  return { line: operatorLine(pending.proposal), reason: "yes to the pending question's proposal", confirmed: true };
 }
 
 /** The question as the person reads it: the operator's text, then record
@@ -480,7 +488,7 @@ export function operatorEventOf(
   mode: "shadow" | "on";
   outcome: "binds" | "question" | "refusal" | "non_decision";
   reason: string;
-  binds?: { line: string; reason: string }[];
+  binds?: { line: string; reason: string; confirmed?: true }[];
   question?: string;
   proposal?: string;
   refusalCause?: string;
@@ -495,7 +503,15 @@ export function operatorEventOf(
     mode,
     outcome: d.kind,
     reason: d.reason,
-    ...(d.kind === "binds" ? { binds: d.binds.map((b) => ({ line: b.line, reason: b.reason })) } : {}),
+    ...(d.kind === "binds"
+      ? {
+          binds: d.binds.map((b) => ({
+            line: b.line,
+            reason: b.reason,
+            ...(b.confirmed ? { confirmed: true as const } : {}),
+          })),
+        }
+      : {}),
     ...(d.kind === "question" ? { question: renderOperatorQuestion(d) } : {}),
     ...(d.kind === "question" && d.proposal !== undefined ? { proposal: d.proposal } : {}),
     ...(d.kind === "refusal" ? { refusalCause: d.cause, refusalText: d.text } : {}),
@@ -696,12 +712,33 @@ export function presetBindOf(line: string, presets: readonly string[]): string |
   return name !== undefined && presets.includes(name) ? name : undefined;
 }
 
+/** The request a confirmed preset proposal carries: the line's tail after its
+ *  head token (`agent:<preset>` or the preset's bare name) — the task the
+ *  proposal spelled out, which the answering "yes" does not repeat. Undefined
+ *  when the line has no tail: then the person's own message stays the request
+ *  rather than routing an empty one. */
+export function presetRequestOf(line: string): string | undefined {
+  const tail = /^(?:agent:\S+|\S+)\s+(.*\S)\s*$/s.exec(line.trim());
+  return tail ? tail[1] : undefined;
+}
+
 /** What `executeOperatorDecision` leaves the dispatcher: the dispatch answered
  *  here (a question, a refusal, command binds run or handed back), or a preset
  *  to route the person's request through — the decision's event rides that
  *  run unless a command bind before it already carried it (`carried`), so no
  *  record holds the event twice and none loses it. */
-export type OperatorExecution = { kind: "answered" } | { kind: "route"; preset: string; carried: boolean };
+export type OperatorExecution =
+  | { kind: "answered" }
+  | {
+      kind: "route";
+      preset: string;
+      /** The request the route runs INSTEAD of the person's own message: a
+       *  confirmed proposal's tail (`presetRequestOf`) — the person's message
+       *  was the word "yes", which routes nothing. Absent for a fresh preset
+       *  bind, whose request stays the person's own words. */
+      request?: string;
+      carried: boolean;
+    };
 
 /**
  * One verifier call (the one-door plan): the author's own turns and the bound line through
@@ -870,8 +907,12 @@ export async function executeOperatorDecision(
     // operator's line is a paraphrase that may drop the task — so that line is
     // what the verifier judges, whole and redacted (the turns it is compared
     // with are fenced and capped on their own), and what the receipt prints,
-    // cut like every receipt.
-    const runs = preset !== undefined ? redactSecrets(`agent:${preset} ${msg.text}`) : bind.line;
+    // cut like every receipt. A CONFIRMED bind is the one exception: the
+    // pending question's proposal is the line the person's "yes" agreed to,
+    // and only that line carries the task — the person's message is the word
+    // "yes" — so the proposal itself is judged, printed and routed.
+    const runs =
+      preset !== undefined ? (bind.confirmed ? bind.line : redactSecrets(`agent:${preset} ${msg.text}`)) : bind.line;
     const line = preset !== undefined ? operatorLine(runs) : bind.line;
     // The verifier's hold (the one-door plan): a disagreement — a failure and a timeout
     // count as one, and so does a process with no model to verify on — hands
@@ -900,7 +941,10 @@ export async function executeOperatorDecision(
       // lines rather than dropped, and the route stage starts the preset on
       // the request itself.
       for (const rest of binds.slice(i + 1)) await io.reply(`${HAND_BACK_PREFIX}\n\`${rest.line}\``);
-      return { kind: "route", preset, carried };
+      // A confirmed proposal routes its own tail as the request; a fresh bind
+      // routes the person's own message, as ever.
+      const request = bind.confirmed ? presetRequestOf(bind.line) : undefined;
+      return { kind: "route", preset, ...(request !== undefined ? { request } : {}), carried };
     }
     if (!parsed || parsed.kind !== "invoke" || !def || !bound) {
       // An agreeing verifier's line rides this hand-back too (an `agent:<preset>`

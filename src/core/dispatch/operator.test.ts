@@ -10,6 +10,7 @@ import {
   operatorThreadTail,
   parseOperatorDecision,
   presetBindOf,
+  presetRequestOf,
   renderOperatorQuestion,
   runOperator,
   verifierHolds,
@@ -142,6 +143,18 @@ describe("the question and its answer-as-a-bind", () => {
     expect(bindFromAnswer("yes", pending)).toMatchObject({ line: "runs list --status all" });
     expect(bindFromAnswer("Yes.", pending)).toMatchObject({ line: "runs list --status all" });
     expect(bindFromAnswer("no, the docs one", pending)).toBeUndefined();
+  });
+
+  it("a yes-bound proposal is marked confirmed: the line, not the answer's word, carries the task", () => {
+    const bind = bindFromAnswer("yes", { proposal: "agent:coding fix the flaky test" });
+    expect(bind).toMatchObject({ line: "agent:coding fix the flaky test", confirmed: true });
+  });
+
+  it("presetRequestOf: the tail after the head token is the request; a bare line without a tail carries none", () => {
+    expect(presetRequestOf("agent:coding fix the flaky test")).toBe("fix the flaky test");
+    expect(presetRequestOf("ship in acme/repo: fix issue #7")).toBe("in acme/repo: fix issue #7");
+    expect(presetRequestOf("ship")).toBeUndefined();
+    expect(presetRequestOf("  agent:ship   ")).toBeUndefined();
   });
 });
 
