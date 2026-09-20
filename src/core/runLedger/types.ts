@@ -286,7 +286,7 @@ export type AppendableEvent = RunEvent & { seq: number };
 export interface IntakeReceipt {
   verdict: "addressed" | "silent";
   reason: string;
-  source: "model" | "mode" | "error" | "timeout";
+  source: "model" | "mode" | "question" | "error" | "timeout";
   /** The structured seam's attempts (docs/decisions/0067): what each answer
    *  violated, or that it was accepted; absent when no model was asked. */
   attempts?: ReadonlyArray<{ outcome: "accepted" | "violation"; violation?: string }>;
@@ -322,7 +322,11 @@ export function isIntakeReceipt(v: unknown): v is IntakeReceipt {
   return (
     (r.verdict === "addressed" || r.verdict === "silent") &&
     typeof r.reason === "string" &&
-    (r.source === "model" || r.source === "mode" || r.source === "error" || r.source === "timeout") &&
+    (r.source === "model" ||
+      r.source === "mode" ||
+      r.source === "question" ||
+      r.source === "error" ||
+      r.source === "timeout") &&
     (r.mode === "mention" || r.mode === "classify") &&
     typeof r.model === "string" &&
     typeof r.gen === "number" &&

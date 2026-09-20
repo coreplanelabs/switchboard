@@ -1792,9 +1792,9 @@ describe("the misses row — the filed misses bound as the person meant", () => 
       route({ text, recentDirectives: {}, presets, allowed, fallback: "general", commands: menu, ...facts }, model);
   };
 
-  it("seventeen fixtures, each with the bind the person meant, ids unique, every command-meant input parsing and every preset-meant label routable", () => {
-    expect(ROUTE_MISS_FIXTURES).toHaveLength(17);
-    expect(new Set(ROUTE_MISS_FIXTURES.map((f) => f.id)).size).toBe(17);
+  it("nineteen fixtures, each with the bind the person meant, ids unique, every command-meant input parsing and every preset-meant label routable", () => {
+    expect(ROUTE_MISS_FIXTURES).toHaveLength(19);
+    expect(new Set(ROUTE_MISS_FIXTURES.map((f) => f.id)).size).toBe(19);
     for (const f of ROUTE_MISS_FIXTURES) {
       if (f.meant === "command") {
         const def = byId.get(f.command);
@@ -1810,11 +1810,11 @@ describe("the misses row — the filed misses bound as the person meant", () => 
   it("a knowing router binds every filed miss as the person meant and the row passes at its named bar", async () => {
     const results = await replayMisses(ROUTE_MISS_FIXTURES, router(), { now: () => 0 }, defs);
     const score = missScore(results);
-    expect(score).toMatchObject({ fixtures: 17, bound: 17, rate: 1, misses: [] });
+    expect(score).toMatchObject({ fixtures: 19, bound: 19, rate: 1, misses: [] });
     expect(MISS_BIND_BAR).toBe(1);
     const row = routeChecks({ ...base, miss: score }).find((c) => c.name.includes("filed miss"))!;
     expect(row.pass).toBe(true);
-    expect(renderMisses(score)[0]).toContain("17/17");
+    expect(renderMisses(score)[0]).toContain("19/19");
   });
 
   it("two of three bound right prints two of three and fails its bar", async () => {

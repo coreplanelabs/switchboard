@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   bindFromAnswer,
   buildOperatorPrompt,
+  isYesAnswer,
+  joinedAnswerRequest,
   OPERATOR_QUESTION_MARKER,
   OPERATOR_TOOL_NAME,
+  pendingQuestionOf,
   operatorAuthorTurns,
   operatorEventOf,
   operatorProjection,
@@ -157,6 +160,76 @@ describe("the question and its answer-as-a-bind", () => {
     expect(presetRequestOf("ship in acme/repo: fix issue #7")).toBe("in acme/repo: fix issue #7");
     expect(presetRequestOf("ship")).toBeUndefined();
     expect(presetRequestOf("  agent:ship   ")).toBeUndefined();
+  });
+});
+
+describe("the pending question's free-text answer joins the original ask (issue 2046; routing-and-config item 29)", () => {
+  const QUESTION = `Which repo has the lgtm action?\n${OPERATOR_QUESTION_MARKER}\n\`agent:explore acme/company\``;
+  const REQUEST = "in acme/company add the lgtm github action like you see in other org repos";
+
+  it("isYesAnswer: the bare assent in any case with trailing punctuation, and nothing else", () => {
+    expect(isYesAnswer("yes")).toBe(true);
+    expect(isYesAnswer(" Yes! ")).toBe(true);
+    expect(isYesAnswer("yes please")).toBe(false);
+    expect(isYesAnswer("acme/tools is the repo")).toBe(false);
+  });
+
+  it("pendingQuestionOf: the thread's newest `on` question with its proposal, question and kept request; anything else is none", () => {
+    const operator = {
+      mode: "on",
+      outcome: "question",
+      proposal: "agent:explore acme/company",
+      question: QUESTION,
+      request: REQUEST,
+    };
+    expect(pendingQuestionOf([{ operator }])).toEqual({
+      proposal: "agent:explore acme/company",
+      question: QUESTION,
+      request: REQUEST,
+    });
+    // Pending only while the question is the thread's last word.
+    expect(pendingQuestionOf([{ operator: { mode: "on", outcome: "binds" } }, { operator }])).toBeUndefined();
+    expect(pendingQuestionOf([{ operator: { ...operator, mode: "shadow" } }])).toBeUndefined();
+    expect(pendingQuestionOf([])).toBeUndefined();
+    expect(pendingQuestionOf(undefined)).toBeUndefined();
+    // A question without a proposal is still pending: the answer joins.
+    expect(
+      pendingQuestionOf([{ operator: { mode: "on", outcome: "question", question: "Which repo?", request: REQUEST } }]),
+    ).toEqual({
+      question: "Which repo?",
+      request: REQUEST,
+    });
+  });
+
+  it("joinedAnswerRequest: `<request> — <question>: <answer>`, the marker block stripped from the question", () => {
+    expect(joinedAnswerRequest({ question: QUESTION, request: REQUEST }, "acme/tools is the repo")).toBe(
+      `${REQUEST} — Which repo has the lgtm action?: acme/tools is the repo`,
+    );
+    // No question text kept: the answer still joins onto the ask.
+    expect(joinedAnswerRequest({ request: REQUEST }, "acme/tools is the repo")).toBe(
+      `${REQUEST} — acme/tools is the repo`,
+    );
+    // A record from before the field kept no request: nothing joins, the answer stands alone.
+    expect(joinedAnswerRequest({ question: QUESTION }, "acme/tools is the repo")).toBeUndefined();
+    // An empty answer joins nothing.
+    expect(joinedAnswerRequest({ question: QUESTION, request: REQUEST }, "   ")).toBeUndefined();
+  });
+
+  it("the prompt's rules bind a named-repo write ask instead of asking, and hold a question's proposal to a line that would do the work", () => {
+    const prompt = buildOperatorPrompt(input());
+    expect(prompt.system).toContain("A write ask in a named repository binds the write preset");
+    expect(prompt.system).toContain("a question's proposal must be a line that would do the asked work");
+  });
+
+  it("a pending question rides the user turn with the join rule — the marker line with a proposal, the pending sentence without one", () => {
+    const withProposal = buildOperatorPrompt(input({ pendingQuestion: { proposal: "agent:explore acme/company" } }));
+    expect(withProposal.user).toContain(
+      `A question is pending: ${OPERATOR_QUESTION_MARKER} \`agent:explore acme/company\``,
+    );
+    expect(withProposal.user).toContain("joined onto the original ask");
+    const withoutProposal = buildOperatorPrompt(input({ pendingQuestion: {} }));
+    expect(withoutProposal.user).toContain("A question you asked is pending on this thread.");
+    expect(withoutProposal.user).toContain("never call it unclear");
   });
 });
 

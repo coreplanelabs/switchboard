@@ -45,8 +45,9 @@ export const INTAKE_ANSWERS = ["addressed", "silent", "unsure"] as const;
 export type IntakeAnswer = (typeof INTAKE_ANSWERS)[number];
 
 /** How the verdict was reached: the model's answer, the mode alone
- *  (`mention`), a provider error, or the timeout. */
-export type IntakeSource = "model" | "mode" | "error" | "timeout";
+ *  (`mention`), the bot's own pending question (`question` — the reply is its
+ *  answer, no model asked), a provider error, or the timeout. */
+export type IntakeSource = "model" | "mode" | "question" | "error" | "timeout";
 
 /** What became of the receipt: this caller inserted it, another caller's row
  *  stood (first writer wins), the write failed, or there is no ledger. */
@@ -61,7 +62,8 @@ export interface IntakeTurn {
   text: string;
 }
 
-/** The five facts computed by code — inputs to the turn, never a rule here. */
+/** The facts computed by code — inputs to the turn, never a rule here, except
+ *  `pendingQuestion`, the one fact that decides deterministically. */
 export interface IntakeFacts {
   /** The agent and seconds in flight of a run live in the thread, or none. */
   liveRun?: { agent: string; secondsInFlight: number };
@@ -74,6 +76,11 @@ export interface IntakeFacts {
   pendingConfirmation?: string;
   /** Whether the thread's parent is the bot's own post (a scheduled report). */
   threadStartedByBot: boolean;
+  /** Whether the operator's own question is the thread's last word (issue
+   *  2046; `pendingQuestionOf`): the bot asked, so a reply in its own thread
+   *  is addressed to it — the one fact that decides the verdict without a
+   *  model turn, in every mode. */
+  pendingQuestion?: boolean;
 }
 
 /** The receipt row as the ledger stores it, keyed by `<channel>:<ts>` — one
@@ -147,10 +154,24 @@ export async function decideIntake(input: IntakeInput, deps: IntakeDeps): Promis
     }
     if (row) return { verdict: row.verdict, reason: row.reason, source: row.source, receipt: "existing" };
   }
+  // The bot's own pending question decides deterministically, in every mode
+  // (issue 2046): the bot asked, so the person's next words in that thread are
+  // its answer — no mention needed, no model asked, fail-open on this one fact
+  // the code computed itself.
   const decided =
-    input.mode === "mention"
-      ? { verdict: "silent" as const, reason: "mode mention: only a mention is answered here", source: "mode" as const }
-      : await askModel(input, deps);
+    input.facts.pendingQuestion === true
+      ? {
+          verdict: "addressed" as const,
+          reason: "the bot's own question is pending in this thread: the reply is its answer",
+          source: "question" as const,
+        }
+      : input.mode === "mention"
+        ? {
+            verdict: "silent" as const,
+            reason: "mode mention: only a mention is answered here",
+            source: "mode" as const,
+          }
+        : await askModel(input, deps);
   const row: IntakeReceipt = {
     ...decided,
     mode: input.mode,

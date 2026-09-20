@@ -1069,6 +1069,13 @@ export type RunEvent =
       /** A question's proposed line, redacted and cut like the receipt — what
        *  the next turn's "yes" binds (`bindFromAnswer`). */
       proposal?: string;
+      /** A question's original ask, redacted and capped: the request the
+       *  question interrupted, kept so the person's next words in the thread
+       *  join back onto it (`joinedAnswerRequest` —
+       *  `<request> — <question>: <answer>`) and bind as the request would
+       *  have been, never routed as a bare fragment. Set on `question`
+       *  outcomes alone. Additive: unknown → ignored. */
+      request?: string;
       refusalCause?: string;
       refusalText?: string;
       attempts?: ReadonlyArray<{ outcome: "accepted" | "violation"; violation?: string }>;
