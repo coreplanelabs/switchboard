@@ -1,4 +1,4 @@
-import { DRAIN } from "../core/budgets.js";
+import { DRAIN, MINUTE_MS } from "../core/budgets.js";
 import { refusalOf, residentErrorCause, RefusalError } from "../core/refusal.js";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { classifyError } from "../core/trace/classify.js";
@@ -549,6 +549,13 @@ export interface ResidentExecutorOptions {
    *  never a token. Absent (a test, the CLI), the body carries only what a
    *  caller gave. */
   resolveEnvs?: () => Promise<Record<string, string>>;
+  /** The card's word while the run is admitted onto a drained fleet (issue
+   *  2044): called with one line in user words — `waiting for the deploy to
+   *  finish · N min` — on each poll of the drain wait, and with `undefined`
+   *  when the wait ends, so the card never counts an `attaching the
+   *  workspace…` silence through a deploy. Absent (a test, the CLI): the wait
+   *  is as it was. */
+  onSetupNote?: (note: string | undefined) => void;
 }
 
 /** What a successful /attach reports about the thread's worktree. */
@@ -581,6 +588,12 @@ export interface ResidentBinding {
    *  the wake wait). Set by the client, never by the resident; absent when the
    *  first answer bound. The card names it. */
   wokeAfterMs?: number;
+  /** How much of `wokeAfterMs` was spent waiting out a fleet drain (item 69;
+   *  issue 2044) — the run was admitted onto a drained fleet and waited for
+   *  the deploy to finish. Set by the client beside `wokeAfterMs`; absent when
+   *  no drain was met. The dispatch publishes it as the run's `drain_wait`
+   *  note, so `runs friction` names the drain as the wait's category. */
+  drainWaitMs?: number;
   /** This attach moved the thread's binding onto the branch its own run opened
    *  a pull request on (docs/reference/specs/resident-repos.md item 16): from
    *  where, to where, which PR. Absent when the binding stood. */
@@ -1119,7 +1132,7 @@ export class ResidentExecutor implements Executor {
     if (answer.ok) return answer.binding;
     if (isDrainingRefusal(answer)) {
       const reopened = await this.awaitDrainEnd(answer, opts, span);
-      return { ...reopened.binding, wokeAfterMs: reopened.waitedMs };
+      return { ...reopened.binding, wokeAfterMs: reopened.waitedMs, drainWaitMs: reopened.waitedMs };
     }
     if (isTransientRefusal(answer)) {
       const woke = await this.awaitWake("/attach", refusalWords(answer), {
@@ -1128,6 +1141,10 @@ export class ResidentExecutor implements Executor {
         budgetMs: opts.budgetMs,
         span,
       });
+      // The spread keeps a `drainWaitMs` the wake path stamped when its
+      // re-attach met the drain (item 69): the transient-then-draining
+      // sequence carries the drain's share exactly as a first draining
+      // answer does.
       return { ...woke.binding, wokeAfterMs: woke.waitedMs };
     }
     throw this.attachRefusal(answer);
@@ -1156,25 +1173,38 @@ export class ResidentExecutor implements Executor {
     );
     const deadline = t0 + budget;
     let answer = first;
-    for (;;) {
-      const now = systemClock();
-      if (now >= deadline)
-        throw new ResidentDrainingError(this.opts.resource, now - t0, drainingUntil(answer), refusalWords(answer));
-      await wakePause(Math.min(DRAIN_POLL_MS, deadline - now), opts.signal, "/attach");
-      const next = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
-      if (next.ok) return { binding: next.binding, waitedMs: systemClock() - t0 };
-      answer = next;
-      if (isDrainingRefusal(answer)) continue;
-      if (isTransientRefusal(answer)) {
-        const woke = await this.awaitWake("/attach", refusalWords(answer), {
-          origin: "transient-refusal",
-          signal: opts.signal,
-          budgetMs: Math.max(0, deadline - systemClock()),
-          span,
-        });
-        return { binding: woke.binding, waitedMs: systemClock() - t0 };
+    // The card's one line while the run waits (issue 2044): user words, the
+    // minutes counted up on every poll, cleared however the wait ends — the
+    // silence of `attaching the workspace…` through a whole deploy is the
+    // incident this exists for.
+    const note = (now: number) =>
+      this.opts.onSetupNote?.(
+        `waiting for the deploy to finish · ${Math.max(1, Math.round((now - t0) / MINUTE_MS))} min`,
+      );
+    try {
+      for (;;) {
+        const now = systemClock();
+        note(now);
+        if (now >= deadline)
+          throw new ResidentDrainingError(this.opts.resource, now - t0, drainingUntil(answer), refusalWords(answer));
+        await wakePause(Math.min(DRAIN_POLL_MS, deadline - now), opts.signal, "/attach");
+        const next = await this.attachOnce(span, this.attachBoundMs("/attach"), opts.signal);
+        if (next.ok) return { binding: next.binding, waitedMs: systemClock() - t0 };
+        answer = next;
+        if (isDrainingRefusal(answer)) continue;
+        if (isTransientRefusal(answer)) {
+          const woke = await this.awaitWake("/attach", refusalWords(answer), {
+            origin: "transient-refusal",
+            signal: opts.signal,
+            budgetMs: Math.max(0, deadline - systemClock()),
+            span,
+          });
+          return { binding: woke.binding, waitedMs: systemClock() - t0 };
+        }
+        throw this.attachRefusal(answer);
       }
-      throw this.attachRefusal(answer);
+    } finally {
+      this.opts.onSetupNote?.(undefined);
     }
   }
 
@@ -1658,9 +1688,16 @@ export class ResidentExecutor implements Executor {
           // exists to hold and fall them back cold; the binding carries the
           // whole wait, and a drain still in force past the drain budget is
           // the typed ResidentDrainingError, as a first draining answer's is.
+          // The drain's share rides the binding as `drainWaitMs` (item 69,
+          // issue 2044) from this path exactly as from a first draining
+          // answer: `attach` folds the wake result into `wokeAfterMs` alone,
+          // and a binding without the share would publish no `drain_wait`
+          // note — the silence the field exists to end.
           if (isDrainingRefusal(answer)) {
             const reopened = await this.awaitDrainEnd(answer, { signal: opts.signal }, opts.span);
-            return { end: { waitedMs: spent(), binding: reopened.binding } };
+            return {
+              end: { waitedMs: spent(), binding: { ...reopened.binding, drainWaitMs: reopened.waitedMs } },
+            };
           }
           // A 500 the Worker typed transient (the Durable Object reset or lost under
           // the re-attach): the resident is coming back as far as anyone can tell,

@@ -307,6 +307,20 @@ describe("analyzeRunFriction — per-category classification", () => {
     expect(fleet).toMatchObject({ category: "infra_failure", severity: "medium" });
   });
 
+  it("drain_wait: a run admitted onto a drained fleet has its wait named as the drain's own category, never a verdict of none (issue 2044)", () => {
+    const d = analyzeRunFriction([
+      note("drain_wait", "waited 23 min at the fleet drain for a deploy to finish", T0),
+      call("bash", "$ npm test", T0 + 1_000),
+      result("bash", true, "ok", T0 + 2_000),
+    ]);
+    const wait = d.findings.find((f) => f.category === "drain_wait");
+    expect(wait).toMatchObject({
+      severity: "medium",
+      summary: "fleet drained: waited 23 min at the fleet drain for a deploy to finish",
+    });
+    expect(d.byCategory.drain_wait.count).toBe(1);
+  });
+
   it("infra_failure: the sandbox_dead note is an infra failure and leads the verdict", () => {
     const d = analyzeRunFriction([
       call("bash", "$ pnpm install", T0),
@@ -473,6 +487,7 @@ describe("analyzeRunFriction — aggregation and verdict", () => {
     const d = analyzeRunFriction([]);
     expect(Object.keys(d.byCategory).sort()).toEqual([
       "budget_hit",
+      "drain_wait",
       "failed_tool",
       "infra_failure",
       "retry",

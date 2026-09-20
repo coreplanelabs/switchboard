@@ -186,6 +186,36 @@ describe("repo.list", () => {
     expect(c.residents).toHaveBeenCalledTimes(2);
   });
 
+  it("issue 2044: a drained fleet leads the reply and every row says `drained — attach refused` with a pending image report named — never a bare `warm` no attach can reach", async () => {
+    const drained = bind({
+      admin: mockClient({
+        residents: ok({
+          cap: 6,
+          count: 1,
+          draining: {
+            since: "2026-09-20T04:48:00.000Z",
+            until: "2026-09-20T05:53:27.000Z",
+            by: "deploy all",
+            reason: "deploy fd814ee",
+          },
+          residents: [
+            {
+              resource: "repo:acme/api",
+              defaultRef: "main",
+              live: { state: "warm", reason: "", imageReport: "pending" },
+            },
+          ],
+        }),
+      }),
+    });
+    const res = await drained.invoke("repo.list", {}, chat("slack:URANDOM"));
+    expect(res.ok).toBe(true);
+    expect(renderText(drained.get("repo.list")!, res.ok ? res.value : null)).toBe(
+      "*Resident repos* (1/6) — ⚠️ fleet drained for deploy fd814ee (ends by 2026-09-20T05:53:27.000Z): new runs wait at their attach\n" +
+        "• `acme/api` — *warm (drained — attach refused) · image report pending* · ref `main`",
+    );
+  });
+
   it("item 55: a resident with a disk sample gets ` · disk <used>/<total> (<pct>%)` on its line; one without stays as before", async () => {
     const withDisk = bind({
       admin: mockClient({

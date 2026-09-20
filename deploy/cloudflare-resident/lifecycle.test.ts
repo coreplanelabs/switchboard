@@ -56,11 +56,18 @@ describe("no lifecycle timer — the resident's cycles are Workflow instances, n
     },
   );
 
-  it("worker.ts arms the alarm slot only in ResidentRegistryDO, at the drain's `until` — the one-shot drain-lift, never a re-arming cycle", () => {
+  it("worker.ts arms the alarm slot only in ResidentRegistryDO, at the drain record's own ends — `until`, the hold's cycle bound, or the earlier of the two — the one-shot drain-lift, never a re-arming cycle", () => {
     const [, source] = WORKER_FILES[0];
     const registry = registryClassBody(source);
     const calls = registry.match(/setAlarm\(/g) ?? [];
-    const drainLifts = registry.match(/setAlarm\(Date\.parse\(.*\.until\)\)/g) ?? [];
+    // Every alarm is one-shot at a timestamp the drain record itself carries:
+    // `until` (the last resort), `holdsUntil` (the hold's cycle bound, issue
+    // 2044), or the earlier of the two when the alarm handler re-arms a
+    // replaced record — never a computed "now plus interval" cycle.
+    const drainLifts =
+      registry.match(
+        /setAlarm\(Date\.parse\(\w+\.(?:until|holdsUntil)\)\)|setAlarm\(Math\.min\(\.\.\.ends\.filter\(Number\.isFinite\)\)\)/g,
+      ) ?? [];
     expect(calls.length, "the registry arms the drain-lift alarm").toBeGreaterThan(0);
     expect(drainLifts.length, "every registry setAlarm is the drain-lift at `until`").toBe(calls.length);
   });

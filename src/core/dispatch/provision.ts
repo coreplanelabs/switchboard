@@ -25,6 +25,7 @@ import {
 import { isRunStopError } from "../../execution/executor.js";
 import type { ResidentStep } from "../../execution/residentStepTrace.js";
 import { graftResidentSteps, residentTraceOf } from "../../execution/residentTrace.js";
+import { displayNameOf } from "../trace/displayNames.js";
 import { ResidentNeedsRefError } from "../../execution/resident.js";
 import { memoryContextBlock, type MemoryStore } from "../memory/index.js";
 import { provisionalBearerExpiresAt } from "../budgets.js";
@@ -756,6 +757,10 @@ export interface AttachContext {
    *  GitHub binding names the commits' author pair in the workspace's env
    *  (record 0062; execution.md item 5). Absent, the bot pair authors. */
   requester?: string;
+  /** The card's setup-note sink (issue 2044): the drain wait paints `waiting
+   *  for the deploy to finish · N min` through it. Absent, the wait is silent
+   *  on the card (a caller without one). */
+  onSetupNote?: (note: string | undefined) => void;
 }
 
 /** How a recorded workspace's re-attach ended: the round's workspace
@@ -790,6 +795,7 @@ async function attachRound(
   ctx: AttachContext,
 ): Promise<RoundWorkspace> {
   const { threadKey, agent, profile, repoCtx, root, clock, reattach, stopSignal, remainingMs, requester } = ctx;
+  const { onSetupNote } = ctx;
   const ownPr = ownPrOf(repoCtx);
   return root.span("dispatch.workspace.attach", async (span) => {
     // The resident's own steps (clone, install, the mutex wait…) graft under
@@ -828,6 +834,7 @@ async function attachRound(
           ...(stopSignal !== undefined ? { stopSignal } : {}),
           ...(remainingMs !== undefined ? { remainingMs } : {}),
           ...(requester !== undefined ? { requester } : {}),
+          ...(onSetupNote !== undefined ? { onSetupNote } : {}),
         },
         logKey: threadKey,
         span,
@@ -902,6 +909,10 @@ export async function attachWorkspace(
       clock,
       // The requester whose binding names the author pair (record 0062).
       requester: msg.userId,
+      // A run admitted onto a drained fleet says so (issue 2044): the drain
+      // wait paints its one line here, and its end restores the attach label
+      // the card sink painted at the span's start.
+      onSetupNote: (note) => shell.setSetupLabel(note ?? `${displayNameOf("dispatch.workspace.attach")}…`),
       ...(reattach !== undefined ? { reattach } : {}),
       ...(stopSignal !== undefined ? { stopSignal } : {}),
       ...(remainingMs !== undefined ? { remainingMs } : {}),

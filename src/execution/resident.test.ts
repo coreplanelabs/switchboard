@@ -9,7 +9,7 @@ import {
   infraMayClear,
 } from "./executor.js";
 import { RUNTIME_BUSY_WAIT_MAX_MS, runtimeBusyMessage } from "./sandboxErrors.js";
-import { WAKE_WAIT_MAX_MS } from "./residentWake.js";
+import { WAKE_POLL_MS, WAKE_WAIT_MAX_MS } from "./residentWake.js";
 import {
   ResidentExecutor,
   ResidentLeaseSpentError,
@@ -2567,8 +2567,31 @@ describe("ResidentExecutor.attach during a fleet drain (item 69)", () => {
     await vi.advanceTimersByTimeAsync(DRAIN_POLL_MS);
     await vi.advanceTimersByTimeAsync(DRAIN_POLL_MS);
     const binding = await p;
-    expect(binding).toMatchObject({ ref: "master", sha: "1220b9c4", wokeAfterMs: 2 * DRAIN_POLL_MS });
+    expect(binding).toMatchObject({
+      ref: "master",
+      sha: "1220b9c4",
+      wokeAfterMs: 2 * DRAIN_POLL_MS,
+      // The drain's share of the wait, for the run's `drain_wait` note (issue 2044).
+      drainWaitMs: 2 * DRAIN_POLL_MS,
+    });
     expect(calls.map(route)).toEqual(["/attach", "/attach", "/attach"]);
+  });
+
+  it("the wait says so on the card (issue 2044): `onSetupNote` paints `waiting for the deploy to finish · N min` on each poll, and clears it when the wait ends", async () => {
+    stubFetch(draining, draining, draining, { raw: "\n" + JSON.stringify(ATTACH_OK) });
+    const notes: (string | undefined)[] = [];
+    const ex = new ResidentExecutor({ ...OPTS, onSetupNote: (n) => notes.push(n) });
+    const p = ex.attach();
+    await vi.advanceTimersByTimeAsync(3 * DRAIN_POLL_MS);
+    await p;
+    // Under a minute in, the line rounds up to 1 min; at 90 s it reads 2 min
+    // (rounded); the wait's end clears the note so the attach label returns.
+    expect(notes).toEqual([
+      "waiting for the deploy to finish · 1 min",
+      "waiting for the deploy to finish · 1 min",
+      "waiting for the deploy to finish · 1 min",
+      undefined,
+    ]);
   });
 
   it("the wait is bounded by the run's lease less the reserve: a run with 20 min left waits 10 min, then the typed ResidentDrainingError names the wait and the drain's end", async () => {
@@ -2595,10 +2618,13 @@ describe("ResidentExecutor.attach during a fleet drain (item 69)", () => {
     expect((err as Error).message).toContain("is not onboarded");
   });
 
-  it("a Durable Object reset that lands during a live drain is the drain's case, not a wake failure: the wake wait's re-attach meets the surviving drain record and hands the wait to the drain wait, so the run waits past the wake budget and binds when the fleet reopens, the binding carrying the whole wait", async () => {
+  it("a Durable Object reset that lands during a live drain is the drain's case, not a wake failure: the wake wait's re-attach meets the surviving drain record and hands the wait to the drain wait, so the run waits past the wake budget and binds when the fleet reopens, the binding carrying the whole wait and the drain's share as drainWaitMs", async () => {
     // The release-window gap: the deploy's isolate swap lands inside its own drain, so the
     // attach meets the platform's reset (transient) — the wake wait — while the
-    // drain record survives the swap and answers the re-attach.
+    // drain record survives the swap and answers the re-attach. The first probe
+    // finds the wake still running (`restoring`), so the wake spends one poll of
+    // its own before the re-attach meets the drain — which is why `drainWaitMs`
+    // below is the drain's share, strictly less than the whole `wokeAfterMs`.
     const reset = {
       body: {
         error: "attach-failed: Durable Object reset because its code was updated.",
@@ -2609,19 +2635,34 @@ describe("ResidentExecutor.attach during a fleet drain (item 69)", () => {
     const polls = WAKE_WAIT_MAX_MS / DRAIN_POLL_MS + 1; // draining answers past the wake ceiling
     const { calls } = stubFetch(
       reset,
+      { body: { state: "restoring", reason: "rehydrating", inFlight: 0 } },
       { body: { state: "warm", reason: "", inFlight: 0 } },
       ...Array.from({ length: polls }, () => draining),
       { raw: "\n" + JSON.stringify(ATTACH_OK) },
     );
     const ex = new ResidentExecutor(OPTS);
     const p = ex.attach();
-    await vi.advanceTimersByTimeAsync(polls * DRAIN_POLL_MS);
+    await vi.advanceTimersByTimeAsync(WAKE_POLL_MS + polls * DRAIN_POLL_MS);
     const binding = await p;
-    expect(binding).toMatchObject({ ref: "master", sha: "1220b9c4", wokeAfterMs: polls * DRAIN_POLL_MS });
+    // The whole wait on `wokeAfterMs`; the drain's share alone on `drainWaitMs`
+    // (item 69, issue 2044) — what the dispatcher publishes as the `drain_wait`
+    // note. Losing it on this path would silence exactly the deploy wait the
+    // note exists to name.
+    expect(binding).toMatchObject({
+      ref: "master",
+      sha: "1220b9c4",
+      wokeAfterMs: WAKE_POLL_MS + polls * DRAIN_POLL_MS,
+      drainWaitMs: polls * DRAIN_POLL_MS,
+    });
     expect(polls * DRAIN_POLL_MS).toBeGreaterThan(WAKE_WAIT_MAX_MS);
-    // One /attach, the wake's probe, its re-attach (the drain's first answer),
-    // then one re-attach per drain poll until the fleet admits the run.
-    expect(calls.map(route)).toEqual(["/attach", "/status", ...Array.from({ length: polls + 1 }, () => "/attach")]);
+    // One /attach, the wake's two probes, its re-attach (the drain's first
+    // answer), then one re-attach per drain poll until the fleet admits the run.
+    expect(calls.map(route)).toEqual([
+      "/attach",
+      "/status",
+      "/status",
+      ...Array.from({ length: polls + 1 }, () => "/attach"),
+    ]);
   });
 
   it("a drain still in force past the lease's budget after the wake hand-off ends in the typed ResidentDrainingError naming the drain — never the wake budget's strike", async () => {

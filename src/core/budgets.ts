@@ -109,6 +109,14 @@ export const DRAIN = {
   marginMinutes: 5,
   maxMinutes: 90,
   defaultMinutes: 60,
+  /** How long a held drain waits for a container's post-deploy cycle before
+   *  reopening the fleet anyway with the stale container named (issue 2044):
+   *  the platform replaces container processes three to ten minutes after a
+   *  deploy (docs/reference/specs/resident-repos.md item 65), so a cycle that
+   *  has not landed within this bound is not coming on its own — the gate
+   *  asked for the cycle, so it owns the outcome and never holds the fleet
+   *  closed to the drain's whole `until` on a report nothing will send. */
+  cycleBoundMinutes: 10,
 } as const;
 
 /** How long an intake receipt row is kept on the run history object

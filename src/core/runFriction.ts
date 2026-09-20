@@ -39,6 +39,7 @@ export type FrictionCategory =
   | "wrap_up"
   | "budget_hit"
   | "infra_failure"
+  | "drain_wait"
   | "unkept_promise";
 
 export const FRICTION_CATEGORIES: readonly FrictionCategory[] = [
@@ -50,6 +51,7 @@ export const FRICTION_CATEGORIES: readonly FrictionCategory[] = [
   "wrap_up",
   "budget_hit",
   "infra_failure",
+  "drain_wait",
   "unkept_promise",
 ];
 
@@ -63,6 +65,7 @@ export const CATEGORY_LABEL: Record<FrictionCategory, string> = {
   wrap_up: "agent wind-down",
   budget_hit: "budget hits",
   infra_failure: "infra failures",
+  drain_wait: "the fleet drain",
   unkept_promise: "unkept promises",
 };
 
@@ -78,6 +81,7 @@ export const DENOMINATOR_OF: Record<FrictionCategory, "tool" | "run"> = {
   wrap_up: "run",
   budget_hit: "run",
   infra_failure: "run",
+  drain_wait: "run",
   unkept_promise: "run",
 };
 
@@ -571,6 +575,18 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
           category: "infra_failure",
           severity: "medium",
           summary: `fleet busy: ${ev.summary}`,
+          eventIndex: index,
+        });
+        return;
+      case "drain_wait":
+        // The run was admitted onto a drained fleet (resident-repos item 69;
+        // issue 2044): the wait is the deploy's, its own category — a verdict
+        // of "none" over a run that sat half an hour at the drain was the
+        // incident's shape. No extent: the wait precedes the loop's spans.
+        findings.push({
+          category: "drain_wait",
+          severity: "medium",
+          summary: `fleet drained: ${ev.summary}`,
           eventIndex: index,
         });
         return;
