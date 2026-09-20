@@ -40,7 +40,7 @@ import { ROUTE_WRITE_FIXTURES } from "./routeWriteFixtures.js";
 import { ROUTE_MISS_FIXTURES } from "./routeMissFixtures.js";
 import { DIRECTIVE_WORDS, ROUTE_DIRECTIVE_FIXTURES } from "./routeDirectiveFixtures.js";
 import { ROUTE_PLANTED_FIXTURES } from "./routePlantedFixtures.js";
-import { ROUTE_DOOR_FIXTURES } from "./routeDoorFixtures.js";
+import { DOOR_MERGED_UNITS, ROUTE_DOOR_FIXTURES, type RouteDoorFixture } from "./routeDoorFixtures.js";
 import type { OperatorDecision } from "../core/dispatch/operator.js";
 import {
   compoundExamples,
@@ -81,6 +81,8 @@ import {
   doorFixtureScore,
   renderDoorFixtures,
   replayDoorFixtures,
+  partitionDoorFixtures,
+  judgeDoorFixture,
   MISS_BIND_BAR,
   missScore,
   PLANTED_PASS_BAR,
@@ -2108,11 +2110,11 @@ describe("the agreement row over the shadow log (load-harness item 17)", () => {
   });
 });
 
-describe("the checked-in door set (src/load/routeDoorFixtures.ts) and its replay over the operator (issue 2043)", () => {
+describe("the door row scores the defect fixtures", () => {
   const binds = (line: string): OperatorDecision => ({
     kind: "binds",
-    binds: [{ line, reason: "a docs write" }],
-    reason: "a docs write in the named repo",
+    binds: [{ line, reason: "the table's cell" }],
+    reason: "the table's cell for this shape",
   });
   const refusal: OperatorDecision = {
     kind: "refusal",
@@ -2120,75 +2122,58 @@ describe("the checked-in door set (src/load/routeDoorFixtures.ts) and its replay
     text: "control plane records require admin access",
     reason: "invented authority",
   };
+  /** A scripted operator that answers each fixture with its expected shape,
+   *  as far as the text seam can express it. */
+  const asExpected = (fixture: RouteDoorFixture): OperatorDecision => {
+    const e = fixture.expected;
+    if (e.kind === "bind") {
+      // A text already opening with the directive head passes through once
+      // (D4, D12); words the thread's context supplies (N3's pull request
+      // URL) ride the bound line beside the reply's own text.
+      const head = fixture.text.startsWith(`agent:${e.preset}`) ? fixture.text : `agent:${e.preset} ${fixture.text}`;
+      const line = e.carries !== undefined && !head.includes(e.carries) ? `${head} ${e.carries}` : head;
+      return binds(line);
+    }
+    if (e.kind === "refusal")
+      return {
+        kind: "refusal",
+        cause: "policy",
+        text: `the App is not installed on this repository — ${e.naming} it first`,
+        reason: "policy row",
+      };
+    return { kind: "non_decision", reason: "not observable over the text seam" };
+  };
+  const byText = new Map(ROUTE_DOOR_FIXTURES.map((f) => [f.text, f]));
+  const operate = async (text: string): Promise<OperatorDecision> => asExpected(byText.get(text)!);
+  const bindFixtures = ROUTE_DOOR_FIXTURES.filter((f) => f.expected.kind === "bind");
 
-  it("every id is unique; every fixture names a repository and a record or plan by number and expects the write preset", () => {
-    expect(new Set(ROUTE_DOOR_FIXTURES.map((f) => f.id)).size).toBe(ROUTE_DOOR_FIXTURES.length);
+  it("the set is the eighteen defects — D1 to D14 and N1 to N4, each exactly once, ids unique, each tagged with the unit that turns it green", () => {
+    expect(ROUTE_DOOR_FIXTURES).toHaveLength(18);
+    expect(new Set(ROUTE_DOOR_FIXTURES.map((f) => f.id)).size).toBe(18);
+    const defects = ROUTE_DOOR_FIXTURES.map((f) => f.defect);
+    expect([...defects].sort()).toEqual(
+      [...Array.from({ length: 14 }, (_, i) => `D${i + 1}`), "N1", "N2", "N3", "N4"].sort(),
+    );
     for (const f of ROUTE_DOOR_FIXTURES) {
-      expect(f.preset, f.id).toBe("ship");
-      expect(f.text, f.id).toContain("in acme/");
-      expect(/record \d{4}|plan \d{4}-\d{2}-\d{2}-\d{3}/.test(f.text), f.id).toBe(true);
+      expect(["E2", "E3"], f.id).toContain(f.unit);
+      expect(f.text.length, f.id).toBeGreaterThan(0);
     }
   });
 
-  it("a binds decision whose first bind is agent:ship on the request hits every fixture and the score is green", async () => {
-    const results = await replayDoorFixtures(ROUTE_DOOR_FIXTURES, async (text) => binds(`agent:ship ${text}`), {
-      now: () => 0,
-    });
-    expect(results.every((r) => r.hit)).toBe(true);
-    const score = doorFixtureScore(results);
-    expect(score).toMatchObject({
-      fixtures: ROUTE_DOOR_FIXTURES.length,
-      hits: ROUTE_DOOR_FIXTURES.length,
-      refusals: 0,
-      misses: [],
-    });
-    expect(score.hitRate).toBeGreaterThanOrEqual(DOOR_BIND_BAR);
-    expect(renderDoorFixtures(score)[0]).toContain(`${score.hits}/${score.fixtures}`);
-    expect(renderDoorFixtures(score)).toContain("misses: none");
-  });
-
-  it("the incident's refusal shape is a miss counted apart, rendered with the reason and the text, and the check row fails", async () => {
-    const results = await replayDoorFixtures(ROUTE_DOOR_FIXTURES, async () => refusal, { now: () => 0 });
-    const score = doorFixtureScore(results);
-    expect(score.hits).toBe(0);
-    expect(score.refusals).toBe(ROUTE_DOOR_FIXTURES.length);
+  it("a fixture whose unit is unmerged scores pending, never fails: with no unit merged the whole set is pending and the check row passes", () => {
+    const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, DOOR_MERGED_UNITS);
+    expect(DOOR_MERGED_UNITS).toEqual([]);
+    expect(split.scored).toEqual([]);
+    expect(split.pending).toHaveLength(18);
+    const score = doorFixtureScore([], split.pending);
+    expect(score).toMatchObject({ fixtures: 0, hits: 0, refusals: 0, misses: [] });
+    expect(Number.isNaN(score.hitRate)).toBe(true);
     const lines = renderDoorFixtures(score);
-    expect(lines[0]).toContain(`refused ${score.refusals}`);
-    expect(lines.some((l) => l.includes("invented authority"))).toBe(true);
-    const checks = routeChecks({
-      table: confusionTable([], []),
-      answered: 0,
-      readToWrite: 0,
-      compound: compoundScore([]),
-      compoundBar: { detection: 0.9 },
-      imperative: imperativeScore([]),
-      imperativeBar: { hit: 0.9 },
-      writePreset: "ship",
-      door: score,
-    });
-    const row = checks.find((c) => c.name.includes("door fixture"))!;
-    expect(row).toMatchObject({
-      pass: false,
-      actual: `0/${ROUTE_DOOR_FIXTURES.length} bound, ${score.refusals} refused`,
-    });
-  });
-
-  it("a bind of another preset, a non_decision and a question are misses; a hit needs the write preset's head", async () => {
-    const answers: Record<string, OperatorDecision> = {
-      [ROUTE_DOOR_FIXTURES[0].text]: binds(`agent:general ${ROUTE_DOOR_FIXTURES[0].text}`),
-      [ROUTE_DOOR_FIXTURES[1].text]: { kind: "non_decision", reason: "prose" },
-      [ROUTE_DOOR_FIXTURES[2].text]: { kind: "question", text: "which record?", reason: "unsure" },
-    };
-    const results = await replayDoorFixtures(
-      ROUTE_DOOR_FIXTURES,
-      async (text) => answers[text] ?? binds(`agent:ship ${text}`),
-      { now: () => 0 },
-    );
-    const score = doorFixtureScore(results);
-    expect(score.hits).toBe(ROUTE_DOOR_FIXTURES.length - 3);
-    expect(score.refusals).toBe(0);
-    expect(score.misses.map((m) => m.outcome)).toEqual(["binds", "non_decision", "question"]);
-    const routed = routeChecks({
+    expect(lines[0]).toContain("no fixture's unit is merged yet — 18 pending");
+    expect(lines[1]).toContain("D3 (unit E3)");
+    expect(lines[1]).toContain("D13 (unit E3)");
+    expect(lines).toContain("misses: none");
+    const row = routeChecks({
       table: confusionTable([], []),
       answered: 0,
       readToWrite: 0,
@@ -2199,6 +2184,117 @@ describe("the checked-in door set (src/load/routeDoorFixtures.ts) and its replay
       writePreset: "ship",
       door: score,
     }).find((c) => c.name.includes("door fixture"))!;
-    expect(routed.pass).toBe(false);
+    expect(row.pass).toBe(true);
+    expect(row.actual).toContain("18 pending");
+  });
+
+  it("partitioning splits by the unit tag: with E2 merged, E3's fixtures — D3's typed hand-back line expecting a run once E3 lands, and D13's click — stay pending", () => {
+    const split = partitionDoorFixtures(ROUTE_DOOR_FIXTURES, ["E2"]);
+    expect(split.pending.map((f) => f.defect).sort()).toEqual(["D13", "D3"]);
+    const d03 = split.pending.find((f) => f.defect === "D3")!;
+    expect(d03.expected).toEqual({ kind: "run", line: d03.text });
+    const d13 = split.pending.find((f) => f.defect === "D13")!;
+    expect(d13.expected.kind).toBe("click");
+    expect(split.scored).toHaveLength(16);
+  });
+
+  it("a bind expectation hits when the first bind names the preset and carries the words, and misses on a dropped task text, a doubled head or another preset", () => {
+    const d01 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "D1")!;
+    expect(judgeDoorFixture(binds(`agent:ship ${d01.text}`), d01).hit).toBe(true);
+    // D1's shape: the person's words gone from the bind.
+    expect(judgeDoorFixture(binds("agent:ship"), d01).hit).toBe(false);
+    // Another preset's head.
+    expect(judgeDoorFixture(binds(`agent:general ${d01.text}`), d01).hit).toBe(false);
+    // D4's shape: the seed directive doubled instead of passing through.
+    const d04 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "D4")!;
+    expect(judgeDoorFixture(binds(`ship ${d04.text}`), d04).hit).toBe(false);
+    expect(judgeDoorFixture(binds(d04.text), d04).hit).toBe(true);
+  });
+
+  it("a refusal expectation hits only on a refusal whose text carries the naming whole; an expected refusal never counts as a false refusal", async () => {
+    const d11 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "D11")!;
+    expect(d11.expected.kind).toBe("refusal");
+    expect(judgeDoorFixture(asExpected(d11), d11).hit).toBe(true);
+    // The incident's shape: the text cut before the remedy.
+    expect(
+      judgeDoorFixture({ kind: "refusal", cause: "policy", text: "This request has a typo (", reason: "cut" }, d11).hit,
+    ).toBe(false);
+    const results = await replayDoorFixtures([d11], operate, { now: () => 0 });
+    expect(doorFixtureScore(results).refusals).toBe(0);
+  });
+
+  it("an outcome the text seam cannot observe misses by name, so a unit that merges such a fixture must extend the judge", () => {
+    const d08 = ROUTE_DOOR_FIXTURES.find((f) => f.defect === "D8")!;
+    const judged = judgeDoorFixture(binds(d08.text), d08);
+    expect(judged.hit).toBe(false);
+    expect(judged.reason).toContain("cannot observe a `run` outcome");
+    expect(judged.reason).toContain(`unit ${d08.unit}`);
+  });
+
+  it("a scored replay over the bind fixtures is green when each bind carries the words, and the check row passes with the pending count beside it", async () => {
+    const results = await replayDoorFixtures(bindFixtures, operate, { now: () => 0 });
+    expect(results.every((r) => r.hit)).toBe(true);
+    const pending = ROUTE_DOOR_FIXTURES.filter((f) => f.expected.kind !== "bind");
+    const score = doorFixtureScore(results, pending);
+    expect(score.hits).toBe(bindFixtures.length);
+    expect(score.hitRate).toBeGreaterThanOrEqual(DOOR_BIND_BAR);
+    expect(score.refusals).toBe(0);
+    const lines = renderDoorFixtures(score);
+    expect(lines[0]).toContain(`${score.hits}/${score.fixtures}`);
+    expect(lines[0]).toContain(`pending ${pending.length}`);
+    expect(lines).toContain("misses: none");
+    const row = routeChecks({
+      table: confusionTable([], []),
+      answered: 0,
+      readToWrite: 0,
+      compound: compoundScore([]),
+      compoundBar: { detection: 0.9 },
+      imperative: imperativeScore([]),
+      imperativeBar: { hit: 0.9 },
+      writePreset: "ship",
+      door: score,
+    }).find((c) => c.name.includes("door fixture"))!;
+    expect(row.pass).toBe(true);
+  });
+
+  it("the incident's refusal shape on a bind fixture is a false refusal counted apart, rendered with the defect id and the reason, and the check row fails", async () => {
+    const results = await replayDoorFixtures(bindFixtures, async () => refusal, { now: () => 0 });
+    const score = doorFixtureScore(results);
+    expect(score.hits).toBe(0);
+    expect(score.refusals).toBe(bindFixtures.length);
+    const lines = renderDoorFixtures(score);
+    expect(lines[0]).toContain(`falsely refused ${score.refusals}`);
+    expect(lines.some((l) => l.includes("(D1):") && l.includes("invented authority"))).toBe(true);
+    const row = routeChecks({
+      table: confusionTable([], []),
+      answered: 0,
+      readToWrite: 0,
+      compound: compoundScore([]),
+      compoundBar: { detection: 0.9 },
+      imperative: imperativeScore([]),
+      imperativeBar: { hit: 0.9 },
+      writePreset: "ship",
+      door: score,
+    }).find((c) => c.name.includes("door fixture"))!;
+    expect(row).toMatchObject({
+      pass: false,
+      actual: `0/${bindFixtures.length} as expected, ${score.refusals} falsely refused, 0 pending`,
+    });
+  });
+
+  it("a bind of another preset, a non_decision and a question are misses; a hit needs the expected preset's head", async () => {
+    const [a, b, c] = bindFixtures;
+    const answers = new Map<string, OperatorDecision>([
+      [a.text, binds(`agent:general ${a.text}`)],
+      [b.text, { kind: "non_decision", reason: "prose" }],
+      [c.text, { kind: "question", text: "which record?", reason: "unsure" }],
+    ]);
+    const results = await replayDoorFixtures(bindFixtures, async (text) => answers.get(text) ?? operate(text), {
+      now: () => 0,
+    });
+    const score = doorFixtureScore(results);
+    expect(score.hits).toBe(bindFixtures.length - 3);
+    expect(score.refusals).toBe(0);
+    expect(score.misses.map((m) => m.outcome)).toEqual(["binds", "non_decision", "question"]);
   });
 });

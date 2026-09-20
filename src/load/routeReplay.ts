@@ -40,7 +40,7 @@ import {
 import type { SloCheck } from "./aggregate.js";
 import { presetBindOf, type OperatorDecision } from "../core/dispatch/operator.js";
 import type { RouteCompoundFixture } from "./routeCompoundFixtures.js";
-import type { RouteDoorFixture } from "./routeDoorFixtures.js";
+import type { DoorUnit, RouteDoorFixture } from "./routeDoorFixtures.js";
 import type { RouteCommandExample } from "./routeCommandFixtures.js";
 import type { RouteDirectiveFixture } from "./routeDirectiveFixtures.js";
 import type { RouteImperativeFixture } from "./routeImperativeFixtures.js";
@@ -632,11 +632,13 @@ export function renderImperative(
   ];
 }
 
-/** One replayed door fixture (issue 2043): the OPERATOR's decision on a
- *  plain-words docs ask that names a record or a plan by number, beside the
- *  write bind the fixture expects. A hit is a binds decision whose first bind
- *  names the fixture's preset (`presetBindOf` over an `agent:<preset>` head or
- *  the bare name); a refusal is the incident's shape and counted apart. */
+/** One replayed door fixture (record 0069's D-table and the night's N-set):
+ *  the OPERATOR's decision on the failure's message shape, beside the amended
+ *  table's expected outcome. A `bind` expectation hits on a binds decision
+ *  whose first bind names the preset (`presetBindOf` over an `agent:<preset>`
+ *  head or the bare name) and carries the person's words; a `refusal` hits on
+ *  a policy refusal whose text carries the naming whole; a refusal where a
+ *  bind was expected is the incident's shape and counted apart. */
 export interface DoorFixtureResult extends RouteDoorFixture {
   outcome: OperatorDecision["kind"];
   /** The first bind's line, when the decision bound. */
@@ -646,9 +648,57 @@ export interface DoorFixtureResult extends RouteDoorFixture {
   ms: number;
 }
 
+/** Split the door set into the fixtures whose unit is merged (scored on this
+ *  run) and the rest (printed as pending, never replayed and never a
+ *  failure): the units of the one-execution-path plan land one pull request
+ *  at a time, and each flips its own fixtures from pending to scored by
+ *  appending itself to `DOOR_MERGED_UNITS`. */
+export function partitionDoorFixtures(
+  fixtures: readonly RouteDoorFixture[],
+  mergedUnits: readonly DoorUnit[],
+): { scored: RouteDoorFixture[]; pending: RouteDoorFixture[] } {
+  const merged = new Set<DoorUnit>(mergedUnits);
+  return {
+    scored: fixtures.filter((f) => merged.has(f.unit)),
+    pending: fixtures.filter((f) => !merged.has(f.unit)),
+  };
+}
+
+/** Judge one operator decision against a fixture's expected outcome. The
+ *  `bind` and `refusal` kinds are observable over the replay's text seam
+ *  today; the others — a typed line that runs, a click, a fold, a rebind,
+ *  the floor — need the seam their unit builds, so a scored fixture of such
+ *  a kind misses loudly by name until that unit extends this judge. */
+export function judgeDoorFixture(
+  decision: OperatorDecision,
+  fixture: RouteDoorFixture,
+): { hit: boolean; bound?: string; reason: string } {
+  const expected = fixture.expected;
+  const bound = decision.kind === "binds" ? decision.binds[0]?.line : undefined;
+  if (expected.kind === "bind") {
+    const preset = bound === undefined ? undefined : presetBindOf(bound, [expected.preset]);
+    const hit =
+      bound !== undefined &&
+      preset === expected.preset &&
+      (expected.carries === undefined || bound.includes(expected.carries)) &&
+      (expected.forbids === undefined || !bound.includes(expected.forbids));
+    return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
+  }
+  if (expected.kind === "refusal") {
+    const hit = decision.kind === "refusal" && decision.text.includes(expected.naming);
+    return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
+  }
+  return {
+    hit: false,
+    ...(bound !== undefined ? { bound } : {}),
+    reason: `the replay's seam cannot observe a \`${expected.kind}\` outcome yet — unit ${fixture.unit} extends the judge when it flips this fixture to scored`,
+  };
+}
+
 /** Ask the operator about each door fixture — the operator's own seam, never
- *  the router's: the set exists because the door refused these shapes, so the
- *  door is what the replay grades. */
+ *  the router's: the set exists because the door made these misses, so the
+ *  door is what the replay grades. The caller hands only the fixtures whose
+ *  unit is merged (`partitionDoorFixtures`). */
 export async function replayDoorFixtures(
   fixtures: readonly RouteDoorFixture[],
   operate: (text: string) => Promise<OperatorDecision>,
@@ -665,13 +715,10 @@ export async function replayDoorFixtures(
       const fixture = fixtures[i];
       const started = now();
       const decision = await operate(fixture.text);
-      const bound = decision.kind === "binds" ? decision.binds[0]?.line : undefined;
       results[i] = {
         ...fixture,
         outcome: decision.kind,
-        ...(bound !== undefined ? { bound } : {}),
-        hit: bound !== undefined && presetBindOf(bound, [fixture.preset]) === fixture.preset,
-        reason: decision.reason,
+        ...judgeDoorFixture(decision, fixture),
         ms: Math.max(0, now() - started),
       };
     }
@@ -680,47 +727,66 @@ export async function replayDoorFixtures(
   return results;
 }
 
-/** Every fixture bound to its write preset — the bar: a refused docs ask is
- *  the incident the set exists for, so the row fails on one miss. */
+/** Every scored fixture answered with its expected outcome — the bar: each
+ *  fixture is a defect the door already shipped once, so the row fails on
+ *  one regression. */
 export const DOOR_BIND_BAR = 1;
 
-/** The door score: hits, the refusals counted apart (the incident's shape),
- *  and every miss in replay order. */
+/** The door score: hits over the scored fixtures, the false refusals counted
+ *  apart (a refusal where the fixture expected anything else — the
+ *  incident's shape), the pending fixtures whose unit is not merged, and
+ *  every miss in replay order. */
 export interface DoorFixtureScore {
+  /** The scored fixtures — the ones whose unit is merged. */
   fixtures: number;
   hits: number;
-  /** `hits / fixtures`; NaN with no fixtures. */
+  /** `hits / fixtures`; NaN with no scored fixtures. */
   hitRate: number;
-  /** Fixtures the operator answered with a refusal — the false-refusal shape. */
+  /** Scored fixtures the operator refused where the expectation was not a
+   *  refusal — the false-refusal shape. */
   refusals: number;
+  /** The fixtures whose unit is not merged, printed and never judged. */
+  pending: RouteDoorFixture[];
   misses: DoorFixtureResult[];
 }
 
-export function doorFixtureScore(results: readonly DoorFixtureResult[]): DoorFixtureScore {
+export function doorFixtureScore(
+  results: readonly DoorFixtureResult[],
+  pending: readonly RouteDoorFixture[] = [],
+): DoorFixtureScore {
   const hits = results.filter((r) => r.hit).length;
   return {
     fixtures: results.length,
     hits,
     hitRate: results.length === 0 ? NaN : hits / results.length,
-    refusals: results.filter((r) => r.outcome === "refusal").length,
+    refusals: results.filter((r) => r.outcome === "refusal" && r.expected.kind !== "refusal").length,
+    pending: [...pending],
     misses: results.filter((r) => !r.hit),
   };
 }
 
-/** The door score and its misses as markdown lines, for the receipt's notes. */
+/** The door score, its pending fixtures and its misses as markdown lines,
+ *  for the receipt's notes. */
 export function renderDoorFixtures(score: DoorFixtureScore, opts: { textCap?: number } = {}): string[] {
   const cap = opts.textCap ?? 80;
   const snippet = (text: string) => {
     const one = text.replace(/\s+/g, " ").trim();
     return one.length > cap ? `${one.slice(0, cap - 1)}…` : one;
   };
+  const scoredLine =
+    score.fixtures === 0
+      ? `door: no fixture's unit is merged yet — ${score.pending.length} pending, none scored`
+      : `door: defect fixtures answered as the table expects ${score.hits}/${score.fixtures} (${pct(score.hitRate)}), falsely refused ${score.refusals} (bar 0), pending ${score.pending.length}`;
   return [
-    `door: docs asks bound to their write preset ${score.hits}/${score.fixtures} (${pct(score.hitRate)}), refused ${score.refusals} (bar 0)`,
+    scoredLine,
+    ...(score.pending.length === 0
+      ? []
+      : [`pending (${score.pending.length}): ${score.pending.map((f) => `${f.defect} (unit ${f.unit})`).join(", ")}`]),
     "",
     score.misses.length === 0 ? "misses: none" : `misses (${score.misses.length}):`,
     ...score.misses.map(
       (m) =>
-        `- ${m.id}: expected agent:${m.preset}, answered ${m.outcome}${m.bound ? ` \`${m.bound}\`` : ""} — ${m.reason} — "${snippet(m.text)}"`,
+        `- ${m.id} (${m.defect}): expected ${m.expected.kind}, answered ${m.outcome}${m.bound ? ` \`${m.bound}\`` : ""} — ${m.reason} — "${snippet(m.text)}"`,
     ),
   ];
 }
@@ -1711,10 +1777,10 @@ export function routeChecks(input: RouteCheckInput): SloCheck[] {
       ? []
       : [
           {
-            name: "every door fixture — a docs ask naming a record or plan by number — bound to its write preset by the operator, none refused (issue 2043)",
-            pass: input.door.hitRate >= DOOR_BIND_BAR && input.door.refusals === 0,
-            actual: `${input.door.hits}/${input.door.fixtures} bound, ${input.door.refusals} refused`,
-            limit: `${input.door.fixtures} bound, 0 refused`,
+            name: "every scored door fixture — record 0069's defects and the night's door failures, the units merged so far — answered as the amended table expects, none falsely refused; unmerged units' fixtures pending, never failing",
+            pass: input.door.fixtures === 0 || (input.door.hitRate >= DOOR_BIND_BAR && input.door.refusals === 0),
+            actual: `${input.door.hits}/${input.door.fixtures} as expected, ${input.door.refusals} falsely refused, ${input.door.pending.length} pending`,
+            limit: `${input.door.fixtures} as expected, 0 falsely refused`,
           },
         ]),
     ...(input.planted === undefined
