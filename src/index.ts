@@ -19,7 +19,7 @@ import { loadWebAssets, webDistDir } from "./channels/webAssets.js";
 import { PACKAGE_ROOT, packageVersion } from "./packageRoot.js";
 import { makePageSender } from "./channels/webShell.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
-import { createWebChatHandler, resumeWebIO } from "./channels/web.js";
+import { createWebChatHandler, orchestratorChatSeed, resumeWebIO } from "./channels/web.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
 import { createMetricsViewHandler } from "./channels/metricsView.js";
 import { createPlaneViewHandler } from "./channels/planeView.js";
@@ -1187,6 +1187,15 @@ export async function runBot(): Promise<void> {
     // rows' tokens come from the registry's index face, as the runs index reads them.
     const planeView = createPlaneViewHandler(planeService, page, {
       liveTokens: () => new Map(defaultRunRegistry.listActive().map((s) => [s.id, s.token])),
+      // The chat column (record 0070): the viewer's own orchestrator thread,
+      // read by the web chat's own reader — same runs service, same predicate,
+      // same silent receipts — so the column is the /threads chat, rebound.
+      chat: orchestratorChatSeed({
+        service: runsService,
+        registry: defaultRunRegistry,
+        intake: ledgerClient ? { listIntake: (query) => ledgerClient.listIntake(query) } : null,
+        commands,
+      }),
     });
     const costsState = costs
       ? `GET /costs (${costsService.groups().join(",")}; LLM ${costs.llmOn ? "on" : "off"}; snapshot every ${costsCfg?.snapshot.everyHours ?? "?"} h)`
@@ -1530,7 +1539,7 @@ export async function runBot(): Promise<void> {
             if (residentsView(req, res, { actor })) return;
             if (costsView(req, res, { identity, actor })) return;
             if (metricsView(req, res, { actor })) return;
-            if (planeView(req, res, { actor })) return;
+            if (planeView(req, res, { actor, identity })) return;
             if (deliveryView(req, res, { actor })) return;
             if (settingsView(req, res, { identity })) return;
             res.writeHead(200, { "content-type": "text/plain" });

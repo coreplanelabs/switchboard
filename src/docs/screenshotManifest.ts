@@ -74,7 +74,7 @@ export const SURFACES = [
     name: "plane",
     path: "/plane",
     page: "web/src/pages/PlanePage.vue",
-    what: "the plane's table: every live and recent run, every unit and every tracked pull request with its owner and health",
+    what: "the plane's table — every live and recent run, every unit and every tracked pull request with its owner and health — beside the pinned orchestrator chat",
   },
   {
     name: "costs-users",

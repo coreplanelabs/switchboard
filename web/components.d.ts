@@ -34,6 +34,7 @@ declare module 'vue' {
     ParentTurn: typeof import('./src/components/home/ParentTurn.vue')['default']
     PendingTurnRow: typeof import('./src/components/run/PendingTurnRow.vue')['default']
     PersonTurn: typeof import('./src/components/home/PersonTurn.vue')['default']
+    PlaneChat: typeof import('./src/components/plane/PlaneChat.vue')['default']
     ReceiptChip: typeof import('./src/components/home/ReceiptChip.vue')['default']
     ReplyBlock: typeof import('./src/components/run/ReplyBlock.vue')['default']
     ResidentRow: typeof import('./src/components/residents/ResidentRow.vue')['default']

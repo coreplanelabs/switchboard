@@ -2634,7 +2634,23 @@ function page(
     const tokens = Object.fromEntries(
       INDEX_ROWS.filter((r) => !r.finished && r.token).map((r) => [r.id, r.token as string]),
     );
-    return { title: "Plane", seed: { page: "plane", table, tokens } };
+    // The chat column (record 0070): the viewer's orchestrator thread beside the
+    // panels, one answered fleet question citing the table's own rows.
+    const chat = {
+      conversation: "orchestrator",
+      turns: [
+        homeTurn("plane-c1", HOME_RECEIPT_AT, "review", {
+          threadKey: "web:a1:orchestrator",
+          request: "which unit is waiting on a person?",
+          answer:
+            "**plan-acme-3:U14** is merge-ready with [acme/api#214](https://github.com/acme/api/pull/214) still open — the Units row flags the owner gap. Every other row is live or healthy.",
+        }),
+      ],
+      sendUrl: "/threads/orchestrator/send",
+      viewer: { name: "alice" },
+      commands: HOME_COMMANDS,
+    };
+    return { title: "Plane", seed: { page: "plane", table, tokens, chat } };
   }
   if (pathname === "/metrics" || pathname === "/metrics.json") {
     return { title: "Run metrics", seed: { page: "metrics", report: METRICS } };
