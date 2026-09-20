@@ -1,5 +1,42 @@
 # Changelog
 
+## [1.255.0](https://github.com/coreplanelabs/switchboard/compare/v1.254.1...v1.255.0) (2026-09-20)
+
+
+### Features
+
+* **agents:** a spawn sets the child's tier within the preset's set ([#2016](https://github.com/coreplanelabs/switchboard/issues/2016)) ([e2362b3](https://github.com/coreplanelabs/switchboard/commit/e2362b34696c7c0dff4bfa40e8850221ac021125))
+* **dispatcher:** one structured-answer seam re-asks a named violation ([#1999](https://github.com/coreplanelabs/switchboard/issues/1999)) ([238e0ff](https://github.com/coreplanelabs/switchboard/commit/238e0fff8afad999e7ad4e4a5b8577bae6933760))
+* **dispatcher:** the operator re-asks a bind that drops the request ([#2008](https://github.com/coreplanelabs/switchboard/issues/2008)) ([e4fc6e3](https://github.com/coreplanelabs/switchboard/commit/e4fc6e3e60cba9854bc8e331373177836e5ef82f))
+* resident levels queue a coding ask and probe a silent resident ([#2019](https://github.com/coreplanelabs/switchboard/issues/2019)) ([dbfc975](https://github.com/coreplanelabs/switchboard/commit/dbfc9750eb31f0b37096d2f711adf3987da33f58))
+* **runs:** plane.admission on queues an ask and admits it on the event ([#2000](https://github.com/coreplanelabs/switchboard/issues/2000)) ([8c04b2c](https://github.com/coreplanelabs/switchboard/commit/8c04b2ceacfae528874f2db721f2a054cde17174))
+* **runs:** thread and working session keys with idempotent keyed append ([#2009](https://github.com/coreplanelabs/switchboard/issues/2009)) ([455f9f7](https://github.com/coreplanelabs/switchboard/commit/455f9f764bd709bc74fde6726b7b8e1c2fbe866d))
+* **sandbox:** the requester pair authors a write run's commits ([#2006](https://github.com/coreplanelabs/switchboard/issues/2006)) ([0d584c0](https://github.com/coreplanelabs/switchboard/commit/0d584c05a1a5232d9dbf9e9699c1e23e94b601be))
+* **ship:** a human-gated-only review round holds the unit for a person ([#2007](https://github.com/coreplanelabs/switchboard/issues/2007)) ([69f1964](https://github.com/coreplanelabs/switchboard/commit/69f1964a8e8a0618a07f2d9e77ac5cb7193f1f17))
+
+
+### Bug fixes
+
+* **costs:** invoice keys reach the container; tie-out never negative ([#2002](https://github.com/coreplanelabs/switchboard/issues/2002)) ([2226999](https://github.com/coreplanelabs/switchboard/commit/22269992a0c3e1ba6b956bf691674342f532dc02))
+* **costs:** tie-out names the meter's dollars and counts unpriced tokens ([#2004](https://github.com/coreplanelabs/switchboard/issues/2004)) ([c35b3fe](https://github.com/coreplanelabs/switchboard/commit/c35b3fef7fd319409f530105880ab539edadfd55))
+* **dispatcher:** preset binds keep typed intent and typed lines as typed ([#2018](https://github.com/coreplanelabs/switchboard/issues/2018)) ([fa9f6a1](https://github.com/coreplanelabs/switchboard/commit/fa9f6a1a76e59e60032b08ff8d3c31b6e730cc23))
+* **dispatcher:** the operator's ship bind keeps the seeded-plan guard ([#1997](https://github.com/coreplanelabs/switchboard/issues/1997)) ([8ca372c](https://github.com/coreplanelabs/switchboard/commit/8ca372c51586eefa5fd37f08d9e63ee6b3c62808))
+* **harness:** bash timeout ends a command that holds its pipe open ([#2014](https://github.com/coreplanelabs/switchboard/issues/2014)) ([82ef74f](https://github.com/coreplanelabs/switchboard/commit/82ef74f0dac1d8ba2a2664fb45a21e0ed0c50d99))
+* **resident:** the fleet reopens only after its containers reconcile ([#2003](https://github.com/coreplanelabs/switchboard/issues/2003)) ([9ada7f2](https://github.com/coreplanelabs/switchboard/commit/9ada7f2f3cf3d3f1332177c16d89e8a99cff3afb))
+* **sandbox:** a fleet-busy run ending is one queryable log line ([#2012](https://github.com/coreplanelabs/switchboard/issues/2012)) ([22dc7ff](https://github.com/coreplanelabs/switchboard/commit/22dc7ffb95bb635065c8448d6c78358dec878d46))
+* **ship:** a failed check fails the round at once, before pending waits ([#1998](https://github.com/coreplanelabs/switchboard/issues/1998)) ([31ce04c](https://github.com/coreplanelabs/switchboard/commit/31ce04c075a585110a79e4f0e4b2379b52e57864))
+* **ship:** a hosted parent's hard stop also stops its plan runner ([#2022](https://github.com/coreplanelabs/switchboard/issues/2022)) ([69e86c9](https://github.com/coreplanelabs/switchboard/commit/69e86c926ce6358c6ad3591ea97700184034d7aa))
+* **ship:** a provider transient retries on a ladder and re-runs round 0 ([#2013](https://github.com/coreplanelabs/switchboard/issues/2013)) ([eea1ba2](https://github.com/coreplanelabs/switchboard/commit/eea1ba2de0ce03979a9dc569f157c55941e13371))
+* **ship:** the merge door enqueues on a merge-queue base, never refuses ([#2017](https://github.com/coreplanelabs/switchboard/issues/2017)) ([f3909a7](https://github.com/coreplanelabs/switchboard/commit/f3909a765a15cd093b96ac966eaf00d3cfed1013))
+* **slack:** a finished run's markers land even when a sibling run starts ([#2005](https://github.com/coreplanelabs/switchboard/issues/2005)) ([5505ee7](https://github.com/coreplanelabs/switchboard/commit/5505ee748d9dd0038813e477c018581eda170f82))
+
+
+### Documentation
+
+* **docs:** add the vocabulary and containment pages, linked first ([#2021](https://github.com/coreplanelabs/switchboard/issues/2021)) ([bdce894](https://github.com/coreplanelabs/switchboard/commit/bdce8943172c92faf3f94dffc51550c8d8ea98de))
+* **docs:** record 0066 is accepted with both maintainer calls decided ([#2020](https://github.com/coreplanelabs/switchboard/issues/2020)) ([70e7afd](https://github.com/coreplanelabs/switchboard/commit/70e7afd6e4a3b9ea712f9b3738720c18a66607a4))
+* **docs:** records 0031, 0035, 0043 accepted; 0034 superseded by 0068 ([#2024](https://github.com/coreplanelabs/switchboard/issues/2024)) ([7aa47ac](https://github.com/coreplanelabs/switchboard/commit/7aa47acaebc4f3dca256151e77e67489f17bfd48))
+
 ## [1.254.1](https://github.com/coreplanelabs/switchboard/compare/v1.254.0...v1.254.1) (2026-09-19)
 
 
