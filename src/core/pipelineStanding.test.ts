@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   ENDING_STAGE,
+  endingWordOf,
   pipelineOfEvents,
   pipelineStandingOf,
   ROUND_STAGE,
+  roundOutcomeWordOf,
   STAGES,
   summaryOfStanding,
   isPipelineSummaryShape,
@@ -261,5 +263,26 @@ describe("the fold binds rounds by adjacency, ignores a companion's state and is
     expect(isPipelineSummaryShape(summary)).toBe(true);
     expect(pipelineOfEvents([{ type: "answer", text: "hi", at: 1 }])).toBeUndefined();
     expect(pipelineOfEvents([round(0, "coding", "started", 1)])).toMatchObject({ total: 0 });
+  });
+});
+
+describe("the user's words for endings and round outcomes (record 0066)", () => {
+  it("every ending kind has a word without an internal token — merge_ready reads merge-ready, round_cap reads round cap reached — and the maps carry no underscores", () => {
+    expect(endingWordOf("merge_ready")).toBe("merge-ready");
+    expect(endingWordOf("round_cap")).toBe("round cap reached");
+    expect(endingWordOf("wall_clock_cap")).toBe("out of budget");
+    expect(endingWordOf("held")).toBe("held");
+    expect(endingWordOf("stopped")).toBe("stopped");
+    expect(endingWordOf("already_landed")).toBe("merged");
+    for (const kind of [...UNIT_ENDING_WORDS, "blocked"]) expect(endingWordOf(kind)).not.toMatch(/_/);
+    for (const outcome of ROUND_OUTCOME_WORDS) expect(roundOutcomeWordOf(outcome)).not.toMatch(/_/);
+  });
+
+  it("round outcomes read in plain words — checks_failed reads checks failed — and an unknown token prints as itself, total over stored rows", () => {
+    expect(roundOutcomeWordOf("checks_failed")).toBe("checks failed");
+    expect(roundOutcomeWordOf("request_changes")).toBe("changes requested");
+    expect(roundOutcomeWordOf("pr_opened")).toBe("pull request opened");
+    expect(endingWordOf("some_future_kind")).toBe("some_future_kind");
+    expect(roundOutcomeWordOf("some_future_outcome")).toBe("some_future_outcome");
   });
 });

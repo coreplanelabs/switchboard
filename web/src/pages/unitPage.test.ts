@@ -215,7 +215,8 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     expect(contract.find(".title").text()).toBe("The unit page composes both threads at the round boundaries");
     expect(contract.find(".report").text()).toBe("✅ Merge-ready after 2 review rounds");
     // The standing in the header: the ending, since the unit has one.
-    expect(w.find("#standing .chip").text()).toBe("merge_ready");
+    // The header prints the user's word for the ending (record 0066), never the internal kind.
+    expect(w.find("#standing .chip").text()).toBe("merge-ready");
     expect(w.find("#standing .chip").classes()).toContain("text-ok");
   });
 

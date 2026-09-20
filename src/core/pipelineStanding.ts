@@ -130,6 +130,63 @@ export const ENDING_STAGE = {
   blocked: "ended",
 } as const satisfies Record<UnitEnding["kind"] | "blocked", Stage | "hold">;
 
+/** The user's words for a unit's ending (record 0066): what a card, a plan
+ *  summary and the web unit page print instead of the internal token —
+ *  `merge_ready` reads `merge-ready`, `round_cap` reads `round cap reached`,
+ *  never the snake_case kind. Pinned to the union plus `blocked` (the driver's
+ *  never-started status), so a new ending kind fails the build here. */
+export const ENDING_WORDS = {
+  merged: "merged",
+  already_landed: "merged",
+  merge_ready: "merge-ready",
+  held: "held",
+  merge_refused: "not merged",
+  round_cap: "round cap reached",
+  wall_clock_cap: "out of budget",
+  review_pending: "review pending",
+  stopped: "stopped",
+  aborted: "aborted",
+  transient: "aborted",
+  continued: "continuing",
+  no_verdict: "no verdict",
+  interrupted: "interrupted",
+  refused: "refused",
+  idle: "idle",
+  blocked: "blocked",
+} as const satisfies Record<UnitEnding["kind"] | "blocked", string>;
+
+/** The user's words for a round outcome (record 0066): the card's unit line
+ *  prints these beside the round header, never `checks_failed` or another
+ *  internal token. Pinned to the union: a new outcome fails the build here. */
+export const ROUND_OUTCOME_WORDS = {
+  started: "started",
+  pr_opened: "pull request opened",
+  completed: "done",
+  approve: "approved",
+  request_changes: "changes requested",
+  no_verdict: "no verdict",
+  checks_failed: "checks failed",
+  transient: "retried",
+  enqueued: "queued to merge",
+  dequeued: "removed from the merge queue",
+  aborted: "aborted",
+  stopped: "stopped",
+  continued: "continuing",
+  idle: "idle",
+} as const satisfies Record<ShipRoundOutcome, string>;
+
+/** The user's word for any ending or unit-status token — total over strings
+ *  read off a stored row, so an unknown word prints as itself rather than
+ *  throwing on an older record. */
+export function endingWordOf(kind: string): string {
+  return (ENDING_WORDS as Record<string, string>)[kind] ?? kind;
+}
+
+/** The user's word for any round-outcome token, total like `endingWordOf`. */
+export function roundOutcomeWordOf(outcome: string): string {
+  return (ROUND_OUTCOME_WORDS as Record<string, string>)[outcome] ?? outcome;
+}
+
 type ShipEvent = Extract<RunEvent, { type: "ship_round" } | { type: "ship_unit" }>;
 
 function isShipEvent(e: RunEvent): e is ShipEvent {

@@ -33,6 +33,7 @@
 
 import { normalizeHead } from "./reviewedHead.js";
 import { redactSecrets } from "./redact.js";
+import { shows, type Verbosity } from "./verbosity.js";
 
 export type ReviewVerdictKind = "approve" | "request_changes";
 
@@ -248,6 +249,37 @@ export function verdictLine(verdict: ReviewVerdict | undefined): string {
   return summary ? `${token} ${summary}` : token;
 }
 
+/** The counted plural for a severity: `blocker` and `nit` inflect, `major`
+ *  and `minor` read as adjectives and stay uninflected. */
+function severityCount(sev: FindingSeverity, n: number): string {
+  if (sev === "blocking") return `${n} blocker${n === 1 ? "" : "s"}`;
+  if (sev === "nit") return `${n} nit${n === 1 ? "" : "s"}`;
+  return `${n} ${sev}`;
+}
+
+/** The verdict as ONE line in the user's words (record 0066): `LGTM` for an
+ *  approve, `Changes requested: 2 blockers, 1 major, 2 minor, 3 nits` — only
+ *  the non-zero counts, most severe first — for a request for changes, the
+ *  bare token word when the findings were not itemized or none were filed.
+ *  The quiet thread reply prints this and nothing more; the full verdict line
+ *  and the finding bullets are `verbose` material and stay on the pull
+ *  request, where the post-step put them. */
+export function verdictCountsLine(verdict: ReviewVerdict): string {
+  if (verdict.verdict === "approve") return "LGTM";
+  const counts = severityCounts(verdict.findings ?? []);
+  return counts ? `Changes requested: ${counts}` : "Changes requested";
+}
+
+/** The non-zero severity counts of a finding list, most severe first —
+ *  `2 blockers, 1 major, 2 minor, 3 nits` — or the empty string for none.
+ *  Shared by the quiet verdict line and the quiet round-cap report. */
+export function severityCounts(findings: readonly Finding[]): string {
+  return FINDING_SEVERITIES.map((sev) => [sev, findings.filter((f) => f.severity === sev).length] as const)
+    .filter(([, n]) => n > 0)
+    .map(([sev, n]) => severityCount(sev, n))
+    .join(", ");
+}
+
 /** One compact finding line — `[severity] id file[:line] — title` — shared by
  *  the posted body's list (bulleted below) and ship's synthesized child turns. */
 export function formatFinding(f: Finding): string {
@@ -381,6 +413,13 @@ export function buildReviewPostBody(
  * opt-out, a guard refusal) or findings not itemized (a list that says
  * nothing is no substitute) — so the review's text is always somewhere a
  * person reads it. No verdict → the bare answer with the link, as before.
+ *
+ * The request's verbosity decides how much of the verdict the thread hears
+ * (routing-and-config item 28, record 0066): below `verbose`, a verdict whose
+ * findings are itemized and posted to GitHub is ONE line — `verdictCountsLine`
+ * with the pull request link — because the full verdict, the finding lines and
+ * the prose already stand on the pull request; at `verbose`, and whenever the
+ * text would otherwise land nowhere a person reads it, the full render above.
  */
 export function buildReviewChannelReply(input: {
   answer: string;
@@ -388,8 +427,18 @@ export function buildReviewChannelReply(input: {
   /** The PR the post landed on, or undefined when nothing was posted. */
   posted: { repo: string; number: number } | undefined;
   liveUrl: string | undefined;
+  /** The request's level (default `verbose`: the full render, the row's shape). */
+  verbosity?: Verbosity;
 }): string {
   const { answer, verdict, posted, liveUrl } = input;
+  if (
+    !shows(input.verbosity ?? "verbose", "verbose") &&
+    verdict !== undefined &&
+    verdict.findings !== undefined &&
+    posted !== undefined
+  ) {
+    return `${verdictCountsLine(verdict)} — https://github.com/${posted.repo}/pull/${posted.number}`;
+  }
   const tail = [
     ...(posted && verdict ? [`Posted to ${posted.repo}#${posted.number}`] : []),
     ...(liveUrl ? [`[Live run](${liveUrl})`] : []),

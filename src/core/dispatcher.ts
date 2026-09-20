@@ -1883,6 +1883,7 @@ export async function dispatch(
       answer,
       verdict: ran.verdict,
       reviewPost: ran.reviewPost,
+      verbosity: resolved.verbosity,
       liveUrl,
       prNote,
       stopped,
