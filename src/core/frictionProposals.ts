@@ -118,6 +118,7 @@ const KIND_LABEL: Record<PatternKind, string> = {
   wrap_up: "agent wind-down",
   budget_hit: "budget hit",
   infra_failure: "infra failure",
+  drain_wait: "the fleet drain",
   unkept_promise: "unkept promise",
   long_run: "long run",
 };
@@ -636,6 +637,8 @@ function suggestedFix(p: FrictionPattern): string {
         return `Runs ended with \`${p.signature.replace(/^mid-tool /, "")}\` still outstanding — the run (or its transport) was cut while the tool ran. Correlate the affected runs with deploys/drains (\`[drain]\` log lines), the sandbox command timeout (exit 124 / heartbeat streaming, docs/reference/specs/execution.md), and the executor's error surfacing.`;
       }
       return `The exec transport failed during \`${p.signature}\` in ${p.runIds.length} runs (the sandbox, not the command). Check the sandbox/resident Worker logs (\`deploy/bin/cf-logs\`) around the affected runs for the underlying error, and whether the command's runtime exceeds the executor's timeout.`;
+    case "drain_wait":
+      return `In ${p.runIds.length} runs the request waited at the resident fleet's drain for a deploy to finish (docs/reference/specs/resident-repos.md item 69). A long or frequent wait here is the deploy window's cost, not the run's: check the deploy job's drain lines (\`fleet drained …\`, \`fleet stays closed …\`) for a hold that outlived its cycle bound, and whether releases are landing more often than the drained wait can absorb.`;
     case "unkept_promise":
       return `In ${p.runIds.length} runs the reply told the person a file was attached and the run produced none — no outbound \`artifact\` event, so nothing reached the thread or the run page. Read the affected runs' presets: a preset without \`attach_file\` in its toolset (\`src/agents/registry.ts\`) must say in its prompt that its whole answer is text and name the workspace path instead of promising an attachment; an ask that needs the file belongs on a preset with the full toolset (the router's description of the preset should say it cannot post files). If the run did call \`attach_file\` and it failed, the paired \`failed_tool\` proposal has the cause.`;
     case "long_run":

@@ -145,6 +145,11 @@ export interface ExecutorContext {
    *  GitHub binding names the commits' author pair (record 0062;
    *  `gitIdentityEnvs`). Absent, the bot pair authors. */
   requester?: string;
+  /** The card's setup-note sink (issue 2044): the resident executor's drain
+   *  wait paints `waiting for the deploy to finish · N min` through it while
+   *  the run is admitted onto a drained fleet, and clears it when the wait
+   *  ends. Absent for a caller without a card (the CLI, tests). */
+  onSetupNote?: (note: string | undefined) => void;
 }
 
 /** Where a run's workspace is (docs/reference/specs/run-history.md item 54):
@@ -479,6 +484,7 @@ export async function makeExecutor(
             resolveEnvs: () => gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
             ...(ctx.ownPr !== undefined ? { ownPr: ctx.ownPr } : {}),
             ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
+            ...(ctx.onSetupNote !== undefined ? { onSetupNote: ctx.onSetupNote } : {}),
           },
           nonWarm,
           span,
@@ -739,6 +745,7 @@ async function reattachWorkspace(
     // resident holds its own credential, so the pairs alone ride.
     resolveEnvs: () => gitIdentityEnvs(ctx.profile.identity, authorSourceOf(opts, ctx)),
     ...(ctx.remainingMs !== undefined ? { remainingMs: ctx.remainingMs } : {}),
+    ...(ctx.onSetupNote !== undefined ? { onSetupNote: ctx.onSetupNote } : {}),
   });
   let binding: ResidentBinding;
   try {

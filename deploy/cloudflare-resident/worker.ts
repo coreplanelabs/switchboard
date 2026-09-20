@@ -350,6 +350,7 @@ import {
   liveDrain,
   parseDrainRequest,
   reportImageCurrent,
+  staleHolds,
   type DrainRecord,
 } from "./drain";
 import {
@@ -1604,9 +1605,15 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  the new image (issue 1931): hold the drain for each — the fleet must not
    *  reopen onto them until they report. No live drain, nothing to hold. */
   async holdDrainFor(resources: string[]): Promise<void> {
-    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), systemClock());
+    const now = systemClock();
+    const record = liveDrain(await this.ctx.storage.get(DRAIN_KEY), now);
     if (record === null || resources.length === 0) return;
-    await this.ctx.storage.put(DRAIN_KEY, holdDrain(record, resources));
+    const held = holdDrain(record, resources, now);
+    await this.ctx.storage.put(DRAIN_KEY, held);
+    // The hold's liveness alarm (issue 2044): the cycle bound is the earlier
+    // end, so the alarm fires there — reopening the fleet with the stale
+    // containers named — instead of at `until`, the last resort.
+    if (held.holdsUntil !== undefined) await this.ctx.storage.setAlarm(Date.parse(held.holdsUntil));
   }
 
   /** One resident's word that its running container is on the deploy's image:
@@ -1635,11 +1642,25 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     const stored = await this.ctx.storage.get(DRAIN_KEY);
     if (stored === undefined) return;
     if (liveDrain(stored, now) === null) {
+      // The hold's liveness (issue 2044): a reopen past the cycle bound names
+      // the containers whose post-deploy cycle never landed — a warning, never
+      // a silence; each restarts on its own next quiet attach or refresh.
+      const stale = staleHolds(stored, now);
+      if (stale !== null)
+        console.log(
+          `[drain] fleet reopened with ${stale.join(", ")} still on the pre-deploy image — the post-deploy cycle did not land within its bound; a stale container restarts on its next quiet attach or refresh`,
+        );
       await this.ctx.storage.delete(DRAIN_KEY);
       await this.pushDrainPost("below");
     } else {
-      // Replaced with a later end under an already-armed alarm: re-arm at it.
-      await this.ctx.storage.setAlarm(Date.parse((stored as DrainRecord).until));
+      // Replaced with a later end under an already-armed alarm: re-arm at the
+      // record's own earlier end — the hold's cycle bound when one stands.
+      const record = stored as DrainRecord;
+      const ends = [
+        Date.parse(record.until),
+        ...(record.holdsUntil !== undefined ? [Date.parse(record.holdsUntil)] : []),
+      ];
+      await this.ctx.storage.setAlarm(Math.min(...ends.filter(Number.isFinite)));
     }
   }
 
@@ -3261,6 +3282,14 @@ export class ResidentDO extends Sandbox<Env> {
       await this.writeDiskMarkers({ ready: sha, depsKey: lockfileHash, builtSha: sha });
       this.deleteSchedules(PROVISIONING_CALLBACK);
       await this.setResidentState("warm");
+      // A fresh provision runs on the image the deployed Worker pins, so it IS
+      // the cycle a held drain waits for (issue 2044): report it — a rebuild
+      // mid-drain reopens the fleet instead of leaving the hold standing on a
+      // report `reconcileImage` would never send for a container it never saw
+      // as stale. The marker is cleared with the report; a failure keeps both
+      // for the next reconcile, and the hold's cycle bound is the backstop.
+      await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource });
+      await this.reportPendingImageCurrent("provision");
       // The first refresh instance is the cron's: the row now reads `warm`
       // with no instance recorded, so the next firing creates it (item 9).
     } catch (err) {
@@ -7597,6 +7626,19 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   private async runOpTraced(op: "test" | "build", refArg: string | null, t0: number): Promise<OpRunOk | ThreadErr> {
+    // The fleet drain (item 69; issue 2044): a typed op is a new piece of work
+    // like a new run's attach, and during the incident one waited silently at
+    // the drain — so it is answered with the drain's own record at once, a
+    // deterministic refusal the command surfaces as its reason, never a wait.
+    const drain = await this.fleetDrain();
+    if (drain !== null) {
+      return {
+        error: `op-refused: the resident fleet is drained for ${drain.reason} (asked by ${drain.by}, ends by ${drain.until}) — re-run the command when the fleet reopens`,
+        status: 503,
+        reason: "draining",
+        cause: "system",
+      };
+    }
     try {
       await this.ensureHydrated();
     } catch (err) {
@@ -8070,6 +8112,7 @@ export class ResidentDO extends Sandbox<Env> {
       AUTO_REBUILDS_KEY,
       INFRA_STREAK_KEY,
       MEMORY_KEY,
+      IMAGE_REPORT_PENDING_KEY,
     ]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const snap = map.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
@@ -8147,6 +8190,11 @@ export class ResidentDO extends Sandbox<Env> {
       inFlight: this.inFlightCount() + registeredRuns,
       // The runs alone (no refresh cycle): what the deploy preflight refuses on.
       runsInFlight: this.runsInFlightCount() + registeredRuns,
+      // Issue 2044: whether this container's new-image report is still owed —
+      // `pending` names a resident a held drain waits on, so `repo list` and
+      // the deploy's readers never print a bare "warm" for a repository whose
+      // running container the last deploy could not verify.
+      imageReport: map.get(IMAGE_REPORT_PENDING_KEY) !== undefined ? "pending" : "current",
       // Item 22: who holds what, as the rows say — the mirror mutex and the
       // cycle/hydration leases, each judged against this incarnation.
       incarnation: this.incarnation,

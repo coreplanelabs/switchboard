@@ -969,6 +969,48 @@ describe("executor provisioning by agent resources", () => {
     expect(events.slice(0, loopAt).every(isHeadMaterial)).toBe(true);
   });
 
+  // Feature: docs/reference/specs/resident-repos.md item 69 (issue 2044) — a run
+  // admitted onto a drained fleet says so on its record: the dispatcher turns the
+  // binding's `drainWaitMs` into the `drain_wait` run note `runs friction` reads
+  // as the wait's category. A regression here silently restores the "friction:
+  // none" verdict while the client and the analyzer both stay green.
+  it("a binding that carries drainWaitMs publishes the run's drain_wait note with the rounded minutes, before the loop; a binding without one publishes none", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const registry = new RunRegistry({ genId: () => "run-drained", genToken: () => "tok" });
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, capturingProvider());
+    deps.runRegistry = registry;
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+    vi.mocked(makeExecutor).mockImplementationOnce(async () => ({
+      executor: fake,
+      backend: "resident" as const,
+      resident: true,
+      binding: { ref: "main", sha: "abc", wokeAfterMs: 8 * 60_000, drainWaitMs: 7 * 60_000 + 20_000 },
+    }));
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    const events = registry.snapshot("run-drained", "tok")!.events;
+    const noteAt = events.findIndex((e) => e.type === "run_note" && e.kind === "drain_wait");
+    expect(events[noteAt]).toMatchObject({
+      summary: "waited 7 min at the fleet drain for a deploy to finish",
+    });
+    const loopAt = events.findIndex((e) => e.type === "span_start" && e.name === "run.agent");
+    expect(noteAt).toBeGreaterThan(-1);
+    expect(noteAt).toBeLessThan(loopAt);
+
+    // No drain met (no `drainWaitMs` on the binding): no note.
+    const quiet = new RunRegistry({ genId: () => "run-quiet", genToken: () => "tok" });
+    deps.runRegistry = quiet;
+    vi.mocked(makeExecutor).mockImplementationOnce(async () => ({
+      executor: fake,
+      backend: "resident" as const,
+      resident: true,
+      binding: { ref: "main", sha: "abc" },
+    }));
+    await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), fakeIO().io);
+    const quietEvents = quiet.snapshot("run-quiet", "tok")!.events;
+    expect(quietEvents.some((e) => e.type === "run_note" && e.kind === "drain_wait")).toBe(false);
+  });
+
   // Feature: docs/reference/specs/tracing.md item 19 — a resident attach that FAILS still
   // grafts the steps it ran under the (failed) attach span; no run exists, so
   // they reach the process sinks.

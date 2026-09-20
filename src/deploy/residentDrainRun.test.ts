@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DRAIN } from "../core/budgets.js";
 import {
   DRAINED_GAVE_UP_SUFFIX,
   drainBeganLine,
@@ -114,11 +115,15 @@ describe("the pure pieces", () => {
     );
     const stood = { drained: true, until: UNTIL };
     expect(drainLiftedLine("resident", lifted, stood)).toBe("[deploy:all] resident: fleet reopened");
-    // The gated lift (issue 1931): the reopen does not fire while a container
-    // still reports the pre-deploy image — the registry holds the drain and the
-    // line says the last container's report reopens the fleet.
+    // The gated lift (issue 1931; issue 2044): the reopen does not fire while a
+    // container still reports the pre-deploy image — the registry holds the
+    // drain — and the line names every way it reopens: the container's own
+    // report (a cycle, a rebuild, a fresh provision), the cycle bound past
+    // which the fleet reopens anyway with the stale container named, and the
+    // record's `until` as the last resort. A 65-minute silence on a report
+    // nothing sends was the incident this line must foreclose.
     expect(drainLiftedLine("resident", { status: 200, body: { cleared: false, held: ["repo:acme/api"] } }, stood)).toBe(
-      `[deploy:all] resident: fleet stays closed — repo:acme/api still reports the pre-deploy image; it reopens by itself on the last container's new-image report (backstop ${UNTIL})`,
+      `[deploy:all] resident: fleet stays closed — repo:acme/api still reports the pre-deploy image; it reopens on each container's new-image report (a cycle, a rebuild or a fresh provision), or within ${DRAIN.cycleBoundMinutes} min anyway with the stale container named in a warning (backstop ${UNTIL})`,
     );
     expect(drainLiftedLine("resident", { error: "POST x failed: fetch failed" }, stood)).toBe(
       `[deploy:all] resident: fleet NOT reopened (POST x failed: fetch failed) — it reopens by itself at ${UNTIL}; \`POST /undrain\` with the drain or admin bearer reopens it now`,

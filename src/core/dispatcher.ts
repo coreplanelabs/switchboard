@@ -1,4 +1,5 @@
 import { getAgent } from "../agents/registry.js";
+import { MINUTE_MS } from "./budgets.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { systemClock } from "./trace/index.js";
 import type { SpanSink, Tracer } from "./trace/types.js";
@@ -1600,6 +1601,19 @@ export async function dispatch(
         ...(deps.workflow !== undefined ? { workflow: deps.workflow } : {}),
       });
     const { executor, note, resident } = round.selection;
+    // A run admitted onto a drained fleet says so on its record (issue 2044):
+    // the note is what `runs friction` reads as the wait's category and the
+    // plane's table shows as the run's cause — a half-hour wait with a card
+    // that counted "attaching the workspace…" and a friction verdict of
+    // "none" was the incident's shape.
+    const drainWaitMs = round.selection.binding?.drainWaitMs ?? 0;
+    if (drainWaitMs > 0)
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "drain_wait",
+        summary: `waited ${Math.max(1, Math.round(drainWaitMs / MINUTE_MS))} min at the fleet drain for a deploy to finish`,
+        at: clock(),
+      });
     if (fencedWhileAttaching) {
       // The reservation's lease lapsed during the attach and another generation
       // took the row (item 42): the run is theirs to restart — nothing more

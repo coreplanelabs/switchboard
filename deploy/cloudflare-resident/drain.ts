@@ -30,6 +30,14 @@ export interface DrainRecord {
    *  container on the deploy's image, and the fleet reopens on the LAST
    *  report, a fact, never a wait. Absent or empty: no swap outstanding. */
   holds?: string[];
+  /** The hold's own liveness bound (issue 2044): stamped when the first hold
+   *  lands, the cycle's measured bound out (`DRAIN.cycleBoundMinutes`, clamped
+   *  to `until`). The gate asked the containers to cycle, so it owns the
+   *  outcome: past this time a cycle that never happened reopens the fleet
+   *  anyway — `liveDrain` reads the record as no drain — with the stale
+   *  containers named in the registry's warning, never a silence to `until`.
+   *  A record without it (an older build's) keeps `until` as its only end. */
+  holdsUntil?: string;
   /** Whether `POST /undrain` already asked for the lift while holds stood:
    *  the record then clears itself on the last hold's report instead of
    *  waiting for a second lift. */
@@ -42,6 +50,9 @@ export interface DrainRecord {
  *  and a half, not a day. */
 export const DRAIN_MAX_MINUTES: number = DRAIN.maxMinutes;
 export const DRAIN_DEFAULT_MINUTES: number = DRAIN.defaultMinutes;
+/** The post-deploy container cycle's measured bound (issue 2044): a hold that
+ *  outlives it reopens the fleet with the container named stale. */
+export const HOLD_CYCLE_BOUND_MINUTES: number = DRAIN.cycleBoundMinutes;
 const REASON_MAX = 200;
 const BY_MAX = 80;
 
@@ -100,24 +111,55 @@ export function liveDrain(stored: unknown, now: number): DrainRecord | null {
   const until = Date.parse(r.until);
   if (!Number.isFinite(until) || until <= now) return null;
   const holds = Array.isArray(r.holds) ? r.holds.filter((h): h is string => typeof h === "string") : [];
+  const holdsUntil = typeof r.holdsUntil === "string" ? r.holdsUntil : undefined;
+  // The hold's liveness (issue 2044): holds whose cycle bound has passed are a
+  // cycle that never happened — the fleet reopens by construction, whoever
+  // died between the reconcile and the lift; `staleHolds` names the containers.
+  if (holds.length > 0 && holdsUntil !== undefined) {
+    const bound = Date.parse(holdsUntil);
+    if (Number.isFinite(bound) && bound <= now) return null;
+  }
   return {
     since: r.since,
     until: r.until,
     by: r.by,
     reason: r.reason,
     ...(holds.length > 0 ? { holds } : {}),
+    ...(holds.length > 0 && holdsUntil !== undefined ? { holdsUntil } : {}),
     ...(r.liftAsked === true ? { liftAsked: true } : {}),
   };
+}
+
+/** The stale containers of a stored record whose hold bound has passed while
+ *  its `until` had not (issue 2044): what `liveDrain` just reopened past, for
+ *  the registry's warning — the reopen is never silent about who never cycled.
+ *  Null when the record is not that case (no holds, bound still ahead, or the
+ *  record expired on `until` itself). */
+export function staleHolds(stored: unknown, now: number): string[] | null {
+  if (typeof stored !== "object" || stored === null) return null;
+  const r = stored as Record<string, unknown>;
+  const until = Date.parse(typeof r.until === "string" ? r.until : "");
+  if (!Number.isFinite(until) || until <= now) return null;
+  const holds = Array.isArray(r.holds) ? r.holds.filter((h): h is string => typeof h === "string") : [];
+  const bound = Date.parse(typeof r.holdsUntil === "string" ? r.holdsUntil : "");
+  if (holds.length === 0 || !Number.isFinite(bound) || bound > now) return null;
+  return holds;
 }
 
 /** The record with the named residents held (issue 1931): the deploy's
  *  reconcile could not verify their running containers on the new image, so
  *  the fleet must not reopen onto them until each reports. Deduplicated;
- *  an empty set changes nothing. */
-export function holdDrain(record: DrainRecord, resources: readonly string[]): DrainRecord {
+ *  an empty set changes nothing. The first hold stamps the record's cycle
+ *  bound (issue 2044): the reconcile just asked each container to cycle, so
+ *  the cycle either lands within its measured bound or is not coming — past
+ *  `holdsUntil` the fleet reopens with the holdouts named, `until` staying
+ *  the last resort for a record from before the bound. */
+export function holdDrain(record: DrainRecord, resources: readonly string[], now: number): DrainRecord {
   const holds = [...new Set([...(record.holds ?? []), ...resources])];
   if (holds.length === 0) return record;
-  return { ...record, holds };
+  const bound = Math.min(Date.parse(record.until), now + minutesToMs(HOLD_CYCLE_BOUND_MINUTES));
+  const holdsUntil = record.holdsUntil ?? new Date(bound).toISOString();
+  return { ...record, holds, holdsUntil };
 }
 
 /** `POST /undrain`'s decision over the stored record: with no holds the drain
@@ -140,7 +182,10 @@ export function reportImageCurrent(
 ): { lifted: boolean; record: DrainRecord | null } {
   const holds = (record.holds ?? []).filter((h) => h !== resource);
   const next: DrainRecord = { ...record, ...(holds.length > 0 ? { holds } : {}) };
-  if (holds.length === 0) delete next.holds;
+  if (holds.length === 0) {
+    delete next.holds;
+    delete next.holdsUntil;
+  }
   if (holds.length === 0 && record.liftAsked === true) return { lifted: true, record: null };
   return { lifted: false, record: next };
 }

@@ -93,6 +93,11 @@ export type RunNoteKind =
    *  note says that loop's settlement instead: the executor waited for the
    *  wake and the run went on. */
   | "sandbox_restarted"
+  /** The run was admitted onto a drained fleet (docs/reference/specs/resident-repos.md
+   *  item 69) and waited at its attach for the deploy to finish: the summary
+   *  names the wait. Published by the dispatcher after the attach, so `runs
+   *  friction` reads the drain as the wait's category instead of "none". */
+  | "drain_wait"
   | "stop_requested"
   | "stopped"
   /** A stop the loop or turn had to ask pi for again reached it: the series a
@@ -317,6 +322,7 @@ export const RUN_NOTE_KINDS = [
   "sandbox_dead",
   "fleet_busy",
   "sandbox_restarted",
+  "drain_wait",
   "stop_requested",
   "stopped",
   "stop_landed",

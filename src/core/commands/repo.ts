@@ -222,10 +222,18 @@ export function renderResidentList(data: Record<string, unknown>): string {
   const residents = (data.residents as Array<Record<string, unknown>> | undefined) ?? [];
   if (residents.length === 0)
     return `No repos onboarded (0/${n(data.cap)}). Onboard one with \`repo onboard <owner/name>\`.`;
+  // The fleet drain (resident-repos item 69; issue 2044): while it stands no
+  // attach reaches any resident, so a bare "warm" would be a lie — the drain
+  // leads the reply and every row says it, with the container's own image
+  // report beside it (`pending` names a resident a held drain waits on).
+  const draining = obj(data.draining);
+  const drained = typeof draining.until === "string";
   const lines = residents.map((rec) => {
     const live = obj(rec.live);
     const slug = String(rec.resource ?? "").replace(/^repo:/, "");
-    const state = String(live.state ?? "unknown");
+    const rawState = String(live.state ?? "unknown");
+    const report = typeof live.imageReport === "string" ? live.imageReport : undefined;
+    const state = `${rawState}${drained ? " (drained — attach refused)" : ""}${report === "pending" ? " · image report pending" : ""}`;
     const reason = String(live.reason ?? "");
     const sha = typeof live.sha === "string" && live.sha ? ` · sha \`${live.sha.slice(0, 8)}\`` : "";
     const refreshed =
@@ -239,7 +247,10 @@ export function renderResidentList(data: Record<string, unknown>): string {
         : "";
     return `• \`${slug}\` — *${state}*${reason ? ` (${reason})` : ""} · ref \`${String(rec.defaultRef ?? "?")}\`${sha}${refreshed}${disk}`;
   });
-  const out = [`*Resident repos* (${n(data.count)}/${n(data.cap)}):`, ...lines];
+  const head = drained
+    ? `*Resident repos* (${n(data.count)}/${n(data.cap)}) — ⚠️ fleet drained for ${str(draining.reason)} (ends by ${str(draining.until)}): new runs wait at their attach`
+    : `*Resident repos* (${n(data.count)}/${n(data.cap)}):`;
+  const out = [head, ...lines];
   // Item 49: a test override lowers the enforced cap/floor for live checks —
   // say so, or the count above reads as the real cap.
   const t = data.testOverrides as Record<string, unknown> | undefined;

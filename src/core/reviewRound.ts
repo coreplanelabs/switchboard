@@ -141,6 +141,9 @@ export async function attachRoundWorkspace(input: {
     /** The run's requester (the platform-namespaced user id), whose stored
      *  GitHub binding names the commits' author pair (record 0062). */
     requester?: string;
+    /** The card's setup-note sink (issue 2044): the resident drain wait paints
+     *  `waiting for the deploy to finish · N min` through it. */
+    onSetupNote?: (note: string | undefined) => void;
   };
   logKey: string;
   /** The caller's `dispatch.workspace.attach` span: the probe and the attach
@@ -162,6 +165,7 @@ export async function attachRoundWorkspace(input: {
       ...(input.round.stopSignal !== undefined ? { stopSignal: input.round.stopSignal } : {}),
       ...(input.round.remainingMs !== undefined ? { remainingMs: input.round.remainingMs } : {}),
       ...(input.round.requester !== undefined ? { requester: input.round.requester } : {}),
+      ...(input.round.onSetupNote !== undefined ? { onSetupNote: input.round.onSetupNote } : {}),
     },
     input.span,
   );

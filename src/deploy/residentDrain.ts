@@ -103,7 +103,7 @@ export function drainLiftedLine(
       ? (answer.body.held as unknown[]).filter((h): h is string => typeof h === "string")
       : [];
   if (ok && held.length > 0)
-    return `[${tag}] ${step}: fleet stays closed — ${held.join(", ")} still report${held.length === 1 ? "s" : ""} the pre-deploy image; it reopens by itself on the last container's new-image report${drain.until ? ` (backstop ${drain.until})` : ""}`;
+    return `[${tag}] ${step}: fleet stays closed — ${held.join(", ")} still report${held.length === 1 ? "s" : ""} the pre-deploy image; it reopens on each container's new-image report (a cycle, a rebuild or a fresh provision), or within ${DRAIN.cycleBoundMinutes} min anyway with the stale container named in a warning${drain.until ? ` (backstop ${drain.until})` : ""}`;
   if (drain.drained) {
     if (ok) return `[${tag}] ${step}: fleet reopened`;
     return `[${tag}] ${step}: fleet NOT reopened (${answerWords(answer)}) — it reopens by itself${drain.until ? ` at ${drain.until}` : " when the drain ends"}; \`POST /undrain\` with the drain or admin bearer reopens it now`;

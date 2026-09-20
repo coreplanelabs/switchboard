@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   DRAIN_DEFAULT_MINUTES,
   DRAIN_MAX_MINUTES,
+  HOLD_CYCLE_BOUND_MINUTES,
   drainRefusal,
   holdDrain,
   liftDrain,
   liveDrain,
   parseDrainRequest,
   reportImageCurrent,
+  staleHolds,
 } from "./drain";
 import { readSource } from "./testing/sourceScan";
 
@@ -103,14 +105,25 @@ describe("the reopen gate — the fleet reopens on the last container's new-imag
   const record = parsed.record;
 
   it("holdDrain marks the residents whose containers still report the pre-deploy image, deduplicated; an empty set changes nothing", () => {
-    expect(holdDrain(record, [])).toEqual(record);
-    const held = holdDrain(record, ["repo:a/x", "repo:a/y"]);
+    expect(holdDrain(record, [], NOW)).toEqual(record);
+    const held = holdDrain(record, ["repo:a/x", "repo:a/y"], NOW);
     expect(held.holds).toEqual(["repo:a/x", "repo:a/y"]);
-    expect(holdDrain(held, ["repo:a/y", "repo:a/z"]).holds).toEqual(["repo:a/x", "repo:a/y", "repo:a/z"]);
+    expect(holdDrain(held, ["repo:a/y", "repo:a/z"], NOW).holds).toEqual(["repo:a/x", "repo:a/y", "repo:a/z"]);
+  });
+
+  it("the first hold stamps the record's cycle bound (issue 2044): now + the measured bound, clamped to `until`, kept by later holds", () => {
+    const held = holdDrain(record, ["repo:a/x"], NOW);
+    expect(held.holdsUntil).toBe(new Date(NOW + HOLD_CYCLE_BOUND_MINUTES * 60_000).toISOString());
+    // A later hold keeps the first stamp — the bound is the reconcile's ask, not the last holdout's.
+    expect(holdDrain(held, ["repo:a/y"], NOW + 60_000).holdsUntil).toBe(held.holdsUntil);
+    // A drain shorter than the bound clamps to its own end — `until` stays the last resort.
+    const short = parseDrainRequest({ minutes: 1 }, NOW);
+    if (!short.ok) throw new Error("fixture");
+    expect(holdDrain(short.record, ["repo:a/x"], NOW).holdsUntil).toBe(short.record.until);
   });
 
   it("the lift does NOT reopen while a container still reports the old image: the record stands with liftAsked, and liveDrain keeps refusing attaches", () => {
-    const held = holdDrain(record, ["repo:a/x"]);
+    const held = holdDrain(record, ["repo:a/x"], NOW);
     const lift = liftDrain(held);
     expect(lift.cleared).toBe(false);
     if (lift.cleared) throw new Error("unreachable");
@@ -124,7 +137,7 @@ describe("the reopen gate — the fleet reopens on the last container's new-imag
   });
 
   it("a report while another container is still old drops only that hold; the LAST container's new-image report lifts the asked drain", () => {
-    const gated = liftDrain(holdDrain(record, ["repo:a/x", "repo:a/y"]));
+    const gated = liftDrain(holdDrain(record, ["repo:a/x", "repo:a/y"], NOW));
     if (gated.cleared) throw new Error("fixture");
     const first = reportImageCurrent(gated.record, "repo:a/x");
     expect(first.lifted).toBe(false);
@@ -134,7 +147,7 @@ describe("the reopen gate — the fleet reopens on the last container's new-imag
   });
 
   it("the last report before any lift was asked keeps the drain standing without holds — the deploy's own lift still decides", () => {
-    const held = holdDrain(record, ["repo:a/x"]);
+    const held = holdDrain(record, ["repo:a/x"], NOW);
     const reported = reportImageCurrent(held, "repo:a/x");
     expect(reported.lifted).toBe(false);
     expect(reported.record).toEqual(record);
@@ -144,6 +157,56 @@ describe("the reopen gate — the fleet reopens on the last container's new-imag
   it("liveDrain carries holds and liftAsked through a stored record, and drops malformed holds", () => {
     const gated = { ...record, holds: ["repo:a/x", 7], liftAsked: true };
     expect(liveDrain(gated, NOW)).toEqual({ ...record, holds: ["repo:a/x"], liftAsked: true });
+  });
+});
+
+describe("the hold's liveness — a cycle that never happens reopens the fleet with the container named, never a silence to the record's own until (issue 2044)", () => {
+  const parsed = parseDrainRequest({ minutes: 65, reason: "deploy fd814ee", by: "deploy all" }, NOW);
+  if (!parsed.ok) throw new Error("fixture");
+  const record = parsed.record;
+  const boundMs = HOLD_CYCLE_BOUND_MINUTES * 60_000;
+
+  it("a held record whose cycle bound passed reads as NO drain — the fleet reopens by construction, liftAsked or not", () => {
+    const held = holdDrain(record, ["repo:acme/api"], NOW);
+    expect(liveDrain(held, NOW + boundMs - 1)).not.toBeNull();
+    expect(liveDrain(held, NOW + boundMs)).toBeNull();
+    const gated = liftDrain(held);
+    if (gated.cleared) throw new Error("fixture");
+    expect(liveDrain(gated.record, NOW + boundMs)).toBeNull();
+  });
+
+  it("staleHolds names the containers the reopen left stale — and nothing for a record that expired on `until`, has no holds, or whose bound is still ahead", () => {
+    const held = holdDrain(record, ["repo:acme/api"], NOW);
+    expect(staleHolds(held, NOW + boundMs)).toEqual(["repo:acme/api"]);
+    expect(staleHolds(held, NOW + boundMs - 1)).toBeNull();
+    expect(staleHolds(record, NOW + boundMs)).toBeNull();
+    expect(staleHolds(held, Date.parse(record.until))).toBeNull();
+  });
+
+  it("a record from before the bound (holds, no holdsUntil) keeps `until` as its only end — the last resort", () => {
+    const legacy = { ...record, holds: ["repo:a/x"], liftAsked: true };
+    expect(liveDrain(legacy, NOW + boundMs)).not.toBeNull();
+    expect(liveDrain(legacy, Date.parse(record.until))).toBeNull();
+    expect(staleHolds(legacy, NOW + boundMs)).toBeNull();
+  });
+
+  it("replays the incident's deploy: drain, reconcile holds the one container that never reports, the lift is asked, the cycle bound elapses — the fleet is open and the container is named", () => {
+    // 04:48Z: the deploy drains the fleet and the swap lands.
+    const drained = record;
+    // The reconcile cannot verify the switchboard container on the new image: held.
+    const held = holdDrain(drained, ["repo:acme/api"], NOW);
+    // The runner's `/undrain` meets the hold: the fleet stays closed…
+    const gated = liftDrain(held);
+    if (gated.cleared) throw new Error("the lift must hold");
+    expect(liveDrain(gated.record, NOW + 60_000)).not.toBeNull();
+    // …the container never cycles, so no report ever lands; the bound elapses…
+    const at = NOW + boundMs;
+    // …and the fleet is OPEN — not closed to the drain's 65-minute `until` —
+    // with the stale container named for the warning.
+    expect(liveDrain(gated.record, at)).toBeNull();
+    expect(staleHolds(gated.record, at)).toEqual(["repo:acme/api"]);
+    // A rebuild that DID report would have lifted it earlier: the report is the fact.
+    expect(reportImageCurrent(gated.record, "repo:acme/api")).toEqual({ lifted: true, record: null });
   });
 });
 
@@ -163,6 +226,30 @@ describe("drainRefusal — what /attach answers while drained", () => {
 
 describe("the Worker's wiring (by scan)", () => {
   const source = readSource("worker.ts");
+
+  it("the hold's liveness is wired (issue 2044): holdDrainFor stamps the bound and arms the alarm at it, the alarm's reopen names the stale containers, a fresh provision reports its own container current, /op answers the drain, and the admin view carries the image report", () => {
+    // The bound stamped and the alarm armed at it — the earlier end fires first.
+    expect(source).toMatch(/holdDrain\(record, resources, now\)/);
+    expect(source).toMatch(
+      /if \(held\.holdsUntil !== undefined\) await this\.ctx\.storage\.setAlarm\(Date\.parse\(held\.holdsUntil\)\);/,
+    );
+    // The reopen past the bound is a warning naming who never cycled, never a silence.
+    expect(source).toMatch(/const stale = staleHolds\(stored, now\);/);
+    expect(source).toMatch(/fleet reopened with \$\{stale\.join\(", "\)\} still on the pre-deploy image/);
+    // A rebuild or fresh provision counts as the report: provisioning reports right after warm.
+    const provision = source.slice(
+      source.indexOf("async runProvisioning("),
+      source.indexOf("private async provisionTimedOut("),
+    );
+    expect(provision).toMatch(
+      /await this\.ctx\.storage\.put\(IMAGE_REPORT_PENDING_KEY, \{ resource \}\);\s*\n\s*await this\.reportPendingImageCurrent\("provision"\);/,
+    );
+    // A typed op on a drained fleet answers with the drain instead of hanging.
+    const op = source.slice(source.indexOf("private async runOpTraced("));
+    expect(op).toMatch(/op-refused: the resident fleet is drained for \$\{drain\.reason\}/);
+    // Readiness tells the truth: the admin view says whether the container's report is owed.
+    expect(source).toMatch(/imageReport: map\.get\(IMAGE_REPORT_PENDING_KEY\) !== undefined \? "pending" : "current"/);
+  });
 
   it("`/drain` and `/undrain` are POST routes of the drain scope, dispatched to their handlers; the drain bearer is a fourth scope that passes only its own routes, admin passes everything", () => {
     expect(source).toMatch(/"\/drain": \{ scope: "drain", method: "POST" \}/);
