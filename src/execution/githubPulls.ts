@@ -590,13 +590,14 @@ export type MergeResult = { ok: true; sha: string } | { ok: false; status: numbe
 
 /** `PUT /repos/{repo}/pulls/{n}/merge`: a squash at exactly `sha` — GitHub
  *  refuses when the head moved — with `<title> (#n)` as the commit's title and
- *  an empty body, the shape the repository's own squash setting gives a
+ *  an empty body (or a `Merged-by: <login>` trailer when a person's merge
+ *  command names them), the shape the repository's own squash setting gives a
  *  person's merge. GitHub's refusal (405: not mergeable — a conflict, a branch
  *  protection; 409: the head is not `sha`; 422) is an answer with its status
  *  and words, never a throw; a call that fails throws, like every write here. */
 export async function mergePullRequest(
   pr: { repo: string; number: number },
-  opts: { sha: string; title: string },
+  opts: { sha: string; title: string; mergedBy?: string },
 ): Promise<MergeResult> {
   const token = await requireToken();
   const res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}/merge`, {
@@ -606,7 +607,9 @@ export async function mergePullRequest(
       merge_method: "squash",
       sha: opts.sha,
       commit_title: `${opts.title} (#${pr.number})`,
-      commit_message: "",
+      // `mergedBy` is the person the merge command acts for (record 0062's
+      // binding): the App holds the token, but the commit itself names them.
+      commit_message: opts.mergedBy === undefined ? "" : `Merged-by: ${opts.mergedBy}`,
     }),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
@@ -686,11 +689,16 @@ const prGraphqlArgs = (pr: { repo: string; number: number }) => {
 export type EnqueueResult = { ok: true } | { ok: false; reason: string };
 
 /** The GraphQL `enqueuePullRequest` mutation — the same act `gh pr merge
- *  --auto` performs on a merge-queue repository. A pull request already in the
- *  queue is success (a replayed step enqueues nothing twice); any other GraphQL
- *  error is an answer with GitHub's words, never a throw — a person decides.
- *  A call that fails (network, HTTP) throws, like every write here. */
-export async function enqueuePullRequest(pr: { repo: string; number: number }): Promise<EnqueueResult> {
+ *  --auto` performs on a merge-queue repository. `expectedHeadOid` makes the
+ *  mutation atomic with the review fence: GitHub refuses if the branch moved
+ *  after its approved head was read. A pull request already in the queue is
+ *  success (a replayed step enqueues nothing twice); any other GraphQL error is
+ *  an answer with GitHub's words, never a throw — a person decides. A call that
+ *  fails (network, HTTP) throws, like every write here. */
+export async function enqueuePullRequest(
+  pr: { repo: string; number: number },
+  opts: { sha: string },
+): Promise<EnqueueResult> {
   const looked = await graphql(
     `
       query ($owner: String!, $name: String!, $number: Int!) {
@@ -709,15 +717,15 @@ export async function enqueuePullRequest(pr: { repo: string; number: number }): 
     return { ok: false, reason: firstGraphqlError(looked) ?? `${pr.repo}#${pr.number} has no node id` };
   const answer = await graphql(
     `
-      mutation ($id: ID!) {
-        enqueuePullRequest(input: { pullRequestId: $id }) {
+      mutation ($id: ID!, $sha: GitObjectID!) {
+        enqueuePullRequest(input: { pullRequestId: $id, expectedHeadOid: $sha }) {
           mergeQueueEntry {
             position
           }
         }
       }
     `,
-    { id: nodeId },
+    { id: nodeId, sha: opts.sha },
   );
   const error = firstGraphqlError(answer);
   if (error === undefined) return { ok: true };

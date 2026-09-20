@@ -47,6 +47,12 @@ exports[`capability axis — a capability turning on changes exactly the command
   "metrics.trend": [
     "metrics",
   ],
+  "pulls.enqueue": [
+    "github",
+  ],
+  "pulls.merge": [
+    "github",
+  ],
   "pulls.rebase": [
     "github",
   ],
@@ -150,6 +156,8 @@ commands:
   metrics trend        — The run trend from the metrics dataset: runs, failure rate, p50/p95 wall and dollars per day and per agent over the range, weighted for sampling — the /metrics page's report as text or JSON; nothing written.
   providers check      — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each.
   pulls rebase         — Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request.
+  pulls merge          — Squash-merge one approved pull request at exactly its reviewed head, under your own name: refused when no review approves the head, when a review there requests changes, when a check at it is red, still running or none has reported yet, and for the release pull request, which is answered with its card — that merge stays a person's click.
+  pulls enqueue        — Put one approved pull request at exactly its reviewed head in the base branch's merge queue, recorded under your own name: refused when no review approves the head, when a review there requests changes, when a check at it is red, or when the head moves before enqueue, and for the release pull request, which is answered with its card — that merge stays a person's click; the queue runs the still-pending checks itself.
   artifacts lifecycle  — Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after \`artifacts.retentionDays\` (default 30), incomplete multipart uploads abort after one day — and read them back; \`--dry-run\` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token.
   artifacts check      — Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token.
   plane show           — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written.
@@ -185,6 +193,8 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "plane.show",
   "plane.stop",
   "providers.check",
+  "pulls.enqueue",
+  "pulls.merge",
   "pulls.rebase",
   "repo.build",
   "repo.list",
@@ -238,6 +248,8 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "plane_show",
   "plane_stop",
   "providers_check",
+  "pulls_enqueue",
+  "pulls_merge",
   "pulls_rebase",
   "repo_build",
   "repo_list",
@@ -325,6 +337,8 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`providers check\` — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each.
 *pulls*
 • \`pulls rebase\` — Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request.
+• \`pulls merge\` — Squash-merge one approved pull request at exactly its reviewed head, under your own name: refused when no review approves the head, when a review there requests changes, when a check at it is red, still running or none has reported yet, and for the release pull request, which is answered with its card — that merge stays a person's click.
+• \`pulls enqueue\` — Put one approved pull request at exactly its reviewed head in the base branch's merge queue, recorded under your own name: refused when no review approves the head, when a review there requests changes, when a check at it is red, or when the head moves before enqueue, and for the release pull request, which is answered with its card — that merge stays a person's click; the queue runs the still-pending checks itself.
 *plane*
 • \`plane show\` — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written.
 • \`plane stop\` — Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads."
@@ -424,6 +438,8 @@ commands:
   delivery report      — Delivery indicators per week and per unit — issue-to-merge time, first-pass CI, review rounds, findings and the share resolved with no human edit — from the repository's snapshot of GitHub's facts (--fresh reads GitHub now) and the run history; nothing written.
   providers check      — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each.
   pulls rebase         — Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request.
+  pulls merge          — Squash-merge one approved pull request at exactly its reviewed head, under your own name: refused when no review approves the head, when a review there requests changes, when a check at it is red, still running or none has reported yet, and for the release pull request, which is answered with its card — that merge stays a person's click.
+  pulls enqueue        — Put one approved pull request at exactly its reviewed head in the base branch's merge queue, recorded under your own name: refused when no review approves the head, when a review there requests changes, when a check at it is red, or when the head moves before enqueue, and for the release pull request, which is answered with its card — that merge stays a person's click; the queue runs the still-pending checks itself.
   artifacts lifecycle  — Apply the artifacts bucket's lifecycle rules from config.yaml — objects expire after \`artifacts.retentionDays\` (default 30), incomplete multipart uploads abort after one day — and read them back; \`--dry-run\` prints the rules and touches nothing. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Edit, never the bot's token.
   artifacts check      — Report whether the artifacts bucket is private: its managed r2.dev domain must be disabled and no custom domain enabled — the two ways R2 serves a bucket without a signature. Operator-side: CLOUDFLARE_API_TOKEN with Workers R2 Storage: Read, never the bot's token.
   plane show           — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written.
@@ -456,6 +472,8 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "plane.show",
   "plane.stop",
   "providers.check",
+  "pulls.enqueue",
+  "pulls.merge",
   "pulls.rebase",
   "repo.build",
   "repo.test",
@@ -499,6 +517,8 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "plane_show",
   "plane_stop",
   "providers_check",
+  "pulls_enqueue",
+  "pulls_merge",
   "pulls_rebase",
   "repo_build",
   "repo_test",
@@ -565,6 +585,8 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 • \`providers check\` — Read the provider's own endpoints for each aggregator model the configuration names and report where the resolved model card disagrees — supported parameters, context length, modalities — with the override that would pin each.
 *pulls*
 • \`pulls rebase\` — Rebase the pipeline's open pull requests (or one named) onto their bases: git alone first — the repository's own merge drivers, rerere, an unchanged patch carries its approval — then one bounded fix round for a conflict git leaves; one line per pull request.
+• \`pulls merge\` — Squash-merge one approved pull request at exactly its reviewed head, under your own name: refused when no review approves the head, when a review there requests changes, when a check at it is red, still running or none has reported yet, and for the release pull request, which is answered with its card — that merge stays a person's click.
+• \`pulls enqueue\` — Put one approved pull request at exactly its reviewed head in the base branch's merge queue, recorded under your own name: refused when no review approves the head, when a review there requests changes, when a check at it is red, or when the head moves before enqueue, and for the release pull request, which is answered with its card — that merge stays a person's click; the queue runs the still-pending checks itself.
 *plane*
 • \`plane show\` — What is happening: every live and recently ended run, every tracked pull request and every ship unit, each with its owner and its health — the plane's table, as text or JSON; nothing written.
 • \`plane stop\` — Stop a pipeline and end its live children in one move: it starts no more units, its run is sealed, and every live child in its unit threads is aborted — recorded on the pipeline's run and the unit threads."

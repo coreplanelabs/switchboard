@@ -223,7 +223,7 @@ function harness(
   const roundChecksBase: (string | undefined)[] = [];
   const reruns: Array<{ sha: string; names: string[] }> = [];
   const mergeWaitNotes: Array<{ headSha: string; instanceId: string; at: number }> = [];
-  const enqueues: Array<{ repo: string; number: number }> = [];
+  const enqueues: Array<{ pr: { repo: string; number: number }; opts: { sha: string } }> = [];
   let reviewFetches = 0;
   const github = new InMemoryGithubApi({ "acme/api": { files: over.files ?? {}, issues: over.issues ?? [] } });
   const deps: AdminCoordinatorDeps = {
@@ -324,8 +324,8 @@ function harness(
     },
     ...("enqueue" in over
       ? {
-          enqueuePullRequest: async (pr: { repo: string; number: number }) => {
-            enqueues.push(pr);
+          enqueuePullRequest: async (pr: { repo: string; number: number }, opts: { sha: string }) => {
+            enqueues.push({ pr, opts });
             if (over.enqueue instanceof Error) throw over.enqueue;
             return over.enqueue!;
           },
@@ -4091,7 +4091,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       status: 200,
       body: { ok: true, outcome: "enqueued", reason: `enqueued at \`${HEAD.slice(0, 7)}\``, at: NOW },
     });
-    expect(h.enqueues).toEqual([{ repo: "acme/api", number: 7 }]);
+    expect(h.enqueues).toEqual([{ pr: { repo: "acme/api", number: 7 }, opts: { sha: HEAD } }]);
     expect(h.merges).toEqual([]);
     expect(h.logs.some((l) => l.includes("enqueued acme/api#7"))).toBe(true);
   });
@@ -4110,7 +4110,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     // The squash was attempted (the rules read decided nothing) and the 405's
     // own wording routed it to the queue.
     expect(h.merges).toHaveLength(1);
-    expect(h.enqueues).toEqual([{ repo: "acme/api", number: 7 }]);
+    expect(h.enqueues).toEqual([{ pr: { repo: "acme/api", number: 7 }, opts: { sha: HEAD } }]);
     // A 405 without the queue's wording keeps today's refusal in GitHub's words.
     const plain = await mergeHarness({
       queueRule: undefined,

@@ -118,6 +118,11 @@ export const POLICY: readonly Rule[] = [
   // `pulls rebase` force-pushes the pipeline's branches and can start a paid
   // fix round (record 0071): a grant, never a chat baseline.
   { action: "pulls:write", resource: "command", when: [grant("pulls:write")] },
+  // `pulls merge|enqueue` (record 0070, criterion 4): a person's merge through
+  // the door — the grant, never a baseline, so a grant-less person has a
+  // thread that reads everything and merges nothing. The release pull
+  // request's handoff and the approval fences are the handler's own refusals.
+  { action: "merge:write", resource: "command", when: [grant("merge:write")] },
 
   // ── repos ────────────────────────────────────────────────────────────────
   { action: "repo:read", resource: "command", when: [grant("repo:read")] },

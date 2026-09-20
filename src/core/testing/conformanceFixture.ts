@@ -784,6 +784,28 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
         },
       }),
     },
+    // The merge door behind `pulls merge|enqueue` (record 0070): a recording
+    // stub whose fixture pull request is open, approved at its head and green,
+    // and whose every caller is bound to one login — the real door reads and
+    // writes GitHub, which no fixture holds.
+    merge: {
+      service: async () => ({
+        facts: async () => ({
+          state: "open" as const,
+          headSha: "a".repeat(40),
+          headRef: "feat/fixture",
+          title: "feat(core): the fixture change",
+          htmlUrl: "https://github.com/acme/api/pull/42",
+        }),
+        checks: async () => ({ total: 1, pending: [], failed: [] }),
+        reviews: async () => [{ state: "APPROVED", commitId: "a".repeat(40) }],
+        merge: async (pr: { repo: string; number: number }) =>
+          exec(`pulls merge ${pr.repo}#${pr.number}`, { ok: true as const, sha: "b".repeat(40) }),
+        enqueue: async (pr: { repo: string; number: number }, opts: { sha: string }) =>
+          exec(`pulls enqueue ${pr.repo}#${pr.number}@${opts.sha}`, { ok: true as const }),
+        githubLogin: async () => "fixture-login",
+      }),
+    },
     review: { abridger: async () => s.abridger, runs },
     friction: {
       ledger: async () => new RunStoreFrictionLedger(s.store),

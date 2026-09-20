@@ -1160,6 +1160,58 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "merge:write",
+    "args": [
+      {
+        "name": "pr",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "pulls.enqueue",
+    "options": [
+      {
+        "name": "repo",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "merge:write",
+    "args": [
+      {
+        "name": "pr",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "pulls.merge",
+    "options": [
+      {
+        "name": "repo",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "pulls:write",
     "args": [
       {

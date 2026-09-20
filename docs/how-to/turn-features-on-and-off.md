@@ -69,7 +69,7 @@ A command under two capabilities is on when either gives it a backend.
 | `costs` | `costs by`, `costs snapshot` |
 | `metrics` | `metrics trend` |
 | `schedules` | `schedule list` |
-| `github` | `delivery report`, `pulls rebase` |
+| `github` | `delivery report`, `pulls rebase`, `pulls merge`, `pulls enqueue` |
 | `ingress` | — |
 | `readingDiffAbridge` | `review abridge` |
 | `dashboardAuth` | — |

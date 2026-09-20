@@ -112,6 +112,7 @@ import { systemClock } from "../core/trace/clock.js";
 import type { ChannelIO, IncomingMessage } from "../core/types.js";
 import { authenticateIngressBearer } from "../deploy/restart.js";
 import type { GithubApi } from "../execution/githubApi.js";
+import { isReleasePullRequest } from "../core/commands/merge.js";
 import type { GithubIdentity } from "../execution/githubApp.js";
 import {
   MERGE_QUEUE_405,
@@ -259,7 +260,7 @@ export interface AdminCoordinatorDeps {
   /** The queue's one write (githubPulls.enqueuePullRequest): the GraphQL
    *  `enqueuePullRequest` mutation — the same act `gh pr merge --auto`
    *  performs. Optional: without it a merge-queue base is refused by name. */
-  enqueuePullRequest?: (pr: { repo: string; number: number }) => Promise<EnqueueResult>;
+  enqueuePullRequest?: (pr: { repo: string; number: number }, opts: { sha: string }) => Promise<EnqueueResult>;
   /** Where the pull request stands with the queue (githubPulls.
    *  fetchMergeQueueState), read on a `queued` re-ask: still in it, or removed
    *  with the queue's own reason. */
@@ -2125,13 +2126,6 @@ async function codingHandoffOf(
 
 // ---- the merge (docs/reference/specs/http-ingress.md item 9; record 0031's merge grant) ------------
 
-/** The release pull request — release-please's, which deploys — is always a person's merge. */
-function isReleasePullRequest(facts: PullRequestFacts): boolean {
-  return (
-    (facts.headRef?.startsWith("release-please--") ?? false) || /^chore\(main\): release\b/.test(facts.title ?? "")
-  );
-}
-
 /**
  * `POST /admin/coordinator/merge {parentInstanceId, unit, prNumber, headSha}`:
  * the runner's squash of a unit's pull request, executed only when every guard
@@ -2327,7 +2321,7 @@ async function merge(
       );
     let queued: EnqueueResult;
     try {
-      queued = await deps.enqueuePullRequest(pr);
+      queued = await deps.enqueuePullRequest(pr, { sha: headSha });
     } catch (err) {
       return json(502, { ok: false, error: "github_unavailable", message: describe(err), at });
     }
