@@ -115,7 +115,7 @@ import {
   HELD_NOT_HANDED_OFF,
   createDrainDeadline,
 } from "./core/drain.js";
-import { MINUTE_MS } from "./core/budgets.js";
+import { MINUTE_MS, PULL_SWEEP } from "./core/budgets.js";
 import { startProcessRoot } from "./core/requestTrace.js";
 import { configureInternalHosts, internalHostsOf } from "./core/trace/internalHosts.js";
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
@@ -125,6 +125,9 @@ import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
 import { createAdminCoordinatorHandler, isCoordinatorAdminPath } from "./channels/adminCoordinator.js";
 import { createGithubWebhookHandler, GITHUB_WEBHOOK_PATH } from "./channels/githubWebhook.js";
 import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
+import { sendPullMerged } from "./core/coordinator/contract.js";
+import { createMergeReadyBook, createMergeWatch } from "./core/mergeWatch.js";
+import type { PullsCommandDeps } from "./core/commands/pulls.js";
 import { processShimOptions, shimWorkflowSender } from "./core/coordinator/instancesClient.js";
 import { classifyRoundChecks } from "./core/ship/checkFindings.js";
 import { buildCoordinatorInstanceStore } from "./core/coordinator/instanceStore.js";
@@ -647,6 +650,70 @@ export async function runBot(): Promise<void> {
           new AnalyticsEngineSqlSource({ accountId: costsCfg.cloudflareAccountId, token: metricsToken.reveal() }),
         )
       : new NullMetricsService();
+  // The sweep behind `pulls rebase` (record 0071, mechanism two; issue 2067):
+  // the two-rung resolver over the pipeline's open pull requests. The listing
+  // and the effects are src/core/pullSweepWiring.ts over the GitHub REST
+  // modules; rung one runs in a throwaway clone of the pull request's branch
+  // (src/execution/sweepCheckout.ts); the delta re-review and the one bounded
+  // model round go through `dispatch()` as the requester — the command
+  // handler never starts a run itself (AGENTS.md invariant 3). One shared
+  // state per process, so the per-repository bound and the spent-round flag
+  // hold across sweeps and requesters — and across the merge watch (record
+  // 0071, mechanism three), whose resolver rounds are the same sweep on one
+  // named pull request.
+  // Shared across requesters and with the merge watch: the spent-round flags
+  // (one model round per pull request) and the per-repository queue (one
+  // rebase in flight per repository, whoever asked) — each requester's
+  // service already queues its own sweeps, this chain queues them across
+  // requesters too, and the watch's spend read counts the spent rounds.
+  const sweepState = { roundSpent: new Set<string>() };
+  const pullsWiring: PullsCommandDeps["pulls"] = (() => {
+    const state = sweepState;
+    const chains = new Map<string, Promise<unknown>>();
+    return {
+      service: async (origin) => {
+        // A fresh service per ask, parameterized by the origin — everything
+        // that must outlive the ask (the spent-round flags, the per-repository
+        // queue) rides `state` and `chains` above, so caching a service per
+        // requester would only accumulate entries.
+        const inner = createPullSweepService(
+          buildPullSweepDeps({
+            github: {
+              listOpen: listOpenPullRequests,
+              facts: fetchPullRequestFacts,
+              reviews: fetchPullRequestReviews,
+              selfIdentity: resolveGithubIdentity,
+              postReview: postReviewComment,
+              titleBody: fetchPullRequestTitleBody,
+              update: (pr, patch) => updatePullRequest(pr.repo, pr.number, patch),
+            },
+            git: createSweepGit({ cloneUrl: sweepCloneUrl, authHeader: sweepAuthHeader }),
+            origin,
+            state,
+            dispatch: async (m) => {
+              const io = threadIoFor({ threadKey: m.threadKey, userId: m.userId }) ?? nullChannelIO(m.threadKey);
+              await dispatch(deps, m, io);
+            },
+          }),
+        );
+        return {
+          sweep: (target) => {
+            const tail = chains.get(target.repo) ?? Promise.resolve();
+            const next = tail.then(
+              () => inner.sweep(target),
+              () => inner.sweep(target),
+            );
+            const stored = next.catch(() => {});
+            chains.set(target.repo, stored);
+            void stored.then(() => {
+              if (chains.get(target.repo) === stored) chains.delete(target.repo);
+            });
+            return next;
+          },
+        };
+      },
+    };
+  })();
   const commands = buildCoreCommands(config, runStore, {
     registry: defaultRunRegistry,
     secrets: processSecrets,
@@ -702,66 +769,7 @@ export async function runBot(): Promise<void> {
           await dispatch(deps, m, io);
         },
       }),
-    // The sweep behind `pulls rebase` (record 0071, mechanism two; issue 2067):
-    // the two-rung resolver over the pipeline's open pull requests. The listing
-    // and the effects are src/core/pullSweepWiring.ts over the GitHub REST
-    // modules; rung one runs in a throwaway clone of the pull request's branch
-    // (src/execution/sweepCheckout.ts); the delta re-review and the one bounded
-    // model round go through `dispatch()` as the requester — the command
-    // handler never starts a run itself (AGENTS.md invariant 3). One shared
-    // state per process, so the per-repository bound and the spent-round flag
-    // hold across sweeps and requesters.
-    pulls: () => {
-      // Shared across requesters: the spent-round flags (one model round per
-      // pull request) and the per-repository queue (one rebase in flight per
-      // repository, whoever asked) — each requester's service already queues
-      // its own sweeps, this chain queues them across requesters too.
-      const state = { roundSpent: new Set<string>() };
-      const chains = new Map<string, Promise<unknown>>();
-      return {
-        service: async (origin) => {
-          // A fresh service per ask, parameterized by the origin — everything
-          // that must outlive the ask (the spent-round flags, the per-repository
-          // queue) rides `state` and `chains` above, so caching a service per
-          // requester would only accumulate entries.
-          const inner = createPullSweepService(
-            buildPullSweepDeps({
-              github: {
-                listOpen: listOpenPullRequests,
-                facts: fetchPullRequestFacts,
-                reviews: fetchPullRequestReviews,
-                selfIdentity: resolveGithubIdentity,
-                postReview: postReviewComment,
-                titleBody: fetchPullRequestTitleBody,
-                update: (pr, patch) => updatePullRequest(pr.repo, pr.number, patch),
-              },
-              git: createSweepGit({ cloneUrl: sweepCloneUrl, authHeader: sweepAuthHeader }),
-              origin,
-              state,
-              dispatch: async (m) => {
-                const io = threadIoFor({ threadKey: m.threadKey, userId: m.userId }) ?? nullChannelIO(m.threadKey);
-                await dispatch(deps, m, io);
-              },
-            }),
-          );
-          return {
-            sweep: (target) => {
-              const tail = chains.get(target.repo) ?? Promise.resolve();
-              const next = tail.then(
-                () => inner.sweep(target),
-                () => inner.sweep(target),
-              );
-              const stored = next.catch(() => {});
-              chains.set(target.repo, stored);
-              void stored.then(() => {
-                if (chains.get(target.repo) === stored) chains.delete(target.repo);
-              });
-              return next;
-            },
-          };
-        },
-      };
-    },
+    pulls: () => pullsWiring,
   });
   // The same bound registry serves HTTP, MCP, and the chat fast path (U13): one
   // registration, every surface.
@@ -987,8 +995,59 @@ export async function runBot(): Promise<void> {
     // wait re-asks the door on its own cadence.
     const mergeWaits = createMergeWaitRegistry();
     const checksWorkflow = workflowSender;
+    // The merge-ready book beside the merge-wait book (record 0071, mechanism
+    // three): who waits on which pull request. The push-to-base webhook hands
+    // each registered pull request of the pushed branch to the watch, which
+    // reads GitHub's recomputed `mergeable_state` and — only on DIRTY, under
+    // the caps — runs the sweep's two-rung resolver for that one pull request;
+    // a merged fact ends the waiting unit `merged` by other through the same
+    // event relay the checks-settled send rides. In-memory like the merge-wait
+    // registry: a restart loses the waiters, and the waiting unit re-registers.
+    const mergeReadyBook = createMergeReadyBook();
+    const mergeWatch = createMergeWatch({
+      settings: (repo) => config.mergeWatchOf(repo),
+      book: mergeReadyBook,
+      facts: async (entry) => {
+        const facts = await fetchPullRequestFacts({ repo: entry.repo, number: entry.number });
+        if (facts === undefined) return { state: "open" }; // unreadable: the DIRTY stands until the next push
+        if (facts.mergedAt !== undefined)
+          return {
+            state: "merged",
+            ...(facts.mergeCommitSha !== undefined ? { sha: facts.mergeCommitSha } : {}),
+            mergedAt: facts.mergedAt,
+          };
+        if (facts.state === "closed") return { state: "closed" };
+        return {
+          state: "open",
+          ...(facts.mergeableState !== undefined ? { mergeableState: facts.mergeableState } : {}),
+        };
+      },
+      resolve: async (entry) => {
+        const service = await pullsWiring!.service({ userId: entry.requester });
+        return service.sweep({ repo: entry.repo, number: entry.number });
+      },
+      // The spend read (the per-pull-request limit): a plain dispatch has no
+      // per-run spend lever today — the lease bounds the round — so a spent
+      // model round counts as the round's cap, and the default limit buys one;
+      // a configured `pulls.spendLimitUsd` other than the default has no finer
+      // effect until that lever lands (agent-ship.md item 21 discloses it).
+      spendOf: async (entry) =>
+        sweepState.roundSpent.has(`${entry.repo}#${entry.number}`) ? PULL_SWEEP.spendCapUsd : 0,
+      card: async (entry, line) => {
+        const io = threadIoFor({ threadKey: entry.threadKey, userId: entry.requester });
+        await io?.reply(line);
+      },
+      merged: async (entry, facts) => {
+        await sendPullMerged(
+          checksWorkflow,
+          { instanceId: entry.instanceId, unit: entry.unit },
+          { repo: entry.repo, number: entry.number, sha: facts.sha, mergedAt: facts.mergedAt },
+        );
+      },
+    });
     const githubWebhook = createGithubWebhookHandler({
       secret: processSecrets.get("GITHUB_WEBHOOK_SECRET")?.reveal(),
+      watch: mergeWatch,
       checksSettled: async (repo, headSha) => {
         const checks = await fetchCommitChecks(repo, headSha);
         return checks !== undefined && checks.total > 0 && checks.pending.length === 0;
@@ -1003,6 +1062,10 @@ export async function runBot(): Promise<void> {
       instances: coordinatorInstances,
       // The spawn's tier gate reads which model is the fast tier (routing.model).
       appConfig: () => config.config,
+      // The merge door's conflict refusal (record 0071 criterion 5): where the
+      // watch is on for the repository, the refusal names the watching unit's
+      // own round; off, the sweep's `pulls rebase` sentence stands.
+      mergeWatchOf: (repo) => config.mergeWatchOf(repo),
       // The runs page base (agent-ship item 12): a unit-end report links a
       // child's write-up to its run page; without PUBLIC_BASE_URL it names the run id.
       ...(process.env.PUBLIC_BASE_URL?.trim()

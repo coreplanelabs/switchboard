@@ -67,6 +67,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "string",
       },
       {
+        "name": "repo",
+        "required": false,
+        "type": "string",
+      },
+      {
         "name": "user",
         "required": false,
         "type": "string",
@@ -199,6 +204,16 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "name": "intake",
         "required": false,
         "type": "object",
+      },
+      {
+        "name": "pulls",
+        "required": false,
+        "type": "object",
+      },
+      {
+        "name": "repo",
+        "required": false,
+        "type": "string",
       },
       {
         "name": "user",

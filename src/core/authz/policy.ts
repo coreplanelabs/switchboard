@@ -155,6 +155,10 @@ export const POLICY: readonly Rule[] = [
   // channel-config right — whoever may set the channel may set a thread in it;
   // never a baseline, so membership alone admits nobody.
   { action: "config:write", resource: "config-scope", resourceKind: "thread", when: [grant("config:write")] },
+  // The ORG scope (`config set org --pulls.…`, record 0071) — and a repository
+  // scope, the org setting's per-repository slice — affects every requester:
+  // the same `config:write` grant, never a baseline.
+  { action: "config:write", resource: "config-scope", resourceKind: "org", when: [grant("config:write")] },
   // A user edits only their own scope.
   { action: "config:write", resource: "config-scope", resourceKind: "user", when: [IS_SELF] },
   // The author binding's one trusted write (record 0062, authorization.md item

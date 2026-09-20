@@ -10,6 +10,7 @@
 // fact filed into the thread that owns the work, is docs/decisions/0047-an-outside-fact-finds-the-thread-that-owns-the-work.md;
 // no second event-specific intake is added before it lands.
 import { sendChecksSettled, type RunFinishedSend, type WorkflowSender } from "./contract.js";
+import type { MergeWatch, WatchResult } from "../mergeWatch.js";
 
 /** The webhook header GitHub signs the raw body into: `sha256=<hex hmac>`. */
 export const GITHUB_SIGNATURE_HEADER = "x-hub-signature-256";
@@ -122,4 +123,44 @@ export async function handleCheckRunIntake(
     status: 200,
     body: { ok: true, settled: true, sent: sends.filter((s) => s.kind === "sent").length, of: instances.length },
   };
+}
+
+export interface PushIntakeDeps {
+  /** The webhook secret; absent, the intake is disabled — never open. */
+  secret: string | undefined;
+  /** The merge watch (record 0071, mechanism three); absent, a push is acknowledged and ignored. */
+  watch: MergeWatch | undefined;
+}
+
+/** One `push` webhook delivery (record 0071, mechanism three): verify, read
+ *  the pushed branch, and hand it to the merge watch — every merge-ready pull
+ *  request registered on that base is read once GitHub has recomputed its
+ *  `mergeable_state`, and a DIRTY one buys a resolver round under the caps.
+ *  Never on a clock: the push is the only trigger. */
+export async function handlePushIntake(
+  headers: { event?: string; signature?: string },
+  rawBody: string,
+  deps: PushIntakeDeps,
+): Promise<CheckRunIntakeResult> {
+  if (deps.secret === undefined || deps.secret === "") return { status: 503, body: { error: "disabled" } };
+  if (headers.signature === undefined || !(await verifyWebhookSignature(deps.secret, rawBody, headers.signature)))
+    return { status: 401, body: { error: "unauthorized" } };
+  if (headers.event !== "push") return { status: 200, body: { ok: true, ignored: "event" } };
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    return { status: 400, body: { error: "invalid_json" } };
+  }
+  if (typeof payload !== "object" || payload === null) return { status: 400, body: { error: "invalid_body" } };
+  const p = payload as { ref?: unknown; repository?: { full_name?: unknown } };
+  const repo = p.repository?.full_name;
+  if (typeof p.ref !== "string" || typeof repo !== "string" || repo === "")
+    return { status: 400, body: { error: "invalid_body" } };
+  // Only a branch push moves a pull request's base; a tag push is ignored.
+  const branch = p.ref.startsWith("refs/heads/") ? p.ref.slice("refs/heads/".length) : undefined;
+  if (branch === undefined || branch === "") return { status: 200, body: { ok: true, ignored: "ref" } };
+  if (deps.watch === undefined) return { status: 200, body: { ok: true, watched: 0 } };
+  const results: WatchResult[] = await deps.watch.pushToBase(repo, branch);
+  return { status: 200, body: { ok: true, watched: results.length, results } };
 }

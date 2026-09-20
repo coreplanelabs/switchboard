@@ -164,6 +164,9 @@ function harness(
     queueState?: MergeQueueState | Error;
     /** The runs page base the plan route answers (agent-ship item 12). */
     runPageBase?: string;
+    /** Watch until merge for the repository (record 0071, mechanism three): the
+     *  merge door's conflict refusal names the remedy that exists. */
+    mergeWatch?: boolean;
     /** A tiny backlog for the trim tests (record 0065): the seal must not read the trimmed snapshot's standing. */
     backlogLimit?: number;
   } = {},
@@ -223,6 +226,7 @@ function harness(
     grantsFor: (id) => GRANTS[id] ?? NO_GRANTS,
     instances,
     ...(over.runPageBase !== undefined ? { runPageBase: over.runPageBase } : {}),
+    ...(over.mergeWatch !== undefined ? { mergeWatchOf: () => ({ watch: over.mergeWatch! }) } : {}),
     runs,
     registry,
     ledgerRuns: () => writeThrough.liveRuns(),
@@ -3727,6 +3731,30 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       checks: { total: 0, pending: [], failed: [] },
     });
     expect((await merge(clean)).body).toMatchObject({ outcome: "pending" });
+  });
+
+  it("the conflict refusal names the remedy that exists (record 0071 criterion 5): the watching unit's own round where the watch is on, the sweep otherwise", async () => {
+    // Watch on for the repository: the refusal names the waiting unit's round, never the hand merge as the only way.
+    const on = await mergeHarness({
+      prFacts: facts({ mergeable: false, mergeableState: "dirty" }),
+      checks: undefined,
+      mergeWatch: true,
+    });
+    expect((await merge(on)).body).toMatchObject({
+      outcome: "refused",
+      reason: `acme/api#7 conflicts with \`main\` at \`${HEAD.slice(0, 7)}\` — the watch is on for \`acme/api\`: the waiting unit's own round rebases it on the next push to \`main\` (an unchanged patch carries the approval). The approved work stands`,
+    });
+    expect(on.merges).toEqual([]);
+    // Watch off (the setting resolved off, or no resolver wired): the sweep's sentence, byte for byte as today.
+    const off = await mergeHarness({
+      prFacts: facts({ mergeable: false, mergeableState: "dirty" }),
+      checks: undefined,
+      mergeWatch: false,
+    });
+    expect((await merge(off)).body).toMatchObject({
+      outcome: "refused",
+      reason: `acme/api#7 conflicts with \`main\` at \`${HEAD.slice(0, 7)}\` — \`pulls rebase acme/api#7\` rebases it onto \`main\` (an unchanged patch carries the approval); merge it by hand once the checks are green. The approved work stands`,
+    });
   });
 
   it("GitHub's own refusal of the squash — a conflict, a branch protection, a head that moved between the check and the merge — is answered as refused in GitHub's words; the pull request unreadable or the merge call failing is a passing 502; a malformed body is 400 and an unknown instance or unit 404", async () => {

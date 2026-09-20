@@ -88,6 +88,9 @@ function configDeps(config: ConfigStore) {
     clearUserGithub: (u: string) => config.clearUserGithub(u),
     githubBindingConflict: async (u: string, b: { login: string; id: number }) => config.githubBindingConflict(u, b),
     clearThreadOverride: (t: string) => config.clearThreadOverride(t),
+    setOrgOverride: (p: Parameters<ConfigStore["setOrgOverride"]>[0]) => config.setOrgOverride(p),
+    setRepoOverride: (r: string, p: Parameters<ConfigStore["setRepoOverride"]>[1]) => config.setRepoOverride(r, p),
+    clearRepoOverride: (r: string) => config.clearRepoOverride(r),
     channelsWithScope: async () => config.channelsWithScope(),
   };
 }
@@ -510,7 +513,11 @@ describe("config set", () => {
       message: expect.stringMatching(/^nothing to set/),
     });
     expect(await commands.invoke("config.set", { args: ["everyone"], options: { agent: "review" } }, me)).toMatchObject(
-      { ok: false, error: "invalid_input", message: 'scope: expected one of "channel", "me", "thread", "user"' },
+      {
+        ok: false,
+        error: "invalid_input",
+        message: 'scope: expected one of "channel", "me", "thread", "user", "org", "repo"',
+      },
     );
     expect(
       JSON.stringify(await commands.invoke("config.set", { args: ["me"], options: { agent: "wizard" } }, me)),
@@ -1321,5 +1328,82 @@ describe("config set user / config clear user — the author binding (record 006
     expect(chatActorOf(withKey, msg)).toEqual(chatActorOf(without, msg));
     expect(effectiveGrants(chatActorOf(withKey, msg))).toEqual(effectiveGrants(chatActorOf(without, msg)));
     expect(withKey.grantsFor("slack:UX")).toEqual(without.grantsFor("slack:UX"));
+  });
+});
+
+describe("config set at org and repo scope — the pull-request watch (record 0071, mechanism three; routing-and-config item 32)", () => {
+  it("an admin turns the watch on at org scope, a repository overrides it off, and the resolution reads repo over org over the default", async () => {
+    const config = store();
+    const commands = bind(config);
+    // Default: off.
+    expect(config.mergeWatchOf("acme/api").watch).toBe(false);
+    const org = await say(commands, "config set org --pulls.watch on", chat(config, "slack:UADMIN"));
+    expect(org.res.ok).toBe(true);
+    expect(org.text).toBe("Updated org scope: watch `on`.");
+    expect(config.mergeWatchOf("acme/api").watch).toBe(true);
+    // The repository's word wins over the org's.
+    const repo = await say(commands, "config set repo --repo acme/api --pulls.watch off", chat(config, "slack:UADMIN"));
+    expect(repo.res.ok).toBe(true);
+    expect(repo.text).toBe("Updated repository scope: watch `off`.");
+    expect(config.mergeWatchOf("acme/api").watch).toBe(false);
+    expect(config.mergeWatchOf("acme/web").watch).toBe(true);
+    // And on over an org that never turned it on, once the org clears.
+    await say(commands, "config clear org", chat(config, "slack:UADMIN"));
+    expect(config.mergeWatchOf("acme/web").watch).toBe(false);
+    await say(commands, "config set repo --repo acme/web --pulls.watch on", chat(config, "slack:UADMIN"));
+    expect(config.mergeWatchOf("acme/web").watch).toBe(true);
+    expect(config.mergeWatchOf("acme/api").watch).toBe(false);
+  });
+
+  it("the caps are configurable at both scopes and resolve per key", async () => {
+    const config = store();
+    const commands = bind(config);
+    await say(
+      commands,
+      "config set org --pulls.watch on --pulls.rebaseInFlight 2 --pulls.spendLimitUsd 10",
+      chat(config, "slack:UADMIN"),
+    );
+    expect(config.mergeWatchOf("acme/api")).toEqual({ watch: true, rebaseInFlight: 2, spendLimitUsd: 10 });
+    await say(commands, "config set repo --repo acme/api --pulls.rebaseInFlight 1", chat(config, "slack:UADMIN"));
+    expect(config.mergeWatchOf("acme/api")).toEqual({ watch: true, rebaseInFlight: 1, spendLimitUsd: 10 });
+  });
+
+  it("the org and repo scopes are gated on config:write; anyone else is refused by name", async () => {
+    const config = store();
+    const commands = bind(config);
+    const refused = await say(commands, "config set org --pulls.watch on", chat(config, "slack:UX"));
+    expect(refused.res.ok).toBe(false);
+    expect(refused.text).toContain("Org and repository config changes are restricted.");
+    const granted = store(OPEN_YAML);
+    const open = bind(granted);
+    expect((await say(open, "config set org --pulls.watch on", chat(granted, "slack:UX"))).res.ok).toBe(true);
+  });
+
+  it("the scopes carry the watch alone: no --pulls is named, another setting refused, repo requires --repo, and --pulls elsewhere points at org|repo", async () => {
+    const config = store();
+    const commands = bind(config);
+    const none = await say(commands, "config set org", chat(config, "slack:UADMIN"));
+    expect(none.text).toContain("org: pass --pulls.watch on|off");
+    const other = await say(commands, "config set org --pulls.watch on --agent review", chat(config, "slack:UADMIN"));
+    expect(other.text).toContain("only --pulls.* applies");
+    const noRepo = await say(commands, "config set repo --pulls.watch on", chat(config, "slack:UADMIN"));
+    expect(noRepo.text).toContain("repo: required — pass --repo <owner/name>");
+    const misplaced = await say(commands, "config set me --pulls.watch on", chat(config, "slack:UADMIN"));
+    expect(misplaced.text).toContain("config set org|repo --pulls.…");
+  });
+
+  it("config clear repo drops the repository's scope; config clear org drops the org's watch and nothing else", async () => {
+    const config = store();
+    const commands = bind(config);
+    await say(commands, "config set org --pulls.watch on", chat(config, "slack:UADMIN"));
+    await say(commands, "config set repo --repo acme/api --pulls.watch off", chat(config, "slack:UADMIN"));
+    const cleared = await say(commands, "config clear repo --repo acme/api", chat(config, "slack:UADMIN"));
+    expect(cleared.text).toBe("Cleared repository overrides.");
+    expect(config.mergeWatchOf("acme/api").watch).toBe(true);
+    await say(commands, "config clear org", chat(config, "slack:UADMIN"));
+    expect(config.mergeWatchOf("acme/api").watch).toBe(false);
+    // Clearing is gated the same way.
+    const refused = await say(commands, "config clear org", chat(config, "slack:UX"));
+    expect(refused.res.ok).toBe(false);
   });
 });
