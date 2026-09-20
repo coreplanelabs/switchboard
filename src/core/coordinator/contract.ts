@@ -233,6 +233,26 @@ export interface ChecksSettledPayload {
   settledAt: number;
 }
 
+/** The event the merge watch sends a waiting unit when its pull request
+ *  merged, whoever merged (record 0071, mechanism three): the unit ends
+ *  `merged` by other. The type names the unit within the instance, the
+ *  nudge's alphabet and clip rule. */
+export const PULL_MERGED_EVENT_PREFIX = "pr-merged-";
+export function pullMergedEventType(key: { instanceId: string; unit: string }): string {
+  const suffix = `-${key.unit}`;
+  const room = 100 - PULL_MERGED_EVENT_PREFIX.length - suffix.length;
+  return `${PULL_MERGED_EVENT_PREFIX}${key.instanceId.slice(0, room)}${suffix}`;
+}
+
+/** What the merged event carries — the pull request and the merge's facts;
+ *  the waiting unit confirms through its own pr-check before it acts. */
+export interface PullMergedPayload {
+  repo: string;
+  number: number;
+  sha: string;
+  mergedAt: string;
+}
+
 /** What the event carries — ids, a status and a clock; the parent confirms
  *  through `read-record` before it acts, so nothing more rides here. */
 export interface RunFinishedPayload {
@@ -597,6 +617,26 @@ export async function sendChecksSettled(
   if (!workflow) return { kind: "no-binding", instance };
   const type = checksSettledEventType(headSha);
   const payload: ChecksSettledPayload = { headSha, settledAt };
+  try {
+    const handle = await workflow.get(instance);
+    await handle.sendEvent({ type, payload });
+    return { kind: "sent", instance, type };
+  } catch (err) {
+    return { kind: "failed", instance, type, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** The one send per merged fact the watch observed (record 0071): best effort
+ *  like `sendRunFinished` — a refusal is answered, never thrown; the waiting
+ *  unit's bounded wait re-asks its own pr-check on its next chunk. */
+export async function sendPullMerged(
+  workflow: WorkflowSender | undefined,
+  key: { instanceId: string; unit: string },
+  payload: PullMergedPayload,
+): Promise<RunFinishedSend> {
+  const instance = key.instanceId;
+  if (!workflow) return { kind: "no-binding", instance };
+  const type = pullMergedEventType(key);
   try {
     const handle = await workflow.get(instance);
     await handle.sendEvent({ type, payload });

@@ -12,6 +12,7 @@ import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
 import type { AddressSeverity, ShipConfig } from "./core/shipPipeline.js";
+import { resolveMergeWatch, type MergeWatchSettings, type PullsSettings } from "./core/mergeWatch.js";
 import type { ReadingDiffConfig } from "./core/readingDiff.js";
 import type { SpawnConfig } from "./core/dispatch/spawn.js";
 import type { DashboardConfig } from "./core/dashboardAuthConfig.js";
@@ -136,6 +137,19 @@ export interface Scope {
    * Validated at load (`validateScopeBlocks`).
    */
   ship?: { grant?: Grant; idleDays?: number };
+  /**
+   * Watch until merge and its caps (record 0071, mechanism three;
+   * docs/reference/specs/routing-and-config.md item 32): `watch` keeps a
+   * merge-ready unit on its pull request until the pull request merges,
+   * `rebaseInFlight` caps the watch's rebases per repository and
+   * `spendLimitUsd` caps one pull request's model rounds. Off by default.
+   * Read on the ORG scope and a REPOSITORY scope alone — a repository's word
+   * over the org's, per key (`mergeWatchOf`); under a channel, user or thread
+   * it would be read by nothing and is refused at load. Set with `config set
+   * org|repo --pulls.watch on|off` (and the caps' keys); the static half is
+   * `defaults.pulls`. Validated at load (`validateScopeBlocks`).
+   */
+  pulls?: PullsSettings;
   /**
    * The thread-reply intake gate's mode in this scope (routing-and-config
    * item 27, record 0058): thread over user over channel over the top-level
@@ -346,6 +360,9 @@ export interface AppConfig {
     mcpServers?: Record<string, McpServerEntry>;
     /** The installation-wide boundary: the cap every run meets first (`Scope.boundary`). */
     boundary?: Boundary;
+    /** The org tier's static half of the merge watch (`Scope.pulls`, record 0071):
+     *  `config set org --pulls.*` layers the runtime half over it. */
+    pulls?: PullsSettings;
   };
   channels?: Record<string, Scope>;
   users?: Record<string, Scope>;
@@ -596,9 +613,15 @@ export interface Overrides {
    *  `intake.threadReplies` only — no other setting resolves a thread layer.
    *  Optional so documents written before it existed load (no migration). */
   threads?: Record<string, Scope>;
-  /** Org-wide runtime settings (today: `mcpServers` added with `mcp add --scope org`);
-   *  layered over `defaults`. Optional so documents written before it existed load. */
+  /** Org-wide runtime settings (`mcpServers` added with `mcp add --scope org`;
+   *  `pulls` set with `config set org`, record 0071); layered over `defaults`.
+   *  Optional so documents written before it existed load. */
   org?: Scope;
+  /** Per-repository runtime scopes (`config set repo --repo owner/name`,
+   *  record 0071), keyed by `owner/name`. Read by `mergeWatchOf` for the
+   *  `pulls` block alone — no other setting resolves a repository layer.
+   *  Optional so documents written before it existed load. */
+  repos?: Record<string, Scope>;
 }
 
 /**
@@ -1428,6 +1451,31 @@ export class ConfigStore {
     });
   }
 
+  /** The repository scope is runtime-only (`config set repo`, record 0071): no
+   *  static `repos:` scope block exists in config.yaml, so the override IS the
+   *  scope. It carries the `pulls` block alone, held to that at the write. */
+  async setRepoOverride(repo: string, patch: Scope): Promise<Scope> {
+    await this.write((o) => {
+      o.repos ??= {};
+      o.repos[repo] = mergeScope(o.repos[repo], patch);
+    });
+    return { ...(this.overrides.repos?.[repo] ?? {}) };
+  }
+
+  async clearRepoOverride(repo: string): Promise<void> {
+    await this.write((o) => {
+      delete o.repos?.[repo];
+    });
+  }
+
+  /** Watch until merge, resolved for one repository (record 0071, mechanism
+   *  three): the repository scope's word over the org's — `config set org`
+   *  layered over `defaults.pulls` — over the default (off), per key. */
+  mergeWatchOf(repo: string): MergeWatchSettings {
+    const org = { ...(this.config.defaults.pulls ?? {}), ...(this.overrides.org?.pulls ?? {}) };
+    return resolveMergeWatch(org, this.overrides.repos?.[repo]?.pulls);
+  }
+
   /** Apply a mutation to a COPY, persist it, then adopt it — so a failed save
    *  leaves the in-memory document exactly as it was (what the running bot
    *  uses is always what the store holds). The caller sees the error.
@@ -1643,6 +1691,11 @@ export function fmtScope(s: Scope): string {
     parts.push(
       `grant renewals=${s.ship.grant.renewals}${s.ship.grant.costCapUsd !== undefined ? ` cap=$${s.ship.grant.costCapUsd}` : ""}`,
     );
+  if (s.pulls) {
+    if (s.pulls.watch !== undefined) parts.push(`watch \`${s.pulls.watch ? "on" : "off"}\``);
+    if (s.pulls.rebaseInFlight !== undefined) parts.push(`rebases in flight \`${s.pulls.rebaseInFlight}\``);
+    if (s.pulls.spendLimitUsd !== undefined) parts.push(`watch limit \`$${s.pulls.spendLimitUsd}\``);
+  }
   return parts.length > 0 ? parts.join(", ") : "_none_";
 }
 

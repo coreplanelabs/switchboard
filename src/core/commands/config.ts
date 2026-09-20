@@ -32,7 +32,8 @@ import {
 // The `config.*` registrations (phase 4b): runtime config on the typed model.
 //   config show [--channel <id>]
 //   config overrides                       — the channels that carry a scope, setting names only
-//   config set <channel|me|thread> [--agent x] [--model p/m] [--models.<agent> p/m] [--effort e] [--efforts.<agent> e]
+//   config set <channel|me|thread|org|repo> [--agent x] [--model p/m] [--models.<agent> p/m] [--effort e] [--efforts.<agent> e]
+//                           [--pulls.watch on|off] [--pulls.rebaseInFlight n] [--pulls.spendLimitUsd n] [--repo owner/name]
 //                           [--verbosity quiet|verbose|debug]
 //                           [--harness.<agent> pi|opencode] [--intake.threadReplies mention|classify|always]
 //                           [--boundary.maxMinutes n] [--boundary.maxIdentity none|read|write] [--boundary.machines a,b]
@@ -74,6 +75,11 @@ export interface ConfigCommandDeps {
     setChannelOverride(channelId: string, patch: Scope): Promise<Scope>;
     setUserOverride(userId: string, patch: Scope): Promise<Scope>;
     setThreadOverride(threadKey: string, patch: Scope): Promise<Scope>;
+    /** The org tier's runtime half (`config set org --pulls.…`, record 0071). */
+    setOrgOverride(patch: Scope): Promise<Scope>;
+    /** A repository scope (`config set repo --repo owner/name --pulls.…`, record 0071). */
+    setRepoOverride(repo: string, patch: Scope): Promise<Scope>;
+    clearRepoOverride(repo: string): Promise<void>;
     clearChannelOverride(channelId: string): Promise<void>;
     clearUserOverride(userId: string): Promise<void>;
     /** Removes one person's author binding alone (`config clear user`, record 0062). */
@@ -105,9 +111,9 @@ const defineCommand = commandDefiner<ConfigCommandDeps>();
 
 const scopeArg = {
   name: "scope",
-  schema: z.enum(["channel", "me", "thread", "user"]),
+  schema: z.enum(["channel", "me", "thread", "user", "org", "repo"]),
   describe:
-    "`channel` (everyone here), `me` (your own runs), `thread` (this thread's intake gate) or `user` (another person's GitHub binding, identity admins only)",
+    "`channel` (everyone here), `me` (your own runs), `thread` (this thread's intake gate), `user` (another person's GitHub binding, identity admins only), `org` or `repo` (the pull-request watch and its caps, `config:write`)",
 } as const;
 /** `config instructions` keeps the two scopes: a thread carries no instructions text. */
 const instructionsScopeArg = {
@@ -193,6 +199,14 @@ function targetThread(caller: Caller, thread: string | undefined): string {
  *  `config:write` row on `config-scope { channel }` (the channel-config right). */
 function mayEditChannel(caller: Caller, channel: string): boolean {
   return authorize(caller.actor, "config:write", { type: "config-scope", kind: "channel", id: channel }).allow;
+}
+
+/** The org scope — and a repository scope, which is the org setting's
+ *  per-repository slice (record 0071) — affects every requester: the policy
+ *  table's `config:write` row on `config-scope { org }`. */
+function assertMayEditOrg(caller: Caller): void {
+  if (!authorize(caller.actor, "config:write", { type: "config-scope", kind: "org" }).allow)
+    throw new CommandError("unauthorized", "Org and repository config changes are restricted.");
 }
 
 function assertMayEditChannel(caller: Caller, channel: string): void {
@@ -309,7 +323,8 @@ function summarizeScope(s: Scope): JsonObject {
   ) as JsonObject;
 }
 
-const who = (scope: "channel" | "me" | "thread" | "user") => (scope === "me" ? "your" : scope);
+const who = (scope: "channel" | "me" | "thread" | "user" | "org" | "repo") =>
+  scope === "me" ? "your" : scope === "repo" ? "repository" : scope;
 
 // ---- config show ---------------------------------------------------------------------
 
@@ -468,6 +483,32 @@ export const configSet = defineCommand({
           ),
       })
       .optional(),
+    pulls: z
+      .object({
+        watch: z
+          .enum(["on", "off"])
+          .optional()
+          .describe(
+            "watch a merge-ready pull request until it merges (org and repo scopes; off by default): the unit stays on it and a push to its base that leaves it conflicting buys a rebase (--pulls.watch on|off)",
+          ),
+        rebaseInFlight: z.coerce
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe("how many watch rebases may run at once per repository (default 1)"),
+        spendLimitUsd: z.coerce
+          .number()
+          .positive()
+          .optional()
+          .describe("what one pull request's watch may spend, in dollars"),
+      })
+      .optional(),
+    repo: z
+      .string()
+      .regex(/^[\w.-]+\/[\w.-]+$/)
+      .optional()
+      .describe("the repository (`owner/name`) a repo-scope write targets"),
     user: z
       .string()
       .optional()
@@ -497,7 +538,7 @@ export const configSet = defineCommand({
     risk: () => "changes the scope's settings for everyone in it until reset",
   },
   describe:
-    "Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, the intake gate's mode for a thread (gated like the channel), or a person's GitHub binding (`config set user --user <id> --github <login>`, identity admins — never your own: it is not yours to type); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
+    "Set the agent, model, effort, verbosity, harness or boundary for a channel (gated) or for yourself, the intake gate's mode for a thread (gated like the channel), a person's GitHub binding (`config set user --user <id> --github <login>`, identity admins — never your own: it is not yours to type), or the pull-request watch (`config set org|repo --pulls.watch on|off` with `--pulls.rebaseInFlight` / `--pulls.spendLimitUsd`, repo taking `--repo <owner/name>`); per-agent forms take --models.<agent> / --efforts.<agent> / --harness.<agent>, the boundary's axes --boundary.<axis> (a boundary caps every run in the scope and never grants).",
   // A sentence for the person who typed the command (routing-and-config item
   // 28): the scope's settings in `config show`'s words, never a JSON dump.
   render: (output) => {
@@ -506,7 +547,7 @@ export const configSet = defineCommand({
     // The instructions text is never echoed (custom-instructions item 5):
     // `summarizeScope` left its length in its place, and the sentence names it.
     const instructions = effective.instructions !== undefined ? `, instructions ${effective.instructions}` : "";
-    return `Updated ${who(o.scope as "channel" | "me" | "thread" | "user")} scope: ${fmtScope(effective)}${instructions}.`;
+    return `Updated ${who(o.scope as Parameters<typeof who>[0])} scope: ${fmtScope(effective)}${instructions}.`;
   },
   handler: async ({ args, options, caller, deps }) => {
     const agents = deps.config.agentNames();
@@ -549,6 +590,39 @@ export const configSet = defineCommand({
       throw new CommandError(
         "invalid_input",
         "github: a GitHub binding is written on the user scope — config set user --user <id> --github <login>",
+      );
+    // The org and repository scopes carry the pull-request watch alone (record
+    // 0071): any other setting stored there would be read by nothing.
+    if (args.scope === "org" || args.scope === "repo") {
+      assertMayEditOrg(caller);
+      const p = options.pulls;
+      const pulls: Scope["pulls"] = {
+        ...(p?.watch !== undefined ? { watch: p.watch === "on" } : {}),
+        ...(p?.rebaseInFlight !== undefined ? { rebaseInFlight: p.rebaseInFlight } : {}),
+        ...(p?.spendLimitUsd !== undefined ? { spendLimitUsd: p.spendLimitUsd } : {}),
+      };
+      if (Object.keys(pulls).length === 0)
+        throw new CommandError(
+          "invalid_input",
+          `${args.scope}: pass --pulls.watch on|off, --pulls.rebaseInFlight <n> or --pulls.spendLimitUsd <usd> — the org and repository scopes carry the pull-request watch alone`,
+        );
+      const selectors = new Set(["pulls", "repo", "channel", "thread", "user"]);
+      if (Object.keys(options).some((k) => !selectors.has(k) && options[k as keyof typeof options] !== undefined))
+        throw new CommandError("invalid_input", `${args.scope}: only --pulls.* applies to this scope`);
+      let effective: Scope;
+      if (args.scope === "repo") {
+        if (options.repo === undefined)
+          throw new CommandError("invalid_input", "repo: required — pass --repo <owner/name>");
+        effective = await deps.config.setRepoOverride(options.repo, { pulls });
+      } else {
+        effective = await deps.config.setOrgOverride({ pulls });
+      }
+      return { scope: args.scope, effective: summarizeScope(effective) };
+    }
+    if (options.pulls !== undefined)
+      throw new CommandError(
+        "invalid_input",
+        "pulls: the pull-request watch is an org or repository setting — config set org|repo --pulls.…",
       );
     const patch: Scope = {};
     if (options.agent !== undefined) {
@@ -638,6 +712,11 @@ export const configClear = defineCommand({
   options: z.object({
     channel: channelOption,
     thread: threadOption,
+    repo: z
+      .string()
+      .regex(/^[\w.-]+\/[\w.-]+$/)
+      .optional()
+      .describe("the repository (`owner/name`) whose scope to drop (repo scope only)"),
     user: z
       .string()
       .optional()
@@ -652,11 +731,21 @@ export const configClear = defineCommand({
   describe:
     "Drop every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); `config clear user --user <id>` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.",
   render: (output) => {
-    const scope = (output as JsonObject).scope as "channel" | "me" | "thread" | "user";
+    const scope = (output as JsonObject).scope as Parameters<typeof who>[0];
     return scope === "user" ? "Cleared the user's GitHub binding." : `Cleared ${who(scope)} overrides.`;
   },
   handler: async ({ args, options, caller, deps }) => {
-    if (args.scope === "channel") {
+    if (args.scope === "org") {
+      // The org scope's `config set` key alone (record 0071): the org tier's
+      // MCP servers are `mcp remove`'s to drop, never cleared from here.
+      assertMayEditOrg(caller);
+      await deps.config.setOrgOverride({ pulls: undefined } as Scope);
+    } else if (args.scope === "repo") {
+      assertMayEditOrg(caller);
+      if (options.repo === undefined)
+        throw new CommandError("invalid_input", "repo: required — pass --repo <owner/name>");
+      await deps.config.clearRepoOverride(options.repo);
+    } else if (args.scope === "channel") {
       const channel = targetChannel(caller, options.channel);
       assertMayEditChannel(caller, channel);
       await deps.config.clearChannelOverride(channel);

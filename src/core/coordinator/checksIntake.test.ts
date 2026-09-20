@@ -3,6 +3,7 @@ import {
   GITHUB_EVENT_HEADER,
   GITHUB_SIGNATURE_HEADER,
   handleCheckRunIntake,
+  handlePushIntake,
   verifyWebhookSignature,
   type CheckRunIntakeDeps,
   createMergeWaitRegistry,
@@ -151,5 +152,89 @@ describe("the merge-wait registry — who the settled head wakes", () => {
     // plan-x's entry expires; plan-y's stands.
     expect(reg.waitingAt("aaa111", 12_000)).toEqual(["plan-y"]);
     expect(reg.waitingAt("aaa111", 13_000)).toEqual([]);
+  });
+});
+
+describe("the push-to-base intake — the merge watch's trigger (record 0071, mechanism three)", () => {
+  const pushBody = (over: Record<string, unknown> = {}) =>
+    JSON.stringify({ ref: "refs/heads/main", repository: { full_name: "octo/repo" }, ...over });
+
+  function watch() {
+    const pushes: Array<{ repo: string; base: string }> = [];
+    return {
+      pushes,
+      watch: {
+        async pushToBase(repo: string, base: string) {
+          pushes.push({ repo, base });
+          return [{ repo, number: 7, outcome: "resolver" as const }];
+        },
+      },
+    };
+  }
+
+  it("verified: a branch push hands exactly the repo and branch to the watch, and answers what it did", async () => {
+    const w = watch();
+    const raw = pushBody();
+    const res = await handlePushIntake({ event: "push", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      watch: w.watch,
+    });
+    expect(res).toEqual({
+      status: 200,
+      body: { ok: true, watched: 1, results: [{ repo: "octo/repo", number: 7, outcome: "resolver" }] },
+    });
+    expect(w.pushes).toEqual([{ repo: "octo/repo", base: "main" }]);
+  });
+
+  it("no secret is disabled, a bad signature is unauthorized, a non-push event and a tag push are ignored", async () => {
+    const w = watch();
+    const raw = pushBody();
+    expect(
+      (await handlePushIntake({ event: "push", signature: "sha256=x" }, raw, { secret: undefined, watch: w.watch }))
+        .status,
+    ).toBe(503);
+    expect(
+      (await handlePushIntake({ event: "push", signature: "sha256=deadbeef" }, raw, { secret: SECRET, watch: w.watch }))
+        .status,
+    ).toBe(401);
+    const other = await handlePushIntake({ event: "ping", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      watch: w.watch,
+    });
+    expect(other.body).toEqual({ ok: true, ignored: "event" });
+    const tag = pushBody({ ref: "refs/tags/v1.0.0" });
+    const tagged = await handlePushIntake({ event: "push", signature: await sign(SECRET, tag) }, tag, {
+      secret: SECRET,
+      watch: w.watch,
+    });
+    expect(tagged.body).toEqual({ ok: true, ignored: "ref" });
+    expect(w.pushes).toEqual([]);
+  });
+
+  it("without a wired watch the push is acknowledged and nothing runs; a malformed body is named", async () => {
+    const raw = pushBody();
+    const res = await handlePushIntake({ event: "push", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      watch: undefined,
+    });
+    expect(res.body).toEqual({ ok: true, watched: 0 });
+    const bad = "{not json";
+    expect(
+      (
+        await handlePushIntake({ event: "push", signature: await sign(SECRET, bad) }, bad, {
+          secret: SECRET,
+          watch: undefined,
+        })
+      ).status,
+    ).toBe(400);
+    const missing = JSON.stringify({ repository: { full_name: "octo/repo" } });
+    expect(
+      (
+        await handlePushIntake({ event: "push", signature: await sign(SECRET, missing) }, missing, {
+          secret: SECRET,
+          watch: undefined,
+        })
+      ).status,
+    ).toBe(400);
   });
 });

@@ -132,6 +132,20 @@ defaults:
   #   maxIdentity: write
   #   machines: [none, blank, repo-cold, repo-resident]
   #   confirm: write
+  # Watch until merge (docs/reference/specs/routing-and-config.md item 32;
+  # agent-ship.md item 21): keep a merge-ready pipeline unit on its pull
+  # request until the pull request merges — each push to its base that leaves
+  # it conflicting buys one rebase of the sweep's resolver. OFF by default.
+  # `rebaseInFlight` caps the watch's rebases per repository (default 1);
+  # `spendLimitUsd` caps one pull request's model rounds — read in whole
+  # rounds today, so the default buys one rebase round per pull request and
+  # a finer value has no extra effect yet. This block is the
+  # org tier; `config set org --pulls.…` layers over it at run time, and
+  # `config set repo --repo <owner/name> --pulls.…` overrides per repository.
+  # pulls:
+  #   watch: false
+  #   rebaseInFlight: 1
+  #   spendLimitUsd: 5
 
 # PR reviews and the reading diff (docs/reference/specs/reading-diff.md). Every
 # review records its full `git diff`; the ABRIDGED version (meat.dev, run on

@@ -317,6 +317,11 @@ export function validateConfig(cfg: AppConfig): void {
   validateScopeVerbosity(cfg, "config.yaml");
   validateBoundaries(cfg, "config.yaml");
   validateScopeBlocks(cfg, "config.yaml");
+  {
+    // The merge watch's static half (record 0071): the org tier's defaults.
+    const problem = pullsProblem("defaults.pulls", cfg.defaults?.pulls);
+    if (problem) throw new Error(`config.yaml: ${problem}`);
+  }
   validateHarnessWords(cfg, "config.yaml");
   validateMcpServers(cfg, "config.yaml");
   if (typeof cfg.organization !== "string" || cfg.organization.trim() === "") {
@@ -851,6 +856,27 @@ export function grantProblem(path: string, raw: unknown): string | undefined {
  *  channel's or a user's): an integer count of days from 0 to `IDLE_DAYS_MAX`
  *  (record 0051), refused naming the path — a typo never reads as "never
  *  idles" or "idles a year". */
+/** The merge watch's block (record 0071, mechanism three), wherever config can
+ *  carry it — `defaults.pulls`, the runtime org scope or a repository scope:
+ *  `watch` a boolean, `rebaseInFlight` a positive integer, `spendLimitUsd` a
+ *  positive number, refused naming the path — a typo never reads as "off". */
+export function pullsProblem(path: string, raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return `${path} must be a mapping`;
+  for (const key of unknownKeys(raw, { watch: true, rebaseInFlight: true, spendLimitUsd: true }))
+    return `${path}.${key} is not a known key`;
+  const p = raw as { watch?: unknown; rebaseInFlight?: unknown; spendLimitUsd?: unknown };
+  if (p.watch !== undefined && typeof p.watch !== "boolean") return `${path}.watch must be true or false`;
+  if (p.rebaseInFlight !== undefined && (!Number.isInteger(p.rebaseInFlight) || (p.rebaseInFlight as number) < 1))
+    return `${path}.rebaseInFlight must be a positive integer`;
+  if (
+    p.spendLimitUsd !== undefined &&
+    (typeof p.spendLimitUsd !== "number" || !Number.isFinite(p.spendLimitUsd) || p.spendLimitUsd <= 0)
+  )
+    return `${path}.spendLimitUsd must be a positive number of dollars`;
+  return undefined;
+}
+
 export function idleDaysProblem(path: string, raw: unknown): string | undefined {
   if (raw === undefined) return undefined;
   return Number.isInteger(raw) && (raw as number) >= 0 && (raw as number) <= IDLE_DAYS_MAX
@@ -964,10 +990,29 @@ export function githubBindingConflict(
  *  document is validated, so the two layers cannot bind one GitHub account to
  *  two people between them (a user present in both counts once: the override wins). */
 export function validateScopeBlocks(
-  layer: { channels?: Record<string, Scope>; users?: Record<string, Scope>; threads?: Record<string, Scope> },
+  layer: {
+    channels?: Record<string, Scope>;
+    users?: Record<string, Scope>;
+    threads?: Record<string, Scope>;
+    org?: Scope;
+    repos?: Record<string, Scope>;
+  },
   source: string,
   base?: { users?: Record<string, Scope> },
 ): void {
+  // The merge watch's scopes (record 0071): the runtime org scope and the
+  // repository scopes carry a `pulls` block, each held to the block's rule; a
+  // repository scope carries the block ALONE — no other setting resolves a
+  // repository layer, so anything else there would be read by nothing.
+  const orgPulls = pullsProblem("org.pulls", layer.org?.pulls);
+  if (orgPulls) throw new Error(`${source}: ${orgPulls}`);
+  for (const [repo, scope] of Object.entries(layer.repos ?? {})) {
+    for (const key of Object.keys(scope))
+      if (key !== "pulls")
+        throw new Error(`${source}: repos.${repo}.${key} is not a repository-scope key — only \`pulls\` is`);
+    const problem = pullsProblem(`repos.${repo}.pulls`, scope.pulls);
+    if (problem) throw new Error(`${source}: ${problem}`);
+  }
   for (const [kind, scopes] of [
     ["channels", layer.channels],
     ["users", layer.users],
@@ -999,6 +1044,12 @@ export function validateScopeBlocks(
         throw new Error(`${source}: ${ADDRESS_SEVERITY_MOVED(`${kind}.${id}.ship.addressSeverity`)}`);
       const idle = idleDaysProblem(`${kind}.${id}.ship.idleDays`, scope.ship?.idleDays);
       if (idle) throw new Error(`${source}: ${idle}`);
+      // The merge watch is an org-or-repository setting (record 0071): under a
+      // channel, user or thread it would be read by nothing, refused by name.
+      if (scope.pulls !== undefined)
+        throw new Error(
+          `${source}: ${kind}.${id}.pulls is an org or repository key — config set org|repo --pulls.… (record 0071)`,
+        );
       // The author binding is a users key: under a channel or a thread it
       // would be read by nothing, so it is refused by name (record 0062).
       if (scope.github !== undefined && kind !== "users")

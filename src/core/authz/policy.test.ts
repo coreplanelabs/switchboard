@@ -504,6 +504,21 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.token, channelConfig("slack:C_PUB1")],
     ],
   },
+  // The ORG config scope (`config set org|repo --pulls.…`, record 0071): the
+  // channel-config grant — a repository scope is the org setting's slice.
+  "config:write config-scope/org [has-grant(config:write)]": {
+    allow: [
+      [A.admin, orgConfig],
+      [A.operator, orgConfig],
+      [A.chatUser, orgConfig],
+    ],
+    deny: [
+      [A.chatUserGated, orgConfig],
+      [A.browser, orgConfig],
+      [A.reader, orgConfig],
+      [A.mcpWriter, orgConfig],
+    ],
+  },
   // ORG-wide MCP servers: the repo-management right for a person…
   "mcp:write config-scope/org [has-grant(repo:write)]": {
     allow: [

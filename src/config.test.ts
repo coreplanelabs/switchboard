@@ -2664,3 +2664,61 @@ describe("references block (references.enabled)", () => {
     );
   });
 });
+
+describe("the merge watch's pulls block (record 0071, mechanism three; routing-and-config item 32)", () => {
+  it("mergeWatchOf resolves repo override over the runtime org scope over the static defaults.pulls over off", async () => {
+    const s = store(YAML_FIXTURE.replace("defaults:\n", "defaults:\n  pulls: { watch: true, spendLimitUsd: 8 }\n"));
+    // The static org half.
+    expect(s.mergeWatchOf("acme/api")).toEqual({ watch: true, rebaseInFlight: 1, spendLimitUsd: 8 });
+    // The runtime org scope layers over it.
+    await s.setOrgOverride({ pulls: { watch: false } });
+    expect(s.mergeWatchOf("acme/api").watch).toBe(false);
+    expect(s.mergeWatchOf("acme/api").spendLimitUsd).toBe(8);
+    // The repository's word wins over either.
+    await s.setRepoOverride("acme/api", { pulls: { watch: true, rebaseInFlight: 2 } });
+    expect(s.mergeWatchOf("acme/api")).toEqual({ watch: true, rebaseInFlight: 2, spendLimitUsd: 8 });
+    expect(s.mergeWatchOf("acme/web").watch).toBe(false);
+    await s.clearRepoOverride("acme/api");
+    expect(s.mergeWatchOf("acme/api").watch).toBe(false);
+    // Bare default: off, one rebase in flight.
+    expect(store().mergeWatchOf("acme/api")).toEqual({ watch: false, rebaseInFlight: 1, spendLimitUsd: 5 });
+  });
+
+  it("a malformed defaults.pulls is refused at load naming the path", () => {
+    expect(() => store(YAML_FIXTURE.replace("defaults:\n", "defaults:\n  pulls: { watch: maybe }\n"))).toThrow(
+      /defaults\.pulls\.watch must be true or false/,
+    );
+    expect(() => store(YAML_FIXTURE.replace("defaults:\n", "defaults:\n  pulls: { rebaseInFlight: 0 }\n"))).toThrow(
+      /defaults\.pulls\.rebaseInFlight must be a positive integer/,
+    );
+    expect(() => store(YAML_FIXTURE.replace("defaults:\n", "defaults:\n  pulls: { spendLimitUsd: -1 }\n"))).toThrow(
+      /defaults\.pulls\.spendLimitUsd must be a positive number/,
+    );
+    expect(() => store(YAML_FIXTURE.replace("defaults:\n", "defaults:\n  pulls: { watchme: true }\n"))).toThrow(
+      /defaults\.pulls\.watchme is not a known key/,
+    );
+  });
+
+  it("a pulls block under a channel or user scope is refused at load — it would be read by nothing", () => {
+    expect(() =>
+      store(YAML_FIXTURE.replace('"slack:CREVIEW":\n', '"slack:CREVIEW":\n    pulls: { watch: true }\n')),
+    ).toThrow(/channels\.slack:CREVIEW\.pulls is an org or repository key/);
+    expect(() =>
+      store(YAML_FIXTURE.replace('"slack:UFORCED":\n', '"slack:UFORCED":\n    pulls: { watch: true }\n')),
+    ).toThrow(/users\.slack:UFORCED\.pulls is an org or repository key/);
+  });
+
+  it("a stored repository scope is held to the same rule: the pulls block alone, validated by name", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-config-"));
+    const cfg = join(dir, "config.yaml");
+    writeFileSync(cfg, YAML_FIXTURE);
+    const overrides = join(dir, "overrides.json");
+    writeFileSync(overrides, JSON.stringify({ channels: {}, users: {}, repos: { "acme/api": { agent: "review" } } }));
+    expect(() => new ConfigStore(cfg, overrides)).toThrow(/repos\.acme\/api\.agent is not a repository-scope key/);
+    writeFileSync(
+      overrides,
+      JSON.stringify({ channels: {}, users: {}, repos: { "acme/api": { pulls: { watch: "yes" } } } }),
+    );
+    expect(() => new ConfigStore(cfg, overrides)).toThrow(/repos\.acme\/api\.pulls\.watch must be true or false/);
+  });
+});

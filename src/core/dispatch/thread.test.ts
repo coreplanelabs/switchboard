@@ -312,6 +312,27 @@ describe("ownerOf and instanceOf — the thread's owner (record 0051's owner rul
     expect(await ownerOf([child], async () => [ended], THREAD)).toEqual({ kind: "none" });
   });
 
+  it("a watching unit owns its thread (record 0071, mechanism three): a merge-ready wait leaves the row without an ending, so an addressed reply is the unit's turn and never the router's", async () => {
+    // With watch until merge on, a unit whose pull request reached merge-ready
+    // stays registered in the merge-ready book and its row carries no ending
+    // while it waits — exactly the unfinished-unit clause, so the reply is
+    // appended to the unit's events (thread-admission item 9), not routed.
+    const watching = unit({ pr: { number: 7, url: "https://github.com/acme/api/pull/7" } });
+    const child = run({ id: "r-child", agent: "coding", parentInstanceId: "ship_acme_api_1", session: closed });
+    expect(await ownerOf([child], async () => [watching], THREAD)).toEqual({
+      kind: "unit",
+      instanceId: "ship_acme_api_1",
+      unit: watching,
+    });
+    // With the watch off, merge_ready is an ended kind exactly as today: the
+    // row carries the ending and the thread is the router's again.
+    const endedMergeReady = unit({
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      ending: { kind: "merge_ready", report: "merge-ready", at: 2_000 },
+    });
+    expect(await ownerOf([child], async () => [endedMergeReady], THREAD)).toEqual({ kind: "none" });
+  });
+
   it("a unit row for another thread is not the owner, and an empty page owns nothing", async () => {
     const ship = run({ id: "r-ship", agent: "ship", instanceId: "ship_acme_api_1", session: closed });
     expect(await ownerOf([ship], async () => [unit({ threadKey: "slack:C1:9.9" })], THREAD)).toEqual({

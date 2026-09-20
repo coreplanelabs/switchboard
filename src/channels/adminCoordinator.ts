@@ -159,6 +159,12 @@ export interface AdminCoordinatorDeps {
    *  (agent-ship item 12); absent without PUBLIC_BASE_URL — the report names
    *  the run id instead. */
   runPageBase?: string;
+  /** Watch until merge, resolved for one repository (`ConfigStore.mergeWatchOf`,
+   *  record 0071 mechanism three): read by the merge door's conflict refusal so
+   *  the remedy it names is the one that exists — the watching unit's own round
+   *  where the setting is on, the sweep a person runs otherwise. Absent — a
+   *  test of the other paths — the watch reads as off. */
+  mergeWatchOf?: (repo: string) => { watch: boolean };
   /** The one runs service every surface reads: the live and finished runs of the instance's thread. */
   runs: RunsService;
   /** The registry the hosted parent run lives in (record 0060): the four
@@ -2224,6 +2230,13 @@ async function merge(
   // approved work is already on the branch.
   if (facts.mergeableState === "dirty") {
     const base = facts.baseRef ?? "its base";
+    // The remedy named is the one that exists (record 0071, criterion 5): with
+    // the watch on for this repository, the watching unit's own round rebases
+    // it on the next push to the base; otherwise the sweep a person runs.
+    if (deps.mergeWatchOf?.(instance.repo).watch === true)
+      return refused(
+        `${where} conflicts with \`${base}\` at \`${headSha.slice(0, 7)}\` — the watch is on for \`${instance.repo}\`: the waiting unit's own round rebases it on the next push to \`${base}\` (an unchanged patch carries the approval). The approved work stands`,
+      );
     return refused(
       `${where} conflicts with \`${base}\` at \`${headSha.slice(0, 7)}\` — \`pulls rebase ${where}\` rebases it onto \`${base}\` (an unchanged patch carries the approval); merge it by hand once the checks are green. The approved work stands`,
     );

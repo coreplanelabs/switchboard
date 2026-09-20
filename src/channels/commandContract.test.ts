@@ -507,10 +507,10 @@ describe("derived naming across surfaces", () => {
     expect(byId["help.show"]).toBe("help show");
     expect(byId["config.show"]).toBe("config show [--channel <string>]");
     expect(byId["config.set"]).toBe(
-      "config set <scope> [--agent <string>] [--model <string>] [--models <object>] [--effort <low|medium|high|xhigh|max>] [--efforts <object>] [--verbosity <quiet|verbose|debug>] [--harness <object>] [--boundary <object>] [--review <object>] [--intake <object>] [--user <string>] [--github <string>] [--channel <string>] [--thread <string>]",
+      "config set <scope> [--agent <string>] [--model <string>] [--models <object>] [--effort <low|medium|high|xhigh|max>] [--efforts <object>] [--verbosity <quiet|verbose|debug>] [--harness <object>] [--boundary <object>] [--review <object>] [--intake <object>] [--pulls <object>] [--repo <string>] [--user <string>] [--github <string>] [--channel <string>] [--thread <string>]",
     );
     expect(byId["config.clear"]).toBe(
-      "config clear <scope> [--channel <string>] [--thread <string>] [--user <string>]",
+      "config clear <scope> [--channel <string>] [--thread <string>] [--repo <string>] [--user <string>]",
     );
     expect(byId["config.instructions"]).toBe("config instructions <scope> [text…] [--channel <string>]");
     expect(byId["memory.list"]).toBe(

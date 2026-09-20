@@ -542,10 +542,14 @@ export const COMMAND_FIXTURES: Readonly<
       // `--github` and `--user` belong to the `user` scope alone (record 0062):
       // the all-set combination is refused by name, and the user scope carries
       // the binding alone — so the grid's two incoherent cases are patched here.
-      "all-options-set": { omit: ["github", "user"] },
+      "all-options-set": { omit: ["github", "user", "pulls", "repo"] },
       "scope=user": { set: { user: FIXTURE.boundUser, github: "ivy-dev" }, omit: ["intake"] },
+      // The org and repo scopes carry the pull-request watch alone (record 0071):
+      // any other setting there is refused by name, and the repo scope needs its target.
+      "scope=org": { set: { pulls: { watch: "on" } }, omit: ["intake"] },
+      "scope=repo": { set: { pulls: { watch: "on" }, repo: FIXTURE.repo }, omit: ["intake"] },
     },
-    why: "as config.show plus `--thread` (a machine caller has no origin thread), and at least one setting every scope takes (a bare `config set` is `nothing to set`; a thread scope carries only the intake gate's mode; the user scope carries the binding alone)",
+    why: "as config.show plus `--thread` (a machine caller has no origin thread), and at least one setting every scope takes (a bare `config set` is `nothing to set`; a thread scope carries only the intake gate's mode; the user scope carries the binding alone; the org and repo scopes carry the pull-request watch alone)",
   },
   "config.clear": {
     baseline: { channel: FIXTURE.channel, thread: FIXTURE.thread },
@@ -553,8 +557,10 @@ export const COMMAND_FIXTURES: Readonly<
     variants: {
       // `config clear user` names the person whose binding to remove.
       "scope=user": { set: { user: FIXTURE.boundUser } },
+      // `config clear repo` names the repository whose scope to drop (record 0071).
+      "scope=repo": { set: { repo: FIXTURE.repo } },
     },
-    why: "as config.show, plus `--thread` for the thread scope on machine surfaces and `--user` for the user scope's binding",
+    why: "as config.show, plus `--thread` for the thread scope on machine surfaces, `--user` for the user scope's binding and `--repo` for the repo scope's target",
   },
   "config.instructions": { baseline: { channel: FIXTURE.channel }, why: "as config.show" },
   "pulls.rebase": {
