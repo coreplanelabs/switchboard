@@ -7,6 +7,7 @@ import { MAX_READ_BYTES, tooLargeMessage } from "./binaryRead.js";
 import type { Span } from "../core/trace/types.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { PushedBranch } from "./residentRebind.js";
+import type { FleetBusyEndingFacts } from "./sandboxErrors.js";
 import type { LeftBehind } from "./residentCleanliness.js";
 import { publicEnv } from "../secrets.js";
 
@@ -259,10 +260,16 @@ export function requestFailedMessage(worker: "resident" | "sandbox", route: stri
  *  Nothing ran and nothing is broken — the fleet's `max_instances` is reached
  *  — so this is deliberately NOT an `ExecInfraError`: a caller that reads
  *  infra failures as a dead sandbox must not read this one so. `extends
- *  Error` so message/`instanceof Error` callers are unaffected. */
+ *  Error` so message/`instanceof Error` callers are unaffected. `fleetBusy`
+ *  is present only when the spent wait was the fleet's (item 14): the facts
+ *  of the last busy answer, which the run's ending site logs as one
+ *  queryable line (`fleetBusyRunEndedLine`) beside the run id it alone knows. */
 export class ExecCapacityError extends Error {
   readonly capacity = true as const;
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly fleetBusy?: FleetBusyEndingFacts,
+  ) {
     super(message);
     this.name = "ExecCapacityError";
   }

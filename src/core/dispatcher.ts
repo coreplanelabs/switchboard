@@ -98,6 +98,7 @@ import {
   prepareRestartTurn,
 } from "./dispatch/reattach.js";
 import { workspaceBindingFor } from "../execution/factory.js";
+import { fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
 import { sessionSeedFor } from "./dispatch/seed.js";
 import { sessionCapabilityFor } from "../tools/session.js";
@@ -1833,6 +1834,15 @@ export async function dispatch(
     // already-stamped code: the root and the outcome tell the same story.
     if (!refused) root.setAttrs({ refusal: thrown?.code ?? "uncaught", cause: thrown?.cause ?? "system" });
     const errMsg = err instanceof Error ? err.message : String(err);
+    // A run the full sandbox fleet ended is one queryable line in the bot's
+    // own log (docs/reference/specs/execution.md item 14) — the card and the
+    // record still carry the ending as before; this line is what a log sweep
+    // counts after a capacity incident, when reading every card is the only
+    // other way to find which runs the burst killed. Here, the one site every
+    // failing run passes (the run loop rethrows), so it is emitted once; any
+    // other ending leaves `fleetBusyRunEndedLine` null and logs nothing.
+    const fleetBusyLine = fleetBusyRunEndedLine(registered?.id, msg.threadKey, err);
+    if (fleetBusyLine !== null) console.log(fleetBusyLine);
     // A card left spinning after a setup failure looks like a hang; close it.
     // Only a card still in setup — a run failure was already closed by the run
     // loop with its checklist, and must not be relabeled here.

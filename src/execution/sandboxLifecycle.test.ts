@@ -259,6 +259,20 @@ describe("sandbox Worker wiring (static)", () => {
   // items 9 and 14: the executor waits on `reason`, never on the text, so a
   // refusal the Durable Object named — the stat under a binary read on a full
   // fleet included — leaves with its token.
+  // item 14: where the platform's refusal is turned into the named condition,
+  // the Worker leaves one queryable line (`sandbox.fleet-busy.refused`) and
+  // hands the answer this object's id — both classification sites: the exec
+  // path inside the Durable Object, and the fetch handler's file-route catch,
+  // which computes the id from the thread key the object is named by.
+  it("a fleet-busy refusal is one queryable log line at both classification sites, and the answer carries the Durable Object id", () => {
+    expect(worker).toMatch(
+      /if \(isFleetBusyError\(err\)\) \{\s*const container = this\.ctx\.id\.toString\(\);\s*console\.log\(fleetBusyRefusedLine\(\{ thread: this\.ctx\.id\.name \?\? container, container, refusal: raw \}\)\);\s*return fleetBusyExecAnswer\(raw, container\);/,
+    );
+    expect(worker).toMatch(
+      /if \(isFleetBusyError\(err\)\) \{\s*const container = env\.Sandbox\.idFromName\(threadKey\)\.toString\(\);\s*console\.log\(fleetBusyRefusedLine\(\{ thread: threadKey, container, refusal: msg, route: url\.pathname \}\)\);\s*return json\(fleetBusyAnswer\(msg, container\), 503\);/,
+    );
+  });
+
   it("a file route's refusal carries the Durable Object's reason token", () => {
     expect(worker).toContain("function refused(r: FileRefusal)");
     expect(worker).toMatch(/reason: r\.reason/);

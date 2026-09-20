@@ -213,7 +213,23 @@ export class CloudflareSandboxExecutor implements Executor {
       const answer = await this.send(route, sent, headers, budgetMs, signal, span);
       if (answer.kind === "ok") return answer.data;
       const plan = waitPlan(answer.reason, budgetMs);
-      if (waited >= plan.budget) throw new ExecCapacityError(plan.exhausted(waited));
+      if (waited >= plan.budget) {
+        // The fleet's spent wait carries its facts — the Worker's refusal text
+        // (the platform's own words as the cause), the wait and the Durable
+        // Object id — so the run's ending site can log them beside the run id
+        // (docs/reference/specs/execution.md item 14). Only the fleet's: every
+        // other capacity ending stays a bare message.
+        throw new ExecCapacityError(
+          plan.exhausted(waited),
+          answer.reason === FLEET_BUSY_REASON
+            ? {
+                refusal: answer.refusal,
+                waitedMs: waited,
+                ...(answer.containerId !== undefined ? { containerId: answer.containerId } : {}),
+              }
+            : undefined,
+        );
+      }
       if (answer.reason !== lastReason) {
         attempt = 0;
         lastReason = answer.reason;
@@ -237,7 +253,10 @@ export class CloudflareSandboxExecutor implements Executor {
     budgetMs: number,
     signal?: AbortSignal,
     span?: Span,
-  ): Promise<{ kind: "ok"; data: Record<string, unknown> } | { kind: "busy"; reason: WaitReason }> {
+  ): Promise<
+    | { kind: "ok"; data: Record<string, unknown> }
+    | { kind: "busy"; reason: WaitReason; refusal: string; containerId?: string }
+  > {
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
     const delays = [0, 3000, 6000, 12000];
     let lastErr = "";
@@ -298,7 +317,13 @@ export class CloudflareSandboxExecutor implements Executor {
       // the Worker names them only before any command or file op started, so
       // nothing ran.
       const reason = waitReasonOf(res, data);
-      if (reason) return { kind: "busy", reason };
+      if (reason)
+        return {
+          kind: "busy",
+          reason,
+          refusal: String(data.error ?? ""),
+          ...(typeof data.containerId === "string" ? { containerId: data.containerId } : {}),
+        };
       // A success body has no `error` key at all, so a PRESENT but empty
       // `error` is the Worker's failure shape with its text missing — infra,
       // not a command exit. A thread placed on a previous-image container
