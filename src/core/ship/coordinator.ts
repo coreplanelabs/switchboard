@@ -592,8 +592,14 @@ export type StepReturn =
   | { type: "spawn"; step: string; outcome: "busy"; runId?: string; at: number }
   | { type: "spawn"; step: string; outcome: "refused"; refusal: string; message?: string; at: number }
   | { type: "spawn"; step: string; outcome: "failed"; reason: string; at: number }
+  // The hosted parent's hard stop landed (record 0060; issue 1924): the bot
+  // refuses the spawn over the instance row's stop mark, and the unit ends
+  // `stopped` — nothing more is run.
+  | { type: "spawn"; step: string; outcome: "stopped"; at: number }
   | { type: "wait"; step: string; outcome: "event" | "timeout" }
-  | { type: "read-record"; step: string; run: ChildFacts; at: number }
+  // `stopped` on a read: the instance row carries the hard stop's mark, so a
+  // finished child ends its unit `stopped` whatever the child's own status.
+  | { type: "read-record"; step: string; run: ChildFacts; stopped?: true; at: number }
   | { type: "pr-check"; step: string; pr: PrCheck; at: number }
   | { type: "merge"; step: string; outcome: "merged"; sha: string; at: number }
   // The door found the pull request already merged after the approval — auto-merge
@@ -2126,6 +2132,12 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
             round: p.round,
             reviewRounds: s.reviewRounds,
           });
+        case "stopped":
+          // The hosted parent's hard stop (record 0060; issue 1924): the spawn
+          // was refused over the stop mark, so the unit ends stopped here.
+          return end(clocked, { kind: "stopped", mode: "hard", round: p.round, reviewRounds: s.reviewRounds }, [
+            roundNote(p.round, "stopped"),
+          ]);
         case "failed":
           return end(clocked, {
             kind: "aborted",
@@ -2164,6 +2176,21 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           },
           notes: [],
         };
+      // The hosted parent's hard stop landed while this child ran (record 0060;
+      // issue 1924): the unit ends stopped as the child ends, whatever the
+      // child's own status — the runner runs nothing more of it.
+      if (r.stopped === true)
+        return end(
+          clocked,
+          {
+            kind: "stopped",
+            mode: "hard",
+            round: p.round,
+            reviewRounds: s.reviewRounds,
+            ...(r.run.finalReply !== undefined ? { finalReply: r.run.finalReply } : {}),
+          },
+          [roundNote(p.round, "stopped")],
+        );
       if (r.run.status === "interrupted") {
         // A dead CODING child may have pushed before the ledger closed it: the
         // pr-check recovers the branch. A review child has nothing on the

@@ -3998,3 +3998,56 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     expect(await h.instances.listEvents(key, true)).toHaveLength(1);
   });
 });
+
+// Feature: docs/reference/specs/agent-ship.md item 16 and live-view.md items 10
+// and 16 (record 0060; issue 1924) — the hard stop's mark on the instance row,
+// as the runner's routes read it back: the plan answer carries `stopped: true`,
+// the spawn route refuses over it before any child is dispatched, and the
+// read-record answer flags it beside a finished child's record.
+describe("the runner's routes read the hard stop's mark (record 0060; issue 1924)", () => {
+  it("plan answers `stopped: true` over a marked instance row and leaves the flag out otherwise", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    const bare = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}plan`, { parentInstanceId: INSTANCE.id }),
+      h.deps,
+    );
+    expect("stopped" in (bare.body as Record<string, unknown>)).toBe(false);
+    expect(await h.instances.markStopped(INSTANCE.id, NOW - 1_000)).toEqual({ ok: true });
+    const marked = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}plan`, { parentInstanceId: INSTANCE.id }),
+      h.deps,
+    );
+    expect(marked.status).toBe(200);
+    expect((marked.body as Record<string, unknown>).stopped).toBe(true);
+  });
+
+  it("spawn refuses `stopped` over a marked row before any child is dispatched — a terminal refusal, never a retry", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await h.instances.markStopped(INSTANCE.id, NOW - 1_000);
+    const res = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, spawnBody), h.deps);
+    expect(res).toEqual({ status: 409, body: { ok: false, error: "stopped", at: NOW } });
+    expect(h.dispatched).toHaveLength(0);
+  });
+
+  it("read-record carries `stopped: true` beside a finished child's record, so the unit ends stopped as the child ends", async () => {
+    const h = harness();
+    await h.instances.put(INSTANCE);
+    await h.store.put(record("run-done", { ...TAG }));
+    const read = () =>
+      handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-done" }),
+        h.deps,
+      );
+    expect("stopped" in ((await read()).body as Record<string, unknown>)).toBe(false);
+    await h.instances.markStopped(INSTANCE.id, NOW - 1_000);
+    const marked = await read();
+    expect(marked.status).toBe(200);
+    expect((marked.body as Record<string, unknown>).stopped).toBe(true);
+    expect((marked.body as { run: { finished: boolean; status: string } }).run).toMatchObject({
+      finished: true,
+      status: "completed",
+    });
+  });
+});

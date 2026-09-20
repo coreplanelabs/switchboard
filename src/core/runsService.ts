@@ -477,7 +477,7 @@ export interface RunsServiceDeps {
   /** The coordinator's records (run-history items 49–50): the instance a unit
    *  belongs to and the unit rows a unit listing is cut by. Null or absent:
    *  every unit is `not_found`. */
-  units?: Pick<CoordinatorInstanceStore, "get" | "listUnits"> | null;
+  units?: Pick<CoordinatorInstanceStore, "get" | "listUnits" | "markStopped"> | null;
   /** The price table a finished run's tokens are priced through (costs.md item
    *  4c): `costs.prices` over the Anthropic list; absent → the list alone. */
   prices?: ModelPriceTable;
@@ -605,7 +605,7 @@ const hostedRefused = { ok: false, error: "hosted" } as const;
 /** The hosted parent's last word (record 0060): the units' state as its
  *  answer, in the plan summary's own vocabulary — an ending's kind, else
  *  `unfinished` for a unit whose thread opened, else `not started`. */
-function hostedSealAnswer(units: readonly CoordinatorUnit[]): string {
+function hostedSealAnswer(units: readonly CoordinatorUnit[], runnerStopped: boolean): string {
   const lines = units.map((u) => {
     const how = u.ending ? u.ending.kind : u.threadKey !== undefined ? "unfinished" : "not started";
     return `${u.unit} — ${how}${u.pr ? ` — ${u.pr.url}` : ""}`;
@@ -613,6 +613,11 @@ function hostedSealAnswer(units: readonly CoordinatorUnit[]): string {
   return [
     "⏹ Hard stop: the pipeline's parent run was sealed `failed` and its host key released. The units stood at:",
     ...(lines.length > 0 ? lines : ["(no unit rows recorded)"]),
+    // The runner's stop (issue 1924): the mark on the instance row, honoured
+    // before every unit start and every child spawn.
+    runnerStopped
+      ? "The plan runner was stopped: it starts no further unit and spawns no further child — the remaining units end `stopped`, a unit whose child is still live ending when that child ends."
+      : "The plan runner could not be marked stopped — it may still be walking; terminate its Workflow instance if it is.",
   ].join("\n");
 }
 
@@ -839,7 +844,19 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       undefined,
     );
     let unitRows: CoordinatorUnit[] = [];
+    // The runner's stop (record 0060; issue 1924): the mark on the instance row,
+    // written before the answer is composed so the answer says what happened.
+    // Best effort like the ledger below: a mark that could not be written seals
+    // the parent anyway, and the answer says the runner may still be walking.
+    let runnerStopped = false;
     if (units && instanceId !== undefined) {
+      try {
+        const marked = await units.markStopped(instanceId, at);
+        if (marked.ok) runnerStopped = true;
+        else warn(`[runs] the runner's stop mark was refused for ${id} (${marked.reason})`);
+      } catch (err) {
+        warn(`[runs] the runner's stop mark failed for ${id}: ${describe(err)}`);
+      }
       try {
         unitRows = await units.listUnits(instanceId);
       } catch (err) {
@@ -848,7 +865,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     }
     // The answer before finish() — a publish on a finished run is a no-op — so
     // the record's last content event is the units' state.
-    registry.publish(id, { type: "answer", text: hostedSealAnswer(unitRows), at: clock() });
+    registry.publish(id, { type: "answer", text: hostedSealAnswer(unitRows, runnerStopped), at: clock() });
     registry.finish(id, "failed");
     const snap = registry.snapshotById(id);
     const seal = registry.seal(id);

@@ -693,6 +693,10 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const instance = await deps.instances.get(req.parentInstanceId);
   if (!instance) return json(404, { ok: false, error: "unknown_instance" });
   const at = (deps.clock ?? systemClock)();
+  // The hard stop's mark (record 0060; issue 1924): a sealed parent's runner
+  // spawns nothing more — the refusal is terminal, and the machine ends the
+  // unit stopped on it.
+  if (instance.stop !== undefined) return json(409, { ok: false, error: "stopped", at });
   const unit = await unitRowOf(deps, instance, req.unit);
   if (!unit.ok) return unit.response;
   const own = unitThread(instance, unit.row, unit.rows.length);
@@ -994,6 +998,9 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   const record = full.ok ? full.value : view;
   const finalReply = finalReplyOf(record.events);
   const pr = prOpenedOf(record.events);
+  // The hard stop's mark (record 0060; issue 1924): a finished child's unit
+  // ends stopped on it, whatever the child's own status.
+  const instanceRow = await deps.instances.get(id.value);
   // Whether the verdict stands on the unit's pull request: the child's own
   // record of its post first (item 18) — it posted, or it recorded why not —
   // and GitHub only when the record is silent, looked at patiently: the
@@ -1002,7 +1009,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   // head regardless, so the pre-check may be patient while the guard stays strict.
   let posted: { reviewPosted: boolean; reviewPostReason?: string } | undefined;
   if (record.verdict !== undefined && record.reviewHead !== undefined && typeof body.unit === "string") {
-    const instance = await deps.instances.get(id.value);
+    const instance = instanceRow;
     const row = instance ? (await deps.instances.listUnits(instance.id)).find((u) => u.unit === body.unit) : undefined;
     if (instance && row?.pr !== undefined) {
       const unitPr = { repo: instance.repo, number: row.pr.number };
@@ -1015,6 +1022,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
   }
   return json(200, {
     ok: true,
+    ...(instanceRow?.stop !== undefined ? { stopped: true } : {}),
     run: {
       ...coordinatorRunView(view, id.value, finalReply),
       ...(pr !== undefined ? { pr } : {}),
@@ -1393,6 +1401,9 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
     idleDays: instance.idleDays ?? IDLE_DAYS_DEFAULT,
     // The mark (item 16): the machine's report keys its re-issue line on it.
     generated: isGenerated(instance),
+    // The hard stop's mark (record 0060; issue 1924): the walk reads it before
+    // every unit start and ends the remaining units stopped on it.
+    ...(instance.stop !== undefined ? { stopped: true } : {}),
     // The runs page base: the report's pointer at a child's write-up links its
     // run page with it (agent-ship item 12); left out, the run id is named.
     ...(deps.runPageBase !== undefined ? { runPageBase: deps.runPageBase } : {}),

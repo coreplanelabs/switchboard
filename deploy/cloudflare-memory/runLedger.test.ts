@@ -674,6 +674,34 @@ describe("run ledger — the coordinator instance record (item 49)", () => {
     expect((await post("/runs/coordinator/get", { storeKey: key, id: "ship_none" })).data).toEqual({ instance: null });
   });
 
+  // Record 0060 / issue 1924: the hard stop's mark on the instance row —
+  // written when the hosted parent is sealed, read back by the runner's routes.
+  it("stop marks the instance row and get reads the mark back; a second mark keeps the first `at`; an unknown id is 409 unknown_instance; a malformed body is 400", async () => {
+    const key = storeKey();
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect(await post("/runs/coordinator/stop", { storeKey: key, instanceId: instance.id, at: 5_000 })).toEqual({
+      status: 200,
+      data: { ok: true },
+    });
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data).toEqual({
+      instance: { ...instance, stop: { at: 5_000 } },
+    });
+    expect((await post("/runs/coordinator/stop", { storeKey: key, instanceId: instance.id, at: 9_000 })).status).toBe(
+      200,
+    );
+    expect((await post("/runs/coordinator/get", { storeKey: key, id: instance.id })).data).toEqual({
+      instance: { ...instance, stop: { at: 5_000 } },
+    });
+    expect(await post("/runs/coordinator/stop", { storeKey: key, instanceId: "ship_none", at: 5_000 })).toEqual({
+      status: 409,
+      data: { ok: false, reason: "unknown_instance" },
+    });
+    expect((await post("/runs/coordinator/stop", { storeKey: key, instanceId: "has:colon", at: 5_000 })).status).toBe(
+      400,
+    );
+    expect((await post("/runs/coordinator/stop", { storeKey: key, instanceId: instance.id })).status).toBe(400);
+  });
+
   it("replace writes the record over whatever the id holds — a different record, or none — drops the id's unit rows and no other instance's; a malformed record is 400", async () => {
     const key = storeKey();
     expect(await post("/runs/coordinator/put", { storeKey: key, instance })).toEqual({

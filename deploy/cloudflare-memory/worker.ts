@@ -2276,6 +2276,29 @@ export class RunHistoryDO extends DurableObject<Env> {
     return row ? (JSON.parse(row.json) as CoordinatorInstance) : null;
   }
 
+  /** The hard stop's mark on the instance row (record 0060; issue 1924).
+   *  Idempotent: a marked row keeps its first mark. */
+  async markInstanceStopped(id: string, at: number): Promise<{ ok: true } | { ok: false; reason: "unknown_instance" }> {
+    let out: { ok: true } | { ok: false; reason: "unknown_instance" } = { ok: true };
+    this.ctx.storage.transactionSync(() => {
+      const row = this.sql
+        .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, id)
+        .toArray()[0];
+      if (!row) {
+        out = { ok: false, reason: "unknown_instance" };
+        return;
+      }
+      const instance = JSON.parse(row.json) as CoordinatorInstance;
+      if (instance.stop !== undefined) return;
+      this.sql.exec(
+        `UPDATE coordinator_instances SET json = ? WHERE instance_id = ?`,
+        JSON.stringify({ ...instance, stop: { at } }),
+        id,
+      );
+    });
+    return out;
+  }
+
   // ---- the units of the plan an instance runs (run-history item 50) -----------
 
   /** Each row replaced whole under its (instance, unit); a replace keeps the row's place. */
@@ -4508,6 +4531,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/put",
   "/runs/coordinator/replace",
   "/runs/coordinator/get",
+  "/runs/coordinator/stop",
   "/runs/coordinator/units/put",
   "/runs/coordinator/units/list",
   "/runs/coordinator/events/append",
@@ -5083,6 +5107,16 @@ async function handleLedger(pathname: string, body: unknown, env: Env): Promise<
     if (typeof b.id !== "string" || !INSTANCE_ID_PATTERN.test(b.id))
       return json({ error: "id must be a Workflow instance id" }, 400);
     return json({ instance: await stub.getInstance(b.id) });
+  }
+  // The hard stop's mark on the instance row (record 0060; issue 1924): the
+  // bot writes it when the hosted parent is sealed; the runner reads it back.
+  if (pathname === "/runs/coordinator/stop") {
+    if (typeof b.instanceId !== "string" || !INSTANCE_ID_PATTERN.test(b.instanceId))
+      return json({ error: "instanceId must be a Workflow instance id" }, 400);
+    if (typeof b.at !== "number" || !Number.isFinite(b.at)) return json({ error: "at must be a time" }, 400);
+    const r = await stub.markInstanceStopped(b.instanceId, b.at);
+    console.log(`[runs/coordinator/stop] ${key.value} ${b.instanceId} → ${r.ok ? "marked" : r.reason}`);
+    return r.ok ? json(r) : json(r, 409);
   }
   // The units of the plan an instance runs (run-history item 50): rows
   // validated by the shared contract, each replaced whole; a list by instance.

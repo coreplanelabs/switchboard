@@ -55,6 +55,14 @@ function workerDouble() {
       const text = rows.get(body.id as string);
       return Response.json({ instance: text ? JSON.parse(text) : null });
     }
+    if (path === "/runs/coordinator/stop") {
+      const text = rows.get(body.instanceId as string);
+      if (text === undefined) return Response.json({ ok: false, reason: "unknown_instance" }, { status: 409 });
+      const inst = JSON.parse(text) as CoordinatorInstance;
+      if (inst.stop === undefined)
+        rows.set(body.instanceId as string, JSON.stringify({ ...inst, stop: { at: body.at as number } }));
+      return Response.json({ ok: true });
+    }
     if (path === "/runs/coordinator/units/put") {
       for (const u of body.units as CoordinatorUnit[]) units.set(`${u.instanceId}/${u.unit}`, JSON.stringify(u));
       return Response.json({ ok: true });
@@ -124,6 +132,19 @@ const contract = (name: string, make: () => CoordinatorInstanceStore) => {
       expect((await store.listUnits("ship_other")).map((u) => u.unit)).toEqual(["U12"]);
       expect(await store.replace({ ...again, id: "ship_fresh" })).toEqual({ ok: true });
       expect(await store.get("ship_fresh")).toEqual({ ...again, id: "ship_fresh" });
+    });
+
+    // Record 0060 / issue 1924: the hard stop's mark on the instance row —
+    // written when the hosted parent is sealed, read back by the runner's
+    // routes; idempotent, keeping the first mark; unknown ids answer by name.
+    it("markStopped writes the stop mark on the instance row and get reads it back; a second mark keeps the first `at`; an id no record holds is unknown_instance", async () => {
+      const store = make();
+      expect(await store.put(instance)).toEqual({ ok: true });
+      expect(await store.markStopped(instance.id, 5_000)).toEqual({ ok: true });
+      expect(await store.get(instance.id)).toEqual({ ...instance, stop: { at: 5_000 } });
+      expect(await store.markStopped(instance.id, 9_000)).toEqual({ ok: true });
+      expect(await store.get(instance.id)).toEqual({ ...instance, stop: { at: 5_000 } });
+      expect(await store.markStopped("ship_none", 5_000)).toEqual({ ok: false, reason: "unknown_instance" });
     });
 
     // run-history item 50: the unit rows — written at creation, replaced whole
@@ -257,6 +278,7 @@ describe("NullCoordinatorInstanceStore and the builder", () => {
     });
     expect(await store.listEvents(key)).toEqual([]);
     expect(await store.markConsumed(key, [1], "run:r1")).toEqual({ ok: false, reason: "unavailable" });
+    expect(await store.markStopped(instance.id, 1)).toEqual({ ok: false, reason: "unavailable" });
   });
 
   it("the builder answers the Worker store for a Worker-backed run history and the null store otherwise (no config, a file store, a missing bearer)", () => {
