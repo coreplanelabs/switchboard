@@ -125,6 +125,44 @@ export interface OperatorProjection {
   commands: readonly RoutableCommand[];
 }
 
+/** The thread's owner as the operator's turn reads it (record 0051's owner
+ *  order; thread-admission item 9): a live run — the admission slot's, one
+ *  live on another generation, or a hosted pipeline runner's off the page — or
+ *  the unfinished unit whose row names this thread. Absent for a
+ *  session-owned or unowned thread, where the operator decides as ever. A
+ *  live owner carries no `runId` when it is a hosted pipeline runner (or a
+ *  slot still in setup): the runner takes no inbox, so no steer is offered
+ *  and a steer bind folds like any other decision. */
+export type OperatorThreadOwner = { kind: "live"; runId?: string } | { kind: "unit"; unit: string };
+
+/** The projection an OWNED thread's event is shown (issue 2027;
+ *  thread-admission item 9): a reply there is a follow-up for the thread's
+ *  owner, so the model is offered only `steer run <owner> <words>` and the
+ *  read commands — no preset (a run beside the owner would be a rival) and no
+ *  write. The bind guard still reads the author's full projection: a bind
+ *  outside this table is a decision the executor folds, never a violation the
+ *  seam re-asks. */
+export function ownedProjection(p: OperatorProjection): OperatorProjection {
+  return {
+    presets: [],
+    commands: p.commands.filter((c) => c.id === "steer.run" || c.effect === "read"),
+  };
+}
+
+/** The owned thread's rule as the prompt says it (issue 2027; thread-admission
+ *  item 9): the reply is a follow-up for the thread's owner. */
+export function ownerNote(owner: OperatorThreadOwner): string {
+  const who =
+    owner.kind === "live"
+      ? `a live run${owner.runId !== undefined ? ` (\`${owner.runId}\`)` : ""}`
+      : `the unfinished plan unit ${owner.unit}`;
+  const steer =
+    owner.kind === "live" && owner.runId !== undefined
+      ? ` bind \`steer run ${owner.runId} <words>\` to deliver it,`
+      : "";
+  return `This thread is owned by ${who}: the request below is a follow-up for that owner. To act on it,${steer} bind a read command, or ask a question. Any other decision — a refusal, a preset, a write — folds the whole message into the owner unchanged and posts no answer.`;
+}
+
 /** The projection, filtered by the author's allowed presets and commands: a
  *  preset outside `allowedPresets` and a command outside `allowedCommands`
  *  (when given; absent means every listed command) is dropped, never shown,
@@ -158,6 +196,11 @@ export interface OperatorInput {
   /** The pending question of the thread's last turn, when one is open: its
    *  proposed line, so "yes" binds it (`bindFromAnswer`). */
   pendingQuestion?: { proposal: string };
+  /** The thread's owner, when a live run or an idle unit holds it (issue
+   *  2027): the projection shown narrows to steers and reads
+   *  (`ownedProjection`) and the prompt says the reply is the owner's
+   *  follow-up (`ownerNote`). */
+  owner?: OperatorThreadOwner;
   /** Whether the registry parses a line into an invocation — the seam's bind
    *  guard reads it (record 0067, amended: a bound line the registry cannot
    *  parse is a violation, re-asked, never a dead hand-back). Absent (no
@@ -174,7 +217,10 @@ export interface OperatorInput {
  * router's own tags.
  */
 export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
-  const { projection } = input;
+  // An owned thread's event is shown only what a follow-up may bind (issue
+  // 2027); the full projection stays the bind guard's, so an out-of-table
+  // bind is a decision the executor folds, never a re-asked violation.
+  const projection = input.owner ? ownedProjection(input.projection) : input.projection;
   const commandList = projection.commands
     .map((c) => `- \`${c.tool.name}\`: ${oneLine(c.tool.description ?? c.id)}`)
     .join("\n");
@@ -199,6 +245,7 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
     ...(input.pendingQuestion
       ? [`A question is pending: ${OPERATOR_QUESTION_MARKER} \`${input.pendingQuestion.proposal}\``, ""]
       : []),
+    ...(input.owner ? [ownerNote(input.owner), ""] : []),
     // 5. Request.
     "<request>",
     quoteRequest(input.text),
@@ -380,6 +427,31 @@ export function parseOperatorDecision(answer: RouteToolCall | string, guard?: Op
   if (cause !== "policy" && cause !== "request") return refused(`a refusal with cause "${String(cause)}"`);
   if (typeof text !== "string" || text.trim().length === 0) return refused("a refusal with no text");
   return { kind: "refusal", cause, text: redactAndCap(text, ROUTE_RECEIPT_CAP), reason: tidy(reason) };
+}
+
+/** Whether an owned thread's decision runs as bound (issue 2027;
+ *  thread-admission item 9): a reply there is a follow-up for the thread's
+ *  owner, so only a decision whose every bind is a `steer` or a registry read
+ *  runs — a refusal (the operator's own prose — the incident this rule exists
+ *  for answered a unit thread's reply with prose while the coding child ran
+ *  on unsteered) and any bind that would start or write beside the owner (a
+ *  preset line, a write command, an unparseable line) is the steer of the
+ *  whole message instead: the caller folds the words into the owner and posts
+ *  no reply text. A question is the caller's to render before this is asked. */
+function ownedDecisionRuns(event: OperatorEventFields, owner: OperatorThreadOwner, commands?: ChatCommands): boolean {
+  if (event.outcome !== "binds") return false;
+  return (event.binds ?? []).every((bind) => {
+    const parsed = commands ? parseChatCommand(bind.line, commands) : null;
+    if (parsed?.kind !== "invoke") return false;
+    const def = commands!.list().find((c) => c.id === parsed.id);
+    if (!def) return false;
+    // A live owner without a run id is a hosted pipeline runner (thread-
+    // admission item 9's seed rule): it takes no inbox, so a steer bind there
+    // would queue words nothing drains — it folds like any other decision, and
+    // the fold meets the seed refusal naming where to reply.
+    if (def.id === "steer.run") return !(owner.kind === "live" && owner.runId === undefined);
+    return boundBlastRadius(def as CommandDef<unknown>, parsed.input) === "read";
+  });
 }
 
 /** A yes to the pending question, as one bind of the proposed line (record
@@ -621,6 +693,9 @@ export async function operatorStage(
      *  and each record's operator decision for a pending question. */
     thread?: readonly { agent?: string; operator?: { mode: string; outcome: string; proposal?: string } }[];
     intake?: { verdict: IntakeVerdict; reason: string };
+    /** The thread's owner, when a live run or an idle unit holds it (issue
+     *  2027; thread-admission item 9): the turn's projection and prompt read it. */
+    owner?: OperatorThreadOwner;
   },
 ): Promise<OperatorEventFields | undefined> {
   const { msg, mode } = ctx;
@@ -667,6 +742,7 @@ export async function operatorStage(
           projection,
           tail,
           ...(pending ? { pendingQuestion: pending } : {}),
+          ...(ctx.owner ? { owner: ctx.owner } : {}),
           ...(commands
             ? { registryParses: (line: string) => parseChatCommand(line, commands)?.kind === "invoke" }
             : {}),
@@ -751,6 +827,20 @@ export function presetRequestOf(line: string): string | undefined {
  *  record holds the event twice and none loses it. */
 export type OperatorExecution =
   | { kind: "answered" }
+  /** An owned thread's decision that was neither steers-and-reads nor a
+   *  question (issue 2027; thread-admission item 9): nothing was posted and
+   *  nothing ran — the dispatcher folds the whole message into the owner
+   *  (admission's steer for a live run, one thread event for an idle unit),
+   *  the decision's event riding the fold or a door record. */
+  | {
+      kind: "fold";
+      /** The words the fold delivers INSTEAD of the person's message: a
+       *  confirmed proposal's own task words (`presetRequestOf` for a preset
+       *  line, the whole line otherwise) — the person's message was the word
+       *  "yes", which tells the owner nothing. Absent for every fresh
+       *  decision, whose fold carries the person's own words. */
+      request?: string;
+    }
   | {
       kind: "route";
       preset: string;
@@ -912,6 +1002,10 @@ export async function executeOperatorDecision(
     /** The thread's runs, newest first (the dispatcher's one read): the
      *  agents whose session tails hold the author's turns. */
     thread?: readonly { agent?: string }[];
+    /** The thread's owner, when a live run or an idle unit holds it (issue
+     *  2027): a decision that is not steers-and-reads or a question is the
+     *  steer of the whole message — `kind: "fold"`, nothing posted here. */
+    owner?: OperatorThreadOwner;
   },
 ): Promise<OperatorExecution> {
   const { event, io, msg } = ctx;
@@ -930,6 +1024,26 @@ export async function executeOperatorDecision(
     await io.reply(event.question ?? "");
     await recordOperatorDecision(deps, msg, event, ctx.ending, ctx.trace);
     return answered;
+  }
+  // An owned thread accepts no prose answer (issue 2027; thread-admission item
+  // 9): a decision that is not a steer, a read or the question above is the
+  // steer of the whole message — the dispatcher folds the words into the owner
+  // at its next boundary, and no reply text is posted here.
+  if (ctx.owner !== undefined && !ownedDecisionRuns(event, ctx.owner, deps.commands)) {
+    // A confirmed "yes" to a question minted before the thread became owned
+    // folds the proposal's own words — a preset line's tail, the whole line
+    // otherwise — never the literal "yes" (review F2 of the owned-thread fold).
+    const confirmed = (event.binds ?? []).find((b) => b.confirmed);
+    const request =
+      confirmed !== undefined
+        ? presetBindOf(
+            confirmed.line,
+            routablePresets().map((p) => p.name),
+          ) !== undefined
+          ? (presetRequestOf(confirmed.line) ?? confirmed.line)
+          : confirmed.line
+        : undefined;
+    return { kind: "fold", ...(request !== undefined ? { request } : {}) };
   }
   if (event.outcome === "refusal") {
     await io.reply(event.refusalText ?? "");

@@ -18952,6 +18952,249 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
   });
 
+  // A reply into a thread a live run or an idle unit owns is a steer by
+  // construction (issue 2027; thread-admission item 9): the executor accepts
+  // no prose answer there — a decision that is not a steer, a read or a
+  // question folds the whole message into the owner and posts nothing.
+  it("on: a plain reply into a thread with a live coding run folds — the run's inbox carries the words and no operator prose is posted (issue 2027)", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const live = registry.create("coding · acme/api", {
+      agent: "coding",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "coding" });
+    slot.live.runId = live.id;
+    // The incident's shape: the operator answers the reply with prose of its own.
+    const operator = decides({
+      reason: "reads as guidance for the door, not the run",
+      refusal: { cause: "request", text: "That reads as guidance for the door; it is noted." },
+    });
+    deps.operatorModel = operator;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("one principle from the maintainer: fold replies into the child", "slack:UADMIN"), io);
+    // The words fold into the owner's run at its next boundary; no prose posts.
+    const [item] = slot.live.inbox.drain();
+    expect(item).toMatchObject({
+      text: "one principle from the maintainer: fold replies into the child",
+      userId: "slack:UADMIN",
+    });
+    expect(replies.every((r) => !r.includes("it is noted"))).toBe(true);
+    // The prompt said the reply is the owner's follow-up, steers and reads only.
+    const prompt: RoutePrompt = operator.mock.calls[0]![0];
+    expect(prompt.user).toContain(`This thread is owned by a live run (\`${live.id}\`)`);
+    expect(prompt.user).toContain(`steer run ${live.id} <words>`);
+    expect(prompt.system).not.toContain("| `general` |"); // no preset row: a run beside the owner would be a rival
+    // The decision's event rides the fold, onto the live run's record.
+    expect(registry.snapshotById(live.id)!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "refusal",
+    });
+  });
+
+  it("on: the operator's prose answer into a unit-owned idle thread ends as one unit event — the words fold, zero runs (issue 2027)", async () => {
+    const INSTANCE = "plan-fix-the-login-6435ec";
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.putUnits([
+      {
+        instanceId: INSTANCE,
+        unit: "U12",
+        slug: "u12",
+        branch: "plan/fix-the-login-6435ec/u12",
+        dependsOn: [],
+        rounds: [],
+        threadKey: "slack:CX:1.0",
+      },
+    ]);
+    deps.coordinatorInstances = instances;
+    const sends: string[] = [];
+    deps.workflow = { get: async (id) => ({ sendEvent: async () => void sends.push(id) }) };
+    const thread = [
+      { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: INSTANCE },
+    ] as RunView[];
+    const operator = decides({
+      reason: "reads as guidance for the door, not the unit",
+      refusal: { cause: "request", text: "The principle you state is noted." },
+    });
+    deps.operatorModel = operator;
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("one principle to put at the top of the record", "slack:UADMIN"), io, { thread });
+    const events = await instances.listEvents({ instanceId: INSTANCE, unit: "U12" });
+    expect(events).toEqual([
+      expect.objectContaining({
+        sender: "slack:UADMIN",
+        text: "one principle to put at the top of the record",
+        mode: "steer",
+      }),
+    ]);
+    expect(sends).toEqual([INSTANCE]);
+    expect(replies.every((r) => !r.includes("is noted"))).toBe(true);
+    expect(replies.some((r) => r.includes("Noted for unit U12"))).toBe(true);
+    expect(provider.requests).toHaveLength(0);
+    // The prompt named the unit as the owner.
+    const prompt: RoutePrompt = operator.mock.calls[0]![0];
+    expect(prompt.user).toContain("This thread is owned by the unfinished plan unit U12");
+    // One unit event is the whole outcome; the decision lands on a door record.
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "refusal",
+    });
+    expect(registry.snapshotById("r2")).toBeNull();
+  });
+
+  it("on: a reply that is a typed `runs list` into an owned thread runs it — the typed line is the person's decision, never a fold (issue 2027)", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const live = registry.create("coding · acme/api", {
+      agent: "coding",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "coding" });
+    slot.live.runId = live.id;
+    deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("runs list", "slack:UADMIN"), io);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(deps.invoked).toEqual(["runs.list"]);
+    expect(slot.live.inbox.size).toBe(0);
+    expect(replies.length).toBeGreaterThan(0);
+  });
+
+  it("on: a question from the operator in an owned thread is still allowed and rendered — nothing folds until the person answers (issue 2027)", async () => {
+    const { deps, registry } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const live = registry.create("coding · acme/api", {
+      agent: "coding",
+      channelId: "slack:CX",
+      userId: "slack:UADMIN",
+      threadKey: "slack:CX:1.0",
+    });
+    const slot = deps.admission!.claim("slack:CX:1.0", { agent: "coding" });
+    slot.live.runId = live.id;
+    deps.operatorModel = decides({
+      reason: "ambiguous",
+      question: { text: "Deliver this to the coding run?", proposal: `steer run ${live.id} use the principle` },
+    });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("use the principle", "slack:UADMIN"), io);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("Did you mean:");
+    expect(replies[0]).toContain(`\`steer run ${live.id} use the principle\``);
+    expect(slot.live.inbox.size).toBe(0);
+  });
+
+  it("on: a hosted pipeline runner's seed thread offers no steer and folds a steer bind — the words meet the seed refusal, never an inbox nothing drains (review F1)", async () => {
+    const INSTANCE = "plan-fix-the-login-6435ec";
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.putUnits([
+      {
+        instanceId: INSTANCE,
+        unit: "U12",
+        slug: "u12",
+        branch: "plan/fix-the-login-6435ec/u12",
+        dependsOn: [],
+        rounds: [],
+        threadKey: "slack:CX:99.0",
+      },
+    ]);
+    deps.coordinatorInstances = instances;
+    // The seed thread's page: the ship runner is live and hosted — no
+    // admission slot, an instance on its record, an inbox nothing drains.
+    const thread = [
+      { id: "ship-1", startedAt: 0, finished: false, eventCount: 1, agent: "ship", instanceId: INSTANCE },
+    ] as RunView[];
+    const operator = decides({
+      reason: "deliver it to the live runner",
+      binds: [{ line: "steer run ship-1 use the principle", reason: "the thread's run" }],
+    });
+    deps.operatorModel = operator;
+    const { io, replies } = fakeIO();
+    const ended = await dispatch(deps, msg("use the principle", "slack:UADMIN"), io, { thread });
+    // The steer bind folded — nothing ran, nothing queued — and the fold met
+    // the seed refusal naming where to reply (thread-admission item 9).
+    expect(ended).toMatchObject({ status: "refused", refusal: "pipeline_thread_owned" });
+    expect(deps.invoked).toEqual([]);
+    expect(replies.some((r) => r.includes("slack:CX:99.0"))).toBe(true);
+    expect(provider.requests).toHaveLength(0);
+    // The prompt named a live owner WITHOUT a run id and offered no steer line:
+    // the runner takes no inbox, so there is nothing to steer into.
+    const prompt: RoutePrompt = operator.mock.calls[0]![0];
+    expect(prompt.user).toContain("This thread is owned by a live run:");
+    expect(prompt.user).not.toContain("steer run");
+    // No ledger hole: the decision lands on a door record beside the refusal's.
+    expect(registry.snapshotById("r2")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "binds",
+    });
+  });
+
+  it('on: a confirmed "yes" to a question minted before the thread became owned folds the proposal\'s own words into the owner — never the literal "yes" (review F2)', async () => {
+    const INSTANCE = "plan-fix-the-login-6435ec";
+    const { deps, registry, provider } = operatorDeps(ON_YAML);
+    wireCommands(deps);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.putUnits([
+      {
+        instanceId: INSTANCE,
+        unit: "U12",
+        slug: "u12",
+        branch: "plan/fix-the-login-6435ec/u12",
+        dependsOn: [],
+        rounds: [],
+        threadKey: "slack:CX:1.0",
+      },
+    ]);
+    deps.coordinatorInstances = instances;
+    const sends: string[] = [];
+    deps.workflow = { get: async (id) => ({ sendEvent: async () => void sends.push(id) }) };
+    // The question predates the ownership: the newest record carries the
+    // pending proposal, an older coding child names the instance whose unit
+    // now owns the thread.
+    const thread = [
+      {
+        id: "prev",
+        startedAt: 1,
+        finished: true,
+        eventCount: 2,
+        operator: {
+          mode: "on",
+          outcome: "question",
+          reason: "ambiguous",
+          proposal: "agent:general summarize the incident",
+        },
+      },
+      { id: "c1", startedAt: 0, finished: true, eventCount: 1, agent: "coding", parentInstanceId: INSTANCE },
+    ] as RunView[];
+    deps.operatorModel = decides({ reason: "never", binds: [{ line: "help", reason: "never" }] });
+    const { io, replies } = fakeIO();
+    await dispatch(deps, msg("yes", "slack:UADMIN"), io, { thread });
+    // The confirmed proposal is a preset bind into an owned thread: it folds,
+    // and the fold carries the proposal's own task words — the answer's word
+    // tells the owner nothing.
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+    const events = await instances.listEvents({ instanceId: INSTANCE, unit: "U12" });
+    expect(events).toEqual([
+      expect.objectContaining({ sender: "slack:UADMIN", text: "summarize the incident", mode: "steer" }),
+    ]);
+    expect(sends).toEqual([INSTANCE]);
+    expect(replies.some((r) => r.includes("Noted for unit U12"))).toBe(true);
+    expect(provider.requests).toHaveLength(0);
+    // The confirmed decision still lands on a door record (item 29's promise).
+    expect(registry.snapshotById("r1")!.events.find((e) => e.type === "operator")).toMatchObject({
+      mode: "on",
+      outcome: "binds",
+      binds: [expect.objectContaining({ confirmed: true })],
+    });
+  });
+
   it("on: a typed registry command line runs as typed, ahead of the operator — and a plain-words ask still reaches it", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);
     wireCommands(deps);
