@@ -1529,6 +1529,86 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
   });
 });
 
+// Feature: docs/reference/specs/agent-ship.md item 9 (issue 1932) — a coding
+// child that died on a provider transient with nothing pushed re-runs round 0
+// once; a second transient in the same round is the `transient` ending.
+describe("the transient re-run — round 0 dies on a provider transient with nothing pushed (issue 1932)", () => {
+  const transientChild = finished({ status: "failed", failure: { kind: "provider_transient" } });
+
+  it("a transient with nothing pushed re-runs round 0 once — a fresh attempt under fresh step names — and the re-run's success continues the pipeline", () => {
+    const d = fresh(input({ merge: "person" }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    expect(d.action).toMatchObject({ type: "spawn", step: "U10/0/coding" });
+    runChild(d, "run-c0", transientChild, T0 + 5 * MIN);
+    expect(d.action).toMatchObject({ type: "pr-check", recover: { runId: "run-c0" } });
+    d.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_commits" }, at: T0 + 6 * MIN });
+    // The re-run: the same round, attempt 2, its spawn step named apart so the
+    // Workflow's durable cache never hands it the dead attempt's answers.
+    expect(d.action).toMatchObject({
+      type: "spawn",
+      step: "U10/0/coding/a2",
+      preset: "coding",
+      round: { index: 0, kind: "coding", attempt: 2 },
+      brief: { kind: "contract" },
+    });
+    expect(d.rounds()).toEqual(["0 coding started", "0 coding transient"]);
+    // The re-run succeeds: the pipeline carries on to the review round as any round 0 does.
+    runChild(
+      d,
+      "run-c1",
+      finished({ status: "completed", pr: { number: 7, url: PR_URL, created: true } }),
+      T0 + 15 * MIN,
+    );
+    expect(d.rounds()).toEqual(["0 coding started", "0 coding transient", "0 coding started"]);
+    expect(d.action).toMatchObject({ type: "pr-check", step: "U10/0/coding/a2/pr-check" });
+    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 + 15 * MIN });
+    expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 1, kind: "review" } });
+  });
+
+  it("a transient WITH a push never re-runs: the recover pr-check opened the pull request and the round carries on to review", () => {
+    const d = fresh(input({ merge: "person" }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(d, "run-c0", transientChild, T0 + 5 * MIN);
+    d.answer({ type: "pr-check", pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A }, at: T0 + 6 * MIN });
+    expect(d.action).toMatchObject({ type: "spawn", preset: "review", round: { index: 1, kind: "review" } });
+    expect(d.rounds().filter((r) => r.includes("transient"))).toEqual([]);
+  });
+
+  it("a second transient in the same round is the ending, named `transient` — never a third attempt — and the report says the task was not the problem", () => {
+    const d = fresh(input({ merge: "person" }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(d, "run-c0", transientChild, T0 + 5 * MIN);
+    d.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_commits" }, at: T0 + 6 * MIN });
+    runChild(d, "run-c1", transientChild, T0 + 11 * MIN);
+    expect(d.action).toMatchObject({ type: "pr-check", recover: { runId: "run-c1" } });
+    d.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_commits" }, at: T0 + 12 * MIN });
+    expect(d.action).toMatchObject({
+      type: "end",
+      ending: { kind: "transient", round: { index: 0, kind: "coding", attempt: 2 }, runId: "run-c1" },
+    });
+    expect(d.rounds()).toEqual(["0 coding started", "0 coding transient", "0 coding started", "0 coding transient"]);
+    const report = renderUnitReport(d.state);
+    expect(report).toContain("provider transient");
+    expect(report).toContain("re-run once");
+    expect(report).toContain("The task itself was never the problem");
+  });
+
+  it("a transient whose branch carries work (`no_base`, or a plain none) keeps the abort — only the untouched branch earns the re-run", () => {
+    const d = fresh(input({ merge: "person" }));
+    d.answer({ type: "branch", ok: true, at: T0 });
+    runChild(d, "run-c0", transientChild, T0 + 5 * MIN);
+    d.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_base" }, at: T0 + 6 * MIN });
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+
+    // A dead child whose record names no transient keeps the abort too.
+    const plain = fresh(input({ merge: "person" }));
+    plain.answer({ type: "branch", ok: true, at: T0 });
+    runChild(plain, "run-c0", finished({ status: "failed" }), T0 + 5 * MIN);
+    plain.answer({ type: "pr-check", pr: { state: "none", unrecovered: "no_commits" }, at: T0 + 6 * MIN });
+    expect(plain.action).toMatchObject({ type: "end", ending: { kind: "aborted" } });
+  });
+});
+
 describe("the unit pipeline — the event, the timeout and the confirmation (the durable half)", () => {
   function atWait(): Driver {
     const d = fresh(input());

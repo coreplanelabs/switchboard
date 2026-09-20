@@ -781,6 +781,29 @@ describe("POST /admin/coordinator/read-record — the renewal's facts off the re
     expect(unpriced.run.costUsd).toBeNull();
     expect(unpriced.run.pushed).toBeUndefined();
   });
+
+  // Issue 1932: the failure by name rides the answer, so the machine can tell
+  // a provider transient from the child failing on its task.
+  it("answers a failed child's failure by name (`provider_transient`), and leaves the field off a record without one", async () => {
+    const h = harness();
+    await h.store.put(record("run-transient", { ...TAG, status: "failed", failure: { kind: "provider_transient" } }));
+    const body = (
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-transient" }),
+        h.deps,
+      )
+    ).body as { run: Record<string, unknown> };
+    expect(body.run).toMatchObject({ status: "failed", failure: { kind: "provider_transient" } });
+
+    await h.store.put(record("run-plain", { ...TAG, status: "failed" }));
+    const plain = (
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}read-record`, { parentInstanceId: INSTANCE.id, runId: "run-plain" }),
+        h.deps,
+      )
+    ).body as { run: Record<string, unknown> };
+    expect("failure" in plain.run).toBe(false);
+  });
 });
 
 describe("POST /admin/coordinator/pr-check — the open pull request heading the instance's branch (item 9)", () => {

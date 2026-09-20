@@ -608,6 +608,50 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
     expect(end.ending.report).toContain("the pipeline stopped");
   });
 
+  // Feature: docs/reference/specs/agent-ship.md item 9 (issue 1932) — the
+  // transient re-run through the whole driver: the failure by name off the
+  // record, the re-run under fresh step names, the `transient` round boundary
+  // on the round route, and the re-run's success carrying the unit to merge.
+  it("a coding child dead on a provider transient with nothing pushed re-runs round 0 once: the read-record carries `failure: provider_transient`, the re-run spawns under `/a2` step names, and its success carries the unit to merged", async () => {
+    const s = steps({
+      "U10/0/coding/wait/1": "event",
+      "U10/0/coding/a2/wait/1": "event",
+      "U10/1/review/wait/1": "event",
+    });
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-c0"), spawned("run-c1", T0 + 6 * MIN), spawned("run-r1", T0 + 15 * MIN)],
+      "read-record": [
+        record(
+          { id: "run-c0", finished: true, status: "failed", failure: { kind: "provider_transient" } },
+          T0 + 5 * MIN,
+        ),
+        codingDone("run-c1", T0 + 12 * MIN),
+        reviewApproved("run-r1", T0 + 20 * MIN),
+      ],
+      "pr-check": [
+        prNone(),
+        ok({ ok: true, state: "none", unrecovered: "no_commits" }, T0 + 6 * MIN),
+        prOpen(T0 + 12 * MIN),
+      ],
+      round: [acked(), acked(), acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 21 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 21 * MIN)],
+    });
+    const summary = await runPlan(s.runner, b.client, INSTANCE);
+    expect(summary.units).toEqual({ U10: "merged" });
+    // The dead attempt's recover pr-check named the dead run; the re-run's
+    // steps ride fresh names so the Workflow's cache never replays attempt one.
+    expect(s.names()).toContain("U10/0/coding/a2");
+    expect(s.names()).toContain("U10/0/coding/a2/wait/1");
+    // The round route heard the transient boundary and the re-run's start.
+    const outcomes = (b.of("round") as Array<{ outcome: string }>).map((r) => r.outcome);
+    expect(outcomes.slice(0, 3)).toEqual(["started", "transient", "started"]);
+  });
+
   it("a deploy roll's child-interrupted event settles the wait beside run-finished (item 47a): the read-record confirms the interrupted child and the round ends at once with the child's own reason, never the budget clip", async () => {
     const s = steps({ "U10/0/coding/wait/1/interrupted": "event" });
     const b = bot({

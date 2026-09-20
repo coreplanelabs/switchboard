@@ -326,6 +326,7 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
     leaseStartedAt,
     costUsd,
     handoffLists,
+    failure,
   } = facts;
   return {
     type: "read-record",
@@ -348,6 +349,9 @@ function readRecordReturn(step: string, a: BotAnswer): StepReturn {
       ...(typeof leaseStartedAt === "number" ? { leaseStartedAt } : {}),
       ...(typeof costUsd === "number" || costUsd === null ? { costUsd } : {}),
       ...(handoffLists !== undefined ? { handoffLists } : {}),
+      // The failure by name (run-history item 57), shape-checked: a
+      // `provider_transient` drives the round-0 re-run (agent-ship item 9).
+      ...(isRecord(failure) && typeof failure.kind === "string" ? { failure: { kind: failure.kind } } : {}),
     },
     at: a.body.at,
   };

@@ -48,6 +48,7 @@ export type UnitHealth = "live" | "waiting" | "idle" | "merged" | "merge-ready" 
 /** The ending kinds a unit idles on instead of ending (record 0051). */
 export const IDLING_ENDINGS: ReadonlySet<string> = new Set([
   "aborted",
+  "transient",
   "wall_clock_cap",
   "review_pending",
   "round_cap",
