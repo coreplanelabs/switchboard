@@ -379,17 +379,17 @@ export interface UnitIdle {
   wakes: number;
 }
 
-/** One unit of the plan an instance runs (a task string is a generated plan of
- *  one unit, `U1`): its branch, the units it waits on, and — as the runner
- *  reaches it — its thread, its pull request, the round boundaries the card
- *  drew and how it ended. One row a person can read for "what happened to this
- *  unit". */
 /** What the severity gate caught on a round: the level in force and the gated findings as `id (severity)`. */
 export interface RoundGate {
   level: AddressSeverity;
   findings: string[];
 }
 
+/** One unit of the plan an instance runs (a task string is a generated plan of
+ *  one unit, `U1`): its branch, the units it waits on, and — as the runner
+ *  reaches it — its thread, its pull request, the round boundaries the card
+ *  drew and how it ended. One row a person can read for "what happened to this
+ *  unit". */
 export interface CoordinatorUnit {
   instanceId: string;
   /** `U<n>` as the plan spells it. */
