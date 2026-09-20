@@ -13,6 +13,7 @@
 import type { ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
+import { predicateFor } from "../authz/predicate.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { budgetedAgent, type RunProfile } from "../../config/profile.js";
 import { parseModelRef } from "../provider.js";
@@ -854,6 +855,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         reply: (text: string) => io.reply(text),
       }
     : undefined;
+  // The plane's read for the orchestrator preset (record 0070): the one plane
+  // service under the REQUESTER's own predicate, so the chat cites exactly the
+  // rows its person may see — the same rows `plane show` would print them.
+  const plane = deps.plane
+    ? {
+        table: async () => (await deps.plane!()).table(predicateFor(chatActorOf(deps.config, msg), "runs:read", "run")),
+      }
+    : undefined;
   const toolContext = {
     executor,
     reportProgress,
@@ -867,6 +876,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(repoCtx.repo ? { repo: repoCtx.repo } : {}),
     ...(spawn ? { spawn } : {}),
     ...(runs ? { runs } : {}),
+    ...(plane ? { plane } : {}),
     ...(steer ? { steer } : {}),
     ...(wait ? { wait } : {}),
     ...(session ? { session } : {}),

@@ -14,6 +14,7 @@
 // relayed.
 
 import { attachFileTool } from "./attach.js";
+import { planeShowTool } from "./plane.js";
 import { diffDigestTool } from "./diffDigest.js";
 import { GITHUB_ISSUE_WRITE_TOOLS, GITHUB_READ_TOOLS } from "./github.js";
 import type { RunnableTool } from "./runnableTool.js";
@@ -96,6 +97,15 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
    *  card. No shell, no files, no writes: a conductor coordinates and never
    *  does a child's job. */
   conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
+  /** The orchestrator (record 0070; docs/reference/specs/orchestration-plane.md
+   *  item 11): the plane's read (`plane_show` — the same rows the panels
+   *  paint, run rows included), the session tools (the thread's `recall` and
+   *  `notes` — the resume ledger rides them) and the status card — and nothing
+   *  that writes: no shell, no files, no `submit_*`, no issue writes, and no
+   *  run tool (those stay in the conductor toolset alone,
+   *  docs/reference/specs/routing-and-config.md item 20). Its writes are the
+   *  registry's own commands through the door, never a tool here. */
+  orchestrator: [updateStatusTool, planeShowTool, ...SESSION_TOOLS],
   none: [],
 };
 

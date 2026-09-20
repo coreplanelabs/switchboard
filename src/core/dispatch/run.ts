@@ -33,6 +33,7 @@ import type { PrCommitList } from "../headMoved.js";
 import { REPLAY_EVERYTHING, type RunHandle, type RunRegistry } from "../runRegistry.js";
 import type { RunSeed } from "../runRecord.js";
 import type { RunStore } from "../runStore.js";
+import type { PlaneService } from "../planeService.js";
 import type { RunsService } from "../runsService.js";
 import type { LedgerRun } from "../runLedger/writeThrough.js";
 import type { Actor, ChannelVisibility } from "../authz/types.js";
@@ -148,6 +149,14 @@ export interface RunDeps
    * without a ledger's foreign rows.
    */
   runs?: RunsService;
+  /**
+   * The plane service behind the orchestrator preset's `plane_show` tool
+   * (record 0070; docs/reference/specs/orchestration-plane.md item 11): the ONE
+   * service `plane show` and the `/plane` panel read, so a row the chat cites
+   * is the row the panel paints. The loop binds it with the requester's own
+   * `runs:read` predicate. Absent → the tool reports the tables unavailable.
+   */
+  plane?: () => Promise<PlaneService>;
   /**
    * The artifact store (docs/reference/specs/execution.md item 20): where a
    * run's files move by reference when `artifacts:` is configured. Absent →

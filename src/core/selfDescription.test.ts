@@ -135,7 +135,9 @@ describe("selfDescriptionBlock", () => {
   it("is a few lines, not a manual, in every configuration", () => {
     for (const block of [allOn, allOff]) {
       expect(block.split("\n")).toHaveLength(5);
-      expect(block.length).toBeLessThan(3200);
+      // One line per section; the agents line grows a clause per preset
+      // (the orchestrator of record 0070 is the newest row).
+      expect(block.length).toBeLessThan(3400);
     }
   });
 });

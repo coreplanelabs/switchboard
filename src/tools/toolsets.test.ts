@@ -29,8 +29,17 @@ describe("mergeTools — the static toolset plus a run's extra tools", () => {
 });
 
 describe("the toolset table", () => {
+  // record 0070, criterion 3 (docs/reference/specs/orchestration-plane.md item 12):
+  // the orchestrator's whole reach is the read set — the plane's table, the run
+  // reads and the thread's own session tools — and nothing that writes: no
+  // shell relay, no submit_*, no issue writes, no spawn. The boundary is the
+  // tool list, not prose discipline.
+  it("orchestrator: the plane's read, the session tools and the status card — and nothing that writes, no run tool (the conductor's alone)", () => {
+    expect(TOOLSETS.orchestrator!.map((t) => t.name)).toEqual(["update_status", "plane_show", "recall", "notes"]);
+  });
+
   it("every preset's key indexes a toolset, and every tool has one name across the table", () => {
-    for (const key of ["full", "readonly", "web", "assistant", "explore", "conductor", "none"]) {
+    for (const key of ["full", "readonly", "web", "assistant", "explore", "conductor", "orchestrator", "none"]) {
       const tools = TOOLSETS[key]!;
       expect(new Set(tools.map((t) => t.name)).size, key).toBe(tools.length);
     }

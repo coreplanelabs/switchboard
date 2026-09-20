@@ -589,6 +589,9 @@ export async function runBot(): Promise<void> {
     instances: coordinatorInstances,
     github: { facts: fetchPullRequestFacts, checks: fetchCommitChecks, reviews: fetchPullRequestReviews },
   });
+  // The orchestrator preset's `plane_show` reads the SAME service (record 0070):
+  // a row the chat cites is the row the panel paints.
+  deps.plane = async () => planeService;
   // Scheduled firings are recorded on the state Worker's ScheduleDO;
   // `schedule list` and the /runs "Scheduled" panel read the same store.
   const scheduleStore =

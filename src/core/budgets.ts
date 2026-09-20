@@ -144,7 +144,15 @@ export function intakeReceiptRetentionMs(catchUpWindowMs: number): number {
 export const INTAKE_RECOVERY_WINDOW_MS = 10 * MINUTE_MS;
 
 /** The presets that run the tool loop, and the one pipeline preset. */
-export const LOOP_PRESETS = ["general", "coding", "review", "research", "explore", "conductor"] as const;
+export const LOOP_PRESETS = [
+  "general",
+  "coding",
+  "review",
+  "research",
+  "explore",
+  "conductor",
+  "orchestrator",
+] as const;
 export type LoopPreset = (typeof LOOP_PRESETS)[number];
 export type Preset = LoopPreset | "ship";
 
@@ -165,6 +173,10 @@ export const ASKS: Readonly<Record<Preset, number>> = {
   research: 8,
   explore: 120,
   conductor: 120,
+  // The plane's chat preset (record 0070): reads the fleet's tables and
+  // answers; a turn is a projection read plus a write-up, so its ask sits
+  // between general's and research's kind of work, with room for a few reads.
+  orchestrator: 10,
 };
 
 /** The rounds a ship loop is made of. `findings` is a coding child handed the
@@ -187,6 +199,7 @@ export const PRESET_FLOORS: Readonly<Record<LoopPreset, number>> = {
   research: 3,
   explore: 15,
   conductor: 15,
+  orchestrator: 2,
 };
 export const FLOORS: Readonly<Record<RoundKind, number>> = {
   coding: PRESET_FLOORS.coding,
@@ -265,6 +278,7 @@ export const POST_STEP_MINUTES: Readonly<Record<Preset, number>> = {
   research: 0,
   explore: 0,
   conductor: 0,
+  orchestrator: 0,
   ship: 0,
 };
 
