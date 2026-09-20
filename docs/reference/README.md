@@ -4,6 +4,7 @@
 
 The mechanical parts of these pages (every command, every flag, every `/api` route) are **generated from the code** by `npm run docs:gen` and checked in CI, so they cannot drift from what actually ships. Regions marked `<!-- generated:… -->` are written by the generator — edit the code, not the table.
 
+- [Vocabulary](vocabulary.md) — the twelve user nouns, one meaning each, and the internal words no user surface prints.
 - [Slack commands](slack-commands.md) — every directive and command, by category.
 - [CLI](cli.md) — command form, every group, exit codes.
 - [Configuration](configuration.md) — every `config.yaml` block, what it does, its off-state.

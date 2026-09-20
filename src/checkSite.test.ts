@@ -35,6 +35,13 @@ describe("siteProblems", () => {
     expect(what(complete(home("Acme Switchboard", "Acme Switchboard")))).toEqual([]);
   });
 
+  it("requires the vocabulary page and names a built site that lacks it", () => {
+    expect(REQUIRED_PAGES).toContain("reference/vocabulary.html");
+    const files = complete(home("Acme Switchboard", "Acme Switchboard"));
+    delete files["reference/vocabulary.html"];
+    expect(what(files)).toEqual(["missing: reference/vocabulary.html"]);
+  });
+
   it("names each missing page", () => {
     const files = complete(home("Acme Switchboard", "Acme Switchboard"));
     delete files["tutorials/index.html"];

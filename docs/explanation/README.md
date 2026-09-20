@@ -8,6 +8,7 @@ The contract is elsewhere: [`docs/reference/specs/`](../reference/specs/README.m
 
 - [Architecture](architecture.md) — the parts, in three diagrams.
 - [How a request flows](how-a-request-flows.md) — one pipeline for every entry point.
+- [What holds what](what-holds-what.md) — threads, runs, pipelines: the twelve nouns' containment.
 - [The agents and their toolsets](agents-and-toolsets.md) — five agents and what each may reach.
 - [Worker topology](worker-topology.md) — the bot plus three Workers.
 - [One definition, every surface](one-command-many-surfaces.md) — one command becomes chat, CLI, HTTP and MCP.

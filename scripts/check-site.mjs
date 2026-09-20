@@ -26,6 +26,10 @@ export const REQUIRED_PAGES = [
   // what the sidebar's "Specs" entry and the footer link to.
   "reference/specs/index.html",
   "reference/cli.html",
+  // The vocabulary page is the product's word list; AGENTS.md and the docs
+  // landing page link it before the code map, so a build without it ships
+  // dead links on both front doors.
+  "reference/vocabulary.html",
 ];
 
 /** The `og:image` a built page names, or undefined when it names none. */
