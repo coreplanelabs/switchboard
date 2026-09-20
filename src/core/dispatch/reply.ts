@@ -646,6 +646,9 @@ export interface DeliveryContext {
    *  from them (agent-review.md item 5b). Absent on every other run. */
   verdict?: ReviewVerdict | undefined;
   reviewPost?: ReviewPost | undefined;
+  /** The request's level: a review's thread reply is one line below `verbose`
+   *  (routing-and-config item 28). Absent reads as `verbose` — the full render. */
+  verbosity?: Verbosity | undefined;
   liveUrl: string | undefined;
   prNote: string | undefined;
   stopped: StopMode | undefined;
@@ -727,6 +730,7 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
             verdict: ctx.verdict,
             posted: ctx.reviewPost?.posted ? ctx.reviewPost.target : undefined,
             liveUrl,
+            ...(ctx.verbosity !== undefined ? { verbosity: ctx.verbosity } : {}),
           })
         : answer;
     // The PR note (post-step above) is a projection too: the `answer` event

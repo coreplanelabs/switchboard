@@ -93,6 +93,7 @@ import { BOT_SCOPES, checkPrTitle, TITLE_MAX_LENGTH } from "../core/prTitle.mjs"
 import PR_TITLE_VOCABULARY from "../core/prTitleVocabulary.json" with { type: "json" };
 import { isHandoffShape, renderHandoffComment, type Handoff } from "../core/ship/handoff.js";
 import { normalizeHead, sameCommit } from "../core/reviewedHead.js";
+import { endingWordOf, roundOutcomeWordOf } from "../core/pipelineStanding.js";
 import {
   DEFAULT_ADDRESS_SEVERITY,
   resolveShipCaps,
@@ -1609,13 +1610,15 @@ function unitLines(
 ): string[] {
   return units.map((u) => {
     const last = u.rounds.at(-1);
+    // The card prints the user's words (record 0066): `merge-ready`, never
+    // `merge_ready`; `checks failed`, never `checks_failed`.
     const state = u.ending
-      ? u.ending.kind
+      ? endingWordOf(u.ending.kind)
       : u.idle
-        ? // The idle line names the old kind (record 0051): `idle · wall_clock_cap`.
-          `idle · ${u.idle.why}`
+        ? // The idle line names the old kind's word (record 0051): `idle · out of budget`.
+          `idle · ${endingWordOf(u.idle.why)}`
         : last
-          ? `${shipRoundHeader({ index: last.index, agent: last.agent }, severity)} · ${last.outcome}${
+          ? `${shipRoundHeader({ index: last.index, agent: last.agent }, severity)} · ${roundOutcomeWordOf(last.outcome)}${
               last.gate ? ` · ⚠️ gate fired: ${last.gate.findings.join(", ")} at or above ${last.gate.level}` : ""
             }`
           : u.threadKey
@@ -2305,13 +2308,17 @@ const ENDING_ICON: Readonly<Record<string, string>> = {
   done: "✅",
 };
 
-/** The plan's summary — one line per unit with how it ended and its pull
- *  request; the task wording (no unit id) for a generated plan's one unit. */
+/** The plan's summary — one line per unit with how it ended, in the user's
+ *  words (record 0066), and its pull request; the task wording (no unit id)
+ *  for a generated plan's one unit. */
 export function planSummary(units: readonly CoordinatorUnit[], generated = false): string {
   const lines = units.map((u) => {
-    const how = u.ending ? u.ending.kind : u.threadKey ? "unfinished" : "not started";
+    const kind = u.ending ? u.ending.kind : u.threadKey ? "unfinished" : "not started";
+    const how = u.ending ? endingWordOf(u.ending.kind) : kind;
     const pr = u.pr ? ` — ${u.pr.url}` : "";
-    return generated ? `${ENDING_ICON[how] ?? "•"} ${how}${pr}` : `${ENDING_ICON[how] ?? "•"} ${u.unit} — ${how}${pr}`;
+    return generated
+      ? `${ENDING_ICON[kind] ?? "•"} ${how}${pr}`
+      : `${ENDING_ICON[kind] ?? "•"} ${u.unit} — ${how}${pr}`;
   });
   return lines.join("\n");
 }

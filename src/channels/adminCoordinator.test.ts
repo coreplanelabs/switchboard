@@ -2820,7 +2820,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
 
   // record 0051; run-history item 50: an idle ending is not the unit's end —
   // the row gets the idle and no ending, the leftovers wait, the card names it.
-  it("unit-end with an idle ending writes idle {why, at, renewalsLeft, from, runId, spendUsd, handoff, wakes: 0} and no ending; the report still reaches the thread; unitLines shows `idle · wall_clock_cap`; unconsumed events stay; a malformed idle is 400; a why past 64 chars is 400; the body's headSha lands as lastPush; a later real ending drops the idle; the plan route answers idleDays", async () => {
+  it("unit-end with an idle ending writes idle {why, at, renewalsLeft, from, runId, spendUsd, handoff, wakes: 0} and no ending; the report still reaches the thread; unitLines shows `idle · out of budget`; unconsumed events stay; a malformed idle is 400; a why past 64 chars is 400; the body's headSha lands as lastPush; a later real ending drops the idle; the plan route answers idleDays", async () => {
     const replies: Array<{ threadKey: string; text: string }> = [];
     const frames: unknown[] = [];
     const h = await planHarness({
@@ -2884,7 +2884,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       },
     ]);
     // The parent card's line names the idle and its why (record 0051).
-    expect(JSON.stringify(frames)).toContain("idle · wall_clock_cap");
+    expect(JSON.stringify(frames)).toContain("idle · out of budget");
     // The leftovers wait for the fold or the wake (this plan's fifth unit): no fresh turn ran.
     expect(await h.instances.listEvents(key, true)).toHaveLength(1);
     expect(h.dispatched).toHaveLength(0);
@@ -3109,7 +3109,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(rec.parentInstanceId).toBeUndefined(); // the pipeline's own record is nobody's child
     const summary = rec.events.at(-1);
     expect(summary?.type === "answer" ? summary.text : "").toBe(
-      "✅ U10 — merge_ready — https://github.com/acme/api/pull/7\n• U11 — not started",
+      "✅ U10 — merge-ready — https://github.com/acme/api/pull/7\n• U11 — not started",
     );
     expect(isRunRecord(rec)).toBe(true);
     // The registry row finished and the record went through the ledger sink:
@@ -3139,7 +3139,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect(JSON.stringify(closes[0])).toContain("✅");
     expect(replies.at(-1)).toEqual({
       threadKey: INSTANCE.threadKey,
-      text: "Plan fixture ended (completed):\n✅ U10 — merge_ready — https://github.com/acme/api/pull/7\n• U11 — not started",
+      text: "Plan fixture ended (completed):\n✅ U10 — merge-ready — https://github.com/acme/api/pull/7\n• U11 — not started",
     });
     expect((await call(h, "finish", { parentInstanceId: PLAN_INSTANCE.id, outcome: "won" })).status).toBe(400);
   });
@@ -3209,7 +3209,7 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       body: { ok: true, runId: "run-parent", at: NOW },
     });
     const summary = h.written[0]!.events.at(-1)!;
-    expect(summary.type === "answer" ? summary.text : "").toBe("✅ merge_ready — https://github.com/acme/api/pull/7");
+    expect(summary.type === "answer" ? summary.text : "").toBe("✅ merge-ready — https://github.com/acme/api/pull/7");
     // The card closes with the task wording — no `U1 ·` prefix on the line.
     expect(closes).toHaveLength(1);
     expect(JSON.stringify(closes[0])).not.toContain("U1 ·");

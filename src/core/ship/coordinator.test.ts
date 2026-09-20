@@ -2763,16 +2763,18 @@ describe("the severity gate — an approve's findings held to the level in force
     expect(report).toContain("Findings below major, left as-is: F1 (minor) — naming; F2 (nit) — t");
     // The grant, as the instance carries it: absent reads as the org's zero.
     expect(report).toContain("Renewals: 0 of 0 spent (granted by org).");
-    // The thread's copy at quiet (routing-and-config item 28): the outcome,
-    // the verdict, the findings left below the gate and the declined ones
-    // stay; the level in force and the grant are asides for verbose.
+    // The thread's copy at quiet (routing-and-config item 28, record 0066):
+    // the outcome is ONE line — the merge-ready headline with the round count
+    // and the pull request link; the verdict, the findings left below the
+    // gate, the declined list and the remaining-gate sentence are verbose
+    // asides and stay on the pull request.
     const quiet = renderUnitReport(d.state, undefined, "quiet");
-    expect(quiet).toContain("✅ Merge-ready after");
-    expect(quiet).toContain("Verdict: LGTM");
-    expect(quiet).toContain("Findings below major, left as-is: F1 (minor) — naming; F2 (nit) — t");
-    expect(quiet).toContain("Declined findings:");
-    expect(quiet).not.toContain("Severity addressed");
-    expect(quiet).not.toContain("Renewals:");
+    expect(quiet).toBe("✅ Merge-ready after 1 review round: https://github.com/acme/api/pull/7");
+    expect(quiet).not.toContain("Verdict:");
+    expect(quiet).not.toContain("Findings below");
+    expect(quiet).not.toContain("Declined findings");
+    expect(quiet).not.toContain("Remaining gate");
+    expect(quiet).not.toContain("merge_ready");
     expect(renderUnitReport(d.state, undefined, "verbose")).toBe(report);
   });
 
@@ -3320,7 +3322,7 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
     // The cap's aside — the budget split — is verbose material in the thread's copy.
     expect(renderUnitReport(idle.state)).toContain("Budget split (240 min):");
     const quiet = renderUnitReport(idle.state, undefined, "quiet");
-    expect(quiet).toContain("🧢 Ship stopped at a cap");
+    expect(quiet).toContain("🧢 Out of budget");
     expect(quiet).not.toContain("Renewals:");
     expect(quiet).not.toContain("Budget split");
   });
@@ -3536,5 +3538,103 @@ describe("the merge queue — the door enqueues instead of merging (issue 2011)"
     const reason = (d.state.ending as Extract<UnitEnding, { kind: "merge_refused" }>).reason;
     expect(reason).toContain("still in the merge queue after 60 minutes");
     expect(reason).toContain("the queue merges it on its own");
+  });
+});
+
+describe("the quiet thread report — the ending is ONE line in the user's words (record 0066)", () => {
+  const F = (id: string, severity: "blocking" | "major" | "minor" | "nit", title = "t") => ({
+    id,
+    severity,
+    file: "src/a.ts",
+    title,
+  });
+
+  it("round cap at quiet: `Round cap reached` with only the non-zero severity counts and the pull request link; the verbose copy is the full report unchanged", () => {
+    const d = fresh(input({ caps: { maxRounds: 1, maxMinutes: 120 }, merge: "person" }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: {
+          verdict: "request_changes",
+          summary: "mixed",
+          findings: [
+            F("F1", "blocking"),
+            F("F2", "blocking"),
+            F("F3", "major"),
+            F("F4", "minor"),
+            F("F5", "minor"),
+            F("F6", "nit"),
+            F("F7", "nit"),
+            F("F8", "nit"),
+          ],
+        },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "round_cap" } });
+    const quiet = renderUnitReport(d.state, undefined, "quiet");
+    expect(quiet).toBe(`🧢 Round cap reached: 2 blockers, 1 major, 2 minor, 3 nits — ${PR_URL}`);
+    expect(quiet).not.toContain("round_cap");
+    expect(renderUnitReport(d.state, undefined, "verbose")).toBe(renderUnitReport(d.state));
+    expect(renderUnitReport(d.state)).toContain("🧢 Ship stopped at a cap: the 1-round cap");
+  });
+
+  it("held at quiet: `Held:` with the human-gated row and the pull request link; verbose keeps the full report", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    const HG = { ...F("F1", "minor", "the entry replay receipt is human-gated"), humanGated: true as const };
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "request_changes", summary: "receipt", findings: [HG] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "held" } });
+    const quiet = renderUnitReport(d.state, undefined, "quiet");
+    expect(quiet).toBe(`⏸️ Held: F1 (minor) — the entry replay receipt is human-gated — ${PR_URL}`);
+    expect(renderUnitReport(d.state, undefined, "verbose")).toBe(renderUnitReport(d.state));
+    expect(renderUnitReport(d.state)).toContain("Next step: produce the receipt");
+  });
+
+  it("stopped at quiet: `Stopped` and the pull request line, nothing about the operator machinery; verbose unchanged", () => {
+    const d = fresh(input({ merge: "person" }));
+    throughRoundZero(d);
+    runChild(d, "run-r1", finished({ status: "stopped_soft", finalReply: "stopping" }), T0 + 20 * MIN);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "stopped", mode: "soft" } });
+    const quiet = renderUnitReport(d.state, undefined, "quiet");
+    expect(quiet).toBe(`⏹ Stopped. PR: ${PR_URL}`);
+    expect(renderUnitReport(d.state, undefined, "verbose")).toBe(renderUnitReport(d.state));
+    expect(renderUnitReport(d.state)).toContain("⏹ Ship stopped by operator (soft stop)");
+  });
+
+  it("merge-ready at quiet is the one line with the round count and the link — no internal token on any quiet ending line", () => {
+    const d = fresh(input({ merge: "person", generated: true }));
+    throughRoundZero(d);
+    runChild(
+      d,
+      "run-r1",
+      finished({
+        status: "completed",
+        verdict: { verdict: "approve", summary: "clean", findings: [] },
+        reviewPosted: true,
+        reviewHead: HEAD_A,
+      }),
+      T0 + 20 * MIN,
+    );
+    greenChecks(d, T0 + 20 * MIN);
+    expect(d.action).toMatchObject({ type: "end", ending: { kind: "merge_ready" } });
+    const quiet = renderUnitReport(d.state, undefined, "quiet");
+    expect(quiet).toBe(`✅ Merge-ready after 1 review round: ${PR_URL}`);
+    expect(quiet).not.toMatch(/merge_ready|checks_failed|round_cap|wall_clock_cap/);
   });
 });

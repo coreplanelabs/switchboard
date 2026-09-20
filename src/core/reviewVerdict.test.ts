@@ -10,6 +10,7 @@ import {
   isFindingDispositionsShape,
   isReviewPostShape,
   isReviewVerdictShape,
+  verdictCountsLine,
   LGTM_TOKEN,
   NO_VERDICT_LINE,
   parseDispositionsInput,
@@ -685,5 +686,72 @@ describe("review verdict → channel reply (item 5b: Slack gets the verdict and 
     expect(buildReviewChannelReply({ answer, verdict: v, posted, liveUrl: undefined })).toBe(
       `${head}\n\nPosted to acme/site#359`,
     );
+  });
+});
+
+describe("verdictCountsLine + the quiet channel reply — one line in the user's words (record 0066)", () => {
+  const mixed = parseVerdictInput({
+    verdict: "request_changes",
+    summary: "many things",
+    findings: [
+      { id: "F1", severity: "blocking", file: "a.ts", title: "t" },
+      { id: "F2", severity: "blocking", file: "a.ts", title: "t" },
+      { id: "F3", severity: "major", file: "a.ts", title: "t" },
+      { id: "F4", severity: "minor", file: "a.ts", title: "t" },
+      { id: "F5", severity: "minor", file: "a.ts", title: "t" },
+      { id: "F6", severity: "nit", file: "a.ts", title: "t" },
+      { id: "F7", severity: "nit", file: "a.ts", title: "t" },
+      { id: "F8", severity: "nit", file: "a.ts", title: "t" },
+    ],
+  })!;
+  const posted = { repo: "acme/site", number: 359 };
+  const prUrl = "https://github.com/acme/site/pull/359";
+
+  it("a mixed verdict counts only the non-zero severities, most severe first", () => {
+    expect(verdictCountsLine(mixed)).toBe("Changes requested: 2 blockers, 1 major, 2 minor, 3 nits");
+    const one = parseVerdictInput({
+      verdict: "request_changes",
+      summary: "s",
+      findings: [{ id: "F1", severity: "nit", file: "a.ts", title: "t" }],
+    })!;
+    expect(verdictCountsLine(one)).toBe("Changes requested: 1 nit");
+    const none = parseVerdictInput({ verdict: "request_changes", summary: "s", findings: [] })!;
+    expect(verdictCountsLine(none)).toBe("Changes requested");
+  });
+
+  it("an approve is the one word LGTM", () => {
+    expect(verdictCountsLine(parseVerdictInput({ verdict: "approve", summary: "fine" })!)).toBe("LGTM");
+  });
+
+  it("at quiet, a posted itemized verdict is ONE line — the counts and the pull request link; an approve reads LGTM", () => {
+    expect(buildReviewChannelReply({ answer: "prose", verdict: mixed, posted, liveUrl: "x", verbosity: "quiet" })).toBe(
+      `Changes requested: 2 blockers, 1 major, 2 minor, 3 nits — ${prUrl}`,
+    );
+    const lgtm = parseVerdictInput({ verdict: "approve", summary: "fine", findings: [] })!;
+    expect(buildReviewChannelReply({ answer: "prose", verdict: lgtm, posted, liveUrl: "x", verbosity: "quiet" })).toBe(
+      `LGTM — ${prUrl}`,
+    );
+  });
+
+  it("the verbose copy and the unposted or unitemized quiet copies keep the full render — the text always lands somewhere a person reads it", () => {
+    const full = buildReviewChannelReply({ answer: "prose", verdict: mixed, posted, liveUrl: undefined });
+    expect(
+      buildReviewChannelReply({ answer: "prose", verdict: mixed, posted, liveUrl: undefined, verbosity: "verbose" }),
+    ).toBe(full);
+    // Not posted: the quiet reply still carries the verdict line and the prose.
+    const unposted = buildReviewChannelReply({
+      answer: "prose",
+      verdict: mixed,
+      posted: undefined,
+      liveUrl: undefined,
+      verbosity: "quiet",
+    });
+    expect(unposted).toContain("Changes requested: many things");
+    expect(unposted).toContain("prose");
+    // Findings not itemized: nothing to count, the full render stands.
+    const bare = parseVerdictInput({ verdict: "approve", summary: "fine" })!;
+    expect(
+      buildReviewChannelReply({ answer: "prose", verdict: bare, posted, liveUrl: undefined, verbosity: "quiet" }),
+    ).toBe(buildReviewChannelReply({ answer: "prose", verdict: bare, posted, liveUrl: undefined }));
   });
 });

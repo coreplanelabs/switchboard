@@ -25,7 +25,7 @@ The person is the <a id="requester"></a>**requester** — one word on every surf
 
 ## Nouns versus values
 
-The twelve are the domain nouns. A noun's **values** — an outcome's `merged`, `merge-ready`, `idle`, `aborted`, `failed`, `stopped`; an agent's preset names; a model's name — and **plain English** (issue, minutes, branch, model, effort) are not nouns and need no row. A surface prints a value or plain English freely; what it may not print is an internal word.
+The twelve are the domain nouns. A noun's **values** — an outcome's `merged`, `merge-ready`, `idle`, `aborted`, `failed`, `stopped`, `held`, `round cap reached`, `out of budget`; an agent's preset names; a model's name — and **plain English** (issue, minutes, branch, model, effort) are not nouns and need no row. A surface prints a value or plain English freely; what it may not print is an internal word: the outcome and round-outcome tokens the code keeps (`merge_ready`, `round_cap`, `checks_failed`, …) are translated at every surface by `ENDING_WORDS`/`ROUND_OUTCOME_WORDS` (`src/core/pipelineStanding.ts`), the binding [agent-ship.md](specs/agent-ship.md) item 12a proves.
 
 ## By rule, not only by enumeration
 

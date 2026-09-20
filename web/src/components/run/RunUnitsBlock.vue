@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import GithubMark from "../GithubMark.vue";
+import { endingWordOf } from "@core/core/pipelineStanding.js";
 import type { UnitFacts } from "@core/core/unitRuns.js";
 
 // The pipeline's own record lists the units its instance ran (agent-ship item
@@ -15,11 +16,12 @@ const ENDING_CLS: Record<string, string> = {
   done: "border-ok/30 text-ok",
 };
 
-/** How a unit stands: its ending's kind, else `idle · <why>` while it idles
+/** How a unit stands: its ending in the user's words (record 0066 —
+ *  `merge-ready`, never `merge_ready`), else `idle · <why>` while it idles
  *  (record 0051), else whether it has started. */
 function standing(u: UnitFacts): string {
-  if (u.ending) return u.ending.kind;
-  if (u.idle) return `idle · ${u.idle.why}`;
+  if (u.ending) return endingWordOf(u.ending.kind);
+  if (u.idle) return `idle · ${endingWordOf(u.idle.why)}`;
   return u.threads.coding !== undefined
     ? `round ${u.rounds.at(-1)?.index ?? 0} · ${u.rounds.at(-1)?.agent ?? "in flight"}`
     : "not started";

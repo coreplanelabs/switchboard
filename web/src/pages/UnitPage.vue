@@ -11,6 +11,7 @@ import { useWallClock } from "../lib/wallClock";
 import { githubPrUrl, githubRepoUrl, githubTreeUrl } from "../lib/githubLinks";
 import { formatDateTime, formatLocalIso } from "../lib/format";
 import { unitSessionKeys, type UnitThread } from "@core/core/unitRuns.js";
+import { endingWordOf } from "@core/core/pipelineStanding.js";
 
 // The unit page (agent-ship item 17; record 0034, "the unit is the reading
 // unit"): one ship unit's story on one page — the runs of its coding thread
@@ -70,10 +71,11 @@ const standing = computed(() => {
   if (!view) return { cls: "grey", text: "" };
   if (view.ending) {
     const ok = view.ending.kind === "merged" || view.ending.kind === "merge_ready" || view.ending.kind === "done";
-    return { cls: ok ? "ok" : "grey", text: view.ending.kind, at: view.ending.at };
+    // The header prints the user's word for the ending (record 0066), never the internal kind.
+    return { cls: ok ? "ok" : "grey", text: endingWordOf(view.ending.kind), at: view.ending.at };
   }
-  // An idle unit (record 0051): not ended — the header names the old kind as its why.
-  if (view.idle) return { cls: "grey", text: `idle · ${view.idle.why}`, at: view.idle.at };
+  // An idle unit (record 0051): not ended — the header names the old kind's word as its why.
+  if (view.idle) return { cls: "grey", text: `idle · ${endingWordOf(view.idle.why)}`, at: view.idle.at };
   const live = view.runs.find((r) => !r.finished);
   if (live) return { cls: "live", text: `round ${live.round} · ${live.thread} running` };
   const last = view.runs.at(-1);

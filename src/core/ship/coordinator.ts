@@ -41,6 +41,7 @@ import {
   findingsAtOrAbove,
   formatFinding,
   isAddressSeverity,
+  severityCounts,
   type AddressSeverity,
   type AddressSeveritySource,
   type Finding,
@@ -2451,13 +2452,16 @@ function mergeReadyHeadline(rounds: string, url: string, base: string, facts: Me
 export function renderUnitReport(
   s: UnitPipelineState,
   facts?: MergeReadyFacts,
-  /** The level the report speaks at (routing-and-config item 28). The default
-   *  is the full report — the row's and the board's copy; the thread's copy is
-   *  rendered at the request's level, where the asides about the machinery
-   *  (the level in force, the grant, the write-up pointer, the budget split,
-   *  a segment boundary) are `verbose` and the outcome, the verdict, the
-   *  findings left below the gate, the declined ones and what to do next are
-   *  everyone's. */
+  /** The level the report speaks at (routing-and-config item 28, record
+   *  0066). The default is the full report — the row's and the board's copy;
+   *  the thread's copy is rendered at the request's level, where only the
+   *  outcome is everyone's: ONE line in the user's words — `✅ Merge-ready
+   *  after 2 review rounds: <url>`, `Held: <the human-gated row>`, `Stopped`,
+   *  `Round cap reached: <counts>` — and the verdict, the findings left below
+   *  the gate, the declined ones, the remaining-gate sentence, the level in
+   *  force, the grant, the write-up pointer, the budget split, the re-issue
+   *  prompt and a segment boundary are `verbose` asides; the full detail
+   *  stays on the pull request, where the round routes put it. */
   verbosity: Verbosity = "verbose",
 ): string {
   const e = s.ending;
@@ -2499,11 +2503,11 @@ export function renderUnitReport(
         return `✅ Already merged: ${e.pr.url} (merge commit \`${e.sha.slice(0, 7)}\`, merged ${e.mergedAt}) — the pull request heading \`${s.input.unit.branch}\` was merged before this attempt reached it, by a person or by an earlier attempt of this plan; the runner merged nothing. The unit is done and its dependents start on a base that carries it.`;
       return [
         `✅ Merged after ${rounds}: ${e.pr.url} (squash \`${e.sha.slice(0, 7)}\`) — merged by the plan runner under \`plan:merge\`: the review approved at this head and the guards were green.`,
-        verdictLine,
+        aside(verdictLine),
         aside(levelLine),
         aside(grantLine),
-        skippedLine,
-        declinedLine,
+        aside(skippedLine),
+        aside(declinedLine),
       ]
         .filter(Boolean)
         .join("\n");
@@ -2517,19 +2521,23 @@ export function renderUnitReport(
         facts?.merged
           ? `✅ Merge-ready after ${rounds}: ${e.pr.url}`
           : mergeReadyHeadline(rounds, e.pr.url, s.input.base, facts),
-        verdictLine,
+        aside(verdictLine),
         aside(levelLine),
         aside(grantLine),
-        skippedLine,
-        declinedLine,
+        aside(skippedLine),
+        aside(declinedLine),
         // What the driver read at the approved head when it composed this
         // ending (agent-ship item 9): a merge that already happened is named
         // as such, else the pull request's own auto-merge fact, else the gate.
-        facts?.merged
-          ? `Already merged: ${e.pr.url} (merge commit \`${facts.merged.sha.slice(0, 7)}\`, merged ${facts.merged.mergedAt}) — auto-merge or a person merged it after the approval; the runner merged nothing.`
-          : facts?.autoMergeEnabled
-            ? "Auto-merge is on for this pull request: the approval merges it once checks pass."
-            : "Remaining gate: a person's merge — the runner merges only when the instance's `merge` field says runner, and ship never approves.",
+        // A `verbose` aside like the rest — the quiet thread copy is the
+        // headline alone (record 0066).
+        aside(
+          facts?.merged
+            ? `Already merged: ${e.pr.url} (merge commit \`${facts.merged.sha.slice(0, 7)}\`, merged ${facts.merged.mergedAt}) — auto-merge or a person merged it after the approval; the runner merged nothing.`
+            : facts?.autoMergeEnabled
+              ? "Auto-merge is on for this pull request: the approval merges it once checks pass."
+              : "Remaining gate: a person's merge — the runner merges only when the instance's `merge` field says runner, and ship never approves.",
+        ),
       ]
         .filter(Boolean)
         .join("\n");
@@ -2543,12 +2551,15 @@ export function renderUnitReport(
       // first (item 10), the very round this ending exists to avoid — so the
       // held case renders its own re-issue line instead of the shared one.
       const rows = e.findings.map((f) => `${f.id} (${f.severity}) — ${f.title}`).join("; ");
+      // The quiet copy is the ending in the user's words (record 0066): the
+      // held row named, the pull request linked, nothing about the machinery.
+      if (!shows(verbosity, "verbose")) return `⏸️ Held: ${rows}${e.pr !== undefined ? ` — ${e.pr.url}` : ""}`;
       const heldReissue = s.input.generated
         ? `To continue, re-issue \`agent:ship\` in this thread with only the PR URL${e.pr !== undefined ? ` (${e.pr.url})` : ""} — no new task text.`
         : reissue;
       return join([
         `⏸️ ${e.verdict === "approve" ? "Approved but held" : "Changes requested but held"} after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — every finding of review round ${e.round.index} is human-gated, a receipt only a person can produce: ${rows}. No fix round was opened: a coding child cannot produce the receipt.`,
-        aside(levelLine),
+        levelLine,
         `Next step: produce the receipt each finding names and post it on the pull request. ${heldReissue} The re-issued attempt resumes at the review round — no coding round runs first.`,
       ]);
     }
@@ -2559,6 +2570,9 @@ export function renderUnitReport(
       // `already_landed`) and moves on to the dependents. The generated
       // plan's line already says to re-issue with the PR URL, which takes the
       // same recognition path.
+      // The quiet copy: the outcome in the user's words with the person's
+      // remedy — the hand merge is what a person must act on (record 0066).
+      if (!shows(verbosity, "verbose")) return `⚠️ Not merged: ${e.reason} — ${e.pr.url}`;
       return join([
         `⚠️ The review approved ${e.pr.url} but the runner did not merge it: ${e.reason}. A person decides what becomes of the pull request.`,
         s.input.generated
@@ -2566,6 +2580,12 @@ export function renderUnitReport(
           : `The approved work is on the branch: rebase or fix it, push, and merge it by hand. Then re-issue the plan naming the remaining units — a unit whose pull request has merged is recognized and not run again, and its dependents start from there.`,
       ]);
     case "round_cap": {
+      // The quiet copy counts the last review's open findings, only the
+      // non-zero severities (record 0066): `Round cap reached: 2 blockers, 1 major`.
+      if (!shows(verbosity, "verbose")) {
+        const counts = severityCounts(s.findingsByRound[e.reviewRounds] ?? []);
+        return `🧢 Round cap reached${counts ? `: ${counts}` : ""}${prUrl !== undefined ? ` — ${prUrl}` : ""}`;
+      }
       // The cap bounds fix rounds, never the terminal steps (issue 2023): an
       // approval in the last allowed round still runs the checks step and the
       // merge, so a round_cap after an approve means the checks (or the merge
@@ -2579,9 +2599,10 @@ export function renderUnitReport(
       return join([headline, splitReport(s), reissue]);
     }
     case "wall_clock_cap":
+      if (!shows(verbosity, "verbose")) return `🧢 Out of budget — no approval after ${rounds}.${prLine}`;
       return join([
         `🧢 Ship stopped at a cap: the remaining pipeline time (~${Math.max(0, Math.round(e.remainingMs / MIN))} min of the ${s.input.caps.maxMinutes}-minute budget) cannot hold another round${e.refused ? ` (the ${e.refused.round} round would get ${e.refused.minutes} min, under its floor of ${e.refused.floor})` : ""} — no approval after ${rounds}.${prLine}`,
-        aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
+        budgetSplitLine(e.spent, s.input.caps.maxMinutes),
         splitReport(s),
         reissue,
       ]);
@@ -2589,17 +2610,16 @@ export function renderUnitReport(
       return join([
         `⏳ Review pending: the coding child shipped ${e.pr.url}${e.headSha !== undefined ? ` (head \`${e.headSha.slice(0, 7)}\`)` : ""} but the remaining pipeline time cannot hold the review round — the work stands, only the review is missing. The next attempt starts at the review round while the pull request still heads at the child's own last push.`,
         aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
-        reissue,
+        aside(reissue),
       ]);
     case "stopped":
+      if (!shows(verbosity, "verbose")) return `${e.mode === "hard" ? "⛔" : "⏹"} Stopped.${prLine}`;
       return join([
         `${e.mode === "hard" ? "⛔" : "⏹"} Ship stopped by operator (${e.mode} stop) after ${rounds}.${prLine}`,
-        aside(
-          writeUpPointer(
-            s,
-            e.round.kind,
-            e.round.kind === "review" ? s.reviewRunByRound[e.round.index] : s.lastCodingRunId,
-          ),
+        writeUpPointer(
+          s,
+          e.round.kind,
+          e.round.kind === "review" ? s.reviewRunByRound[e.round.index] : s.lastCodingRunId,
         ),
         e.postedReview
           ? "ℹ️ A changes-requested review was posted this round before the stop — its findings stand on the PR."
@@ -2607,14 +2627,13 @@ export function renderUnitReport(
         reissue,
       ]);
     case "aborted":
+      if (!shows(verbosity, "verbose")) return `⚠️ Aborted after ${rounds}: ${e.reason}${prLine}`;
       return join([
         e.reason,
-        aside(
-          writeUpPointer(
-            s,
-            e.round?.kind ?? "coding",
-            e.round?.kind === "review" ? s.reviewRunByRound[e.round.index] : s.lastCodingRunId,
-          ),
+        writeUpPointer(
+          s,
+          e.round?.kind ?? "coding",
+          e.round?.kind === "review" ? s.reviewRunByRound[e.round.index] : s.lastCodingRunId,
         ),
         e.renewal !== undefined ? `🔁 Not renewed: ${e.renewal.line}.` : undefined,
         `⚠️ Ship aborted after ${rounds}.`,
@@ -2631,16 +2650,20 @@ export function renderUnitReport(
         aside(budgetSplitLine(e.spent, s.input.caps.maxMinutes)),
       ]);
     case "transient":
+      if (!shows(verbosity, "verbose"))
+        return `⚠️ Aborted after ${rounds}: the model provider failed twice; re-issue once it settles.${prLine}`;
       return join([
         `⚠️ The coding child of round ${e.round.index} (run ${e.runId}) died on a provider transient — a model-gateway 5xx, a cut stream or a gateway timeout past the harness's retry ladder — with nothing pushed, after the round was already re-run once for the same reason. The task itself was never the problem.`,
-        aside(writeUpPointer(s, e.round.kind, s.lastCodingRunId)),
+        writeUpPointer(s, e.round.kind, s.lastCodingRunId),
         `⚠️ Ship ended after ${rounds}; re-issue once the provider settles.`,
         reissue,
       ]);
     case "no_verdict":
+      if (!shows(verbosity, "verbose"))
+        return `⚠️ No verdict from review round ${e.round.index} — aborted after ${rounds}.${prLine}`;
       return join([
         `⚠️ Review round ${e.round.index} ended without a submitted verdict (budget, refusal, or stop) — ship never converts that into a request for changes, so no findings step ran.`,
-        aside(writeUpPointer(s, e.round.kind, s.reviewRunByRound[e.round.index])),
+        writeUpPointer(s, e.round.kind, s.reviewRunByRound[e.round.index]),
         `⚠️ Ship aborted after ${rounds}.`,
         reissue,
       ]);
@@ -2649,7 +2672,7 @@ export function renderUnitReport(
     case "refused":
       return join([
         `🚫 The ${presetOf(e.round.kind)} child of round ${e.round.index} was refused by the authorize stage (${e.refusal})${e.message ? `: ${e.message}` : ""} — every child is authorized as the requesting user, so the pipeline ends here.`,
-        reissue,
+        aside(reissue),
       ]);
     case "idle":
       // The old kind's sentence at this copy's level — the report is unchanged

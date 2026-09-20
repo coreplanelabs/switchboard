@@ -567,7 +567,7 @@ describe("RunPage — history mode", () => {
     ]);
     expect(units[0].find("a.title").text()).toBe("The unit page");
     expect(units[1].find("a.title").text()).toBe("plan/p/u2"); // no title: the branch names it
-    expect(units.map((li) => li.find(".standing").text())).toEqual(["merge_ready", "round 1 · review", "not started"]);
+    expect(units.map((li) => li.find(".standing").text())).toEqual(["merge-ready", "round 1 · review", "not started"]);
     expect(units[0].find("a.prlink").attributes("href")).toBe("https://github.com/acme/api/pull/42");
     expect(ship.find("#children").exists()).toBe(false);
 
